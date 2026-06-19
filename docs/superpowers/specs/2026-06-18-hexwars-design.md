@@ -15,8 +15,14 @@ rules are deliberately small; the depth is meant to be emergent. A single curren
 stats, you build income structures, and you fight to annihilate the enemy. Terrain and
 elevation make position matter; a transparent economy makes every purchase a real trade-off.
 
-Two players (milestone 1: both human, hotseat on one screen). Later milestones add a computer
-opponent and networked multiplayer without re-architecting.
+Two players (milestone 1: both human, hotseat on one screen). **AI players are first-class
+citizens.** A challenging AI is a core goal, and beyond it the engine exposes a **basic API any
+agent can use** — so you can play against your own bot, or RL-train against the engine, purely
+by reading game state and submitting commands. Humans, the built-in AI, and external/third-party
+agents are all just clients of that one API (§11). The smart AI and the external/RL transport
+ship in a later milestone, but **milestone 1 builds the engine foundations that make them
+cheap** (serialization, headless self-play, deterministic search-able state). Networked
+multiplayer rides the same command API.
 
 ---
 
@@ -255,11 +261,16 @@ this same Vision computation in a later milestone.
   `GameState` (board, players, activePlayer, round).
 - **Rules (pure functions):** `Distance3D`, pathing with climb + terrain cost and
   `maxClimbPerStep`, `TargetingService` (in Range *and* Vision, 3D), `CombatResolver`
-  (formula in §5), `Economy` (income, bounty, costs), `LegalMoves`, `WinCheck`.
+  (formula in §5), `Economy` (income, bounty, costs), `LegalMoves`, `WinCheck`, and
+  `Evaluate(GameState, player)` — a heuristic position score (reused by the §10 stalemate
+  total-value calc and, later, as the AI's search heuristic).
 - **Commands:** one record per action — `CreateUnit`, `DeployUnit`, `DeployGenerator`,
   `MoveUnit`, `AttackUnit`, `EndTurn`. A single `Apply(GameState, Command) -> Result(events |
-  rejection)` is the **only** mutation path. *This command type is the future network
-  wire-format and the AI's output — present from day one.*
+  rejection)` is the **only** mutation path. **`Apply` is non-mutating** — it returns a *new*
+  `GameState`, leaving the input untouched — and `GameState.Clone()` is cheap. Together with
+  determinism this makes the engine **search-able**: an AI can fork the state, try a command,
+  and score the result (minimax / MCTS) without side effects. *This command type is also the
+  future network wire-format — present from day one.*
 - **`ITurnPolicy`:** decides which commands are legal this turn (`AllUnitsPolicy` vs
   `OneActionPolicy`) — the §3 A/B toggle, swappable without touching rules.
 - **`GameConfig` / ruleset object:** every tunable number (§14). **Balancing is data, not
@@ -285,9 +296,33 @@ board."
 - **Hotseat:** both players share input; a turn banner / pass-device prompt indicates the
   active player.
 
+### Agent API — AI players are first-class (foundations in M1)
+
+The engine *is* the game; the Unity UI, the future built-in AI, and any external/third-party
+agent are all **clients of one basic API**. That API is the command model plus a small set of
+primitives, all designed in milestone 1:
+
+- **Drive:** read `GameState` (or a serialized snapshot), enumerate `LegalMoves`, submit a
+  `Command` via the non-mutating `Apply`. Identical path for human, AI, and bot.
+- **Headless `Match` runner + `IAgent`:** a pure-engine game loop that pits two `IAgent`s
+  against each other with no Unity present. M1 ships `IAgent` and a trivial `RandomAgent`
+  reference implementation (used in the integration test) to prove the API end-to-end.
+- **RL-ready primitives:** `Reset` (new game from a seed) plus the `Apply` / `LegalMoves` /
+  `WinCheck` / `Evaluate` quartet form a Gym-style loop — observation = serialized `GameState`,
+  action space = `LegalMoves`, reward = derived from `Evaluate` / terminal, done = `WinCheck`.
+- **Serializable `GameState` and `Command`s** (JSON) so an out-of-process agent — including a
+  Python RL trainer — can exchange observations and actions over a simple transport.
+
+Because `HexWars.Engine` is pure .NET (no Unity types), it runs fully headless for self-play and
+training. Engine quality bars that keep this (and the §15 research-platform vision) viable:
+**reproducible episodes** (a match is fully determined by `GameConfig` + seed + agent policies)
+and **allocation-light `Apply`/`Clone`** so thousands of games simulate fast. The *built-in
+challenging AI* and the *external/RL transport* (a local socket/JSON bridge or a Gym/PettingZoo
+wrapper) are their own milestone (§15); M1 only lays these in-engine foundations.
+
 ### How the roadmap plugs in (no rework)
 
-- **AI:** a module that reads `GameState` and emits `Command`s. No UI needed.
+- **AI / external agents / RL:** all drive the engine through the Agent API above — no UI needed.
 - **Networking:** sync `Command`s (or seeds + commands) via the Multiplayer Center package; the
   command model is already the wire format.
 - **Fog of war:** a presentation filter over the existing Vision computation.
@@ -318,9 +353,14 @@ board."
 - Readable 3D presentation + create-unit point-allocation UI.
 - Edit-mode engine tests.
 - Default turn mode `AllUnitsPolicy`; `OneActionPolicy` available via `ITurnPolicy`.
+- **Agent-API foundations** (so AI players are first-class later, §11): non-mutating `Apply` +
+  `GameState.Clone()`, `LegalMoves`, `Evaluate`, JSON-serializable `GameState`/`Command`, a
+  headless `Match` runner + `IAgent` with a `RandomAgent` reference impl, and `Reset`/new-game.
 
-**Out (future specs):** AI opponent · networked multiplayer · fog of war · advanced/biome
-procedural generation · art & audio polish · save/load · campaign/meta.
+**Out (future specs):** the *built-in challenging AI* itself and the *external/RL transport*
+(socket/JSON bridge or Gym/PettingZoo wrapper) — M1 ships only the foundations above ·
+networked multiplayer · fog of war · advanced/biome procedural generation · art & audio polish ·
+save/load · campaign/meta · research-platform tooling.
 
 ---
 
@@ -344,8 +384,17 @@ To finalize during implementation/playtest (suggested starting values in parenth
 
 ## 15. Future roadmap (each its own spec → plan → build cycle)
 
-1. **AI opponent** — command-emitting module over `GameState`.
-2. **Networked multiplayer** — Multiplayer Center; sync seeds + commands.
-3. **Fog of war** — vision-driven presentation filter (+ optional in hotseat).
-4. **Advanced procedural generation** — biomes, balance-aware layouts.
-5. **Polish** — art, audio, UX, save/load.
+1. **AI players & external/RL API (first-class)** — a challenging built-in AI (search over the
+   deterministic engine + the `Evaluate` heuristic; difficulty via search depth / eval tuning),
+   plus a *basic external API* so any agent can play or RL-train against the engine. Recommended
+   transport: a language-agnostic local socket with line-delimited JSON, and/or a
+   Gym/PettingZoo-style wrapper, built on the M1 serialization + `Match` foundations. Built-in
+   AI, external bots, and humans all share the identical `Command` API.
+2. **Research platform** — turn the agent API into a reusable multi-agent RL benchmark:
+   versioned observation/action schemas, standard scenarios via `GameConfig`, batch/parallel
+   self-play, metrics/logging, and reproducibility guarantees (config + seed + policies). A
+   natural extension once the external API and a baseline AI exist; **not** required for play.
+3. **Networked multiplayer** — Multiplayer Center; sync seeds + commands.
+4. **Fog of war** — vision-driven presentation filter (+ optional in hotseat).
+5. **Advanced procedural generation** — biomes, balance-aware layouts.
+6. **Polish** — art, audio, UX, save/load.
