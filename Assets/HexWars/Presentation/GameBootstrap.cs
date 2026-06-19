@@ -92,10 +92,10 @@ namespace HexWars.Presentation
             // a few distinct builds so the role icons + size-by-points are visible
             var demos = new[]
             {
-                new UnitStats(health: 7, damage: 1, defense: 2, movement: 2, verticalMovement: 0, range: 1, rangeArc: 0, vision: 2, visionArc: 0), // Brute
-                new UnitStats(health: 2, damage: 6, defense: 0, movement: 2, verticalMovement: 0, range: 2, rangeArc: 0, vision: 2, visionArc: 0), // Striker
-                new UnitStats(health: 2, damage: 1, defense: 0, movement: 1, verticalMovement: 0, range: 6, rangeArc: 1, vision: 3, visionArc: 0), // Sniper
-                new UnitStats(health: 2, damage: 0, defense: 0, movement: 3, verticalMovement: 1, range: 0, rangeArc: 0, vision: 7, visionArc: 2), // Spotter
+                new UnitStats(health: 7, damage: 2, defense: 2, movement: 3, verticalMovement: 2, range: 1, rangeArc: 1, vision: 2, visionArc: 1), // Brute
+                new UnitStats(health: 2, damage: 6, defense: 0, movement: 3, verticalMovement: 2, range: 2, rangeArc: 1, vision: 3, visionArc: 1), // Striker
+                new UnitStats(health: 2, damage: 2, defense: 0, movement: 2, verticalMovement: 2, range: 6, rangeArc: 1, vision: 4, visionArc: 1), // Sniper
+                new UnitStats(health: 2, damage: 0, defense: 0, movement: 4, verticalMovement: 3, range: 0, rangeArc: 0, vision: 7, visionArc: 2), // Spotter
             };
 
             var units = new List<Unit>();
