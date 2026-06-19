@@ -16,7 +16,18 @@ namespace HexWars.Engine
             if (command.Issuer != state.ActivePlayer) return Result.Reject(state, RejectionReason.NotYourTurn);
 
             var result = Dispatch(state, command);
-            return result.Success ? Result.Ok(Finalize(result.NewState)) : result;
+            if (!result.Success) return result;
+
+            var newState = Finalize(result.NewState);
+
+            // One-action turn policies auto-end the turn after a single non-EndTurn action.
+            if (!newState.IsGameOver && !(command is EndTurn)
+                && newState.Config.TurnPolicy.AutoEndTurnAfter(command))
+            {
+                newState = Finalize(ApplyEndTurn(newState, new EndTurn(command.Issuer)).NewState);
+            }
+
+            return Result.Ok(newState);
         }
 
         private static Result Dispatch(GameState state, Command command)

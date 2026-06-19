@@ -33,6 +33,9 @@ namespace HexWars.Engine
         /// <summary>Round at which the stalemate backstop ends the game by total value.</summary>
         public int RoundCap { get; }
 
+        /// <summary>The turn-structure rule (default <see cref="AllUnitsPolicy"/>).</summary>
+        public ITurnPolicy TurnPolicy { get; }
+
         public GameConfig(
             IReadOnlyDictionary<TerrainType, TerrainDef> terrain,
             int startingPoints = 12,
@@ -43,7 +46,8 @@ namespace HexWars.Engine
             int damageFloor = 0,
             int dmgHighGroundBonus = 1,
             int rangeHighGroundBonus = 1,
-            int roundCap = 40)
+            int roundCap = 40,
+            ITurnPolicy? turnPolicy = null)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -55,6 +59,7 @@ namespace HexWars.Engine
             DmgHighGroundBonus = dmgHighGroundBonus;
             RangeHighGroundBonus = rangeHighGroundBonus;
             RoundCap = roundCap;
+            TurnPolicy = turnPolicy ?? new AllUnitsPolicy();
         }
 
         /// <summary>Modifier table for the given terrain.</summary>
