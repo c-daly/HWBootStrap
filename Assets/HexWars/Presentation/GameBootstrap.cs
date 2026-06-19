@@ -12,11 +12,19 @@ namespace HexWars.Presentation
     [RequireComponent(typeof(BoardRenderer))]
     public sealed class GameBootstrap : MonoBehaviour
     {
+        [Header("Map generation")]
         public int Seed = 7;
-        public int Width = 7;
-        public int Height = 5;
+        public int Width = 9;
+        public int Height = 7;
         public int MaxElevation = 4;
         public int ZoneDepth = 2;
+        [Range(0f, 1f)] public float FlatChance = 0.6f;
+
+        [Header("Terrain weights (relative)")]
+        public int PlainsWeight = 70;
+        public int ForestWeight = 15;
+        public int RoughWeight = 10;
+        public int WaterWeight = 5;
 
         public GameState State { get; private set; }
 
@@ -27,7 +35,9 @@ namespace HexWars.Presentation
             SetupEnvironment();
 
             var config = GameConfig.Default();
-            var board = new RandomBoardGenerator(Width, Height, MaxElevation, ZoneDepth).Generate(Seed);
+            var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
+                                               PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
+            var board = new RandomBoardGenerator(genConfig).Generate(Seed);
             var players = new[]
             {
                 new PlayerState(PlayerId.Player0, config.StartingPoints),
