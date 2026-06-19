@@ -74,17 +74,19 @@ namespace HexWars.Presentation
             var active = _game.State.ActivePlayer;
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
 
-            // attack intent: only fire if actually targetable (range + army vision + LOS/arc)
+            // attack intent: only fire if not already attacked AND actually targetable (range/vision/LOS/arc)
             if (ownSelected && unit != null && unit.Unit.Owner != active)
             {
-                if (TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
+                if (!HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)
+                    && TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
                     StartCoroutine(AttackSeq(_selected, unit));
-                return; // out of range / no shot: nothing happens, keep selection
+                return; // invalid / spent: nothing happens, keep selection
             }
-            // move intent: only move to a reachable hex
+            // move intent: only if not already moved AND the hex is reachable
             if (ownSelected && unit == null && tile != null)
             {
-                if (IsReachable(_selected.Unit, tile.Coord))
+                if (!HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)
+                    && IsReachable(_selected.Unit, tile.Coord))
                     StartCoroutine(MoveSeq(_selected, tile.Coord));
                 return;
             }
@@ -95,6 +97,12 @@ namespace HexWars.Presentation
         {
             foreach (var c in MovementService.ReachableTiles(_game.State, unit))
                 if (c == dest) return true;
+            return false;
+        }
+
+        static bool HasActed(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
+        {
+            foreach (var i in ids) if (i == id) return true;
             return false;
         }
 
@@ -129,7 +137,6 @@ namespace HexWars.Presentation
             int dmg = attacker.Unit.Stats.Damage;
             float power = Mathf.Clamp01(dmg / 8f);
             float projScale = Mathf.Lerp(0.14f, 0.5f, power);
-            float flightDur = Mathf.Lerp(0.16f, 0.4f, power);
             Color projColor = dmg >= 6 ? new Color(1f, 0.3f, 0.1f)
                             : dmg >= 3 ? new Color(1f, 0.65f, 0.2f)
                                        : new Color(1f, 0.95f, 0.5f);
@@ -143,6 +150,7 @@ namespace HexWars.Presentation
             bool directLos = LineOfSight.IsClear(_game.State.Board,
                 attacker.Unit.Cell, attacker.Unit.Elevation, target.Unit.Cell, target.Unit.Elevation);
             float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
+            float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f; // slower, weightier
 
             var proj = MakeProjectile(from, projScale, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
