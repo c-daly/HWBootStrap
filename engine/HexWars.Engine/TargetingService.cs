@@ -13,7 +13,15 @@ namespace HexWars.Engine
     {
         public static bool CanTarget(GameState state, Unit attacker, HexCoord targetCell, int targetElevation)
             => InRange(attacker, targetCell, targetElevation, state.Config)
-               && IsVisibleToArmy(state, attacker.Owner, targetCell, targetElevation);
+               && IsVisibleToArmy(state, attacker.Owner, targetCell, targetElevation)
+               && HasShot(state, attacker, targetCell, targetElevation);
+
+        /// <summary>Can the attacker land a shot: a clear direct line of sight, OR indirect/arcing fire
+        /// (RangeArc &gt; 0) lobbing over the blocking terrain. (Targeting still requires army vision,
+        /// so an arcing shot needs a spotter — the attacker can't see through the stack either.)</summary>
+        public static bool HasShot(GameState state, Unit attacker, HexCoord targetCell, int targetElevation)
+            => LineOfSight.IsClear(state.Board, attacker.Cell, attacker.Elevation, targetCell, targetElevation)
+               || attacker.Stats.RangeArc > 0;
 
         /// <summary>Per-unit reach: horizontal Range (+ high-ground bonus) and vertical RangeArc (firing up).</summary>
         public static bool InRange(Unit attacker, HexCoord targetCell, int targetElevation, GameConfig config)
@@ -37,8 +45,9 @@ namespace HexWars.Engine
                 if (!spotter.IsAlive) continue;
                 int hd = HexCoord.Distance(spotter.Cell, targetCell);
                 int up = Math.Max(0, targetElevation - spotter.Elevation);
-                if (hd + concealment <= spotter.Stats.Vision && up <= spotter.Stats.VisionArc)
-                    return true;
+                if (hd + concealment <= spotter.Stats.Vision && up <= spotter.Stats.VisionArc
+                    && LineOfSight.IsClear(state.Board, spotter.Cell, spotter.Elevation, targetCell, targetElevation))
+                    return true; // a spotter can't see through a stack
             }
             return false;
         }

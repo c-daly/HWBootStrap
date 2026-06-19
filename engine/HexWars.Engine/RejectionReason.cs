@@ -22,5 +22,6 @@ namespace HexWars.Engine
         TargetNotEnemy,
         TargetNotInRange,
         TargetNotVisible,
+        LineOfSightBlocked,
     }
 }

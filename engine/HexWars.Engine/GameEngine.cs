@@ -204,6 +204,8 @@ namespace HexWars.Engine
                 return Result.Reject(state, RejectionReason.TargetNotInRange);
             if (!TargetingService.IsVisibleToArmy(state, c.Issuer, targetCell, targetElevation))
                 return Result.Reject(state, RejectionReason.TargetNotVisible);
+            if (!TargetingService.HasShot(state, attacker, targetCell, targetElevation))
+                return Result.Reject(state, RejectionReason.LineOfSightBlocked); // blocked by a stack & no arc
 
             int damage = CombatResolver.ComputeDamage(attacker.Stats.Damage, attacker.Elevation,
                                                       targetElevation, targetDefense, state.Config);
