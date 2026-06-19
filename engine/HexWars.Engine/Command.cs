@@ -18,6 +18,9 @@ namespace HexWars.Engine
     /// <summary>Move one of the issuer's units to a reachable destination (once per turn).</summary>
     public sealed record MoveUnit(PlayerId Issuer, int UnitId, HexCoord Dest) : Command(Issuer);
 
+    /// <summary>Attack an enemy unit or generator (by id) with one of the issuer's units (once per turn).</summary>
+    public sealed record AttackUnit(PlayerId Issuer, int AttackerId, int TargetId) : Command(Issuer);
+
     /// <summary>End the issuer's turn: pass to the opponent, who is credited generator income.</summary>
     public sealed record EndTurn(PlayerId Issuer) : Command(Issuer);
 }

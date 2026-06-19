@@ -27,6 +27,7 @@ namespace HexWars.Engine
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
+                case AttackUnit c: return ApplyAttackUnit(state, c);
                 case EndTurn c: return ApplyEndTurn(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
@@ -144,6 +145,88 @@ namespace HexWars.Engine
             for (int i = 0; i < player.UnitsOnBoard.Count; i++)
                 if (player.UnitsOnBoard[i].Id == unitId && player.UnitsOnBoard[i].IsAlive) return i;
             return -1;
+        }
+
+        private static int IndexOfLivingGenerator(PlayerState player, int generatorId)
+        {
+            for (int i = 0; i < player.Generators.Count; i++)
+                if (player.Generators[i].Id == generatorId && player.Generators[i].IsAlive) return i;
+            return -1;
+        }
+
+        private static Result ApplyAttackUnit(GameState state, AttackUnit c)
+        {
+            var player = state.Player(c.Issuer);
+            int aIdx = IndexOfLivingUnit(player, c.AttackerId);
+            if (aIdx < 0) return Result.Reject(state, RejectionReason.UnitNotFound);
+            if (state.AttackedUnitIds.Contains(c.AttackerId)) return Result.Reject(state, RejectionReason.UnitAlreadyAttacked);
+
+            var attacker = player.UnitsOnBoard[aIdx];
+            var enemy = state.Opponent(c.Issuer);
+
+            int tUnitIdx = IndexOfLivingUnit(enemy, c.TargetId);
+            int tGenIdx = tUnitIdx < 0 ? IndexOfLivingGenerator(enemy, c.TargetId) : -1;
+            if (tUnitIdx < 0 && tGenIdx < 0)
+                return Result.Reject(state, RejectionReason.TargetNotEnemy); // unknown or friendly id
+
+            HexCoord targetCell;
+            int targetElevation, targetDefense, buildCost;
+            if (tUnitIdx >= 0)
+            {
+                var t = enemy.UnitsOnBoard[tUnitIdx];
+                targetCell = t.Cell;
+                targetElevation = t.Elevation;
+                targetDefense = t.Stats.Defense + state.Config.Terrain(state.Board.TileAt(t.Cell).Terrain).Defense;
+                buildCost = t.Stats.PointCost;
+            }
+            else
+            {
+                var g = enemy.Generators[tGenIdx];
+                targetCell = g.Cell;
+                targetElevation = g.Elevation;
+                targetDefense = state.Config.Terrain(state.Board.TileAt(g.Cell).Terrain).Defense;
+                buildCost = state.Config.GeneratorCost;
+            }
+
+            if (!TargetingService.InRange(attacker, targetCell, targetElevation, state.Config))
+                return Result.Reject(state, RejectionReason.TargetNotInRange);
+            if (!TargetingService.IsVisibleToArmy(state, c.Issuer, targetCell, targetElevation))
+                return Result.Reject(state, RejectionReason.TargetNotVisible);
+
+            int damage = CombatResolver.ComputeDamage(attacker.Stats.Damage, attacker.Elevation,
+                                                      targetElevation, targetDefense, state.Config);
+
+            PlayerState newEnemy;
+            bool killed;
+            if (tUnitIdx >= 0)
+            {
+                var hurt = enemy.UnitsOnBoard[tUnitIdx].WithDamage(damage);
+                killed = !hurt.IsAlive;
+                var units = new List<Unit>(enemy.UnitsOnBoard);
+                if (killed) units.RemoveAt(tUnitIdx); else units[tUnitIdx] = hurt;
+                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Reserve, units, enemy.Generators);
+            }
+            else
+            {
+                var hurt = enemy.Generators[tGenIdx].WithDamage(damage);
+                killed = !hurt.IsAlive;
+                var gens = new List<Generator>(enemy.Generators);
+                if (killed) gens.RemoveAt(tGenIdx); else gens[tGenIdx] = hurt;
+                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Reserve, enemy.UnitsOnBoard, gens);
+            }
+
+            var newPlayer = killed
+                ? player.WithPoints(player.Points + CombatResolver.Bounty(buildCost, state.Config))
+                : player;
+
+            var players = state.Players.ToArray();
+            players[(int)newPlayer.Id] = newPlayer;
+            players[(int)newEnemy.Id] = newEnemy;
+            var attackedIds = new HashSet<int>(state.AttackedUnitIds) { c.AttackerId };
+
+            return Result.Ok(new GameState(state.Board, state.Config, players, state.ActivePlayer,
+                state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
+                state.MovedUnitIds, attackedIds));
         }
 
         /// <summary>True if any living unit or generator (either player) stands on the column.</summary>
