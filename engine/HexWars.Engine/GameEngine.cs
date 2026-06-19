@@ -18,6 +18,7 @@ namespace HexWars.Engine
             switch (command)
             {
                 case CreateUnit c: return ApplyCreateUnit(state, c);
+                case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
         }
@@ -36,13 +37,44 @@ namespace HexWars.Engine
             return Result.Ok(WithPlayer(state, updated));
         }
 
-        /// <summary>Rebuild the state with one player replaced (everything else unchanged).</summary>
-        private static GameState WithPlayer(GameState state, PlayerState updated)
+        private static Result ApplyDeployGenerator(GameState state, DeployGenerator c)
+        {
+            var board = state.Board;
+            if (!board.Contains(c.Cell)) return Result.Reject(state, RejectionReason.TileNotFound);
+            if (!board.IsInDeploymentZone(c.Issuer, c.Cell)) return Result.Reject(state, RejectionReason.OutsideDeploymentZone);
+
+            var tile = board.TileAt(c.Cell);
+            if (!state.Config.Terrain(tile.Terrain).Passable) return Result.Reject(state, RejectionReason.TileImpassable);
+            if (IsOccupied(state, c.Cell)) return Result.Reject(state, RejectionReason.TileOccupied);
+
+            var player = state.Player(c.Issuer);
+            if (player.Points < state.Config.GeneratorCost) return Result.Reject(state, RejectionReason.InsufficientPoints);
+
+            var gen = new Generator(state.NextEntityId, c.Issuer, c.Cell, tile.Elevation, state.Config.GeneratorHealth);
+            var generators = new List<Generator>(player.Generators) { gen };
+            var updated = new PlayerState(player.Id, player.Points - state.Config.GeneratorCost,
+                                          player.Reserve, player.UnitsOnBoard, generators);
+            return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
+        }
+
+        /// <summary>True if any living unit or generator (either player) stands on the column.</summary>
+        private static bool IsOccupied(GameState state, HexCoord coord)
+        {
+            foreach (var p in state.Players)
+            {
+                foreach (var u in p.UnitsOnBoard) if (u.IsAlive && u.Cell == coord) return true;
+                foreach (var g in p.Generators) if (g.IsAlive && g.Cell == coord) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Rebuild the state with one player replaced (and optionally a new entity-id counter).</summary>
+        private static GameState WithPlayer(GameState state, PlayerState updated, int? nextEntityId = null)
         {
             var players = state.Players.ToArray();
             players[(int)updated.Id] = updated;
             return new GameState(state.Board, state.Config, players, state.ActivePlayer,
-                                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner);
+                                 state.Round, nextEntityId ?? state.NextEntityId, state.IsGameOver, state.Winner);
         }
     }
 }
