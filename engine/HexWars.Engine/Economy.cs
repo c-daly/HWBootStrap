@@ -11,5 +11,10 @@ namespace HexWars.Engine
                 if (g.IsAlive) living++;
             return living * state.Config.GeneratorOutput;
         }
+
+        /// <summary>Points to deploy one clone of a design = round(PointCost × DeployCostMultiplier).</summary>
+        public static int DeployCost(UnitStats stats, GameConfig config)
+            => (int)System.Math.Round(stats.PointCost * config.DeployCostMultiplier,
+                                      System.MidpointRounding.AwayFromZero);
     }
 }

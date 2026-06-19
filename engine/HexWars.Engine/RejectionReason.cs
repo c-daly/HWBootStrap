@@ -9,7 +9,7 @@ namespace HexWars.Engine
         IllegalForPolicy,
         InsufficientPoints,
         InvalidStats,
-        ReserveUnitNotFound,
+        TemplateNotFound,
         UnitNotFound,
         GeneratorNotFound,
         TileNotFound,

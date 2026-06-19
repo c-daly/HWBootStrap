@@ -21,7 +21,7 @@ namespace HexWars.Engine.Tests
                 TestStates.Stats(health: 3, damage: 2, movement: 1, range: 2, vision: 3), new HexCoord(1, 0), 0);
             var enemy = new Unit(2, PlayerId.Player1, TestStates.Stats(health: 3), new HexCoord(2, 0), 0);
 
-            var p0 = new PlayerState(PlayerId.Player0, 5, reserve: new[] { TestStates.Cost(2) }, unitsOnBoard: new[] { myUnit });
+            var p0 = new PlayerState(PlayerId.Player0, 5, barracks: new[] { TestStates.Cost(2) }, unitsOnBoard: new[] { myUnit });
             var p1 = new PlayerState(PlayerId.Player1, 5, unitsOnBoard: new[] { enemy });
             return new GameState(board, GameConfig.Default(), new[] { p0, p1 }, PlayerId.Player0, round: 2, nextEntityId: 100);
         }
@@ -39,8 +39,8 @@ namespace HexWars.Engine.Tests
             Assert.That(LegalMoves.For(MidGame()).OfType<AttackUnit>().Any(a => a.TargetId == 2), Is.True);
 
         [Test]
-        public void For_IncludesDeployForReserveIntoEmptyZone() =>
-            Assert.That(LegalMoves.For(MidGame()).OfType<DeployUnit>().Any(d => d.ReserveIndex == 0), Is.True);
+        public void For_IncludesDeployForTemplateIntoEmptyZone() =>
+            Assert.That(LegalMoves.For(MidGame()).OfType<DeployUnit>().Any(d => d.TemplateIndex == 0), Is.True);
 
         [Test]
         public void For_IsEmpty_WhenGameOver()

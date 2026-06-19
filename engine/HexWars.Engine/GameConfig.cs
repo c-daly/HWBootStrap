@@ -33,6 +33,12 @@ namespace HexWars.Engine
         /// <summary>Round at which the stalemate backstop ends the game by total value.</summary>
         public int RoundCap { get; }
 
+        /// <summary>Points to add a unit design to the barracks (default 0 = free; configurable).</summary>
+        public int DesignFee { get; }
+
+        /// <summary>Multiplier on a unit's PointCost when deploying a clone of a barracks template.</summary>
+        public double DeployCostMultiplier { get; }
+
         /// <summary>The turn-structure rule (default <see cref="AllUnitsPolicy"/>).</summary>
         public ITurnPolicy TurnPolicy { get; }
 
@@ -47,6 +53,8 @@ namespace HexWars.Engine
             int dmgHighGroundBonus = 1,
             int rangeHighGroundBonus = 1,
             int roundCap = 40,
+            int designFee = 0,
+            double deployCostMultiplier = 1.0,
             ITurnPolicy? turnPolicy = null)
         {
             _terrain = terrain;
@@ -59,6 +67,8 @@ namespace HexWars.Engine
             DmgHighGroundBonus = dmgHighGroundBonus;
             RangeHighGroundBonus = rangeHighGroundBonus;
             RoundCap = roundCap;
+            DesignFee = designFee;
+            DeployCostMultiplier = deployCostMultiplier;
             TurnPolicy = turnPolicy ?? new AllUnitsPolicy();
         }
 

@@ -4,8 +4,9 @@ namespace HexWars.Engine
 {
     /// <summary>
     /// Reference agent: plays deterministically from a seed (so episodes are reproducible). It often
-    /// ends its turn (keeping rounds advancing), sometimes designs and buys a random affordable unit,
-    /// and otherwise picks a random legal move. Useful as a self-play baseline and a smoke test.
+    /// ends its turn (keeping rounds advancing), sometimes designs a random unit template (capped so
+    /// it stays affordable to deploy), and otherwise picks a random legal move — including deploying
+    /// clones of its templates. Useful as a self-play baseline and a smoke test.
     /// </summary>
     public sealed class RandomAgent : IAgent
     {

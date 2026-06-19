@@ -12,7 +12,7 @@ namespace HexWars.Engine.Tests
 
             Assert.That(p.Id, Is.EqualTo(PlayerId.Player0));
             Assert.That(p.Points, Is.EqualTo(12));
-            Assert.That(p.Reserve, Is.Empty);
+            Assert.That(p.Barracks, Is.Empty);
             Assert.That(p.UnitsOnBoard, Is.Empty);
             Assert.That(p.Generators, Is.Empty);
         }

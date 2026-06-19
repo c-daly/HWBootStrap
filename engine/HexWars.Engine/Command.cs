@@ -12,8 +12,9 @@ namespace HexWars.Engine
     /// <summary>Pay for and place an income generator on a hex in the issuer's deployment zone.</summary>
     public sealed record DeployGenerator(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
 
-    /// <summary>Place a reserved unit (by index) onto a hex in the issuer's deployment zone (no point cost).</summary>
-    public sealed record DeployUnit(PlayerId Issuer, int ReserveIndex, HexCoord Cell) : Command(Issuer);
+    /// <summary>Deploy a clone of a barracks template (by index) onto a hex in the issuer's deployment
+    /// zone, paying the deploy cost. The template is reusable — it is NOT consumed.</summary>
+    public sealed record DeployUnit(PlayerId Issuer, int TemplateIndex, HexCoord Cell) : Command(Issuer);
 
     /// <summary>Move one of the issuer's units to a reachable destination (once per turn).</summary>
     public sealed record MoveUnit(PlayerId Issuer, int UnitId, HexCoord Dest) : Command(Issuer);

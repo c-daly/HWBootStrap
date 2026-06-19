@@ -46,6 +46,8 @@ namespace HexWars.Engine.Tests
             Assert.That(c.DmgHighGroundBonus, Is.EqualTo(1));
             Assert.That(c.RangeHighGroundBonus, Is.EqualTo(1));
             Assert.That(c.RoundCap, Is.EqualTo(40));
+            Assert.That(c.DesignFee, Is.EqualTo(0));          // design is free by default (configurable)
+            Assert.That(c.DeployCostMultiplier, Is.EqualTo(1.0));
         }
     }
 }

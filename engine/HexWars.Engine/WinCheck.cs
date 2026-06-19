@@ -6,10 +6,10 @@ namespace HexWars.Engine
     /// </summary>
     public static class WinCheck
     {
-        /// <summary>Cheapest unit that can exist: a single point of Health.</summary>
-        public const int CheapestUnitCost = 1;
+        private static readonly UnitStats MinimalUnit = new UnitStats(1, 0, 0, 0, 0, 0, 0, 0, 0);
 
-        /// <summary>Total value of a player's position: banked points + on-board units + reserve + generators.</summary>
+        /// <summary>Total value of a player's position: banked points + on-board units + generators.
+        /// Barracks templates are free reusable blueprints, so they add no value.</summary>
         public static int Evaluate(GameState state, PlayerId player)
         {
             var p = state.Player(player);
@@ -18,17 +18,14 @@ namespace HexWars.Engine
             foreach (var u in p.UnitsOnBoard)
                 if (u.IsAlive) value += u.Stats.PointCost;
 
-            foreach (var stats in p.Reserve)
-                value += stats.PointCost;
-
             foreach (var g in p.Generators)
                 if (g.IsAlive) value += state.Config.GeneratorCost;
 
             return value;
         }
 
-        /// <summary>A player is eliminated with no living board units, no reserve, and too few points
-        /// to field even the cheapest unit.</summary>
+        /// <summary>A player is eliminated with no living board units and too few points to field a unit
+        /// — either by designing+deploying a minimal one, or deploying a cheaper existing template.</summary>
         public static bool IsEliminated(GameState state, PlayerId player)
         {
             var p = state.Player(player);
@@ -36,10 +33,13 @@ namespace HexWars.Engine
             foreach (var u in p.UnitsOnBoard)
                 if (u.IsAlive) return false;
 
-            if (p.Reserve.Count > 0) return false;
-            if (p.Points >= CheapestUnitCost) return false;
-
-            return true;
+            int cheapest = state.Config.DesignFee + Economy.DeployCost(MinimalUnit, state.Config);
+            foreach (var stats in p.Barracks)
+            {
+                int c = Economy.DeployCost(stats, state.Config);
+                if (c < cheapest) cheapest = c;
+            }
+            return p.Points < cheapest;
         }
 
         /// <summary>Whether the game has ended (a player eliminated after the opening, or the round cap

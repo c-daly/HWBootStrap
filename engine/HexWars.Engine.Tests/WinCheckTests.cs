@@ -13,20 +13,20 @@ namespace HexWars.Engine.Tests
             new GameState(Board1(), cfg ?? GameConfig.Default(), new[] { p0, p1 }, PlayerId.Player0, round, 100);
 
         [Test]
-        public void Evaluate_SumsBankedUnitsReserveAndGenerators()
+        public void Evaluate_SumsBankedUnitsAndGenerators_NotBarracks()
         {
             var unit = new Unit(1, PlayerId.Player0, Cost(4), new HexCoord(0, 0), 0);
             var gen = new Generator(2, PlayerId.Player0, new HexCoord(0, 0), 0, 3);
             var p0 = new PlayerState(PlayerId.Player0, 5,
-                reserve: new[] { Cost(3) }, unitsOnBoard: new[] { unit }, generators: new[] { gen });
+                barracks: new[] { Cost(3) }, unitsOnBoard: new[] { unit }, generators: new[] { gen });
 
-            // 5 banked + 4 unit + 3 reserve + 2 generator(cost) = 14
+            // 5 banked + 4 unit + 2 generator(cost) = 11 (free barracks template adds nothing)
             Assert.That(WinCheck.Evaluate(State(p0, new PlayerState(PlayerId.Player1, 0), 2), PlayerId.Player0),
-                        Is.EqualTo(14));
+                        Is.EqualTo(11));
         }
 
         [Test]
-        public void IsEliminated_True_WhenNoUnitsNoReserveAndBroke()
+        public void IsEliminated_True_WhenNoUnitsAndBroke()
         {
             var s = State(new PlayerState(PlayerId.Player0, 0), new PlayerState(PlayerId.Player1, 0), 2);
             Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.True);
@@ -40,16 +40,21 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void IsEliminated_False_WithBoardUnitOrReserve()
+        public void IsEliminated_False_WithBoardUnit()
         {
             var unit = new Unit(1, PlayerId.Player0, Cost(1), new HexCoord(0, 0), 0);
-            var withUnit = State(new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { unit }),
-                                 new PlayerState(PlayerId.Player1, 0), 2);
-            Assert.That(WinCheck.IsEliminated(withUnit, PlayerId.Player0), Is.False);
+            var s = State(new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { unit }),
+                          new PlayerState(PlayerId.Player1, 0), 2);
+            Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.False);
+        }
 
-            var withReserve = State(new PlayerState(PlayerId.Player0, 0, reserve: new[] { Cost(1) }),
-                                    new PlayerState(PlayerId.Player1, 0), 2);
-            Assert.That(WinCheck.IsEliminated(withReserve, PlayerId.Player0), Is.False);
+        [Test]
+        public void IsEliminated_True_WithBarracksTemplate_ButCannotAffordToDeployIt()
+        {
+            // a reusable template doesn't help if you can't pay the deploy cost
+            var s = State(new PlayerState(PlayerId.Player0, 0, barracks: new[] { Cost(1) }),
+                          new PlayerState(PlayerId.Player1, 0), 2);
+            Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.True);
         }
 
         [Test]

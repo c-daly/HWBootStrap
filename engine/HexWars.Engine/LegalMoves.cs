@@ -26,9 +26,12 @@ namespace HexWars.Engine
                                 && !IsOccupied(state, coord))
                 .ToList();
 
-            for (int i = 0; i < player.Reserve.Count; i++)
+            for (int i = 0; i < player.Barracks.Count; i++)
+            {
+                if (player.Points < Economy.DeployCost(player.Barracks[i], state.Config)) continue;
                 foreach (var coord in emptyZone)
                     moves.Add(new DeployUnit(me, i, coord));
+            }
 
             if (player.Points >= state.Config.GeneratorCost)
                 foreach (var coord in emptyZone)
