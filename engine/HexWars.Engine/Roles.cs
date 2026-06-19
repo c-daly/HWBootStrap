@@ -3,13 +3,14 @@ namespace HexWars.Engine
     /// <summary>A unit's at-a-glance role, derived from its dominant stat (for icons / UI).</summary>
     public enum UnitRole
     {
-        Brute,    // Health
-        Striker,  // Damage
-        Bulwark,  // Defense
-        Runner,   // Movement
-        Climber,  // Vertical Movement
-        Sniper,   // Range (+ Range Arc)
-        Spotter,  // Vision (+ Vision Arc)
+        Generalist, // no single dominant stat (balanced / tie)
+        Brute,      // Health
+        Striker,    // Damage
+        Bulwark,    // Defense
+        Runner,     // Movement
+        Climber,    // Vertical Movement
+        Sniper,     // Range (+ Range Arc)
+        Spotter,    // Vision (+ Vision Arc)
     }
 
     /// <summary>Classifies a unit by its dominant stat. Pure — shared by the role icon and the
@@ -18,7 +19,6 @@ namespace HexWars.Engine
     {
         public static UnitRole Dominant(UnitStats s)
         {
-            // Ranked so earlier entries win ties (deterministic).
             (int value, UnitRole role)[] ranked =
             {
                 (s.Damage, UnitRole.Striker),
@@ -30,10 +30,17 @@ namespace HexWars.Engine
                 (s.Health, UnitRole.Brute),
             };
 
-            var best = ranked[0];
-            foreach (var entry in ranked)
-                if (entry.value > best.value) best = entry;
-            return best.role;
+            int max = 0;
+            foreach (var e in ranked)
+                if (e.value > max) max = e.value;
+
+            int atMax = 0;
+            UnitRole top = UnitRole.Generalist;
+            foreach (var e in ranked)
+                if (e.value == max) { atMax++; top = e.role; }
+
+            // A single clear leader gives that role; a tie at the top = no dominant stat = Generalist.
+            return atMax == 1 ? top : UnitRole.Generalist;
         }
     }
 }

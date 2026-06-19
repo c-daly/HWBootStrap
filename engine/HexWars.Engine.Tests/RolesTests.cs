@@ -34,7 +34,12 @@ namespace HexWars.Engine.Tests
             Assert.That(Roles.Dominant(TestStates.Stats(health: 5)), Is.EqualTo(UnitRole.Brute));
 
         [Test]
-        public void TieDamageVsRange_PrefersStriker() =>
-            Assert.That(Roles.Dominant(TestStates.Stats(damage: 5, range: 5)), Is.EqualTo(UnitRole.Striker));
+        public void TieAtTop_IsGeneralist() =>
+            Assert.That(Roles.Dominant(TestStates.Stats(damage: 5, range: 5)), Is.EqualTo(UnitRole.Generalist));
+
+        [Test]
+        public void BalancedBuild_IsGeneralist() =>
+            Assert.That(Roles.Dominant(TestStates.Stats(damage: 2, defense: 2, movement: 2)),
+                        Is.EqualTo(UnitRole.Generalist));
     }
 }
