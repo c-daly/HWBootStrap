@@ -54,6 +54,9 @@ namespace HexWars.Presentation
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(board);
             renderer.RenderEntities(State);
+
+            var rig = FindFirstObjectByType<CameraRig>();
+            if (rig != null) rig.Frame(); // fit the camera once the board exists
         }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int points, ref int nextId)

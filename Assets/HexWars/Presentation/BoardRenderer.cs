@@ -63,11 +63,11 @@ namespace HexWars.Presentation
 
             var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             disc.name = "Unit_" + unit.Id;
-            DestroyImmediate(disc.GetComponent<Collider>());
             disc.transform.SetParent(parent, false);
             disc.transform.localPosition = new Vector3((float)w.x, topY + 0.18f, (float)w.z);
             disc.transform.localScale = new Vector3(radius, 0.16f, radius);
             disc.GetComponent<MeshRenderer>().sharedMaterial = color;
+            disc.AddComponent<UnitView>().Unit = unit; // collider kept for mouse raycast
             AddHull(disc, 1.16f, 1.05f);
 
             // role icon badge, flat on top, facing up (double-sided so it always reads)
