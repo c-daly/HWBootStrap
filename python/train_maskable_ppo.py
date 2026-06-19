@@ -18,6 +18,7 @@ from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 from hexwars_gym import HexWarsEnv
 
@@ -38,6 +39,8 @@ def main():
     ap.add_argument("--out", default="hexwars_ppo")
     ap.add_argument("--logdir", default=None)
     ap.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
+    ap.add_argument("--resume", default=None, help="path to a saved model/checkpoint .zip to continue from")
+    ap.add_argument("--checkpoint-freq", type=int, default=25_000, help="save a checkpoint every N steps")
     args = ap.parse_args()
 
     logdir = args.logdir or os.path.join("runs", args.out)
@@ -47,9 +50,18 @@ def main():
     base = HexWarsEnv(server_cmd, opponent=args.opponent, seat=args.seat, base_seed=args.seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
-    model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=args.seed, verbose=1)
+    # periodic checkpoints so an interrupted run is resumable (--resume runs/.../checkpoints/...zip)
+    ckpt = CheckpointCallback(save_freq=args.checkpoint_freq,
+                              save_path=os.path.join(logdir, "checkpoints"), name_prefix=args.out)
+
+    if args.resume:
+        model = MaskablePPO.load(args.resume, env=env)
+        print(f"resuming from {args.resume}")
+    else:
+        model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=args.seed, verbose=1)
+
     model.set_logger(configure(logdir, ["stdout", "csv"]))  # add "tensorboard" if installed
-    model.learn(total_timesteps=args.timesteps)
+    model.learn(total_timesteps=args.timesteps, callback=ckpt, reset_num_timesteps=(args.resume is None))
     model.save(args.out)
     print(f"done -> {args.out}.zip  (vs {args.opponent}, seed {args.seed})  logs: {logdir}/")
     env.close()

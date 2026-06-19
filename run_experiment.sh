@@ -21,11 +21,19 @@ export HEXWARS_SERVER="$ROOT/engine/HexWars.GymServer/bin/Release/net8.0/HexWars
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 
 cd python
-echo "[2/4] training agent A (vs greedy baseline, $TS steps)..."
-python train_maskable_ppo.py --opponent greedy --seed 1 --out ppo_a --timesteps "$TS" --logdir runs/ppo_a
+if [ -f ppo_a.zip ]; then
+  echo "[2/4] agent A: ppo_a.zip already exists -> skipping"
+else
+  echo "[2/4] training agent A (vs greedy baseline, $TS steps)..."
+  python train_maskable_ppo.py --opponent greedy --seed 1 --out ppo_a --timesteps "$TS" --logdir runs/ppo_a
+fi
 
-echo "[3/4] training agent B (vs random baseline, $TS steps)..."
-python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps "$TS" --logdir runs/ppo_b
+if [ -f ppo_b.zip ]; then
+  echo "[3/4] agent B: ppo_b.zip already exists -> skipping"
+else
+  echo "[3/4] training agent B (vs random baseline, $TS steps)..."
+  python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps "$TS" --logdir runs/ppo_b
+fi
 
 echo "[4/4] dueling A vs B -> replay..."
 python duel.py --p0 ppo:ppo_a.zip --p1 ppo:ppo_b.zip --out ../replays/ppo_a_vs_b.replay

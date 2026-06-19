@@ -83,7 +83,12 @@ def main():
         steps += 1
 
     saved = rpc(proc, {"cmd": "duel_save", "path": args.out})
-    rpc(proc, {"cmd": "close"})
+    # the server's "close" just exits (no reply), so fire-and-forget — don't wait for a response
+    try:
+        proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
+        proc.stdin.flush()
+    except Exception:
+        pass
     print(f"duel finished in {steps} steps -> {saved.get('saved')}   (p0={args.p0} vs p1={args.p1})")
 
 
