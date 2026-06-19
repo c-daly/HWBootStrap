@@ -103,10 +103,20 @@ must have **≥1 Health** to exist (the only floor).
 |---|---|
 | **Health** | Current/max HP. Unit is destroyed at 0. |
 | **Damage** | Base damage per attack, reduced by the target's Defense (+terrain). |
-| **Range** | How far it can attack — measured in 3D distance (§6). |
+| **Range** | Horizontal firing reach — max hex distance to a target (§5). |
+| **Range Arc** | Vertical firing reach — how many elevation levels *up* it can shoot. Firing at or below its own level is unrestricted. |
 | **Movement** | Movement budget per turn; climbing and terrain cost extra (§6). |
 | **Defense** | Flat reduction of incoming damage per hit. |
-| **Vision** | How far it can *detect and therefore target*, in 3D. No free baseline. |
+| **Vision** | Horizontal sight — max hex distance it can detect a target. Shared army-wide (§7). No free baseline. |
+| **Vision Arc** | Vertical sight — how many elevation levels *up* it can see. Seeing at or below its own level is unrestricted. |
+
+All eight stats are 1 point per step; a unit's `PointCost` is their sum.
+
+**You can only do what you bought.** A stat at 0 means the capability is simply *absent* — there
+is no implicit baseline for anything: `Range` 0 can't attack across, `Range Arc` 0 can't fire
+above its own level, `Vision` 0 is horizontally blind, `Vision Arc` 0 can't see anything higher
+than itself, `Movement` 0 can't move, `Defense` 0 takes full damage. Every capability, on every
+axis, is earned by spending points.
 
 - **Create** (action): pay the unit's total point cost (sum of stats); the designed unit goes
   into your **reserve** (off-board).
@@ -120,22 +130,28 @@ separate from the *board-timing* decision (when/where to commit it).
 
 ## 5. Combat (deterministic — no randomness)
 
-On your turn, choose one of your units, then choose an enemy that is **both in Range and in
-Vision** (§6). Resolve:
+On your turn, choose one of your units, then choose an enemy target your unit can **reach
+(Range)** and that your **army can see (Vision)** — sight is shared army-wide (§7). Resolve:
 
 ```
-D = distance3D(attacker, target)                       // see §6
-H = max(0, attacker.elevation - target.elevation)      // high-ground advantage
-inRange   = D <= attacker.Range + H * rangeHighGroundBonus
-visible   = D + target.terrainConcealment <= attacker.Vision
-damage    = max(damageFloor, attacker.Damage + H * dmgHighGroundBonus
-                              - (target.Defense + target.terrainDefense))
+hd(a,b) = hexDistance(a, b)                              // horizontal hex distance, ignores elevation
+up(a,b) = max(0, b.elevation - a.elevation)             // how many levels b is ABOVE a
+H       = max(0, attacker.elevation - target.elevation) // attacker's high-ground advantage
+
+inRange = hd(attacker,target) <= attacker.Range + H*rangeHighGroundBonus  // horizontal reach
+          AND up(attacker,target) <= attacker.RangeArc                    // vertical reach (firing up)
+visible = ANY friendly living unit f:                                     // ARMY-WIDE sight
+              hd(f,target) + target.terrainConcealment <= f.Vision        //   horizontal sight
+              AND up(f,target) <= f.VisionArc                             //   vertical sight (looking up)
+damage  = max(damageFloor, attacker.Damage + H*dmgHighGroundBonus
+                           - (target.Defense + target.terrainDefense))
 ```
 
-Apply `damage` to the target's Health. At 0 HP the target is destroyed and the attacker's
-owner collects a **bounty** = a configured portion of the destroyed unit's build cost (§8).
-The defender retaliates on **their** turn (no automatic return fire). Same inputs always
-produce the same result.
+A target may be attacked when `inRange && visible`. Apply `damage` to the target's Health. At 0
+HP the target is destroyed and the **owning player** collects a **bounty** = a configured
+portion of the destroyed unit's build cost (§8) — so a kill your *spotter* enabled still pays
+you in full. The defender retaliates on **their** turn (no automatic return fire). Same inputs
+always produce the same result.
 
 An attack may target an enemy **unit or generator** (generators have Health and are valid
 targets — §8); the same range/vision/damage rules apply.
@@ -147,27 +163,29 @@ targets — §8); the same range/vision/damage rules apply.
 Every hex carries **both** an integer `Elevation` **and** a `TerrainType`. They are
 orthogonal: elevation is height; terrain is surface.
 
-### Unified 3D distance & visibility
+### Reach: separate horizontal and vertical axes
 
-All reach is expressed through one readable metric — no special-case occlusion code:
+Reach is two independent, readable axes — no special-case occlusion code:
 
-```
-distance3D(a, b) = hexDistance(a, b) + |a.elevation - b.elevation|
-```
+- **Horizontal** = hex distance on the plane (`hexDistance`, ignoring elevation), gated by
+  `Range` (firing) and `Vision` (sight).
+- **Vertical** = elevation difference. Firing/seeing *upward* is gated by `Range Arc` /
+  `Vision Arc` (levels above you); at or below your own level is unrestricted — looking and
+  shooting *down* is free, reinforcing the high-ground advantage.
 
-Range, Vision, high-ground bonuses, and terrain concealment are all just terms layered on
-this single distance (see §5). A unit in a valley must invest more Range/Vision to reach a
-peak; a unit on a peak naturally out-reaches the valley.
+So a valley unit must buy `Range Arc` / `Vision Arc` to engage a peak, while a peak unit looks
+and fires downhill for free. Terrain concealment adds to the *horizontal* sight requirement.
 
-### Elevation effects (all four the design calls for)
+### Elevation effects (all the design calls for)
 
-1. **3D distance** — elevation difference adds to distance for Range and Vision.
-2. **High-ground bonus** — attacking downhill adds damage and effective range per level of
-   advantage (`H` above); attacking uphill is penalized implicitly via added distance.
+1. **Vertical reach is its own buy** — firing/seeing *up* is gated by `Range Arc` / `Vision Arc`
+   (levels above you); at or below your level is free (§5).
+2. **High-ground bonus** — attacking downhill adds damage and horizontal range per level of
+   advantage (`H` in §5). Holding the peak is real power.
 3. **Climb cost** — entering a higher hex costs extra movement per level; descending is cheap;
    a `maxClimbPerStep` caps un-scalable cliffs.
-4. **Sight = the Vision stat**, not terrain occlusion — keeps terrain "what you see is what
-   you get."
+4. **Sight = the Vision / Vision Arc stats**, not terrain occlusion — keeps terrain "what you
+   see is what you get."
 
 ### Terrain types (data-driven modifier table)
 
@@ -195,10 +213,14 @@ A unit spends up to its `Movement` per turn. One unit/structure per hex.
 
 ## 7. Vision & targeting
 
-There is **no default vision** — it is bought like any stat. Vision determines what a unit can
-**detect and therefore target** (§5 `visible`). Elevation difference and the target's terrain
-concealment both eat into vision, so spotting a peak unit or a unit in forest costs more
-Vision investment.
+There is **no default vision** — it is bought like any stat, on two axes. **Sight is shared
+across your entire army:** a target is *visible* (and therefore targetable, §5) if **any** of
+your living units sees it — `hexDistance(spotter, target) + target.terrainConcealment ≤
+spotter.Vision` (horizontal) **and** `target` is at most `spotter.VisionArc` levels above it
+(seeing down is free). Range/Range Arc stay per-unit: a shooter must independently reach a
+target the army can see. **Consequence:** a 0-damage, all-Vision **spotter** lifts the whole
+army's reach and pays for itself through the kills it unlocks — a first-class build, not a
+gimmick (the §2 success criterion).
 
 **Milestone 1: full on-screen visibility (no fog of war)** so one person can comfortably play
 both sides. Vision still gates *targeting* (you cannot attack what you cannot see) — it simply
@@ -230,9 +252,12 @@ this same Vision computation in a later milestone.
 - **Procedural generation (in M1):** an `IBoardGenerator` with a **seeded**
   `RandomBoardGenerator` is the default board source — deterministic from a seed, so boards are
   reproducible, unit-testable, shareable, and network-syncable later. "New board on the fly" =
-  new seed. The generator produces elevation (simple noise → ridges/valleys), terrain
-  (weighted thresholds), **mirrored/symmetric deployment zones** for fairness, and passes a
-  connectivity sanity check (no one boxed in).
+  new seed. The generator mirrors the **entire board** — terrain *and* elevation — across center
+  for fairness (not just the deployment zones), so neither side gets better ground. It produces
+  elevation (simple noise → ridges/valleys, with adjacent deltas clamped to `maxClimbPerStep` so
+  nothing is walled off), terrain (weighted thresholds), **mirror-symmetric deployment zones**,
+  and passes a **climb-aware connectivity check** (every deployment tile has a climbable path
+  out — no one boxed in by cliffs).
 - **Authored boards** remain supported via an alternate `IBoardGenerator`; both emit identical
   `Board` data and render through the same path.
 - "Basic but fair" generation now; biome/balance sophistication is a future spec.
@@ -256,14 +281,14 @@ this same Vision computation in a later milestone.
 ### `HexWars.Engine` — plain C# assembly, **zero `UnityEngine` references**, fully unit-testable
 
 - **Data:** `HexCoord` (axial/cube + `Elevation`), `TerrainType`, `Board` (cells + deployment
-  zones), `UnitStats` (Health/Damage/Range/Movement/Defense/Vision), `Unit` (stats + owner +
-  position + currentHP), `Generator`, `PlayerState` (points, reserve, on-board units),
-  `GameState` (board, players, activePlayer, round).
-- **Rules (pure functions):** `Distance3D`, pathing with climb + terrain cost and
-  `maxClimbPerStep`, `TargetingService` (in Range *and* Vision, 3D), `CombatResolver`
-  (formula in §5), `Economy` (income, bounty, costs), `LegalMoves`, `WinCheck`, and
-  `Evaluate(GameState, player)` — a heuristic position score (reused by the §10 stalemate
-  total-value calc and, later, as the AI's search heuristic).
+  zones), `UnitStats` (Health/Damage/Range/RangeArc/Movement/Defense/Vision/VisionArc), `Unit`
+  (stats + owner + position + currentHP), `Generator`, `PlayerState` (points, reserve, on-board
+  units), `GameState` (board, players, activePlayer, round).
+- **Rules (pure functions):** `HexDistance`, pathing with climb + terrain cost and
+  `maxClimbPerStep`, `TargetingService` (army-wide sight via `Vision`/`VisionArc` + per-unit
+  `Range`/`RangeArc`), `CombatResolver` (formula in §5), `Economy` (income, bounty, costs),
+  `LegalMoves`, `WinCheck`, and `Evaluate(GameState, player)` — a heuristic position score
+  (reused by the §10 stalemate total-value calc and, later, as the AI's search heuristic).
 - **Commands:** one record per action — `CreateUnit`, `DeployUnit`, `DeployGenerator`,
   `MoveUnit`, `AttackUnit`, `EndTurn`. A single `Apply(GameState, Command) -> Result(events |
   rejection)` is the **only** mutation path. **`Apply` is non-mutating** — it returns a *new*
@@ -378,7 +403,10 @@ To finalize during implementation/playtest (suggested starting values in parenth
 - Board: dimensions (≈9×9), elevation range (0–4), terrain weights, deployment-zone depth.
 - Round cap for the stalemate backstop.
 - Exact `OneActionPolicy` granularity.
-- Vision as a single 3D stat vs split horizontal/vertical (default: single 3D).
+- `Range Arc` / `Vision Arc` magnitudes, and whether downhill firing/sight is ever capped
+  (default: uncapped — at-or-below your level is free).
+- Optional **intel-kickback** bonus for kills only your spotter could see (default: OFF — the
+  shared economy already rewards recon; revisit only if pure spotters underperform in playtest).
 
 ---
 
