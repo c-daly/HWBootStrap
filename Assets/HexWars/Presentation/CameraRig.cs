@@ -72,7 +72,7 @@ namespace HexWars.Presentation
 
         Transform ResolveTarget()
         {
-            var br = FindFirstObjectByType<BoardRenderer>();
+            var br = FindAnyObjectByType<BoardRenderer>();
             return br != null ? br.transform : null;
         }
 

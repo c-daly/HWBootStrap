@@ -7,6 +7,6 @@ namespace HexWars.Presentation
     /// stats. Set by <see cref="BoardRenderer"/> when it builds the token.</summary>
     public sealed class UnitView : MonoBehaviour
     {
-        public Unit Unit;
+        [System.NonSerialized] public Unit Unit; // engine object, set at runtime
     }
 }

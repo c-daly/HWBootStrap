@@ -61,21 +61,30 @@ namespace HexWars.Presentation
             float sizeFactor = Mathf.Clamp(0.6f + unit.Stats.PointCost * 0.04f, 0.6f, 1.4f);
             float radius = HexSize * 0.7f * sizeFactor;
 
+            // unscaled token root carries the data + a generous box collider for easy clicking
+            var token = new GameObject("Unit_" + unit.Id);
+            token.transform.SetParent(parent, false);
+            token.transform.localPosition = new Vector3((float)w.x, topY, (float)w.z);
+            token.AddComponent<UnitView>().Unit = unit;
+            var box = token.AddComponent<BoxCollider>();
+            box.center = new Vector3(0f, 0.35f, 0f);
+            box.size = new Vector3(HexSize * 1.3f, 0.9f, HexSize * 1.3f);
+
             var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            disc.name = "Unit_" + unit.Id;
-            disc.transform.SetParent(parent, false);
-            disc.transform.localPosition = new Vector3((float)w.x, topY + 0.18f, (float)w.z);
+            disc.name = "Disc";
+            DestroyImmediate(disc.GetComponent<Collider>()); // hitbox is the token's box
+            disc.transform.SetParent(token.transform, false);
+            disc.transform.localPosition = new Vector3(0f, 0.18f, 0f);
             disc.transform.localScale = new Vector3(radius, 0.16f, radius);
             disc.GetComponent<MeshRenderer>().sharedMaterial = color;
-            disc.AddComponent<UnitView>().Unit = unit; // collider kept for mouse raycast
             AddHull(disc, 1.16f, 1.05f);
 
             // role icon badge, flat on top, facing up (double-sided so it always reads)
             var icon = GameObject.CreatePrimitive(PrimitiveType.Quad);
             icon.name = "RoleIcon";
             DestroyImmediate(icon.GetComponent<Collider>());
-            icon.transform.SetParent(parent, false);
-            icon.transform.localPosition = new Vector3((float)w.x, topY + 0.40f, (float)w.z);
+            icon.transform.SetParent(token.transform, false);
+            icon.transform.localPosition = new Vector3(0f, 0.40f, 0f);
             icon.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
             icon.transform.localScale = Vector3.one * (radius * 0.9f);
             var mr = icon.GetComponent<MeshRenderer>();

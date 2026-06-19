@@ -55,7 +55,7 @@ namespace HexWars.Presentation
             renderer.Render(board);
             renderer.RenderEntities(State);
 
-            var rig = FindFirstObjectByType<CameraRig>();
+            var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
         }
 
