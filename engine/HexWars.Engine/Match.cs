@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace HexWars.Engine
 {
     /// <summary>
@@ -14,15 +16,32 @@ namespace HexWars.Engine
         /// <summary>Plays to a terminal state (or the command budget) and returns a <see cref="MatchResult"/>
         /// with the outcome and length — the unit a self-play/balance batch aggregates over.</summary>
         public static MatchResult Run(GameState start, IAgent agent0, IAgent agent1, int maxCommands)
+            => RunCore(start, agent0, agent1, maxCommands, null);
+
+        /// <summary>Plays and records the applied commands, so the game can be replayed/scrubbed later
+        /// (see <see cref="Replay"/>). Reproducible from the start state + recorded commands.</summary>
+        public static MatchRecord Record(GameState start, IAgent agent0, IAgent agent1, int maxCommands)
+        {
+            var log = new List<Command>();
+            var result = RunCore(start, agent0, agent1, maxCommands, log);
+            return new MatchRecord(start, log, result);
+        }
+
+        private static MatchResult RunCore(GameState start, IAgent agent0, IAgent agent1, int maxCommands,
+                                           List<Command>? log)
         {
             var state = start;
             int commands = 0;
             for (; commands < maxCommands && !state.IsGameOver; commands++)
             {
                 var agent = state.ActivePlayer == PlayerId.Player0 ? agent0 : agent1;
-                var result = GameEngine.Apply(state, agent.Decide(state));
+                var command = agent.Decide(state);
+                var result = GameEngine.Apply(state, command);
                 if (result.Success)
+                {
                     state = result.NewState; // illegal choices are simply ignored; agents pick legal commands
+                    log?.Add(command);
+                }
             }
 
             return new MatchResult(
