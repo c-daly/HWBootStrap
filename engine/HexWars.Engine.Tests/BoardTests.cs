@@ -36,5 +36,22 @@ namespace HexWars.Engine.Tests
         {
             Assert.That(TwoColumns().TileCount, Is.EqualTo(2));
         }
+
+        [Test]
+        public void DeploymentZone_IsPerPlayer()
+        {
+            var tiles = new[]
+            {
+                new Tile(new HexCoord(0, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(5, 0), 0, TerrainType.Plains),
+            };
+            var board = new Board(tiles,
+                zone0: new[] { new HexCoord(0, 0) },
+                zone1: new[] { new HexCoord(5, 0) });
+
+            Assert.That(board.IsInDeploymentZone(PlayerId.Player0, new HexCoord(0, 0)), Is.True);
+            Assert.That(board.IsInDeploymentZone(PlayerId.Player0, new HexCoord(5, 0)), Is.False);
+            Assert.That(board.IsInDeploymentZone(PlayerId.Player1, new HexCoord(5, 0)), Is.True);
+        }
     }
 }
