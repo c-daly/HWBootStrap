@@ -144,22 +144,28 @@ namespace HexWars.Presentation
         {
             float frac = max <= 0 ? 0f : Mathf.Clamp01((float)cur / max);
             float barW = HexSize * 0.85f;
-            float y = topY + 0.62f;
-            MakeBarQuad(parent, wx, y, wz, barW, 0.15f, new Color(0.18f, 0.03f, 0.03f));
+
+            // upright bar that billboards to the camera; quads live in its local plane
+            var root = new GameObject("HpBar");
+            root.transform.SetParent(parent, false);
+            root.transform.localPosition = new Vector3(wx, topY + 0.62f, wz);
+            root.AddComponent<Billboard>();
+
+            MakeBarQuad(root.transform, 0f, 0f, barW, 0.16f, new Color(0.18f, 0.03f, 0.03f));
             float fw = Mathf.Max(0.001f, barW * frac);
-            float fx = wx - barW * 0.5f + fw * 0.5f; // left-anchored fill
+            float fx = -barW * 0.5f + fw * 0.5f; // left-anchored fill
             var fill = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
-            MakeBarQuad(parent, fx, y + 0.01f, wz, fw, 0.10f, fill);
+            MakeBarQuad(root.transform, fx, -0.01f, fw, 0.11f, fill); // toward camera so it draws over the bg
         }
 
-        void MakeBarQuad(Transform parent, float x, float y, float z, float w, float h, Color c)
+        void MakeBarQuad(Transform parent, float x, float zTowardCam, float w, float h, Color c)
         {
             var q = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            q.name = "HpBar";
+            q.name = "Bar";
             DestroyImmediate(q.GetComponent<Collider>());
             q.transform.SetParent(parent, false);
-            q.transform.localPosition = new Vector3(x, y, z);
-            q.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            q.transform.localPosition = new Vector3(x, 0f, zTowardCam);
+            q.transform.localRotation = Quaternion.identity; // upright; the Billboard root faces the camera
             q.transform.localScale = new Vector3(w, h, 1f);
             var mr = q.GetComponent<MeshRenderer>();
             mr.sharedMaterial = UnlitColor(c);

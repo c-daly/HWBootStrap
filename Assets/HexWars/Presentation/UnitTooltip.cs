@@ -12,15 +12,19 @@ namespace HexWars.Presentation
     {
         GameObject _panel;
         Text _text;
+        Canvas _canvas;
 
         void Awake()
         {
             var canvasGo = new GameObject("UnitTooltipCanvas");
             canvasGo.transform.SetParent(transform, false);
-            var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 1000;
-            canvasGo.AddComponent<CanvasScaler>();
+            _canvas = canvasGo.AddComponent<Canvas>();
+            _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _canvas.sortingOrder = 1000;
+            var scaler = canvasGo.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1600f, 900f);
+            scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
 
             _panel = new GameObject("Panel");
@@ -62,8 +66,12 @@ namespace HexWars.Presentation
         {
             _text.text = Format(unit);
             var prt = _panel.GetComponent<RectTransform>();
-            float x = Mathf.Min(screenPos.x + 16f, Screen.width - prt.sizeDelta.x - 4f);
-            float y = Mathf.Max(screenPos.y - 16f, prt.sizeDelta.y + 4f);
+            // canvas is scaled, so convert mouse pixels into the canvas's reference units
+            float sf = _canvas != null && _canvas.scaleFactor > 0f ? _canvas.scaleFactor : 1f;
+            Vector2 p = screenPos / sf;
+            float wUnits = Screen.width / sf;
+            float x = Mathf.Min(p.x + 16f, wUnits - prt.sizeDelta.x - 4f);
+            float y = Mathf.Max(p.y - 16f, prt.sizeDelta.y + 4f);
             prt.anchoredPosition = new Vector2(x, y);
             _panel.SetActive(true);
         }
