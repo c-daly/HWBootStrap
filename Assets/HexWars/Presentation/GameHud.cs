@@ -37,7 +37,8 @@ namespace HexWars.Presentation
             if (FindAnyObjectByType<EventSystem>() != null) return;
             var es = new GameObject("EventSystem");
             es.AddComponent<EventSystem>();
-            es.AddComponent<InputSystemUIInputModule>();
+            var module = es.AddComponent<InputSystemUIInputModule>();
+            module.AssignDefaultActions(); // without actions the module silently ignores UI input
         }
 
         void Build()
