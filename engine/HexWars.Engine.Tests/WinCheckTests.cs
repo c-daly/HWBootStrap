@@ -79,5 +79,32 @@ namespace HexWars.Engine.Tests
             var p1 = new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { u1 });
             Assert.That(WinCheck.Resolve(State(p0, p1, 40)), Is.EqualTo(PlayerId.Player0));
         }
+
+        [Test]
+        public void IsTerminal_True_WhenAPlayerEliminated_AfterOpening()
+        {
+            var unit = new Unit(1, PlayerId.Player0, Cost(3), new HexCoord(0, 0), 0);
+            var p0 = new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { unit });
+            var p1 = new PlayerState(PlayerId.Player1, 0);
+            Assert.That(WinCheck.IsTerminal(State(p0, p1, 2)), Is.True);
+        }
+
+        [Test]
+        public void IsTerminal_False_DuringOpeningRound1()
+        {
+            var p0 = new PlayerState(PlayerId.Player0, 0);
+            var p1 = new PlayerState(PlayerId.Player1, 0);
+            Assert.That(WinCheck.IsTerminal(State(p0, p1, 1)), Is.False);
+        }
+
+        [Test]
+        public void IsTerminal_True_AtRoundCap()
+        {
+            var u0 = new Unit(1, PlayerId.Player0, Cost(1), new HexCoord(0, 0), 0);
+            var u1 = new Unit(2, PlayerId.Player1, Cost(1), new HexCoord(0, 0), 0);
+            var p0 = new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { u0 });
+            var p1 = new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { u1 });
+            Assert.That(WinCheck.IsTerminal(State(p0, p1, 40)), Is.True);
+        }
     }
 }

@@ -42,6 +42,18 @@ namespace HexWars.Engine
             return true;
         }
 
+        /// <summary>Whether the game has ended (a player eliminated after the opening, or the round cap
+        /// reached). Use with <see cref="Resolve"/> to get the winner (which may be null on a draw).</summary>
+        public static bool IsTerminal(GameState state)
+        {
+            if (state.Round >= 2 &&
+                (IsEliminated(state, PlayerId.Player0) || IsEliminated(state, PlayerId.Player1)))
+                return true;
+            if (state.Round >= state.Config.RoundCap)
+                return true;
+            return false;
+        }
+
         /// <summary>
         /// The winner, or null if the game continues / is a draw. Elimination is not declared during
         /// the opening round (round 1) so a player isn't lost before deploying. At the round cap the
