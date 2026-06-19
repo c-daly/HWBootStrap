@@ -232,6 +232,22 @@ This is deliberately *unlike* Range/Vision: shooting or seeing upward is instant
 (gated by the `Range Arc` / `Vision Arc` you bought), whereas moving upward is a **traversal cost**
 (paid from `Vertical Movement`). Same uniform price — 1 point per level — different mechanic.
 
+### Units occupy 3D positions (ground-first in M1)
+
+A hex column is a **solid pillar** — the only place to stand is its **top** (the tile's elevation),
+so there is **one unit per (q,r) column**. But a unit carries its **own elevation**, so the model
+is genuinely 3D and ready for more than ground troops:
+
+- **Ground** units sit at the column top (unit elevation = tile elevation).
+- **Air** units (jetpack, airplane) hover *above* the terrain (unit elevation > tile elevation).
+- **Subs** dive *below* the surface (in water columns).
+
+Air and sub units need no special "type" — they **emerge** from the stats: enough `Vertical
+Movement` plus the freedom to sit off the ground. **Milestone 1 is ground-first** (units rest on
+the terrain top and climb between columns), but the data model is **3D-ready** — every unit stores
+its own elevation — so flying/diving and fly-over land as a fast follow with no rework. (A future
+"stepstone/ledge" terrain shape could expose multiple standing levels within one column.)
+
 ---
 
 ## 7. Vision & targeting
@@ -306,7 +322,7 @@ this same Vision computation in a later milestone.
 
 - **Data:** `HexCoord` (axial/cube + `Elevation`), `TerrainType`, `Board` (cells + deployment
   zones), `UnitStats` (Health/Damage/Defense/Movement/VerticalMovement/Range/RangeArc/Vision/
-  VisionArc), `Unit` (stats + owner + position + currentHP), `Generator`, `PlayerState` (points,
+  VisionArc), `Unit` (stats + owner + cell (q,r) + own elevation + currentHP), `Generator`, `PlayerState` (points,
   reserve, on-board units), `GameState` (board, players, activePlayer, round).
 - **Rules (pure functions):** `HexDistance`, pathing over two budgets (terrain cost from
   `Movement`, ascent cost from `VerticalMovement`), `TargetingService` (army-wide sight via
@@ -399,6 +415,8 @@ wrapper) are their own milestone (§15); M1 only lays these in-engine foundation
 - Seeded `RandomBoardGenerator` (default) + an authored board option.
 - Create/deploy units; deploy generators; move + attack with elevation/terrain/vision;
   bounties; income; win-by-annihilation.
+- Units carry their **own elevation** (3D-ready model); M1 plays **ground-first** — units rest on
+  terrain tops and climb between columns. One unit per (q,r) column.
 - Hotseat 2-player, full on-screen visibility (no fog).
 - Readable 3D presentation + create-unit point-allocation UI.
 - Edit-mode engine tests.
@@ -410,7 +428,8 @@ wrapper) are their own milestone (§15); M1 only lays these in-engine foundation
 **Out (future specs):** the *built-in challenging AI* itself and the *external/RL transport*
 (socket/JSON bridge or Gym/PettingZoo wrapper) — M1 ships only the foundations above ·
 networked multiplayer · fog of war · advanced/biome procedural generation · art & audio polish ·
-save/load · campaign/meta · research-platform tooling.
+save/load · campaign/meta · research-platform tooling · air/sub unit movement (free elevation,
+flying, diving, fly-over).
 
 ---
 
