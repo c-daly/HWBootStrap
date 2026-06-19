@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Text.Json;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -25,6 +26,7 @@ Func<int, IAgent> opponentFactory = opponent == "random"
     : (s => new GreedyAgent(s));
 
 var env = new TacticalEnv(opponentFactory, seat == 1 ? PlayerId.Player1 : PlayerId.Player0);
+DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 var output = Console.Out;
 
 void Send(object payload)
@@ -61,6 +63,43 @@ while ((line = Console.ReadLine()) != null)
             int action = root.GetProperty("action").GetInt32();
             var r = env.Step(action);
             Send(new { obs = r.Observation, reward = r.Reward, terminated = r.Terminated, truncated = r.Truncated, mask = r.ActionMask });
+            break;
+        }
+
+        case "duel_spaces":
+            duel ??= new DuelEnv();
+            Send(new { obs_len = duel.ObservationLength, n_actions = duel.ActionCount });
+            break;
+
+        case "duel_reset":
+        {
+            duel ??= new DuelEnv();
+            int seed = root.TryGetProperty("seed", out var s) ? s.GetInt32() : 0;
+            var v = duel.Reset(seed);
+            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, terminated = v.Terminated, truncated = v.Truncated });
+            break;
+        }
+
+        case "duel_step":
+        {
+            duel ??= new DuelEnv();
+            int action = root.GetProperty("action").GetInt32();
+            var v = duel.Step(action);
+            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, terminated = v.Terminated, truncated = v.Truncated });
+            break;
+        }
+
+        case "duel_save":
+        {
+            string path = root.TryGetProperty("path", out var pp) ? (pp.GetString() ?? "duel.replay") : "duel.replay";
+            if (duel != null)
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, duel.ToReplay());
+                Send(new { saved = path });
+            }
+            else Send(new { saved = "" });
             break;
         }
 
