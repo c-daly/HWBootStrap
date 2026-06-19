@@ -21,6 +21,8 @@ namespace HexWars.Presentation
         int _deployIndex = -1;
         readonly List<GameObject> _rows = new List<GameObject>();
 
+        public bool IsDeploying => _deployIndex >= 0;
+
         void Start()
         {
             _font = BuiltinFont();
