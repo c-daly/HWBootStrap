@@ -110,8 +110,10 @@ namespace HexWars.Presentation
             if (_game == null || _game.State == null) return;
             var s = _game.State;
             var p = s.Player(s.ActivePlayer);
-            int who = s.ActivePlayer == PlayerId.Player0 ? 1 : 2;
-            _banner.text = $"Player {who}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+            bool p0 = s.ActivePlayer == PlayerId.Player0;
+            int who = p0 ? 1 : 2;
+            _banner.color = p0 ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
+            _banner.text = $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")})     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
         }
 
         static Font BuiltinFont()

@@ -21,7 +21,7 @@ namespace HexWars.Presentation
         [Range(0f, 1f)] public float Smoothness = 0.72f; // crisp enough to read as metal, soft enough to avoid hotspots
         public bool Outlines = true;                     // black cel-style edges (off = realistic metal)
 
-        Material _plains, _forest, _water, _rough, _black, _p0, _p1;
+        Material _plains, _forest, _water, _rough, _black, _p0, _p1, _p0Dim, _p1Dim;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
         static Texture2D _matcap;
 
@@ -74,12 +74,26 @@ namespace HexWars.Presentation
 
             foreach (var player in state.Players)
             {
-                var color = player.Id == PlayerId.Player0 ? _p0 : _p1;
+                bool isActive = player.Id == state.ActivePlayer;
+                var bright = player.Id == PlayerId.Player0 ? _p0 : _p1;
+                var dim = player.Id == PlayerId.Player0 ? _p0Dim : _p1Dim;
+
                 foreach (var u in player.UnitsOnBoard)
-                    if (u.IsAlive) BuildToken(root.transform, u, color);
+                {
+                    if (!u.IsAlive) continue;
+                    // dim if it's the opponent's, or it's yours but already spent (moved AND attacked)
+                    bool spent = isActive && Contains(state.MovedUnitIds, u.Id) && Contains(state.AttackedUnitIds, u.Id);
+                    BuildToken(root.transform, u, (!isActive || spent) ? dim : bright);
+                }
                 foreach (var g in player.Generators)
-                    if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, color);
+                    if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
             }
+        }
+
+        static bool Contains(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
+        {
+            foreach (var i in ids) if (i == id) return true;
+            return false;
         }
 
         float TopY(int elevation) => (elevation + 1) * LevelHeight;
@@ -281,6 +295,8 @@ namespace HexWars.Presentation
             _rough  = Metal(new Color(0.80f, 0.71f, 0.47f));
             _p0     = Matte(new Color(0.27f, 0.68f, 1f));   // units stay matte for readability
             _p1     = Matte(new Color(0.92f, 0.28f, 0.28f));
+            _p0Dim  = Matte(new Color(0.11f, 0.27f, 0.40f)); // dimmed = opponent's, or spent this turn
+            _p1Dim  = Matte(new Color(0.37f, 0.11f, 0.11f));
 
             var seam = new Color(0.05f, 0.05f, 0.06f); // near-black panel seam (visible, defines hexes)
             _black = new Material(unlit);

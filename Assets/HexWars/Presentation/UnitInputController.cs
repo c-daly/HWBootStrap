@@ -22,6 +22,7 @@ namespace HexWars.Presentation
         UnitView _selected;
         int _selectedId = -1;
         GameObject _marker;
+        Material _markerMat;
         bool _animating;
 
         void Awake()
@@ -65,6 +66,11 @@ namespace HexWars.Presentation
                 var p = _selected.transform.position;
                 float bob = Mathf.Sin(Time.time * 4f) * 0.08f;
                 _marker.transform.position = new Vector3(p.x, p.y + 0.85f + bob, p.z);
+
+                // yellow if this unit is yours to command this turn, gray otherwise
+                bool mine = _game != null && _game.State != null && _selected.Unit.Owner == _game.State.ActivePlayer;
+                var c = mine ? new Color(1f, 0.92f, 0.15f) : new Color(0.6f, 0.6f, 0.65f);
+                if (_markerMat != null) { if (_markerMat.HasProperty("_BaseColor")) _markerMat.SetColor("_BaseColor", c); _markerMat.color = c; }
             }
         }
 
@@ -251,6 +257,7 @@ namespace HexWars.Presentation
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", yellow);
             m.color = yellow;
             mr.sharedMaterial = m;
+            _markerMat = m;
             mr.shadowCastingMode = ShadowCastingMode.Off;
 
             _marker.SetActive(false);
