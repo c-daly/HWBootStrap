@@ -29,6 +29,9 @@ namespace HexWars.Engine
 
         public int TileCount => _tiles.Count;
 
+        /// <summary>All tiles on the board (for renderers / iteration).</summary>
+        public IReadOnlyCollection<Tile> Tiles => _tiles.Values;
+
         public bool Contains(HexCoord coord) => _tiles.ContainsKey(coord);
 
         public Tile TileAt(HexCoord coord) => _tiles[coord];

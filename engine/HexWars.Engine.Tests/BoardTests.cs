@@ -1,3 +1,4 @@
+using System.Linq;
 using HexWars.Engine;
 using NUnit.Framework;
 
@@ -52,6 +53,15 @@ namespace HexWars.Engine.Tests
             Assert.That(board.IsInDeploymentZone(PlayerId.Player0, new HexCoord(0, 0)), Is.True);
             Assert.That(board.IsInDeploymentZone(PlayerId.Player0, new HexCoord(5, 0)), Is.False);
             Assert.That(board.IsInDeploymentZone(PlayerId.Player1, new HexCoord(5, 0)), Is.True);
+        }
+
+        [Test]
+        public void Tiles_EnumeratesEveryColumn()
+        {
+            var board = TwoColumns();
+            Assert.That(board.Tiles.Count, Is.EqualTo(2));
+            Assert.That(board.Tiles.Select(t => t.Elevation).OrderBy(e => e).ToArray(),
+                        Is.EqualTo(new[] { 0, 2 }));
         }
     }
 }
