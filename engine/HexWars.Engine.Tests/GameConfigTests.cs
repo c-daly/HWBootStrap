@@ -32,5 +32,20 @@ namespace HexWars.Engine.Tests
             Assert.That(water.MoveCost, Is.EqualTo(3));
             Assert.That(water.Passable, Is.True);
         }
+
+        [Test]
+        public void Default_HasExpectedGameplayTunables()
+        {
+            var c = GameConfig.Default();
+            Assert.That(c.StartingPoints, Is.EqualTo(12));
+            Assert.That(c.BountyRate, Is.EqualTo(0.5));
+            Assert.That(c.GeneratorCost, Is.EqualTo(2));
+            Assert.That(c.GeneratorOutput, Is.EqualTo(1));
+            Assert.That(c.GeneratorHealth, Is.EqualTo(3));
+            Assert.That(c.DamageFloor, Is.EqualTo(0));
+            Assert.That(c.DmgHighGroundBonus, Is.EqualTo(1));
+            Assert.That(c.RangeHighGroundBonus, Is.EqualTo(1));
+            Assert.That(c.RoundCap, Is.EqualTo(40));
+        }
     }
 }

@@ -3,16 +3,58 @@ using System.Collections.Generic;
 namespace HexWars.Engine
 {
     /// <summary>
-    /// All tunable rules values live here so balancing is data, not code. Built up as the rules
-    /// that consume each knob are implemented (TDD). Starts with the terrain table.
+    /// All tunable rules values — balancing is data, not code. Placeholder defaults; every value
+    /// is provisional (balance and fun win). Vertical movement / vertical reach cost a flat 1 per
+    /// level by design (uniform 1pt/hex), so they are not tunables here.
     /// </summary>
     public sealed class GameConfig
     {
         private readonly IReadOnlyDictionary<TerrainType, TerrainDef> _terrain;
 
-        public GameConfig(IReadOnlyDictionary<TerrainType, TerrainDef> terrain)
+        /// <summary>Points each player starts with.</summary>
+        public int StartingPoints { get; }
+
+        /// <summary>Fraction of a destroyed unit's build cost paid to the killer's owner.</summary>
+        public double BountyRate { get; }
+
+        public int GeneratorCost { get; }
+        public int GeneratorOutput { get; }
+        public int GeneratorHealth { get; }
+
+        /// <summary>Minimum damage a hit deals after defense (e.g. 0 or 1).</summary>
+        public int DamageFloor { get; }
+
+        /// <summary>Bonus damage per level of attacker high-ground advantage.</summary>
+        public int DmgHighGroundBonus { get; }
+
+        /// <summary>Bonus horizontal range per level of attacker high-ground advantage.</summary>
+        public int RangeHighGroundBonus { get; }
+
+        /// <summary>Round at which the stalemate backstop ends the game by total value.</summary>
+        public int RoundCap { get; }
+
+        public GameConfig(
+            IReadOnlyDictionary<TerrainType, TerrainDef> terrain,
+            int startingPoints = 12,
+            double bountyRate = 0.5,
+            int generatorCost = 2,
+            int generatorOutput = 1,
+            int generatorHealth = 3,
+            int damageFloor = 0,
+            int dmgHighGroundBonus = 1,
+            int rangeHighGroundBonus = 1,
+            int roundCap = 40)
         {
             _terrain = terrain;
+            StartingPoints = startingPoints;
+            BountyRate = bountyRate;
+            GeneratorCost = generatorCost;
+            GeneratorOutput = generatorOutput;
+            GeneratorHealth = generatorHealth;
+            DamageFloor = damageFloor;
+            DmgHighGroundBonus = dmgHighGroundBonus;
+            RangeHighGroundBonus = rangeHighGroundBonus;
+            RoundCap = roundCap;
         }
 
         /// <summary>Modifier table for the given terrain.</summary>
