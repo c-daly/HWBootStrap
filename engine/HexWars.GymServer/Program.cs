@@ -35,6 +35,13 @@ void Send(object payload)
     output.Flush();
 }
 
+IAgent? MakeController(string? spec, int agentSeed)
+{
+    if (spec == "greedy") return new GreedyAgent(agentSeed);
+    if (spec == "random") return new RandomAgent(agentSeed);
+    return null; // "external" / unset -> caller supplies this seat's actions
+}
+
 string? line;
 while ((line = Console.ReadLine()) != null)
 {
@@ -75,7 +82,9 @@ while ((line = Console.ReadLine()) != null)
         {
             duel ??= new DuelEnv();
             int seed = root.TryGetProperty("seed", out var s) ? s.GetInt32() : 0;
-            var v = duel.Reset(seed);
+            string? p0 = root.TryGetProperty("p0", out var a) ? a.GetString() : null; // "external"(default)/greedy/random
+            string? p1 = root.TryGetProperty("p1", out var b) ? b.GetString() : null;
+            var v = duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2));
             Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, terminated = v.Terminated, truncated = v.Truncated });
             break;
         }
