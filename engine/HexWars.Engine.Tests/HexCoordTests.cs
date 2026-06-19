@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HexWars.Engine;
 using NUnit.Framework;
 
@@ -32,6 +33,18 @@ namespace HexWars.Engine.Tests
         public void Equality_DifferentQR_AreNotEqual()
         {
             Assert.That(new HexCoord(1, 0) != new HexCoord(0, 1), Is.True);
+        }
+
+        [Test]
+        public void Neighbors_AreTheSixDistinctAdjacentCoords()
+        {
+            var origin = new HexCoord(0, 0);
+            var neighbors = origin.Neighbors();
+
+            Assert.That(neighbors.Count, Is.EqualTo(6));
+            foreach (var n in neighbors)
+                Assert.That(HexCoord.Distance(origin, n), Is.EqualTo(1));
+            Assert.That(new HashSet<HexCoord>(neighbors).Count, Is.EqualTo(6));
         }
     }
 }

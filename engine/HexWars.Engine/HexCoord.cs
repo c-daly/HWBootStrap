@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace HexWars.Engine
 {
@@ -38,5 +39,20 @@ namespace HexWars.Engine
 
         public static bool operator ==(HexCoord a, HexCoord b) => a.Equals(b);
         public static bool operator !=(HexCoord a, HexCoord b) => !a.Equals(b);
+
+        /// <summary>The six axial directions (pointy/flat-agnostic): E, NE, NW, W, SW, SE order.</summary>
+        public static readonly (int dq, int dr)[] Directions =
+        {
+            (1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1),
+        };
+
+        /// <summary>The six adjacent columns (no bounds checking — callers filter to the board).</summary>
+        public IReadOnlyList<HexCoord> Neighbors()
+        {
+            var result = new HexCoord[6];
+            for (int i = 0; i < 6; i++)
+                result[i] = new HexCoord(Q + Directions[i].dq, R + Directions[i].dr);
+            return result;
+        }
     }
 }
