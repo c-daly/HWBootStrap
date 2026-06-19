@@ -7,7 +7,8 @@ namespace HexWars.Engine.Tests
     public class BoardGenerationTests
     {
         private const int W = 8, H = 6, MaxElev = 4, ZoneDepth = 2;
-        private static RandomBoardGenerator Gen() => new RandomBoardGenerator(W, H, MaxElev, ZoneDepth);
+        private static RandomBoardGenerator Gen() =>
+            new RandomBoardGenerator(new BoardGenConfig(W, H, MaxElev, ZoneDepth));
 
         [Test]
         public void Generate_ProducesEveryColumn()
@@ -90,6 +91,26 @@ namespace HexWars.Engine.Tests
             var reach = MovementService.ReachableTiles(state, groundUnit);
             Assert.That(reach.Count, Is.GreaterThanOrEqualTo(board.TileCount / 3),
                 "a 0-vertical-movement unit should roam a large connected flat area");
+        }
+
+        [Test]
+        public void Config_FlatChance1_ProducesAllFlatGround()
+        {
+            var board = new RandomBoardGenerator(
+                new BoardGenConfig(6, 4, maxElevation: 4, zoneDepth: 1, flatChance: 1.0)).Generate(5);
+            Assert.That(board.Tiles.All(t => t.Elevation == 0), Is.True);
+        }
+
+        [Test]
+        public void Config_TerrainWeights_DriveTerrainSelection()
+        {
+            var allPlains = new RandomBoardGenerator(new BoardGenConfig(6, 4, flatChance: 1.0,
+                plainsWeight: 1, forestWeight: 0, roughWeight: 0, waterWeight: 0)).Generate(5);
+            Assert.That(allPlains.Tiles.All(t => t.Terrain == TerrainType.Plains), Is.True);
+
+            var allWater = new RandomBoardGenerator(new BoardGenConfig(6, 4, flatChance: 1.0,
+                plainsWeight: 0, forestWeight: 0, roughWeight: 0, waterWeight: 1)).Generate(5);
+            Assert.That(allWater.Tiles.All(t => t.Terrain == TerrainType.Water), Is.True);
         }
     }
 }
