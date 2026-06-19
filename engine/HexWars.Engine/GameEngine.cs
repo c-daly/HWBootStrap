@@ -20,6 +20,7 @@ namespace HexWars.Engine
                 case CreateUnit c: return ApplyCreateUnit(state, c);
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
+                case MoveUnit c: return ApplyMoveUnit(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
         }
@@ -83,6 +84,33 @@ namespace HexWars.Engine
             return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
         }
 
+        private static Result ApplyMoveUnit(GameState state, MoveUnit c)
+        {
+            var player = state.Player(c.Issuer);
+            int idx = IndexOfLivingUnit(player, c.UnitId);
+            if (idx < 0) return Result.Reject(state, RejectionReason.UnitNotFound);
+            if (state.MovedUnitIds.Contains(c.UnitId)) return Result.Reject(state, RejectionReason.UnitAlreadyMoved);
+
+            var unit = player.UnitsOnBoard[idx];
+            var reachable = MovementService.ReachableTiles(state, unit);
+            if (!reachable.Contains(c.Dest)) return Result.Reject(state, RejectionReason.OutOfMovementRange);
+
+            var moved = unit.WithCell(c.Dest, state.Board.TileAt(c.Dest).Elevation);
+            var units = new List<Unit>(player.UnitsOnBoard);
+            units[idx] = moved;
+            var updated = new PlayerState(player.Id, player.Points, player.Reserve, units, player.Generators);
+
+            var movedIds = new HashSet<int>(state.MovedUnitIds) { c.UnitId };
+            return Result.Ok(WithPlayer(state, updated, movedUnitIds: movedIds));
+        }
+
+        private static int IndexOfLivingUnit(PlayerState player, int unitId)
+        {
+            for (int i = 0; i < player.UnitsOnBoard.Count; i++)
+                if (player.UnitsOnBoard[i].Id == unitId && player.UnitsOnBoard[i].IsAlive) return i;
+            return -1;
+        }
+
         /// <summary>True if any living unit or generator (either player) stands on the column.</summary>
         private static bool IsOccupied(GameState state, HexCoord coord)
         {
@@ -94,13 +122,16 @@ namespace HexWars.Engine
             return false;
         }
 
-        /// <summary>Rebuild the state with one player replaced (and optionally a new entity-id counter).</summary>
-        private static GameState WithPlayer(GameState state, PlayerState updated, int? nextEntityId = null)
+        /// <summary>Rebuild the state with one player replaced (optionally a new entity-id counter or
+        /// acted-tracking sets); all other fields, including the per-turn acted sets, are preserved.</summary>
+        private static GameState WithPlayer(GameState state, PlayerState updated, int? nextEntityId = null,
+            IReadOnlyCollection<int>? movedUnitIds = null, IReadOnlyCollection<int>? attackedUnitIds = null)
         {
             var players = state.Players.ToArray();
             players[(int)updated.Id] = updated;
             return new GameState(state.Board, state.Config, players, state.ActivePlayer,
-                                 state.Round, nextEntityId ?? state.NextEntityId, state.IsGameOver, state.Winner);
+                                 state.Round, nextEntityId ?? state.NextEntityId, state.IsGameOver, state.Winner,
+                                 movedUnitIds ?? state.MovedUnitIds, attackedUnitIds ?? state.AttackedUnitIds);
         }
     }
 }

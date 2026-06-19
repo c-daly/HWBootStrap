@@ -3,12 +3,15 @@ using System.Collections.Generic;
 namespace HexWars.Engine
 {
     /// <summary>
-    /// The complete, immutable game state: the board, both players, whose turn it is, the round,
-    /// the running entity-id counter, and terminal status. The single <c>Apply</c> mutation path
-    /// returns a NEW GameState, so the engine is search-able (an AI can fork and score freely).
+    /// The complete, immutable game state. The single <c>Apply</c> mutation path returns a NEW
+    /// GameState, so the engine is search-able (an AI can fork and score freely).
+    /// <see cref="MovedUnitIds"/> / <see cref="AttackedUnitIds"/> track which units have used their
+    /// move / attack this turn (reset on EndTurn).
     /// </summary>
     public sealed class GameState
     {
+        private static readonly IReadOnlyCollection<int> NoIds = new int[0];
+
         public Board Board { get; }
         public GameConfig Config { get; }
 
@@ -20,6 +23,8 @@ namespace HexWars.Engine
         public int NextEntityId { get; }
         public bool IsGameOver { get; }
         public PlayerId? Winner { get; }
+        public IReadOnlyCollection<int> MovedUnitIds { get; }
+        public IReadOnlyCollection<int> AttackedUnitIds { get; }
 
         public GameState(
             Board board,
@@ -29,7 +34,9 @@ namespace HexWars.Engine
             int round,
             int nextEntityId,
             bool isGameOver = false,
-            PlayerId? winner = null)
+            PlayerId? winner = null,
+            IReadOnlyCollection<int>? movedUnitIds = null,
+            IReadOnlyCollection<int>? attackedUnitIds = null)
         {
             Board = board;
             Config = config;
@@ -39,6 +46,8 @@ namespace HexWars.Engine
             NextEntityId = nextEntityId;
             IsGameOver = isGameOver;
             Winner = winner;
+            MovedUnitIds = movedUnitIds ?? NoIds;
+            AttackedUnitIds = attackedUnitIds ?? NoIds;
         }
 
         public PlayerState Player(PlayerId id) => Players[(int)id];
@@ -46,6 +55,7 @@ namespace HexWars.Engine
 
         /// <summary>A distinct GameState with the same (immutable) contents.</summary>
         public GameState Clone() =>
-            new GameState(Board, Config, Players, ActivePlayer, Round, NextEntityId, IsGameOver, Winner);
+            new GameState(Board, Config, Players, ActivePlayer, Round, NextEntityId,
+                          IsGameOver, Winner, MovedUnitIds, AttackedUnitIds);
     }
 }

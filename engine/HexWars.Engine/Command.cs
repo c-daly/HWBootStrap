@@ -14,4 +14,7 @@ namespace HexWars.Engine
 
     /// <summary>Place a reserved unit (by index) onto a hex in the issuer's deployment zone (no point cost).</summary>
     public sealed record DeployUnit(PlayerId Issuer, int ReserveIndex, HexCoord Cell) : Command(Issuer);
+
+    /// <summary>Move one of the issuer's units to a reachable destination (once per turn).</summary>
+    public sealed record MoveUnit(PlayerId Issuer, int UnitId, HexCoord Dest) : Command(Issuer);
 }
