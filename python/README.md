@@ -31,14 +31,33 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r python/requirements.txt
 ```
 
-## Train
+## Train one agent
 
 ```bash
 export HEXWARS_SERVER=$(pwd)/engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll
-cd python && python train_maskable_ppo.py
+cd python && python train_maskable_ppo.py --opponent greedy --out ppo_a
 ```
 
-You should see the episode reward climb as the policy learns to beat the GreedyAgent.
+Episode reward should climb as the policy learns to beat the scripted baseline (Greedy/Random are
+*baselines only* — the learner is the real agent).
+
+## Two learned agents playing each other
+
+Train two **different** agents (here, against different opponents), then duel them — both seats are
+driven by the policies, no scripted opponent:
+
+```bash
+python train_maskable_ppo.py --opponent greedy --seed 1 --out ppo_a --timesteps 200000
+python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps 200000
+python duel.py ppo_a.zip ppo_b.zip --out ../replays/ppo_a_vs_b.replay
+```
+
+Then watch it: Unity → **HexWars → Replay → Open Replay File…** → pick `replays/ppo_a_vs_b.replay`.
+
+**Algorithm choice:** MaskablePPO is used because it's the one SB3 algorithm with *native* action
+masking (essential here — most of the 379 actions are illegal each turn). A value-based agent (a
+masked DQN) is also possible but needs a custom Q-masking wrapper; ask and I'll add it. The two
+agents above are genuinely different *policies* (different opponents/seeds) even though both are PPO.
 
 ## Quick sanity check (no Python deps)
 
