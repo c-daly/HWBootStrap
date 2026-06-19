@@ -28,7 +28,7 @@ echo "[3/4] training agent B (vs random baseline, $TS steps)..."
 python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps "$TS" --logdir runs/ppo_b
 
 echo "[4/4] dueling A vs B -> replay..."
-python duel.py ppo_a.zip ppo_b.zip --out ../replays/ppo_a_vs_b.replay
+python duel.py --p0 ppo:ppo_a.zip --p1 ppo:ppo_b.zip --out ../replays/ppo_a_vs_b.replay
 
 echo "DONE."
 echo "  models : python/ppo_a.zip, python/ppo_b.zip"

@@ -49,15 +49,31 @@ driven by the policies, no scripted opponent:
 ```bash
 python train_maskable_ppo.py --opponent greedy --seed 1 --out ppo_a --timesteps 200000
 python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps 200000
-python duel.py ppo_a.zip ppo_b.zip --out ../replays/ppo_a_vs_b.replay
+python duel.py --p0 ppo:ppo_a.zip --p1 ppo:ppo_b.zip --out ../replays/ppo_a_vs_b.replay
 ```
 
 Then watch it: Unity → **HexWars → Replay → Open Replay File…** → pick `replays/ppo_a_vs_b.replay`.
 
-**Algorithm choice:** MaskablePPO is used because it's the one SB3 algorithm with *native* action
-masking (essential here — most of the 379 actions are illegal each turn). A value-based agent (a
-masked DQN) is also possible but needs a custom Q-masking wrapper; ask and I'll add it. The two
-agents above are genuinely different *policies* (different opponents/seeds) even though both are PPO.
+### Pick any controller per seat
+
+`duel.py --p0 <spec> --p1 <spec>`, where each spec is `random | greedy | ppo:PATH | dqn:PATH`:
+
+```bash
+python duel.py --p0 ppo:ppo_a.zip --p1 greedy          # learned vs greedy baseline
+python duel.py --p0 ppo:ppo_a.zip --p1 dqn:dqn_a.zip   # PPO vs DQN (different algorithms)
+python duel.py --p0 greedy        --p1 random          # baselines only
+```
+
+### Different algorithms (DQN)
+
+`train_dqn.py` is an **experimental** masked DQN (value-based) — SB3 has no native masking for DQN, so
+it masks exploration/exploitation itself (Q-target left unmasked). MaskablePPO is the verified path; use
+DQN when you want the two duelists to use *different* algorithms:
+
+```bash
+python train_dqn.py --opponent greedy --seed 3 --out dqn_a --timesteps 200000
+python duel.py --p0 ppo:ppo_a.zip --p1 dqn:dqn_a.zip
+```
 
 ## Quick sanity check (no Python deps)
 
