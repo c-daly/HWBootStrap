@@ -78,3 +78,7 @@ engine/**/obj/
 
 # Local Claude Code tooling (workflow scripts, etc.)
 .claude/
+
+# Engine DLL placed in Unity is a build artifact — regenerate with engine/build-to-unity.ps1
+Assets/HexWars/Plugins/HexWars.Engine.dll
+Assets/HexWars/Plugins/HexWars.Engine.dll.meta
