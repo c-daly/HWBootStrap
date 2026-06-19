@@ -62,5 +62,34 @@ namespace HexWars.Engine.Tests
                 for (int q = 0; q < W; q++)
                     Assert.That(board.TileAt(new HexCoord(q, r)).Elevation, Is.InRange(0, MaxElev));
         }
+
+        [Test]
+        public void Generate_IsMostlyFlatGround()
+        {
+            foreach (var seed in new[] { 1, 42, 123, 777 })
+            {
+                var board = Gen().Generate(seed);
+                int flat = board.Tiles.Count(t => t.Elevation == 0);
+                Assert.That(flat, Is.GreaterThanOrEqualTo(board.TileCount / 2),
+                    $"seed {seed}: expected a majority of flat (elevation 0) tiles");
+            }
+        }
+
+        [Test]
+        public void Generate_GroundUnit_CanRoamALargeFlatArea()
+        {
+            var board = Gen().Generate(123);
+            var start = board.Tiles.First(t => t.Elevation == 0).Coord;
+            var groundUnit = new Unit(1, PlayerId.Player0,
+                new UnitStats(1, 0, 0, movement: 50, verticalMovement: 0, 0, 0, 0, 0), start, 0);
+            var state = new GameState(board, GameConfig.Default(),
+                new[] { new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { groundUnit }),
+                        new PlayerState(PlayerId.Player1, 0) },
+                PlayerId.Player0, 1, 100);
+
+            var reach = MovementService.ReachableTiles(state, groundUnit);
+            Assert.That(reach.Count, Is.GreaterThanOrEqualTo(board.TileCount / 3),
+                "a 0-vertical-movement unit should roam a large connected flat area");
+        }
     }
 }

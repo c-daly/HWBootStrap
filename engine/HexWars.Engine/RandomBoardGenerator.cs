@@ -15,13 +15,18 @@ namespace HexWars.Engine
         private readonly int _height;
         private readonly int _maxElevation;
         private readonly int _zoneDepth;
+        private readonly double _flatChance;
 
-        public RandomBoardGenerator(int width, int height, int maxElevation, int zoneDepth)
+        /// <param name="flatChance">Probability a tile is flat ground (elevation 0). High by default so
+        /// most of the board is a connected flat area that units with no Vertical Movement can roam;
+        /// the rest is scattered raised terrain.</param>
+        public RandomBoardGenerator(int width, int height, int maxElevation, int zoneDepth, double flatChance = 0.6)
         {
             _width = width;
             _height = height;
             _maxElevation = maxElevation;
             _zoneDepth = zoneDepth;
+            _flatChance = flatChance;
         }
 
         public Board Generate(int seed)
@@ -38,7 +43,7 @@ namespace HexWars.Engine
                     if (elevation.ContainsKey(cell)) continue;
 
                     var mirror = new HexCoord(_width - 1 - q, _height - 1 - r);
-                    int e = rng.Next(_maxElevation + 1);
+                    int e = rng.NextDouble() < _flatChance ? 0 : 1 + rng.Next(_maxElevation);
                     var t = WeightedTerrain(rng);
 
                     elevation[cell] = e; terrain[cell] = t;
