@@ -17,8 +17,8 @@ namespace HexWars.Presentation
         public float LevelHeight = 0.55f;
         public float ColumnRadiusFactor = 0.9f;
         public float EdgeBarThickness = 0.08f;
-        [Range(0f, 1f)] public float Metallic = 0.85f;   // hex bodies: metallic + reflective
-        [Range(0f, 1f)] public float Smoothness = 0.6f;
+        [Range(0f, 1f)] public float Metallic = 0.9f;    // hex bodies: metallic + reflective
+        [Range(0f, 1f)] public float Smoothness = 0.6f;  // soft sheen, not a mirror-sharp hotspot
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();

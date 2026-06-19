@@ -109,24 +109,64 @@ namespace HexWars.Presentation
             return new PlayerState(id, points, unitsOnBoard: units, generators: gens);
         }
 
+        static Cubemap _reflection;
+
         void SetupEnvironment()
         {
             RenderSettings.ambientMode = AmbientMode.Flat;
-            RenderSettings.ambientLight = new Color(0.52f, 0.54f, 0.62f);
-            RenderSettings.skybox = StarfieldSkybox();
+            RenderSettings.ambientLight = new Color(0.40f, 0.43f, 0.52f);
+            RenderSettings.skybox = StarfieldSkybox();                 // dark starfield stays the visible background
+            RenderSettings.defaultReflectionMode = UnityEngine.Rendering.DefaultReflectionMode.Custom;
+            RenderSettings.customReflectionTexture = BrightReflection(); // ...but metal reflects an even bright env
+            RenderSettings.reflectionIntensity = 1f;
             DynamicGI.UpdateEnvironment();
 
-            if (GameObject.Find("KeyLight") == null)
+            // a stray fill from an earlier setup would re-add a second hotspot — remove it
+            var stray = GameObject.Find("FillLight");
+            if (stray != null) { if (Application.isPlaying) Destroy(stray); else DestroyImmediate(stray); }
+
+            // one gentle light: brightness/shine comes from the even reflection, not light hotspots
+            EnsureLight("KeyLight", new Color(1f, 0.98f, 0.94f), 0.9f, Quaternion.Euler(45f, -40f, 0f), LightShadows.Soft, 0.35f);
+        }
+
+        static Cubemap BrightReflection()
+        {
+            if (_reflection != null) return _reflection;
+            const int s = 32;
+            var cm = new Cubemap(s, TextureFormat.RGBA32, false);
+            var hi = new Color(0.95f, 0.96f, 1f);
+            var lo = new Color(0.45f, 0.47f, 0.55f);
+            for (int f = 0; f < 6; f++)
             {
-                var go = new GameObject("KeyLight");
-                var l = go.AddComponent<Light>();
-                l.type = LightType.Directional;
-                l.intensity = 0.85f;
-                l.color = new Color(1f, 0.98f, 0.92f);
-                l.shadows = LightShadows.Soft;
-                l.shadowStrength = 0.4f;
-                go.transform.rotation = Quaternion.Euler(38f, -42f, 0f);
+                var face = (CubemapFace)f;
+                var cols = new Color[s * s];
+                for (int y = 0; y < s; y++)
+                    for (int x = 0; x < s; x++)
+                    {
+                        float t = face == CubemapFace.PositiveY ? 1f
+                                : face == CubemapFace.NegativeY ? 0.25f
+                                : y / (float)(s - 1);
+                        cols[y * s + x] = Color.Lerp(lo, hi, t);
+                    }
+                cm.SetPixels(cols, face);
             }
+            cm.Apply();
+            _reflection = cm;
+            return cm;
+        }
+
+        static void EnsureLight(string name, Color color, float intensity, Quaternion rot, LightShadows shadows, float shadowStrength)
+        {
+            var go = GameObject.Find(name);
+            if (go == null) go = new GameObject(name);
+            var l = go.GetComponent<Light>();
+            if (l == null) l = go.AddComponent<Light>();
+            l.type = LightType.Directional;
+            l.color = color;
+            l.intensity = intensity;
+            l.shadows = shadows;
+            l.shadowStrength = shadowStrength;
+            go.transform.rotation = rot;
         }
 
         static Material StarfieldSkybox()
