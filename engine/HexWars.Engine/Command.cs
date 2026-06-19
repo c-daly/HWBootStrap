@@ -11,4 +11,7 @@ namespace HexWars.Engine
 
     /// <summary>Pay for and place an income generator on a hex in the issuer's deployment zone.</summary>
     public sealed record DeployGenerator(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
+
+    /// <summary>Place a reserved unit (by index) onto a hex in the issuer's deployment zone (no point cost).</summary>
+    public sealed record DeployUnit(PlayerId Issuer, int ReserveIndex, HexCoord Cell) : Command(Issuer);
 }

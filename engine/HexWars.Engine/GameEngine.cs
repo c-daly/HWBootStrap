@@ -19,6 +19,7 @@ namespace HexWars.Engine
             {
                 case CreateUnit c: return ApplyCreateUnit(state, c);
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
+                case DeployUnit c: return ApplyDeployUnit(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
         }
@@ -54,6 +55,31 @@ namespace HexWars.Engine
             var generators = new List<Generator>(player.Generators) { gen };
             var updated = new PlayerState(player.Id, player.Points - state.Config.GeneratorCost,
                                           player.Reserve, player.UnitsOnBoard, generators);
+            return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
+        }
+
+        private static Result ApplyDeployUnit(GameState state, DeployUnit c)
+        {
+            var player = state.Player(c.Issuer);
+            if (c.ReserveIndex < 0 || c.ReserveIndex >= player.Reserve.Count)
+                return Result.Reject(state, RejectionReason.ReserveUnitNotFound);
+
+            var board = state.Board;
+            if (!board.Contains(c.Cell)) return Result.Reject(state, RejectionReason.TileNotFound);
+            if (!board.IsInDeploymentZone(c.Issuer, c.Cell)) return Result.Reject(state, RejectionReason.OutsideDeploymentZone);
+
+            var tile = board.TileAt(c.Cell);
+            if (!state.Config.Terrain(tile.Terrain).Passable) return Result.Reject(state, RejectionReason.TileImpassable);
+            if (IsOccupied(state, c.Cell)) return Result.Reject(state, RejectionReason.TileOccupied);
+
+            var stats = player.Reserve[c.ReserveIndex];
+            var unit = new Unit(state.NextEntityId, c.Issuer, stats, c.Cell, tile.Elevation);
+
+            var reserve = new List<UnitStats>(player.Reserve);
+            reserve.RemoveAt(c.ReserveIndex);
+            var units = new List<Unit>(player.UnitsOnBoard) { unit };
+
+            var updated = new PlayerState(player.Id, player.Points, reserve, units, player.Generators);
             return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
         }
 
