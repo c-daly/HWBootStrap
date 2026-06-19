@@ -15,14 +15,49 @@ namespace HexWars.Engine
             if (state.IsGameOver) return Result.Reject(state, RejectionReason.GameAlreadyOver);
             if (command.Issuer != state.ActivePlayer) return Result.Reject(state, RejectionReason.NotYourTurn);
 
+            var result = Dispatch(state, command);
+            return result.Success ? Result.Ok(Finalize(result.NewState)) : result;
+        }
+
+        private static Result Dispatch(GameState state, Command command)
+        {
             switch (command)
             {
                 case CreateUnit c: return ApplyCreateUnit(state, c);
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
+                case EndTurn c: return ApplyEndTurn(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
+        }
+
+        /// <summary>Win check after every successful command: stamps IsGameOver/Winner if terminal.</summary>
+        private static GameState Finalize(GameState s)
+        {
+            if (s.IsGameOver) return s;
+            if (WinCheck.IsTerminal(s)) return WithGameOver(s, WinCheck.Resolve(s));
+            return s;
+        }
+
+        private static GameState WithGameOver(GameState s, PlayerId? winner) =>
+            new GameState(s.Board, s.Config, s.Players, s.ActivePlayer, s.Round, s.NextEntityId,
+                          isGameOver: true, winner: winner,
+                          movedUnitIds: s.MovedUnitIds, attackedUnitIds: s.AttackedUnitIds);
+
+        private static Result ApplyEndTurn(GameState state, EndTurn c)
+        {
+            var next = state.ActivePlayer == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            int round = state.Round + (next == PlayerId.Player0 ? 1 : 0);
+
+            int income = Economy.Income(state, next);
+            var players = state.Players.ToArray();
+            var np = players[(int)next];
+            players[(int)next] = np.WithPoints(np.Points + income);
+
+            return Result.Ok(new GameState(state.Board, state.Config, players, next, round,
+                state.NextEntityId, state.IsGameOver, state.Winner,
+                movedUnitIds: System.Array.Empty<int>(), attackedUnitIds: System.Array.Empty<int>()));
         }
 
         private static Result ApplyCreateUnit(GameState state, CreateUnit c)
