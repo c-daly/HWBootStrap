@@ -17,6 +17,8 @@ namespace HexWars.Presentation
         public float LevelHeight = 0.55f;
         public float ColumnRadiusFactor = 0.9f;
         public float EdgeBarThickness = 0.08f;
+        [Range(0f, 1f)] public float Metallic = 0.85f;   // hex bodies: metallic + reflective
+        [Range(0f, 1f)] public float Smoothness = 0.6f;
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
@@ -214,21 +216,22 @@ namespace HexWars.Presentation
             var unlit = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlit == null) unlit = Shader.Find("Unlit/Color");
 
-            Material Body(Color c)
+            Material Body(Color c, float metallic)
             {
                 var m = new Material(lit);
                 if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
                 m.color = c;
-                if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", 0.08f);
+                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", metallic);
+                if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", metallic > 0f ? Smoothness : 0.1f);
                 if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
                 return m;
             }
-            _plains = Body(new Color(1f, 0.82f, 0.10f));
-            _forest = Body(new Color(0.30f, 0.62f, 0.27f));
-            _water  = Body(new Color(0.24f, 0.58f, 0.85f));
-            _rough  = Body(new Color(0.80f, 0.71f, 0.47f));
-            _p0     = Body(new Color(0.27f, 0.68f, 1f));
-            _p1     = Body(new Color(0.92f, 0.28f, 0.28f));
+            _plains = Body(new Color(1f, 0.82f, 0.10f), Metallic);
+            _forest = Body(new Color(0.30f, 0.62f, 0.27f), Metallic);
+            _water  = Body(new Color(0.24f, 0.58f, 0.85f), Metallic);
+            _rough  = Body(new Color(0.80f, 0.71f, 0.47f), Metallic);
+            _p0     = Body(new Color(0.27f, 0.68f, 1f), 0f);   // units stay matte for readability
+            _p1     = Body(new Color(0.92f, 0.28f, 0.28f), 0f);
 
             _black = new Material(unlit);
             if (_black.HasProperty("_BaseColor")) _black.SetColor("_BaseColor", Color.black);
