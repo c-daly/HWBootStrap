@@ -48,9 +48,15 @@ multiplayer rides the same command API.
    1:1, so understanding what you can purchase is understanding the game. The **visible board**
    carries the rest — elevation is literally height, terrain is literally what it looks like.
    This is a constraint on every future addition: **prefer expressing a mechanic as a buyable
-   stat over inventing a special rule.** Corollaries already honored: one unified 3D distance
-   formula instead of special-case line-of-sight occlusion (§6); no hidden modifiers or
-   nonlinear costs; deterministic combat.
+   stat over inventing a special rule.** Corollaries already honored: separate flat
+   horizontal/vertical reach instead of special-case line-of-sight occlusion (§6); no hidden
+   modifiers or nonlinear costs; deterministic combat.
+5. **Uniform 3D pricing — every capability, both axes, 1 point per hex.** The board is 3D (hexes
+   + elevation), so every spatial capability is bought on *two* axes: a horizontal reach and a
+   vertical reach, each a flat 1 point per hex/level. This holds for **Movement** (+ **Vertical
+   Movement**), **Range** (+ **Range Arc**), **Vision** (+ **Vision Arc**), and **any capability
+   added later** — e.g. communication would be 1 point per hex, just like everything else. You
+   can do only what you bought; no axis has a free baseline.
 
 **Milestone-1 success criterion:** in playtest, several non-obvious builds (e.g. a 0-damage
 spotter, an immobile bunker, a 1-HP peak sniper, a swarm of 1-point gnats) should each prove
@@ -103,20 +109,24 @@ must have **≥1 Health** to exist (the only floor).
 |---|---|
 | **Health** | Current/max HP. Unit is destroyed at 0. |
 | **Damage** | Base damage per attack, reduced by the target's Defense (+terrain). |
-| **Range** | Horizontal firing reach — max hex distance to a target (§5). |
-| **Range Arc** | Vertical firing reach — how many elevation levels *up* it can shoot. Firing at or below its own level is unrestricted. |
-| **Movement** | Movement budget per turn; climbing and terrain cost extra (§6). |
 | **Defense** | Flat reduction of incoming damage per hit. |
-| **Vision** | Horizontal sight — max hex distance it can detect a target. Shared army-wide (§7). No free baseline. |
-| **Vision Arc** | Vertical sight — how many elevation levels *up* it can see. Seeing at or below its own level is unrestricted. |
+| **Movement** | Horizontal traversal budget per turn — hexes entered, paying terrain move cost (§6). |
+| **Vertical Movement** | Ascent budget per turn — levels it can climb (1 pt = 1 level up). Descending / level moves are free. 0 = can't leave its elevation band. |
+| **Range** | Horizontal firing reach — max hex distance to a target (§5). |
+| **Range Arc** | Vertical firing reach — levels *up* it can shoot. Firing at/below its own level is unrestricted. |
+| **Vision** | Horizontal sight — max hex distance it can detect a target. Shared army-wide (§7). |
+| **Vision Arc** | Vertical sight — levels *up* it can see. Seeing at/below its own level is unrestricted. |
 
-All eight stats are 1 point per step; a unit's `PointCost` is their sum.
+All nine stats are 1 point per step; a unit's `PointCost` is their sum. Naming: the vertical
+*reach* stats are "Arc" (instantaneous reach upward) while vertical *traversal* is "Vertical
+Movement" — the wording itself flags that moving up is a cost, not a reach (§6).
 
 **You can only do what you bought.** A stat at 0 means the capability is simply *absent* — there
-is no implicit baseline for anything: `Range` 0 can't attack across, `Range Arc` 0 can't fire
-above its own level, `Vision` 0 is horizontally blind, `Vision Arc` 0 can't see anything higher
-than itself, `Movement` 0 can't move, `Defense` 0 takes full damage. Every capability, on every
-axis, is earned by spending points.
+is no implicit baseline for anything: `Movement` 0 can't move across, `Vertical Movement` 0 can't
+climb, `Range` 0 can't attack across, `Range Arc` 0 can't fire above its own level, `Vision` 0 is
+horizontally blind, `Vision Arc` 0 can't see anything higher, `Defense` 0 takes full damage. Every
+capability, on every axis, is earned by spending points. (A **bounder** = high Vertical Movement,
+low Movement; an **aircraft** = high in both; a **turret** = zero of both.)
 
 - **Create** (action): pay the unit's total point cost (sum of stats); the designed unit goes
   into your **reserve** (off-board).
@@ -182,8 +192,9 @@ and fires downhill for free. Terrain concealment adds to the *horizontal* sight 
    (levels above you); at or below your level is free (§5).
 2. **High-ground bonus** — attacking downhill adds damage and horizontal range per level of
    advantage (`H` in §5). Holding the peak is real power.
-3. **Climb cost** — entering a higher hex costs extra movement per level; descending is cheap;
-   a `maxClimbPerStep` caps un-scalable cliffs.
+3. **Vertical movement is its own buy** — climbing a higher hex spends `Vertical Movement`
+   (1 per level up); descending / level moves are free. No hard cliff cap — your `Vertical
+   Movement` budget *is* the limit (a bounder leaps a 5-stack; a turret can't step up one).
 4. **Sight = the Vision / Vision Arc stats**, not terrain occlusion — keeps terrain "what you
    see is what you get."
 
@@ -198,16 +209,28 @@ Adding a terrain type is editing a `GameConfig` table, not writing code. Starter
 | **Rough** | 2 | +1 | +1 | yes |
 | **Water** | 3 (or impassable) | 0 | 0 | config |
 
-Terrain affects **movement, sight, and defense**. (Range is purely 3D-distance + elevation.)
+Terrain affects **movement, sight, and defense**. (Range/Vision are horizontal hex distance;
+vertical reach is the Arc stats.)
 
-### Movement
+### Movement — two budgets (horizontal + vertical)
+
+A unit has **two** per-turn budgets: **Movement** (horizontal) and **Vertical Movement**
+(ascent). Entering an adjacent hex draws from both:
 
 ```
-costToEnter(hex) = hex.terrainMoveCost + max(0, climbLevels) * climbCostPerLevel
+horizCost(hex)      = hex.terrainMoveCost                     // from Movement
+vertCost(from, hex) = max(0, hex.elevation - from.elevation)  // from Vertical Movement (ascent only)
 ```
 
-Entry is forbidden if the hex is impassable, occupied, or `climbLevels > maxClimbPerStep`.
-A unit spends up to its `Movement` per turn. One unit/structure per hex.
+A step is allowed only if the hex is passable and unoccupied, AND remaining `Movement >=
+horizCost` AND remaining `Vertical Movement >= vertCost`. Descending or moving level costs **0**
+vertical. There is **no** hard cliff cap — the `Vertical Movement` budget is the only limit, so a
+single step may climb several levels at once (hopping onto an adjacent **2-stack costs 2 Vertical
+Movement** plus the hex's terrain cost). One unit/structure per hex.
+
+This is deliberately *unlike* Range/Vision: shooting or seeing upward is instantaneous **reach**
+(gated by the `Range Arc` / `Vision Arc` you bought), whereas moving upward is a **traversal cost**
+(paid from `Vertical Movement`). Same uniform price — 1 point per level — different mechanic.
 
 ---
 
@@ -254,10 +277,11 @@ this same Vision computation in a later milestone.
   reproducible, unit-testable, shareable, and network-syncable later. "New board on the fly" =
   new seed. The generator mirrors the **entire board** — terrain *and* elevation — across center
   for fairness (not just the deployment zones), so neither side gets better ground. It produces
-  elevation (simple noise → ridges/valleys, with adjacent deltas clamped to `maxClimbPerStep` so
-  nothing is walled off), terrain (weighted thresholds), **mirror-symmetric deployment zones**,
-  and passes a **climb-aware connectivity check** (every deployment tile has a climbable path
-  out — no one boxed in by cliffs).
+  elevation (simple noise → ridges/valleys), terrain (weighted thresholds), **mirror-symmetric
+  deployment zones**, and passes a **passable-terrain connectivity check** (every deployment tile
+  can reach the rest of the board over passable terrain — no zone walled off by impassable hexes).
+  Elevation never traps a unit: any height is climbable given enough `Vertical Movement`, so
+  reachability is a terrain-passability property, not an elevation one.
 - **Authored boards** remain supported via an alternate `IBoardGenerator`; both emit identical
   `Board` data and render through the same path.
 - "Basic but fair" generation now; biome/balance sophistication is a future spec.
@@ -281,12 +305,13 @@ this same Vision computation in a later milestone.
 ### `HexWars.Engine` — plain C# assembly, **zero `UnityEngine` references**, fully unit-testable
 
 - **Data:** `HexCoord` (axial/cube + `Elevation`), `TerrainType`, `Board` (cells + deployment
-  zones), `UnitStats` (Health/Damage/Range/RangeArc/Movement/Defense/Vision/VisionArc), `Unit`
-  (stats + owner + position + currentHP), `Generator`, `PlayerState` (points, reserve, on-board
-  units), `GameState` (board, players, activePlayer, round).
-- **Rules (pure functions):** `HexDistance`, pathing with climb + terrain cost and
-  `maxClimbPerStep`, `TargetingService` (army-wide sight via `Vision`/`VisionArc` + per-unit
-  `Range`/`RangeArc`), `CombatResolver` (formula in §5), `Economy` (income, bounty, costs),
+  zones), `UnitStats` (Health/Damage/Defense/Movement/VerticalMovement/Range/RangeArc/Vision/
+  VisionArc), `Unit` (stats + owner + position + currentHP), `Generator`, `PlayerState` (points,
+  reserve, on-board units), `GameState` (board, players, activePlayer, round).
+- **Rules (pure functions):** `HexDistance`, pathing over two budgets (terrain cost from
+  `Movement`, ascent cost from `VerticalMovement`), `TargetingService` (army-wide sight via
+  `Vision`/`VisionArc` + per-unit `Range`/`RangeArc`), `CombatResolver` (formula in §5),
+  `Economy` (income, bounty, costs),
   `LegalMoves`, `WinCheck`, and `Evaluate(GameState, player)` — a heuristic position score
   (reused by the §10 stalemate total-value calc and, later, as the AI's search heuristic).
 - **Commands:** one record per action — `CreateUnit`, `DeployUnit`, `DeployGenerator`,
@@ -303,7 +328,7 @@ this same Vision computation in a later milestone.
 
 ### `HexWars.Engine.Tests` — Unity Test Framework (edit-mode)
 
-TDD the math: 3D distance, climb/terrain movement cost, targeting (range+vision+concealment),
+TDD the math: hex distance, two-budget movement (terrain + ascent), targeting (range+vision+concealment),
 combat (incl. high-ground & terrain defense), economy (income/bounty/costs), win/elimination,
 command validation & rejection, and "generator always yields a valid, symmetric, connected
 board."
@@ -398,7 +423,7 @@ To finalize during implementation/playtest (suggested starting values in parenth
 - Generator: cost (≈2), per-turn output (≈1), Health (≈3).
 - Damage floor — minimum damage per hit (0 or 1).
 - High-ground bonuses: `dmgHighGroundBonus`, `rangeHighGroundBonus` per level (e.g. +1 each).
-- Climb: `climbCostPerLevel` (e.g. +1), `maxClimbPerStep` (e.g. 2).
+- (Vertical Movement and the Arc reach stats cost a flat 1 point per level — uniform, not tunable.)
 - Terrain table values (move cost / concealment / defense / passable) per §6.
 - Board: dimensions (≈9×9), elevation range (0–4), terrain weights, deployment-zone depth.
 - Round cap for the stalemate backstop.
