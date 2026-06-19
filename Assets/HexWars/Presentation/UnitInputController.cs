@@ -74,12 +74,28 @@ namespace HexWars.Presentation
             var active = _game.State.ActivePlayer;
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
 
-            if (ownSelected)
+            // attack intent: only fire if actually targetable (range + army vision + LOS/arc)
+            if (ownSelected && unit != null && unit.Unit.Owner != active)
             {
-                if (unit != null && unit.Unit.Owner != active) { StartCoroutine(AttackSeq(_selected, unit)); return; }
-                if (unit == null && tile != null) { StartCoroutine(MoveSeq(_selected, tile.Coord)); return; }
+                if (TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
+                    StartCoroutine(AttackSeq(_selected, unit));
+                return; // out of range / no shot: nothing happens, keep selection
+            }
+            // move intent: only move to a reachable hex
+            if (ownSelected && unit == null && tile != null)
+            {
+                if (IsReachable(_selected.Unit, tile.Coord))
+                    StartCoroutine(MoveSeq(_selected, tile.Coord));
+                return;
             }
             Select(unit);
+        }
+
+        bool IsReachable(Unit unit, HexCoord dest)
+        {
+            foreach (var c in MovementService.ReachableTiles(_game.State, unit))
+                if (c == dest) return true;
+            return false;
         }
 
         void Select(UnitView unit)
@@ -123,10 +139,18 @@ namespace HexWars.Presentation
             Vector3 from = attacker.transform.position + Vector3.up * 0.4f;
             Vector3 to = targetPos + Vector3.up * 0.4f;
 
+            // direct shot flies straight; an indirect (LOS-blocked) shot lobs over the obstacles
+            bool directLos = LineOfSight.IsClear(_game.State.Board,
+                attacker.Unit.Cell, attacker.Unit.Elevation, target.Unit.Cell, target.Unit.Elevation);
+            float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
+
             var proj = MakeProjectile(from, projScale, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
             {
-                proj.transform.position = Vector3.Lerp(from, to, t / flightDur);
+                float f = t / flightDur;
+                var pos = Vector3.Lerp(from, to, f);
+                pos.y += Mathf.Sin(f * Mathf.PI) * arc;
+                proj.transform.position = pos;
                 yield return null;
             }
             Destroy(proj);
