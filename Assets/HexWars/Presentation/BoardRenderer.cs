@@ -5,11 +5,10 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Renders an engine <see cref="Board"/> as stacked, black-outlined hex columns (one column per
-    /// tile; elevation = number of stacked levels). Bodies are lit (so soft shadows read); every
-    /// horizontal level boundary gets a black collar and every vertical corner a black bar, so the
-    /// stacking is visible. Procedural geometry for now — a shared prefab + outline shader can
-    /// replace the internals later without changing this interface.
+    /// Renders an engine <see cref="Board"/> as stacked, black-outlined hex columns (elevation = N
+    /// stacked levels; a black collar at each level boundary + black vertical corner bars), and the
+    /// on-board units/generators as tokens (cyan = Player 0, red = Player 1; units are flat discs,
+    /// generators are tall pylons). Bodies are lit so the soft shadows read. Procedural for now.
     /// </summary>
     public sealed class BoardRenderer : MonoBehaviour
     {
@@ -18,26 +17,81 @@ namespace HexWars.Presentation
         public float ColumnRadiusFactor = 0.9f;
         public float EdgeBarThickness = 0.08f;
 
-        Material _plains, _forest, _water, _rough, _black;
+        Material _plains, _forest, _water, _rough, _black, _p0, _p1;
+
+        // ---- board ----
 
         public void Render(Board board)
         {
             EnsureMaterials();
-            Clear();
+            ClearChild("Columns");
+            var columns = ChildRoot("Columns");
             foreach (var tile in board.Tiles)
-                BuildColumn(tile);
+                BuildColumn(columns.transform, tile);
         }
 
-        public void Clear()
+        // ---- units / generators ----
+
+        public void RenderEntities(GameState state)
         {
-            for (int i = transform.childCount - 1; i >= 0; i--)
+            EnsureMaterials();
+            ClearChild("Entities");
+            var root = ChildRoot("Entities");
+
+            foreach (var player in state.Players)
             {
-                var go = transform.GetChild(i).gameObject;
-                if (Application.isPlaying) Destroy(go); else DestroyImmediate(go);
+                var color = player.Id == PlayerId.Player0 ? _p0 : _p1;
+                foreach (var u in player.UnitsOnBoard)
+                    if (u.IsAlive) BuildToken(root.transform, u.Cell, u.Elevation, color);
+                foreach (var g in player.Generators)
+                    if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, color);
             }
         }
 
-        void BuildColumn(Tile tile)
+        float TopY(int elevation) => (elevation + 1) * LevelHeight;
+
+        void BuildToken(Transform parent, HexCoord cell, int elevation, Material color)
+        {
+            var w = HexLayout.ToWorld(cell, HexSize);
+            var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            disc.name = "Unit";
+            DestroyImmediate(disc.GetComponent<Collider>());
+            disc.transform.SetParent(parent, false);
+            disc.transform.localPosition = new Vector3((float)w.x, TopY(elevation) + 0.18f, (float)w.z);
+            disc.transform.localScale = new Vector3(HexSize * 0.7f, 0.16f, HexSize * 0.7f);
+            disc.GetComponent<MeshRenderer>().sharedMaterial = color;
+            AddHull(disc, 1.16f, 1.05f);
+        }
+
+        void BuildPylon(Transform parent, HexCoord cell, int elevation, Material color)
+        {
+            var w = HexLayout.ToWorld(cell, HexSize);
+            var pylon = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            pylon.name = "Generator";
+            DestroyImmediate(pylon.GetComponent<Collider>());
+            pylon.transform.SetParent(parent, false);
+            pylon.transform.localPosition = new Vector3((float)w.x, TopY(elevation) + 0.45f, (float)w.z);
+            pylon.transform.localScale = new Vector3(HexSize * 0.45f, 0.9f, HexSize * 0.45f);
+            pylon.GetComponent<MeshRenderer>().sharedMaterial = color;
+            AddHull(pylon, 1.12f, 1.06f);
+        }
+
+        void AddHull(GameObject host, float xz, float y)
+        {
+            var hull = new GameObject("Outline");
+            hull.transform.SetParent(host.transform, false);
+            hull.transform.localScale = new Vector3(xz, y, xz);
+            hull.AddComponent<MeshFilter>().sharedMesh = host.GetComponent<MeshFilter>().sharedMesh;
+            var mr = hull.AddComponent<MeshRenderer>();
+            var m = new Material(_black);
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 1f); // back faces only -> silhouette
+            mr.sharedMaterial = m;
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+        }
+
+        // ---- internals ----
+
+        void BuildColumn(Transform parent, Tile tile)
         {
             float R = HexSize * ColumnRadiusFactor;
             var w = HexLayout.ToWorld(tile.Coord, HexSize);
@@ -45,7 +99,7 @@ namespace HexWars.Presentation
             float htot = levels * LevelHeight;
 
             var col = new GameObject($"Hex_{tile.Coord.Q}_{tile.Coord.R}");
-            col.transform.SetParent(transform, false);
+            col.transform.SetParent(parent, false);
             col.transform.localPosition = new Vector3((float)w.x, 0f, (float)w.z);
 
             var fill = new GameObject("Fill");
@@ -77,6 +131,21 @@ namespace HexWars.Presentation
                 mr.sharedMaterial = _black;
                 mr.shadowCastingMode = ShadowCastingMode.Off;
             }
+        }
+
+        GameObject ChildRoot(string name)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(transform, false);
+            return go;
+        }
+
+        void ClearChild(string name)
+        {
+            var existing = transform.Find(name);
+            if (existing == null) return;
+            if (Application.isPlaying) Destroy(existing.gameObject);
+            else DestroyImmediate(existing.gameObject);
         }
 
         Material MaterialFor(TerrainType t)
@@ -111,6 +180,8 @@ namespace HexWars.Presentation
             _forest = Body(new Color(0.30f, 0.62f, 0.27f));
             _water  = Body(new Color(0.24f, 0.58f, 0.85f));
             _rough  = Body(new Color(0.80f, 0.71f, 0.47f));
+            _p0     = Body(new Color(0.27f, 0.68f, 1f));
+            _p1     = Body(new Color(0.92f, 0.28f, 0.28f));
 
             _black = new Material(unlit);
             if (_black.HasProperty("_BaseColor")) _black.SetColor("_BaseColor", Color.black);

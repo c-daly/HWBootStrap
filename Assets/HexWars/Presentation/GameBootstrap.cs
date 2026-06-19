@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Rendering;
 using HexWars.Engine;
@@ -6,8 +8,10 @@ namespace HexWars.Presentation
 {
     /// <summary>
     /// Wires the engine to the scene: builds a new game (config + seeded board + two players),
-    /// sets up the soft ambient + soft-shadow light + starfield skybox, and renders the board.
-    /// Holds the live <see cref="State"/> — the seam the input/HUD layer will drive next.
+    /// sets up soft ambient + a soft-shadow light + the starfield skybox, and renders board + units.
+    /// Map-generation parameters are configurable here. Holds the live <see cref="State"/> — the seam
+    /// the input/HUD layer drives. (DemoPieces seeds a couple of visible units/generators until input
+    /// drives creation.)
     /// </summary>
     [RequireComponent(typeof(BoardRenderer))]
     public sealed class GameBootstrap : MonoBehaviour
@@ -26,6 +30,9 @@ namespace HexWars.Presentation
         public int RoughWeight = 10;
         public int WaterWeight = 5;
 
+        [Header("Demo")]
+        public bool DemoPieces = true;
+
         public GameState State { get; private set; }
 
         void Start() => NewGame();
@@ -38,14 +45,40 @@ namespace HexWars.Presentation
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
-            var players = new[]
-            {
-                new PlayerState(PlayerId.Player0, config.StartingPoints),
-                new PlayerState(PlayerId.Player1, config.StartingPoints),
-            };
-            State = new GameState(board, config, players, PlayerId.Player0, 1, 1);
 
-            GetComponent<BoardRenderer>().Render(board);
+            int nextId = 1;
+            var p0 = BuildPlayer(board, PlayerId.Player0, config.StartingPoints, ref nextId);
+            var p1 = BuildPlayer(board, PlayerId.Player1, config.StartingPoints, ref nextId);
+            State = new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
+
+            var renderer = GetComponent<BoardRenderer>();
+            renderer.Render(board);
+            renderer.RenderEntities(State);
+        }
+
+        PlayerState BuildPlayer(Board board, PlayerId id, int points, ref int nextId)
+        {
+            if (!DemoPieces)
+                return new PlayerState(id, points);
+
+            var flatZone = board.DeploymentZone(id)
+                .Where(c => board.TileAt(c).Elevation == 0)
+                .OrderBy(c => c.Q).ThenBy(c => c.R)
+                .ToList();
+
+            var units = new List<Unit>();
+            var gens = new List<Generator>();
+            if (flatZone.Count > 0)
+            {
+                var stats = new UnitStats(health: 4, damage: 2, defense: 1,
+                                          movement: 3, verticalMovement: 1, range: 2, rangeArc: 1,
+                                          vision: 3, visionArc: 1);
+                units.Add(new Unit(nextId++, id, stats, flatZone[0], 0));
+            }
+            if (flatZone.Count > 1)
+                gens.Add(new Generator(nextId++, id, flatZone[1], 0, GameConfig.Default().GeneratorHealth));
+
+            return new PlayerState(id, points, unitsOnBoard: units, generators: gens);
         }
 
         void SetupEnvironment()
@@ -55,8 +88,7 @@ namespace HexWars.Presentation
             RenderSettings.skybox = StarfieldSkybox();
             DynamicGI.UpdateEnvironment();
 
-            var existing = GameObject.Find("KeyLight");
-            if (existing == null)
+            if (GameObject.Find("KeyLight") == null)
             {
                 var go = new GameObject("KeyLight");
                 var l = go.AddComponent<Light>();
