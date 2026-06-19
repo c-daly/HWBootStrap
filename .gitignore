@@ -75,3 +75,6 @@ Thumbs.db
 [Oo]bj/
 engine/**/bin/
 engine/**/obj/
+
+# Local Claude Code tooling (workflow scripts, etc.)
+.claude/
