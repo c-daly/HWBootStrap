@@ -1,24 +1,25 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.Rendering;
 
 namespace HexWars.Presentation
 {
     /// <summary>
     /// Mouse interaction for units: hovering a unit token shows its capability tooltip; left-clicking
-    /// selects it (a ring marks the selection and the tooltip stays pinned). Hex/move/deploy targeting
-    /// comes with the create-unit/barracks HUD.
+    /// selects it (a bright marker floats above the selection and the tooltip stays pinned). Hex/move/
+    /// deploy targeting comes with the create-unit/barracks HUD.
     /// </summary>
     [RequireComponent(typeof(UnitTooltip))]
     public sealed class UnitInputController : MonoBehaviour
     {
         UnitTooltip _tooltip;
         UnitView _selected;
-        GameObject _ring;
+        GameObject _marker;
 
         void Awake()
         {
             _tooltip = GetComponent<UnitTooltip>();
-            BuildRing();
+            BuildMarker();
         }
 
         void Update()
@@ -39,16 +40,28 @@ namespace HexWars.Presentation
             if (mouse.leftButton.wasPressedThisFrame)
             {
                 _selected = hovered; // click empty space to deselect
-                UpdateRing();
+                UpdateMarker();
+            }
+
+            // gentle bob so the marker is obvious
+            if (_marker.activeSelf && _selected != null)
+            {
+                var p = _selected.transform.position;
+                float bob = Mathf.Sin(Time.time * 4f) * 0.08f;
+                _marker.transform.position = new Vector3(p.x, p.y + 0.85f + bob, p.z);
             }
         }
 
-        void BuildRing()
+        void BuildMarker()
         {
-            _ring = new GameObject("SelectionRing");
-            _ring.transform.SetParent(transform, false);
-            _ring.AddComponent<MeshFilter>().sharedMesh = HexMesh.Ring(1.0f, 0.78f);
-            var mr = _ring.AddComponent<MeshRenderer>();
+            _marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            _marker.name = "SelectionMarker";
+            var col = _marker.GetComponent<Collider>();
+            if (col != null) Destroy(col); // must not block unit raycasts
+            _marker.transform.SetParent(transform, false);
+            _marker.transform.localScale = Vector3.one * 0.42f;
+
+            var mr = _marker.GetComponent<MeshRenderer>();
             var unlit = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlit == null) unlit = Shader.Find("Unlit/Color");
             var m = new Material(unlit);
@@ -56,19 +69,17 @@ namespace HexWars.Presentation
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", yellow);
             m.color = yellow;
             mr.sharedMaterial = m;
-            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            _ring.SetActive(false);
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+
+            _marker.SetActive(false);
         }
 
-        void UpdateRing()
+        void UpdateMarker()
         {
-            if (_selected == null) { _ring.SetActive(false); return; }
-            var t = _selected.transform;
-            float discRadius = t.localScale.x;                  // BoardRenderer sets disc x-scale = radius
-            float s = Mathf.Max(discRadius, 0.4f) * 1.35f;      // ring sits just outside the token
-            _ring.transform.position = t.position;              // ring around the disc's mid-height
-            _ring.transform.localScale = new Vector3(s, 1f, s);
-            _ring.SetActive(true);
+            if (_selected == null) { _marker.SetActive(false); return; }
+            var p = _selected.transform.position;
+            _marker.transform.position = new Vector3(p.x, p.y + 0.85f, p.z);
+            _marker.SetActive(true);
         }
     }
 }
