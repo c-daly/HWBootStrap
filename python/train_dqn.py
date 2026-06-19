@@ -24,7 +24,8 @@ DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.
 
 class MaskableDQN(DQN):
     def _action_masks(self):
-        return np.asarray(self.env.env_method("action_masks"))  # (n_envs, n_actions)
+        # gymnasium 1.x: reach each base env's method through the Monitor wrapper
+        return np.asarray([e.unwrapped.action_masks() for e in self.env.envs])
 
     def _sample_action(self, learning_starts, action_noise=None, n_envs=1):
         masks = self._action_masks()

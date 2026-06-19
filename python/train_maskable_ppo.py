@@ -25,7 +25,8 @@ DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.
 
 
 def mask_fn(env):
-    return env.action_masks()
+    # gymnasium 1.x wrappers don't auto-forward attributes; reach the base env's method
+    return env.unwrapped.action_masks()
 
 
 def main():
