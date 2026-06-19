@@ -134,19 +134,27 @@ namespace HexWars.Presentation
             if (_reflection != null) return _reflection;
             const int s = 32;
             var cm = new Cubemap(s, TextureFormat.RGBA32, false);
-            var hi = new Color(0.95f, 0.96f, 1f);
-            var lo = new Color(0.45f, 0.47f, 0.55f);
+            var tint = new Color(0.98f, 0.98f, 1f);
             for (int f = 0; f < 6; f++)
             {
                 var face = (CubemapFace)f;
+                // per-face base brightness gives the 6 hex facets directional variation = metallic sheen
+                float b = face switch
+                {
+                    CubemapFace.PositiveY => 1.0f,   // up: bright
+                    CubemapFace.NegativeY => 0.18f,  // down: dark
+                    CubemapFace.PositiveX => 0.92f,
+                    CubemapFace.NegativeX => 0.30f,
+                    CubemapFace.PositiveZ => 0.70f,
+                    CubemapFace.NegativeZ => 0.48f,
+                    _ => 0.6f,
+                };
                 var cols = new Color[s * s];
                 for (int y = 0; y < s; y++)
                     for (int x = 0; x < s; x++)
                     {
-                        float t = face == CubemapFace.PositiveY ? 1f
-                                : face == CubemapFace.NegativeY ? 0.25f
-                                : y / (float)(s - 1);
-                        cols[y * s + x] = Color.Lerp(lo, hi, t);
+                        float v = Mathf.Clamp01(b * (0.8f + 0.2f * (y / (float)(s - 1))));
+                        cols[y * s + x] = new Color(tint.r * v, tint.g * v, tint.b * v);
                     }
                 cm.SetPixels(cols, face);
             }

@@ -16,12 +16,42 @@ namespace HexWars.Presentation
         public float HexSize = 1f;
         public float LevelHeight = 0.55f;
         public float ColumnRadiusFactor = 0.9f;
-        public float EdgeBarThickness = 0.08f;
-        [Range(0f, 1f)] public float Metallic = 0.9f;    // hex bodies: metallic + reflective
-        [Range(0f, 1f)] public float Smoothness = 0.6f;  // soft sheen, not a mirror-sharp hotspot
+        public float EdgeBarThickness = 0.012f;
+        [Range(0f, 1f)] public float Metallic = 1f;      // hex bodies: full metal
+        [Range(0f, 1f)] public float Smoothness = 0.72f; // crisp enough to read as metal, soft enough to avoid hotspots
+        public bool Outlines = true;                     // black cel-style edges (off = realistic metal)
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
+        static Texture2D _matcap;
+
+        static Texture2D MetalMatcap()
+        {
+            if (_matcap != null) return _matcap;
+            const int N = 128;
+            var tex = new Texture2D(N, N, TextureFormat.RGBA32, false)
+            { wrapMode = TextureWrapMode.Clamp, filterMode = FilterMode.Bilinear };
+            var cols = new Color[N * N];
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++)
+                {
+                    float u = x / (float)(N - 1), v = y / (float)(N - 1);
+                    float nx = u * 2f - 1f, ny = v * 2f - 1f;
+                    float r = Mathf.Sqrt(nx * nx + ny * ny);
+                    // brushed steel: mid-tone so the colour tint reads, gentle top-light + soft sheen
+                    float up = Mathf.Clamp01((ny + 1f) * 0.5f);
+                    float body = Mathf.Lerp(0.26f, 0.80f, up);                      // more range = defined faces
+                    float hx = nx + 0.30f, hy = ny - 0.45f;
+                    float hl = Mathf.Exp(-(hx * hx + hy * hy) / 0.08f) * 0.45f;      // tighter sheen
+                    float rim = Mathf.SmoothStep(0.84f, 1.0f, r) * 0.35f;
+                    float c = Mathf.Clamp01(body + hl + rim);
+                    cols[y * N + x] = new Color(c, c, c * 1.02f);
+                }
+            tex.SetPixels(cols);
+            tex.Apply();
+            _matcap = tex;
+            return tex;
+        }
 
         // ---- board ----
 
@@ -156,30 +186,21 @@ namespace HexWars.Presentation
             fill.AddComponent<MeshFilter>().sharedMesh = HexMesh.Prism(R, htot);
             fill.AddComponent<MeshRenderer>().sharedMaterial = MaterialFor(tile.Terrain);
 
+            if (!Outlines) return;
+
             for (int i = 0; i <= levels; i++)
             {
                 var collar = new GameObject("EdgeH" + i);
                 collar.transform.SetParent(col.transform, false);
                 collar.transform.localPosition = new Vector3(0f, i * LevelHeight, 0f);
-                collar.AddComponent<MeshFilter>().sharedMesh = HexMesh.Ring(R * 1.07f, R * 0.93f);
+                collar.AddComponent<MeshFilter>().sharedMesh = HexMesh.Ring(R * 1.015f, R * 0.99f);
                 var mr = collar.AddComponent<MeshRenderer>();
                 mr.sharedMaterial = _black;
                 mr.shadowCastingMode = ShadowCastingMode.Off;
             }
 
-            for (int k = 0; k < 6; k++)
-            {
-                float a = Mathf.Deg2Rad * (60f * k);
-                var bar = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                bar.name = "EdgeV" + k;
-                DestroyImmediate(bar.GetComponent<Collider>());
-                bar.transform.SetParent(col.transform, false);
-                bar.transform.localPosition = new Vector3(R * Mathf.Cos(a), htot * 0.5f, R * Mathf.Sin(a));
-                bar.transform.localScale = new Vector3(EdgeBarThickness, htot, EdgeBarThickness);
-                var mr = bar.GetComponent<MeshRenderer>();
-                mr.sharedMaterial = _black;
-                mr.shadowCastingMode = ShadowCastingMode.Off;
-            }
+            // (vertical corner bars removed — they read as protruding 'sticks'; the column
+            // geometry + horizontal seams convey the edges)
         }
 
         GameObject ChildRoot(string name)
@@ -216,26 +237,48 @@ namespace HexWars.Presentation
             var unlit = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlit == null) unlit = Shader.Find("Unlit/Color");
 
-            Material Body(Color c, float metallic)
+            var matcapShader = Shader.Find("HexWars/Matcap");
+            var matcap = MetalMatcap();
+
+            // Hex bodies use a matcap (pre-lit metal ball mapped by view-normal) so even flat faces
+            // read as shiny metal, tinted by terrain colour.
+            Material Metal(Color c)
+            {
+                if (matcapShader != null)
+                {
+                    var mm = new Material(matcapShader);
+                    mm.SetColor("_BaseColor", Color.Lerp(c, Color.white, 0.1f)); // keep colors saturated/sharp
+                    mm.SetTexture("_Matcap", matcap);
+                    return mm;
+                }
+                var m = new Material(lit); // fallback
+                if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
+                m.color = c;
+                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", Metallic);
+                if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", Smoothness);
+                if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
+                return m;
+            }
+            Material Matte(Color c)
             {
                 var m = new Material(lit);
                 if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
                 m.color = c;
-                if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", metallic);
-                if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", metallic > 0f ? Smoothness : 0.1f);
+                if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", 0.1f);
                 if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
                 return m;
             }
-            _plains = Body(new Color(1f, 0.82f, 0.10f), Metallic);
-            _forest = Body(new Color(0.30f, 0.62f, 0.27f), Metallic);
-            _water  = Body(new Color(0.24f, 0.58f, 0.85f), Metallic);
-            _rough  = Body(new Color(0.80f, 0.71f, 0.47f), Metallic);
-            _p0     = Body(new Color(0.27f, 0.68f, 1f), 0f);   // units stay matte for readability
-            _p1     = Body(new Color(0.92f, 0.28f, 0.28f), 0f);
+            _plains = Metal(new Color(1f, 0.82f, 0.10f));
+            _forest = Metal(new Color(0.30f, 0.62f, 0.27f));
+            _water  = Metal(new Color(0.24f, 0.58f, 0.85f));
+            _rough  = Metal(new Color(0.80f, 0.71f, 0.47f));
+            _p0     = Matte(new Color(0.27f, 0.68f, 1f));   // units stay matte for readability
+            _p1     = Matte(new Color(0.92f, 0.28f, 0.28f));
 
+            var seam = new Color(0.05f, 0.05f, 0.06f); // near-black panel seam (visible, defines hexes)
             _black = new Material(unlit);
-            if (_black.HasProperty("_BaseColor")) _black.SetColor("_BaseColor", Color.black);
-            _black.color = Color.black;
+            if (_black.HasProperty("_BaseColor")) _black.SetColor("_BaseColor", seam);
+            _black.color = seam;
             if (_black.HasProperty("_Cull")) _black.SetFloat("_Cull", 0f);
         }
     }
