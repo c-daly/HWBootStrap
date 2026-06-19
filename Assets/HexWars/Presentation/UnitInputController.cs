@@ -47,12 +47,12 @@ namespace HexWars.Presentation
         {
             _ring = new GameObject("SelectionRing");
             _ring.transform.SetParent(transform, false);
-            _ring.AddComponent<MeshFilter>().sharedMesh = HexMesh.Ring(0.98f, 0.82f);
+            _ring.AddComponent<MeshFilter>().sharedMesh = HexMesh.Ring(1.0f, 0.78f);
             var mr = _ring.AddComponent<MeshRenderer>();
             var unlit = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlit == null) unlit = Shader.Find("Unlit/Color");
             var m = new Material(unlit);
-            var yellow = new Color(1f, 0.9f, 0.2f);
+            var yellow = new Color(1f, 0.92f, 0.15f);
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", yellow);
             m.color = yellow;
             mr.sharedMaterial = m;
@@ -63,8 +63,11 @@ namespace HexWars.Presentation
         void UpdateRing()
         {
             if (_selected == null) { _ring.SetActive(false); return; }
-            var p = _selected.transform.position;
-            _ring.transform.position = new Vector3(p.x, p.y - 0.06f, p.z);
+            var t = _selected.transform;
+            float discRadius = t.localScale.x;                  // BoardRenderer sets disc x-scale = radius
+            float s = Mathf.Max(discRadius, 0.4f) * 1.35f;      // ring sits just outside the token
+            _ring.transform.position = t.position;              // ring around the disc's mid-height
+            _ring.transform.localScale = new Vector3(s, 1f, s);
             _ring.SetActive(true);
         }
     }
