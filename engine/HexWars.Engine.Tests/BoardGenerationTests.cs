@@ -21,10 +21,10 @@ namespace HexWars.Engine.Tests
         {
             var a = Gen().Generate(123);
             var b = Gen().Generate(123);
-            for (int r = 0; r < H; r++)
-                for (int q = 0; q < W; q++)
+            for (int row = 0; row < H; row++)
+                for (int col = 0; col < W; col++)
                 {
-                    var c = new HexCoord(q, r);
+                    var c = HexLayout.OffsetToAxial(col, row);
                     Assert.That(b.TileAt(c).Elevation, Is.EqualTo(a.TileAt(c).Elevation));
                     Assert.That(b.TileAt(c).Terrain, Is.EqualTo(a.TileAt(c).Terrain));
                 }
@@ -34,11 +34,11 @@ namespace HexWars.Engine.Tests
         public void Generate_IsMirrorSymmetric_InTerrainAndElevation()
         {
             var board = Gen().Generate(99);
-            for (int r = 0; r < H; r++)
-                for (int q = 0; q < W; q++)
+            for (int row = 0; row < H; row++)
+                for (int col = 0; col < W; col++)
                 {
-                    var c = new HexCoord(q, r);
-                    var m = new HexCoord(W - 1 - q, H - 1 - r);
+                    var c = HexLayout.OffsetToAxial(col, row);
+                    var m = HexLayout.OffsetToAxial(W - 1 - col, H - 1 - row);
                     Assert.That(board.TileAt(c).Elevation, Is.EqualTo(board.TileAt(m).Elevation));
                     Assert.That(board.TileAt(c).Terrain, Is.EqualTo(board.TileAt(m).Terrain));
                 }
@@ -59,9 +59,9 @@ namespace HexWars.Engine.Tests
         public void Generate_ElevationsWithinRange()
         {
             var board = Gen().Generate(42);
-            for (int r = 0; r < H; r++)
-                for (int q = 0; q < W; q++)
-                    Assert.That(board.TileAt(new HexCoord(q, r)).Elevation, Is.InRange(0, MaxElev));
+            for (int row = 0; row < H; row++)
+                for (int col = 0; col < W; col++)
+                    Assert.That(board.TileAt(HexLayout.OffsetToAxial(col, row)).Elevation, Is.InRange(0, MaxElev));
         }
 
         [Test]
@@ -99,6 +99,30 @@ namespace HexWars.Engine.Tests
             var board = new RandomBoardGenerator(
                 new BoardGenConfig(6, 4, maxElevation: 4, zoneDepth: 1, flatChance: 1.0)).Generate(5);
             Assert.That(board.Tiles.All(t => t.Elevation == 0), Is.True);
+        }
+
+        [Test]
+        public void OffsetToAxial_StaggersOddColumns()
+        {
+            Assert.That(HexLayout.OffsetToAxial(0, 0), Is.EqualTo(new HexCoord(0, 0)));
+            Assert.That(HexLayout.OffsetToAxial(1, 0), Is.EqualTo(new HexCoord(1, 0)));
+            Assert.That(HexLayout.OffsetToAxial(2, 0), Is.EqualTo(new HexCoord(2, -1)));
+        }
+
+        [Test]
+        public void Generate_HasRectangularFootprint_NotSheared()
+        {
+            var board = Gen().Generate(7);
+            double minZ = double.MaxValue, maxZ = double.MinValue;
+            foreach (var t in board.Tiles)
+            {
+                var (_, z) = HexLayout.ToWorld(t.Coord, 1.0);
+                minZ = System.Math.Min(minZ, z);
+                maxZ = System.Math.Max(maxZ, z);
+            }
+            double sqrt3 = System.Math.Sqrt(3.0);
+            // rectangle: z-span ~ (H-1+0.5) rows. A sheared parallelogram would be ~ (H-1+(W-1)/2) rows.
+            Assert.That(maxZ - minZ, Is.LessThan(H * sqrt3));
         }
 
         [Test]

@@ -25,13 +25,15 @@ namespace HexWars.Engine
             var elevation = new Dictionary<HexCoord, int>();
             var terrain = new Dictionary<HexCoord, TerrainType>();
 
-            for (int r = 0; r < _cfg.Height; r++)
-                for (int q = 0; q < _cfg.Width; q++)
+            // Lay the W×H grid out in offset coordinates -> axial, so the footprint is a rectangle
+            // (alternate columns nudged by half) rather than a sheared parallelogram.
+            for (int row = 0; row < _cfg.Height; row++)
+                for (int col = 0; col < _cfg.Width; col++)
                 {
-                    var cell = new HexCoord(q, r);
+                    var cell = HexLayout.OffsetToAxial(col, row);
                     if (elevation.ContainsKey(cell)) continue;
 
-                    var mirror = new HexCoord(_cfg.Width - 1 - q, _cfg.Height - 1 - r);
+                    var mirror = HexLayout.OffsetToAxial(_cfg.Width - 1 - col, _cfg.Height - 1 - row);
                     int e = rng.NextDouble() < _cfg.FlatChance ? 0 : 1 + rng.Next(_cfg.MaxElevation);
                     var t = WeightedTerrain(rng);
 
@@ -42,13 +44,13 @@ namespace HexWars.Engine
             var tiles = new List<Tile>();
             var zone0 = new List<HexCoord>();
             var zone1 = new List<HexCoord>();
-            for (int r = 0; r < _cfg.Height; r++)
-                for (int q = 0; q < _cfg.Width; q++)
+            for (int row = 0; row < _cfg.Height; row++)
+                for (int col = 0; col < _cfg.Width; col++)
                 {
-                    var cell = new HexCoord(q, r);
+                    var cell = HexLayout.OffsetToAxial(col, row);
                     tiles.Add(new Tile(cell, elevation[cell], terrain[cell]));
-                    if (q < _cfg.ZoneDepth) zone0.Add(cell);
-                    if (q >= _cfg.Width - _cfg.ZoneDepth) zone1.Add(cell);
+                    if (col < _cfg.ZoneDepth) zone0.Add(cell);
+                    if (col >= _cfg.Width - _cfg.ZoneDepth) zone1.Add(cell);
                 }
 
             return new Board(tiles, zone0, zone1);

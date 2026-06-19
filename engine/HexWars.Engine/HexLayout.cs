@@ -15,5 +15,18 @@ namespace HexWars.Engine
             double z = hexSize * System.Math.Sqrt(3.0) * (coord.R + coord.Q / 2.0);
             return (x, z);
         }
+
+        /// <summary>
+        /// Convert a rectangular grid position (col, row) to its axial <see cref="HexCoord"/> for a
+        /// flat-top "odd-q" offset layout. Used to generate a board with a rectangular footprint
+        /// (alternate columns nudged by half) instead of a sheared parallelogram, while keeping all
+        /// engine math (neighbours, distance) on the resulting axial coords.
+        /// </summary>
+        public static HexCoord OffsetToAxial(int col, int row)
+        {
+            int q = col;
+            int r = row - (col - (col & 1)) / 2;
+            return new HexCoord(q, r);
+        }
     }
 }
