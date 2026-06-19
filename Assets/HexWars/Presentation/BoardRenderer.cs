@@ -144,6 +144,10 @@ namespace HexWars.Presentation
             var col = new GameObject($"Hex_{tile.Coord.Q}_{tile.Coord.R}");
             col.transform.SetParent(parent, false);
             col.transform.localPosition = new Vector3((float)w.x, 0f, (float)w.z);
+            col.AddComponent<TileView>().Coord = tile.Coord;
+            var box = col.AddComponent<BoxCollider>();        // clickable for deploy/move targeting
+            box.center = new Vector3(0f, htot * 0.5f, 0f);
+            box.size = new Vector3(R * 1.6f, htot, R * 1.6f);
 
             var fill = new GameObject("Fill");
             fill.transform.SetParent(col.transform, false);
