@@ -136,6 +136,45 @@ namespace HexWars.Presentation
             var mr = icon.GetComponent<MeshRenderer>();
             mr.sharedMaterial = IconMaterial(Roles.Dominant(unit.Stats));
             mr.shadowCastingMode = ShadowCastingMode.Off;
+
+            BuildHpBar(parent, (float)w.x, (float)w.z, topY, unit.CurrentHp, unit.Stats.Health);
+        }
+
+        void BuildHpBar(Transform parent, float wx, float wz, float topY, int cur, int max)
+        {
+            float frac = max <= 0 ? 0f : Mathf.Clamp01((float)cur / max);
+            float barW = HexSize * 0.85f;
+            float y = topY + 0.62f;
+            MakeBarQuad(parent, wx, y, wz, barW, 0.15f, new Color(0.18f, 0.03f, 0.03f));
+            float fw = Mathf.Max(0.001f, barW * frac);
+            float fx = wx - barW * 0.5f + fw * 0.5f; // left-anchored fill
+            var fill = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
+            MakeBarQuad(parent, fx, y + 0.01f, wz, fw, 0.10f, fill);
+        }
+
+        void MakeBarQuad(Transform parent, float x, float y, float z, float w, float h, Color c)
+        {
+            var q = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            q.name = "HpBar";
+            DestroyImmediate(q.GetComponent<Collider>());
+            q.transform.SetParent(parent, false);
+            q.transform.localPosition = new Vector3(x, y, z);
+            q.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            q.transform.localScale = new Vector3(w, h, 1f);
+            var mr = q.GetComponent<MeshRenderer>();
+            mr.sharedMaterial = UnlitColor(c);
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+        }
+
+        Material UnlitColor(Color c)
+        {
+            var sh = Shader.Find("Universal Render Pipeline/Unlit");
+            if (sh == null) sh = Shader.Find("Unlit/Color");
+            var m = new Material(sh);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
+            m.color = c;
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
+            return m;
         }
 
         Material IconMaterial(UnitRole role)

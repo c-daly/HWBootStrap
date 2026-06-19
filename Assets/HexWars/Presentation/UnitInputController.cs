@@ -112,6 +112,43 @@ namespace HexWars.Presentation
             return false;
         }
 
+        // once the acting unit has used both its move and attack, jump to the next unit with actions left
+        void AutoAdvance()
+        {
+            if (_game == null || _game.State == null || _selectedId < 0) return;
+            bool spent = HasActed(_game.State.MovedUnitIds, _selectedId) && HasActed(_game.State.AttackedUnitIds, _selectedId);
+            if (spent) SelectNextActionable();
+        }
+
+        void SelectNextActionable()
+        {
+            var active = _game.State.ActivePlayer;
+            foreach (var u in _game.State.Player(active).UnitsOnBoard)
+            {
+                if (!u.IsAlive) continue;
+                bool spent = HasActed(_game.State.MovedUnitIds, u.Id) && HasActed(_game.State.AttackedUnitIds, u.Id);
+                if (!spent) { SelectById(u.Id); return; }
+            }
+            Select(null); // every unit has acted this turn
+        }
+
+        void SelectById(int id)
+        {
+            _selectedId = id;
+            _selected = null;
+            foreach (var v in FindObjectsByType<UnitView>(FindObjectsSortMode.None))
+                if (v.Unit.Id == id && v.Unit.IsAlive) { _selected = v; break; }
+            UpdateMarker();
+        }
+
+        int UnitHp(int id)
+        {
+            foreach (var p in _game.State.Players)
+                foreach (var u in p.UnitsOnBoard)
+                    if (u.Id == id) return u.CurrentHp;
+            return 0;
+        }
+
         void Select(UnitView unit)
         {
             _selected = unit;
@@ -132,6 +169,7 @@ namespace HexWars.Presentation
             bool ok = _game.TryApply(new MoveUnit(_game.State.ActivePlayer, _selectedId, dest));
             if (!ok && _board != null) _board.RenderEntities(_game.State); // illegal: snap back to truth
             ReacquireSelection();
+            AutoAdvance();
             _animating = false;
         }
 
@@ -148,6 +186,7 @@ namespace HexWars.Presentation
                                        : new Color(1f, 0.95f, 0.5f);
 
             int targetId = target.Unit.Id;
+            int hpBefore = target.Unit.CurrentHp;
             Vector3 targetPos = target.transform.position;
             Vector3 from = attacker.transform.position + Vector3.up * 0.4f;
             Vector3 to = targetPos + Vector3.up * 0.4f;
@@ -172,12 +211,15 @@ namespace HexWars.Presentation
             bool ok = _game.TryApply(new AttackUnit(_game.State.ActivePlayer, _selectedId, targetId));
             if (ok)
             {
+                int dealt = Mathf.Max(0, hpBefore - UnitHp(targetId));
+                DamagePopup.Spawn(targetPos + Vector3.up * 1.1f, dealt.ToString(), new Color(1f, 0.92f, 0.4f));
                 if (!IsUnitAlive(targetId))
                     ExplosionFx.Spawn(targetPos, new Color(0.95f, 0.45f, 0.18f), Mathf.Lerp(0.8f, 2.0f, power), true);
                 else
                     ExplosionFx.Spawn(to, projColor, Mathf.Lerp(0.4f, 0.9f, power), false);
             }
             ReacquireSelection();
+            AutoAdvance();
             _animating = false;
         }
 
