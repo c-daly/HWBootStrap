@@ -37,7 +37,7 @@ namespace HexWars.Presentation
             else if (_selected != null) _tooltip.Show(_selected.Unit, mp);
             else _tooltip.Hide();
 
-            if (mouse.leftButton.wasPressedThisFrame)
+            if (mouse.leftButton.wasPressedThisFrame && !IsPointerOverUi())
             {
                 _selected = hovered; // click empty space to deselect
                 UpdateMarker();
@@ -50,6 +50,12 @@ namespace HexWars.Presentation
                 float bob = Mathf.Sin(Time.time * 4f) * 0.08f;
                 _marker.transform.position = new Vector3(p.x, p.y + 0.85f + bob, p.z);
             }
+        }
+
+        static bool IsPointerOverUi()
+        {
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            return es != null && es.IsPointerOverGameObject();
         }
 
         void BuildMarker()

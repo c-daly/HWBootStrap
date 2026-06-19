@@ -35,6 +35,9 @@ namespace HexWars.Presentation
 
         public GameState State { get; private set; }
 
+        /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
+        public event System.Action StateChanged;
+
         void Start() => NewGame();
 
         public void NewGame()
@@ -57,6 +60,23 @@ namespace HexWars.Presentation
 
             var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
+
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>Apply a command through the engine; on success update state, re-render, notify.</summary>
+        public bool TryApply(Command cmd)
+        {
+            var result = GameEngine.Apply(State, cmd);
+            if (!result.Success)
+            {
+                Debug.Log($"[HexWars] {cmd.GetType().Name} rejected: {result.Reason}");
+                return false;
+            }
+            State = result.NewState;
+            GetComponent<BoardRenderer>().RenderEntities(State);
+            StateChanged?.Invoke();
+            return true;
         }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int points, ref int nextId)
