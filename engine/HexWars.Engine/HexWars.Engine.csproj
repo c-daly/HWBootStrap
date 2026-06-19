@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.1 so the same assembly drops straight into Unity (.NET Standard profile). -->
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>HexWars.Engine</RootNamespace>
+    <AssemblyName>HexWars.Engine</AssemblyName>
+    <!-- Zero Unity / external dependencies: this is a pure, headless, deterministic rules engine. -->
+  </PropertyGroup>
+
+</Project>
