@@ -70,7 +70,7 @@ namespace HexWars.Presentation
 
         void HandleClick(UnitView unit, TileView tile)
         {
-            if (_game == null) { Select(unit); return; }
+            if (_game == null || _game.State == null) { Select(unit); return; }
             var active = _game.State.ActivePlayer;
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
 

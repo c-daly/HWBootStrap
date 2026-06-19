@@ -212,12 +212,15 @@ namespace HexWars.Presentation
 
         void ClearChild(string name)
         {
-            // DestroyImmediate (even in play) so the old group is gone NOW; deferred Destroy would
-            // leave a duplicate visible for a frame (the "clone") and confuse the next Find.
+            // Hide + rename immediately so no duplicate is visible (the "clone") and the next Find
+            // can't return it again; then destroy (deferred in play, immediate in edit).
             var existing = transform.Find(name);
             while (existing != null)
             {
-                DestroyImmediate(existing.gameObject);
+                var go = existing.gameObject;
+                go.SetActive(false);
+                go.name = name + "_dead";
+                if (Application.isPlaying) Destroy(go); else DestroyImmediate(go);
                 existing = transform.Find(name);
             }
         }

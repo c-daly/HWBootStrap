@@ -176,6 +176,9 @@ MonoBehaviour:
   LevelHeight: 0.55
   ColumnRadiusFactor: 0.9
   EdgeBarThickness: 0.08
+  Metallic: 1
+  Smoothness: 0.72
+  Outlines: 1
 --- !u!4 &222244463
 Transform:
   m_ObjectHideFlags: 0
