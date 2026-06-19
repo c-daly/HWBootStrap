@@ -1,0 +1,4 @@
+*.zip
+runs/
+__pycache__/
+.venv/
