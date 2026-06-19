@@ -11,11 +11,13 @@ namespace HexWars.Engine
     {
         private readonly List<GameState> _frames;
 
-        public Replay(MatchRecord record)
+        public Replay(MatchRecord record) : this(record.Start, record.Commands) { }
+
+        public Replay(GameState start, IReadOnlyList<Command> commands)
         {
-            _frames = new List<GameState> { record.Start };
-            var state = record.Start;
-            foreach (var command in record.Commands)
+            _frames = new List<GameState> { start };
+            var state = start;
+            foreach (var command in commands)
             {
                 var result = GameEngine.Apply(state, command);
                 if (result.Success) state = result.NewState;
