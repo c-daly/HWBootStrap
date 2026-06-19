@@ -66,17 +66,22 @@ namespace HexWars.Presentation
                 .OrderBy(c => c.Q).ThenBy(c => c.R)
                 .ToList();
 
+            // a few distinct builds so the role icons + size-by-points are visible
+            var demos = new[]
+            {
+                new UnitStats(health: 7, damage: 1, defense: 2, movement: 2, verticalMovement: 0, range: 1, rangeArc: 0, vision: 2, visionArc: 0), // Brute
+                new UnitStats(health: 2, damage: 6, defense: 0, movement: 2, verticalMovement: 0, range: 2, rangeArc: 0, vision: 2, visionArc: 0), // Striker
+                new UnitStats(health: 2, damage: 1, defense: 0, movement: 1, verticalMovement: 0, range: 6, rangeArc: 1, vision: 3, visionArc: 0), // Sniper
+                new UnitStats(health: 2, damage: 0, defense: 0, movement: 3, verticalMovement: 1, range: 0, rangeArc: 0, vision: 7, visionArc: 2), // Spotter
+            };
+
             var units = new List<Unit>();
             var gens = new List<Generator>();
-            if (flatZone.Count > 0)
-            {
-                var stats = new UnitStats(health: 4, damage: 2, defense: 1,
-                                          movement: 3, verticalMovement: 1, range: 2, rangeArc: 1,
-                                          vision: 3, visionArc: 1);
-                units.Add(new Unit(nextId++, id, stats, flatZone[0], 0));
-            }
-            if (flatZone.Count > 1)
-                gens.Add(new Generator(nextId++, id, flatZone[1], 0, GameConfig.Default().GeneratorHealth));
+            int placed = 0;
+            for (; placed < demos.Length && placed < flatZone.Count; placed++)
+                units.Add(new Unit(nextId++, id, demos[placed], flatZone[placed], 0));
+            if (flatZone.Count > placed)
+                gens.Add(new Generator(nextId++, id, flatZone[placed], 0, GameConfig.Default().GeneratorHealth));
 
             return new PlayerState(id, points, unitsOnBoard: units, generators: gens);
         }

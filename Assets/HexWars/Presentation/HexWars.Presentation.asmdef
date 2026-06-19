@@ -1,7 +1,9 @@
 {
     "name": "HexWars.Presentation",
     "rootNamespace": "HexWars.Presentation",
-    "references": [],
+    "references": [
+        "Unity.InputSystem"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
