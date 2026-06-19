@@ -69,3 +69,9 @@ crashlytics-build.properties
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# .NET engine build output (standalone HexWars.Engine solution under engine/)
+[Bb]in/
+[Oo]bj/
+engine/**/bin/
+engine/**/obj/
