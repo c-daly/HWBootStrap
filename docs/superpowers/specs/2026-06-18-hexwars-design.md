@@ -80,7 +80,8 @@ action menu:
 
 > **Create** a unit · **Deploy** a unit · **Deploy a generator** · **Move / Use** units
 
-- **Currency:** a single resource, **points**. Spent to create units and deploy generators.
+- **Currency:** a single resource, **points**. Spent to **deploy** unit clones (a configurable
+  per-clone cost) and generators; designing unit templates is free by default (configurable fee).
 - **Income:** points earned each turn from **generators** (§8) and from **bounties** on kills.
 - **Win condition:** annihilate the enemy (§10).
 
@@ -89,9 +90,9 @@ action menu:
 How much happens in one turn is **not finalized**; it is implemented behind an `ITurnPolicy`
 so both modes are playtestable without touching the rules:
 
-- **`AllUnitsPolicy` (default for M1):** in any order during your turn you may create units you
-  can afford, deploy reserved units / generators, and move and/or attack with **each on-board
-  unit at most once** (move-then-attack allowed), then End Turn. Stays snappy as armies grow.
+- **`AllUnitsPolicy` (default for M1):** in any order during your turn you may design unit
+  templates (free), deploy clones / generators you can afford, and move and/or attack with **each
+  on-board unit at most once** (move-then-attack allowed), then End Turn. Stays snappy as armies grow.
 - **`OneActionPolicy`:** a turn is a single atomic action (one create, OR one deploy, OR one
   unit's move+attack, OR one generator deploy), then auto-pass. Chess-like and deliberate.
   Exact granularity is tunable.
@@ -128,13 +129,18 @@ horizontally blind, `Vision Arc` 0 can't see anything higher, `Defense` 0 takes 
 capability, on every axis, is earned by spending points. (A **bounder** = high Vertical Movement,
 low Movement; an **aircraft** = high in both; a **turret** = zero of both.)
 
-- **Create** (action): pay the unit's total point cost (sum of stats); the designed unit goes
-  into your **reserve** (off-board).
-- **Deploy** (separate action): place a reserved unit on an empty hex in your deployment zone.
-  Deploy costs **no points** (the cost was paid at Create); it consumes a deploy action.
+- **Create / design** (action): define a unit template (its stats) and bank it in your
+  **barracks**. Designing is **free by default** (a configurable `DesignFee` ≥ 0); the template is
+  a reusable blueprint. You also pick the template's **visual** here (a polygon shape now, a richer
+  asset later) — carried as presentation metadata so every clone of a type looks the same.
+- **Deploy** (separate action): place a **clone** of a barracks template on an empty hex in your
+  deployment zone, paying its **deploy cost** (`PointCost × DeployCostMultiplier`, both
+  configurable). The template is **not consumed** — you can deploy more clones of the same design
+  on later turns as you can afford them.
 
-Create and Deploy are intentionally decoupled: the *economic* decision (what to build) is
-separate from the *board-timing* decision (when/where to commit it).
+Create and Deploy are intentionally decoupled: the *design* decision (what a unit type is) is
+separate from the *production* decision (when/where/how many to field). All costs live in
+`GameConfig` for balance.
 
 ---
 
@@ -307,12 +313,15 @@ this same Vision computation in a later milestone.
 ## 10. Win, elimination & stalemate
 
 - **Win:** annihilate the opponent.
-- **Elimination:** a player loses when they have **no units on the board, none in reserve, and
-  cannot afford to build a new one** (banked points below the cheapest viable unit). This
-  avoids a false win when a player's board is empty but they are still rich. Evaluated after
-  each command/turn, after initial deployment has occurred.
+- **Elimination:** a player loses when they have **no units on the board and cannot afford to
+  field one** — neither by deploying a clone of a barracks template nor by designing + deploying a
+  minimal unit (banked points below the cheapest path to a board unit). A reusable template does
+  **not** stave off elimination if you can't pay its deploy cost. This avoids a false win when a
+  player's board is empty but they are still rich. Evaluated after each command/turn, after the
+  opening round.
 - **Stalemate backstop:** a configured **round cap**; if reached, the winner is whoever has the
-  higher **total value** (on-board + reserve units + generators + banked points).
+  higher **total value** (on-board units + generators + banked points; free barracks templates
+  count for nothing).
 
 ---
 
@@ -323,7 +332,7 @@ this same Vision computation in a later milestone.
 - **Data:** `HexCoord` (axial/cube + `Elevation`), `TerrainType`, `Board` (cells + deployment
   zones), `UnitStats` (Health/Damage/Defense/Movement/VerticalMovement/Range/RangeArc/Vision/
   VisionArc), `Unit` (stats + owner + cell (q,r) + own elevation + currentHP), `Generator`, `PlayerState` (points,
-  reserve, on-board units), `GameState` (board, players, activePlayer, round).
+  **barracks** of reusable unit templates, on-board units, generators), `GameState` (board, players, activePlayer, round).
 - **Rules (pure functions):** `HexDistance`, pathing over two budgets (terrain cost from
   `Movement`, ascent cost from `VerticalMovement`), `TargetingService` (army-wide sight via
   `Vision`/`VisionArc` + per-unit `Range`/`RangeArc`), `CombatResolver` (formula in §5),
@@ -438,6 +447,8 @@ flying, diving, fly-over).
 To finalize during implementation/playtest (suggested starting values in parentheses):
 
 - Starting point bank (e.g. 10–20).
+- **Design fee** — points to bank a unit template in the barracks (default **0** = free).
+- **Deploy cost multiplier** — deploy cost = `PointCost × multiplier` per clone (default **1.0**).
 - Bounty rate — portion of build cost refunded on kill (e.g. 50%).
 - Generator: cost (≈2), per-turn output (≈1), Health (≈3).
 - Damage floor — minimum damage per hit (0 or 1).
