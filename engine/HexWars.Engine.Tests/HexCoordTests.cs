@@ -8,10 +8,30 @@ namespace HexWars.Engine.Tests
         [Test]
         public void Distance_BetweenAdjacentHexes_IsOne()
         {
-            var origin = new HexCoord(0, 0);
-            var neighbor = new HexCoord(1, 0);
+            Assert.That(HexCoord.Distance(new HexCoord(0, 0), new HexCoord(1, 0)), Is.EqualTo(1));
+        }
 
-            Assert.That(HexCoord.Distance(origin, neighbor), Is.EqualTo(1));
+        [Test]
+        public void Distance_AcrossCubeAxes_UsesCubeMetric()
+        {
+            // (0,0) -> (2,-1): cube delta (dq=2, dr=-1, ds=-1) -> (2+1+1)/2 = 2
+            Assert.That(HexCoord.Distance(new HexCoord(0, 0), new HexCoord(2, -1)), Is.EqualTo(2));
+        }
+
+        [Test]
+        public void Equality_SameQR_AreEqualAndShareHashCode()
+        {
+            var a = new HexCoord(2, -3);
+            var b = new HexCoord(2, -3);
+            Assert.That(a, Is.EqualTo(b));
+            Assert.That(a == b, Is.True);
+            Assert.That(a.GetHashCode(), Is.EqualTo(b.GetHashCode()));
+        }
+
+        [Test]
+        public void Equality_DifferentQR_AreNotEqual()
+        {
+            Assert.That(new HexCoord(1, 0) != new HexCoord(0, 1), Is.True);
         }
     }
 }
