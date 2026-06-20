@@ -62,6 +62,8 @@ namespace HexWars.Presentation
             _view = _duel.Reset(Seed, c0, c1, PlayerId.Player0);
             _board.Render(_duel.State.Board);
             _board.RenderEntities(_duel.State);
+            EventConsole.Clear();
+            EventConsole.Report(_duel.State, null);
         }
 
         void Update()
@@ -96,8 +98,10 @@ namespace HexWars.Presentation
             try
             {
                 int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
+                var prev = _duel.State;
                 _view = _duel.Step(action);
                 _board.RenderEntities(_duel.State);
+                EventConsole.Report(_duel.State, CombatLog.Diff(prev, _duel.State));
             }
             catch (System.Exception e)
             {

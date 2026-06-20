@@ -22,6 +22,7 @@ namespace HexWars.Presentation
         BoardRenderer _board;
         Replay _replay;
         int _frame;
+        int _lastReported = -1;
         bool _playing;
         float _accum;
 
@@ -73,6 +74,12 @@ namespace HexWars.Presentation
             var s = _replay.Frame(_frame);
             _board.RenderEntities(s);
             if (_scrub != null) _scrub.SetValueWithoutNotify(_frame);
+
+            // event console: scoreboard always; log lines only on a sequential +1 advance (not on scrub/jump)
+            if (_frame == 0) { EventConsole.Clear(); EventConsole.Report(s, null); }
+            else if (_frame == _lastReported + 1) EventConsole.Report(s, CombatLog.Diff(_replay.Frame(_frame - 1), s));
+            else EventConsole.Report(s, null);
+            _lastReported = _frame;
 
             string status = s.IsGameOver
                 ? (s.Winner == null ? "draw" : (s.Winner == PlayerId.Player0 ? "Player 1 wins" : "Player 2 wins"))

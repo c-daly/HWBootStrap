@@ -61,6 +61,8 @@ namespace HexWars.Presentation
             var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
 
+            EventConsole.Clear();
+            EventConsole.Report(State, null); // seed the scoreboard at game start
             StateChanged?.Invoke();
         }
 
@@ -73,8 +75,10 @@ namespace HexWars.Presentation
                 Debug.Log($"[HexWars] {cmd.GetType().Name} rejected: {result.Reason}");
                 return false;
             }
+            var prev = State;
             State = result.NewState;
             GetComponent<BoardRenderer>().RenderEntities(State);
+            EventConsole.Report(State, CombatLog.Diff(prev, State));
             StateChanged?.Invoke();
             return true;
         }
