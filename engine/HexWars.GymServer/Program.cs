@@ -84,8 +84,10 @@ while ((line = Console.ReadLine()) != null)
             int seed = root.TryGetProperty("seed", out var s) ? s.GetInt32() : 0;
             string? p0 = root.TryGetProperty("p0", out var a) ? a.GetString() : null; // "external"(default)/greedy/random
             string? p1 = root.TryGetProperty("p1", out var b) ? b.GetString() : null;
-            var v = duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2));
-            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, terminated = v.Terminated, truncated = v.Truncated });
+            int learner = root.TryGetProperty("learner", out var lr) ? lr.GetInt32() : 0; // reward perspective
+            var v = duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
+                               learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
+            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, terminated = v.Terminated, truncated = v.Truncated });
             break;
         }
 
@@ -94,7 +96,7 @@ while ((line = Console.ReadLine()) != null)
             duel ??= new DuelEnv();
             int action = root.GetProperty("action").GetInt32();
             var v = duel.Step(action);
-            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, terminated = v.Terminated, truncated = v.Truncated });
+            Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, terminated = v.Terminated, truncated = v.Truncated });
             break;
         }
 

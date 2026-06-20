@@ -75,6 +75,23 @@ python train_dqn.py --opponent greedy --seed 3 --out dqn_a --timesteps 200000
 python duel.py --p0 ppo:ppo_a.zip --p1 dqn:dqn_a.zip
 ```
 
+### Self-play (train against a trained opponent)
+
+Train a learner against a **frozen** policy; the opponent seat is played automatically by that model.
+Optionally **iterate** — each round retrains against the previous round's winner (the bootstrapping
+loop that pushes agents past the scripted baselines):
+
+```bash
+python selfplay.py --opponent ppo:ppo_a.zip --out sp --timesteps 200000             # one round vs frozen ppo_a
+python selfplay.py --opponent ppo:ppo_a.zip --out sp --rounds 3 --timesteps 200000  # iterate: r0 vs ppo_a, r1 vs r0, r2 vs r1
+```
+
+The final policy is `sp_r<N-1>.zip`. Duel it against anything:
+
+```bash
+python duel.py --p0 ppo:sp_r2.zip --p1 ppo:ppo_a.zip --out ../replays/sp_vs_ppo_a.replay
+```
+
 ## Quick sanity check (no Python deps)
 
 The server speaks one JSON object per line — you can poke it by hand:
