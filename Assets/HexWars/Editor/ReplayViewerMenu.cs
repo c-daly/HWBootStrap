@@ -47,5 +47,54 @@ namespace HexWars.Presentation.EditorTools
             EditorPrefs.SetBool("HexWars.Spectate", true); // SpectatorDriver auto-attaches on play
             EditorApplication.EnterPlaymode();
         }
+
+        // Watch two *trained models* (or a model vs greedy/random) fight, live, via the Windows-venv
+        // policy_server.py bridge. Pick a .zip per seat (Cancel = greedy).
+        [MenuItem("HexWars/Watch Model Duel...")]
+        public static void WatchModelDuel()
+        {
+            string root = System.IO.Directory.GetParent(Application.dataPath).FullName;
+            string pyDir = System.IO.Path.Combine(root, "python");
+            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string server = System.IO.Path.Combine(pyDir, "policy_server.py");
+            if (!System.IO.File.Exists(pyExe))
+            {
+                EditorUtility.DisplayDialog("Model Duel", "Windows venv Python not found at:\n" + pyExe, "OK");
+                return;
+            }
+
+            string p0 = PickSpec("Seat 0 (Player 1) model — Cancel for greedy", pyDir);
+            string p1 = PickSpec("Seat 1 (Player 2) model — Cancel for greedy", pyDir);
+
+            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            var camGo = new GameObject("Main Camera");
+            camGo.tag = "MainCamera";
+            var cam = camGo.AddComponent<Camera>();
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.02f, 0.02f, 0.05f);
+            camGo.AddComponent<CameraRig>();
+
+            var go = new GameObject("ModelDuel");
+            go.AddComponent<BoardRenderer>();
+            var d = go.AddComponent<ModelDuelDriver>();
+            d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
+            d.P0Spec = p0; d.P1Spec = p1; d.Seed = 0;
+            go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
+
+            var es = new GameObject("EventSystem");
+            es.AddComponent<EventSystem>();
+            es.AddComponent<InputSystemUIInputModule>();
+
+            EditorApplication.EnterPlaymode();
+        }
+
+        static string PickSpec(string title, string pyDir)
+        {
+            string path = EditorUtility.OpenFilePanel(title, pyDir, "zip");
+            if (string.IsNullOrEmpty(path)) return "greedy";
+            string prefix = System.IO.Path.GetFileNameWithoutExtension(path).ToLowerInvariant().Contains("dqn") ? "dqn:" : "ppo:";
+            return prefix + path;
+        }
     }
 }
