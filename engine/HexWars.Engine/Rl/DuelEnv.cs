@@ -102,7 +102,7 @@ namespace HexWars.Engine.Rl
         private float ComputeReward()
         {
             float adv = Advantage();
-            float shaped = _cfg.ShapeScale * (adv - _prevAdv);
+            float shaped = _cfg.ShapeScale * (adv - _prevAdv) - _cfg.StepPenalty;
             _prevAdv = adv;
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _learner) return shaped + 1f;
@@ -116,29 +116,33 @@ namespace HexWars.Engine.Rl
             var slot = seat == PlayerId.Player0 ? _slot0 : _slot1;
             bool terminated = _state.IsGameOver;
             bool truncated = !terminated && _steps >= _cfg.MaxSteps * 2;
+            int winner = terminated && _state.Winner != null ? (int)_state.Winner.Value : -1; // -1 = draw/none
             return new View(
                 TacticalCoding.Observe(_state, seat, _layout),
                 TacticalCoding.Mask(_state, seat, slot, _layout),
-                (int)seat, reward, terminated, truncated);
+                (int)seat, reward, winner, terminated, truncated);
         }
 
         /// <summary>Per-step result: observation + mask are from <see cref="Seat"/>'s point of view;
-        /// <see cref="Reward"/> is from the learner seat's perspective.</summary>
+        /// <see cref="Reward"/> is from the learner seat's perspective; <see cref="Winner"/> is 0/1 at a
+        /// terminal state, else -1.</summary>
         public readonly struct View
         {
             public readonly float[] Observation;
             public readonly bool[] ActionMask;
             public readonly int Seat;
             public readonly float Reward;
+            public readonly int Winner;
             public readonly bool Terminated;
             public readonly bool Truncated;
 
-            public View(float[] obs, bool[] mask, int seat, float reward, bool terminated, bool truncated)
+            public View(float[] obs, bool[] mask, int seat, float reward, int winner, bool terminated, bool truncated)
             {
                 Observation = obs;
                 ActionMask = mask;
                 Seat = seat;
                 Reward = reward;
+                Winner = winner;
                 Terminated = terminated;
                 Truncated = truncated;
             }

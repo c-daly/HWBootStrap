@@ -13,6 +13,7 @@ namespace HexWars.Engine.Rl
         public IReadOnlyList<UnitStats> Roster = DefaultRoster();
         public int MaxSteps = 400;
         public float ShapeScale = 0.01f;
+        public float StepPenalty = 0.005f; // small per-turn cost -> discourages passive play / stalemates
 
         public static IReadOnlyList<UnitStats> DefaultRoster() => new[]
         {
@@ -126,7 +127,7 @@ namespace HexWars.Engine.Rl
         private float Reward()
         {
             float adv = Advantage();
-            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage);
+            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage) - _cfg.StepPenalty;
             _prevAdvantage = adv;
 
             if (!_state.IsGameOver) return shaped;

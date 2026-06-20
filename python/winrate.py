@@ -43,16 +43,16 @@ def main():
     p0w = p1w = draw = 0
     for seed in range(args.games):
         v = rpc(proc, {"cmd": "duel_reset", "seed": seed, "learner": 0})
-        last, steps = 0.0, 0
+        steps = 0
         while not v["terminated"] and not v["truncated"] and steps < 5000:
             seat = int(v["seat"])
             a = predict(models[seat], np.asarray(v["obs"], dtype=np.float32), np.asarray(v["mask"], dtype=bool))
             v = rpc(proc, {"cmd": "duel_step", "action": int(a)})
-            last = float(v["reward"])
             steps += 1
-        if v["terminated"] and last > 0.5:
+        w = int(v.get("winner", -1)) if v["terminated"] else -1
+        if w == 0:
             p0w += 1
-        elif v["terminated"] and last < -0.5:
+        elif w == 1:
             p1w += 1
         else:
             draw += 1
