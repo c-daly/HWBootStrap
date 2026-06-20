@@ -25,6 +25,8 @@ namespace HexWars.Engine.Rl
         private IAgent? _ctrl1;
         private PlayerId _learner;
         private float _prevAdv;
+        private float _prevGap;
+        private float _armyValue;
         private int _steps;
 
         public DuelEnv(EnvConfig? cfg = null)
@@ -54,6 +56,9 @@ namespace HexWars.Engine.Rl
             _log.Clear();
             AdvancePastInternal();
             _prevAdv = Advantage();
+            var foe0 = _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            _prevGap = RewardShaping.AvgGap(_state, _learner, foe0);
+            _armyValue = WinCheck.Evaluate(_state, _learner);
             return MakeView(0f);
         }
 
@@ -101,13 +106,18 @@ namespace HexWars.Engine.Rl
 
         private float ComputeReward()
         {
+            var foe = _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
             float adv = Advantage();
-            float shaped = _cfg.ShapeScale * (adv - _prevAdv) - _cfg.StepPenalty;
+            float gap = RewardShaping.AvgGap(_state, _learner, foe);
+            float shaped = _cfg.ShapeScale * (adv - _prevAdv)
+                         + _cfg.ClosingWeight * (_prevGap - gap)   // closing the gap to the enemy = positive
+                         - _cfg.StepPenalty;
             _prevAdv = adv;
+            _prevGap = gap;
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _learner) return shaped + 1f;
             if (_state.Winner != null) return shaped - 1f;
-            return shaped; // draw
+            return shaped + RewardShaping.DrawCredit(_state, _learner, foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
         }
 
         private View MakeView(float reward)

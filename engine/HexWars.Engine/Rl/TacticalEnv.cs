@@ -13,7 +13,9 @@ namespace HexWars.Engine.Rl
         public IReadOnlyList<UnitStats> Roster = DefaultRoster();
         public int MaxSteps = 600; // headroom for the higher round cap (games can run longer to a wipeout)
         public float ShapeScale = 0.01f;
-        public float StepPenalty = 0.005f; // small per-turn cost -> discourages passive play / stalemates
+        public float StepPenalty = 0.005f;       // small per-turn cost -> discourages passive play / stalemates
+        public float ClosingWeight = 0.02f;      // reward per hex of distance closed to the enemy -> breaks standoffs
+        public float DrawCreditWeight = 0.5f;    // partial terminal credit at the cap, scaled by net value advantage
 
         public static IReadOnlyList<UnitStats> DefaultRoster() => new[]
         {
@@ -65,6 +67,8 @@ namespace HexWars.Engine.Rl
         private int[] _slot = Array.Empty<int>();
         private int _steps;
         private float _prevAdvantage;
+        private float _prevGap;
+        private float _armyValue;
 
         public TacticalEnv(Func<int, IAgent> opponentFactory, PlayerId learningSeat = PlayerId.Player0, EnvConfig? cfg = null)
         {
@@ -88,6 +92,8 @@ namespace HexWars.Engine.Rl
             _steps = 0;
             AdvanceToSeat();
             _prevAdvantage = Advantage();
+            _prevGap = RewardShaping.AvgGap(_state, _seat, _foe);
+            _armyValue = WinCheck.Evaluate(_state, _seat);
             return TacticalCoding.Observe(_state, _seat, _layout);
         }
 
@@ -127,13 +133,17 @@ namespace HexWars.Engine.Rl
         private float Reward()
         {
             float adv = Advantage();
-            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage) - _cfg.StepPenalty;
+            float gap = RewardShaping.AvgGap(_state, _seat, _foe);
+            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage)
+                         + _cfg.ClosingWeight * (_prevGap - gap)   // closing the gap to the enemy = positive
+                         - _cfg.StepPenalty;
             _prevAdvantage = adv;
+            _prevGap = gap;
 
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _seat) return shaped + 1f;
             if (_state.Winner == _foe) return shaped - 1f;
-            return shaped; // draw
+            return shaped + RewardShaping.DrawCredit(_state, _seat, _foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
         }
     }
 }
