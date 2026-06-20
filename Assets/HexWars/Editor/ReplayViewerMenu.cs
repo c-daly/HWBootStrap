@@ -29,11 +29,22 @@ namespace HexWars.Presentation.EditorTools
             var rep = new GameObject("Replay");
             rep.AddComponent<BoardRenderer>();
             rep.AddComponent<ReplayPlayer>().ReplayPath = path;
+            // read-only hover + click-to-inspect over the replayed units (no GameBootstrap here, so no
+            // commands fire); RequireComponent pulls in the UnitTooltip automatically
+            rep.AddComponent<UnitInputController>().ReadOnly = true;
 
             var es = new GameObject("EventSystem");
             es.AddComponent<EventSystem>();
             es.AddComponent<InputSystemUIInputModule>();
 
+            EditorApplication.EnterPlaymode();
+        }
+
+        [MenuItem("HexWars/Watch AI vs AI")]
+        public static void WatchAiVsAi()
+        {
+            EditorSceneManager.OpenScene("Assets/Scenes/HexWars.unity", OpenSceneMode.Single);
+            EditorPrefs.SetBool("HexWars.Spectate", true); // SpectatorDriver auto-attaches on play
             EditorApplication.EnterPlaymode();
         }
     }
