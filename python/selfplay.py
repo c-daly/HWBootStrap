@@ -36,10 +36,10 @@ def load_opponent(spec):
     return model
 
 
-def train_round(opp_spec, out, timesteps, server, seed, logdir):
+def train_round(opp_specs, out, timesteps, server, seed, logdir):
     os.makedirs(logdir, exist_ok=True)
-    opponent = load_opponent(opp_spec)
-    base = SelfPlayEnv(["dotnet", server], opponent, learner_seat=0, base_seed=seed)
+    opponents = [load_opponent(s) for s in opp_specs]  # a pool; one is sampled per episode
+    base = SelfPlayEnv(["dotnet", server], opponents, learner_seat=0, base_seed=seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
     ckpt = CheckpointCallback(save_freq=25_000, save_path=os.path.join(logdir, "checkpoints"), name_prefix=out)
@@ -60,14 +60,14 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    opp_spec = args.opponent
+    pool = [args.opponent]  # specs; grows each round so we train vs ALL past selves, not just the last
     final = None
     for rnd in range(args.rounds):
         out = f"{args.out}_r{rnd}"
-        print(f"=== self-play round {rnd}: train {out}.zip vs {opp_spec} ===")
-        train_round(opp_spec, out, args.timesteps, args.server, args.seed + rnd, os.path.join("runs", out))
+        print(f"=== self-play round {rnd}: train {out}.zip vs pool of {len(pool)} ({', '.join(pool)}) ===")
+        train_round(pool, out, args.timesteps, args.server, args.seed + rnd, os.path.join("runs", out))
         final = out
-        opp_spec = f"ppo:{out}.zip"  # next round trains against this round's policy
+        pool = pool + [f"ppo:{out}.zip"]  # add this round's policy to the opponent pool
     print(f"done -> {final}.zip  ({args.rounds} round(s))")
 
 

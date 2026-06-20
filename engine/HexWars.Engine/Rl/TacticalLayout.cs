@@ -37,7 +37,7 @@ namespace HexWars.Engine.Rl
             CellCount = Cells.Count;
         }
 
-        public int ActionCount => 1 + 2 * Roster * CellCount;
+        public int ActionCount => 1 + 3 * Roster * CellCount; // EndTurn + (move | attack | deploy) × slot/template × cell
         public int ObservationLength => TacticalCoding.PerCell * CellCount + TacticalCoding.Globals;
 
         /// <summary>Builds the start state (rosters placed in deployment zones) and each seat's stable
@@ -48,8 +48,10 @@ namespace HexWars.Engine.Rl
             int nextId = 1;
             var u0 = BuildRoster(board, PlayerId.Player0, ref nextId);
             var u1 = BuildRoster(board, PlayerId.Player1, ref nextId);
-            var p0 = new PlayerState(PlayerId.Player0, 0, null, u0, null);
-            var p1 = new PlayerState(PlayerId.Player1, 0, null, u1, null);
+            // seed each side's barracks with the roster types so they can DEPLOY reinforcements from bounty
+            var templates = new List<UnitStats>(RosterStats);
+            var p0 = new PlayerState(PlayerId.Player0, 0, templates, u0, null);
+            var p1 = new PlayerState(PlayerId.Player1, 0, templates, u1, null);
             var state = new GameState(board, Game, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
             return (state, SlotMap(u0), SlotMap(u1));
         }

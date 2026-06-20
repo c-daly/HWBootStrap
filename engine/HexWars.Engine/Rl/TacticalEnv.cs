@@ -15,7 +15,8 @@ namespace HexWars.Engine.Rl
         public float ShapeScale = 0.01f;
         public float StepPenalty = 0.005f;       // small per-turn cost -> discourages passive play / stalemates
         public float ClosingWeight = 0.02f;      // reward per hex of distance closed to the enemy -> breaks standoffs
-        public float DrawCreditWeight = 0.5f;    // partial terminal credit at the cap, scaled by net value advantage
+        public float DrawCreditWeight = 0.25f;   // partial terminal credit at the cap (lowered: don't reward coasting to a draw)
+        public float PointsWeight = 0.5f;        // banked points worth less than committed force -> deploying earned bounty pays
 
         public static IReadOnlyList<UnitStats> DefaultRoster() => new[]
         {
@@ -91,7 +92,7 @@ namespace HexWars.Engine.Rl
             _steps = 0;
             AdvanceToSeat();
             _prevAdvantage = Advantage();
-            _armyValue = WinCheck.Evaluate(_state, _seat);
+            _armyValue = RewardShaping.PositionValue(_state, _seat, _cfg.PointsWeight);
             return TacticalCoding.Observe(_state, _seat, _layout);
         }
 
@@ -139,7 +140,7 @@ namespace HexWars.Engine.Rl
             }
         }
 
-        private float Advantage() => WinCheck.Evaluate(_state, _seat) - WinCheck.Evaluate(_state, _foe);
+        private float Advantage() => RewardShaping.Advantage(_state, _seat, _foe, _cfg.PointsWeight);
 
         private float Reward(float closing)
         {
@@ -150,7 +151,7 @@ namespace HexWars.Engine.Rl
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _seat) return shaped + 1f;
             if (_state.Winner == _foe) return shaped - 1f;
-            return shaped + RewardShaping.DrawCredit(_state, _seat, _foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
+            return shaped + RewardShaping.DrawCredit(_state, _seat, _foe, _armyValue, _cfg.DrawCreditWeight, _cfg.PointsWeight); // cap draw
         }
     }
 }

@@ -10,8 +10,21 @@ namespace HexWars.Engine.Rl
     /// </summary>
     internal static class RewardShaping
     {
-        public static float Advantage(GameState s, PlayerId me, PlayerId foe)
-            => WinCheck.Evaluate(s, me) - WinCheck.Evaluate(s, foe);
+        /// <summary>Position value with banked points weighted below committed force (units/generators count
+        /// full, points count <paramref name="pointsWeight"/>). Makes deploying earned bounty into a unit
+        /// (points -> board force) a net gain — the backfire-proof way to reward creating units, since it's
+        /// the unit's combat value while alive, paid for by bounty, not a flat per-create bonus.</summary>
+        public static float PositionValue(GameState s, PlayerId p, float pointsWeight)
+        {
+            var ps = s.Player(p);
+            float v = pointsWeight * ps.Points;
+            foreach (var u in ps.UnitsOnBoard) if (u.IsAlive) v += u.Stats.PointCost;
+            foreach (var g in ps.Generators) if (g.IsAlive) v += s.Config.GeneratorCost;
+            return v;
+        }
+
+        public static float Advantage(GameState s, PlayerId me, PlayerId foe, float pointsWeight)
+            => PositionValue(s, me, pointsWeight) - PositionValue(s, foe, pointsWeight);
 
         /// <summary>Hex distance from <paramref name="cell"/> to the nearest living enemy unit, or -1 if none.</summary>
         public static int NearestEnemyDist(GameState s, PlayerId foe, HexCoord cell)
@@ -39,10 +52,10 @@ namespace HexWars.Engine.Rl
         /// <summary>Partial reward at a draw (round cap): net value advantage normalized by the starting
         /// army value, clamped to [-1,1], times <paramref name="weight"/>. Ahead on kills pays up to
         /// +weight; behind pays down to -weight; dead even = 0.</summary>
-        public static float DrawCredit(GameState s, PlayerId me, PlayerId foe, float armyValue, float weight)
+        public static float DrawCredit(GameState s, PlayerId me, PlayerId foe, float armyValue, float weight, float pointsWeight)
         {
             if (armyValue <= 0f) return 0f;
-            float a = Advantage(s, me, foe) / armyValue;
+            float a = Advantage(s, me, foe, pointsWeight) / armyValue;
             if (a > 1f) a = 1f;
             else if (a < -1f) a = -1f;
             return weight * a;

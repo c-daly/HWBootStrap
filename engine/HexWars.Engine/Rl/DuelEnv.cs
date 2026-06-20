@@ -55,7 +55,7 @@ namespace HexWars.Engine.Rl
             _log.Clear();
             AdvancePastInternal();
             _prevAdv = Advantage();
-            _armyValue = WinCheck.Evaluate(_state, _learner);
+            _armyValue = RewardShaping.PositionValue(_state, _learner, _cfg.PointsWeight);
             return MakeView(0f);
         }
 
@@ -109,7 +109,7 @@ namespace HexWars.Engine.Rl
 
         private PlayerId Foe => _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
 
-        private float Advantage() => WinCheck.Evaluate(_state, _learner) - WinCheck.Evaluate(_state, Foe);
+        private float Advantage() => RewardShaping.Advantage(_state, _learner, Foe, _cfg.PointsWeight);
 
         private float ComputeReward(float closing)
         {
@@ -119,7 +119,7 @@ namespace HexWars.Engine.Rl
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _learner) return shaped + 1f;
             if (_state.Winner != null) return shaped - 1f;
-            return shaped + RewardShaping.DrawCredit(_state, _learner, Foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
+            return shaped + RewardShaping.DrawCredit(_state, _learner, Foe, _armyValue, _cfg.DrawCreditWeight, _cfg.PointsWeight); // cap draw
         }
 
         private View MakeView(float reward)

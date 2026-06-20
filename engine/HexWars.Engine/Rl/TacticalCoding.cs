@@ -96,17 +96,19 @@ namespace HexWars.Engine.Rl
 
             int n = L.CellCount, r = L.Roster;
             int a = action - 1;
-            bool attack = a >= r * n;
-            if (attack) a -= r * n;
-
-            int slot = a / n, cell = a % n;
-            if (slot < 0 || slot >= r || cell < 0 || cell >= n) return null;
-
-            int unitId = slotToUnitId[slot];
-            if (unitId < 0 || !IsLivingUnit(s, seat, unitId)) return null;
+            int region = a / (r * n);   // 0 = move, 1 = attack, 2 = deploy
+            a %= r * n;
+            int idx = a / n, cell = a % n;   // idx = unit slot (move/attack) or barracks template (deploy)
+            if (idx < 0 || idx >= r || cell < 0 || cell >= n) return null;
 
             var coord = L.Cells[cell];
-            if (!attack) return new MoveUnit(seat, unitId, coord);
+
+            if (region == 2) // deploy a copy of barracks template `idx` onto `coord` (engine validates cost/zone)
+                return new DeployUnit(seat, idx, coord);
+
+            int unitId = slotToUnitId[idx];
+            if (unitId < 0 || !IsLivingUnit(s, seat, unitId)) return null;
+            if (region == 0) return new MoveUnit(seat, unitId, coord);
 
             int targetId = EnemyEntityAt(s, seat, coord);
             return targetId < 0 ? null : new AttackUnit(seat, unitId, targetId);
@@ -131,6 +133,12 @@ namespace HexWars.Engine.Rl
                     var tc = CellOfEntity(s, at.TargetId);
                     if (slot < 0 || tc == null || !L.CellIndex.TryGetValue(tc.Value, out int cell)) return -1;
                     return 1 + r * n + slot * n + cell;
+                }
+                case DeployUnit d:
+                {
+                    if (d.TemplateIndex < 0 || d.TemplateIndex >= r) return -1; // only the seeded roster templates are codable
+                    if (!L.CellIndex.TryGetValue(d.Cell, out int cell)) return -1;
+                    return 1 + 2 * r * n + d.TemplateIndex * n + cell;
                 }
                 default:
                     return -1;

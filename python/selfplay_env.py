@@ -6,6 +6,7 @@ points, and each step's reward (from the learner's perspective) sums the learner
 opponent's reply. Use with sb3-contrib MaskablePPO (exposes action_masks()).
 """
 import json
+import random
 import subprocess
 
 import numpy as np
@@ -18,11 +19,13 @@ from duel import predict  # shared model -> legal action (handles MaskablePPO + 
 class SelfPlayEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, server_cmd, opponent_model, learner_seat: int = 0, base_seed: int = 0):
+    def __init__(self, server_cmd, opponent_models, learner_seat: int = 0, base_seed: int = 0):
         super().__init__()
         self.proc = subprocess.Popen(list(server_cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1)
-        self.opp = opponent_model
+        # a pool of frozen opponents; one is picked at random each episode (reduces self-play cycling)
+        self.opp_pool = list(opponent_models) if isinstance(opponent_models, (list, tuple)) else [opponent_models]
+        self.opp = self.opp_pool[0]
         self.learner = learner_seat
         self.opp_seat = 1 - learner_seat
         self._next_seed = base_seed
@@ -56,6 +59,7 @@ class SelfPlayEnv(gym.Env):
         if seed is None:
             seed = self._next_seed
             self._next_seed += 1
+        self.opp = random.choice(self.opp_pool)  # sample a frozen opponent from the pool for this episode
         v = self._rpc({"cmd": "duel_reset", "seed": int(seed), "learner": self.learner})
         v, _ = self._play_opponent(v)  # in case the opponent moves first
         self._mask = np.asarray(v["mask"], dtype=bool)
