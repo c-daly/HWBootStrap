@@ -48,23 +48,49 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
-        // Watch two *trained models* (or a model vs greedy/random) fight, live, via the Windows-venv
+        // Watch two *trained models* (or a model vs greedy/random) fight once, via the Windows-venv
         // policy_server.py bridge. Pick a .zip per seat (Cancel = greedy).
         [MenuItem("HexWars/Watch Model Duel...")]
         public static void WatchModelDuel()
         {
-            string root = System.IO.Directory.GetParent(Application.dataPath).FullName;
-            string pyDir = System.IO.Path.Combine(root, "python");
-            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
-            string server = System.IO.Path.Combine(pyDir, "policy_server.py");
-            if (!System.IO.File.Exists(pyExe))
-            {
-                EditorUtility.DisplayDialog("Model Duel", "Windows venv Python not found at:\n" + pyExe, "OK");
-                return;
-            }
-
+            string pyDir = PyDir();
+            if (!PyReady(pyDir)) return;
             string p0 = PickSpec("Seat 0 (Player 1) model — Cancel for greedy", pyDir);
             string p1 = PickSpec("Seat 1 (Player 2) model — Cancel for greedy", pyDir);
+            LaunchDuel(pyDir, p0, p1, loop: false);
+        }
+
+        // Watch LIVE training: seat 0 = the newest checkpoint in a run's folder, reloaded between games as
+        // training writes fresh ones, looping continuously, vs an opponent (Cancel = greedy). You watch the
+        // agent visibly improve over the run.
+        [MenuItem("HexWars/Watch Live Training...")]
+        public static void WatchLiveTraining()
+        {
+            string pyDir = PyDir();
+            if (!PyReady(pyDir)) return;
+            string dir = EditorUtility.OpenFolderPanel(
+                "Pick the learner's checkpoint folder (runs/<run>/checkpoints)",
+                System.IO.Path.Combine(pyDir, "runs"), "");
+            if (string.IsNullOrEmpty(dir)) return;
+            string p1 = PickSpec("Opponent model — Cancel for greedy", pyDir);
+            LaunchDuel(pyDir, "ppo:" + dir, p1, loop: true);
+        }
+
+        static string PyDir() =>
+            System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
+
+        static bool PyReady(string pyDir)
+        {
+            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            if (System.IO.File.Exists(pyExe)) return true;
+            EditorUtility.DisplayDialog("HexWars", "Windows venv Python not found at:\n" + pyExe, "OK");
+            return false;
+        }
+
+        static void LaunchDuel(string pyDir, string p0, string p1, bool loop)
+        {
+            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string server = System.IO.Path.Combine(pyDir, "policy_server.py");
 
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
@@ -79,7 +105,7 @@ namespace HexWars.Presentation.EditorTools
             go.AddComponent<BoardRenderer>();
             var d = go.AddComponent<ModelDuelDriver>();
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
-            d.P0Spec = p0; d.P1Spec = p1; d.Seed = 0;
+            d.P0Spec = p0; d.P1Spec = p1; d.Seed = 0; d.Loop = loop;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 
             var es = new GameObject("EventSystem");

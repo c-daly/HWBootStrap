@@ -5,74 +5,104 @@ SHARED codec (HexWars.Engine.Rl.TacticalCoding, same C# the models trained again
 stdin, and this returns the model's action over stdout. So the model sees exactly what it saw at training
 time, and Unity stays in charge of the game.
 
-Protocol (one JSON object per line):
-    spawn:  python policy_server.py --p0 ppo:sp6_r4.zip --p1 ppo:sp6base.zip   (only model seats load)
-    ready:  -> {"ready": true, "model_seats": [0,1]}
-    in:     {"seat": 0, "obs": [...float...], "mask": [...bool...]}
-    out:    {"action": 123}
-    in:     {"cmd": "close"}   -> exits
+A seat spec is "ppo:PATH" or "dqn:PATH" where PATH is either a .zip OR a DIRECTORY — for a directory we
+load the NEWEST .zip in it, and a {"cmd":"reload"} re-scans (so the live-training viewer can pick up fresh
+checkpoints between games). Inference runs on CPU on purpose: it's one tiny forward pass per turn, faster
+than a GPU round-trip and it never contends with training for the GPU.
 
-Greedy/Random seats are NOT served here — Unity drives those with its own C# agents; this process only
-loads the trained models (ppo:PATH / dqn:PATH). Runs in the Windows venv (CUDA torch), launched by Unity
-as a local subprocess, so it's all localhost — no WSL networking.
+Protocol (one JSON object per line):
+    spawn:  python policy_server.py --p0 ppo:runs/sp6_r1/checkpoints --p1 ppo:sp6base.zip
+    ready:  -> {"ready": true, "model_seats": [0,1]}
+    in:     {"seat": 0, "obs": [...float...], "mask": [...bool...]}   -> {"action": 123}
+    in:     {"cmd": "reload"}   -> {"reloaded": [0]}   (seats whose newest checkpoint changed)
+    in:     {"cmd": "close"}    -> exits
+
+Greedy/Random seats are NOT served here — Unity drives those with its own C# agents.
 """
 import argparse
+import glob
 import json
+import os
 import sys
 
 import numpy as np
 
 
-def load_model(spec):
-    """spec = 'ppo:PATH' or 'dqn:PATH' -> (kind, model). device='auto' uses the GPU when present."""
-    kind, _, path = spec.partition(":")
+def newest_zip(path):
+    """If path is a directory, the newest .zip inside it; otherwise path itself."""
+    if os.path.isdir(path):
+        zips = glob.glob(os.path.join(path, "*.zip"))
+        return max(zips, key=os.path.getmtime) if zips else None
+    return path
+
+
+def load(kind, file):
     if kind == "ppo":
         from sb3_contrib import MaskablePPO
-        return "ppo", MaskablePPO.load(path, device="auto")
+        return MaskablePPO.load(file, device="cpu")
     if kind == "dqn":
         from stable_baselines3 import DQN
-        return "dqn", DQN.load(path, device="auto")
-    raise ValueError(f"unknown model spec '{spec}' (expected ppo:PATH or dqn:PATH)")
+        return DQN.load(file, device="cpu")
+    raise ValueError(f"unknown model kind '{kind}' (expected ppo/dqn)")
 
 
 def predict(kind, model, obs, mask):
     if kind == "ppo":
         action, _ = model.predict(obs, action_masks=mask, deterministic=True)
         return int(action)
-    # masked DQN: zero out illegal actions in the Q-values, then argmax
     import torch
     with torch.no_grad():
-        q = model.q_net(torch.as_tensor(obs, dtype=torch.float32)
-                         .unsqueeze(0).to(model.device)).cpu().numpy()[0]
+        q = model.q_net(torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)).cpu().numpy()[0]
     q[~mask] = -np.inf
     return int(q.argmax())
 
 
+class Seat:
+    def __init__(self, spec):
+        self.kind, _, self.path = spec.partition(":")  # path may be a file or a directory
+        self.loaded_from = None
+        self.model = None
+        self.reload()
+
+    def reload(self):
+        """Load the newest checkpoint if it changed. Returns True if a (re)load happened."""
+        file = newest_zip(self.path)
+        if file is None or file == self.loaded_from:
+            return False
+        self.model = load(self.kind, file)
+        self.loaded_from = file
+        return True
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p0", default=None, help="model spec for seat 0 (ppo:PATH / dqn:PATH), else omit")
-    ap.add_argument("--p1", default=None, help="model spec for seat 1")
+    ap.add_argument("--p0", default=None, help="ppo:PATH / dqn:PATH (PATH = .zip or checkpoint dir)")
+    ap.add_argument("--p1", default=None)
     args = ap.parse_args()
 
-    models = {}
-    for seat, spec in ((0, args.p0), (1, args.p1)):
+    seats = {}
+    for i, spec in ((0, args.p0), (1, args.p1)):
         if spec and spec.split(":", 1)[0] in ("ppo", "dqn"):
-            models[seat] = load_model(spec)
+            seats[i] = Seat(spec)
 
-    print(json.dumps({"ready": True, "model_seats": sorted(models.keys())}), flush=True)
+    print(json.dumps({"ready": True, "model_seats": sorted(seats.keys())}), flush=True)
 
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         msg = json.loads(line)
-        if msg.get("cmd") == "close":
+        cmd = msg.get("cmd")
+        if cmd == "close":
             break
-        seat = int(msg["seat"])
-        kind, model = models[seat]
+        if cmd == "reload":
+            changed = [i for i, s in seats.items() if s.reload()]
+            print(json.dumps({"reloaded": changed}), flush=True)
+            continue
+        seat = seats[int(msg["seat"])]
         obs = np.asarray(msg["obs"], dtype=np.float32)
         mask = np.asarray(msg["mask"], dtype=bool)
-        print(json.dumps({"action": predict(kind, model, obs, mask)}), flush=True)
+        print(json.dumps({"action": predict(seat.kind, seat.model, obs, mask)}), flush=True)
 
 
 if __name__ == "__main__":

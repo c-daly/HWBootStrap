@@ -21,13 +21,15 @@ namespace HexWars.Presentation
         public string P1Spec = "greedy";
         public int Seed = 0;
         public float SecondsPerAction = 0.4f;
+        public bool Loop = false;          // play games back-to-back (live-training viewer)
+        public float SecondsBetweenGames = 1.5f;
 
         BoardRenderer _board;
         DuelEnv _duel;
         PolicyBridge _bridge;
         DuelEnv.View _view;
-        bool _p0Model, _p1Model, _done;
-        float _timer;
+        bool _p0Model, _p1Model, _done, _ended;
+        float _timer, _restTimer;
 
         void Start()
         {
@@ -43,19 +45,23 @@ namespace HexWars.Presentation
                 if (!ok) { Debug.LogError("ModelDuelDriver: policy bridge failed to start."); _done = true; return; }
             }
 
-            // model seats are external (null controller -> we feed actions); scripted seats run inside DuelEnv
+            var input = FindAnyObjectByType<UnitInputController>();
+            if (input != null) input.ReadOnly = true; // hover + inspect, no commands
+
+            Debug.Log($"ModelDuelDriver: P0={P0Spec} vs P1={P1Spec}, loop={Loop}");
+            BeginGame();
+        }
+
+        // Start a fresh game: model seats are external (we feed actions from the bridge); a greedy/random
+        // seat runs inside DuelEnv. Re-rendered each game (the board changes with the seed).
+        void BeginGame()
+        {
             IAgent c0 = _p0Model ? null : Scripted(P0Spec, Seed * 2 + 1);
             IAgent c1 = _p1Model ? null : Scripted(P1Spec, Seed * 2 + 2);
-
             _duel = new DuelEnv();
             _view = _duel.Reset(Seed, c0, c1, PlayerId.Player0);
             _board.Render(_duel.State.Board);
             _board.RenderEntities(_duel.State);
-
-            var input = FindAnyObjectByType<UnitInputController>();
-            if (input != null) input.ReadOnly = true; // hover + inspect, no commands
-
-            Debug.Log($"ModelDuelDriver: P0={P0Spec} vs P1={P1Spec}, seed {Seed}");
         }
 
         void Update()
@@ -63,8 +69,19 @@ namespace HexWars.Presentation
             if (_done || _duel == null) return;
             if (_view.Terminated || _view.Truncated)
             {
-                if (!_done) Debug.Log($"Duel over: winner={(_view.Winner < 0 ? "DRAW" : "P" + _view.Winner)}");
-                _done = true;
+                if (!_ended)
+                {
+                    Debug.Log($"Game over: winner={(_view.Winner < 0 ? "DRAW" : "P" + _view.Winner)}");
+                    _ended = true;
+                    _restTimer = 0f;
+                    if (!Loop) { _done = true; return; }
+                }
+                _restTimer += Time.deltaTime;          // brief pause, then reload newest checkpoint + next game
+                if (_restTimer < SecondsBetweenGames) return;
+                _bridge?.Reload();
+                Seed++;
+                _ended = false;
+                BeginGame();
                 return;
             }
 

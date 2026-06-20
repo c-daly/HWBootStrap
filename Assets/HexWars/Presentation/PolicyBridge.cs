@@ -72,6 +72,16 @@ namespace HexWars.Presentation
             return int.Parse(resp.Substring(c + 1, e - c - 1).Trim(), CultureInfo.InvariantCulture);
         }
 
+        /// <summary>Ask the server to reload each seat's newest checkpoint (live-training viewer calls this
+        /// between games so the next game uses fresher weights).</summary>
+        public void Reload()
+        {
+            if (_proc == null || _proc.HasExited) return;
+            _proc.StandardInput.WriteLine("{\"cmd\":\"reload\"}");
+            _proc.StandardInput.Flush();
+            _proc.StandardOutput.ReadLine(); // drain {"reloaded":[...]}
+        }
+
         public void Dispose()
         {
             try
