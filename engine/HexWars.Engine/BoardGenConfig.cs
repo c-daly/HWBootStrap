@@ -20,10 +20,10 @@ namespace HexWars.Engine
         public int WaterWeight { get; }
 
         public BoardGenConfig(
-            int width = 9,
-            int height = 7,
+            int width = 13,
+            int height = 9,
             int maxElevation = 4,
-            int zoneDepth = 2,
+            int zoneDepth = 3,
             double flatChance = 0.6,
             int plainsWeight = 70,
             int forestWeight = 15,
