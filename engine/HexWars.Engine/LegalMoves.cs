@@ -33,9 +33,7 @@ namespace HexWars.Engine
                     moves.Add(new DeployUnit(me, i, coord));
             }
 
-            if (player.Points >= state.Config.GeneratorCost)
-                foreach (var coord in emptyZone)
-                    moves.Add(new DeployGenerator(me, coord));
+            // generators removed from the game model: the only income is bounty from kills
 
             foreach (var unit in player.UnitsOnBoard)
             {

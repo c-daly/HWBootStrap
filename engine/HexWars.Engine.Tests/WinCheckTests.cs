@@ -33,9 +33,11 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void IsEliminated_False_WhenCanStillAffordACheapUnit()
+        public void IsEliminated_False_WhenCanRedeployAnAffordableTemplate()
         {
-            var s = State(new PlayerState(PlayerId.Player0, 1), new PlayerState(PlayerId.Player1, 0), 2);
+            // no units, but an existing template you can pay to redeploy = a comeback is still possible
+            var s = State(new PlayerState(PlayerId.Player0, 1, barracks: new[] { Cost(1) }),
+                          new PlayerState(PlayerId.Player1, 0), 2);
             Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.False);
         }
 

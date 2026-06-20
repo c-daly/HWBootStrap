@@ -20,9 +20,15 @@ if (args.Length >= 2 && args[0] == "inspect")
         var data = ReplayFile.Read(File.ReadAllText(args[i]));
         var replay = new Replay(data.Start, data.Commands);
         var f = replay.Final;
-        int v0 = WinCheck.Evaluate(f, PlayerId.Player0), v1 = WinCheck.Evaluate(f, PlayerId.Player1);
         string w = f.Winner == null ? "DRAW" : (f.Winner == PlayerId.Player0 ? "P0" : "P1");
-        Console.WriteLine($"{System.IO.Path.GetFileName(args[i])}: frames={replay.FrameCount} round={f.Round} over={f.IsGameOver} winner={w} value P0={v0} P1={v1}");
+        Console.WriteLine($"{System.IO.Path.GetFileName(args[i])}: round={f.Round} winner={w}");
+        foreach (var pid in new[] { PlayerId.Player0, PlayerId.Player1 })
+        {
+            var p = f.Player(pid);
+            int units = 0; foreach (var u in p.UnitsOnBoard) if (u.IsAlive) units++;
+            int gens = 0; foreach (var g in p.Generators) if (g.IsAlive) gens++;
+            Console.WriteLine($"    {pid}: bankedPoints={p.Points}  unitsOnBoard={units}  generators={gens}  totalValue={WinCheck.Evaluate(f, pid)}");
+        }
     }
     return;
 }

@@ -18,10 +18,10 @@ namespace HexWars.Presentation
     {
         [Header("Map generation")]
         public int Seed = 7;
-        public int Width = 9;
-        public int Height = 7;
+        public int Width = 13;
+        public int Height = 9;
         public int MaxElevation = 4;
-        public int ZoneDepth = 2;
+        public int ZoneDepth = 3;
         [Range(0f, 1f)] public float FlatChance = 0.6f;
 
         [Header("Terrain weights (relative)")]
@@ -50,8 +50,8 @@ namespace HexWars.Presentation
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
 
             int nextId = 1;
-            var p0 = BuildPlayer(board, PlayerId.Player0, config.StartingPoints, ref nextId);
-            var p1 = BuildPlayer(board, PlayerId.Player1, config.StartingPoints, ref nextId);
+            var p0 = BuildPlayer(board, PlayerId.Player0, ref nextId);
+            var p1 = BuildPlayer(board, PlayerId.Player1, ref nextId);
             State = new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
 
             var renderer = GetComponent<BoardRenderer>();
@@ -79,7 +79,7 @@ namespace HexWars.Presentation
             return true;
         }
 
-        PlayerState BuildPlayer(Board board, PlayerId id, int points, ref int nextId)
+        PlayerState BuildPlayer(Board board, PlayerId id, ref int nextId)
         {
             if (!DemoPieces)
                 return new PlayerState(id, points);
@@ -98,15 +98,14 @@ namespace HexWars.Presentation
                 new UnitStats(health: 2, damage: 0, defense: 0, movement: 4, verticalMovement: 3, range: 0, rangeArc: 0, vision: 7, visionArc: 2), // Spotter
             };
 
+            // start with an army (the only resource); no generators, no starting points —
+            // the only way to earn points (for reinforcements) is bounty from kills
             var units = new List<Unit>();
-            var gens = new List<Generator>();
             int placed = 0;
             for (; placed < demos.Length && placed < flatZone.Count; placed++)
                 units.Add(new Unit(nextId++, id, demos[placed], flatZone[placed], 0));
-            if (flatZone.Count > placed)
-                gens.Add(new Generator(nextId++, id, flatZone[placed], 0, GameConfig.Default().GeneratorHealth));
 
-            return new PlayerState(id, points, unitsOnBoard: units, generators: gens);
+            return new PlayerState(id, 0, unitsOnBoard: units);
         }
 
         static Cubemap _reflection;

@@ -6,8 +6,6 @@ namespace HexWars.Engine
     /// </summary>
     public static class WinCheck
     {
-        private static readonly UnitStats MinimalUnit = new UnitStats(1, 0, 0, 0, 0, 0, 0, 0, 0);
-
         /// <summary>Total value of a player's position: banked points + on-board units + generators.
         /// Barracks templates are free reusable blueprints, so they add no value.</summary>
         public static int Evaluate(GameState state, PlayerId player)
@@ -24,22 +22,20 @@ namespace HexWars.Engine
             return value;
         }
 
-        /// <summary>A player is eliminated with no living board units and too few points to field a unit
-        /// — either by designing+deploying a minimal one, or deploying a cheaper existing template.</summary>
+        /// <summary>A player is eliminated (annihilated) when it has no living board units and cannot
+        /// redeploy any existing barracks template (so a bounty-funded comeback is still possible, but an
+        /// empty board with no affordable template — or no template at all — is a loss).</summary>
         public static bool IsEliminated(GameState state, PlayerId player)
         {
             var p = state.Player(player);
 
             foreach (var u in p.UnitsOnBoard)
-                if (u.IsAlive) return false;
+                if (u.IsAlive) return false; // still has an army
 
-            int cheapest = state.Config.DesignFee + Economy.DeployCost(MinimalUnit, state.Config);
             foreach (var stats in p.Barracks)
-            {
-                int c = Economy.DeployCost(stats, state.Config);
-                if (c < cheapest) cheapest = c;
-            }
-            return p.Points < cheapest;
+                if (p.Points >= Economy.DeployCost(stats, state.Config)) return false; // can redeploy
+
+            return true; // no units and nothing it can field
         }
 
         /// <summary>Whether the game has ended (a player eliminated after the opening, or the round cap
