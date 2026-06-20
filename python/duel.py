@@ -49,7 +49,8 @@ def predict(model, obs, mask) -> int:
     # value-based (DQN): mask illegal Q-values then take the argmax
     import torch
     with torch.no_grad():
-        q = model.q_net(torch.as_tensor(obs[None]).float()).cpu().numpy()[0]
+        obs_t = torch.as_tensor(obs[None]).float().to(model.device)  # match model's device (CPU/GPU)
+        q = model.q_net(obs_t).cpu().numpy()[0]
     q[~mask] = -1e9
     return int(np.argmax(q))
 

@@ -59,7 +59,9 @@ def main():
     base = HexWarsEnv(["dotnet", args.server], opponent=args.opponent, seat=args.seat, base_seed=args.seed)
     env = Monitor(base, filename=os.path.join(logdir, "monitor.csv"))
 
-    model = MaskableDQN("MlpPolicy", env, seed=args.seed, verbose=1)
+    # buffer_size capped so the replay buffer (761-dim obs) doesn't balloon to multiple GB
+    model = MaskableDQN("MlpPolicy", env, seed=args.seed, verbose=1,
+                        buffer_size=100_000, learning_starts=1_000)
     model.set_logger(configure(logdir, ["stdout", "csv"]))
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)
