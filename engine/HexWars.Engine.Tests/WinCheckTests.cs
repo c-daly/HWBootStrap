@@ -76,13 +76,14 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Resolve_AtRoundCap_WinsByHigherTotalValue()
+        public void Resolve_AtRoundCap_IsDraw_WhenNeitherAnnihilated()
         {
+            // win is by annihilation only — reaching the cap with both sides alive is a draw
             var u0 = new Unit(1, PlayerId.Player0, Cost(5), new HexCoord(0, 0), 0);
             var u1 = new Unit(2, PlayerId.Player1, Cost(2), new HexCoord(0, 0), 0);
             var p0 = new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { u0 });
             var p1 = new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { u1 });
-            Assert.That(WinCheck.Resolve(State(p0, p1, 40)), Is.EqualTo(PlayerId.Player0));
+            Assert.That(WinCheck.Resolve(State(p0, p1, GameConfig.Default().RoundCap)), Is.Null);
         }
 
         [Test]
@@ -109,7 +110,7 @@ namespace HexWars.Engine.Tests
             var u1 = new Unit(2, PlayerId.Player1, Cost(1), new HexCoord(0, 0), 0);
             var p0 = new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { u0 });
             var p1 = new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { u1 });
-            Assert.That(WinCheck.IsTerminal(State(p0, p1, 40)), Is.True);
+            Assert.That(WinCheck.IsTerminal(State(p0, p1, GameConfig.Default().RoundCap)), Is.True);
         }
     }
 }

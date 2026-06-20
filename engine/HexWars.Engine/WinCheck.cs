@@ -55,9 +55,9 @@ namespace HexWars.Engine
         }
 
         /// <summary>
-        /// The winner, or null if the game continues / is a draw. Elimination is not declared during
-        /// the opening round (round 1) so a player isn't lost before deploying. At the round cap the
-        /// higher total value wins (equal = draw).
+        /// The winner, or null if the game continues / is a draw. A game is won ONLY by annihilation
+        /// (one side eliminated, the other not). Anything else — the round cap, mutual annihilation —
+        /// is a DRAW. Elimination is not declared during the opening round (round 1).
         /// </summary>
         public static PlayerId? Resolve(GameState state)
         {
@@ -67,19 +67,9 @@ namespace HexWars.Engine
                 bool e1 = IsEliminated(state, PlayerId.Player1);
                 if (e0 && !e1) return PlayerId.Player1;
                 if (e1 && !e0) return PlayerId.Player0;
-                if (e0 && e1) return null; // mutual annihilation = draw
             }
 
-            if (state.Round >= state.Config.RoundCap)
-            {
-                int v0 = Evaluate(state, PlayerId.Player0);
-                int v1 = Evaluate(state, PlayerId.Player1);
-                if (v0 > v1) return PlayerId.Player0;
-                if (v1 > v0) return PlayerId.Player1;
-                return null; // tie
-            }
-
-            return null;
+            return null; // no annihilation (incl. round cap) = draw
         }
     }
 }

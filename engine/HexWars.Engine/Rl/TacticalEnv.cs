@@ -11,7 +11,7 @@ namespace HexWars.Engine.Rl
         public BoardGenConfig BoardGen = BoardGenConfig.Default();
         public GameConfig Game = GameConfig.Default();
         public IReadOnlyList<UnitStats> Roster = DefaultRoster();
-        public int MaxSteps = 400;
+        public int MaxSteps = 600; // headroom for the higher round cap (games can run longer to a wipeout)
         public float ShapeScale = 0.01f;
         public float StepPenalty = 0.005f; // small per-turn cost -> discourages passive play / stalemates
 

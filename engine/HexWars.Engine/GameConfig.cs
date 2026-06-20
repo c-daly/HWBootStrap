@@ -52,7 +52,7 @@ namespace HexWars.Engine
             int damageFloor = 0,
             int dmgHighGroundBonus = 1,
             int rangeHighGroundBonus = 1,
-            int roundCap = 40,
+            int roundCap = 100, // backstop only — games are meant to end by annihilation, so give them room
             int designFee = 0,
             double deployCostMultiplier = 1.0,
             ITurnPolicy? turnPolicy = null)

@@ -11,6 +11,22 @@ using HexWars.Engine;
 var cfg = GameConfig.Default();
 var gen = new RandomBoardGenerator(BoardGenConfig.Default());
 
+// Inspect: reconstruct replay file(s) and print the real final outcome.
+//   dotnet run --project engine/HexWars.Sim -- inspect <file.replay> [more...]
+if (args.Length >= 2 && args[0] == "inspect")
+{
+    for (int i = 1; i < args.Length; i++)
+    {
+        var data = ReplayFile.Read(File.ReadAllText(args[i]));
+        var replay = new Replay(data.Start, data.Commands);
+        var f = replay.Final;
+        int v0 = WinCheck.Evaluate(f, PlayerId.Player0), v1 = WinCheck.Evaluate(f, PlayerId.Player1);
+        string w = f.Winner == null ? "DRAW" : (f.Winner == PlayerId.Player0 ? "P0" : "P1");
+        Console.WriteLine($"{System.IO.Path.GetFileName(args[i])}: frames={replay.FrameCount} round={f.Round} over={f.IsGameOver} winner={w} value P0={v0} P1={v1}");
+    }
+    return;
+}
+
 GameState NewGame(int seed, int points)
 {
     var board = gen.Generate(seed + 1); // +1 so seed 0 isn't the trivial board
