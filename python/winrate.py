@@ -32,20 +32,29 @@ def main():
                     default="dotnet ../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll")
     args = ap.parse_args()
 
-    _, m0 = load_controller(args.p0)
-    _, m1 = load_controller(args.p1)
-    if m0 is None or m1 is None:
-        raise SystemExit("both --p0 and --p1 must be trained models (ppo:PATH / dqn:PATH)")
-    models = {0: m0, 1: m1}
+    # each seat is a model (ppo:/dqn:) driven here, or a server-side scripted agent (greedy/random)
+    scripted = {0: args.p0 if args.p0 in ("greedy", "random") else None,
+                1: args.p1 if args.p1 in ("greedy", "random") else None}
+    models = {}
+    for seat, spec in ((0, args.p0), (1, args.p1)):
+        if scripted[seat] is None:
+            _, m = load_controller(spec)
+            if m is None:
+                raise SystemExit(f"--p{seat} must be a model (ppo:/dqn:) or 'greedy'/'random'")
+            models[seat] = m
 
     proc = subprocess.Popen(args.server.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             text=True, bufsize=1)
     p0w = p1w = draw = 0
     for seed in range(args.games):
-        v = rpc(proc, {"cmd": "duel_reset", "seed": seed, "learner": 0})
+        reset = {"cmd": "duel_reset", "seed": seed, "learner": 0}
+        for seat in (0, 1):
+            if scripted[seat]:
+                reset[f"p{seat}"] = scripted[seat]  # server plays this seat internally
+        v = rpc(proc, reset)
         steps = 0
         while not v["terminated"] and not v["truncated"] and steps < 5000:
-            seat = int(v["seat"])
+            seat = int(v["seat"])  # only model seats surface here; server auto-plays scripted seats
             a = predict(models[seat], np.asarray(v["obs"], dtype=np.float32), np.asarray(v["mask"], dtype=bool))
             v = rpc(proc, {"cmd": "duel_step", "action": int(a)})
             steps += 1
