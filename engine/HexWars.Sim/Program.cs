@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using HexWars.Engine;
+using HexWars.Engine.Rl;
 
 // Two modes:
 //   Batch:  dotnet run --project engine/HexWars.Sim -- [matchup] [games] [maxCommands] [points]
@@ -31,6 +33,66 @@ if (args.Length >= 2 && args[0] == "inspect")
         }
     }
     return;
+}
+
+// Grid: greedy-vs-greedy TACTICAL batches over board × combat-lethality, to find params where decisive
+// play is achievable (low draw rate) before committing to RL. Fast proxy: if competent agents can't make
+// decisive games under a config, RL won't either.
+//   dotnet run --project engine/HexWars.Sim -- grid [games]
+if (args.Length >= 1 && args[0] == "grid")
+{
+    int games = args.Length >= 2 ? int.Parse(args[1]) : 50;
+    var boards = new (string name, BoardGenConfig bg)[]
+    {
+        ("13x9", new BoardGenConfig(13, 9, 4, 3)),
+        ("11x8", new BoardGenConfig(11, 8, 4, 3)),
+        ("9x7",  new BoardGenConfig(9, 7, 4, 2)),
+    };
+    var rosters = new (string name, IReadOnlyList<UnitStats> roster)[]
+    {
+        ("std",   GridRoster("std")),
+        ("glass", GridRoster("glass")),   // ~half HP, no defense -> attacks kill fast
+        ("hidmg", GridRoster("hidmg")),   // +3 damage -> attacks kill fast
+    };
+
+    Console.WriteLine($"greedy-vs-greedy tactical, {games} games/config (lower draw% = decisive play achievable):");
+    Console.WriteLine("board  roster | decisive%  draw%  avgRounds  avgUnitsLeft");
+    foreach (var (bn, bg) in boards)
+        foreach (var (rn, roster) in rosters)
+        {
+            var env = new EnvConfig { BoardGen = bg, Roster = roster };
+            var layout = new TacticalLayout(env);
+            int dec = 0, draw = 0; long rounds = 0, unitsLeft = 0;
+            for (int s = 0; s < games; s++)
+            {
+                var (state, _, _) = layout.NewGame(s);
+                var res = Match.Run(state, new GreedyAgent(2 * s + 1), new GreedyAgent(2 * s + 2), 4000);
+                if (res.Winner != null) dec++; else draw++;
+                rounds += res.Rounds;
+                unitsLeft += AliveCount(res.Final, PlayerId.Player0) + AliveCount(res.Final, PlayerId.Player1);
+            }
+            Console.WriteLine($"{bn,-6} {rn,-6} | dec={100.0 * dec / games,5:F0}%  draw={100.0 * draw / games,4:F0}%  rounds={rounds / (double)games,5:F0}  units={unitsLeft / (double)games,4:F1}");
+        }
+    return;
+
+    static IReadOnlyList<UnitStats> GridRoster(string kind)
+    {
+        var d = EnvConfig.DefaultRoster();
+        if (kind == "std") return d;
+        var list = new List<UnitStats>();
+        foreach (var u in d)
+            list.Add(kind == "glass"
+                ? new UnitStats(Math.Max(1, u.Health / 2), u.Damage, 0, u.Movement, u.VerticalMovement, u.Range, u.RangeArc, u.Vision, u.VisionArc)
+                : new UnitStats(u.Health, u.Damage + 3, u.Defense, u.Movement, u.VerticalMovement, u.Range, u.RangeArc, u.Vision, u.VisionArc));
+        return list;
+    }
+
+    static int AliveCount(GameState s, PlayerId p)
+    {
+        int c = 0;
+        foreach (var u in s.Player(p).UnitsOnBoard) if (u.IsAlive) c++;
+        return c;
+    }
 }
 
 GameState NewGame(int seed, int points)
