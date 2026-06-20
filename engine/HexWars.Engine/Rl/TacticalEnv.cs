@@ -67,7 +67,6 @@ namespace HexWars.Engine.Rl
         private int[] _slot = Array.Empty<int>();
         private int _steps;
         private float _prevAdvantage;
-        private float _prevGap;
         private float _armyValue;
 
         public TacticalEnv(Func<int, IAgent> opponentFactory, PlayerId learningSeat = PlayerId.Player0, EnvConfig? cfg = null)
@@ -92,7 +91,6 @@ namespace HexWars.Engine.Rl
             _steps = 0;
             AdvanceToSeat();
             _prevAdvantage = Advantage();
-            _prevGap = RewardShaping.AvgGap(_state, _seat, _foe);
             _armyValue = WinCheck.Evaluate(_state, _seat);
             return TacticalCoding.Observe(_state, _seat, _layout);
         }
@@ -100,15 +98,28 @@ namespace HexWars.Engine.Rl
         public StepResult Step(int action)
         {
             var cmd = TacticalCoding.Decode(action, _state, _seat, _slot, _layout);
+            float closing = 0f;
             if (cmd != null)
             {
+                // active-piece closing: reward the unit you MOVE for reducing its own gap to the nearest
+                // enemy, measured at your move (before the opponent replies) so it's undiluted + noise-free
+                var mv = cmd as MoveUnit;
+                int gapBefore = mv != null ? RewardShaping.GapOfUnit(_state, mv.UnitId, _seat, _foe) : -1;
                 var r = GameEngine.Apply(_state, cmd);
-                if (r.Success) _state = r.NewState;
+                if (r.Success)
+                {
+                    _state = r.NewState;
+                    if (mv != null && gapBefore >= 0)
+                    {
+                        int gapAfter = RewardShaping.GapOfUnit(_state, mv.UnitId, _seat, _foe);
+                        if (gapAfter >= 0) closing = _cfg.ClosingWeight * (gapBefore - gapAfter);
+                    }
+                }
             }
             AdvanceToSeat();
             _steps++;
 
-            float reward = Reward();
+            float reward = Reward(closing);
             bool terminated = _state.IsGameOver;
             bool truncated = !terminated && _steps >= _cfg.MaxSteps;
             return new StepResult(TacticalCoding.Observe(_state, _seat, _layout), reward, terminated, truncated, LegalActionMask());
@@ -130,15 +141,11 @@ namespace HexWars.Engine.Rl
 
         private float Advantage() => WinCheck.Evaluate(_state, _seat) - WinCheck.Evaluate(_state, _foe);
 
-        private float Reward()
+        private float Reward(float closing)
         {
             float adv = Advantage();
-            float gap = RewardShaping.AvgGap(_state, _seat, _foe);
-            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage)
-                         + _cfg.ClosingWeight * (_prevGap - gap)   // closing the gap to the enemy = positive
-                         - _cfg.StepPenalty;
+            float shaped = _cfg.ShapeScale * (adv - _prevAdvantage) + closing - _cfg.StepPenalty;
             _prevAdvantage = adv;
-            _prevGap = gap;
 
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _seat) return shaped + 1f;

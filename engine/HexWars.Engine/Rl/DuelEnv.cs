@@ -25,7 +25,6 @@ namespace HexWars.Engine.Rl
         private IAgent? _ctrl1;
         private PlayerId _learner;
         private float _prevAdv;
-        private float _prevGap;
         private float _armyValue;
         private int _steps;
 
@@ -56,8 +55,6 @@ namespace HexWars.Engine.Rl
             _log.Clear();
             AdvancePastInternal();
             _prevAdv = Advantage();
-            var foe0 = _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
-            _prevGap = RewardShaping.AvgGap(_state, _learner, foe0);
             _armyValue = WinCheck.Evaluate(_state, _learner);
             return MakeView(0f);
         }
@@ -69,14 +66,26 @@ namespace HexWars.Engine.Rl
             var seat = _state.ActivePlayer;
             var slot = seat == PlayerId.Player0 ? _slot0 : _slot1;
             var cmd = TacticalCoding.Decode(action, _state, seat, slot, _layout);
+            float closing = 0f;
             if (cmd != null)
             {
+                // active-piece closing, credited only when the LEARNER moves one of its own units
+                var mv = seat == _learner ? cmd as MoveUnit : null;
+                int gapBefore = mv != null ? RewardShaping.GapOfUnit(_state, mv.UnitId, _learner, Foe) : -1;
                 var r = GameEngine.Apply(_state, cmd);
-                if (r.Success) { _state = r.NewState; _log.Add(cmd); }
+                if (r.Success)
+                {
+                    _state = r.NewState; _log.Add(cmd);
+                    if (mv != null && gapBefore >= 0)
+                    {
+                        int gapAfter = RewardShaping.GapOfUnit(_state, mv.UnitId, _learner, Foe);
+                        if (gapAfter >= 0) closing = _cfg.ClosingWeight * (gapBefore - gapAfter);
+                    }
+                }
             }
             _steps++;
             AdvancePastInternal();
-            return MakeView(ComputeReward());
+            return MakeView(ComputeReward(closing));
         }
 
         /// <summary>The recorded duel as a portable replay (start + commands), for Unity playback.</summary>
@@ -98,26 +107,19 @@ namespace HexWars.Engine.Rl
             }
         }
 
-        private float Advantage()
-        {
-            var foe = _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
-            return WinCheck.Evaluate(_state, _learner) - WinCheck.Evaluate(_state, foe);
-        }
+        private PlayerId Foe => _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
 
-        private float ComputeReward()
+        private float Advantage() => WinCheck.Evaluate(_state, _learner) - WinCheck.Evaluate(_state, Foe);
+
+        private float ComputeReward(float closing)
         {
-            var foe = _learner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
             float adv = Advantage();
-            float gap = RewardShaping.AvgGap(_state, _learner, foe);
-            float shaped = _cfg.ShapeScale * (adv - _prevAdv)
-                         + _cfg.ClosingWeight * (_prevGap - gap)   // closing the gap to the enemy = positive
-                         - _cfg.StepPenalty;
+            float shaped = _cfg.ShapeScale * (adv - _prevAdv) + closing - _cfg.StepPenalty;
             _prevAdv = adv;
-            _prevGap = gap;
             if (!_state.IsGameOver) return shaped;
             if (_state.Winner == _learner) return shaped + 1f;
             if (_state.Winner != null) return shaped - 1f;
-            return shaped + RewardShaping.DrawCredit(_state, _learner, foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
+            return shaped + RewardShaping.DrawCredit(_state, _learner, Foe, _armyValue, _cfg.DrawCreditWeight); // cap draw
         }
 
         private View MakeView(float reward)
