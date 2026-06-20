@@ -45,8 +45,23 @@ class SelfPlayEnv(gym.Env):
             raise RuntimeError("server closed unexpectedly")
         return json.loads(line)
 
+    def _scripted(self):
+        """True if the current opponent is a server-side scripted agent ('greedy'/'random'), not a model."""
+        return isinstance(self.opp, str)
+
+    def _pick_opponent(self):
+        """Sample this episode's opponent. A scripted anchor (e.g. greedy) is picked ~half the time when
+        present — it's decisive, so it punishes passivity and keeps self-play from collapsing to draws."""
+        scripted = [o for o in self.opp_pool if isinstance(o, str)]
+        models = [o for o in self.opp_pool if not isinstance(o, str)]
+        if scripted and (not models or random.random() < 0.5):
+            self.opp = random.choice(scripted)
+        else:
+            self.opp = random.choice(models)
+
     def _play_opponent(self, v):
-        """Play the frozen opponent until it's the learner's turn (or terminal). Returns (view, reward)."""
+        """Drive a MODEL opponent (Python predict) until it's the learner's turn. Returns (view, reward).
+        Scripted opponents are played server-side, so this is only used for model opponents."""
         acc = 0.0
         while not v["terminated"] and not v["truncated"] and int(v["seat"]) == self.opp_seat:
             a = predict(self.opp, np.asarray(v["obs"], dtype=np.float32), np.asarray(v["mask"], dtype=bool))
@@ -59,17 +74,24 @@ class SelfPlayEnv(gym.Env):
         if seed is None:
             seed = self._next_seed
             self._next_seed += 1
-        self.opp = random.choice(self.opp_pool)  # sample a frozen opponent from the pool for this episode
-        v = self._rpc({"cmd": "duel_reset", "seed": int(seed), "learner": self.learner})
-        v, _ = self._play_opponent(v)  # in case the opponent moves first
+        self._pick_opponent()
+        msg = {"cmd": "duel_reset", "seed": int(seed), "learner": self.learner}
+        if self._scripted():
+            msg[f"p{self.opp_seat}"] = self.opp  # server plays the scripted opponent internally
+        v = self._rpc(msg)
+        if not self._scripted():
+            v, _ = self._play_opponent(v)  # model opponent: Python drives it (incl. if it moves first)
         self._mask = np.asarray(v["mask"], dtype=bool)
         return np.asarray(v["obs"], dtype=np.float32), {}
 
     def step(self, action):
+        # one duel_step covers the learner's move; for a scripted opponent the server also plays its reply
+        # within that step (reward already includes it), so we only Python-drive a model opponent.
         v = self._rpc({"cmd": "duel_step", "action": int(action)})
         reward = float(v["reward"])
-        v, acc = self._play_opponent(v)
-        reward += acc
+        if not self._scripted():
+            v, acc = self._play_opponent(v)
+            reward += acc
         self._mask = np.asarray(v["mask"], dtype=bool)
         return (np.asarray(v["obs"], dtype=np.float32), reward,
                 bool(v["terminated"]), bool(v["truncated"]), {})

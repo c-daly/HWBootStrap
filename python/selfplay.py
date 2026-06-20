@@ -38,7 +38,8 @@ def load_opponent(spec):
 
 def train_round(opp_specs, out, timesteps, server, seed, logdir):
     os.makedirs(logdir, exist_ok=True)
-    opponents = [load_opponent(s) for s in opp_specs]  # a pool; one is sampled per episode
+    # a pool; one sampled per episode. "greedy"/"random" stay as strings (server-side); rest are models.
+    opponents = [s if s in ("greedy", "random") else load_opponent(s) for s in opp_specs]
     base = SelfPlayEnv(["dotnet", server], opponents, learner_seat=0, base_seed=seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
@@ -60,7 +61,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    pool = [args.opponent]  # specs; grows each round so we train vs ALL past selves, not just the last
+    # greedy is anchored in the pool (decisive -> punishes passivity, stops the draw collapse); plus the
+    # base model and every past self, added each round. ~half of episodes face greedy.
+    pool = ["greedy", args.opponent]
     final = None
     for rnd in range(args.rounds):
         out = f"{args.out}_r{rnd}"
