@@ -82,7 +82,7 @@ namespace HexWars.Presentation
         PlayerState BuildPlayer(Board board, PlayerId id, ref int nextId)
         {
             if (!DemoPieces)
-                return new PlayerState(id, points);
+                return new PlayerState(id, 0);
 
             var flatZone = board.DeploymentZone(id)
                 .Where(c => board.TileAt(c).Elevation == 0)
