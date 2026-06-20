@@ -51,44 +51,45 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
-            if (_state != null) DrawScoreboard();
-            if (_lines.Count > 0) DrawLog();
+            // OnGUI doesn't DPI-scale, so it's tiny on 4K — scale the whole overlay by screen height
+            // (≈2x at 2160p) and draw in 1080p-logical coordinates.
+            float s = Mathf.Max(1f, Screen.height / 1080f);
+            var prevMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
+            if (_state != null) DrawScoreboard(Screen.width / s);
+            if (_lines.Count > 0) DrawLog(Screen.height / s);
+            GUI.matrix = prevMatrix;
         }
 
-        void DrawScoreboard()
+        void DrawScoreboard(float logicalWidth)
         {
             int u0 = AliveUnits(PlayerId.Player0), u1 = AliveUnits(PlayerId.Player1);
             int v0 = WinCheck.Evaluate(_state, PlayerId.Player0), v1 = WinCheck.Evaluate(_state, PlayerId.Player1);
 
             string result = "";
             if (_state.IsGameOver)
-                result = _state.Winner == null ? "  —  DRAW"
-                       : (_state.Winner == PlayerId.Player0 ? "  —  P1 WINS" : "  —  P2 WINS");
+                result = _state.Winner == null ? "   —   DRAW"
+                       : (_state.Winner == PlayerId.Player0 ? "   —   P1 WINS" : "   —   P2 WINS");
 
             string text = $"Round {_state.Round}{result}\n"
                         + $"P1:  {u0} units · {v0} val          P2:  {u1} units · {v1} val";
 
-            var style = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 16,
-                fontStyle = FontStyle.Bold,
-                alignment = TextAnchor.UpperCenter,
-            };
+            var style = new GUIStyle(GUI.skin.label) { fontSize = 24, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter };
             style.normal.textColor = Color.white;
 
-            var rect = new Rect(Screen.width / 2f - 280f, 6f, 560f, 52f);
+            var rect = new Rect(logicalWidth / 2f - 340f, 8f, 680f, 70f);
             GUI.Box(rect, GUIContent.none);
             GUI.Label(rect, text, style);
         }
 
-        void DrawLog()
+        void DrawLog(float logicalHeight)
         {
-            var style = new GUIStyle(GUI.skin.label) { fontSize = 13, alignment = TextAnchor.LowerLeft, richText = false };
+            var style = new GUIStyle(GUI.skin.label) { fontSize = 17, alignment = TextAnchor.LowerLeft, richText = false };
             style.normal.textColor = new Color(0.9f, 0.92f, 0.95f);
 
-            var rect = new Rect(8f, Screen.height - 232f, 380f, 224f);
+            var rect = new Rect(10f, logicalHeight - 320f, 470f, 310f);
             GUI.Box(rect, GUIContent.none);
-            GUI.Label(new Rect(rect.x + 6f, rect.y + 4f, rect.width - 12f, rect.height - 8f),
+            GUI.Label(new Rect(rect.x + 8f, rect.y + 6f, rect.width - 16f, rect.height - 12f),
                       string.Join("\n", _lines), style);
         }
 

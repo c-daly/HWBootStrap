@@ -34,23 +34,31 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
+            // OnGUI doesn't DPI-scale — scale by screen height (≈2x at 4K), draw in 1080p-logical coords
+            float s = Mathf.Max(1f, Screen.height / 1080f);
+            var prevMatrix = GUI.matrix;
+            GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
+            float W = Screen.width / s;
+
             // speed slider (top-right)
-            const float w = 150f;
-            float x = Screen.width - w - 64f, y = 12f;
-            float v = GUI.HorizontalSlider(new Rect(x, y + 5f, w, 18f), _speed, 0.25f, 4f);
+            const float w = 190f;
+            float x = W - w - 90f, y = 16f;
+            var slabel = new GUIStyle(GUI.skin.label) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
+            slabel.normal.textColor = Color.white;
+            GUI.Label(new Rect(x - 70f, y - 2f, 70f, 32f), "Speed", slabel);
+            float v = GUI.HorizontalSlider(new Rect(x, y + 9f, w, 22f), _speed, 0.25f, 4f);
             v = Mathf.Round(v * 4f) / 4f; // snap to 0.25x steps
             if (!Mathf.Approximately(v, _speed)) { _speed = v; Apply(); }
-
-            var label = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleLeft };
-            label.normal.textColor = Color.white;
-            GUI.Label(new Rect(x + w + 6f, y, 56f, 24f), $"{_speed:0.00}x", label);
+            GUI.Label(new Rect(x + w + 8f, y - 2f, 70f, 32f), $"{_speed:0.00}x", slabel);
 
             if (_paused)
             {
-                var p = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter };
+                var p = new GUIStyle(GUI.skin.label) { fontSize = 30, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter };
                 p.normal.textColor = Color.white;
-                GUI.Label(new Rect(0f, 40f, Screen.width, 40f), "PAUSED  —  Space to resume", p);
+                GUI.Label(new Rect(0f, 52f, W, 50f), "PAUSED  —  Space to resume", p);
             }
+
+            GUI.matrix = prevMatrix;
         }
     }
 }
