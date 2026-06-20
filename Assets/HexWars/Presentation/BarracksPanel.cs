@@ -23,6 +23,10 @@ namespace HexWars.Presentation
 
         public bool IsDeploying => _deployIndex >= 0;
 
+        /// <summary>Spectator mode: still shows the active player's barracks, but the human can't deploy
+        /// (the AI is playing). Set by <see cref="SpectatorDriver"/>.</summary>
+        public bool ReadOnly;
+
         void Start()
         {
             _font = BuiltinFont();
@@ -38,7 +42,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            if (_deployIndex < 0 || _game == null) return;
+            if (ReadOnly || _deployIndex < 0 || _game == null) return; // spectating: no human deploys
             var mouse = Mouse.current;
             var cam = Camera.main;
             if (mouse == null || cam == null || !mouse.leftButton.wasPressedThisFrame || IsOverUi()) return;

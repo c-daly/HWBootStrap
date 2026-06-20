@@ -4,6 +4,7 @@ using UnityEngine.InputSystem;
 using UnityEngine.Rendering;
 using HexWars.Engine;
 
+// (timestamp touch to force a fresh Unity recompile — the file's content was already correct)
 namespace HexWars.Presentation
 {
     /// <summary>
@@ -24,6 +25,10 @@ namespace HexWars.Presentation
         GameObject _marker;
         Material _markerMat;
         bool _animating;
+
+        /// <summary>Spectator mode: hover tooltips and click-to-inspect still work, but no commands are
+        /// issued (the AI is playing). Set by <see cref="SpectatorDriver"/> instead of disabling input.</summary>
+        public bool ReadOnly;
 
         void Awake()
         {
@@ -76,6 +81,7 @@ namespace HexWars.Presentation
 
         void HandleClick(UnitView unit, TileView tile)
         {
+            if (ReadOnly) { Select(unit); return; } // spectating: inspect any unit, but issue no commands
             if (_game == null || _game.State == null) { Select(unit); return; }
             var active = _game.State.ActivePlayer;
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
