@@ -16,8 +16,9 @@ namespace HexWars.Engine
     /// <summary>
     /// Portable, dependency-free text serialization of a match (start state + applied commands). The
     /// SAME engine code reads and writes it, so a file written headless in WSL2 reconstructs identically
-    /// in Unity — no format drift. Uses GameConfig.Default() on load (matches every current scenario);
-    /// start-state units/generators are assumed full health. Feed <see cref="ReplayData"/> to a Replay.
+    /// in Unity — no format drift. Loads GameConfig.Default(), preserving the recorded biomes-on/off flag
+    /// (META) so terrain rules replay faithfully; start-state units/generators are assumed full health.
+    /// Feed <see cref="ReplayData"/> to a Replay.
     /// </summary>
     public static class ReplayFile
     {
@@ -29,7 +30,8 @@ namespace HexWars.Engine
         {
             var sb = new StringBuilder();
             sb.Append(Header).Append('\n');
-            sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round).Append('\n');
+            sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round)
+              .Append(' ').Append(s.Config.BiomesEnabled ? 1 : 0).Append('\n');
 
             var tiles = new List<Tile>(s.Board.Tiles);
             sb.Append("TILES ").Append(tiles.Count).Append('\n');
@@ -55,10 +57,11 @@ namespace HexWars.Engine
 
             if (Next() != Header) throw new FormatException("not a HexWars replay");
 
-            var meta = Next().Split(' ');           // META nextId active round
+            var meta = Next().Split(' ');           // META nextId active round [biomes]
             int nextId = int.Parse(meta[1], CultureInfo.InvariantCulture);
             var active = (PlayerId)int.Parse(meta[2], CultureInfo.InvariantCulture);
             int round = int.Parse(meta[3], CultureInfo.InvariantCulture);
+            bool biomes = meta.Length <= 4 || int.Parse(meta[4], CultureInfo.InvariantCulture) != 0; // old replays: biomes on
 
             int tileCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
             var tiles = new List<Tile>(tileCount);
@@ -73,7 +76,7 @@ namespace HexWars.Engine
 
             var p0 = ReadPlayer(Next, PlayerId.Player0);
             var p1 = ReadPlayer(Next, PlayerId.Player1);
-            var start = new GameState(board, GameConfig.Default(), new[] { p0, p1 }, active, round, nextId);
+            var start = new GameState(board, GameConfig.Default(biomesEnabled: biomes), new[] { p0, p1 }, active, round, nextId);
 
             int cmdCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
             var commands = new List<Command>(cmdCount);

@@ -30,6 +30,9 @@ namespace HexWars.Presentation
         public int RoughWeight = 10;
         public int WaterWeight = 5;
 
+        [Tooltip("Off = biomes are mechanically inert (every tile plays as flat plains); the board still renders varied terrain.")]
+        public bool BiomesEnabled = false; // off for now
+
         [Header("Demo")]
         public bool DemoPieces = true;
 
@@ -44,7 +47,7 @@ namespace HexWars.Presentation
         {
             SetupEnvironment();
 
-            var config = GameConfig.Default();
+            var config = GameConfig.Default(biomesEnabled: BiomesEnabled);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);

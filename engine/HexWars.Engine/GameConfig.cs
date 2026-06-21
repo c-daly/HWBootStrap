@@ -42,6 +42,14 @@ namespace HexWars.Engine
         /// <summary>The turn-structure rule (default <see cref="AllUnitsPolicy"/>).</summary>
         public ITurnPolicy TurnPolicy { get; }
 
+        /// <summary>When false, every terrain looks identical (flat plains: move 1, no defense/concealment,
+        /// passable) regardless of the tile's biome — i.e. biomes are mechanically off. The board can still
+        /// generate/render varied terrain; it just has no gameplay effect. Default true.</summary>
+        public bool BiomesEnabled { get; }
+
+        // Uniform terrain used for every tile when BiomesEnabled is false.
+        private static readonly TerrainDef FlatTerrain = new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true);
+
         public GameConfig(
             IReadOnlyDictionary<TerrainType, TerrainDef> terrain,
             int startingPoints = 12,
@@ -55,7 +63,8 @@ namespace HexWars.Engine
             int roundCap = 100, // backstop only — games are meant to end by annihilation, so give them room
             int designFee = 0,
             double deployCostMultiplier = 1.0,
-            ITurnPolicy? turnPolicy = null)
+            ITurnPolicy? turnPolicy = null,
+            bool biomesEnabled = true)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -70,18 +79,20 @@ namespace HexWars.Engine
             DesignFee = designFee;
             DeployCostMultiplier = deployCostMultiplier;
             TurnPolicy = turnPolicy ?? new AllUnitsPolicy();
+            BiomesEnabled = biomesEnabled;
         }
 
-        /// <summary>Modifier table for the given terrain.</summary>
-        public TerrainDef Terrain(TerrainType type) => _terrain[type];
+        /// <summary>Modifier table for the given terrain. With biomes off, every tile reads as flat plains.</summary>
+        public TerrainDef Terrain(TerrainType type) => BiomesEnabled ? _terrain[type] : FlatTerrain;
 
-        /// <summary>Default ruleset (placeholder values, all tunable).</summary>
-        public static GameConfig Default() => new GameConfig(new Dictionary<TerrainType, TerrainDef>
+        /// <summary>Default ruleset (placeholder values, all tunable). Pass <paramref name="biomesEnabled"/>
+        /// = false to make terrain mechanically inert (all tiles flat plains).</summary>
+        public static GameConfig Default(bool biomesEnabled = true) => new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
             { TerrainType.Forest, new TerrainDef(moveCost: 2, concealment: 2, defense: 1, passable: true) },
             { TerrainType.Rough,  new TerrainDef(moveCost: 2, concealment: 1, defense: 1, passable: true) },
             { TerrainType.Water,  new TerrainDef(moveCost: 3, concealment: 0, defense: 0, passable: true) },
-        });
+        }, biomesEnabled: biomesEnabled);
     }
 }

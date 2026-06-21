@@ -9,7 +9,7 @@ namespace HexWars.Engine.Rl
     public sealed class EnvConfig
     {
         public BoardGenConfig BoardGen = BoardGenConfig.Default();
-        public GameConfig Game = GameConfig.Default();
+        public GameConfig Game = GameConfig.Default(biomesEnabled: false); // biomes off for now — terrain is mechanically inert
         public IReadOnlyList<UnitStats> Roster = DefaultRoster();
         public int MaxSteps = 600; // headroom for the higher round cap (games can run longer to a wipeout)
         public float ShapeScale = 0.01f;
