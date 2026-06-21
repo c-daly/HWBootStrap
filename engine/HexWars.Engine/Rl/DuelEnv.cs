@@ -36,6 +36,10 @@ namespace HexWars.Engine.Rl
 
         public int ActionCount => _layout.ActionCount;
         public int ObservationLength => _layout.ObservationLength;
+        public int ObsChannels => _layout.ObsChannels;
+        public int BoardH => _layout.BoardH;
+        public int BoardW => _layout.BoardW;
+        public EnvConfig Config => _cfg;
         public GameState State => _state;
 
         /// <summary>Start a duel. A null controller = that seat is external (caller supplies its actions);

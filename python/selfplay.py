@@ -21,6 +21,8 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 from selfplay_env import SelfPlayEnv
 from duel import load_controller
+from hex_cnn import cnn_policy_kwargs
+from experiment import write_params
 
 DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll"
 
@@ -43,8 +45,12 @@ def train_round(opp_specs, out, timesteps, server, seed, logdir):
     base = SelfPlayEnv(["dotnet", server], opponents, learner_seat=0, base_seed=seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
+    write_params(logdir, base.spaces_info,
+                 dict(out=out, seed=seed, timesteps=timesteps, n_steps=512, policy="CNN", pool=list(opp_specs)))
+
     ckpt = CheckpointCallback(save_freq=25_000, save_path=os.path.join(logdir, "checkpoints"), name_prefix=out)
-    model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=seed, verbose=1)
+    model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=seed, verbose=1,
+                        policy_kwargs=cnn_policy_kwargs(base.spaces_info))
     model.set_logger(configure(logdir, ["stdout", "csv"]))
     model.learn(total_timesteps=timesteps, callback=ckpt)
     model.save(out)

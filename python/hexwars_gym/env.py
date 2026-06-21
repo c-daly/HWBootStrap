@@ -24,7 +24,8 @@ class HexWarsEnv(gym.Env):
         )
         self._next_seed = base_seed
 
-        spaces_info = self._rpc({"cmd": "spaces"})
+        self.spaces_info = self._rpc({"cmd": "spaces"})  # full handshake: shapes + env config (for params)
+        spaces_info = self.spaces_info
         self.n_actions = int(spaces_info["n_actions"])
         self.obs_len = int(spaces_info["obs_len"])
         self.action_space = spaces.Discrete(self.n_actions)

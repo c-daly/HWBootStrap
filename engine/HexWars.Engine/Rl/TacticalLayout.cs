@@ -38,7 +38,12 @@ namespace HexWars.Engine.Rl
         }
 
         public int ActionCount => 1 + 3 * Roster * CellCount; // EndTurn + (move | attack | deploy) × slot/template × cell
-        public int ObservationLength => TacticalCoding.PerCell * CellCount + TacticalCoding.Globals;
+
+        // Spatial obs shape: (Channels, BoardH, BoardW) board planes (cells row-major) + Globals scalars.
+        public int BoardH => BoardGen.Height;
+        public int BoardW => BoardGen.Width;
+        public int ObsChannels => TacticalCoding.Channels(Roster);
+        public int ObservationLength => ObsChannels * CellCount + TacticalCoding.Globals;
 
         /// <summary>Builds the start state (rosters placed in deployment zones) and each seat's stable
         /// slot→unitId map for the action codec.</summary>

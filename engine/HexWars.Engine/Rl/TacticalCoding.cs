@@ -10,8 +10,13 @@ namespace HexWars.Engine.Rl
     /// </summary>
     public static class TacticalCoding
     {
-        public const int PerCell = 12; // elev, 4×terrain, myUnit, enemyUnit, myGen, enemyGen, hp, dmg, range
-        public const int Globals = 5;  // myPoints, foePoints, round, myCount, foeCount
+        // Spatial observation, biomes off: one HP plane per (owner × roster role) + one elevation plane,
+        // emitted channel-major as [channel][cell] (cells are row-major over the board), so the Python side
+        // reshapes the board part to (C, H, W) for a CNN. A few scalar globals follow. C = 2·roster + 1.
+        public const int Globals = 5; // myPoints, foePoints, round, myCount, foeCount
+
+        /// <summary>Observation channels: my-role + enemy-role HP planes (2·roster) plus an elevation plane.</summary>
+        public static int Channels(int roster) => 2 * roster + 1;
 
         private static PlayerId Other(PlayerId p) => p == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
 
@@ -20,29 +25,22 @@ namespace HexWars.Engine.Rl
         public static float[] Observe(GameState s, PlayerId seat, TacticalLayout L)
         {
             var foe = Other(seat);
-            var obs = new float[L.ObservationLength];
+            int N = L.CellCount, R = L.Roster, C = 2 * R + 1;
+            var obs = new float[C * N + Globals];
             var board = s.Board;
             float maxElev = Math.Max(1, L.BoardGen.MaxElevation);
 
-            for (int i = 0; i < L.CellCount; i++)
+            int elevPlane = 2 * R; // last channel
+            for (int i = 0; i < N; i++)
             {
                 if (!board.Contains(L.Cells[i])) continue;
-                var t = board.TileAt(L.Cells[i]);
-                int o = i * PerCell;
-                obs[o] = Math.Min(1f, t.Elevation / maxElev);
-                switch (t.Terrain)
-                {
-                    case TerrainType.Plains: obs[o + 1] = 1f; break;
-                    case TerrainType.Forest: obs[o + 2] = 1f; break;
-                    case TerrainType.Rough: obs[o + 3] = 1f; break;
-                    case TerrainType.Water: obs[o + 4] = 1f; break;
-                }
+                obs[elevPlane * N + i] = Math.Min(1f, board.TileAt(L.Cells[i]).Elevation / maxElev);
             }
 
-            WriteEntities(obs, s.Player(seat), true, L);
-            WriteEntities(obs, s.Player(foe), false, L);
+            WriteUnits(obs, s.Player(seat), 0, N, L); // my units  -> role planes 0..R-1
+            WriteUnits(obs, s.Player(foe), R, N, L);  // enemy units -> role planes R..2R-1
 
-            int g = L.CellCount * PerCell;
+            int g = C * N;
             obs[g + 0] = Math.Min(1f, s.Player(seat).Points / 50f);
             obs[g + 1] = Math.Min(1f, s.Player(foe).Points / 50f);
             obs[g + 2] = Math.Min(1f, s.Round / (float)Math.Max(1, L.Game.RoundCap));
@@ -51,22 +49,32 @@ namespace HexWars.Engine.Rl
             return obs;
         }
 
-        private static void WriteEntities(float[] obs, PlayerState p, bool mine, TacticalLayout L)
+        // Light up plane (planeBase + role) at the unit's cell with its HP fraction. Role-keyed (not slot),
+        // so a deployed reinforcement shows up on its template's plane.
+        private static void WriteUnits(float[] obs, PlayerState p, int planeBase, int N, TacticalLayout L)
         {
             foreach (var u in p.UnitsOnBoard)
             {
                 if (!u.IsAlive || !L.CellIndex.TryGetValue(u.Cell, out int i)) continue;
-                int o = i * PerCell;
-                obs[o + (mine ? 5 : 6)] = 1f;
-                obs[o + 9] = Math.Min(1f, u.CurrentHp / (float)Math.Max(1, u.Stats.Health));
-                obs[o + 10] = Math.Min(1f, u.Stats.Damage / 10f);
-                obs[o + 11] = Math.Min(1f, u.Stats.Range / 8f);
+                int role = RoleOf(u.Stats, L);
+                if (role < 0) continue;
+                obs[(planeBase + role) * N + i] = Math.Min(1f, u.CurrentHp / (float)Math.Max(1, u.Stats.Health));
             }
-            foreach (var gen in p.Generators)
+        }
+
+        /// <summary>The roster-role index (0..R-1) whose template matches these stats, or -1 if none
+        /// (shouldn't happen in the fixed-roster tactical setup; deployed units copy a template's stats).</summary>
+        private static int RoleOf(UnitStats st, TacticalLayout L)
+        {
+            for (int r = 0; r < L.RosterStats.Count; r++)
             {
-                if (!gen.IsAlive || !L.CellIndex.TryGetValue(gen.Cell, out int i)) continue;
-                obs[i * PerCell + (mine ? 7 : 8)] = 1f;
+                var t = L.RosterStats[r];
+                if (t.Health == st.Health && t.Damage == st.Damage && t.Defense == st.Defense &&
+                    t.Movement == st.Movement && t.VerticalMovement == st.VerticalMovement &&
+                    t.Range == st.Range && t.RangeArc == st.RangeArc &&
+                    t.Vision == st.Vision && t.VisionArc == st.VisionArc) return r;
             }
+            return -1;
         }
 
         private static int AliveUnits(PlayerState p)

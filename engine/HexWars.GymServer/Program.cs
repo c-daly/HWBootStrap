@@ -42,6 +42,27 @@ IAgent? MakeController(string? spec, int agentSeed)
     return null; // "external" / unset -> caller supplies this seat's actions
 }
 
+// Handshake: obs/action sizes + the spatial obs shape (so Python reshapes the board part to (C,H,W))
+// + the env config (recorded into each run's params for reproducibility).
+object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, EnvConfig c) => new
+{
+    obs_len = obsLen,
+    n_actions = nActions,
+    channels,
+    board_h = boardH,
+    board_w = boardW,
+    globals = TacticalCoding.Globals,
+    roster = c.Roster.Count,
+    biomes = c.Game.BiomesEnabled,
+    round_cap = c.Game.RoundCap,
+    max_steps = c.MaxSteps,
+    shape_scale = c.ShapeScale,
+    step_penalty = c.StepPenalty,
+    closing_weight = c.ClosingWeight,
+    draw_credit_weight = c.DrawCreditWeight,
+    points_weight = c.PointsWeight,
+};
+
 string? line;
 while ((line = Console.ReadLine()) != null)
 {
@@ -54,7 +75,7 @@ while ((line = Console.ReadLine()) != null)
     switch (cmd)
     {
         case "spaces":
-            Send(new { obs_len = env.ObservationLength, n_actions = env.ActionCount });
+            Send(Spaces(env.ObservationLength, env.ActionCount, env.ObsChannels, env.BoardH, env.BoardW, env.Config));
             break;
 
         case "reset":
@@ -75,7 +96,7 @@ while ((line = Console.ReadLine()) != null)
 
         case "duel_spaces":
             duel ??= new DuelEnv();
-            Send(new { obs_len = duel.ObservationLength, n_actions = duel.ActionCount });
+            Send(Spaces(duel.ObservationLength, duel.ActionCount, duel.ObsChannels, duel.BoardH, duel.BoardW, duel.Config));
             break;
 
         case "duel_reset":

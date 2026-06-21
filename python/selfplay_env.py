@@ -31,6 +31,7 @@ class SelfPlayEnv(gym.Env):
         self._next_seed = base_seed
 
         sp = self._rpc({"cmd": "duel_spaces"})
+        self.spaces_info = sp  # full handshake: shapes + env config (for params)
         self.n_actions = int(sp["n_actions"])
         self.obs_len = int(sp["obs_len"])
         self.action_space = spaces.Discrete(self.n_actions)

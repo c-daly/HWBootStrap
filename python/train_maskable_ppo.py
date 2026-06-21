@@ -21,6 +21,8 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from hexwars_gym import HexWarsEnv
+from hex_cnn import cnn_policy_kwargs
+from experiment import write_params
 
 DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll"
 
@@ -50,6 +52,11 @@ def main():
     base = HexWarsEnv(server_cmd, opponent=args.opponent, seat=args.seat, base_seed=args.seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
+    # record params (env config from the handshake + training args) for reproducibility
+    write_params(logdir, base.spaces_info,
+                 dict(out=args.out, opponent=args.opponent, seat=args.seat, seed=args.seed,
+                      timesteps=args.timesteps, n_steps=512, policy="CNN", resume=args.resume))
+
     # periodic checkpoints so an interrupted run is resumable (--resume runs/.../checkpoints/...zip)
     ckpt = CheckpointCallback(save_freq=args.checkpoint_freq,
                               save_path=os.path.join(logdir, "checkpoints"), name_prefix=args.out)
@@ -58,7 +65,8 @@ def main():
         model = MaskablePPO.load(args.resume, env=env)
         print(f"resuming from {args.resume}")
     else:
-        model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=args.seed, verbose=1)
+        model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=args.seed, verbose=1,
+                            policy_kwargs=cnn_policy_kwargs(base.spaces_info))
 
     model.set_logger(configure(logdir, ["stdout", "csv"]))  # add "tensorboard" if installed
     model.learn(total_timesteps=args.timesteps, callback=ckpt, reset_num_timesteps=(args.resume is None))
