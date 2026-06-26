@@ -13,11 +13,13 @@ namespace HexWars.Engine
         private readonly Dictionary<HexCoord, Tile> _tiles;
         private readonly HashSet<HexCoord> _zone0;
         private readonly HashSet<HexCoord> _zone1;
+        private readonly Dictionary<HexCoord, PlayerId> _control;
 
         public Board(
             IEnumerable<Tile> tiles,
             IReadOnlyCollection<HexCoord>? zone0 = null,
-            IReadOnlyCollection<HexCoord>? zone1 = null)
+            IReadOnlyCollection<HexCoord>? zone1 = null,
+            IReadOnlyDictionary<HexCoord, PlayerId>? control = null)
         {
             _tiles = new Dictionary<HexCoord, Tile>();
             foreach (var tile in tiles)
@@ -25,6 +27,9 @@ namespace HexWars.Engine
 
             _zone0 = zone0 != null ? new HashSet<HexCoord>(zone0) : Empty;
             _zone1 = zone1 != null ? new HashSet<HexCoord>(zone1) : Empty;
+            _control = control != null
+                ? new Dictionary<HexCoord, PlayerId>(control)
+                : new Dictionary<HexCoord, PlayerId>();
         }
 
         public int TileCount => _tiles.Count;
@@ -41,5 +46,25 @@ namespace HexWars.Engine
 
         public bool IsInDeploymentZone(PlayerId player, HexCoord coord) =>
             (player == PlayerId.Player0 ? _zone0 : _zone1).Contains(coord);
+
+        /// <summary>Who currently controls this hex, or null if neutral.</summary>
+        public PlayerId? Controller(HexCoord coord) =>
+            _control.TryGetValue(coord, out var p) ? p : (PlayerId?)null;
+
+        /// <summary>How many hexes the player controls.</summary>
+        public int ControlledCount(PlayerId player)
+        {
+            int n = 0;
+            foreach (var kv in _control) if (kv.Value == player) n++;
+            return n;
+        }
+
+        /// <summary>A new board identical to this one but with <paramref name="coord"/> controlled by
+        /// <paramref name="owner"/>. Immutable — this board is unchanged.</summary>
+        public Board WithControl(HexCoord coord, PlayerId owner)
+        {
+            var control = new Dictionary<HexCoord, PlayerId>(_control) { [coord] = owner };
+            return new Board(_tiles.Values, _zone0, _zone1, control);
+        }
     }
 }
