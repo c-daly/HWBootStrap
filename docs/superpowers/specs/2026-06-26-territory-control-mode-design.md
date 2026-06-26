@@ -30,15 +30,13 @@ Independent flags; any subset may be enabled.
 - **Annihilation** *(instant, checked every turn):* a side with no living units and no way to field one
   loses; the other wins. (Existing `WinCheck` rule.)
 - **Economy** *(instant, checked every turn):* a side reaching `EconomyWinThreshold` banked points wins.
-- **Score** *(timed):* only resolves at the round cap — the higher score wins (tiebreak = draw). With
-  Score off, the cap is a draw, as today.
+- **Score** *(timed, calculated):* resolves only at the round cap — higher score wins (tie = draw; with
+  Score off, the cap is a draw, as today). The score is a **configurable weighted composite** (§6,
+  "Score composite"), not a single stat — at minimum it counts the value of enemy units destroyed.
 
 **Resolution:** instant conditions fire immediately, in whatever order they occur; if the game reaches
 the round cap with no instant win, Score (if enabled) decides, else draw. Examples: `Annihilation+Economy`
 = win two ways, sudden-death; `Economy+Score` = race to threshold, else highest score at the cap.
-
-"Score" = banked points by default (same currency as Economy); a future variant could score by controlled
-territory value.
 
 ## 3. Hex control (new state)
 
@@ -96,6 +94,31 @@ pattern). Lives in config (a `TerritoryConfig` block, or added to `GameConfig`):
 Net payback of a generator ≈ `CaptureFactor / (1 − UpkeepFactor)` turns — a single intuitive dial.
 Dimensionless coefficients keep the whole economy easy to balance.
 
+### Score composite (when the Score win is enabled)
+
+The Score is itself a tunable weighted sum of contributions — **at minimum the value of enemy units
+destroyed** — same coefficient philosophy as the economy:
+
+| Contribution | Metric | Weight |
+|---|---|---|
+| **Kills** | cumulative value of enemy units destroyed | `ScoreKills` |
+| Banked points | current banked points | `ScorePoints` |
+| Territory | `Σ controlled hex value` | `ScoreTerritory` |
+| Army | `Σ surviving own unit value` | `ScoreArmy` |
+
+`Score = ScoreKills·kills + ScorePoints·points + ScoreTerritory·territory + ScoreArmy·army`. The
+"banked-points-only" case is just `ScorePoints = 1`, the rest 0; a kills-focused score sets `ScoreKills`
+high. The Kills term needs a small running tally of destroyed enemy value per player (new state).
+
+**RL-reward version.** One Score preset *is the RL reward function itself* — the same position-value /
+advantage the agents optimize today (`RewardShaping.PositionValue` / `Advantage`: committed force +
+points-weighted economy), extended with the kills/territory terms above. This deliberately makes the
+game's "who's winning" and the AI's objective **one shared, weighted value function** instead of two
+parallel definitions — so the score function lives in one place (engine `Score`/`PositionValue`) and is
+consumed by both the Score win-check and the RL reward. It also means an agent trained on this mode is
+optimizing exactly the score players see. (The kills/territory contributions are precisely the terms the
+reward would gain for this mode.)
+
 ## 7. Turn integration
 
 - **Economy tick** at the round (or turn) boundary: each player gains `income − upkeep`. Net can be
@@ -114,8 +137,11 @@ Dimensionless coefficients keep the whole economy easy to balance.
 - **WinCheck:** evaluate the enabled win-condition subset (instant + timed).
 - **Config:** the coefficient table + win-condition flags + economy style.
 - **Replay:** serialize control state + the mode config (extend `ReplayFile` META, as biomes did).
-- **RL/obs:** out of scope for this mode initially (the RL setup stays on the combat mode); a future obs
-  could add control planes.
+- **Shared score/value function:** a single engine `Score`/`PositionValue` (weighted contributions) is
+  consumed by both the Score win-check and `RewardShaping` — so the human score and the RL reward are one
+  definition (§6, "RL-reward version").
+- **RL/obs:** *training* agents on this mode is deferred (the RL setup stays on the combat mode for now);
+  the scoring above is reward-ready, and a future obs would add control/value planes.
 
 ## 9. Mode selection
 
@@ -139,5 +165,6 @@ The full mode is sizeable; build in slices, each independently testable:
 
 - **UI/UX:** how control reads on the board (tint, borders), income/upkeep display, capture/build input.
 - **AI:** greedy/RL support for `Capture`/`BuildGenerator` so the AI opponent plays this mode.
-- **Score-by-territory** variant (score = controlled value, not banked points).
+- **Score weights:** default coefficients for the Score composite (how much kills vs points vs territory
+  vs army count) — needs play-testing to tune.
 - **Biome reintroduction** drives territory per-hex value — coordinate with that work.
