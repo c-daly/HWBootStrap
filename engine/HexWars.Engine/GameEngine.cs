@@ -83,7 +83,7 @@ namespace HexWars.Engine
 
             var barracks = new List<UnitStats>(player.Barracks) { c.Stats }; // reusable template
             var updated = new PlayerState(player.Id, player.Points - fee, barracks,
-                                          player.UnitsOnBoard, player.Generators);
+                                          player.UnitsOnBoard, player.Generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated));
         }
 
@@ -103,7 +103,7 @@ namespace HexWars.Engine
             var gen = new Generator(state.NextEntityId, c.Issuer, c.Cell, tile.Elevation, state.Config.GeneratorHealth);
             var generators = new List<Generator>(player.Generators) { gen };
             var updated = new PlayerState(player.Id, player.Points - state.Config.GeneratorCost,
-                                          player.Barracks, player.UnitsOnBoard, generators);
+                                          player.Barracks, player.UnitsOnBoard, generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
         }
 
@@ -129,7 +129,7 @@ namespace HexWars.Engine
             var units = new List<Unit>(player.UnitsOnBoard) { unit };
 
             // barracks is unchanged — the template is reusable
-            var updated = new PlayerState(player.Id, player.Points - cost, player.Barracks, units, player.Generators);
+            var updated = new PlayerState(player.Id, player.Points - cost, player.Barracks, units, player.Generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
         }
 
@@ -147,7 +147,7 @@ namespace HexWars.Engine
             var moved = unit.WithCell(c.Dest, state.Board.TileAt(c.Dest).Elevation);
             var units = new List<Unit>(player.UnitsOnBoard);
             units[idx] = moved;
-            var updated = new PlayerState(player.Id, player.Points, player.Barracks, units, player.Generators);
+            var updated = new PlayerState(player.Id, player.Points, player.Barracks, units, player.Generators, player.DestroyedValue);
 
             var movedIds = new HashSet<int>(state.MovedUnitIds) { c.UnitId };
             return Result.Ok(WithPlayer(state, updated, movedUnitIds: movedIds));
@@ -219,7 +219,7 @@ namespace HexWars.Engine
                 killed = !hurt.IsAlive;
                 var units = new List<Unit>(enemy.UnitsOnBoard);
                 if (killed) units.RemoveAt(tUnitIdx); else units[tUnitIdx] = hurt;
-                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Barracks, units, enemy.Generators);
+                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Barracks, units, enemy.Generators, enemy.DestroyedValue);
             }
             else
             {
@@ -227,11 +227,12 @@ namespace HexWars.Engine
                 killed = !hurt.IsAlive;
                 var gens = new List<Generator>(enemy.Generators);
                 if (killed) gens.RemoveAt(tGenIdx); else gens[tGenIdx] = hurt;
-                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Barracks, enemy.UnitsOnBoard, gens);
+                newEnemy = new PlayerState(enemy.Id, enemy.Points, enemy.Barracks, enemy.UnitsOnBoard, gens, enemy.DestroyedValue);
             }
 
             var newPlayer = killed
                 ? player.WithPoints(player.Points + CombatResolver.Bounty(buildCost, state.Config))
+                       .WithDestroyed(buildCost)
                 : player;
 
             var players = state.Players.ToArray();

@@ -19,21 +19,29 @@ namespace HexWars.Engine
         public IReadOnlyList<Unit> UnitsOnBoard { get; }
         public IReadOnlyList<Generator> Generators { get; }
 
+        /// <summary>Cumulative point value of enemy entities this player has destroyed (for Score).</summary>
+        public int DestroyedValue { get; }
+
         public PlayerState(
             PlayerId id,
             int points,
             IReadOnlyList<UnitStats>? barracks = null,
             IReadOnlyList<Unit>? unitsOnBoard = null,
-            IReadOnlyList<Generator>? generators = null)
+            IReadOnlyList<Generator>? generators = null,
+            int destroyedValue = 0)
         {
             Id = id;
             Points = points;
             Barracks = barracks ?? NoBarracks;
             UnitsOnBoard = unitsOnBoard ?? NoUnits;
             Generators = generators ?? NoGenerators;
+            DestroyedValue = destroyedValue;
         }
 
         public PlayerState WithPoints(int points) =>
-            new PlayerState(Id, points, Barracks, UnitsOnBoard, Generators);
+            new PlayerState(Id, points, Barracks, UnitsOnBoard, Generators, DestroyedValue);
+
+        public PlayerState WithDestroyed(int delta) =>
+            new PlayerState(Id, Points, Barracks, UnitsOnBoard, Generators, DestroyedValue + delta);
     }
 }
