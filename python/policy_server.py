@@ -27,13 +27,19 @@ import sys
 
 import numpy as np
 
+# So models that reference a custom feature extractor (hex_cnn.HexCNN) load no matter what cwd Unity
+# spawns us from — SB3 imports the class by module path on load.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 
 def newest_zip(path):
-    """If path is a directory, the newest .zip inside it; otherwise path itself."""
-    if os.path.isdir(path):
-        zips = glob.glob(os.path.join(path, "*.zip"))
-        return max(zips, key=os.path.getmtime) if zips else None
-    return path
+    """The model .zip to load. A file path is used as-is. A directory resolves to the newest .zip in it,
+    or — if it has none — the newest .zip in its checkpoints/ subfolder, so you can point at a run dir
+    (e.g. runs/sp9base) and get its latest checkpoint. None if nothing is found."""
+    if not os.path.isdir(path):
+        return path
+    zips = glob.glob(os.path.join(path, "*.zip")) or glob.glob(os.path.join(path, "checkpoints", "*.zip"))
+    return max(zips, key=os.path.getmtime) if zips else None
 
 
 def load(kind, file):
@@ -63,6 +69,9 @@ class Seat:
         self.loaded_from = None
         self.model = None
         self.reload()
+        if self.model is None:
+            sys.exit(f"policy_server: no model .zip found for '{spec}' (looked in '{self.path}' and its "
+                     f"checkpoints/ subfolder). Point the seat at a model .zip or a run/checkpoints dir.")
 
     def reload(self):
         """Load the newest checkpoint if it changed. Returns True if a (re)load happened."""
