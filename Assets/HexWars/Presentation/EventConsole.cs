@@ -17,6 +17,7 @@ namespace HexWars.Presentation
 
         readonly Queue<string> _lines = new Queue<string>();
         GameState _state;
+        bool _collapsed;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoCreate()
@@ -51,6 +52,9 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
+            var e = Event.current;
+            if (e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.BackQuote) { _collapsed = !_collapsed; e.Use(); }
+
             // OnGUI doesn't DPI-scale, so it's tiny on 4K — scale the whole sidebar by screen height
             // (≈2x at 2160p) and draw in 1080p-logical coordinates.
             float s = Mathf.Max(1f, Screen.height / 1080f);
@@ -63,6 +67,14 @@ namespace HexWars.Presentation
         // Right-edge panel: a header scoreboard + a scrolling, color-coded narration of events.
         void DrawSidebar(float w, float h)
         {
+            var btn = new GUIStyle(GUI.skin.button) { fontSize = 16 };
+
+            // collapsed: just a small re-open tab top-right (also toggle with the ` key)
+            if (_collapsed)
+            {
+                if (GUI.Button(new Rect(w - 96f, 6f, 90f, 30f), "◀ Log", btn)) _collapsed = false;
+                return;
+            }
             if (_state == null && _lines.Count == 0) return;
 
             const float pad = 12f, panelW = 430f;
@@ -73,8 +85,10 @@ namespace HexWars.Presentation
             GUI.DrawTexture(new Rect(x, 0f, panelW, h), Texture2D.whiteTexture);
             GUI.color = prevColor;
 
+            if (GUI.Button(new Rect(x + panelW - 36f, 6f, 30f, 28f), "▶", btn)) { _collapsed = true; return; }
+
             float y = pad;
-            if (_state != null) y = DrawHeader(x + pad, y, panelW - 2f * pad);
+            if (_state != null) y = DrawHeader(x + pad, y, panelW - 2f * pad - 34f); // leave room for the collapse button
             if (_lines.Count > 0) DrawLog(x + pad, y + 6f, panelW - 2f * pad, h - y - pad - 6f);
         }
 
