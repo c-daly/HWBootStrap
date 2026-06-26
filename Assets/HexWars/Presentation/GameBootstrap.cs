@@ -36,6 +36,12 @@ namespace HexWars.Presentation
         [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]
         public bool OneActionPerTurn = false;
 
+        [Header("Opponent")]
+        [Tooltip("On = Player 2 is played by the AI; you play Player 1. (How a vs-AI game starts in a build.)")]
+        public bool VsAI = false;
+        [Tooltip("Easy = Random, Hard = Greedy (challenging).")]
+        public AiLevel Difficulty = AiLevel.Hard;
+
         [Header("Demo")]
         public bool DemoPieces = true;
 
@@ -44,7 +50,15 @@ namespace HexWars.Presentation
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
 
-        void Start() => NewGame();
+        void Start()
+        {
+            NewGame();
+            if (VsAI)
+            {
+                var ai = GetComponent<AiOpponent>() ?? gameObject.AddComponent<AiOpponent>();
+                ai.Level = Difficulty;
+            }
+        }
 
         public void NewGame()
         {

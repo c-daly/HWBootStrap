@@ -48,6 +48,22 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
+        // Challenge the computer: you play Player 1, the AI plays Player 2. AiOpponent auto-attaches on
+        // play from these prefs (the saved scene is untouched). In a build, set GameBootstrap.VsAI instead.
+        [MenuItem("HexWars/Play vs AI/Easy (Random)")]
+        public static void PlayVsAiEasy() => PlayVsAi(AiLevel.Easy);
+
+        [MenuItem("HexWars/Play vs AI/Hard (Greedy)")]
+        public static void PlayVsAiHard() => PlayVsAi(AiLevel.Hard);
+
+        static void PlayVsAi(AiLevel level)
+        {
+            EditorSceneManager.OpenScene("Assets/Scenes/HexWars.unity", OpenSceneMode.Single);
+            EditorPrefs.SetBool("HexWars.VsAI", true);
+            EditorPrefs.SetInt("HexWars.AiLevel", (int)level);
+            EditorApplication.EnterPlaymode();
+        }
+
         // Watch two *trained models* (or a model vs greedy/random) fight once, via the Windows-venv
         // policy_server.py bridge. Pick a .zip per seat (Cancel = greedy).
         [MenuItem("HexWars/Watch Model Duel...")]
