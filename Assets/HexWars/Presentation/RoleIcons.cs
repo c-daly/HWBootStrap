@@ -5,7 +5,7 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Procedurally drawn role-icon textures (black symbol on a white badge), one per
+    /// Procedurally drawn role-icon textures (light symbol on a transparent background), one per
     /// <see cref="UnitRole"/>, so players can tell units apart at a glance. Cached.
     /// Swap for hand-drawn icon art later without changing callers.
     /// </summary>
@@ -13,8 +13,8 @@ namespace HexWars.Presentation
     {
         const int N = 48;
         static readonly Dictionary<UnitRole, Texture2D> Cache = new Dictionary<UnitRole, Texture2D>();
-        static readonly Color32 Black = new Color32(15, 15, 18, 255);
-        static readonly Color32 White = new Color32(240, 240, 245, 255);
+        static readonly Color32 Glyph = new Color32(245, 245, 250, 255); // light symbol — reads on the colored discs
+        static readonly Color32 Clear = new Color32(0, 0, 0, 0);          // transparent — the icon sits on the piece
 
         public static Texture2D For(UnitRole role)
         {
@@ -27,7 +27,7 @@ namespace HexWars.Presentation
         static Texture2D Build(UnitRole role)
         {
             var px = new Color32[N * N];
-            for (int i = 0; i < px.Length; i++) px[i] = White; // badge background
+            for (int i = 0; i < px.Length; i++) px[i] = Clear; // badge background
 
             switch (role)
             {
@@ -55,7 +55,7 @@ namespace HexWars.Presentation
                     break;
                 case UnitRole.Bulwark: // shield / armor block (thick square ring)
                     Rect(px, 10, 10, 38, 38);
-                    Rect(px, 16, 16, 32, 32, White);
+                    Rect(px, 16, 16, 32, 32, Clear);
                     break;
                 case UnitRole.Brute: // plus (health)
                     Rect(px, 21, 9, 27, 39);
@@ -72,7 +72,7 @@ namespace HexWars.Presentation
             return tex;
         }
 
-        static void Rect(Color32[] px, int x0, int y0, int x1, int y1) => Rect(px, x0, y0, x1, y1, Black);
+        static void Rect(Color32[] px, int x0, int y0, int x1, int y1) => Rect(px, x0, y0, x1, y1, Glyph);
         static void Rect(Color32[] px, int x0, int y0, int x1, int y1, Color32 c)
         {
             for (int y = Mathf.Max(0, y0); y <= Mathf.Min(N - 1, y1); y++)
@@ -84,7 +84,7 @@ namespace HexWars.Presentation
         {
             for (int y = -r; y <= r; y++)
                 for (int x = -r; x <= r; x++)
-                    if (x * x + y * y <= r * r) Plot(px, cx + x, cy + y, Black);
+                    if (x * x + y * y <= r * r) Plot(px, cx + x, cy + y, Glyph);
         }
 
         static void Ring(Color32[] px, int cx, int cy, int r, int t)
@@ -94,7 +94,7 @@ namespace HexWars.Presentation
                 for (int x = -r; x <= r; x++)
                 {
                     int d = x * x + y * y;
-                    if (d <= outer && d >= inner) Plot(px, cx + x, cy + y, Black);
+                    if (d <= outer && d >= inner) Plot(px, cx + x, cy + y, Glyph);
                 }
         }
 
@@ -110,7 +110,7 @@ namespace HexWars.Presentation
                 int py0 = Mathf.RoundToInt(Mathf.Lerp(y0, y1, u));
                 for (int dy = -h; dy <= h; dy++)
                     for (int dx = -h; dx <= h; dx++)
-                        Plot(px, px0 + dx, py0 + dy, Black);
+                        Plot(px, px0 + dx, py0 + dy, Glyph);
             }
         }
 

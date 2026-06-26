@@ -125,12 +125,12 @@ namespace HexWars.Presentation
             disc.GetComponent<MeshRenderer>().sharedMaterial = color;
             AddHull(disc, 1.16f, 1.05f);
 
-            // role icon badge, flat on top, facing up (double-sided so it always reads)
+            // role icon, transparent + flat on the disc top so it sits directly on the piece (double-sided)
             var icon = GameObject.CreatePrimitive(PrimitiveType.Quad);
             icon.name = "RoleIcon";
             DestroyImmediate(icon.GetComponent<Collider>());
             icon.transform.SetParent(token.transform, false);
-            icon.transform.localPosition = new Vector3(0f, 0.40f, 0f);
+            icon.transform.localPosition = new Vector3(0f, 0.345f, 0f); // just above the disc top (~0.34)
             icon.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
             icon.transform.localScale = Vector3.one * (radius * 0.9f);
             var mr = icon.GetComponent<MeshRenderer>();
@@ -193,6 +193,13 @@ namespace HexWars.Presentation
             if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", tex);
             if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", tex);
             if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f); // double-sided
+            // transparent: the badge background is alpha-0, so only the glyph shows on the piece
+            m.SetFloat("_Surface", 1f);
+            m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+            m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+            m.SetFloat("_ZWrite", 0f);
+            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            m.renderQueue = (int)RenderQueue.Transparent;
             _iconMats[role] = m;
             return m;
         }

@@ -33,6 +33,9 @@ namespace HexWars.Presentation
         [Tooltip("Off = biomes are mechanically inert (every tile plays as flat plains); the board still renders varied terrain.")]
         public bool BiomesEnabled = false; // off for now
 
+        [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]
+        public bool OneActionPerTurn = false;
+
         [Header("Demo")]
         public bool DemoPieces = true;
 
@@ -47,7 +50,8 @@ namespace HexWars.Presentation
         {
             SetupEnvironment();
 
-            var config = GameConfig.Default(biomesEnabled: BiomesEnabled);
+            var config = GameConfig.Default(biomesEnabled: BiomesEnabled,
+                                            turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
