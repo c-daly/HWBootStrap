@@ -22,6 +22,27 @@ namespace HexWars.Engine
             return value;
         }
 
+        /// <summary>The configurable Score composite: a weighted sum of kills (destroyed enemy value),
+        /// banked points, surviving army value, and controlled-hex count. Weights live in
+        /// <see cref="GameConfig"/>. Phase 1 counts controlled hexes flat; per-hex value arrives in Phase 3.
+        /// This is the shared "who's winning" value the Score win-check reads (and the RL reward will too).</summary>
+        public static int Score(GameState state, PlayerId player)
+        {
+            var p = state.Player(player);
+            var cfg = state.Config;
+
+            int army = 0;
+            foreach (var u in p.UnitsOnBoard)
+                if (u.IsAlive) army += u.Stats.PointCost;
+
+            int territory = state.Board.ControlledCount(player);
+
+            return cfg.ScoreKills * p.DestroyedValue
+                 + cfg.ScorePoints * p.Points
+                 + cfg.ScoreArmy * army
+                 + cfg.ScoreTerritory * territory;
+        }
+
         /// <summary>A player is eliminated (annihilated) when it has no living board units and cannot
         /// redeploy any existing barracks template (so a bounty-funded comeback is still possible, but an
         /// empty board with no affordable template — or no template at all — is a loss).</summary>
