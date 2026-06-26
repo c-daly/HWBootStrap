@@ -16,6 +16,7 @@ import numpy as np
 from stable_baselines3 import DQN
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 from hexwars_gym import HexWarsEnv
 
@@ -51,6 +52,7 @@ def main():
     ap.add_argument("--out", default="hexwars_dqn")
     ap.add_argument("--logdir", default=None)
     ap.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
+    ap.add_argument("--checkpoint-freq", type=int, default=10_000, help="save a checkpoint every N steps (for the live viewer)")
     args = ap.parse_args()
 
     logdir = args.logdir or os.path.join("runs", args.out)
@@ -63,7 +65,9 @@ def main():
     model = MaskableDQN("MlpPolicy", env, seed=args.seed, verbose=1,
                         buffer_size=100_000, learning_starts=1_000)
     model.set_logger(configure(logdir, ["stdout", "csv"]))
-    model.learn(total_timesteps=args.timesteps)
+    ckpt = CheckpointCallback(save_freq=args.checkpoint_freq,
+                              save_path=os.path.join(logdir, "checkpoints"), name_prefix=args.out)
+    model.learn(total_timesteps=args.timesteps, callback=ckpt)
     model.save(args.out)
     print(f"done -> {args.out}.zip  (EXPERIMENTAL masked DQN, vs {args.opponent})  logs: {logdir}/")
     env.close()
