@@ -22,6 +22,10 @@ namespace HexWars.Engine
     /// <summary>Attack an enemy unit or generator (by id) with one of the issuer's units (once per turn).</summary>
     public sealed record AttackUnit(PlayerId Issuer, int AttackerId, int TargetId) : Command(Issuer);
 
+    /// <summary>Take control of the hex the issuer's unit stands on, paying the capture cost. Control is
+    /// persistent (kept after the unit leaves) until an enemy unit recaptures it.</summary>
+    public sealed record CaptureHex(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
+
     /// <summary>End the issuer's turn: pass to the opponent, who is credited generator income.</summary>
     public sealed record EndTurn(PlayerId Issuer) : Command(Issuer);
 }

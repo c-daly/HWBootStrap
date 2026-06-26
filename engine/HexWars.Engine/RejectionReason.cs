@@ -23,5 +23,7 @@ namespace HexWars.Engine
         TargetNotInRange,
         TargetNotVisible,
         LineOfSightBlocked,
+        NoUnitOnHex,
+        AlreadyControlled,
     }
 }

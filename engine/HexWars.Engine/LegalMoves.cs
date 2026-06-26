@@ -52,6 +52,10 @@ namespace HexWars.Engine
                         if (g.IsAlive && TargetingService.CanTarget(state, unit, g.Cell, g.Elevation))
                             moves.Add(new AttackUnit(me, unit.Id, g.Id));
                 }
+
+                if (board.Controller(unit.Cell) != me
+                    && player.Points >= state.Config.CaptureCost)
+                    moves.Add(new CaptureHex(me, unit.Cell));
             }
 
             moves.Add(new EndTurn(me));

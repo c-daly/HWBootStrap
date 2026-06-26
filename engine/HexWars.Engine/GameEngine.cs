@@ -39,6 +39,7 @@ namespace HexWars.Engine
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
                 case AttackUnit c: return ApplyAttackUnit(state, c);
+                case CaptureHex c: return ApplyCaptureHex(state, c);
                 case EndTurn c: return ApplyEndTurn(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
@@ -241,6 +242,31 @@ namespace HexWars.Engine
             return Result.Ok(new GameState(state.Board, state.Config, players, state.ActivePlayer,
                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
                 state.MovedUnitIds, attackedIds));
+        }
+
+        private static Result ApplyCaptureHex(GameState state, CaptureHex c)
+        {
+            if (!state.Board.Contains(c.Cell)) return Result.Reject(state, RejectionReason.TileNotFound);
+
+            var player = state.Player(c.Issuer);
+            bool hasUnit = false;
+            foreach (var u in player.UnitsOnBoard)
+                if (u.IsAlive && u.Cell == c.Cell) { hasUnit = true; break; }
+            if (!hasUnit) return Result.Reject(state, RejectionReason.NoUnitOnHex);
+
+            if (state.Board.Controller(c.Cell) == c.Issuer)
+                return Result.Reject(state, RejectionReason.AlreadyControlled);
+
+            if (player.Points < state.Config.CaptureCost)
+                return Result.Reject(state, RejectionReason.InsufficientPoints);
+
+            var players = state.Players.ToArray();
+            players[(int)c.Issuer] = player.WithPoints(player.Points - state.Config.CaptureCost);
+            var newBoard = state.Board.WithControl(c.Cell, c.Issuer);
+
+            return Result.Ok(new GameState(newBoard, state.Config, players, state.ActivePlayer,
+                state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
+                state.MovedUnitIds, state.AttackedUnitIds));
         }
 
         /// <summary>True if any living unit or generator (either player) stands on the column.</summary>
