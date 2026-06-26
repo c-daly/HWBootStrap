@@ -59,26 +59,32 @@ namespace HexWars.Engine
             return true; // no units and nothing it can field
         }
 
-        /// <summary>Whether the game has ended (a player eliminated after the opening, or the round cap
-        /// reached). Use with <see cref="Resolve"/> to get the winner (which may be null on a draw).</summary>
+        /// <summary>Whether the game has ended: an instant win condition fired, or the round cap reached.</summary>
         public static bool IsTerminal(GameState state)
         {
-            if (state.Round >= 2 &&
+            var win = state.Config.WinConditions;
+
+            if ((win & WinBy.Annihilation) != 0 && state.Round >= 2 &&
                 (IsEliminated(state, PlayerId.Player0) || IsEliminated(state, PlayerId.Player1)))
                 return true;
+
+            if ((win & WinBy.Economy) != 0 && (EconomyWinner(state) != null))
+                return true;
+
             if (state.Round >= state.Config.RoundCap)
                 return true;
+
             return false;
         }
 
-        /// <summary>
-        /// The winner, or null if the game continues / is a draw. A game is won ONLY by annihilation
-        /// (one side eliminated, the other not). Anything else — the round cap, mutual annihilation —
-        /// is a DRAW. Elimination is not declared during the opening round (round 1).
-        /// </summary>
+        /// <summary>The winner, or null on a draw / continuing game. Instant conditions (annihilation,
+        /// economy) resolve immediately in priority order; if none fired and the round cap is reached, the
+        /// Score condition (if enabled) decides by higher score, else it is a draw.</summary>
         public static PlayerId? Resolve(GameState state)
         {
-            if (state.Round >= 2)
+            var win = state.Config.WinConditions;
+
+            if ((win & WinBy.Annihilation) != 0 && state.Round >= 2)
             {
                 bool e0 = IsEliminated(state, PlayerId.Player0);
                 bool e1 = IsEliminated(state, PlayerId.Player1);
@@ -86,7 +92,33 @@ namespace HexWars.Engine
                 if (e1 && !e0) return PlayerId.Player0;
             }
 
-            return null; // no annihilation (incl. round cap) = draw
+            if ((win & WinBy.Economy) != 0)
+            {
+                var ew = EconomyWinner(state);
+                if (ew != null) return ew;
+            }
+
+            if (state.Round >= state.Config.RoundCap && (win & WinBy.Score) != 0)
+            {
+                int s0 = Score(state, PlayerId.Player0);
+                int s1 = Score(state, PlayerId.Player1);
+                if (s0 > s1) return PlayerId.Player0;
+                if (s1 > s0) return PlayerId.Player1;
+            }
+
+            return null; // draw / continue
+        }
+
+        /// <summary>The player at or past the Economy threshold (higher points if both), or null.</summary>
+        private static PlayerId? EconomyWinner(GameState state)
+        {
+            int t = state.Config.EconomyWinThreshold;
+            int p0 = state.Player(PlayerId.Player0).Points;
+            int p1 = state.Player(PlayerId.Player1).Points;
+            bool a = p0 >= t, b = p1 >= t;
+            if (a && (!b || p0 >= p1)) return PlayerId.Player0;
+            if (b) return PlayerId.Player1;
+            return null;
         }
     }
 }
