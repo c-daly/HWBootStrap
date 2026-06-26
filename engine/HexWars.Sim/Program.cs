@@ -10,7 +10,11 @@ using HexWars.Engine.Rl;
 //   Record: dotnet run --project engine/HexWars.Sim -- record [matchup] <outfile> [seed] [points]
 // matchup = two chars, g=Greedy r=Random, for Player 1 / Player 2 (e.g. gg, gr, rr).
 
-var cfg = GameConfig.Default();
+// Audit toggles: HEXWARS_BIOMES=off (terrain inert, matches the base game) and HEXWARS_TURN=one
+// (one action per turn, vs the default whole-army turn). Default = biomes on, whole-army.
+bool biomesOff = string.Equals(Environment.GetEnvironmentVariable("HEXWARS_BIOMES"), "off", StringComparison.OrdinalIgnoreCase);
+bool oneAction = string.Equals(Environment.GetEnvironmentVariable("HEXWARS_TURN"), "one", StringComparison.OrdinalIgnoreCase);
+var cfg = GameConfig.Default(biomesEnabled: !biomesOff, turnPolicy: oneAction ? new OneActionPolicy() : null);
 var gen = new RandomBoardGenerator(BoardGenConfig.Default());
 
 // Inspect: reconstruct replay file(s) and print the real final outcome.
