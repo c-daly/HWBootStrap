@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.UI;
 using UnityEngine.InputSystem;
 using UnityEngine.Rendering;
 using HexWars.Engine;
@@ -25,6 +26,7 @@ namespace HexWars.Presentation
         GameObject _marker;
         Material _markerMat;
         bool _animating;
+        Text _hint;
 
         /// <summary>Spectator mode: hover tooltips and click-to-inspect still work, but no commands are
         /// issued (the AI is playing). Set by <see cref="SpectatorDriver"/> instead of disabling input.</summary>
@@ -41,6 +43,7 @@ namespace HexWars.Presentation
             _game = FindAnyObjectByType<GameBootstrap>();
             _barracks = FindAnyObjectByType<BarracksPanel>();
             _board = FindAnyObjectByType<BoardRenderer>();
+            _hint = MakeHintLabel();
         }
 
         void Update()
@@ -77,6 +80,8 @@ namespace HexWars.Presentation
                 var c = mine ? new Color(1f, 0.92f, 0.15f) : new Color(0.6f, 0.6f, 0.65f);
                 if (_markerMat != null) { if (_markerMat.HasProperty("_BaseColor")) _markerMat.SetColor("_BaseColor", c); _markerMat.color = c; }
             }
+
+            if (_hint != null) _hint.text = HintText();
         }
 
         void HandleClick(UnitView unit, TileView tile)
@@ -93,6 +98,19 @@ namespace HexWars.Presentation
                     && TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
                     StartCoroutine(AttackSeq(_selected, unit));
                 return; // invalid / spent: nothing happens, keep selection
+            }
+            // territory: click your selected unit's OWN hex to claim it (if not yours) or build on it
+            if (ownSelected && unit == null && tile != null
+                && _game.State.Config.TerritoryMode && tile.Coord == _selected.Unit.Cell)
+            {
+                var st = _game.State;
+                var cell = _selected.Unit.Cell;
+                if (st.Board.Controller(cell) != active)
+                    _game.TryApply(new CaptureHex(active, cell));        // claim / convert (ends the turn)
+                else if (!HasGeneratorOn(st, cell))
+                    _game.TryApply(new BuildGenerator(active, cell));    // build on owned empty hex
+                ReacquireSelection();
+                return;
             }
             // move intent: only if not already moved AND the hex is reachable
             if (ownSelected && unit == null && tile != null)
@@ -115,6 +133,14 @@ namespace HexWars.Presentation
         static bool HasActed(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
         {
             foreach (var i in ids) if (i == id) return true;
+            return false;
+        }
+
+        static bool HasGeneratorOn(GameState s, HexCoord cell)
+        {
+            foreach (var p in s.Players)
+                foreach (var g in p.Generators)
+                    if (g.IsAlive && g.Cell == cell) return true;
             return false;
         }
 
@@ -317,6 +343,44 @@ namespace HexWars.Presentation
             var p = _selected.transform.position;
             _marker.transform.position = new Vector3(p.x, p.y + 0.85f, p.z);
             _marker.SetActive(true);
+        }
+
+        Text MakeHintLabel()
+        {
+            var canvasGo = new GameObject("HintCanvas");
+            canvasGo.transform.SetParent(transform, false);
+            var canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 450;
+            var go = new GameObject("Hint");
+            go.transform.SetParent(canvasGo.transform, false);
+            var t = go.AddComponent<Text>();
+            t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            t.fontSize = 18; t.color = new Color(1f, 0.95f, 0.6f); t.alignment = TextAnchor.LowerCenter;
+            var rt = t.GetComponent<RectTransform>();
+            rt.anchorMin = new Vector2(0.5f, 0f); rt.anchorMax = new Vector2(0.5f, 0f);
+            rt.pivot = new Vector2(0.5f, 0f); rt.sizeDelta = new Vector2(700f, 30f);
+            rt.anchoredPosition = new Vector2(0f, 70f);
+            return t;
+        }
+
+        string HintText()
+        {
+            if (ReadOnly || _game == null || _game.State == null) return "";
+            var st = _game.State;
+            if (!st.Config.TerritoryMode || _selected == null) return "";
+            if (_selected.Unit.Owner != st.ActivePlayer) return "";
+            var cell = _selected.Unit.Cell;
+            bool actedAlready = st.MovedUnitIds.Count > 0 || st.AttackedUnitIds.Count > 0;
+            if (st.Board.Controller(cell) != st.ActivePlayer)
+            {
+                if (st.Config.ClaimEndsTurn && actedAlready)
+                    return "Can't claim — your army already acted this turn";
+                return "Click this hex to CLAIM it (ends your turn)";
+            }
+            if (!HasGeneratorOn(st, cell))
+                return "Click this hex to BUILD a generator";
+            return "";
         }
     }
 }
