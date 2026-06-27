@@ -26,5 +26,6 @@ namespace HexWars.Engine
         NoUnitOnHex,
         AlreadyControlled,
         HexNotControlled,
+        MustClaimFirst,
     }
 }

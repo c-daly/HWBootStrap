@@ -35,6 +35,9 @@ namespace HexWars.Engine
 
             // generators removed from the game model: the only income is bounty from kills
 
+            bool claimLegal = !(state.Config.TerritoryMode && state.Config.ClaimEndsTurn)
+                || (state.MovedUnitIds.Count == 0 && state.AttackedUnitIds.Count == 0);
+
             foreach (var unit in player.UnitsOnBoard)
             {
                 if (!unit.IsAlive) continue;
@@ -53,7 +56,8 @@ namespace HexWars.Engine
                             moves.Add(new AttackUnit(me, unit.Id, g.Id));
                 }
 
-                if (board.Controller(unit.Cell) != me
+                if (claimLegal
+                    && board.Controller(unit.Cell) != me
                     && player.Points >= CaptureCostFor(state, unit.Cell))
                     moves.Add(new CaptureHex(me, unit.Cell));
 

@@ -22,7 +22,8 @@ namespace HexWars.Engine
 
             // One-action turn policies auto-end the turn after a single non-EndTurn action.
             if (!newState.IsGameOver && !(command is EndTurn)
-                && newState.Config.TurnPolicy.AutoEndTurnAfter(command))
+                && (newState.Config.TurnPolicy.AutoEndTurnAfter(command)
+                    || (newState.Config.TerritoryMode && newState.Config.ClaimEndsTurn && command is CaptureHex)))
             {
                 newState = Finalize(ApplyEndTurn(newState, new EndTurn(command.Issuer)).NewState);
             }
@@ -265,6 +266,10 @@ namespace HexWars.Engine
 
             if (state.Board.Controller(c.Cell) == c.Issuer)
                 return Result.Reject(state, RejectionReason.AlreadyControlled);
+
+            if (state.Config.TerritoryMode && state.Config.ClaimEndsTurn
+                && (state.MovedUnitIds.Count > 0 || state.AttackedUnitIds.Count > 0))
+                return Result.Reject(state, RejectionReason.MustClaimFirst);
 
             int cost = CaptureCostFor(state, c.Cell);
             if (player.Points < cost) return Result.Reject(state, RejectionReason.InsufficientPoints);
