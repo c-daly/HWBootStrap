@@ -116,7 +116,14 @@ namespace HexWars.Engine
 
             var board = state.Board;
             if (!board.Contains(c.Cell)) return Result.Reject(state, RejectionReason.TileNotFound);
-            if (!board.IsInDeploymentZone(c.Issuer, c.Cell)) return Result.Reject(state, RejectionReason.OutsideDeploymentZone);
+            if (state.Config.TerritoryMode)
+            {
+                if (board.Controller(c.Cell) != c.Issuer) return Result.Reject(state, RejectionReason.HexNotControlled);
+            }
+            else
+            {
+                if (!board.IsInDeploymentZone(c.Issuer, c.Cell)) return Result.Reject(state, RejectionReason.OutsideDeploymentZone);
+            }
 
             var tile = board.TileAt(c.Cell);
             if (!state.Config.Terrain(tile.Terrain).Passable) return Result.Reject(state, RejectionReason.TileImpassable);
