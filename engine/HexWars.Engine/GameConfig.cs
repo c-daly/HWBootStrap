@@ -59,6 +59,13 @@ namespace HexWars.Engine
         public int ScoreArmy { get; }
         public int ScoreTerritory { get; }
 
+        /// <summary>Per-turn upkeep as a fraction of a player's generator income.</summary>
+        public double UpkeepFactor { get; }
+        /// <summary>Capture cost on a generator hex = max(CaptureCost, round(CaptureFactor × that generator's income)).</summary>
+        public double CaptureFactor { get; }
+        /// <summary>Build cost of a generator = round(BuildFactor × GeneratorOutput × strength).</summary>
+        public double BuildFactor { get; }
+
         // Uniform terrain used for every tile when BiomesEnabled is false.
         private static readonly TerrainDef FlatTerrain = new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true);
 
@@ -83,7 +90,10 @@ namespace HexWars.Engine
             int scoreKills = 1,
             int scorePoints = 1,
             int scoreArmy = 1,
-            int scoreTerritory = 1)
+            int scoreTerritory = 1,
+            double upkeepFactor = 0.25,
+            double captureFactor = 4.0,
+            double buildFactor = 4.0)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -106,6 +116,9 @@ namespace HexWars.Engine
             ScorePoints = scorePoints;
             ScoreArmy = scoreArmy;
             ScoreTerritory = scoreTerritory;
+            UpkeepFactor = upkeepFactor;
+            CaptureFactor = captureFactor;
+            BuildFactor = buildFactor;
         }
 
         /// <summary>Modifier table for the given terrain. With biomes off, every tile reads as flat plains.</summary>
@@ -116,7 +129,8 @@ namespace HexWars.Engine
         /// to override the turn structure (null = the default <see cref="AllUnitsPolicy"/>).</summary>
         public static GameConfig Default(bool biomesEnabled = true, ITurnPolicy? turnPolicy = null,
             WinBy winConditions = WinBy.Annihilation, int captureCost = 3, int economyWinThreshold = 200,
-            int scoreKills = 1, int scorePoints = 1, int scoreArmy = 1, int scoreTerritory = 1) =>
+            int scoreKills = 1, int scorePoints = 1, int scoreArmy = 1, int scoreTerritory = 1,
+            double upkeepFactor = 0.25, double captureFactor = 4.0, double buildFactor = 4.0) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -125,6 +139,7 @@ namespace HexWars.Engine
             { TerrainType.Water,  new TerrainDef(moveCost: 3, concealment: 0, defense: 0, passable: true) },
         }, turnPolicy: turnPolicy, biomesEnabled: biomesEnabled, winConditions: winConditions,
            captureCost: captureCost, economyWinThreshold: economyWinThreshold,
-           scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory);
+           scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory,
+           upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor);
     }
 }
