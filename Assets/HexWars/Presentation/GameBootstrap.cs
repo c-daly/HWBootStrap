@@ -36,6 +36,12 @@ namespace HexWars.Presentation
         [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]
         public bool OneActionPerTurn = false;
 
+        [Header("Territory mode")]
+        [Tooltip("On = territory mode: control gates deploy/build, claiming a hex is a turn-exclusive action. Takes effect on a new game.")]
+        public bool TerritoryMode = false;
+        [Tooltip("Points each player starts with in territory mode (you need these to claim/build).")]
+        public int TerritoryStartingPoints = 40;
+
         [Header("Opponent")]
         [Tooltip("On = Player 2 is played by the AI; you play Player 1. (How a vs-AI game starts in a build.)")]
         public bool VsAI = false;
@@ -64,15 +70,27 @@ namespace HexWars.Presentation
         {
             SetupEnvironment();
 
-            var config = GameConfig.Default(biomesEnabled: BiomesEnabled,
-                                            turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null);
+            var config = TerritoryMode
+                ? GameConfig.Default(biomesEnabled: BiomesEnabled,
+                                     turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
+                                     winConditions: WinBy.Economy | WinBy.Annihilation,
+                                     startingPoints: TerritoryStartingPoints,
+                                     territoryMode: true)
+                : GameConfig.Default(biomesEnabled: BiomesEnabled,
+                                     turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
+            if (TerritoryMode)
+            {
+                board = board.WithControl(board.DeploymentZone(PlayerId.Player0), PlayerId.Player0);
+                board = board.WithControl(board.DeploymentZone(PlayerId.Player1), PlayerId.Player1);
+            }
 
             int nextId = 1;
-            var p0 = BuildPlayer(board, PlayerId.Player0, ref nextId);
-            var p1 = BuildPlayer(board, PlayerId.Player1, ref nextId);
+            int startPts = TerritoryMode ? config.StartingPoints : 0;
+            var p0 = BuildPlayer(board, PlayerId.Player0, startPts, ref nextId);
+            var p1 = BuildPlayer(board, PlayerId.Player1, startPts, ref nextId);
             State = new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
 
             var renderer = GetComponent<BoardRenderer>();
@@ -104,10 +122,10 @@ namespace HexWars.Presentation
             return true;
         }
 
-        PlayerState BuildPlayer(Board board, PlayerId id, ref int nextId)
+        PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints, ref int nextId)
         {
             if (!DemoPieces)
-                return new PlayerState(id, 0);
+                return new PlayerState(id, startingPoints);
 
             var flatZone = board.DeploymentZone(id)
                 .Where(c => board.TileAt(c).Elevation == 0)
@@ -130,7 +148,7 @@ namespace HexWars.Presentation
             for (; placed < demos.Length && placed < flatZone.Count; placed++)
                 units.Add(new Unit(nextId++, id, demos[placed], flatZone[placed], 0));
 
-            return new PlayerState(id, 0, unitsOnBoard: units);
+            return new PlayerState(id, startingPoints, unitsOnBoard: units);
         }
 
         static Cubemap _reflection;
