@@ -259,16 +259,57 @@ namespace HexWars.Engine
             if (state.Board.Controller(c.Cell) == c.Issuer)
                 return Result.Reject(state, RejectionReason.AlreadyControlled);
 
-            if (player.Points < state.Config.CaptureCost)
-                return Result.Reject(state, RejectionReason.InsufficientPoints);
+            int cost = CaptureCostFor(state, c.Cell);
+            if (player.Points < cost) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
             var players = state.Players.ToArray();
-            players[(int)c.Issuer] = player.WithPoints(player.Points - state.Config.CaptureCost);
+
+            // steal: transfer an enemy generator on the captured hex to the capturer
+            var enemy = state.Opponent(c.Issuer);
+            int gi = IndexOfGeneratorAt(enemy, c.Cell);
+            if (gi >= 0)
+            {
+                var stolen = enemy.Generators[gi].WithOwner(c.Issuer);
+                var enemyGens = new List<Generator>(enemy.Generators);
+                enemyGens.RemoveAt(gi);
+                players[(int)enemy.Id] = new PlayerState(enemy.Id, enemy.Points, enemy.Barracks,
+                                                         enemy.UnitsOnBoard, enemyGens, enemy.DestroyedValue);
+                var myGens = new List<Generator>(player.Generators) { stolen };
+                player = new PlayerState(player.Id, player.Points, player.Barracks,
+                                         player.UnitsOnBoard, myGens, player.DestroyedValue);
+            }
+
+            players[(int)c.Issuer] = player.WithPoints(player.Points - cost);
             var newBoard = state.Board.WithControl(c.Cell, c.Issuer);
 
             return Result.Ok(new GameState(newBoard, state.Config, players, state.ActivePlayer,
                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
                 state.MovedUnitIds, state.AttackedUnitIds));
+        }
+
+        /// <summary>Capture cost for a hex: flat CaptureCost, or — if a generator sits here — scaled by its
+        /// income: max(CaptureCost, round(CaptureFactor × round(GeneratorOutput × strength))).</summary>
+        private static int CaptureCostFor(GameState state, HexCoord cell)
+        {
+            int flat = state.Config.CaptureCost;
+            foreach (var p in state.Players)
+                foreach (var g in p.Generators)
+                    if (g.IsAlive && g.Cell == cell)
+                    {
+                        int income = (int)System.Math.Round(state.Config.GeneratorOutput * g.Strength,
+                                                            System.MidpointRounding.AwayFromZero);
+                        int scaled = (int)System.Math.Round(state.Config.CaptureFactor * income,
+                                                            System.MidpointRounding.AwayFromZero);
+                        return System.Math.Max(flat, scaled);
+                    }
+            return flat;
+        }
+
+        private static int IndexOfGeneratorAt(PlayerState p, HexCoord cell)
+        {
+            for (int i = 0; i < p.Generators.Count; i++)
+                if (p.Generators[i].IsAlive && p.Generators[i].Cell == cell) return i;
+            return -1;
         }
 
         private static Result ApplyBuildGenerator(GameState state, BuildGenerator c)
