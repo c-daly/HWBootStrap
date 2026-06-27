@@ -116,7 +116,26 @@ namespace HexWars.Presentation
             bool p0 = s.ActivePlayer == PlayerId.Player0;
             int who = p0 ? 1 : 2;
             _banner.color = p0 ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
-            _banner.text = $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")})     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+
+            if (!s.Config.TerritoryMode)
+            {
+                _banner.text = $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")})     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+                return;
+            }
+
+            _banner.text =
+                $"P{who}'s turn  Round {s.Round}     " +
+                $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}";
+        }
+
+        static string Stat(GameState s, PlayerId id)
+        {
+            int net = Economy.Income(s, id) - Economy.Upkeep(s, id);
+            int pts = s.Player(id).Points;
+            int hexes = s.Board.ControlledCount(id);
+            int score = WinCheck.Score(s, id);
+            string sign = net >= 0 ? "+" : "";
+            return $"{pts}p ({sign}{net}/t)  {hexes} hex  score {score}";
         }
 
         static Font BuiltinFont()
