@@ -66,5 +66,14 @@ namespace HexWars.Engine
             var control = new Dictionary<HexCoord, PlayerId>(_control) { [coord] = owner };
             return new Board(_tiles.Values, _zone0, _zone1, control);
         }
+
+        /// <summary>A new board with every hex in <paramref name="coords"/> controlled by
+        /// <paramref name="owner"/>. Immutable — this board is unchanged. (Used to seed home zones.)</summary>
+        public Board WithControl(System.Collections.Generic.IEnumerable<HexCoord> coords, PlayerId owner)
+        {
+            var control = new Dictionary<HexCoord, PlayerId>(_control);
+            foreach (var c in coords) control[c] = owner;
+            return new Board(_tiles.Values, _zone0, _zone1, control);
+        }
     }
 }
