@@ -47,7 +47,7 @@ Default for this mode: **Economy + Annihilation** (bank `EconomyWinThreshold` po
 
 Thin, code-built UI consistent with the existing presentation layer.
 
-- **Control overlay:** each hex's top face is tinted by its controller — your color, enemy color, or neutral (untinted). Lives in `BoardRenderer`/`TileView`, refreshed on `StateChanged`.
+- **Control overlay:** every hex you occupy (control) carries its **owner's color** on the top face, clearly readable at a glance — your color vs. the enemy's; neutral hexes are untinted. Lives in `BoardRenderer`/`TileView`, refreshed on `StateChanged`.
 - **Claim/build input (click-the-hex):** select a unit (existing `UnitInputController`); a one-line hint states exactly what clicking its hex will do and the cost — e.g. "Click to **Claim (3)** — ends your turn", "Click to **Build generator (4)**", or why it's unavailable (not your turn / already acted / can't afford / already controlled). Clicking the unit's own hex issues `CaptureHex` if you don't control it, or `BuildGenerator` if you control it and it's empty. The claim affordance only appears when the claim is legal (turn not yet spent). The result (and any rejection reason) is logged to the existing `EventConsole`.
 - **Economy/score HUD:** for each player, show points, income − upkeep per turn, controlled-hex count, and score. Extends the existing HUD/`EventConsole` scoreboard.
 - **Mode enable:** a `TerritoryMode` toggle on `GameBootstrap` (alongside `BiomesEnabled`/`OneActionPerTurn`/`VsAI`) that builds the territory config, seeds home-zone control, and applies the starting points. (A full New-Game setup screen is the next slice.)
