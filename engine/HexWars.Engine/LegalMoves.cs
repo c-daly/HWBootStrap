@@ -54,7 +54,7 @@ namespace HexWars.Engine
                 }
 
                 if (board.Controller(unit.Cell) != me
-                    && player.Points >= state.Config.CaptureCost)
+                    && player.Points >= CaptureCostFor(state, unit.Cell))
                     moves.Add(new CaptureHex(me, unit.Cell));
 
                 if (board.Controller(unit.Cell) == me
@@ -87,5 +87,22 @@ namespace HexWars.Engine
 
         private static int BuildCostFor(GameConfig cfg) =>
             (int)System.Math.Round(cfg.BuildFactor * cfg.GeneratorOutput, System.MidpointRounding.AwayFromZero);
+
+        // Mirrors GameEngine.CaptureCostFor so an enumerated CaptureHex is always affordable by the handler.
+        private static int CaptureCostFor(GameState state, HexCoord cell)
+        {
+            int flat = state.Config.CaptureCost;
+            foreach (var p in state.Players)
+                foreach (var g in p.Generators)
+                    if (g.IsAlive && g.Cell == cell)
+                    {
+                        int income = (int)System.Math.Round(state.Config.GeneratorOutput * g.Strength,
+                                                            System.MidpointRounding.AwayFromZero);
+                        int scaled = (int)System.Math.Round(state.Config.CaptureFactor * income,
+                                                            System.MidpointRounding.AwayFromZero);
+                        return System.Math.Max(flat, scaled);
+                    }
+            return flat;
+        }
     }
 }
