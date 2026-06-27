@@ -66,6 +66,13 @@ namespace HexWars.Engine
         /// <summary>Build cost of a generator = round(BuildFactor × GeneratorOutput × strength).</summary>
         public double BuildFactor { get; }
 
+        /// <summary>When true, the territory rules apply: deploy/build require control, and (with
+        /// ClaimEndsTurn) claiming is a turn-exclusive opening action. Default false = base game.</summary>
+        public bool TerritoryMode { get; }
+        /// <summary>When true (and TerritoryMode), a claim must be the turn's first army action and
+        /// immediately ends the turn — the vulnerable-as-you-expand tempo. Default true.</summary>
+        public bool ClaimEndsTurn { get; }
+
         // Uniform terrain used for every tile when BiomesEnabled is false.
         private static readonly TerrainDef FlatTerrain = new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true);
 
@@ -93,7 +100,9 @@ namespace HexWars.Engine
             int scoreTerritory = 1,
             double upkeepFactor = 0.25,
             double captureFactor = 4.0,
-            double buildFactor = 4.0)
+            double buildFactor = 4.0,
+            bool territoryMode = false,
+            bool claimEndsTurn = true)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -119,6 +128,8 @@ namespace HexWars.Engine
             UpkeepFactor = upkeepFactor;
             CaptureFactor = captureFactor;
             BuildFactor = buildFactor;
+            TerritoryMode = territoryMode;
+            ClaimEndsTurn = claimEndsTurn;
         }
 
         /// <summary>Modifier table for the given terrain. With biomes off, every tile reads as flat plains.</summary>
@@ -131,7 +142,10 @@ namespace HexWars.Engine
             WinBy winConditions = WinBy.Annihilation, int captureCost = 3, int economyWinThreshold = 200,
             int scoreKills = 1, int scorePoints = 1, int scoreArmy = 1, int scoreTerritory = 1,
             double upkeepFactor = 0.25, double captureFactor = 4.0, double buildFactor = 4.0,
-            int generatorOutput = 1) =>
+            int generatorOutput = 1,
+            int startingPoints = 12,
+            bool territoryMode = false,
+            bool claimEndsTurn = true) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -142,6 +156,7 @@ namespace HexWars.Engine
            captureCost: captureCost, economyWinThreshold: economyWinThreshold,
            scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory,
            upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor,
-           generatorOutput: generatorOutput);
+           generatorOutput: generatorOutput, startingPoints: startingPoints,
+           territoryMode: territoryMode, claimEndsTurn: claimEndsTurn);
     }
 }
