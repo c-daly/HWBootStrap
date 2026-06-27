@@ -61,12 +61,8 @@ namespace HexWars.Engine
         {
             var set = new HashSet<HexCoord>();
             foreach (var player in state.Players)
-            {
                 foreach (var u in player.UnitsOnBoard)
                     if (u.IsAlive) set.Add(u.Cell);
-                foreach (var g in player.Generators)
-                    if (g.IsAlive) set.Add(g.Cell);
-            }
             set.Remove(mover.Cell);
             return set;
         }
