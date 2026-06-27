@@ -19,15 +19,31 @@ These rules are gated by a **`TerritoryMode`** flag on `GameConfig` (default off
 You may **deploy units** and **build generators** only on a hex you **control**. (Today `BuildGenerator` already requires control; this slice adds the same requirement to `DeployUnit` — replacing the fixed deployment-zone rule when `TerritoryMode` is on.)
 
 ### 2.2 Claiming is a turn-exclusive opening action
-Making a hex yours (the `CaptureHex` command) is, in `TerritoryMode`:
+Making a hex yours (the `CaptureHex` command) is, in `TerritoryMode` with `ClaimEndsTurn` on (the default):
 - **First-or-not-at-all:** legal only if you have not yet moved or attacked this turn. Once your army has acted, you cannot claim until next turn.
 - **Turn-ending:** issuing a claim immediately ends your turn (regardless of turn policy).
 - Unchanged from Phases 1–2: you must have a **living unit standing on the target hex** (positioned on an earlier turn); you pay the capture cost (flat on an empty hex, scaled on a generator hex); claiming an enemy generator hex **transfers the generator** (the steal).
+- **Configurable:** `ClaimEndsTurn` (default true) governs the tempo. With it **off**, claiming is a normal action — no first-action requirement, no auto-end — for a faster, less punishing variant.
 
 So each turn you choose: **declare a claim** (your whole turn) **or play your army** (move/attack/build/deploy, then End Turn) — never both.
 
 ### 2.3 Taking enemy ground
 Same command, same rule. Because of one-unit-per-column you cannot stand on a hex an enemy unit occupies, so converting enemy ground means: **clear the defender in combat** (so the hex frees up), **occupy it** (move a unit on, a later turn), then **convert it** (a claim turn). Converting an enemy-controlled generator hex inherits the generator.
+
+### 2.4 Everything is a dial
+Per the configurable-game principle, the rules above are all config, not hardcoded. The relevant `GameConfig` dials (most already exist from Phases 1–2):
+
+| Dial | Config | Status |
+|---|---|---|
+| Mode on/off | `TerritoryMode` | new (this slice) |
+| Claim tempo (full turn vs. free action) | `ClaimEndsTurn` | new (this slice) |
+| Cost to claim (flat / scaled) | `CaptureCost` / `CaptureFactor` | existing |
+| Build / upkeep / deploy / bounty multipliers | `BuildFactor` / `UpkeepFactor` / `DeployCostMultiplier` / `BountyRate` | existing |
+| Generator output | `GeneratorOutput` | existing |
+| Win conditions | `WinConditions` (`WinBy` flags) | existing |
+| Economy-win threshold | `EconomyWinThreshold` | existing |
+| Starting points | `StartingPoints` | existing |
+| Turn structure (whole-army vs. one-action) | `TurnPolicy` | existing |
 
 ## 3. Starting state
 
@@ -55,10 +71,10 @@ Thin, code-built UI consistent with the existing presentation layer.
 ## 6. Engine vs. presentation split
 
 - **Engine (`engine/HexWars.Engine`, netstandard2.1, NUnit):**
-  - `GameConfig.TerritoryMode` flag (optional, last, default false).
+  - `GameConfig.TerritoryMode` and `GameConfig.ClaimEndsTurn` flags (both optional, last, defaults `false` / `true`).
   - `DeployUnit`: when `TerritoryMode`, require the target hex be controlled by the issuer (instead of the deployment-zone check); off-mode behavior unchanged.
-  - `CaptureHex`: when `TerritoryMode`, reject unless it's the turn's first army action (no units moved/attacked yet) and end the turn on success. A new `RejectionReason` (e.g. `MustClaimFirst`). Off-mode capture behavior unchanged.
-  - `LegalMoves`: enumerate `CaptureHex` only when the claim is currently legal (first-action) in `TerritoryMode`.
+  - `CaptureHex`: when `TerritoryMode && ClaimEndsTurn`, reject unless it's the turn's first army action (no units moved/attacked yet) — a new `RejectionReason.MustClaimFirst` — and end the turn on success. With `ClaimEndsTurn` off (or off-mode), capture stays a normal action with its existing behavior.
+  - `LegalMoves`: when `TerritoryMode && ClaimEndsTurn`, enumerate `CaptureHex` only when the claim is currently legal (first-action); otherwise unchanged.
   - A small reusable helper to seed a player's control over a set of hexes at game start (used by setup + tests).
 - **Presentation (`Assets/HexWars/Presentation`, Unity, not unit-tested):** control overlay, click-to-claim/build + hint, economy/score HUD, `GameBootstrap` territory setup. After engine changes, **re-sync the Plugins DLL** (`Assets/HexWars/Plugins/HexWars.Engine.dll`).
 
