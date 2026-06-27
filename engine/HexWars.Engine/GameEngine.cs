@@ -40,6 +40,7 @@ namespace HexWars.Engine
                 case MoveUnit c: return ApplyMoveUnit(state, c);
                 case AttackUnit c: return ApplyAttackUnit(state, c);
                 case CaptureHex c: return ApplyCaptureHex(state, c);
+                case BuildGenerator c: return ApplyBuildGenerator(state, c);
                 case EndTurn c: return ApplyEndTurn(state, c);
                 default: return Result.Reject(state, RejectionReason.None);
             }
@@ -268,6 +269,37 @@ namespace HexWars.Engine
             return Result.Ok(new GameState(newBoard, state.Config, players, state.ActivePlayer,
                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
                 state.MovedUnitIds, state.AttackedUnitIds));
+        }
+
+        private static Result ApplyBuildGenerator(GameState state, BuildGenerator c)
+        {
+            if (!state.Board.Contains(c.Cell)) return Result.Reject(state, RejectionReason.TileNotFound);
+            if (state.Board.Controller(c.Cell) != c.Issuer)
+                return Result.Reject(state, RejectionReason.HexNotControlled);
+            if (HasGeneratorAt(state, c.Cell)) return Result.Reject(state, RejectionReason.TileOccupied);
+
+            var player = state.Player(c.Issuer);
+            int cost = BuildCost(state.Config);
+            if (player.Points < cost) return Result.Reject(state, RejectionReason.InsufficientPoints);
+
+            var tile = state.Board.TileAt(c.Cell);
+            var gen = new Generator(state.NextEntityId, c.Issuer, c.Cell, tile.Elevation, state.Config.GeneratorHealth, 1.0);
+            var generators = new List<Generator>(player.Generators) { gen };
+            var updated = new PlayerState(player.Id, player.Points - cost, player.Barracks,
+                                          player.UnitsOnBoard, generators, player.DestroyedValue);
+            return Result.Ok(WithPlayer(state, updated, state.NextEntityId + 1));
+        }
+
+        /// <summary>Build cost of a full-strength generator = round(BuildFactor × GeneratorOutput).</summary>
+        private static int BuildCost(GameConfig cfg) =>
+            (int)System.Math.Round(cfg.BuildFactor * cfg.GeneratorOutput, System.MidpointRounding.AwayFromZero);
+
+        private static bool HasGeneratorAt(GameState state, HexCoord coord)
+        {
+            foreach (var p in state.Players)
+                foreach (var g in p.Generators)
+                    if (g.IsAlive && g.Cell == coord) return true;
+            return false;
         }
 
         /// <summary>True if any living unit or generator (either player) stands on the column.</summary>

@@ -56,6 +56,11 @@ namespace HexWars.Engine
                 if (board.Controller(unit.Cell) != me
                     && player.Points >= state.Config.CaptureCost)
                     moves.Add(new CaptureHex(me, unit.Cell));
+
+                if (board.Controller(unit.Cell) == me
+                    && !HasGeneratorAt(state, unit.Cell)
+                    && player.Points >= BuildCostFor(state.Config))
+                    moves.Add(new BuildGenerator(me, unit.Cell));
             }
 
             moves.Add(new EndTurn(me));
@@ -71,5 +76,16 @@ namespace HexWars.Engine
             }
             return false;
         }
+
+        private static bool HasGeneratorAt(GameState state, HexCoord coord)
+        {
+            foreach (var p in state.Players)
+                foreach (var g in p.Generators)
+                    if (g.IsAlive && g.Cell == coord) return true;
+            return false;
+        }
+
+        private static int BuildCostFor(GameConfig cfg) =>
+            (int)System.Math.Round(cfg.BuildFactor * cfg.GeneratorOutput, System.MidpointRounding.AwayFromZero);
     }
 }

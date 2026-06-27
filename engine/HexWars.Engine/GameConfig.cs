@@ -130,7 +130,8 @@ namespace HexWars.Engine
         public static GameConfig Default(bool biomesEnabled = true, ITurnPolicy? turnPolicy = null,
             WinBy winConditions = WinBy.Annihilation, int captureCost = 3, int economyWinThreshold = 200,
             int scoreKills = 1, int scorePoints = 1, int scoreArmy = 1, int scoreTerritory = 1,
-            double upkeepFactor = 0.25, double captureFactor = 4.0, double buildFactor = 4.0) =>
+            double upkeepFactor = 0.25, double captureFactor = 4.0, double buildFactor = 4.0,
+            int generatorOutput = 1) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -140,6 +141,7 @@ namespace HexWars.Engine
         }, turnPolicy: turnPolicy, biomesEnabled: biomesEnabled, winConditions: winConditions,
            captureCost: captureCost, economyWinThreshold: economyWinThreshold,
            scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory,
-           upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor);
+           upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor,
+           generatorOutput: generatorOutput);
     }
 }

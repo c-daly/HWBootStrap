@@ -25,5 +25,6 @@ namespace HexWars.Engine
         LineOfSightBlocked,
         NoUnitOnHex,
         AlreadyControlled,
+        HexNotControlled,
     }
 }

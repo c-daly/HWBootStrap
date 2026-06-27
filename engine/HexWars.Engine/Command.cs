@@ -26,6 +26,9 @@ namespace HexWars.Engine
     /// persistent (kept after the unit leaves) until an enemy unit recaptures it.</summary>
     public sealed record CaptureHex(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
 
+    /// <summary>Build a generator (full strength) on a hex the issuer controls, paying the build cost.</summary>
+    public sealed record BuildGenerator(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
+
     /// <summary>End the issuer's turn: pass to the opponent, who is credited generator income.</summary>
     public sealed record EndTurn(PlayerId Issuer) : Command(Issuer);
 }
