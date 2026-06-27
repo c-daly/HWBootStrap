@@ -59,6 +59,7 @@ namespace HexWars.Presentation
         {
             EnsureMaterials();
             ClearChild("Columns");
+            ClearChild("Control");
             var columns = ChildRoot("Columns");
             foreach (var tile in board.Tiles)
                 BuildColumn(columns.transform, tile);
@@ -87,6 +88,16 @@ namespace HexWars.Presentation
                 }
                 foreach (var g in player.Generators)
                     if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
+            }
+
+            // control overlay: every controlled hex carries a translucent owner-colored cap
+            ClearChild("Control");
+            var controlRoot = ChildRoot("Control");
+            foreach (var tile in state.Board.Tiles)
+            {
+                var owner = state.Board.Controller(tile.Coord);
+                if (owner == null) continue;
+                BuildControlCap(controlRoot.transform, tile.Coord, tile.Elevation, owner.Value);
             }
         }
 
@@ -215,6 +226,41 @@ namespace HexWars.Presentation
             pylon.transform.localScale = new Vector3(HexSize * 0.45f, 0.9f, HexSize * 0.45f);
             pylon.GetComponent<MeshRenderer>().sharedMaterial = color;
             AddHull(pylon, 1.12f, 1.06f);
+        }
+
+        void BuildControlCap(Transform parent, HexCoord cell, int elevation, PlayerId owner)
+        {
+            var w = HexLayout.ToWorld(cell, HexSize);
+            var cap = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            cap.name = "ControlCap";
+            DestroyImmediate(cap.GetComponent<Collider>());
+            cap.transform.SetParent(parent, false);
+            cap.transform.localPosition = new Vector3((float)w.x, TopY(elevation) + 0.03f, (float)w.z);
+            cap.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            cap.transform.localScale = Vector3.one * (HexSize * 1.3f);
+            var c = owner == PlayerId.Player0
+                ? new Color(0.27f, 0.68f, 1f, 0.40f)    // cyan, semi-transparent
+                : new Color(0.92f, 0.28f, 0.28f, 0.40f); // red
+            var mr = cap.GetComponent<MeshRenderer>();
+            mr.sharedMaterial = TransparentColor(c);
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+        }
+
+        Material TransparentColor(Color c)
+        {
+            var sh = Shader.Find("Universal Render Pipeline/Unlit");
+            if (sh == null) sh = Shader.Find("Unlit/Color");
+            var m = new Material(sh);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
+            m.color = c;
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
+            m.SetFloat("_Surface", 1f);                                  // transparent
+            m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+            m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+            m.SetFloat("_ZWrite", 0f);
+            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            m.renderQueue = (int)RenderQueue.Transparent;
+            return m;
         }
 
         void AddHull(GameObject host, float xz, float y)
