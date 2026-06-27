@@ -64,10 +64,10 @@ namespace HexWars.Engine
             var next = state.ActivePlayer == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
             int round = state.Round + (next == PlayerId.Player0 ? 1 : 0);
 
-            int income = Economy.Income(state, next);
+            int net = Economy.Income(state, next) - Economy.Upkeep(state, next);
             var players = state.Players.ToArray();
             var np = players[(int)next];
-            players[(int)next] = np.WithPoints(np.Points + income);
+            players[(int)next] = np.WithPoints(System.Math.Max(0, np.Points + net));
 
             return Result.Ok(new GameState(state.Board, state.Config, players, next, round,
                 state.NextEntityId, state.IsGameOver, state.Winner,
