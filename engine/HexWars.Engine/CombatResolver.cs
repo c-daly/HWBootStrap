@@ -17,6 +17,8 @@ namespace HexWars.Engine
             int targetDefense,
             GameConfig config)
         {
+            if (attackerDamage <= 0) return 0; // a non-combatant deals nothing, even from high ground
+
             int highGround = Math.Max(0, attackerElevation - targetElevation);
             int raw = attackerDamage + highGround * config.DmgHighGroundBonus - targetDefense;
             return Math.Max(config.DamageFloor, raw);

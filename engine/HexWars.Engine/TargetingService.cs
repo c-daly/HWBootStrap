@@ -30,7 +30,9 @@ namespace HexWars.Engine
             int up = Math.Max(0, targetElevation - attacker.Elevation);
             int highGround = Math.Max(0, attacker.Elevation - targetElevation);
 
-            bool horizontal = hd <= attacker.Stats.Range + highGround * config.RangeHighGroundBonus;
+            // Range 0 = no ranged attack: high-ground augments a real range, it doesn't manufacture one.
+            int reach = attacker.Stats.Range > 0 ? attacker.Stats.Range + highGround * config.RangeHighGroundBonus : 0;
+            bool horizontal = hd <= reach;
             bool vertical = up <= attacker.Stats.RangeArc;
             return horizontal && vertical;
         }
