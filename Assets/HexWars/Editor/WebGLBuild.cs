@@ -21,9 +21,10 @@ namespace HexWars.Presentation.EditorTools
         [MenuItem("HexWars/Build WebGL")]
         public static void Build()
         {
-            // Plain static files: no compression, full exception detail for a first browser build.
-            PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Disabled;
-            PlayerSettings.WebGL.decompressionFallback = false;
+            // Gzip + decompression fallback: ~15 MB instead of ~54 MB, and still serves from any static
+            // host (incl. our Kestrel) without Content-Encoding header config. Full exceptions for now.
+            PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Gzip;
+            PlayerSettings.WebGL.decompressionFallback = true;
             PlayerSettings.WebGL.exceptionSupport = WebGLExceptionSupport.FullWithStacktrace;
 
             var fullOut = Path.GetFullPath(OutputDir);

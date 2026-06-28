@@ -51,6 +51,14 @@ namespace HexWars.Presentation
         [Header("Demo")]
         public bool DemoPieces = true;
 
+        [Header("Online")]
+        [Tooltip("On = play online vs another browser through the HexWars server: wait for the server's start state instead of building a local game, and send moves to the server.")]
+        public bool Networked = false;
+
+        NetClient _net;
+        /// <summary>The seat the server assigned this browser (null until seated, or if the room was full).</summary>
+        public PlayerId? Seat { get; private set; }
+
         public GameState State { get; private set; }
 
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
@@ -58,6 +66,16 @@ namespace HexWars.Presentation
 
         void Start()
         {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            Networked = true; // the deployed browser build is always the online client
+#endif
+            if (Networked)
+            {
+                SetupEnvironment();          // light/skybox now; the board renders when the server deals the start state
+                _net = gameObject.AddComponent<NetClient>();
+                _net.Connect(this);
+                return;
+            }
             NewGame();
             if (VsAI)
             {
@@ -108,6 +126,14 @@ namespace HexWars.Presentation
         /// <summary>Apply a command through the engine; on success update state, re-render, notify.</summary>
         public bool TryApply(Command cmd)
         {
+            if (Networked)
+            {
+                if (_net == null || State == null) return false;
+                if (Seat.HasValue && cmd.Issuer != Seat.Value) return false; // only act as your own seat, on your turn
+                _net.Send(NetProtocol.Cmd(cmd));
+                return true; // the server validates and echoes APPLY (or REJECT) — state updates there
+            }
+
             var result = GameEngine.Apply(State, cmd);
             if (!result.Success)
             {
@@ -120,6 +146,43 @@ namespace HexWars.Presentation
             EventConsole.Report(State, CombatLog.Diff(prev, State));
             StateChanged?.Invoke();
             return true;
+        }
+
+        // ---- server callbacks (online mode), invoked by NetClient ----
+
+        internal void OnNetSeat(PlayerId seat) { Seat = seat; StateChanged?.Invoke(); }
+
+        internal void OnNetSeatFull() { Debug.LogWarning("[Net] room full — joined as a spectator (no seat)."); }
+
+        /// <summary>The server dealt the authoritative start state — load and render it.</summary>
+        internal void OnNetStart(string startStateText)
+        {
+            State = ReplayFile.Read(startStateText).Start;
+            var renderer = GetComponent<BoardRenderer>();
+            renderer.Render(State.Board);
+            renderer.RenderEntities(State);
+            FindAnyObjectByType<CameraRig>()?.Frame();
+            EventConsole.Clear();
+            EventConsole.Report(State, null);
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>A validated move from the server — apply it locally (same engine, so identical result).</summary>
+        internal void OnNetApply(Command cmd)
+        {
+            var result = GameEngine.Apply(State, cmd);
+            if (!result.Success) { Debug.LogWarning("[Net] server move rejected locally: " + result.Reason); return; }
+            var prev = State;
+            State = result.NewState;
+            GetComponent<BoardRenderer>().RenderEntities(State);
+            EventConsole.Report(State, CombatLog.Diff(prev, State));
+            StateChanged?.Invoke();
+        }
+
+        internal void OnNetReject(string reason)
+        {
+            Debug.Log("[Net] move rejected: " + reason);
+            if (State != null) GetComponent<BoardRenderer>().RenderEntities(State); // snap optimistic UI back to truth
         }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints, ref int nextId)
