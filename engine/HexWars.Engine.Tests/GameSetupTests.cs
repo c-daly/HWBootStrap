@@ -43,6 +43,14 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Build_FloorsDamageAtOne_SoLandedHitsAlwaysCount()
+        {
+            // a real combatant's attack should never deal 0 (e.g. Brute dmg2 vs Brute def2)
+            Assert.That(GameFactory.Build(GameSetup.Default).Config.DamageFloor, Is.GreaterThanOrEqualTo(1));
+            Assert.That(GameFactory.Build(new GameSetup(GameMode.Territory, 11, 8, 40, 1)).Config.DamageFloor, Is.GreaterThanOrEqualTo(1));
+        }
+
+        [Test]
         public void Build_SameSeed_SameBoard()
         {
             var a = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 0, 42));

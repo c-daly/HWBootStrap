@@ -6,9 +6,10 @@ namespace HexWars.Presentation
     public enum SoundKind { Move, Attack, Death, EndTurn, Claim, Build, Win }
 
     /// <summary>
-    /// Tiny procedural SFX — clips are synthesized in code (tones / sweeps / a win arpeggio), so there are
-    /// no audio assets to ship. One persistent AudioSource plays them as one-shots. Callers just say
-    /// <c>SoundManager.Play(SoundKind.Move)</c>.
+    /// Procedural SFX synthesized in code (no audio assets to ship), but noise/filter-based rather than
+    /// arcade beeps: filtered-noise explosions with a low rumble, a swept "rocket" whoosh for attacks, and
+    /// soft sine clicks for UI. One persistent AudioSource plays one-shots; callers just say
+    /// <c>SoundManager.Play(SoundKind.Attack)</c>.
     /// </summary>
     public static class SoundManager
     {
@@ -19,7 +20,7 @@ namespace HexWars.Presentation
         public static void Play(SoundKind kind)
         {
             Ensure();
-            _src.PlayOneShot(Clip(kind), 0.6f);
+            _src.PlayOneShot(Clip(kind));
         }
 
         static void Ensure()
@@ -41,60 +42,90 @@ namespace HexWars.Presentation
         {
             switch (kind)
             {
-                case SoundKind.Move:    return Tone("move", 520f, 0.10f, 18f, false, 0f);
-                case SoundKind.Attack:  return Tone("attack", 170f, 0.18f, 13f, true, 0.30f);
-                case SoundKind.Death:   return Sweep("death", 420f, 80f, 0.40f, 6f);
-                case SoundKind.EndTurn: return Tone("endturn", 300f, 0.12f, 16f, false, 0f);
-                case SoundKind.Claim:   return Sweep("claim", 300f, 640f, 0.22f, 8f);
-                case SoundKind.Build:   return Tone("build", 440f, 0.14f, 12f, false, 0f);
-                case SoundKind.Win:     return Arp("win", new[] { 392f, 523f, 659f, 784f }, 0.55f);
-                default:                return Tone("blip", 440f, 0.10f, 16f, false, 0f);
+                case SoundKind.Attack:  return Whoosh("attack", 0.34f);          // rocket launch → small burst
+                case SoundKind.Death:   return Explosion("death", 0.70f, 0.55f); // bigger boom
+                case SoundKind.Move:    return Click("move", 660f, 0.07f, 0.18f);
+                case SoundKind.EndTurn: return Click("endturn", 330f, 0.11f, 0.22f);
+                case SoundKind.Claim:   return Chime("claim", new[] { 523f, 784f }, 0.16f);
+                case SoundKind.Build:   return Click("build", 494f, 0.10f, 0.22f);
+                case SoundKind.Win:     return Chime("win", new[] { 523f, 659f, 784f, 1047f }, 0.16f);
+                default:                return Click("blip", 600f, 0.08f, 0.2f);
             }
         }
 
-        static AudioClip Tone(string name, float freq, float dur, float decay, bool square, float noise)
+        // ---- explosion: lowpassed white-noise burst + a sub rumble, fast attack, exponential tail ----
+        static AudioClip Explosion(string name, float dur, float vol)
         {
             int n = (int)(Rate * dur);
             var s = new float[n];
             var rng = new System.Random(name.GetHashCode());
+            float lp = 0f;                       // one-pole lowpass state
             for (int i = 0; i < n; i++)
             {
                 float t = i / (float)Rate;
-                float env = Mathf.Exp(-t * decay);
-                float w = square ? (Mathf.Sin(freq * t * 2f * Mathf.PI) >= 0f ? 1f : -1f)
-                                 : Mathf.Sin(freq * t * 2f * Mathf.PI);
-                if (noise > 0f) w = Mathf.Lerp(w, (float)(rng.NextDouble() * 2.0 - 1.0), noise);
-                s[i] = w * env * 0.4f;
+                float attack = Mathf.Clamp01(t / 0.008f);     // ~8ms punch
+                float env = attack * Mathf.Exp(-t * 7f);
+                float white = (float)(rng.NextDouble() * 2.0 - 1.0);
+                lp += 0.12f * (white - lp);                   // boomy lowpass
+                float sub = Mathf.Sin(2f * Mathf.PI * 55f * t) * Mathf.Exp(-t * 9f); // low rumble
+                s[i] = (lp * 0.9f + sub * 0.6f) * env * vol;
             }
             return Make(name, s);
         }
 
-        static AudioClip Sweep(string name, float f0, float f1, float dur, float decay)
+        // ---- rocket whoosh: noise with a sweeping lowpass that opens then a short tail ----
+        static AudioClip Whoosh(string name, float dur)
+        {
+            int n = (int)(Rate * dur);
+            var s = new float[n];
+            var rng = new System.Random(name.GetHashCode());
+            float lp = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                float u = i / (float)n;
+                float t = i / (float)Rate;
+                float cutoff = Mathf.Lerp(0.02f, 0.30f, u);   // lowpass opens up = "launch"
+                float white = (float)(rng.NextDouble() * 2.0 - 1.0);
+                lp += cutoff * (white - lp);
+                float env = Mathf.Sin(u * Mathf.PI) * 0.9f + (u > 0.85f ? 0.4f : 0f); // swell + tiny burst at end
+                s[i] = lp * env * 0.55f;
+            }
+            return Make(name, s);
+        }
+
+        // ---- soft modern UI click: sine with quick attack/decay and a slight downward pitch glide ----
+        static AudioClip Click(string name, float freq, float dur, float vol)
         {
             int n = (int)(Rate * dur);
             var s = new float[n];
             float phase = 0f;
             for (int i = 0; i < n; i++)
             {
-                float freq = Mathf.Lerp(f0, f1, i / (float)n);
-                phase += freq / Rate * 2f * Mathf.PI;
-                float env = Mathf.Exp(-(i / (float)Rate) * decay);
-                s[i] = Mathf.Sin(phase) * env * 0.4f;
+                float u = i / (float)n;
+                float f = freq * Mathf.Lerp(1.0f, 0.85f, u);   // gentle glide down
+                phase += f / Rate * 2f * Mathf.PI;
+                float env = Mathf.Min(1f, (1f - u) * 4f) * (1f - u); // soft, no hard edges
+                s[i] = Mathf.Sin(phase) * env * vol;
             }
             return Make(name, s);
         }
 
-        static AudioClip Arp(string name, float[] notes, float dur)
+        // ---- chime: a couple of soft sine notes in sequence (confirm / win) ----
+        static AudioClip Chime(string name, float[] notes, float each)
         {
-            int n = (int)(Rate * dur);
+            int per = (int)(Rate * each);
+            int n = per * notes.Length;
             var s = new float[n];
-            int per = Mathf.Max(1, n / notes.Length);
-            for (int i = 0; i < n; i++)
+            for (int k = 0; k < notes.Length; k++)
             {
-                int note = Mathf.Min(i / per, notes.Length - 1);
-                float tIn = (i - note * per) / (float)Rate;
-                float env = Mathf.Exp(-tIn * 9f);
-                s[i] = Mathf.Sin(notes[note] * (i / (float)Rate) * 2f * Mathf.PI) * env * 0.4f;
+                float phase = 0f;
+                for (int i = 0; i < per; i++)
+                {
+                    float u = i / (float)per;
+                    phase += notes[k] / Rate * 2f * Mathf.PI;
+                    float env = Mathf.Min(1f, u * 6f) * Mathf.Exp(-u * 4f);
+                    s[k * per + i] = Mathf.Sin(phase) * env * 0.3f;
+                }
             }
             return Make(name, s);
         }

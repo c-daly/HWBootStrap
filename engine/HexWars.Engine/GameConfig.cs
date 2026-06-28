@@ -144,6 +144,7 @@ namespace HexWars.Engine
             double upkeepFactor = 0.25, double captureFactor = 4.0, double buildFactor = 4.0,
             int generatorOutput = 1,
             int startingPoints = 12,
+            int damageFloor = 0,
             bool territoryMode = false,
             bool claimEndsTurn = true) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
@@ -156,7 +157,7 @@ namespace HexWars.Engine
            captureCost: captureCost, economyWinThreshold: economyWinThreshold,
            scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory,
            upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor,
-           generatorOutput: generatorOutput, startingPoints: startingPoints,
+           generatorOutput: generatorOutput, startingPoints: startingPoints, damageFloor: damageFloor,
            territoryMode: territoryMode, claimEndsTurn: claimEndsTurn);
     }
 }

@@ -111,7 +111,14 @@ namespace HexWars.Presentation
             GUI.Label(new Rect(x, y + 36f, w, 26f),
                       $"<color=#6FB1FF>P1</color>  {u0}u · {v0}v       <color=#FF7B6B>P2</color>  {u1}u · {v1}v", h2);
 
-            return y + 70f;
+            // game settings readout (derived from the state — works for the joiner too)
+            string mode = _state.Config.TerritoryMode ? "Territory" : "Annihilation";
+            var h3 = new GUIStyle(GUI.skin.label) { fontSize = 15, richText = true };
+            h3.normal.textColor = new Color(0.62f, 0.66f, 0.74f);
+            GUI.Label(new Rect(x, y + 64f, w, 22f),
+                      $"{mode} · {_state.Board.Tiles.Count} tiles · {_state.Config.StartingPoints} start pts", h3);
+
+            return y + 90f;
         }
 
         void DrawLog(float x, float y, float w, float h)

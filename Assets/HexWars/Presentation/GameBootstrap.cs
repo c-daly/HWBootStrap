@@ -158,6 +158,22 @@ namespace HexWars.Presentation
             _net.Connect(this, room, setupWire);
         }
 
+        /// <summary>Start a single-machine game from the lobby's setup (no server). <paramref name="vsAi"/>
+        /// adds an AI opponent on Player 2; otherwise it's a local hotseat. Used by the lobby's vs-AI option.</summary>
+        public void StartLocalGame(GameSetup setup, bool vsAi)
+        {
+            Networked = false; // play locally — TryApply applies here instead of going to the server
+            State = GameFactory.Build(setup);
+            var renderer = GetComponent<BoardRenderer>();
+            renderer.Render(State.Board);
+            renderer.RenderEntities(State);
+            FindAnyObjectByType<CameraRig>()?.Frame();
+            EventConsole.Clear();
+            EventConsole.Report(State, null);
+            StateChanged?.Invoke();
+            if (vsAi) gameObject.AddComponent<AiOpponent>();
+        }
+
         static string RoomFromPageUrl()
         {
             string page = Application.absoluteURL;

@@ -49,13 +49,16 @@ namespace HexWars.Engine
 
         public static GameState Build(GameSetup setup)
         {
-            var board = new RandomBoardGenerator(new BoardGenConfig(setup.Width, setup.Height)).Generate(setup.Seed);
+            // maxElevation 2 keeps climbs within unit vertical budgets (no unclimbable cliffs)
+            var board = new RandomBoardGenerator(new BoardGenConfig(setup.Width, setup.Height, maxElevation: 2)).Generate(setup.Seed);
 
             bool territory = setup.Mode == GameMode.Territory;
+            // biomesEnabled false: terrain is inert (no impassable/expensive tiles that box units in).
+            // damageFloor 1: a landed attack by a real combatant always deals at least 1 (no 0-damage hits).
             var config = territory
-                ? GameConfig.Default(winConditions: WinBy.Economy | WinBy.Annihilation,
-                                     startingPoints: setup.StartingPoints, territoryMode: true)
-                : GameConfig.Default(startingPoints: setup.StartingPoints);
+                ? GameConfig.Default(biomesEnabled: false, winConditions: WinBy.Economy | WinBy.Annihilation,
+                                     startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1)
+                : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1);
 
             if (territory)
             {
