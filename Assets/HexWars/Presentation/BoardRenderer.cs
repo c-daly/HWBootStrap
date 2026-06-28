@@ -197,14 +197,25 @@ namespace HexWars.Presentation
         Material IconMaterial(UnitRole role)
         {
             if (_iconMats.TryGetValue(role, out var m)) return m;
+            var tex = RoleIcons.For(role);
+
+            // Preferred: custom HexWars/IconUnlit bakes alpha blending — no keyword variant for WebGL to strip.
+            var iconShader = Shader.Find("HexWars/IconUnlit");
+            if (iconShader != null)
+            {
+                m = new Material(iconShader);
+                m.SetTexture("_MainTex", tex);
+                _iconMats[role] = m;
+                return m;
+            }
+
+            // Fallback (editor/desktop): URP/Unlit switched to transparent mode via keyword.
             var unlit = Shader.Find("Universal Render Pipeline/Unlit");
             if (unlit == null) unlit = Shader.Find("Unlit/Texture");
             m = new Material(unlit);
-            var tex = RoleIcons.For(role);
             if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", tex);
             if (m.HasProperty("_MainTex")) m.SetTexture("_MainTex", tex);
             if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f); // double-sided
-            // transparent: the badge background is alpha-0, so only the glyph shows on the piece
             m.SetFloat("_Surface", 1f);
             m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
             m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);

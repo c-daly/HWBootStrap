@@ -35,6 +35,7 @@ namespace HexWars.Presentation.EditorTools
                 "Universal Render Pipeline/Lit",
                 "Universal Render Pipeline/Unlit",
                 "HexWars/Matcap",
+                "HexWars/IconUnlit",
                 "Unlit/Color",
                 "Unlit/Texture",
                 "Skybox/Panoramic");
