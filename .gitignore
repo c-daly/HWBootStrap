@@ -33,6 +33,9 @@
 ExportedObj/
 .consulo/
 *.csproj
+# Exception: the standalone .NET engine/server projects under engine/ are real source (not Unity-generated)
+# and must be tracked so repo-based deploys can build the server.
+!engine/**/*.csproj
 *.unityproj
 *.sln
 *.suo
