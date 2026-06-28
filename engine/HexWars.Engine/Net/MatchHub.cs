@@ -86,5 +86,17 @@ namespace HexWars.Engine
             }
             return outs;
         }
+
+        /// <summary>Free a dropped connection's seat; once the room is empty, reset it so the next pair gets a fresh game.</summary>
+        public IReadOnlyList<Outbound> Disconnect(string roomCode, string connectionId)
+        {
+            if (_rooms.TryGetValue(roomCode, out var room))
+            {
+                room.Session.Leave(connectionId);
+                room.Members.Remove(connectionId);
+                if (room.Members.Count == 0) _rooms.Remove(roomCode);
+            }
+            return Array.Empty<Outbound>();
+        }
     }
 }

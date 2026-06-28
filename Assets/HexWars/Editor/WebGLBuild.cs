@@ -1,7 +1,9 @@
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace HexWars.Presentation.EditorTools
 {
@@ -26,6 +28,16 @@ namespace HexWars.Presentation.EditorTools
             PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Gzip;
             PlayerSettings.WebGL.decompressionFallback = true;
             PlayerSettings.WebGL.exceptionSupport = WebGLExceptionSupport.FullWithStacktrace;
+
+            // Board/unit materials are created at runtime via Shader.Find — WebGL strips shaders that
+            // nothing references at build time, so they'd render magenta. Force-include them.
+            EnsureShadersIncluded(
+                "Universal Render Pipeline/Lit",
+                "Universal Render Pipeline/Unlit",
+                "HexWars/Matcap",
+                "Unlit/Color",
+                "Unlit/Texture",
+                "Skybox/Panoramic");
 
             var fullOut = Path.GetFullPath(OutputDir);
             Directory.CreateDirectory(fullOut);
@@ -52,6 +64,27 @@ namespace HexWars.Presentation.EditorTools
             }
             Debug.Log("[WebGLBuild] SUCCESS");
             if (Application.isBatchMode) EditorApplication.Exit(0);
+        }
+
+        /// <summary>Add shaders to Graphics ▸ Always Included Shaders so runtime Shader.Find works in the build.</summary>
+        static void EnsureShadersIncluded(params string[] names)
+        {
+            var so = new SerializedObject(GraphicsSettings.GetGraphicsSettings());
+            var arr = so.FindProperty("m_AlwaysIncludedShaders");
+            var have = new HashSet<string>();
+            for (int i = 0; i < arr.arraySize; i++)
+                if (arr.GetArrayElementAtIndex(i).objectReferenceValue is Shader s) have.Add(s.name);
+
+            foreach (var n in names)
+            {
+                if (have.Contains(n)) continue;
+                var sh = Shader.Find(n);
+                if (sh == null) { Debug.LogWarning("[WebGLBuild] shader not found to include: " + n); continue; }
+                arr.InsertArrayElementAtIndex(arr.arraySize);
+                arr.GetArrayElementAtIndex(arr.arraySize - 1).objectReferenceValue = sh;
+                Debug.Log("[WebGLBuild] +AlwaysIncluded: " + n);
+            }
+            so.ApplyModifiedProperties();
         }
     }
 }

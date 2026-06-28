@@ -60,6 +60,9 @@ namespace HexWars.Engine
             return null;
         }
 
+        /// <summary>Release a connection's seat (on disconnect) so it can be re-taken by a reconnect.</summary>
+        public void Leave(string connectionId) => _seats.Remove(connectionId);
+
         /// <summary>Validate the issuer owns its seat, then apply through the engine. On Accepted, advances State.</summary>
         public SubmitOutcome Submit(string connectionId, Command cmd)
         {

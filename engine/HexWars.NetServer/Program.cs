@@ -28,8 +28,13 @@ namespace HexWars.NetServer
 
             var app = builder.Build();
             app.UseWebSockets();
-            app.UseDefaultFiles();   // serve the WebGL client from wwwroot/ when a deploy copies it in
-            app.UseStaticFiles();
+            app.UseDefaultFiles();   // serve the WebGL client (index.html) from wwwroot/ when a deploy copies it in
+            // Unity WebGL ships .unityweb/.data/.wasm; without these mappings Kestrel 404s them.
+            var types = new Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider();
+            types.Mappings[".unityweb"] = "application/octet-stream"; // gzip payload; the loader decompresses (decompressionFallback)
+            types.Mappings[".data"] = "application/octet-stream";
+            types.Mappings[".wasm"] = "application/wasm";
+            app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = types });
             app.MapGet("/healthz", () => "ok");
             app.Map("/ws", Handle);
             await app.RunAsync();
@@ -46,6 +51,7 @@ namespace HexWars.NetServer
             var socket = await ctx.WebSockets.AcceptWebSocketAsync();
             var conn = new Conn(Guid.NewGuid().ToString("N"), socket);
             Conns[conn.Id] = conn;
+            Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} (total={Conns.Count})");
             try
             {
                 await Dispatch(Locked(() => Hub.Connect(room, conn.Id)));
@@ -54,11 +60,14 @@ namespace HexWars.NetServer
                     string? text = await Receive(socket);
                     if (text is null) break;          // closed / errored
                     if (text.Length == 0) continue;
+                    Console.WriteLine($"[ws] RECV  room={room} id={conn.Id[..8]}: {text}");
                     await Dispatch(Locked(() => Hub.Receive(room, conn.Id, text)));
                 }
             }
             finally
             {
+                Console.WriteLine($"[ws] DISCONNECT room={room} id={conn.Id[..8]}");
+                Locked(() => Hub.Disconnect(room, conn.Id)); // free the seat so a refresh/rejoin can re-take it
                 Conns.TryRemove(conn.Id, out _);
                 if (socket.State == WebSocketState.Open)
                     try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
@@ -71,8 +80,11 @@ namespace HexWars.NetServer
         static async Task Dispatch(IReadOnlyList<Outbound> outs)
         {
             foreach (var o in outs)
+            {
+                Console.WriteLine($"[ws] SEND  -> {o.ConnectionId[..8]}: {(o.Message.Length > 60 ? o.Message[..60] + "…" : o.Message)}");
                 if (Conns.TryGetValue(o.ConnectionId, out var c))
                     try { await c.Send(o.Message); } catch { /* drop a dead socket; cleanup happens on its own loop */ }
+            }
         }
 
         static async Task<string?> Receive(WebSocket socket)
