@@ -21,10 +21,10 @@ namespace HexWars.Presentation
         public PlayerId? Seat { get; private set; }
         public bool Connected { get; private set; }
 
-        public async void Connect(GameBootstrap game)
+        public async void Connect(GameBootstrap game, string room, string setupWire)
         {
             _game = game;
-            string url = ServerWsUrl();
+            string url = ServerWsUrl(room, setupWire);
             Debug.Log("[Net] connecting to " + url);
             _ws = new WebSocket(url);
             _ws.OnOpen += () => { Connected = true; Debug.Log("[Net] open"); };
@@ -67,22 +67,14 @@ namespace HexWars.Presentation
             if (_ws != null) await _ws.Close();
         }
 
-        /// <summary>https://host/?room=X → wss://host/ws?room=X (ws://127.0.0.1:5234 in the editor).</summary>
-        static string ServerWsUrl()
+        /// <summary>Build the WebSocket URL for a room from the page origin: https://host → wss://host/ws?room=…
+        /// (&amp;setup=… for the host). Falls back to ws://127.0.0.1:5234 in the editor (no page URL).</summary>
+        static string ServerWsUrl(string room, string setupWire)
         {
-            string page = Application.absoluteURL;
-            string room = "default";
             string origin = "ws://127.0.0.1:5234"; // dev default when there's no page URL (editor)
-
+            string page = Application.absoluteURL;
             if (!string.IsNullOrEmpty(page))
             {
-                int q = page.IndexOf('?');
-                if (q >= 0)
-                    foreach (var kv in page.Substring(q + 1).Split('&'))
-                    {
-                        var p = kv.Split('=');
-                        if (p.Length == 2 && p[0] == "room") room = Uri.UnescapeDataString(p[1]);
-                    }
                 try
                 {
                     var uri = new Uri(page);
@@ -90,7 +82,9 @@ namespace HexWars.Presentation
                 }
                 catch { /* keep dev default */ }
             }
-            return origin + "/ws?room=" + Uri.EscapeDataString(room);
+            string url = origin + "/ws?room=" + Uri.EscapeDataString(room);
+            if (!string.IsNullOrEmpty(setupWire)) url += "&setup=" + Uri.EscapeDataString(setupWire);
+            return url;
         }
     }
 }

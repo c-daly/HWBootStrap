@@ -28,6 +28,7 @@ namespace HexWars.Presentation.EditorTools
             PlayerSettings.WebGL.compressionFormat = WebGLCompressionFormat.Gzip;
             PlayerSettings.WebGL.decompressionFallback = true;
             PlayerSettings.WebGL.exceptionSupport = WebGLExceptionSupport.FullWithStacktrace;
+            PlayerSettings.WebGL.template = "PROJECT:HexWarsFull"; // full-window canvas → sharp at any size / in fullscreen
 
             // Board/unit materials are created at runtime via Shader.Find — WebGL strips shaders that
             // nothing references at build time, so they'd render magenta. Force-include them.

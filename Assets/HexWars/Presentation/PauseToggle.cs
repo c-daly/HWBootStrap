@@ -22,8 +22,22 @@ namespace HexWars.Presentation
             DontDestroyOnLoad(go);
         }
 
+        bool _show;     // only shown in playback contexts (replay / spectator / model-duel), not live play
+        float _nextCheck;
+
         void Update()
         {
+            if (Time.unscaledTime >= _nextCheck)
+            {
+                _nextCheck = Time.unscaledTime + 0.5f;
+                bool show = FindAnyObjectByType<ReplayPlayer>() != null
+                         || FindAnyObjectByType<SpectatorDriver>() != null
+                         || FindAnyObjectByType<ModelDuelDriver>() != null;
+                if (_show && !show && _paused) { _paused = false; Apply(); } // left a playback context — don't leave it paused
+                _show = show;
+            }
+            if (!_show) return;
+
             var kb = Keyboard.current;
             if (kb != null && kb.spaceKey.wasPressedThisFrame) { _paused = !_paused; Apply(); }
         }
@@ -34,6 +48,7 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
+            if (!_show) return; // hidden unless we're in a playback context (e.g. a replay)
             // OnGUI doesn't DPI-scale — scale by screen height (≈2x at 4K), draw in 1080p-logical coords
             float s = Mathf.Max(1f, Screen.height / 1080f);
             var prevMatrix = GUI.matrix;

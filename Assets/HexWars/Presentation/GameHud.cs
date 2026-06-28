@@ -74,19 +74,19 @@ namespace HexWars.Presentation
             var trt = _banner.GetComponent<RectTransform>();
             trt.anchorMin = Vector2.zero;
             trt.anchorMax = Vector2.one;
-            trt.offsetMin = new Vector2(16f, 0f);
-            trt.offsetMax = new Vector2(-160f, 0f);
+            trt.offsetMin = new Vector2(160f, 0f); // leave room for the End Turn button on the left
+            trt.offsetMax = new Vector2(-16f, 0f);
 
             var btn = new GameObject("EndTurnButton");
             btn.transform.SetParent(bar.transform, false);
             btn.AddComponent<Image>().color = new Color(0.20f, 0.34f, 0.55f, 1f);
             btn.AddComponent<Button>().onClick.AddListener(OnEndTurn);
             var rt = btn.GetComponent<RectTransform>();
-            rt.anchorMin = new Vector2(1f, 0.5f);
-            rt.anchorMax = new Vector2(1f, 0.5f);
-            rt.pivot = new Vector2(1f, 0.5f);
+            rt.anchorMin = new Vector2(0f, 0.5f);
+            rt.anchorMax = new Vector2(0f, 0.5f);
+            rt.pivot = new Vector2(0f, 0.5f);
             rt.sizeDelta = new Vector2(140f, 34f);
-            rt.anchoredPosition = new Vector2(-8f, 0f);
+            rt.anchoredPosition = new Vector2(8f, 0f); // left side — clear of the right-side log/speed controls
 
             var btnTextGo = new GameObject("Text");
             btnTextGo.transform.SetParent(btn.transform, false);

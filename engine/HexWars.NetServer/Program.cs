@@ -15,7 +15,7 @@ namespace HexWars.NetServer
     public static class Program
     {
         static readonly ConcurrentDictionary<string, Conn> Conns = new();
-        static readonly MatchHub Hub = new(NewGame);
+        static readonly MatchHub Hub = new(GameFactory.Build);
         static readonly object HubLock = new();
 
         public static async Task<int> Main(string[] args)
@@ -47,14 +47,15 @@ namespace HexWars.NetServer
             if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
             string room = ctx.Request.Query["room"].ToString();
             if (string.IsNullOrWhiteSpace(room)) room = "default";
+            var setup = ParseSetup(ctx.Request.Query["setup"].ToString());
 
             var socket = await ctx.WebSockets.AcceptWebSocketAsync();
             var conn = new Conn(Guid.NewGuid().ToString("N"), socket);
             Conns[conn.Id] = conn;
-            Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} (total={Conns.Count})");
+            Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} setup=({setup.Mode} {setup.Width}x{setup.Height} pts{setup.StartingPoints} seed{setup.Seed}) total={Conns.Count}");
             try
             {
-                await Dispatch(Locked(() => Hub.Connect(room, conn.Id)));
+                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup)));
                 while (socket.State == WebSocketState.Open)
                 {
                     string? text = await Receive(socket);
@@ -102,33 +103,11 @@ namespace HexWars.NetServer
             return Encoding.UTF8.GetString(ms.ToArray());
         }
 
-        /// <summary>The v0 slice game: a generated board with a few distinct units per side, regular annihilation rules.</summary>
-        static GameState NewGame()
+        /// <summary>Parse the host's lobby picks from the connect query (?setup=...); default if absent/bad.</summary>
+        static GameSetup ParseSetup(string raw)
         {
-            var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);
-            int nextId = 1;
-            var p0 = Seed(board, PlayerId.Player0, ref nextId);
-            var p1 = Seed(board, PlayerId.Player1, ref nextId);
-            return new GameState(board, GameConfig.Default(), new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
-        }
-
-        static PlayerState Seed(Board board, PlayerId id, ref int nextId)
-        {
-            var roster = new[]
-            {
-                new UnitStats(7, 2, 2, 3, 2, 1, 1, 2, 1), // Brute
-                new UnitStats(2, 6, 0, 3, 2, 2, 1, 3, 1), // Striker
-                new UnitStats(2, 2, 0, 2, 2, 6, 1, 4, 1), // Sniper
-            };
-            var flat = new List<HexCoord>();
-            foreach (var c in board.DeploymentZone(id))
-                if (board.TileAt(c).Elevation == 0) flat.Add(c);
-            flat.Sort((x, y) => x.Q != y.Q ? x.Q - y.Q : x.R - y.R);
-
-            var units = new List<Unit>();
-            for (int i = 0; i < roster.Length && i < flat.Count; i++)
-                units.Add(new Unit(nextId++, id, roster[i], flat[i], 0));
-            return new PlayerState(id, 0, null, units, null);
+            if (string.IsNullOrWhiteSpace(raw)) return GameSetup.Default;
+            try { return GameSetup.Parse(raw); } catch { return GameSetup.Default; }
         }
     }
 

@@ -44,10 +44,10 @@ namespace HexWars.Presentation
             {
                 Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
                 Vector3 right = transform.right;
-                if (kb.wKey.isPressed) _focus += fwd * PanSpeed * dt;
-                if (kb.sKey.isPressed) _focus -= fwd * PanSpeed * dt;
-                if (kb.dKey.isPressed) _focus += right * PanSpeed * dt;
-                if (kb.aKey.isPressed) _focus -= right * PanSpeed * dt;
+                if (kb.wKey.isPressed || kb.upArrowKey.isPressed) _focus += fwd * PanSpeed * dt;
+                if (kb.sKey.isPressed || kb.downArrowKey.isPressed) _focus -= fwd * PanSpeed * dt;
+                if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) _focus += right * PanSpeed * dt;
+                if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) _focus -= right * PanSpeed * dt;
                 if (kb.qKey.isPressed) Yaw -= RotateSpeed * dt;
                 if (kb.eKey.isPressed) Yaw += RotateSpeed * dt;
             }

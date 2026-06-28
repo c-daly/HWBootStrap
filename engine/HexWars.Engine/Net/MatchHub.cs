@@ -27,17 +27,19 @@ namespace HexWars.Engine
             public Room(GameState start) { Session = new GameSession(start); }
         }
 
-        private readonly Func<GameState> _newGame;
+        private readonly Func<GameSetup, GameState> _newGame;
         private readonly Dictionary<string, Room> _rooms = new Dictionary<string, Room>();
 
-        public MatchHub(Func<GameState> newGame) { _newGame = newGame; }
+        public MatchHub(Func<GameSetup, GameState> newGame) { _newGame = newGame; }
 
-        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId)
+        /// <summary>Seat a connection. The first connection to a room creates it from <paramref name="setup"/>
+        /// (the host's lobby picks); later joiners' setups are ignored — they join the host's game.</summary>
+        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId, GameSetup setup = default)
         {
             var outs = new List<Outbound>();
             if (!_rooms.TryGetValue(roomCode, out var room))
             {
-                room = new Room(_newGame());
+                room = new Room(_newGame(setup));
                 _rooms[roomCode] = room;
             }
 

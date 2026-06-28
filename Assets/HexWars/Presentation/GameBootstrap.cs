@@ -72,8 +72,9 @@ namespace HexWars.Presentation
             if (Networked)
             {
                 SetupEnvironment();          // light/skybox now; the board renders when the server deals the start state
-                _net = gameObject.AddComponent<NetClient>();
-                _net.Connect(this);
+                string room = RoomFromPageUrl();
+                if (!string.IsNullOrEmpty(room)) StartNetGame(room, null); // opened via a shared ?room= link → join it
+                else gameObject.AddComponent<LobbyPanel>();                // otherwise show the lobby / setup screen
                 return;
             }
             NewGame();
@@ -144,8 +145,31 @@ namespace HexWars.Presentation
             State = result.NewState;
             GetComponent<BoardRenderer>().RenderEntities(State);
             EventConsole.Report(State, CombatLog.Diff(prev, State));
+            PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
             return true;
+        }
+
+        /// <summary>Connect to the server for a room. <paramref name="setupWire"/> is non-null only for the
+        /// host (carries the lobby's game-setup picks); a joiner passes null and gets the host's game.</summary>
+        public void StartNetGame(string room, string setupWire)
+        {
+            _net = gameObject.AddComponent<NetClient>();
+            _net.Connect(this, room, setupWire);
+        }
+
+        static string RoomFromPageUrl()
+        {
+            string page = Application.absoluteURL;
+            if (string.IsNullOrEmpty(page)) return null;
+            int q = page.IndexOf('?');
+            if (q < 0) return null;
+            foreach (var kv in page.Substring(q + 1).Split('&'))
+            {
+                var p = kv.Split('=');
+                if (p.Length == 2 && p[0] == "room") return p[1];
+            }
+            return null;
         }
 
         // ---- server callbacks (online mode), invoked by NetClient ----
@@ -176,6 +200,7 @@ namespace HexWars.Presentation
             State = result.NewState;
             GetComponent<BoardRenderer>().RenderEntities(State);
             EventConsole.Report(State, CombatLog.Diff(prev, State));
+            PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
         }
 
@@ -183,6 +208,34 @@ namespace HexWars.Presentation
         {
             Debug.Log("[Net] move rejected: " + reason);
             if (State != null) GetComponent<BoardRenderer>().RenderEntities(State); // snap optimistic UI back to truth
+        }
+
+        // ---- sound ----
+
+        static void PlaySounds(Command cmd, GameState prev, GameState now)
+        {
+            switch (cmd)
+            {
+                case MoveUnit _: SoundManager.Play(SoundKind.Move); break;
+                case AttackUnit _: SoundManager.Play(SoundKind.Attack); break;
+                case CaptureHex _: SoundManager.Play(SoundKind.Claim); break;
+                case BuildGenerator _:
+                case DeployGenerator _:
+                case DeployUnit _:
+                case CreateUnit _: SoundManager.Play(SoundKind.Build); break;
+                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); break;
+            }
+            if (LiveUnits(now) < LiveUnits(prev)) SoundManager.Play(SoundKind.Death);
+            if (now.IsGameOver && !prev.IsGameOver) SoundManager.Play(SoundKind.Win);
+        }
+
+        static int LiveUnits(GameState s)
+        {
+            int n = 0;
+            foreach (var p in s.Players)
+                foreach (var u in p.UnitsOnBoard)
+                    if (u.IsAlive) n++;
+            return n;
         }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints, ref int nextId)

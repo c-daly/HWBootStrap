@@ -40,7 +40,7 @@ namespace HexWars.Engine.Tests
         [Test]
         public void Hub_Disconnect_FreesSeat_SoANewJoinerIsSeatedNotTurnedAway()
         {
-            var hub = new MatchHub(TwoUnitGame);
+            var hub = new MatchHub(_ => TwoUnitGame());
             hub.Connect("r", "a"); // P0
             hub.Connect("r", "b"); // P1 — room full
             hub.Disconnect("r", "a");
@@ -52,7 +52,7 @@ namespace HexWars.Engine.Tests
         [Test]
         public void Hub_Disconnect_LastMember_ResetsRoomForAFreshGame()
         {
-            var hub = new MatchHub(TwoUnitGame);
+            var hub = new MatchHub(_ => TwoUnitGame());
             hub.Connect("r", "a");
             hub.Connect("r", "b");
             hub.Disconnect("r", "a");

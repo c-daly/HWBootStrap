@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using HexWars.Engine;
 using NUnit.Framework;
 
@@ -27,7 +28,7 @@ namespace HexWars.Engine.Tests
             return new GameState(board, GameConfig.Default(), new[] { p0, p1 }, P0, 1, 3);
         }
 
-        private static MatchHub NewHub() => new MatchHub(TwoUnitGame);
+        private static MatchHub NewHub() => new MatchHub(_ => TwoUnitGame());
 
         [Test]
         public void SecondJoin_SeatsBothAndDealsStartToEveryone()
@@ -93,6 +94,17 @@ namespace HexWars.Engine.Tests
             var outs = hub.Receive("r", "a", NetProtocol.Cmd(new EndTurn(P0)));
             Assert.That(outs, Has.Some.Matches<Outbound>(
                 o => o.ConnectionId == "a" && o.Message == NetProtocol.Reject(RejectionReason.NotYourTurn)));
+        }
+
+        [Test]
+        public void Connect_RoomBuiltFromHostSetup_NotJoiners()
+        {
+            var hub = new MatchHub(GameFactory.Build); // the real factory turns the host's setup into the game
+            hub.Connect("r", "host", new GameSetup(GameMode.Annihilation, 11, 8, 0, 1));
+            var outs = hub.Connect("r", "guest", new GameSetup(GameMode.Annihilation, 5, 5, 0, 2));
+            var startMsg = outs.First(o => o.Message.StartsWith("START ")).Message;
+            var state = ReplayFile.Read(startMsg.Substring("START ".Length)).Start;
+            Assert.That(state.Board.Tiles.Count, Is.EqualTo(11 * 8), "room uses the host's board size, not the joiner's");
         }
     }
 }
