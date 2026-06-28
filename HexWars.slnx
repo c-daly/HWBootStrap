@@ -1,0 +1,6 @@
+﻿<Solution>
+  <Project Path="HexWars.Presentation.csproj" />
+  <Project Path="HexWars.Presentation.Editor.csproj" />
+  <Project Path="Assembly-CSharp-Editor.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
+</Solution>

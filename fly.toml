@@ -1,0 +1,19 @@
+# Fly.io config for the HexWars server (serves the WebGL client + the /ws WebSocket).
+# `fly launch` will set/confirm `app` (must be globally unique) and primary_region for you.
+app = "hexwars-CHANGEME"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # scale to zero when idle (free), wake on the first connection (small cold start).
+  # set min_machines_running = 1 for always-instant.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

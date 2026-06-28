@@ -1,0 +1,6 @@
+# Send only the .NET server + engine (and the WebGL build under HexWars.NetServer/wwwroot) to the
+# Docker build. Excludes the multi-GB Unity project (Assets/Library/Temp), python, logs, etc.
+*
+!engine
+**/bin/
+**/obj/

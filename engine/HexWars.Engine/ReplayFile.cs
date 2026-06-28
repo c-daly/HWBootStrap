@@ -156,44 +156,14 @@ namespace HexWars.Engine
             return new PlayerState(expected, points, barracks, unitList, genList);
         }
 
-        private static void AppendStats(StringBuilder sb, UnitStats s) =>
-            sb.Append(s.Health).Append(' ').Append(s.Damage).Append(' ').Append(s.Defense).Append(' ')
-              .Append(s.Movement).Append(' ').Append(s.VerticalMovement).Append(' ')
-              .Append(s.Range).Append(' ').Append(s.RangeArc).Append(' ')
-              .Append(s.Vision).Append(' ').Append(s.VisionArc);
+        // Stats + command encoding live in CommandWire (the networking wire-format), shared verbatim so
+        // replays and the multiplayer relay never drift.
+        private static void AppendStats(StringBuilder sb, UnitStats s) => sb.Append(CommandWire.WriteStats(s));
 
-        private static UnitStats ReadStats(string[] p, int o) =>
-            new UnitStats(I(p[o]), I(p[o + 1]), I(p[o + 2]), I(p[o + 3]), I(p[o + 4]),
-                          I(p[o + 5]), I(p[o + 6]), I(p[o + 7]), I(p[o + 8]));
+        private static UnitStats ReadStats(string[] p, int o) => CommandWire.ReadStats(p, o);
 
-        private static string WriteCommand(Command c)
-        {
-            switch (c)
-            {
-                case MoveUnit m: return $"M {(int)m.Issuer} {m.UnitId} {m.Dest.Q} {m.Dest.R}";
-                case AttackUnit a: return $"A {(int)a.Issuer} {a.AttackerId} {a.TargetId}";
-                case EndTurn e: return $"E {(int)e.Issuer}";
-                case CreateUnit cu: return $"C {(int)cu.Issuer} {cu.Stats.Health} {cu.Stats.Damage} {cu.Stats.Defense} {cu.Stats.Movement} {cu.Stats.VerticalMovement} {cu.Stats.Range} {cu.Stats.RangeArc} {cu.Stats.Vision} {cu.Stats.VisionArc}";
-                case DeployUnit d: return $"D {(int)d.Issuer} {d.TemplateIndex} {d.Cell.Q} {d.Cell.R}";
-                case DeployGenerator g: return $"N {(int)g.Issuer} {g.Cell.Q} {g.Cell.R}";
-                default: throw new FormatException("unknown command " + c.GetType().Name);
-            }
-        }
+        private static string WriteCommand(Command c) => CommandWire.Write(c);
 
-        private static Command ReadCommand(string line)
-        {
-            var p = line.Split(' ');
-            var issuer = (PlayerId)I(p[1]);
-            switch (p[0])
-            {
-                case "M": return new MoveUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
-                case "A": return new AttackUnit(issuer, I(p[2]), I(p[3]));
-                case "E": return new EndTurn(issuer);
-                case "C": return new CreateUnit(issuer, ReadStats(p, 2));
-                case "D": return new DeployUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
-                case "N": return new DeployGenerator(issuer, new HexCoord(I(p[2]), I(p[3])));
-                default: throw new FormatException("unknown command token " + p[0]);
-            }
-        }
+        private static Command ReadCommand(string line) => CommandWire.Read(line);
     }
 }
