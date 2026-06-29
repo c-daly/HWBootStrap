@@ -50,6 +50,18 @@ namespace HexWars.Engine.Tests
                     Assert.That(UnitAt(st, b.Cell), Is.True, "without build-anywhere, builds only under a unit");
         }
 
+        [Test]
+        public void PointDecay_BleedsABankedSurplus()
+        {
+            var cfg = GameConfig.Default(biomesEnabled: false, territoryMode: true, pointDecay: 0.2, startingPoints: 100);
+            var st = GameFactory.BuildTerritory(cfg, 11, 9, 1);
+            int before = st.Player(PlayerId.Player1).Points; // P1 gets income+decay when P0 ends its turn
+            var r = GameEngine.Apply(st, new EndTurn(PlayerId.Player0));
+            Assert.That(r.Success, Is.True);
+            Assert.That(r.NewState.Player(PlayerId.Player1).Points, Is.LessThan(before),
+                "a big bank with no generator income should shrink under decay");
+        }
+
         static bool UnitAt(GameState st, HexCoord cell)
         {
             foreach (var u in st.Player(PlayerId.Player0).UnitsOnBoard)

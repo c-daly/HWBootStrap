@@ -81,6 +81,10 @@ namespace HexWars.Engine
         public int TerritoryIncome { get; }
         /// <summary>When false, generators can't be built (the pure passive-income economy). Default true.</summary>
         public bool GeneratorsEnabled { get; }
+        /// <summary>Fraction of a player's banked points that decays at the start of each of their turns
+        /// (use-it-or-lose-it: spend on army or lose it). Self-targeting — big hoards bleed, small balances
+        /// barely notice. Default 0 = no decay.</summary>
+        public double PointDecay { get; }
 
         // Uniform terrain used for every tile when BiomesEnabled is false.
         private static readonly TerrainDef FlatTerrain = new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true);
@@ -114,7 +118,8 @@ namespace HexWars.Engine
             bool claimEndsTurn = true,
             bool buildAnywhere = false,
             int territoryIncome = 0,
-            bool generatorsEnabled = true)
+            bool generatorsEnabled = true,
+            double pointDecay = 0.0)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -145,6 +150,7 @@ namespace HexWars.Engine
             BuildAnywhere = buildAnywhere;
             TerritoryIncome = territoryIncome;
             GeneratorsEnabled = generatorsEnabled;
+            PointDecay = pointDecay;
         }
 
         /// <summary>Modifier table for the given terrain. With biomes off, every tile reads as flat plains.</summary>
@@ -164,7 +170,8 @@ namespace HexWars.Engine
             bool claimEndsTurn = true,
             bool buildAnywhere = false,
             int territoryIncome = 0,
-            bool generatorsEnabled = true) =>
+            bool generatorsEnabled = true,
+            double pointDecay = 0.0) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -178,6 +185,6 @@ namespace HexWars.Engine
            generatorOutput: generatorOutput, startingPoints: startingPoints, damageFloor: damageFloor,
            territoryMode: territoryMode, claimEndsTurn: claimEndsTurn,
            buildAnywhere: buildAnywhere, territoryIncome: territoryIncome,
-           generatorsEnabled: generatorsEnabled);
+           generatorsEnabled: generatorsEnabled, pointDecay: pointDecay);
     }
 }

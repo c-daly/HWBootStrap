@@ -105,57 +105,56 @@ if (args.Length >= 1 && args[0] == "grid")
 //   dotnet run --project engine/HexWars.Sim -- territory [games]
 if (args.Length >= 1 && args[0] == "territory")
 {
-    int games = args.Length >= 2 ? int.Parse(args[1]) : 60;
-    int econThreshold = args.Length >= 3 ? int.Parse(args[2]) : 200;
+    int games = args.Length >= 2 ? int.Parse(args[1]) : 100;
     int width = 11, height = 9, maxCmds = 4000;
-
-    var placements = new (string name, bool anywhere)[] { ("occ", false), ("any", true) };
-    var incomes = new (string name, int gout, int tinc, bool gens)[] { ("gen", 1, 0, true), ("passive", 0, 1, false), ("both", 1, 1, true) };
-    var caps = new[] { 1, 4 };
-    var pts = new[] { 20, 40 };
-
     double Pc(int x) => 100.0 * x / games;
-    Console.WriteLine($"Territory balance — Greedy mirror, {games} games/config, {width}x{height}, econWin={econThreshold}");
-    Console.WriteLine("place income   cap pts |  P1%  P2% draw%  to% | rnds | econ% anni% oth% | hexes gens");
-    foreach (var pl in placements)
-        foreach (var inc in incomes)
-            foreach (var cap in caps)
-                foreach (var stp in pts)
-                {
-                    var c = GameConfig.Default(
-                        biomesEnabled: false, territoryMode: true, claimEndsTurn: true,
-                        winConditions: WinBy.Economy | WinBy.Annihilation,
-                        captureCost: cap, generatorOutput: inc.gout, territoryIncome: inc.tinc,
-                        generatorsEnabled: inc.gens,
-                        buildAnywhere: pl.anywhere, startingPoints: stp, damageFloor: 1,
-                        economyWinThreshold: econThreshold);
 
-                    int p0 = 0, p1 = 0, dr = 0, to = 0, econ = 0, anni = 0, oth = 0;
-                    long rounds = 0, hexes = 0, gens = 0, maxPts = 0;
-                    for (int s = 0; s < games; s++)
-                    {
-                        var st = GameFactory.BuildTerritory(c, width, height, s);
-                        var r = Match.Run(st, new GreedyAgent(2 * s + 1), new GreedyAgent(2 * s + 2), maxCmds);
-                        rounds += r.Rounds;
-                        var f = r.Final;
-                        maxPts += System.Math.Max(f.Player(PlayerId.Player0).Points, f.Player(PlayerId.Player1).Points);
-                        hexes += Economy.ControlledHexes(f, PlayerId.Player0) + Economy.ControlledHexes(f, PlayerId.Player1);
-                        gens += Gens(f, PlayerId.Player0) + Gens(f, PlayerId.Player1);
-                        if (r.TimedOut) { to++; continue; }
-                        if (r.Winner == null) { dr++; continue; }
-                        if (r.Winner == PlayerId.Player0) p0++; else p1++;
-                        var loser = r.Winner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
-                        int winVal = r.Winner == PlayerId.Player0 ? r.Value0 : r.Value1;
-                        if (Units(f, loser) == 0) anni++;
-                        else if (winVal >= c.EconomyWinThreshold) econ++;
-                        else oth++;
-                    }
-                    Console.WriteLine($"{pl.name,-5} {inc.name,-8}{cap,3}{stp,4} | {Pc(p0),4:F0} {Pc(p1),4:F0} {Pc(dr),4:F0} {Pc(to),4:F0} | {rounds / (double)games,4:F0} | {Pc(econ),4:F0} {Pc(anni),5:F0} {Pc(oth),4:F0} | {hexes / (double)games,5:F1} {gens / (double)games,4:F1} {maxPts / (double)games,5:F0}");
-                }
+    // combat-centric territory ruleset (no economy win; gentle decay) — the lever under test is PointDecay
+    GameConfig Terr(double decay) => GameConfig.Default(
+        biomesEnabled: false, territoryMode: true, claimEndsTurn: true,
+        winConditions: WinBy.Annihilation | WinBy.Score,
+        generatorOutput: 1, startingPoints: 40, damageFloor: 1, pointDecay: decay);
+
+    // A) Does decay keep games decisive, and does it push points into army instead of the bank?
+    Console.WriteLine($"A) Point-decay sweep — Greedy mirror, {games} games, {width}x{height}, annihilation win");
+    Console.WriteLine("decay |  P1%  P2% draw%  to% | rounds | armyEnd maxBank");
+    foreach (var decay in new[] { 0.0, 0.1, 0.2, 0.3 })
+    {
+        var c = Terr(decay);
+        int p0 = 0, p1 = 0, dr = 0, to = 0; long rounds = 0, army = 0, bank = 0;
+        for (int s = 0; s < games; s++)
+        {
+            var r = Match.Run(GameFactory.BuildTerritory(c, width, height, s), new GreedyAgent(2 * s + 1), new GreedyAgent(2 * s + 2), maxCmds);
+            rounds += r.Rounds;
+            army += Units(r.Final, PlayerId.Player0) + Units(r.Final, PlayerId.Player1);
+            bank += System.Math.Max(r.Final.Player(PlayerId.Player0).Points, r.Final.Player(PlayerId.Player1).Points);
+            if (r.TimedOut) to++; else if (r.Winner == null) dr++; else if (r.Winner == PlayerId.Player0) p0++; else p1++;
+        }
+        Console.WriteLine($"{decay,5:F2} | {Pc(p0),4:F0} {Pc(p1),4:F0} {Pc(dr),4:F0} {Pc(to),4:F0} | {rounds / (double)games,6:F1} | {army / (double)games,6:F1} {bank / (double)games,6:F0}");
+    }
+
+    // B) Does decay punish a hoarder (banks points, never spends)? Run both seatings.
+    Console.WriteLine();
+    Console.WriteLine($"B) Greedy vs Hoarder — {2 * games} games, annihilation win");
+    Console.WriteLine("decay | greedyWin% | hoarderEndBank");
+    foreach (var decay in new[] { 0.0, 0.15 })
+    {
+        var c = Terr(decay);
+        int gWin = 0; long bank = 0; int n = 2 * games;
+        for (int s = 0; s < games; s++)
+        {
+            var ra = Match.Run(GameFactory.BuildTerritory(c, width, height, s), new GreedyAgent(2 * s + 1), new HoarderAgent(2 * s + 2), maxCmds);
+            if (ra.Winner == PlayerId.Player0) gWin++;
+            bank += ra.Final.Player(PlayerId.Player1).Points;
+            var rb = Match.Run(GameFactory.BuildTerritory(c, width, height, s + 100000), new HoarderAgent(2 * s + 1), new GreedyAgent(2 * s + 2), maxCmds);
+            if (rb.Winner == PlayerId.Player1) gWin++;
+            bank += rb.Final.Player(PlayerId.Player0).Points;
+        }
+        Console.WriteLine($"{decay,5:F2} | {100.0 * gWin / n,9:F0} | {bank / (double)n,14:F0}");
+    }
     return;
 
     static int Units(GameState s, PlayerId p) { int n = 0; foreach (var u in s.Player(p).UnitsOnBoard) if (u.IsAlive) n++; return n; }
-    static int Gens(GameState s, PlayerId p) { int n = 0; foreach (var g in s.Player(p).Generators) if (g.IsAlive) n++; return n; }
 }
 
 GameState NewGame(int seed, int points)

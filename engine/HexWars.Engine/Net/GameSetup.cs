@@ -62,8 +62,12 @@ namespace HexWars.Engine
             bool territory = setup.Mode == GameMode.Territory;
             // biomesEnabled false: terrain is inert (no impassable/expensive tiles that box units in).
             // damageFloor 1: a landed attack by a real combatant always deals at least 1 (no 0-damage hits).
+            // Territory is combat-centric: economy funds the army, it doesn't win on its own. So no Economy
+            // win — Annihilation decides, Score breaks a round-cap tie. (Sim validation showed dropping the
+            // economy win already makes hoarding a ~96% loss; point decay on top just taxes the active spender,
+            // so it's left off — the PointDecay knob stays available for experiments.)
             var config = territory
-                ? GameConfig.Default(biomesEnabled: false, winConditions: WinBy.Economy | WinBy.Annihilation,
+                ? GameConfig.Default(biomesEnabled: false, winConditions: WinBy.Annihilation | WinBy.Score,
                                      startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1)
                 : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1);
 

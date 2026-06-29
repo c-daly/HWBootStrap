@@ -68,7 +68,11 @@ namespace HexWars.Engine
             int net = Economy.Income(state, next) - Economy.Upkeep(state, next);
             var players = state.Players.ToArray();
             var np = players[(int)next];
-            players[(int)next] = np.WithPoints(System.Math.Max(0, np.Points + net));
+            int pts = System.Math.Max(0, np.Points + net);
+            // use-it-or-lose-it: a fraction of banked points decays each turn (big hoards bleed fastest)
+            if (state.Config.PointDecay > 0)
+                pts -= (int)System.Math.Round(pts * state.Config.PointDecay, System.MidpointRounding.AwayFromZero);
+            players[(int)next] = np.WithPoints(pts);
 
             return Result.Ok(new GameState(state.Board, state.Config, players, next, round,
                 state.NextEntityId, state.IsGameOver, state.Winner,
