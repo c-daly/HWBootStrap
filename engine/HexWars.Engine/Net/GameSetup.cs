@@ -80,6 +80,20 @@ namespace HexWars.Engine
             return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
         }
 
+        /// <summary>Build a territory game with an explicit ruleset (for balance experiments): same board and
+        /// army seeding as <see cref="Build"/>, but the caller supplies the <see cref="GameConfig"/> to vary.</summary>
+        public static GameState BuildTerritory(GameConfig config, int width, int height, int seed)
+        {
+            var board = new RandomBoardGenerator(new BoardGenConfig(width, height, maxElevation: 2)).Generate(seed);
+            board = board.WithControl(board.DeploymentZone(PlayerId.Player0), PlayerId.Player0);
+            board = board.WithControl(board.DeploymentZone(PlayerId.Player1), PlayerId.Player1);
+            var army = BuildArmy(new GameSetup(GameMode.Territory, width, height, config.StartingPoints, seed));
+            int nextId = 1;
+            var p0 = SeedPlayer(board, PlayerId.Player0, config.StartingPoints, army, ref nextId);
+            var p1 = SeedPlayer(board, PlayerId.Player1, config.StartingPoints, army, ref nextId);
+            return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
+        }
+
         // Both sides share one composition (symmetric/fair). Requested role counts come first; any remaining
         // slots up to ArmySize are filled with random roles from a seed-derived RNG — so all-zero counts give
         // a fully random army, partial counts fill the rest randomly.

@@ -99,6 +99,65 @@ if (args.Length >= 1 && args[0] == "grid")
     }
 }
 
+// Territory balance: greedy-mirror batches across a matrix of territory rulesets (build placement ×
+// income model × capture cost × starting points), reporting who wins, how (economy vs annihilation),
+// decisiveness, length, and end-state economy.
+//   dotnet run --project engine/HexWars.Sim -- territory [games]
+if (args.Length >= 1 && args[0] == "territory")
+{
+    int games = args.Length >= 2 ? int.Parse(args[1]) : 60;
+    int econThreshold = args.Length >= 3 ? int.Parse(args[2]) : 200;
+    int width = 11, height = 9, maxCmds = 4000;
+
+    var placements = new (string name, bool anywhere)[] { ("occ", false), ("any", true) };
+    var incomes = new (string name, int gout, int tinc, bool gens)[] { ("gen", 1, 0, true), ("passive", 0, 1, false), ("both", 1, 1, true) };
+    var caps = new[] { 1, 4 };
+    var pts = new[] { 20, 40 };
+
+    double Pc(int x) => 100.0 * x / games;
+    Console.WriteLine($"Territory balance — Greedy mirror, {games} games/config, {width}x{height}, econWin={econThreshold}");
+    Console.WriteLine("place income   cap pts |  P1%  P2% draw%  to% | rnds | econ% anni% oth% | hexes gens");
+    foreach (var pl in placements)
+        foreach (var inc in incomes)
+            foreach (var cap in caps)
+                foreach (var stp in pts)
+                {
+                    var c = GameConfig.Default(
+                        biomesEnabled: false, territoryMode: true, claimEndsTurn: true,
+                        winConditions: WinBy.Economy | WinBy.Annihilation,
+                        captureCost: cap, generatorOutput: inc.gout, territoryIncome: inc.tinc,
+                        generatorsEnabled: inc.gens,
+                        buildAnywhere: pl.anywhere, startingPoints: stp, damageFloor: 1,
+                        economyWinThreshold: econThreshold);
+
+                    int p0 = 0, p1 = 0, dr = 0, to = 0, econ = 0, anni = 0, oth = 0;
+                    long rounds = 0, hexes = 0, gens = 0, maxPts = 0;
+                    for (int s = 0; s < games; s++)
+                    {
+                        var st = GameFactory.BuildTerritory(c, width, height, s);
+                        var r = Match.Run(st, new GreedyAgent(2 * s + 1), new GreedyAgent(2 * s + 2), maxCmds);
+                        rounds += r.Rounds;
+                        var f = r.Final;
+                        maxPts += System.Math.Max(f.Player(PlayerId.Player0).Points, f.Player(PlayerId.Player1).Points);
+                        hexes += Economy.ControlledHexes(f, PlayerId.Player0) + Economy.ControlledHexes(f, PlayerId.Player1);
+                        gens += Gens(f, PlayerId.Player0) + Gens(f, PlayerId.Player1);
+                        if (r.TimedOut) { to++; continue; }
+                        if (r.Winner == null) { dr++; continue; }
+                        if (r.Winner == PlayerId.Player0) p0++; else p1++;
+                        var loser = r.Winner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+                        int winVal = r.Winner == PlayerId.Player0 ? r.Value0 : r.Value1;
+                        if (Units(f, loser) == 0) anni++;
+                        else if (winVal >= c.EconomyWinThreshold) econ++;
+                        else oth++;
+                    }
+                    Console.WriteLine($"{pl.name,-5} {inc.name,-8}{cap,3}{stp,4} | {Pc(p0),4:F0} {Pc(p1),4:F0} {Pc(dr),4:F0} {Pc(to),4:F0} | {rounds / (double)games,4:F0} | {Pc(econ),4:F0} {Pc(anni),5:F0} {Pc(oth),4:F0} | {hexes / (double)games,5:F1} {gens / (double)games,4:F1} {maxPts / (double)games,5:F0}");
+                }
+    return;
+
+    static int Units(GameState s, PlayerId p) { int n = 0; foreach (var u in s.Player(p).UnitsOnBoard) if (u.IsAlive) n++; return n; }
+    static int Gens(GameState s, PlayerId p) { int n = 0; foreach (var g in s.Player(p).Generators) if (g.IsAlive) n++; return n; }
+}
+
 GameState NewGame(int seed, int points)
 {
     var board = gen.Generate(seed + 1); // +1 so seed 0 isn't the trivial board

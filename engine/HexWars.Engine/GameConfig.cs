@@ -73,6 +73,15 @@ namespace HexWars.Engine
         /// immediately ends the turn — the vulnerable-as-you-expand tempo. Default true.</summary>
         public bool ClaimEndsTurn { get; }
 
+        /// <summary>When true (TerritoryMode), a generator may be built on ANY hex you control, not only the
+        /// hex a unit stands on. Default false = build only under a unit.</summary>
+        public bool BuildAnywhere { get; }
+        /// <summary>Passive income per controlled hex per turn (the no-generator economy). Default 0 = income
+        /// comes only from generators.</summary>
+        public int TerritoryIncome { get; }
+        /// <summary>When false, generators can't be built (the pure passive-income economy). Default true.</summary>
+        public bool GeneratorsEnabled { get; }
+
         // Uniform terrain used for every tile when BiomesEnabled is false.
         private static readonly TerrainDef FlatTerrain = new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true);
 
@@ -102,7 +111,10 @@ namespace HexWars.Engine
             double captureFactor = 4.0,
             double buildFactor = 4.0,
             bool territoryMode = false,
-            bool claimEndsTurn = true)
+            bool claimEndsTurn = true,
+            bool buildAnywhere = false,
+            int territoryIncome = 0,
+            bool generatorsEnabled = true)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -130,6 +142,9 @@ namespace HexWars.Engine
             BuildFactor = buildFactor;
             TerritoryMode = territoryMode;
             ClaimEndsTurn = claimEndsTurn;
+            BuildAnywhere = buildAnywhere;
+            TerritoryIncome = territoryIncome;
+            GeneratorsEnabled = generatorsEnabled;
         }
 
         /// <summary>Modifier table for the given terrain. With biomes off, every tile reads as flat plains.</summary>
@@ -146,7 +161,10 @@ namespace HexWars.Engine
             int startingPoints = 12,
             int damageFloor = 0,
             bool territoryMode = false,
-            bool claimEndsTurn = true) =>
+            bool claimEndsTurn = true,
+            bool buildAnywhere = false,
+            int territoryIncome = 0,
+            bool generatorsEnabled = true) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -158,6 +176,8 @@ namespace HexWars.Engine
            scoreKills: scoreKills, scorePoints: scorePoints, scoreArmy: scoreArmy, scoreTerritory: scoreTerritory,
            upkeepFactor: upkeepFactor, captureFactor: captureFactor, buildFactor: buildFactor,
            generatorOutput: generatorOutput, startingPoints: startingPoints, damageFloor: damageFloor,
-           territoryMode: territoryMode, claimEndsTurn: claimEndsTurn);
+           territoryMode: territoryMode, claimEndsTurn: claimEndsTurn,
+           buildAnywhere: buildAnywhere, territoryIncome: territoryIncome,
+           generatorsEnabled: generatorsEnabled);
     }
 }

@@ -10,7 +10,19 @@ namespace HexWars.Engine
             double income = 0;
             foreach (var g in state.Player(player).Generators)
                 if (g.IsAlive) income += state.Config.GeneratorOutput * g.Strength;
+            // optional passive income: each controlled hex pays TerritoryIncome (the no-generator economy)
+            if (state.Config.TerritoryIncome > 0)
+                income += state.Config.TerritoryIncome * ControlledHexes(state, player);
             return (int)System.Math.Round(income, System.MidpointRounding.AwayFromZero);
+        }
+
+        /// <summary>Number of board hexes the player currently controls.</summary>
+        public static int ControlledHexes(GameState state, PlayerId player)
+        {
+            int n = 0;
+            foreach (var t in state.Board.Tiles)
+                if (state.Board.Controller(t.Coord) == player) n++;
+            return n;
         }
 
         /// <summary>Per-turn upkeep = round(income × UpkeepFactor).</summary>

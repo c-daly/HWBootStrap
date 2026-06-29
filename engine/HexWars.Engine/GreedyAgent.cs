@@ -14,12 +14,14 @@ namespace HexWars.Engine
         private readonly Random _rng;
         private readonly double _pointsWeight; // banked points are worth less than units on the board
         private readonly double _aggression;   // per-hex reward for closing on the nearest enemy
+        private readonly double _territoryWeight; // value per controlled hex (territory mode) so it claims/expands
 
-        public GreedyAgent(int seed, double pointsWeight = 0.5, double aggression = 0.08)
+        public GreedyAgent(int seed, double pointsWeight = 0.5, double aggression = 0.08, double territoryWeight = 3.0)
         {
             _rng = new Random(seed);
             _pointsWeight = pointsWeight;
             _aggression = aggression;
+            _territoryWeight = territoryWeight;
         }
 
         public Command Decide(GameState state)
@@ -74,7 +76,10 @@ namespace HexWars.Engine
             var ps = s.Player(p);
             double v = _pointsWeight * ps.Points;
             foreach (var u in ps.UnitsOnBoard) if (u.IsAlive) v += u.Stats.PointCost;
-            foreach (var g in ps.Generators) if (g.IsAlive) v += s.Config.GeneratorCost;
+            // value a generator by the income it actually makes (~2 turns of output), not its sunk build
+            // cost — so the agent won't build output-zero generators in the passive-income model
+            foreach (var g in ps.Generators) if (g.IsAlive) v += s.Config.GeneratorOutput * g.Strength * 2.0;
+            if (s.Config.TerritoryMode) v += _territoryWeight * Economy.ControlledHexes(s, p);
             return v;
         }
 

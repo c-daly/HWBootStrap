@@ -61,11 +61,19 @@ namespace HexWars.Engine
                     && player.Points >= CaptureCostFor(state, unit.Cell))
                     moves.Add(new CaptureHex(me, unit.Cell));
 
-                if (board.Controller(unit.Cell) == me
+                if (state.Config.GeneratorsEnabled
+                    && board.Controller(unit.Cell) == me
                     && !HasGeneratorAt(state, unit.Cell)
                     && player.Points >= BuildCostFor(state.Config))
                     moves.Add(new BuildGenerator(me, unit.Cell));
             }
+
+            // build-anywhere: a generator may go on any empty hex you control, not just under a unit
+            if (state.Config.GeneratorsEnabled && state.Config.TerritoryMode && state.Config.BuildAnywhere
+                && player.Points >= BuildCostFor(state.Config))
+                foreach (var t in board.Tiles)
+                    if (board.Controller(t.Coord) == me && !IsOccupied(state, t.Coord))
+                        moves.Add(new BuildGenerator(me, t.Coord));
 
             moves.Add(new EndTurn(me));
             return moves;
