@@ -153,12 +153,14 @@ if (args.Length >= 1 && args[0] == "territory")
         Console.WriteLine($"{decay,5:F2} | {100.0 * gWin / n,9:F0} | {bank / (double)n,14:F0}");
     }
 
-    // C) Where does the second-player edge come from? Compare turn structures. If P2's edge shrinks under
-    // one-action-per-turn, the cause is the second-mover counter to a whole-army commitment.
+    // C) Tune the second-player edge: sweep how many actions a player commits before passing (K), from
+    // near one-action up to whole-army. Find the K that's both fair (P1≈P2) and fast (few rounds).
     Console.WriteLine();
-    Console.WriteLine($"C) Second-player advantage by turn structure — Greedy mirror, {games} games");
-    Console.WriteLine("turn structure | P1(first)% P2(second)% | rounds");
-    foreach (var (pname, policy) in new (string, ITurnPolicy)[] { ("whole-army", new AllUnitsPolicy()), ("one-action", new OneActionPolicy()) })
+    Console.WriteLine($"C) Second-player advantage vs commitment (K actions/turn) — Greedy mirror, {games} games");
+    Console.WriteLine("turn policy    | P1(first)% P2(second)% | rounds");
+    foreach (var (pname, policy) in new (string, ITurnPolicy)[] {
+        ("K=1", new KActionsPolicy(1)), ("K=2", new KActionsPolicy(2)), ("K=3", new KActionsPolicy(3)),
+        ("K=4", new KActionsPolicy(4)), ("K=6", new KActionsPolicy(6)), ("whole-army", new AllUnitsPolicy()) })
     {
         var c = GameConfig.Default(biomesEnabled: false, territoryMode: true, claimEndsTurn: true,
             winConditions: WinBy.Annihilation | WinBy.Score, generatorOutput: 1, startingPoints: 40,

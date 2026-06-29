@@ -22,7 +22,7 @@ namespace HexWars.Engine
 
             // One-action turn policies auto-end the turn after a single non-EndTurn action.
             if (!newState.IsGameOver && !(command is EndTurn)
-                && (newState.Config.TurnPolicy.AutoEndTurnAfter(command)
+                && (newState.Config.TurnPolicy.AutoEndTurnAfter(command, newState)
                     || (newState.Config.TerritoryMode && newState.Config.ClaimEndsTurn && command is CaptureHex)))
             {
                 newState = Finalize(ApplyEndTurn(newState, new EndTurn(command.Issuer)).NewState);
