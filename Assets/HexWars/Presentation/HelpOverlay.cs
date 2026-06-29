@@ -104,10 +104,10 @@ YOUR UNITS
   Tap an enemy within range to ATTACK
 
 TERRITORY MODE
-  Select a unit, then use the button at the bottom of
-  the screen to:
+  Select a unit, then use the button at the bottom:
     - CLAIM the hex it stands on (costs points, ends turn)
-    - BUILD a generator on a hex you control
+    - BUILD generators: tap ""Build generators"", then tap
+      any hexes you control to place them
   Generators are your ONLY income, so build them early.
   Start a Territory game with about 40 points so you can
   afford the first claims and a generator.

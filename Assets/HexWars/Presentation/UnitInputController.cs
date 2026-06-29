@@ -30,6 +30,7 @@ namespace HexWars.Presentation
         Image _actionBg;
         Text _actionLabel;
         System.Action _actionOnClick;
+        bool _buildMode; // territory: when on, taps place generators on any hex you control
 
         /// <summary>Spectator mode: hover tooltips and click-to-inspect still work, but no commands are
         /// issued (the AI is playing). Set by <see cref="SpectatorDriver"/> instead of disabling input.</summary>
@@ -99,6 +100,17 @@ namespace HexWars.Presentation
             if (ReadOnly) { Select(unit); return; } // spectating: inspect any unit, but issue no commands
             if (_game == null || _game.State == null) { Select(unit); return; }
             var active = _game.State.ActivePlayer;
+
+            // build mode (territory): a tap places a generator on any empty hex you control
+            if (_buildMode && _game.State.Config.TerritoryMode)
+            {
+                var bst = _game.State;
+                HexCoord? target = tile != null ? (HexCoord?)tile.Coord : (unit != null ? (HexCoord?)unit.Unit.Cell : null);
+                if (target.HasValue && bst.Board.Controller(target.Value) == active && !HasGeneratorOn(bst, target.Value))
+                    _game.TryApply(new BuildGenerator(active, target.Value));
+                return; // while building, taps only place generators (or do nothing)
+            }
+
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
 
             // attack intent: only fire if not already attacked AND actually targetable (range/vision/LOS/arc)
@@ -388,7 +400,16 @@ namespace HexWars.Presentation
             var cell = _selected.Unit.Cell;
             int points = st.Player(active).Points;
             bool actedAlready = st.MovedUnitIds.Count > 0 || st.AttackedUnitIds.Count > 0;
+            int buildCost = Mathf.RoundToInt((float)(st.Config.BuildFactor * st.Config.GeneratorOutput));
 
+            // build mode: tap any hex you control to place a generator there
+            if (_buildMode)
+            {
+                ShowAction("Building — tap your hexes to place   ·   Done", () => _buildMode = false);
+                return;
+            }
+
+            // claim the unit's own hex if it isn't yours yet
             if (st.Board.Controller(cell) != active)
             {
                 int cost = st.Config.CaptureCost;
@@ -399,17 +420,14 @@ namespace HexWars.Presentation
                 else
                     ShowAction($"Claim hex   ·   {cost} pts, ends turn",
                                () => { _game.TryApply(new CaptureHex(active, cell)); ReacquireSelection(); });
+                return;
             }
-            else if (!HasGeneratorOn(st, cell))
-            {
-                int cost = Mathf.RoundToInt((float)(st.Config.BuildFactor * st.Config.GeneratorOutput));
-                if (points < cost)
-                    ShowAction($"Build generator  —  need {cost} pts (have {points})", null);
-                else
-                    ShowAction($"Build generator   ·   {cost} pts",
-                               () => { _game.TryApply(new BuildGenerator(active, cell)); ReacquireSelection(); });
-            }
-            else HideAction();
+
+            // standing on your own territory: place generators on any hex you control
+            if (points >= buildCost)
+                ShowAction("Build generators   ·   tap your hexes", () => _buildMode = true);
+            else
+                ShowAction($"Build generator  —  need {buildCost} pts (have {points})", null);
         }
 
         void ShowAction(string label, System.Action onClick)
