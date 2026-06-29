@@ -152,6 +152,26 @@ if (args.Length >= 1 && args[0] == "territory")
         }
         Console.WriteLine($"{decay,5:F2} | {100.0 * gWin / n,9:F0} | {bank / (double)n,14:F0}");
     }
+
+    // C) Where does the second-player edge come from? Compare turn structures. If P2's edge shrinks under
+    // one-action-per-turn, the cause is the second-mover counter to a whole-army commitment.
+    Console.WriteLine();
+    Console.WriteLine($"C) Second-player advantage by turn structure — Greedy mirror, {games} games");
+    Console.WriteLine("turn structure | P1(first)% P2(second)% | rounds");
+    foreach (var (pname, policy) in new (string, ITurnPolicy)[] { ("whole-army", new AllUnitsPolicy()), ("one-action", new OneActionPolicy()) })
+    {
+        var c = GameConfig.Default(biomesEnabled: false, territoryMode: true, claimEndsTurn: true,
+            winConditions: WinBy.Annihilation | WinBy.Score, generatorOutput: 1, startingPoints: 40,
+            damageFloor: 1, turnPolicy: policy);
+        int p0 = 0, p1 = 0; long rounds = 0;
+        for (int s = 0; s < games; s++)
+        {
+            var r = Match.Run(GameFactory.BuildTerritory(c, width, height, s), new GreedyAgent(2 * s + 1), new GreedyAgent(2 * s + 2), maxCmds);
+            rounds += r.Rounds;
+            if (r.Winner == PlayerId.Player0) p0++; else if (r.Winner == PlayerId.Player1) p1++;
+        }
+        Console.WriteLine($"{pname,-14} | {Pc(p0),9:F0} {Pc(p1),10:F0} | {rounds / (double)games,6:F1}");
+    }
     return;
 
     static int Units(GameState s, PlayerId p) { int n = 0; foreach (var u in s.Player(p).UnitsOnBoard) if (u.IsAlive) n++; return n; }
