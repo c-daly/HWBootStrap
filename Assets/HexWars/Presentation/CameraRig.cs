@@ -60,6 +60,30 @@ namespace HexWars.Presentation
                     Distance = Mathf.Clamp(Distance - scroll * ZoomSpeed * dt, 4f, 90f);
             }
 
+            // touch: one-finger drag pans, two-finger pinch zooms
+            var ts = Touchscreen.current;
+            if (ts != null)
+            {
+                var touches = ts.touches;
+                int active = 0, i0 = -1, i1 = -1;
+                for (int i = 0; i < touches.Count; i++)
+                    if (touches[i].press.isPressed) { if (active == 0) i0 = i; else if (active == 1) i1 = i; active++; }
+
+                if (active == 1)
+                {
+                    Vector2 d = touches[i0].delta.ReadValue();
+                    Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
+                    float scale = Distance * 0.0016f;
+                    _focus -= (transform.right * d.x + fwd * d.y) * scale; // drag the world under the finger
+                }
+                else if (active >= 2)
+                {
+                    Vector2 a = touches[i0].position.ReadValue(), b = touches[i1].position.ReadValue();
+                    Vector2 pa = a - touches[i0].delta.ReadValue(), pb = b - touches[i1].delta.ReadValue();
+                    Distance = Mathf.Clamp(Distance - (Vector2.Distance(a, b) - Vector2.Distance(pa, pb)) * 0.03f, 4f, 90f);
+                }
+            }
+
             Apply();
         }
 

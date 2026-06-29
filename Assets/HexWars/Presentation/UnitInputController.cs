@@ -46,13 +46,17 @@ namespace HexWars.Presentation
             _hint = MakeHintLabel();
         }
 
+        Vector2 _pressPos;
+        bool _pressedOverUi;
+        const float TapThreshold = 24f; // px; beyond this, a press is treated as a camera drag, not a tap
+
         void Update()
         {
-            var mouse = Mouse.current;
+            var pointer = Pointer.current; // mouse OR touch — one path for desktop and mobile
             var cam = Camera.main;
-            if (mouse == null || cam == null) return;
+            if (pointer == null || cam == null) return;
 
-            Vector2 mp = mouse.position.ReadValue();
+            Vector2 mp = pointer.position.ReadValue();
             UnitView hoveredUnit = null;
             TileView hoveredTile = null;
             if (Physics.Raycast(cam.ScreenPointToRay(mp), out var hit, 1000f))
@@ -65,8 +69,11 @@ namespace HexWars.Presentation
             else if (_selected != null) _tooltip.Show(_selected.Unit, mp);
             else _tooltip.Hide();
 
-            bool blocked = _animating || IsPointerOverUi() || (_barracks != null && _barracks.IsDeploying);
-            if (mouse.leftButton.wasPressedThisFrame && !blocked)
+            // act on a TAP (press + release without dragging) so a drag is free to pan the camera
+            if (pointer.press.wasPressedThisFrame) { _pressPos = mp; _pressedOverUi = IsPointerOverUi(); }
+            bool blocked = _animating || (_barracks != null && _barracks.IsDeploying);
+            if (pointer.press.wasReleasedThisFrame && !blocked && !_pressedOverUi
+                && Vector2.Distance(mp, _pressPos) <= TapThreshold)
                 HandleClick(hoveredUnit, hoveredTile);
 
             if (_selected != null && _marker.activeSelf)

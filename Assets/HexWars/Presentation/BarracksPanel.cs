@@ -43,11 +43,11 @@ namespace HexWars.Presentation
         void Update()
         {
             if (ReadOnly || _deployIndex < 0 || _game == null) return; // spectating: no human deploys
-            var mouse = Mouse.current;
+            var pointer = Pointer.current; // mouse or touch
             var cam = Camera.main;
-            if (mouse == null || cam == null || !mouse.leftButton.wasPressedThisFrame || IsOverUi()) return;
+            if (pointer == null || cam == null || !pointer.press.wasReleasedThisFrame || IsOverUi()) return;
 
-            var mp = mouse.position.ReadValue();
+            var mp = pointer.position.ReadValue();
             if (Physics.Raycast(cam.ScreenPointToRay(mp), out var hit, 1000f))
             {
                 var tv = hit.collider.GetComponentInParent<TileView>();
