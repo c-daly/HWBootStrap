@@ -23,6 +23,7 @@ namespace HexWars.Presentation
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1, _p0Dim, _p1Dim;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
+        readonly Dictionary<(TerrainType, PlayerId), Material> _controlMats = new Dictionary<(TerrainType, PlayerId), Material>();
         static Texture2D _matcap;
 
         static Texture2D MetalMatcap()
@@ -90,15 +91,19 @@ namespace HexWars.Presentation
                     if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
             }
 
-            // control overlay: every controlled hex carries a translucent owner-colored cap
-            ClearChild("Control");
-            var controlRoot = ChildRoot("Control");
-            foreach (var tile in state.Board.Tiles)
-            {
-                var owner = state.Board.Controller(tile.Coord);
-                if (owner == null) continue;
-                BuildControlCap(controlRoot.transform, tile.Coord, tile.Elevation, owner.Value);
-            }
+            // control overlay: tint the controlled hex itself toward its owner's colour (no floating caps)
+            var cols = transform.Find("Columns");
+            if (cols != null)
+                foreach (Transform col in cols)
+                {
+                    var tv = col.GetComponent<TileView>();
+                    var fillT = col.Find("Fill");
+                    if (tv == null || fillT == null) continue;
+                    var terrain = state.Board.TileAt(tv.Coord).Terrain;
+                    var owner = state.Board.Controller(tv.Coord);
+                    fillT.GetComponent<MeshRenderer>().sharedMaterial =
+                        owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);
+                }
         }
 
         static bool Contains(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
@@ -237,6 +242,21 @@ namespace HexWars.Presentation
             pylon.transform.localScale = new Vector3(HexSize * 0.45f, 0.9f, HexSize * 0.45f);
             pylon.GetComponent<MeshRenderer>().sharedMaterial = color;
             AddHull(pylon, 1.12f, 1.06f);
+        }
+
+        // tint a controlled hex toward its owner's colour, keeping the matcap metal look (opaque → WebGL-safe)
+        Material ControlTintMaterial(TerrainType terrain, PlayerId owner)
+        {
+            var key = (terrain, owner);
+            if (_controlMats.TryGetValue(key, out var m)) return m;
+            var baseMat = MaterialFor(terrain);
+            m = new Material(baseMat); // clone: same matcap shader + texture
+            Color baseC = baseMat.HasProperty("_BaseColor") ? baseMat.GetColor("_BaseColor") : baseMat.color;
+            Color ownerC = owner == PlayerId.Player0 ? new Color(0.27f, 0.68f, 1f) : new Color(0.92f, 0.28f, 0.28f);
+            Color tint = Color.Lerp(baseC, ownerC, 0.6f);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", tint);
+            m.color = tint;
+            return _controlMats[key] = m;
         }
 
         void BuildControlCap(Transform parent, HexCoord cell, int elevation, PlayerId owner)
