@@ -40,6 +40,10 @@ namespace HexWars.Presentation
         bool _vsAi;
         int _w = 9, _h = 7, _pts = 0, _seed = 7;
         int _armySize = 3, _brutes = 1, _strikers = 1, _snipers = 1;
+        int _turnActions = 3; // "Pace": 0 = whole army; K = commit K actions then auto-pass
+
+        static readonly int[] PacePresets = { 3, 4, 0, 1 };
+        static string PaceLabel(int k) => k <= 0 ? "whole army (fast)" : $"{k} action{(k == 1 ? "" : "s")}/turn";
 
         readonly List<(Button btn, Func<bool> selected)> _toggles = new List<(Button, Func<bool>)>();
 
@@ -76,7 +80,7 @@ namespace HexWars.Presentation
             var frt = _form.GetComponent<RectTransform>();
             frt.anchorMin = frt.anchorMax = new Vector2(0.5f, 0.5f);
             frt.pivot = new Vector2(0.5f, 0.5f);
-            frt.sizeDelta = new Vector2(680f, 560f);
+            frt.sizeDelta = new Vector2(680f, 608f);
             frt.anchoredPosition = Vector2.zero;
 
             float y = -22f;
@@ -101,6 +105,19 @@ namespace HexWars.Presentation
             armyBtn.GetComponent<Image>().color = new Color(0.17f, 0.20f, 0.27f, 1f);
             _armyLabel = armyBtn.GetComponentInChildren<Text>();
             _armyLabel.text = ArmySummary();
+            y -= 48f;
+
+            // pace = turn commitment (whole army ↔ K actions/turn); tunes both fairness and the claim tax
+            Text paceLabel = null;
+            var paceBtn = Btn(_form.transform, "", 0f, y, 480f, 40f, () =>
+            {
+                int idx = System.Array.IndexOf(PacePresets, _turnActions);
+                _turnActions = PacePresets[(idx + 1) % PacePresets.Length];
+                if (paceLabel != null) paceLabel.text = "Pace:  " + PaceLabel(_turnActions) + "   ▸";
+            });
+            paceBtn.GetComponent<Image>().color = new Color(0.17f, 0.20f, 0.27f, 1f);
+            paceLabel = paceBtn.GetComponentInChildren<Text>();
+            paceLabel.text = "Pace:  " + PaceLabel(_turnActions) + "   ▸";
             y -= 48f;
 
             ToggleBtn(_form.transform, "vs AI (single player)", -90f, y, 260f, 38f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
@@ -190,7 +207,7 @@ namespace HexWars.Presentation
 
         void OnCreate()
         {
-            var setup = new GameSetup(_mode, _w, _h, _pts, _seed, _armySize, _brutes, _strikers, _snipers);
+            var setup = new GameSetup(_mode, _w, _h, _pts, _seed, _armySize, _brutes, _strikers, _snipers, _turnActions);
             if (_vsAi)
             {
                 _game.StartLocalGame(setup, true);

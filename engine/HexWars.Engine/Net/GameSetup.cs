@@ -21,17 +21,18 @@ namespace HexWars.Engine
         public readonly int Brutes;     // requested counts of each role; the rest of ArmySize is filled
         public readonly int Strikers;   // with random roles (so all-zero = a fully random army)
         public readonly int Snipers;
+        public readonly int TurnActions; // actions a player commits before auto-passing; 0 = whole army
 
         public GameSetup(GameMode mode, int width, int height, int startingPoints, int seed,
-                         int armySize = 3, int brutes = 1, int strikers = 1, int snipers = 1)
+                         int armySize = 3, int brutes = 1, int strikers = 1, int snipers = 1, int turnActions = 0)
         {
             Mode = mode; Width = width; Height = height; StartingPoints = startingPoints; Seed = seed;
-            ArmySize = armySize; Brutes = brutes; Strikers = strikers; Snipers = snipers;
+            ArmySize = armySize; Brutes = brutes; Strikers = strikers; Snipers = snipers; TurnActions = turnActions;
         }
 
         public static GameSetup Default => new GameSetup(GameMode.Annihilation, 9, 7, 0, 7);
 
-        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers}";
+        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers} {TurnActions}";
 
         public static GameSetup Parse(string wire)
         {
@@ -39,7 +40,7 @@ namespace HexWars.Engine
             int G(int i, int def) => i < p.Length
                 && int.TryParse(p[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : def;
             return new GameSetup((GameMode)G(0, 0), G(1, 9), G(2, 7), G(3, 0), G(4, 7),
-                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1));
+                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0));
         }
     }
 
@@ -60,6 +61,9 @@ namespace HexWars.Engine
             var board = new RandomBoardGenerator(new BoardGenConfig(setup.Width, setup.Height, maxElevation: 2)).Generate(setup.Seed);
 
             bool territory = setup.Mode == GameMode.Territory;
+            // turn pace: 0 = whole army (snappy but a second-player advantage); K = commit K actions then
+            // auto-pass (fairer, more interleaved — sim shows K=2-3 balances first/second player).
+            ITurnPolicy turnPolicy = setup.TurnActions <= 0 ? null : new KActionsPolicy(setup.TurnActions);
             // biomesEnabled false: terrain is inert (no impassable/expensive tiles that box units in).
             // damageFloor 1: a landed attack by a real combatant always deals at least 1 (no 0-damage hits).
             // Territory is combat-centric: economy funds the army, it doesn't win on its own. So no Economy
@@ -68,8 +72,10 @@ namespace HexWars.Engine
             // so it's left off — the PointDecay knob stays available for experiments.)
             var config = territory
                 ? GameConfig.Default(biomesEnabled: false, winConditions: WinBy.Annihilation | WinBy.Score,
-                                     startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1)
-                : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1);
+                                     startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1,
+                                     turnPolicy: turnPolicy)
+                : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1,
+                                     turnPolicy: turnPolicy);
 
             if (territory)
             {
