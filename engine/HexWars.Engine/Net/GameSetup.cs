@@ -130,7 +130,8 @@ namespace HexWars.Engine
             var units = new List<Unit>();
             for (int i = 0; i < army.Length && i < flat.Count; i++)
                 units.Add(new Unit(nextId++, id, army[i], flat[i], 0));
-            return new PlayerState(id, startingPoints, null, units, null);
+            // pre-seed the barracks with the default roster so players can deploy without designing first
+            return new PlayerState(id, startingPoints, new List<UnitStats>(Roster), units, null);
         }
     }
 }

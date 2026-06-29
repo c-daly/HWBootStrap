@@ -35,15 +35,13 @@ namespace HexWars.Presentation
             scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
 
-            var q = Btn(canvasGo.transform, "?", new Color(0.18f, 0.32f, 0.50f, 0.95f), 26, Toggle);
+            var q = Btn(canvasGo.transform, "?", new Color(0.18f, 0.32f, 0.50f, 0.95f), 26,
+                        () => GameRules.Show(canvasGo.transform, _font, 950));
             var qrt = q.GetComponent<RectTransform>();
             qrt.anchorMin = qrt.anchorMax = new Vector2(1f, 1f);
             qrt.pivot = new Vector2(1f, 1f);
             qrt.sizeDelta = new Vector2(54f, 54f);
             qrt.anchoredPosition = new Vector2(-12f, -12f);
-
-            BuildPanel(canvasGo.transform);
-            _panel.SetActive(false);
         }
 
         void Toggle() { if (_panel != null) _panel.SetActive(!_panel.activeSelf); }

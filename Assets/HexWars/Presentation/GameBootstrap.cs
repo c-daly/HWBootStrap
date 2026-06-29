@@ -139,6 +139,7 @@ namespace HexWars.Presentation
             if (!result.Success)
             {
                 Debug.Log($"[HexWars] {cmd.GetType().Name} rejected: {result.Reason}");
+                Toast.Show(Friendly(result.Reason.ToString()));
                 return false;
             }
             var prev = State;
@@ -223,8 +224,26 @@ namespace HexWars.Presentation
         internal void OnNetReject(string reason)
         {
             Debug.Log("[Net] move rejected: " + reason);
+            Toast.Show(Friendly(reason));
             if (State != null) GetComponent<BoardRenderer>().RenderEntities(State); // snap optimistic UI back to truth
         }
+
+        /// <summary>Turn a RejectionReason name into a plain-language explanation for the player.</summary>
+        static string Friendly(string reason) => reason switch
+        {
+            "InsufficientPoints"    => "Not enough points for that.",
+            "HexNotControlled"      => "You can only build or deploy on your own territory.",
+            "OutsideDeploymentZone" => "Deploy inside your own starting area.",
+            "TileOccupied"          => "That hex is already taken.",
+            "TileImpassable"        => "A unit can't go there.",
+            "NotYourTurn"           => "It's not your turn.",
+            "MustClaimFirst"        => "Claiming has to be your turn's first action.",
+            "AlreadyControlled"     => "You already control that hex.",
+            "NoUnitOnHex"           => "You need one of your units on that hex.",
+            "TemplateNotFound"      => "Pick a unit to deploy first.",
+            "GameAlreadyOver"       => "The game is over.",
+            _                        => "That move isn't allowed right now.",
+        };
 
         // ---- sound ----
 

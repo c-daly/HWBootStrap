@@ -84,7 +84,12 @@ namespace HexWars.Presentation
             frt.anchoredPosition = Vector2.zero;
 
             float y = -22f;
-            Label(_form.transform, "HexWars — New Game", 0f, y, 680f, 36f, 25, TextAnchor.MiddleCenter); y -= 42f;
+            Label(_form.transform, "HexWars — New Game", 0f, y, 680f, 36f, 25, TextAnchor.MiddleCenter);
+            var rulesBtn = Btn(_form.transform, "Rules", 0f, 0f, 100f, 34f, () => GameRules.Show(_canvasGo.transform, _font, 1100));
+            var rrt = rulesBtn.GetComponent<RectTransform>();
+            rrt.anchorMin = rrt.anchorMax = new Vector2(1f, 1f); rrt.pivot = new Vector2(1f, 1f);
+            rrt.anchoredPosition = new Vector2(-12f, -12f);
+            y -= 42f;
             Label(_form.transform, "tap a value to type it, or use − / +", 0f, y, 680f, 22f, 14, TextAnchor.MiddleCenter); y -= 42f;
 
             ToggleBtn(_form.transform, "Annihilation", -90f, y, 170f, 38f, () => _mode == GameMode.Annihilation, () => { _mode = GameMode.Annihilation; Refresh(); });
