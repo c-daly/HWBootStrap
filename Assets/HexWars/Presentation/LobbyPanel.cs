@@ -7,10 +7,10 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Online/offline setup screen. Pick mode, map width/height, starting points, and seed (all typeable),
-    /// optionally toggle "vs AI", then Create or Join a room code. Create + vs-AI starts a local game vs the
-    /// computer; Create online connects with the chosen <see cref="GameSetup"/> and shows a shareable link;
-    /// Join connects to an existing room. Removes itself once the match starts.
+    /// Online/offline setup screen — fully tap-based so it works on mobile WebGL (no text fields, which
+    /// don't get a keyboard there). Steppers set map width/height and starting points, Reroll picks a seed,
+    /// toggles choose mode and vs-AI. Create + vs-AI starts a local game; Create online shows a shareable
+    /// link; joining is done by opening that link (no code typing). Removes itself once the match starts.
     /// </summary>
     public sealed class LobbyPanel : MonoBehaviour
     {
@@ -19,10 +19,10 @@ namespace HexWars.Presentation
         GameObject _canvasGo;
         GameObject _form;
         Text _status;
-        InputField _wIn, _hIn, _ptsIn, _seedIn, _joinIn;
 
         GameMode _mode = GameMode.Annihilation;
         bool _vsAi;
+        int _w = 9, _h = 7, _pts = 0, _seed = 7;
 
         readonly List<(Button btn, Func<bool> selected)> _toggles = new List<(Button, Func<bool>)>();
 
@@ -30,6 +30,7 @@ namespace HexWars.Presentation
         {
             _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             _game = FindAnyObjectByType<GameBootstrap>();
+            _seed = UnityEngine.Random.Range(1, 9999);
             Build();
             Refresh();
         }
@@ -58,51 +59,40 @@ namespace HexWars.Presentation
             var frt = _form.GetComponent<RectTransform>();
             frt.anchorMin = frt.anchorMax = new Vector2(0.5f, 0.5f);
             frt.pivot = new Vector2(0.5f, 0.5f);
-            frt.sizeDelta = new Vector2(460f, 600f);
+            frt.sizeDelta = new Vector2(470f, 560f);
             frt.anchoredPosition = Vector2.zero;
 
-            const float L = -210f, RX = 30f;  // label x, controls x
-            float y = -24f;
-            Label(_form.transform, "HexWars — New Game", 0f, y, 460f, 36f, 26, TextAnchor.MiddleCenter); y -= 56f;
+            const float L = -215f, RX = 36f;
+            float y = -22f;
+            Label(_form.transform, "HexWars — New Game", 0f, y, 470f, 36f, 26, TextAnchor.MiddleCenter); y -= 54f;
 
-            Label(_form.transform, "Mode", L, y, 150f, 30f, 17, TextAnchor.MiddleLeft);
-            ToggleBtn(_form.transform, "Annihilation", RX, y, 150f, 32f, () => _mode == GameMode.Annihilation, () => { _mode = GameMode.Annihilation; Refresh(); });
-            ToggleBtn(_form.transform, "Territory", RX + 158f, y, 120f, 32f, () => _mode == GameMode.Territory, () => { _mode = GameMode.Territory; Refresh(); });
-            y -= 46f;
-
-            Label(_form.transform, "Map width", L, y, 150f, 30f, 17, TextAnchor.MiddleLeft);
-            _wIn = NumberInput(_form.transform, "9", RX, y, 90f); y -= 42f;
-            Label(_form.transform, "Map height", L, y, 150f, 30f, 17, TextAnchor.MiddleLeft);
-            _hIn = NumberInput(_form.transform, "7", RX, y, 90f); y -= 42f;
-            Label(_form.transform, "Start points", L, y, 150f, 30f, 17, TextAnchor.MiddleLeft);
-            _ptsIn = NumberInput(_form.transform, "0", RX, y, 90f); y -= 42f;
-
-            Label(_form.transform, "Seed", L, y, 150f, 30f, 17, TextAnchor.MiddleLeft);
-            _seedIn = NumberInput(_form.transform, UnityEngine.Random.Range(1, 9999).ToString(), RX, y, 90f);
-            Btn(_form.transform, "Reroll", RX + 100f, y, 90f, 32f, () => _seedIn.text = UnityEngine.Random.Range(1, 9999).ToString());
+            Label(_form.transform, "Mode", L, y, 150f, 32f, 17, TextAnchor.MiddleLeft);
+            ToggleBtn(_form.transform, "Annihilation", RX, y, 150f, 34f, () => _mode == GameMode.Annihilation, () => { _mode = GameMode.Annihilation; Refresh(); });
+            ToggleBtn(_form.transform, "Territory", RX + 158f, y, 120f, 34f, () => _mode == GameMode.Territory, () => { _mode = GameMode.Territory; Refresh(); });
             y -= 50f;
 
-            ToggleBtn(_form.transform, "vs AI", RX, y, 120f, 32f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
-            Label(_form.transform, "(single player)", RX + 130f, y, 160f, 30f, 14, TextAnchor.MiddleLeft);
-            y -= 54f;
+            Stepper(_form.transform, "Map width", y, () => _w, v => _w = v, 5, 24, 2); y -= 46f;
+            Stepper(_form.transform, "Map height", y, () => _h, v => _h = v, 5, 24, 2); y -= 46f;
+            Stepper(_form.transform, "Start points", y, () => _pts, v => _pts = v, 0, 200, 10); y -= 46f;
 
-            Btn(_form.transform, "Create Game", 0f, y, 280f, 44f, OnCreate, big: true); y -= 54f;
+            Label(_form.transform, "Seed", L, y, 150f, 32f, 17, TextAnchor.MiddleLeft);
+            var seedLabel = Label(_form.transform, _seed.ToString(), RX, y, 120f, 34f, 18, TextAnchor.MiddleLeft);
+            Btn(_form.transform, "Reroll", RX + 120f, y, 100f, 34f, () => { _seed = UnityEngine.Random.Range(1, 9999); seedLabel.text = _seed.ToString(); });
+            y -= 52f;
 
-            Label(_form.transform, "— or join an online game —", 0f, y, 460f, 24f, 14, TextAnchor.MiddleCenter); y -= 38f;
-            _joinIn = MakeInput(_form.transform, "", -70f, y, 190f, 34f, "room code", InputField.ContentType.Standard);
-            Btn(_form.transform, "Join", 140f, y, 90f, 34f, OnJoin);
+            ToggleBtn(_form.transform, "vs AI", RX, y, 130f, 34f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
+            Label(_form.transform, "(single player)", RX + 140f, y, 160f, 32f, 14, TextAnchor.MiddleLeft);
+            y -= 56f;
 
-            _status = Label(_canvasGo.transform, "", 0f, -330f, 1000f, 70f, 18, TextAnchor.MiddleCenter);
+            Btn(_form.transform, "Create Game", 0f, y, 300f, 48f, OnCreate, big: true); y -= 56f;
+            Label(_form.transform, "To join: open the host's shared link.", 0f, y, 470f, 24f, 14, TextAnchor.MiddleCenter);
+
+            _status = Label(_canvasGo.transform, "", 0f, -320f, 1100f, 80f, 18, TextAnchor.MiddleCenter);
         }
 
         void OnCreate()
         {
-            int w = Mathf.Clamp(ParseInt(_wIn, 9), 5, 24);
-            int h = Mathf.Clamp(ParseInt(_hIn, 7), 5, 24);
-            int pts = Mathf.Clamp(ParseInt(_ptsIn, 0), 0, 999);
-            int seed = ParseInt(_seedIn, UnityEngine.Random.Range(1, 9999));
-            var setup = new GameSetup(_mode, w, h, pts, seed);
-
+            var setup = new GameSetup(_mode, _w, _h, _pts, _seed);
             if (_vsAi)
             {
                 _game.StartLocalGame(setup, true);
@@ -112,16 +102,8 @@ namespace HexWars.Presentation
             {
                 string room = RandomCode();
                 _game.StartNetGame(room, setup.ToWire());
-                ShowWaiting($"Waiting for opponent…  Share this link:\n{ShareUrl(room)}");
+                ShowWaiting($"Waiting for opponent…  Open this link on the other device:\n{ShareUrl(room)}");
             }
-        }
-
-        void OnJoin()
-        {
-            string room = (_joinIn != null ? _joinIn.text : "").Trim();
-            if (string.IsNullOrEmpty(room)) { if (_status != null) _status.text = "Enter a room code to join."; return; }
-            _game.StartNetGame(room, null);
-            ShowWaiting($"Joining {room}…");
         }
 
         void ShowWaiting(string msg)
@@ -129,8 +111,6 @@ namespace HexWars.Presentation
             if (_form != null) _form.SetActive(false);
             if (_status != null) _status.text = msg;
         }
-
-        static int ParseInt(InputField f, int fallback) => (f != null && int.TryParse(f.text, out var v)) ? v : fallback;
 
         static string RandomCode()
         {
@@ -156,6 +136,16 @@ namespace HexWars.Presentation
             foreach (var (btn, selected) in _toggles)
                 btn.GetComponent<Image>().color = selected()
                     ? new Color(0.26f, 0.50f, 0.82f, 1f) : new Color(0.17f, 0.20f, 0.27f, 1f);
+        }
+
+        // a tap-based number control: label, [−] value [+]
+        void Stepper(Transform parent, string label, float y, Func<int> get, Action<int> set, int min, int max, int step)
+        {
+            const float L = -215f, RX = 36f;
+            Label(parent, label, L, y, 150f, 34f, 17, TextAnchor.MiddleLeft);
+            var val = Label(parent, get().ToString(), RX + 54f, y, 70f, 34f, 19, TextAnchor.MiddleCenter);
+            Btn(parent, "−", RX, y, 48f, 34f, () => { set(Mathf.Clamp(get() - step, min, max)); val.text = get().ToString(); });
+            Btn(parent, "+", RX + 130f, y, 48f, 34f, () => { set(Mathf.Clamp(get() + step, min, max)); val.text = get().ToString(); });
         }
 
         GameObject Panel(Transform parent, string name, Color color)
@@ -191,7 +181,7 @@ namespace HexWars.Presentation
             var b = go.AddComponent<Button>();
             b.onClick.AddListener(() => onClick());
             SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
-            Label(go.transform, text, 0f, 0f, w, h, big ? 22 : 16, TextAnchor.MiddleCenter);
+            Label(go.transform, text, 0f, 0f, w, h, big ? 22 : 18, TextAnchor.MiddleCenter);
             return b;
         }
 
@@ -200,35 +190,9 @@ namespace HexWars.Presentation
             _toggles.Add((Btn(parent, text, x, y, w, h, onClick), selected));
         }
 
-        InputField NumberInput(Transform parent, string initial, float x, float y, float w)
-            => MakeInput(parent, initial, x, y, w, 32f, "", InputField.ContentType.IntegerNumber);
-
-        InputField MakeInput(Transform parent, string initial, float x, float y, float w, float h, string placeholder, InputField.ContentType type)
-        {
-            var go = new GameObject("Input");
-            go.transform.SetParent(parent, false);
-            go.AddComponent<Image>().color = new Color(1f, 1f, 1f, 0.14f);
-            SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
-            var input = go.AddComponent<InputField>();
-            input.contentType = type;
-
-            var ph = Label(go.transform, placeholder, 0f, 0f, w, h, 15, TextAnchor.MiddleLeft);
-            ph.color = new Color(1f, 1f, 1f, 0.4f);
-            var phRt = ph.GetComponent<RectTransform>(); phRt.offsetMin = new Vector2(8f, 0f); phRt.offsetMax = new Vector2(-8f, 0f);
-
-            var text = Label(go.transform, "", 0f, 0f, w, h, 16, TextAnchor.MiddleLeft);
-            var txRt = text.GetComponent<RectTransform>(); txRt.offsetMin = new Vector2(8f, 0f); txRt.offsetMax = new Vector2(-8f, 0f);
-
-            input.textComponent = text;
-            input.placeholder = ph;
-            input.text = initial;
-            input.characterLimit = 8;
-            return input;
-        }
-
         static void SetRect(RectTransform rt, float x, float y, float w, float h)
         {
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 1f);  // x from parent center, y down from parent top
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 1f);
             rt.pivot = new Vector2(0.5f, 1f);
             rt.sizeDelta = new Vector2(w, h);
             rt.anchoredPosition = new Vector2(x, y);
