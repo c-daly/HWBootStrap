@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using UnityEngine;
 using UnityEngine.UI;
 using HexWars.Engine;
@@ -7,13 +8,26 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Online/offline setup screen. Each numeric setting is an editable box (type a value) flanked by big
-    /// −/+ buttons (tap to adjust — the mobile fallback when the soft keyboard doesn't appear). Toggles pick
-    /// mode and vs-AI. Create + vs-AI starts a local game; Create online shows a shareable link; joining is
-    /// done by opening that link. Removes itself once the match starts.
+    /// Online/offline setup screen. Each numeric setting is a value box you tap to type a number (via the
+    /// browser's native prompt — the only reliable keyboard on mobile WebGL) flanked by −/+ buttons for
+    /// quick nudges. Toggles pick mode and vs-AI. Create + vs-AI starts a local game; Create online shows a
+    /// shareable link; joining is done by opening that link. Removes itself once the match starts.
     /// </summary>
     public sealed class LobbyPanel : MonoBehaviour
     {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        [DllImport("__Internal")] static extern string HexWarsPrompt(string message, string current);
+#endif
+        static int PromptInt(string label, int current)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            string s = HexWarsPrompt(label, current.ToString());
+            return int.TryParse(s, out var v) ? v : current;
+#else
+            return current; // editor has no browser prompt; use the −/+ buttons there
+#endif
+        }
+
         GameBootstrap _game;
         Font _font;
         GameObject _canvasGo;
@@ -59,11 +73,12 @@ namespace HexWars.Presentation
             var frt = _form.GetComponent<RectTransform>();
             frt.anchorMin = frt.anchorMax = new Vector2(0.5f, 0.5f);
             frt.pivot = new Vector2(0.5f, 0.5f);
-            frt.sizeDelta = new Vector2(680f, 520f);
+            frt.sizeDelta = new Vector2(680f, 540f);
             frt.anchoredPosition = Vector2.zero;
 
             float y = -26f;
-            Label(_form.transform, "HexWars — New Game", 0f, y, 680f, 38f, 26, TextAnchor.MiddleCenter); y -= 52f;
+            Label(_form.transform, "HexWars — New Game", 0f, y, 680f, 38f, 26, TextAnchor.MiddleCenter); y -= 46f;
+            Label(_form.transform, "tap a value to type it, or use − / +", 0f, y, 680f, 24f, 14, TextAnchor.MiddleCenter); y -= 44f;
 
             ToggleBtn(_form.transform, "Annihilation", -90f, y, 170f, 38f, () => _mode == GameMode.Annihilation, () => { _mode = GameMode.Annihilation; Refresh(); });
             ToggleBtn(_form.transform, "Territory", 95f, y, 150f, 38f, () => _mode == GameMode.Territory, () => { _mode = GameMode.Territory; Refresh(); });
@@ -74,10 +89,8 @@ namespace HexWars.Presentation
             NumberRow("Start points", y, () => _pts, v => _pts = v, 0, 200, 10); y -= 48f;
 
             Label(_form.transform, "Seed", -235f, y, 210f, 38f, 18, TextAnchor.MiddleLeft);
-            var seedBox = MakeInput(_form.transform, _seed.ToString(), 40f, y, 130f, 38f);
-            seedBox.characterLimit = 5;
-            seedBox.onEndEdit.AddListener(s => { if (int.TryParse(s, out var v)) _seed = v; seedBox.text = _seed.ToString(); });
-            Btn(_form.transform, "Reroll", 165f, y, 110f, 38f, () => { _seed = UnityEngine.Random.Range(1, 9999); seedBox.text = _seed.ToString(); });
+            var seedDisp = ValueBox(_form.transform, "Seed", 60f, y, 130f, 38f, () => _seed, v => _seed = v, 1, 99999);
+            Btn(_form.transform, "Reroll", 185f, y, 100f, 38f, () => { _seed = UnityEngine.Random.Range(1, 9999); seedDisp.text = _seed.ToString(); });
             y -= 52f;
 
             ToggleBtn(_form.transform, "vs AI (single player)", -90f, y, 260f, 38f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
@@ -93,16 +106,33 @@ namespace HexWars.Presentation
             srt.anchoredPosition = Vector2.zero;
         }
 
-        // label + [−] [editable box] [+], all kept comfortably inside the panel
+        // label + [−] [tap-to-type value] [+], all kept comfortably inside the panel
         void NumberRow(string label, float y, Func<int> get, Action<int> set, int min, int max, int step)
         {
             Label(_form.transform, label, -235f, y, 210f, 38f, 18, TextAnchor.MiddleLeft);
-            InputField box = null;
-            Btn(_form.transform, "-", -10f, y, 54f, 38f, () => { set(Mathf.Clamp(get() - step, min, max)); if (box != null) box.text = get().ToString(); }, glyph: 30);
-            box = MakeInput(_form.transform, get().ToString(), 80f, y, 90f, 38f);
-            var b = box;
-            b.onEndEdit.AddListener(s => { int v = int.TryParse(s, out var p) ? p : get(); set(Mathf.Clamp(v, min, max)); b.text = get().ToString(); });
-            Btn(_form.transform, "+", 170f, y, 54f, 38f, () => { set(Mathf.Clamp(get() + step, min, max)); if (box != null) box.text = get().ToString(); }, glyph: 30);
+            Text disp = null;
+            Btn(_form.transform, "-", -10f, y, 54f, 38f, () => { set(Mathf.Clamp(get() - step, min, max)); if (disp != null) disp.text = get().ToString(); }, glyph: 30);
+            disp = ValueBox(_form.transform, label, 80f, y, 90f, 38f, get, set, min, max);
+            Btn(_form.transform, "+", 170f, y, 54f, 38f, () => { set(Mathf.Clamp(get() + step, min, max)); if (disp != null) disp.text = get().ToString(); }, glyph: 30);
+        }
+
+        // a light box showing the value; tap to type a new one via the browser prompt. Returns its Text so
+        // the −/+ buttons can update the same display.
+        Text ValueBox(Transform parent, string label, float x, float y, float w, float h, Func<int> get, Action<int> set, int min, int max)
+        {
+            var go = new GameObject("ValueBox");
+            go.transform.SetParent(parent, false);
+            go.AddComponent<Image>().color = new Color(0.93f, 0.95f, 0.98f, 1f);
+            var btn = go.AddComponent<Button>();
+            SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
+            var t = Label(go.transform, get().ToString(), 0f, 0f, w, h, 20, TextAnchor.MiddleCenter);
+            t.color = new Color(0.06f, 0.07f, 0.10f);
+            btn.onClick.AddListener(() =>
+            {
+                set(Mathf.Clamp(PromptInt(label, get()), min, max));
+                t.text = get().ToString();
+            });
+            return t;
         }
 
         void OnCreate()
@@ -151,33 +181,6 @@ namespace HexWars.Presentation
             foreach (var (btn, selected) in _toggles)
                 btn.GetComponent<Image>().color = selected()
                     ? new Color(0.26f, 0.50f, 0.82f, 1f) : new Color(0.17f, 0.20f, 0.27f, 1f);
-        }
-
-        // editable numeric field: light box, dark text in a stretched child (renders the value and is typeable)
-        InputField MakeInput(Transform parent, string initial, float x, float y, float w, float h)
-        {
-            var go = new GameObject("Input");
-            go.transform.SetParent(parent, false);
-            var bg = go.AddComponent<Image>();
-            bg.color = new Color(0.93f, 0.95f, 0.98f, 1f);
-            SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
-            var input = go.AddComponent<InputField>();
-            input.targetGraphic = bg;
-
-            var textGo = new GameObject("Text");
-            textGo.transform.SetParent(go.transform, false);
-            var text = textGo.AddComponent<Text>();
-            text.font = _font; text.fontSize = 20; text.color = new Color(0.06f, 0.07f, 0.10f);
-            text.alignment = TextAnchor.MiddleCenter; text.supportRichText = false;
-            var trt = textGo.GetComponent<RectTransform>();
-            trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one;
-            trt.offsetMin = new Vector2(6f, 2f); trt.offsetMax = new Vector2(-6f, -2f);
-
-            input.textComponent = text;
-            input.contentType = InputField.ContentType.IntegerNumber;
-            input.characterLimit = 4;
-            input.text = initial;
-            return input;
         }
 
         GameObject Panel(Transform parent, string name, Color color)
