@@ -26,7 +26,10 @@ namespace HexWars.Presentation
         GameObject _marker;
         Material _markerMat;
         bool _animating;
-        Text _hint;
+        GameObject _actionGo;
+        Image _actionBg;
+        Text _actionLabel;
+        System.Action _actionOnClick;
 
         /// <summary>Spectator mode: hover tooltips and click-to-inspect still work, but no commands are
         /// issued (the AI is playing). Set by <see cref="SpectatorDriver"/> instead of disabling input.</summary>
@@ -43,7 +46,7 @@ namespace HexWars.Presentation
             _game = FindAnyObjectByType<GameBootstrap>();
             _barracks = FindAnyObjectByType<BarracksPanel>();
             _board = FindAnyObjectByType<BoardRenderer>();
-            _hint = MakeHintLabel();
+            MakeActionButton();
         }
 
         Vector2 _pressPos;
@@ -88,7 +91,7 @@ namespace HexWars.Presentation
                 if (_markerMat != null) { if (_markerMat.HasProperty("_BaseColor")) _markerMat.SetColor("_BaseColor", c); _markerMat.color = c; }
             }
 
-            if (_hint != null) _hint.text = HintText();
+            UpdateActionButton();
         }
 
         void HandleClick(UnitView unit, TileView tile)
@@ -106,19 +109,9 @@ namespace HexWars.Presentation
                     StartCoroutine(AttackSeq(_selected, unit));
                 return; // invalid / spent: nothing happens, keep selection
             }
-            // territory: click your selected unit's OWN hex to claim it (if not yours) or build on it
-            if (ownSelected && unit == null && tile != null
-                && _game.State.Config.TerritoryMode && tile.Coord == _selected.Unit.Cell)
-            {
-                var st = _game.State;
-                var cell = _selected.Unit.Cell;
-                if (st.Board.Controller(cell) != active)
-                    _game.TryApply(new CaptureHex(active, cell));        // claim / convert (ends the turn)
-                else if (!HasGeneratorOn(st, cell))
-                    _game.TryApply(new BuildGenerator(active, cell));    // build on owned empty hex
-                ReacquireSelection();
-                return;
-            }
+            // territory claim/build is done via the explicit on-screen action button (UpdateActionButton),
+            // never by tapping the hex — so a stray tap can't spend points or end your turn by accident.
+
             // move intent: only if not already moved AND the hex is reachable
             if (ownSelected && unit == null && tile != null)
             {
@@ -352,42 +345,86 @@ namespace HexWars.Presentation
             _marker.SetActive(true);
         }
 
-        Text MakeHintLabel()
+        void MakeActionButton()
         {
-            var canvasGo = new GameObject("HintCanvas");
+            var canvasGo = new GameObject("ActionCanvas");
             canvasGo.transform.SetParent(transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 450;
-            var go = new GameObject("Hint");
-            go.transform.SetParent(canvasGo.transform, false);
-            var t = go.AddComponent<Text>();
-            t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            t.fontSize = 18; t.color = new Color(1f, 0.95f, 0.6f); t.alignment = TextAnchor.LowerCenter;
-            var rt = t.GetComponent<RectTransform>();
+            canvas.sortingOrder = 460;
+            canvasGo.AddComponent<GraphicRaycaster>();
+
+            _actionGo = new GameObject("ActionButton");
+            _actionGo.transform.SetParent(canvasGo.transform, false);
+            _actionBg = _actionGo.AddComponent<Image>();
+            var btn = _actionGo.AddComponent<Button>();
+            btn.onClick.AddListener(() => { if (_actionOnClick != null) _actionOnClick(); });
+            var rt = _actionGo.GetComponent<RectTransform>();
             rt.anchorMin = new Vector2(0.5f, 0f); rt.anchorMax = new Vector2(0.5f, 0f);
-            rt.pivot = new Vector2(0.5f, 0f); rt.sizeDelta = new Vector2(700f, 30f);
-            rt.anchoredPosition = new Vector2(0f, 70f);
-            return t;
+            rt.pivot = new Vector2(0.5f, 0f); rt.sizeDelta = new Vector2(400f, 56f);
+            rt.anchoredPosition = new Vector2(0f, 92f);
+
+            var labelGo = new GameObject("Label");
+            labelGo.transform.SetParent(_actionGo.transform, false);
+            _actionLabel = labelGo.AddComponent<Text>();
+            _actionLabel.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            _actionLabel.fontSize = 18; _actionLabel.color = Color.white;
+            _actionLabel.alignment = TextAnchor.MiddleCenter; _actionLabel.raycastTarget = false;
+            var lrt = _actionLabel.GetComponent<RectTransform>();
+            lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+
+            _actionGo.SetActive(false);
         }
 
-        string HintText()
+        // Shows the one relevant territory action (claim or build) for the selected unit, with its cost and
+        // consequence; greyed (no-op) with a reason when it can't be done. The only path to claim/build.
+        void UpdateActionButton()
         {
-            if (ReadOnly || _game == null || _game.State == null) return "";
-            var st = _game.State;
-            if (!st.Config.TerritoryMode || _selected == null) return "";
-            if (_selected.Unit.Owner != st.ActivePlayer) return "";
+            var st = _game != null ? _game.State : null;
+            if (st == null || ReadOnly || !st.Config.TerritoryMode || _selected == null
+                || !_selected.Unit.IsAlive || _selected.Unit.Owner != st.ActivePlayer) { HideAction(); return; }
+
+            var active = st.ActivePlayer;
             var cell = _selected.Unit.Cell;
+            int points = st.Player(active).Points;
             bool actedAlready = st.MovedUnitIds.Count > 0 || st.AttackedUnitIds.Count > 0;
-            if (st.Board.Controller(cell) != st.ActivePlayer)
+
+            if (st.Board.Controller(cell) != active)
             {
+                int cost = st.Config.CaptureCost;
                 if (st.Config.ClaimEndsTurn && actedAlready)
-                    return "Can't claim — your army already acted this turn";
-                return "Click this hex to CLAIM it (ends your turn)";
+                    ShowAction("Claim hex  —  army already acted this turn", null);
+                else if (points < cost)
+                    ShowAction($"Claim hex  —  need {cost} pts (have {points})", null);
+                else
+                    ShowAction($"Claim hex   ·   {cost} pts, ends turn",
+                               () => { _game.TryApply(new CaptureHex(active, cell)); ReacquireSelection(); });
             }
-            if (!HasGeneratorOn(st, cell))
-                return "Click this hex to BUILD a generator";
-            return "";
+            else if (!HasGeneratorOn(st, cell))
+            {
+                int cost = Mathf.RoundToInt((float)(st.Config.BuildFactor * st.Config.GeneratorOutput));
+                if (points < cost)
+                    ShowAction($"Build generator  —  need {cost} pts (have {points})", null);
+                else
+                    ShowAction($"Build generator   ·   {cost} pts",
+                               () => { _game.TryApply(new BuildGenerator(active, cell)); ReacquireSelection(); });
+            }
+            else HideAction();
+        }
+
+        void ShowAction(string label, System.Action onClick)
+        {
+            if (_actionGo == null) return;
+            _actionGo.SetActive(true);
+            _actionLabel.text = label;
+            _actionOnClick = onClick;
+            _actionBg.color = onClick != null ? new Color(0.20f, 0.52f, 0.32f, 0.97f) : new Color(0.32f, 0.34f, 0.38f, 0.92f);
+        }
+
+        void HideAction()
+        {
+            _actionOnClick = null;
+            if (_actionGo != null) _actionGo.SetActive(false);
         }
     }
 }
