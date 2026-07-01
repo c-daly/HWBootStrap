@@ -260,6 +260,8 @@ namespace HexWars.Presentation
                 case CreateUnit _: SoundManager.Play(SoundKind.Build); break;
                 case EndTurn _: SoundManager.Play(SoundKind.EndTurn); break;
             }
+            // a paced turn (K actions) auto-passes without an EndTurn command — still mark the handover
+            if (!(cmd is EndTurn) && now.ActivePlayer != prev.ActivePlayer) SoundManager.Play(SoundKind.EndTurn);
             if (LiveUnits(now) < LiveUnits(prev)) SoundManager.Play(SoundKind.Death);
             if (now.IsGameOver && !prev.IsGameOver) SoundManager.Play(SoundKind.Win);
         }

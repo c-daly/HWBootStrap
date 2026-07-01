@@ -10,18 +10,29 @@ namespace HexWars.Engine
     public interface ITurnPolicy
     {
         bool AutoEndTurnAfter(Command command, GameState stateAfter);
+
+        /// <summary>Combat actions allowed per turn, or null when unlimited (act with the whole army).</summary>
+        int? ActionsPerTurn { get; }
+
+        /// <summary>Combat actions the active player can still take this turn; null when unlimited.</summary>
+        int? RemainingActions(GameState state);
     }
 
     /// <summary>Default M1 mode: the turn never auto-ends; the player acts freely then ends it.</summary>
     public sealed class AllUnitsPolicy : ITurnPolicy
     {
         public bool AutoEndTurnAfter(Command command, GameState stateAfter) => false;
+        public int? ActionsPerTurn => null;
+        public int? RemainingActions(GameState state) => null;
     }
 
     /// <summary>Chess-like mode: the turn auto-ends after any single non-EndTurn action.</summary>
     public sealed class OneActionPolicy : ITurnPolicy
     {
         public bool AutoEndTurnAfter(Command command, GameState stateAfter) => !(command is EndTurn);
+        public int? ActionsPerTurn => 1;
+        public int? RemainingActions(GameState state)
+            => System.Math.Max(0, 1 - state.MovedUnitIds.Count - state.AttackedUnitIds.Count);
     }
 
     /// <summary>
@@ -38,5 +49,10 @@ namespace HexWars.Engine
         public bool AutoEndTurnAfter(Command command, GameState stateAfter)
             => !(command is EndTurn)
                && (stateAfter.MovedUnitIds.Count + stateAfter.AttackedUnitIds.Count) >= _k;
+
+        public int? ActionsPerTurn => _k;
+
+        public int? RemainingActions(GameState state)
+            => System.Math.Max(0, _k - state.MovedUnitIds.Count - state.AttackedUnitIds.Count);
     }
 }

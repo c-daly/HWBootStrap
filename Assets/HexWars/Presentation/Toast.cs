@@ -5,16 +5,22 @@ namespace HexWars.Presentation
 {
     /// <summary>
     /// A brief on-screen message, bottom-centre, that auto-hides after a couple of seconds. Used to explain
-    /// why an action was rejected (deploy/move/claim), which is otherwise silent. Call <see cref="Show"/>.
+    /// why an action was rejected (deploy/move/claim) and to announce turn handovers. Call <see cref="Show"/>;
+    /// the default background is the rejection red, pass a colour for non-error messages.
     /// </summary>
     public sealed class Toast : MonoBehaviour
     {
+        static readonly Color RejectionRed = new Color(0.55f, 0.12f, 0.12f, 0.94f);
+
         static Toast _inst;
         GameObject _bg;
+        Image _bgImage;
         Text _text;
         float _until;
 
-        public static void Show(string message)
+        public static void Show(string message) => Show(message, RejectionRed);
+
+        public static void Show(string message, Color background)
         {
             if (_inst == null)
             {
@@ -23,6 +29,7 @@ namespace HexWars.Presentation
                 _inst = go.AddComponent<Toast>();
                 _inst.BuildUi();
             }
+            _inst._bgImage.color = background;
             _inst._text.text = message;
             _inst._bg.SetActive(true);
             _inst._until = Time.unscaledTime + 2.8f;
@@ -42,7 +49,8 @@ namespace HexWars.Presentation
 
             _bg = new GameObject("Bg");
             _bg.transform.SetParent(canvasGo.transform, false);
-            _bg.AddComponent<Image>().color = new Color(0.55f, 0.12f, 0.12f, 0.94f);
+            _bgImage = _bg.AddComponent<Image>();
+            _bgImage.color = RejectionRed;
             var brt = _bg.GetComponent<RectTransform>();
             brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f);
             brt.pivot = new Vector2(0.5f, 0f);

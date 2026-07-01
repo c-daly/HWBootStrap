@@ -7,13 +7,19 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Top banner showing the active player, points, round, and barracks count, with an End Turn
-    /// button. Builds its own canvas; ensures an EventSystem exists so UI buttons get clicks.
+    /// Top banner showing the active player, points, round, barracks count, and — under a paced turn
+    /// structure — the actions left this turn, with an End Turn button. Announces turn handovers with a
+    /// toast so an auto-pass (K actions spent) is unmistakable. Builds its own canvas; ensures an
+    /// EventSystem exists so UI buttons get clicks.
     /// </summary>
     public sealed class GameHud : MonoBehaviour
     {
+        static readonly Color P0ToastBlue = new Color(0.10f, 0.30f, 0.45f, 0.94f);
+        static readonly Color P1ToastRed = new Color(0.42f, 0.16f, 0.16f, 0.94f);
+
         GameBootstrap _game;
         Text _banner;
+        PlayerId? _lastActive; // last seen active player, to detect handovers (incl. auto-pass)
 
         void Start()
         {
@@ -117,15 +123,39 @@ namespace HexWars.Presentation
             int who = p0 ? 1 : 2;
             _banner.color = p0 ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
 
-            if (!s.Config.TerritoryMode)
-            {
-                _banner.text = $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")})     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
-                return;
-            }
+            string pace = "";
+            if (s.Config.TurnPolicy.ActionsPerTurn is int k)
+                pace = $"     Actions left {s.Config.TurnPolicy.RemainingActions(s) ?? k}/{k}";
 
-            _banner.text =
-                $"P{who}'s turn  Round {s.Round}     " +
-                $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}";
+            _banner.text = s.Config.TerritoryMode
+                ? $"P{who}'s turn{pace}     Round {s.Round}     " +
+                  $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}"
+                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+
+            AnnounceTurnIfChanged(s);
+        }
+
+        /// <summary>Toast the handover whenever the active player flips — the only reliable signal when a
+        /// paced turn auto-passes mid-flow. Skips the AI's own turn (it plays out on screen anyway).</summary>
+        void AnnounceTurnIfChanged(GameState s)
+        {
+            if (_lastActive == s.ActivePlayer) return;
+            bool first = _lastActive == null;
+            _lastActive = s.ActivePlayer;
+            if (first || s.IsGameOver) return;
+
+            var ai = FindAnyObjectByType<AiOpponent>();
+            if (ai != null && s.ActivePlayer == ai.AiSeat) return;
+
+            string who;
+            if (_game.Seat.HasValue) who = s.ActivePlayer == _game.Seat.Value ? "Your turn" : "Opponent's turn";
+            else if (ai != null) who = "Your turn";
+            else who = s.ActivePlayer == PlayerId.Player0 ? "Player 1's turn" : "Player 2's turn";
+
+            if (s.Config.TurnPolicy.ActionsPerTurn is int k)
+                who += k == 1 ? "  (1 action)" : $"  ({k} actions)";
+
+            Toast.Show(who, s.ActivePlayer == PlayerId.Player0 ? P0ToastBlue : P1ToastRed);
         }
 
         static string Stat(GameState s, PlayerId id)

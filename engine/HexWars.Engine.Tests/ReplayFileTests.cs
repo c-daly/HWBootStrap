@@ -33,6 +33,27 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TurnActionBudget_RoundTrips()
+        {
+            // The START message online is a ReplayFile dump — the pace (K actions per turn) must
+            // survive it, or the client falls back to whole-army and the HUD can't show the budget.
+            var tiles = new List<Tile>();
+            for (int q = 0; q < 5; q++)
+                tiles.Add(new Tile(new HexCoord(q, 0), 0, TerrainType.Plains));
+            var board = new Board(tiles, zone0: new[] { new HexCoord(0, 0) }, zone1: new[] { new HexCoord(4, 0) });
+            var players = new[] { new PlayerState(P0, 10), new PlayerState(P1, 10) };
+            var start = new GameState(board, GameConfig.Default(turnPolicy: new KActionsPolicy(3)),
+                                      players, P0, 1, 1);
+
+            var s = ReplayFile.Read(ReplayFile.Write(start, new List<Command>())).Start;
+            Assert.That(s.Config.TurnPolicy.ActionsPerTurn, Is.EqualTo(3));
+
+            var unlimited = ReplayFile.Read(ReplayFile.Write(AgentGame(), new List<Command>())).Start;
+            Assert.That(unlimited.Config.TurnPolicy.ActionsPerTurn, Is.Null,
+                "a whole-army game must not grow a budget in the round trip");
+        }
+
+        [Test]
         public void RichStartState_RoundTrips()
         {
             var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);
