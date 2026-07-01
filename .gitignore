@@ -2,9 +2,12 @@
 [Ll]ibrary/
 [Tt]emp/
 [Oo]bj/
+[Bb]uild/
+[Bb]uilds/
 
 # Exception: the built WebGL client lives under the server's wwwroot and MUST be committed for
 # repo-based (Render/Railway) deploys — the cloud builder can't run Unity to produce it.
+# (The raw Unity output at /Build stays ignored; copy it here to ship it.)
 !engine/HexWars.NetServer/wwwroot/Build/
 !engine/HexWars.NetServer/wwwroot/Build/**
 [Ll]ogs/
