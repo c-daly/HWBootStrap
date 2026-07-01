@@ -89,14 +89,17 @@ namespace HexWars.Presentation
         {
             SetupEnvironment();
 
+            // damageFloor 1 matches GameFactory (the lobby path): a landed hit always deals at least 1,
+            // so an attacker with damage > 0 never "does nothing" against high defense
             var config = TerritoryMode
                 ? GameConfig.Default(biomesEnabled: BiomesEnabled,
                                      turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
                                      winConditions: WinBy.Economy | WinBy.Annihilation,
                                      startingPoints: TerritoryStartingPoints,
-                                     territoryMode: true)
+                                     territoryMode: true, damageFloor: 1)
                 : GameConfig.Default(biomesEnabled: BiomesEnabled,
-                                     turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null);
+                                     turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
+                                     damageFloor: 1);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
@@ -146,6 +149,7 @@ namespace HexWars.Presentation
             State = result.NewState;
             GetComponent<BoardRenderer>().RenderEntities(State);
             EventConsole.Report(State, CombatLog.Diff(prev, State));
+            CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
             PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
             return true;
@@ -217,6 +221,7 @@ namespace HexWars.Presentation
             State = result.NewState;
             GetComponent<BoardRenderer>().RenderEntities(State);
             EventConsole.Report(State, CombatLog.Diff(prev, State));
+            CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
             PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
         }

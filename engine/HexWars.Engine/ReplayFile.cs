@@ -33,6 +33,7 @@ namespace HexWars.Engine
             sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round)
               .Append(' ').Append(s.Config.BiomesEnabled ? 1 : 0)
               .Append(' ').Append(s.Config.TurnPolicy.ActionsPerTurn ?? 0).Append('\n');
+            WriteConfig(sb, s.Config);
 
             var tiles = new List<Tile>(s.Board.Tiles);
             sb.Append("TILES ").Append(tiles.Count).Append('\n');
@@ -41,6 +42,8 @@ namespace HexWars.Engine
 
             WriteZone(sb, "ZONE0", s.Board.DeploymentZone(PlayerId.Player0));
             WriteZone(sb, "ZONE1", s.Board.DeploymentZone(PlayerId.Player1));
+            WriteControl(sb, "CONTROL0", s.Board, PlayerId.Player0);
+            WriteControl(sb, "CONTROL1", s.Board, PlayerId.Player1);
 
             WritePlayer(sb, s.Player(PlayerId.Player0));
             WritePlayer(sb, s.Player(PlayerId.Player1));
@@ -55,6 +58,7 @@ namespace HexWars.Engine
             var lines = text.Replace("\r\n", "\n").Split('\n');
             int li = 0;
             string Next() { while (li < lines.Length && lines[li].Length == 0) li++; return lines[li++]; }
+            string Peek() { while (li < lines.Length && lines[li].Length == 0) li++; return li < lines.Length ? lines[li] : ""; }
 
             if (Next() != Header) throw new FormatException("not a HexWars replay");
 
@@ -65,6 +69,10 @@ namespace HexWars.Engine
             bool biomes = meta.Length <= 4 || int.Parse(meta[4], CultureInfo.InvariantCulture) != 0; // old replays: biomes on
             int turnActions = meta.Length > 5 ? int.Parse(meta[5], CultureInfo.InvariantCulture) : 0; // old replays: whole army
 
+            // CONFIG is optional (old payloads lack it) — without it, defaults reproduce the old behaviour
+            var cfgKv = new Dictionary<string, string>();
+            if (Peek().StartsWith("CONFIG", StringComparison.Ordinal)) ParseConfig(Next(), cfgKv);
+
             int tileCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
             var tiles = new List<Tile>(tileCount);
             for (int i = 0; i < tileCount; i++)
@@ -74,13 +82,19 @@ namespace HexWars.Engine
             }
             var zone0 = ReadZone(Next());
             var zone1 = ReadZone(Next());
-            var board = new Board(tiles, zone0, zone1);
+
+            // CONTROL is optional too (old payloads: no hex is controlled at the start)
+            var control = new Dictionary<HexCoord, PlayerId>();
+            if (Peek().StartsWith("CONTROL0", StringComparison.Ordinal))
+                foreach (var c in ReadZone(Next())) control[c] = PlayerId.Player0;
+            if (Peek().StartsWith("CONTROL1", StringComparison.Ordinal))
+                foreach (var c in ReadZone(Next())) control[c] = PlayerId.Player1;
+
+            var board = new Board(tiles, zone0, zone1, control);
 
             var p0 = ReadPlayer(Next, PlayerId.Player0);
             var p1 = ReadPlayer(Next, PlayerId.Player1);
-            var start = new GameState(board,
-                GameConfig.Default(biomesEnabled: biomes,
-                                   turnPolicy: turnActions > 0 ? new KActionsPolicy(turnActions) : null),
+            var start = new GameState(board, BuildConfig(cfgKv, biomes, turnActions),
                 new[] { p0, p1 }, active, round, nextId);
 
             int cmdCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
@@ -93,6 +107,84 @@ namespace HexWars.Engine
         // ---- helpers ----
 
         private static int I(string s) => int.Parse(s, CultureInfo.InvariantCulture);
+
+        // The effective ruleset, as key=value pairs mapping onto GameConfig.Default's parameters —
+        // every game-construction path (GameFactory, GameBootstrap, tests) builds through Default, so
+        // this covers the whole varied space. Omitting a key on read falls back to Default's default,
+        // which keeps old payloads parseable and lets new knobs be added without a format break.
+        private static void WriteConfig(StringBuilder sb, GameConfig c)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            sb.Append("CONFIG");
+            sb.Append(" win=").Append((int)c.WinConditions);
+            sb.Append(" captureCost=").Append(c.CaptureCost);
+            sb.Append(" economyWin=").Append(c.EconomyWinThreshold);
+            sb.Append(" scoreKills=").Append(c.ScoreKills);
+            sb.Append(" scorePoints=").Append(c.ScorePoints);
+            sb.Append(" scoreArmy=").Append(c.ScoreArmy);
+            sb.Append(" scoreTerritory=").Append(c.ScoreTerritory);
+            sb.Append(" upkeep=").Append(c.UpkeepFactor.ToString("R", inv));
+            sb.Append(" captureFactor=").Append(c.CaptureFactor.ToString("R", inv));
+            sb.Append(" buildFactor=").Append(c.BuildFactor.ToString("R", inv));
+            sb.Append(" genOutput=").Append(c.GeneratorOutput);
+            sb.Append(" startingPoints=").Append(c.StartingPoints);
+            sb.Append(" damageFloor=").Append(c.DamageFloor);
+            sb.Append(" territory=").Append(c.TerritoryMode ? 1 : 0);
+            sb.Append(" claimEndsTurn=").Append(c.ClaimEndsTurn ? 1 : 0);
+            sb.Append(" buildAnywhere=").Append(c.BuildAnywhere ? 1 : 0);
+            sb.Append(" territoryIncome=").Append(c.TerritoryIncome);
+            sb.Append(" generators=").Append(c.GeneratorsEnabled ? 1 : 0);
+            sb.Append(" pointDecay=").Append(c.PointDecay.ToString("R", inv));
+            sb.Append('\n');
+        }
+
+        private static void ParseConfig(string line, Dictionary<string, string> kv)
+        {
+            var parts = line.Split(' ');
+            for (int i = 1; i < parts.Length; i++)     // parts[0] == "CONFIG"
+            {
+                int eq = parts[i].IndexOf('=');
+                if (eq > 0) kv[parts[i].Substring(0, eq)] = parts[i].Substring(eq + 1);
+            }
+        }
+
+        private static GameConfig BuildConfig(Dictionary<string, string> kv, bool biomes, int turnActions)
+        {
+            int Gi(string k, int def) => kv.TryGetValue(k, out var v) ? int.Parse(v, CultureInfo.InvariantCulture) : def;
+            double Gd(string k, double def) => kv.TryGetValue(k, out var v) ? double.Parse(v, CultureInfo.InvariantCulture) : def;
+            bool Gb(string k, bool def) => kv.TryGetValue(k, out var v) ? v != "0" : def;
+
+            return GameConfig.Default(
+                biomesEnabled: biomes,
+                turnPolicy: turnActions > 0 ? new KActionsPolicy(turnActions) : null,
+                winConditions: (WinBy)Gi("win", (int)WinBy.Annihilation),
+                captureCost: Gi("captureCost", 3),
+                economyWinThreshold: Gi("economyWin", 200),
+                scoreKills: Gi("scoreKills", 1),
+                scorePoints: Gi("scorePoints", 1),
+                scoreArmy: Gi("scoreArmy", 1),
+                scoreTerritory: Gi("scoreTerritory", 1),
+                upkeepFactor: Gd("upkeep", 0.25),
+                captureFactor: Gd("captureFactor", 4.0),
+                buildFactor: Gd("buildFactor", 4.0),
+                generatorOutput: Gi("genOutput", 1),
+                startingPoints: Gi("startingPoints", 12),
+                damageFloor: Gi("damageFloor", 0),
+                territoryMode: Gb("territory", false),
+                claimEndsTurn: Gb("claimEndsTurn", true),
+                buildAnywhere: Gb("buildAnywhere", false),
+                territoryIncome: Gi("territoryIncome", 0),
+                generatorsEnabled: Gb("generators", true),
+                pointDecay: Gd("pointDecay", 0.0));
+        }
+
+        private static void WriteControl(StringBuilder sb, string tag, Board board, PlayerId owner)
+        {
+            var owned = new List<HexCoord>();
+            foreach (var t in board.Tiles)
+                if (board.Controller(t.Coord) == owner) owned.Add(t.Coord);
+            WriteZone(sb, tag, owned);
+        }
 
         private static void WriteZone(StringBuilder sb, string tag, IReadOnlyCollection<HexCoord> zone)
         {

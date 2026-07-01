@@ -20,7 +20,10 @@ namespace HexWars.Presentation
 
         public static void Show(string message) => Show(message, RejectionRed);
 
-        public static void Show(string message, Color background)
+        /// <summary><paramref name="top"/> places the box just under the HUD banner instead of
+        /// bottom-centre — used for turn announcements so they never cover the battlefield or the
+        /// damage popups rising from it.</summary>
+        public static void Show(string message, Color background, bool top = false, float seconds = 2.8f)
         {
             if (_inst == null)
             {
@@ -29,10 +32,28 @@ namespace HexWars.Presentation
                 _inst = go.AddComponent<Toast>();
                 _inst.BuildUi();
             }
+            _inst.Place(top);
             _inst._bgImage.color = background;
             _inst._text.text = message;
             _inst._bg.SetActive(true);
-            _inst._until = Time.unscaledTime + 2.8f;
+            _inst._until = Time.unscaledTime + seconds;
+        }
+
+        void Place(bool top)
+        {
+            var brt = _bg.GetComponent<RectTransform>();
+            if (top)
+            {
+                brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 1f);
+                brt.pivot = new Vector2(0.5f, 1f);
+                brt.anchoredPosition = new Vector2(0f, -50f); // clear of the 46px banner
+            }
+            else
+            {
+                brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f);
+                brt.pivot = new Vector2(0.5f, 0f);
+                brt.anchoredPosition = new Vector2(0f, 170f);
+            }
         }
 
         void BuildUi()

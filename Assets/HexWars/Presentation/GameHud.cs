@@ -16,9 +16,12 @@ namespace HexWars.Presentation
     {
         static readonly Color P0ToastBlue = new Color(0.10f, 0.30f, 0.45f, 0.94f);
         static readonly Color P1ToastRed = new Color(0.42f, 0.16f, 0.16f, 0.94f);
+        static readonly Color EndTurnIdle = new Color(0.20f, 0.34f, 0.55f, 1f);
+        static readonly Color EndTurnUrge = new Color(0.16f, 0.52f, 0.28f, 1f); // nothing left to do
 
         GameBootstrap _game;
         Text _banner;
+        Image _endBtn;
         PlayerId? _lastActive; // last seen active player, to detect handovers (incl. auto-pass)
 
         void Start()
@@ -85,7 +88,8 @@ namespace HexWars.Presentation
 
             var btn = new GameObject("EndTurnButton");
             btn.transform.SetParent(bar.transform, false);
-            btn.AddComponent<Image>().color = new Color(0.20f, 0.34f, 0.55f, 1f);
+            _endBtn = btn.AddComponent<Image>();
+            _endBtn.color = EndTurnIdle;
             btn.AddComponent<Button>().onClick.AddListener(OnEndTurn);
             var rt = btn.GetComponent<RectTransform>();
             rt.anchorMin = new Vector2(0f, 0.5f);
@@ -123,16 +127,47 @@ namespace HexWars.Presentation
             int who = p0 ? 1 : 2;
             _banner.color = p0 ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
 
+            // What can the active player still do? Drives the "you're not stuck, you're done" signal:
+            // without it, a turn with no legal move/attack left just feels unresponsive.
+            bool localHuman = LocalHumanActs(s);
+            bool anyAction = false, anyCombat = false;
+            if (localHuman && !s.IsGameOver)
+                foreach (var m in LegalMoves.For(s))
+                {
+                    if (m is EndTurn) continue;
+                    anyAction = true;
+                    if (m is MoveUnit || m is AttackUnit) { anyCombat = true; break; }
+                }
+
             string pace = "";
             if (s.Config.TurnPolicy.ActionsPerTurn is int k)
-                pace = $"     Actions left {s.Config.TurnPolicy.RemainingActions(s) ?? k}/{k}";
+            {
+                int left = s.Config.TurnPolicy.RemainingActions(s) ?? k;
+                pace = $"     Actions left {left}/{k}";
+                if (localHuman && !s.IsGameOver && left > 0 && !anyCombat && anyAction)
+                    pace += "  (no unit can act)";
+            }
+            string done = localHuman && !s.IsGameOver && !anyAction
+                ? "     Nothing left to do - press End Turn"
+                : "";
 
             _banner.text = s.Config.TerritoryMode
-                ? $"P{who}'s turn{pace}     Round {s.Round}     " +
+                ? $"P{who}'s turn{pace}{done}     Round {s.Round}     " +
                   $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}"
-                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+
+            if (_endBtn != null) _endBtn.color = done.Length > 0 ? EndTurnUrge : EndTurnIdle;
 
             AnnounceTurnIfChanged(s);
+        }
+
+        /// <summary>Is the seat that's about to act driven by a human on this machine? (Hotseat: both;
+        /// vs AI: only the human's seat; online: only this browser's seat.)</summary>
+        bool LocalHumanActs(GameState s)
+        {
+            if (_game.Seat.HasValue) return s.ActivePlayer == _game.Seat.Value;
+            var ai = FindAnyObjectByType<AiOpponent>();
+            return ai == null || s.ActivePlayer != ai.AiSeat;
         }
 
         /// <summary>Toast the handover whenever the active player flips — the only reliable signal when a
@@ -155,7 +190,10 @@ namespace HexWars.Presentation
             if (s.Config.TurnPolicy.ActionsPerTurn is int k)
                 who += k == 1 ? "  (1 action)" : $"  ({k} actions)";
 
-            Toast.Show(who, s.ActivePlayer == PlayerId.Player0 ? P0ToastBlue : P1ToastRed);
+            // top slot + short life: turn flips are frequent under a paced game and must never
+            // cover the battlefield (or the damage popups rising from it)
+            Toast.Show(who, s.ActivePlayer == PlayerId.Player0 ? P0ToastBlue : P1ToastRed,
+                       top: true, seconds: 1.6f);
         }
 
         static string Stat(GameState s, PlayerId id)

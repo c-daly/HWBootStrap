@@ -185,14 +185,6 @@ namespace HexWars.Presentation
             UpdateMarker();
         }
 
-        int UnitHp(int id)
-        {
-            foreach (var p in _game.State.Players)
-                foreach (var u in p.UnitsOnBoard)
-                    if (u.Id == id) return u.CurrentHp;
-            return 0;
-        }
-
         void Select(UnitView unit)
         {
             _selected = unit;
@@ -230,7 +222,6 @@ namespace HexWars.Presentation
                                        : new Color(1f, 0.95f, 0.5f);
 
             int targetId = target.Unit.Id;
-            int hpBefore = target.Unit.CurrentHp;
             Vector3 targetPos = target.transform.position;
             Vector3 from = attacker.transform.position + Vector3.up * 0.4f;
             Vector3 to = targetPos + Vector3.up * 0.4f;
@@ -252,16 +243,10 @@ namespace HexWars.Presentation
             }
             Destroy(proj);
 
+            // Damage numbers and kill explosions come from CombatFx when the state actually changes
+            // (online that's the server echo, a beat after this send) — here only the impact puff.
             bool ok = _game.TryApply(new AttackUnit(_game.State.ActivePlayer, _selectedId, targetId));
-            if (ok)
-            {
-                int dealt = Mathf.Max(0, hpBefore - UnitHp(targetId));
-                DamagePopup.Spawn(targetPos + Vector3.up * 1.1f, dealt.ToString(), new Color(1f, 0.92f, 0.4f));
-                if (!IsUnitAlive(targetId))
-                    ExplosionFx.Spawn(targetPos, new Color(0.95f, 0.45f, 0.18f), Mathf.Lerp(0.8f, 2.0f, power), true);
-                else
-                    ExplosionFx.Spawn(to, projColor, Mathf.Lerp(0.4f, 0.9f, power), false);
-            }
+            if (ok) ExplosionFx.Spawn(to, projColor, Mathf.Lerp(0.4f, 0.9f, power), false);
             ReacquireSelection();
             AutoAdvance();
             _animating = false;
@@ -274,14 +259,6 @@ namespace HexWars.Presentation
             int elev = _game.State.Board.TileAt(cell).Elevation;
             var w = HexLayout.ToWorld(cell, hexSize);
             return new Vector3((float)w.x, (elev + 1) * levelH, (float)w.z);
-        }
-
-        bool IsUnitAlive(int id)
-        {
-            foreach (var p in _game.State.Players)
-                foreach (var u in p.UnitsOnBoard)
-                    if (u.Id == id && u.IsAlive) return true;
-            return false;
         }
 
         void ReacquireSelection()

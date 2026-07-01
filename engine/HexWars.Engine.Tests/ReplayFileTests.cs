@@ -54,6 +54,69 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void EffectiveConfig_RoundTrips_ThroughTheWire()
+        {
+            // The START message online must carry the rules: otherwise the client re-simulates the
+            // game under different config than the server (damageFloor 0 => "0 damage" attacks,
+            // territoryMode false => dead claims, wrong win conditions => wrong winner).
+            var start = GameFactory.Build(new GameSetup(GameMode.Territory, 11, 9, 40, 7, turnActions: 3));
+            var s = ReplayFile.Read(ReplayFile.Write(start, new List<Command>())).Start;
+
+            Assert.That(s.Config.TerritoryMode, Is.True, "territory mode");
+            Assert.That(s.Config.DamageFloor, Is.EqualTo(start.Config.DamageFloor), "damage floor");
+            Assert.That(s.Config.WinConditions, Is.EqualTo(start.Config.WinConditions), "win conditions");
+            Assert.That(s.Config.StartingPoints, Is.EqualTo(start.Config.StartingPoints), "starting points");
+            Assert.That(s.Config.ClaimEndsTurn, Is.EqualTo(start.Config.ClaimEndsTurn), "claim ends turn");
+            Assert.That(s.Config.CaptureCost, Is.EqualTo(start.Config.CaptureCost), "capture cost");
+            Assert.That(s.Config.TerritoryIncome, Is.EqualTo(start.Config.TerritoryIncome), "territory income");
+            Assert.That(s.Config.GeneratorsEnabled, Is.EqualTo(start.Config.GeneratorsEnabled), "generators");
+            Assert.That(s.Config.UpkeepFactor, Is.EqualTo(start.Config.UpkeepFactor), "upkeep factor");
+            Assert.That(s.Config.PointDecay, Is.EqualTo(start.Config.PointDecay), "point decay");
+            Assert.That(s.Config.TurnPolicy.ActionsPerTurn, Is.EqualTo(3), "pace");
+        }
+
+        [Test]
+        public void TerritoryControl_RoundTrips_ThroughTheWire()
+        {
+            var start = GameFactory.Build(new GameSetup(GameMode.Territory, 11, 9, 40, 7));
+            var s = ReplayFile.Read(ReplayFile.Write(start, new List<Command>())).Start;
+
+            Assert.That(s.Board.ControlledCount(P0), Is.GreaterThan(0), "P0 home zone control survives");
+            foreach (var t in start.Board.Tiles)
+                Assert.That(s.Board.Controller(t.Coord), Is.EqualTo(start.Board.Controller(t.Coord)),
+                    $"control of {t.Coord} must survive the wire");
+        }
+
+        [Test]
+        public void ClientLockstep_ReplayingServerCommands_ReachesTheSameState()
+        {
+            // Online, the client applies every server-echoed command to its own copy of the state.
+            // Same engine + same config + same start => it must never reject one, and must land on
+            // the exact same final state as the server.
+            var server = GameFactory.Build(new GameSetup(GameMode.Territory, 11, 9, 40, 7, turnActions: 3));
+            var rec = Match.Record(server, new RandomAgent(3), new RandomAgent(4), maxCommands: 2000);
+
+            var client = ReplayFile.Read(ReplayFile.Write(server, new List<Command>())).Start;
+            foreach (var c in rec.Commands)
+            {
+                var r = GameEngine.Apply(client, c);
+                Assert.That(r.Success, Is.True,
+                    $"client must accept the server-validated {c.GetType().Name} (got {r.Reason})");
+                client = r.NewState;
+            }
+
+            var final = rec.Result.Final;
+            Assert.That(client.Round, Is.EqualTo(final.Round), "round");
+            Assert.That(client.Winner, Is.EqualTo(final.Winner), "winner");
+            Assert.That(client.IsGameOver, Is.EqualTo(final.IsGameOver), "game over");
+            foreach (var p in final.Players)
+            {
+                Assert.That(client.Player(p.Id).Points, Is.EqualTo(p.Points), $"{p.Id} points");
+                Assert.That(client.Player(p.Id).UnitsOnBoard.Count, Is.EqualTo(p.UnitsOnBoard.Count), $"{p.Id} units");
+            }
+        }
+
+        [Test]
         public void RichStartState_RoundTrips()
         {
             var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);
