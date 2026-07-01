@@ -23,6 +23,7 @@ namespace HexWars.Presentation
         Text _banner;
         Image _endBtn;
         PlayerId? _lastActive; // last seen active player, to detect handovers (incl. auto-pass)
+        bool _wasOver;         // so the game-over announcement fires exactly once per game
 
         void Start()
         {
@@ -122,6 +123,19 @@ namespace HexWars.Presentation
         {
             if (_game == null || _game.State == null) return;
             var s = _game.State;
+
+            if (s.IsGameOver)
+            {
+                ShowGameOver(s);
+                return;
+            }
+            if (_wasOver) // a new game started while the old result was still up
+            {
+                _wasOver = false;
+                GameOverBanner.Dismiss();
+                if (_endBtn != null) _endBtn.gameObject.SetActive(true);
+            }
+
             var p = s.Player(s.ActivePlayer);
             bool p0 = s.ActivePlayer == PlayerId.Player0;
             int who = p0 ? 1 : 2;
@@ -159,6 +173,46 @@ namespace HexWars.Presentation
             if (_endBtn != null) _endBtn.color = done.Length > 0 ? EndTurnUrge : EndTurnIdle;
 
             AnnounceTurnIfChanged(s);
+        }
+
+        /// <summary>The moment the game ends: result in the HUD banner, End Turn gone, and (once) the
+        /// big centre announcement. Previously nothing marked it — the first hint was a rejection
+        /// toast when you tried to keep playing.</summary>
+        void ShowGameOver(GameState s)
+        {
+            bool p0Won = s.Winner == PlayerId.Player0;
+            _banner.color = s.Winner == null ? Color.white
+                          : p0Won ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
+            string result = ResultText(s);
+            _banner.text = $"GAME OVER   {result}     Round {s.Round}     " +
+                           $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}";
+            if (_endBtn != null) _endBtn.gameObject.SetActive(false);
+
+            if (!_wasOver)
+            {
+                _wasOver = true;
+                var accent = s.Winner == null ? new Color(0.25f, 0.27f, 0.33f, 0.96f)
+                           : p0Won ? P0ToastBlue : P1ToastRed;
+                GameOverBanner.Show(result.ToUpperInvariant(), HowText(s), accent);
+            }
+        }
+
+        static string ResultText(GameState s)
+        {
+            if (s.Winner == null) return "Draw";
+            return s.Winner == PlayerId.Player0 ? "Player 1 wins" : "Player 2 wins";
+        }
+
+        /// <summary>Which win condition decided it, derived from the final state.</summary>
+        static string HowText(GameState s)
+        {
+            if (s.Winner == null) return "Round cap reached with equal scores";
+            var loser = s.Winner == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            if (WinCheck.IsEliminated(s, loser)) return "The enemy army was wiped out";
+            if ((s.Config.WinConditions & WinBy.Economy) != 0
+                && s.Player(s.Winner.Value).Points >= s.Config.EconomyWinThreshold)
+                return $"Banked {s.Config.EconomyWinThreshold} points (economy win)";
+            return "Higher score at the round cap";
         }
 
         /// <summary>Is the seat that's about to act driven by a human on this machine? (Hotseat: both;
