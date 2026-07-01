@@ -13,16 +13,24 @@ namespace HexWars.Presentation
     {
         public static void Show(Transform canvasParent, Font font, int sortingOrder)
         {
+            // Nested under the caller's canvas: a child canvas ignores renderMode/CanvasScaler, so
+            // stretch to the parent (else the rect is ~zero: an unclickable backdrop) and use
+            // overrideSorting (else sortingOrder is ignored). The card is clamped to the actually
+            // available height — a fixed 720 was taller than many screens, pushing Close off-screen
+            // with no way to dismiss.
             var canvasGo = new GameObject("RulesCanvas");
             canvasGo.transform.SetParent(canvasParent, false);
             var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.overrideSorting = true;
             canvas.sortingOrder = sortingOrder;
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1200f, 800f);
-            scaler.matchWidthOrHeight = 0.5f;
             canvasGo.AddComponent<GraphicRaycaster>();
+            Stretch((RectTransform)canvasGo.transform);
+
+            var parentRt = canvasParent as RectTransform;
+            float availW = parentRt != null && parentRt.rect.width > 0f ? parentRt.rect.width : 1200f;
+            float availH = parentRt != null && parentRt.rect.height > 0f ? parentRt.rect.height : 800f;
+            float cardW = Mathf.Min(760f, availW - 20f);
+            float cardH = Mathf.Min(720f, availH - 20f);
 
             // dim backdrop — tap outside the card to close
             var dim = Panel(canvasGo.transform, new Color(0.02f, 0.03f, 0.06f, 0.86f));
@@ -33,11 +41,11 @@ namespace HexWars.Presentation
             var card = Panel(canvasGo.transform, new Color(0.10f, 0.12f, 0.18f, 1f));
             card.anchorMin = card.anchorMax = new Vector2(0.5f, 0.5f);
             card.pivot = new Vector2(0.5f, 0.5f);
-            card.sizeDelta = new Vector2(760f, 720f);
+            card.sizeDelta = new Vector2(cardW, cardH);
             card.anchoredPosition = Vector2.zero;
 
             Label(card, "HexWars — Rules", font, 26, TextAnchor.UpperCenter,
-                  new Vector2(0f, -18f), new Vector2(760f, 36f));
+                  new Vector2(0f, -18f), new Vector2(cardW, 36f));
 
             // scroll viewport (clips the content)
             var viewportGo = new GameObject("Viewport");
@@ -67,6 +75,8 @@ namespace HexWars.Presentation
             var scroll = viewportGo.AddComponent<ScrollRect>();
             scroll.horizontal = false; scroll.vertical = true; scroll.scrollSensitivity = 24f;
             scroll.viewport = vp; scroll.content = ct; scroll.movementType = ScrollRect.MovementType.Clamped;
+            Canvas.ForceUpdateCanvases();
+            scroll.verticalNormalizedPosition = 1f; // 1 = top (the default 0 opens scrolled to the bottom)
 
             // close button
             var close = Panel(card.transform, new Color(0.22f, 0.36f, 0.58f, 1f));

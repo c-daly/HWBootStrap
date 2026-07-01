@@ -62,10 +62,18 @@ namespace HexWars.Presentation
             return f;
         }
 
-        public void Show(Unit unit, Vector2 screenPos)
+        public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);
+
+        /// <summary>With <paramref name="state"/>, the active player's own units also get a
+        /// "this turn" line: movement/climb budget still unspent and whether the attack is ready.</summary>
+        public void Show(Unit unit, Vector2 screenPos, GameState state)
         {
-            _text.text = Format(unit);
+            string text = Format(unit, state);
+            _text.text = text;
             var prt = _panel.GetComponent<RectTransform>();
+            int lines = text.Split('\n').Length;
+            // wide enough for the "this turn" line — text overflows horizontally rather than wrapping
+            prt.sizeDelta = new Vector2(300f, 26f * lines + 14f);
             // canvas is scaled, so convert mouse pixels into the canvas's reference units
             float sf = _canvas != null && _canvas.scaleFactor > 0f ? _canvas.scaleFactor : 1f;
             Vector2 p = screenPos / sf;
@@ -81,18 +89,31 @@ namespace HexWars.Presentation
             if (_panel != null) _panel.SetActive(false);
         }
 
-        static string Format(Unit u)
+        static string Format(Unit u, GameState state)
         {
             var s = u.Stats;
             string role = Roles.Dominant(s).ToString();
             string owner = u.Owner == PlayerId.Player0 ? "Player 1" : "Player 2";
-            return
+            string text =
                 $"<b>{role}</b>   {s.PointCost} pts   ({owner})\n" +
                 $"HP {u.CurrentHp}/{s.Health}\n" +
                 $"Damage {s.Damage}    Defense {s.Defense}\n" +
                 $"Move {s.Movement}    Vertical {s.VerticalMovement}\n" +
                 $"Range {s.Range}    Range Arc {s.RangeArc}\n" +
                 $"Vision {s.Vision}    Vision Arc {s.VisionArc}";
+
+            if (state != null && !state.IsGameOver && u.Owner == state.ActivePlayer)
+            {
+                var spent = state.MovementSpent.TryGetValue(u.Id, out var sp) ? sp : (H: 0, V: 0);
+                int moveLeft = Mathf.Max(0, s.Movement - spent.H);
+                int climbLeft = Mathf.Max(0, s.VerticalMovement - spent.V);
+                bool attacked = false;
+                foreach (var id in state.AttackedUnitIds) if (id == u.Id) { attacked = true; break; }
+                text += $"\n<color=#9FD68C>Left:  Move {moveLeft}/{s.Movement}" +
+                        $"  Climb {climbLeft}/{s.VerticalMovement}" +
+                        $"  Attack {(attacked ? "used" : "ready")}</color>";
+            }
+            return text;
         }
     }
 }

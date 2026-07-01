@@ -69,8 +69,8 @@ namespace HexWars.Presentation
                 hoveredTile = hit.collider.GetComponentInParent<TileView>();
             }
 
-            if (hoveredUnit != null) _tooltip.Show(hoveredUnit.Unit, mp);
-            else if (_selected != null) _tooltip.Show(_selected.Unit, mp);
+            if (hoveredUnit != null) _tooltip.Show(hoveredUnit.Unit, mp, _game.State);
+            else if (_selected != null) _tooltip.Show(_selected.Unit, mp, _game.State);
             else _tooltip.Hide();
 
             // act on a TAP (press + release without dragging) so a drag is free to pan the camera

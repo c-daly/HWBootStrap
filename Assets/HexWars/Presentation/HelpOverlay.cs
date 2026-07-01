@@ -122,6 +122,7 @@ Press End Turn (bottom-left) when you're done.";
             var t = new GameObject("Label").AddComponent<Text>();
             t.transform.SetParent(go.transform, false);
             t.font = _font; t.fontSize = fontSize; t.color = Color.white;
+            t.text = label;
             t.alignment = TextAnchor.MiddleCenter; t.raycastTarget = false;
             var lrt = t.GetComponent<RectTransform>();
             lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;

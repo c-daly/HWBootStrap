@@ -8,20 +8,31 @@ namespace HexWars.Engine
     /// <see cref="UnitStats.Movement"/> (terrain move cost to enter a hex) and vertical
     /// <see cref="UnitStats.VerticalMovement"/> (ascent only; descending and level moves are free).
     /// Because the two budgets are separate constraints, reachability keeps a Pareto frontier of
-    /// (horizontal, vertical) cost pairs per column. (Ground-first M1: a unit's elevation = the tile
-    /// it stands on, so path costs use tile elevations.)
+    /// (horizontal, vertical) cost pairs per column. Budgets are per TURN, not per move: hops spend
+    /// them incrementally (<see cref="GameState.MovementSpent"/>), so a unit can move, look, and move
+    /// again until they run out. (Ground-first M1: a unit's elevation = the tile it stands on, so
+    /// path costs use tile elevations.)
     /// </summary>
     public static class MovementService
     {
         public static IReadOnlyCollection<HexCoord> ReachableTiles(GameState state, Unit unit)
+            => ReachableCosts(state, unit).Keys;
+
+        /// <summary>Every hex the unit can still reach this turn, with the (horizontal, vertical)
+        /// cost the hop would charge against its remaining budgets — the cheapest-horizontal
+        /// (then cheapest-vertical) of the Pareto-optimal paths.</summary>
+        public static Dictionary<HexCoord, (int H, int V)> ReachableCosts(GameState state, Unit unit)
         {
+            var costs = new Dictionary<HexCoord, (int H, int V)>();
+            var spent = state.MovementSpent.TryGetValue(unit.Id, out var sp) ? sp : (H: 0, V: 0);
+            int maxH = unit.Stats.Movement - spent.H;
+            int maxV = unit.Stats.VerticalMovement - spent.V;
+            if (maxH <= 0) return costs; // horizontal budget gone — no hop can enter any hex
+
             var board = state.Board;
             var config = state.Config;
             var occupied = OccupiedCells(state, unit);
-            int maxH = unit.Stats.Movement;
-            int maxV = unit.Stats.VerticalMovement;
 
-            var reachable = new HashSet<HexCoord>();
             var frontier = new Dictionary<HexCoord, List<(int h, int v)>>();
             var queue = new Queue<(HexCoord coord, int h, int v)>();
 
@@ -48,13 +59,14 @@ namespace HexWars.Engine
                     if (IsDominated(frontier, n, nh, nv)) continue;
 
                     AddToFrontier(frontier, n, nh, nv);
-                    reachable.Add(n);
+                    if (!costs.TryGetValue(n, out var best) || nh < best.H || (nh == best.H && nv < best.V))
+                        costs[n] = (nh, nv);
                     queue.Enqueue((n, nh, nv));
                 }
             }
 
-            reachable.Remove(start);
-            return reachable;
+            costs.Remove(start);
+            return costs;
         }
 
         private static HashSet<HexCoord> OccupiedCells(GameState state, Unit mover)

@@ -43,11 +43,15 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void MoveUnit_Rejects_WhenAlreadyMovedThisTurn()
+        public void MoveUnit_Rejects_WhenMovementBudgetIsSpent()
         {
+            // movement is a per-turn budget spent across hops (see MultiHopMovementTests): with
+            // Movement 2, hop + hop-back spends it all, and a third hop is the real rejection
             var first = GameEngine.Apply(MoveScene(Mover(2)), new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 0)));
             var second = GameEngine.Apply(first.NewState, new MoveUnit(PlayerId.Player0, 1, new HexCoord(0, 0)));
-            Assert.That(second.Reason, Is.EqualTo(RejectionReason.UnitAlreadyMoved));
+            Assert.That(second.Success, Is.True, "budget remains — hopping back is legal now");
+            var third = GameEngine.Apply(second.NewState, new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 0)));
+            Assert.That(third.Reason, Is.EqualTo(RejectionReason.UnitAlreadyMoved));
         }
 
         [Test]

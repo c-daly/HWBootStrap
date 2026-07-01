@@ -47,13 +47,26 @@ namespace HexWars.Presentation
             var cam = Camera.main;
             if (pointer == null || cam == null || !pointer.press.wasReleasedThisFrame || IsOverUi()) return;
 
+            // Deploy mode is easy to leave: only a successful deploy keeps it. Clicking a unit,
+            // an illegal hex, or empty space hands control back to the board (it used to stay
+            // sticky until the template was re-clicked).
             var mp = pointer.position.ReadValue();
             if (Physics.Raycast(cam.ScreenPointToRay(mp), out var hit, 1000f))
             {
+                if (hit.collider.GetComponentInParent<UnitView>() != null) { StopDeploying(); return; }
+
                 var tv = hit.collider.GetComponentInParent<TileView>();
-                if (tv != null)
-                    _game.TryApply(new DeployUnit(_game.State.ActivePlayer, _deployIndex, tv.Coord));
+                if (tv == null
+                    || !_game.TryApply(new DeployUnit(_game.State.ActivePlayer, _deployIndex, tv.Coord)))
+                    StopDeploying();
             }
+            else StopDeploying();
+        }
+
+        void StopDeploying()
+        {
+            _deployIndex = -1;
+            Rebuild();
         }
 
         void Build()
@@ -114,7 +127,7 @@ namespace HexWars.Presentation
             }
 
             _hint.text = _deployIndex >= 0
-                ? "Click a zone hex to deploy (re-click to stop)."
+                ? "Click a zone hex to deploy - anywhere else to stop."
                 : (p.Barracks.Count == 0 ? "Design a unit, then deploy it here." : "Select a template to deploy.");
         }
 

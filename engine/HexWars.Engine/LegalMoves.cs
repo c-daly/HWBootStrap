@@ -42,9 +42,9 @@ namespace HexWars.Engine
             {
                 if (!unit.IsAlive) continue;
 
-                if (!state.MovedUnitIds.Contains(unit.Id))
-                    foreach (var dest in MovementService.ReachableTiles(state, unit))
-                        moves.Add(new MoveUnit(me, unit.Id, dest));
+                // ReachableTiles honours the budget already spent by earlier hops this turn
+                foreach (var dest in MovementService.ReachableTiles(state, unit))
+                    moves.Add(new MoveUnit(me, unit.Id, dest));
 
                 if (!state.AttackedUnitIds.Contains(unit.Id))
                 {

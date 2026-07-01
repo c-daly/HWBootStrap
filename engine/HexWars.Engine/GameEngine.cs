@@ -58,7 +58,8 @@ namespace HexWars.Engine
         private static GameState WithGameOver(GameState s, PlayerId? winner) =>
             new GameState(s.Board, s.Config, s.Players, s.ActivePlayer, s.Round, s.NextEntityId,
                           isGameOver: true, winner: winner,
-                          movedUnitIds: s.MovedUnitIds, attackedUnitIds: s.AttackedUnitIds);
+                          movedUnitIds: s.MovedUnitIds, attackedUnitIds: s.AttackedUnitIds,
+                          movementSpent: s.MovementSpent);
 
         private static Result ApplyEndTurn(GameState state, EndTurn c)
         {
@@ -151,11 +152,17 @@ namespace HexWars.Engine
             var player = state.Player(c.Issuer);
             int idx = IndexOfLivingUnit(player, c.UnitId);
             if (idx < 0) return Result.Reject(state, RejectionReason.UnitNotFound);
-            if (state.MovedUnitIds.Contains(c.UnitId)) return Result.Reject(state, RejectionReason.UnitAlreadyMoved);
 
             var unit = player.UnitsOnBoard[idx];
-            var reachable = MovementService.ReachableTiles(state, unit);
-            if (!reachable.Contains(c.Dest)) return Result.Reject(state, RejectionReason.OutOfMovementRange);
+
+            // hops spend the per-turn movement budgets incrementally; when they're gone, the unit
+            // has "already moved" (its move — possibly several hops — is complete)
+            var spent = state.MovementSpent.TryGetValue(c.UnitId, out var sp) ? sp : (H: 0, V: 0);
+            if (spent.H >= unit.Stats.Movement) return Result.Reject(state, RejectionReason.UnitAlreadyMoved);
+
+            var costs = MovementService.ReachableCosts(state, unit);
+            if (!costs.TryGetValue(c.Dest, out var cost))
+                return Result.Reject(state, RejectionReason.OutOfMovementRange);
 
             var moved = unit.WithCell(c.Dest, state.Board.TileAt(c.Dest).Elevation);
             var units = new List<Unit>(player.UnitsOnBoard);
@@ -163,7 +170,10 @@ namespace HexWars.Engine
             var updated = new PlayerState(player.Id, player.Points, player.Barracks, units, player.Generators, player.DestroyedValue);
 
             var movedIds = new HashSet<int>(state.MovedUnitIds) { c.UnitId };
-            return Result.Ok(WithPlayer(state, updated, movedUnitIds: movedIds));
+            var newSpent = new Dictionary<int, (int H, int V)>(state.MovementSpent.Count + 1);
+            foreach (var kv in state.MovementSpent) newSpent[kv.Key] = kv.Value;
+            newSpent[c.UnitId] = (spent.H + cost.H, spent.V + cost.V);
+            return Result.Ok(WithPlayer(state, updated, movedUnitIds: movedIds, movementSpent: newSpent));
         }
 
         private static int IndexOfLivingUnit(PlayerState player, int unitId)
@@ -255,7 +265,7 @@ namespace HexWars.Engine
 
             return Result.Ok(new GameState(state.Board, state.Config, players, state.ActivePlayer,
                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
-                state.MovedUnitIds, attackedIds));
+                state.MovedUnitIds, attackedIds, state.MovementSpent));
         }
 
         private static Result ApplyCaptureHex(GameState state, CaptureHex c)
@@ -300,7 +310,7 @@ namespace HexWars.Engine
 
             return Result.Ok(new GameState(newBoard, state.Config, players, state.ActivePlayer,
                 state.Round, state.NextEntityId, state.IsGameOver, state.Winner,
-                state.MovedUnitIds, state.AttackedUnitIds));
+                state.MovedUnitIds, state.AttackedUnitIds, state.MovementSpent));
         }
 
         /// <summary>Capture cost for a hex: flat CaptureCost, or — if a generator sits here — scaled by its
@@ -373,13 +383,15 @@ namespace HexWars.Engine
         /// <summary>Rebuild the state with one player replaced (optionally a new entity-id counter or
         /// acted-tracking sets); all other fields, including the per-turn acted sets, are preserved.</summary>
         private static GameState WithPlayer(GameState state, PlayerState updated, int? nextEntityId = null,
-            IReadOnlyCollection<int>? movedUnitIds = null, IReadOnlyCollection<int>? attackedUnitIds = null)
+            IReadOnlyCollection<int>? movedUnitIds = null, IReadOnlyCollection<int>? attackedUnitIds = null,
+            IReadOnlyDictionary<int, (int H, int V)>? movementSpent = null)
         {
             var players = state.Players.ToArray();
             players[(int)updated.Id] = updated;
             return new GameState(state.Board, state.Config, players, state.ActivePlayer,
                                  state.Round, nextEntityId ?? state.NextEntityId, state.IsGameOver, state.Winner,
-                                 movedUnitIds ?? state.MovedUnitIds, attackedUnitIds ?? state.AttackedUnitIds);
+                                 movedUnitIds ?? state.MovedUnitIds, attackedUnitIds ?? state.AttackedUnitIds,
+                                 movementSpent ?? state.MovementSpent);
         }
     }
 }
