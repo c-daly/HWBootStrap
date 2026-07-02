@@ -14,9 +14,15 @@ namespace HexWars.Presentation
     {
         public const string RootName = "GameOverBanner";
 
+        // taps within this window after showing are ignored — the click that ends the game (or a
+        // reflexive next one) must not silently dismiss the result before the player registers it
+        const float DismissGrace = 0.8f;
+        static float _shownAt;
+
         public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null)
         {
             Dismiss(); // never stack two
+            _shownAt = Time.unscaledTime;
 
             var root = new GameObject(RootName);
             var canvas = root.AddComponent<Canvas>();
@@ -35,7 +41,10 @@ namespace HexWars.Presentation
             var drt = dim.GetComponent<RectTransform>();
             drt.anchorMin = Vector2.zero; drt.anchorMax = Vector2.one;
             drt.offsetMin = Vector2.zero; drt.offsetMax = Vector2.zero;
-            dim.AddComponent<Button>().onClick.AddListener(Dismiss);
+            dim.AddComponent<Button>().onClick.AddListener(() =>
+            {
+                if (Time.unscaledTime - _shownAt >= DismissGrace) Dismiss();
+            });
 
             var band = new GameObject("Band");
             band.transform.SetParent(root.transform, false);

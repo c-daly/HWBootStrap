@@ -165,10 +165,21 @@ namespace HexWars.Presentation
                 ? "     Nothing left to do - press End Turn"
                 : "";
 
+            // the comeback rule keeps a unitless side alive while it can afford a redeploy — say so,
+            // or (especially under fog) a wiped board reads as "the game ended and nothing happened"
+            string armies = "";
+            foreach (var pl in s.Players)
+            {
+                int alive = 0;
+                foreach (var u in pl.UnitsOnBoard) if (u.IsAlive) alive++;
+                if (alive == 0)
+                    armies += $"     P{((int)pl.Id) + 1} has no army (can still deploy)";
+            }
+
             _banner.text = s.Config.TerritoryMode
-                ? $"P{who}'s turn{pace}{done}     Round {s.Round}     " +
+                ? $"P{who}'s turn{pace}{done}{armies}     Round {s.Round}     " +
                   $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}"
-                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}{armies}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
 
             if (_endBtn != null) _endBtn.color = done.Length > 0 ? EndTurnUrge : EndTurnIdle;
 
