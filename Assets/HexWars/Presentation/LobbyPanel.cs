@@ -75,7 +75,8 @@ namespace HexWars.Presentation
             scaler.matchWidthOrHeight = 0f;
             _canvasGo.AddComponent<GraphicRaycaster>();
 
-            Stretch(Panel(_canvasGo.transform, "Dim", new Color(0.02f, 0.03f, 0.06f, 0.9f)).GetComponent<RectTransform>());
+            // fully opaque: the menu is its own screen, not a veil over a (possibly finished) game
+            Stretch(Panel(_canvasGo.transform, "Dim", new Color(0.03f, 0.04f, 0.08f, 1f)).GetComponent<RectTransform>());
 
             _form = Panel(_canvasGo.transform, "Form", new Color(0.10f, 0.12f, 0.18f, 0.99f));
             var frt = _form.GetComponent<RectTransform>();

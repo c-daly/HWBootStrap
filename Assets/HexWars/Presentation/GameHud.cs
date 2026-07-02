@@ -193,7 +193,8 @@ namespace HexWars.Presentation
                 _wasOver = true;
                 var accent = s.Winner == null ? new Color(0.25f, 0.27f, 0.33f, 0.96f)
                            : p0Won ? P0ToastBlue : P1ToastRed;
-                GameOverBanner.Show(result.ToUpperInvariant(), HowText(s), accent);
+                GameOverBanner.Show(result.ToUpperInvariant(), HowText(s), accent,
+                                    onMainMenu: () => _game.ReturnToMenu());
             }
         }
 

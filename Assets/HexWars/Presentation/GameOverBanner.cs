@@ -5,15 +5,16 @@ namespace HexWars.Presentation
 {
     /// <summary>
     /// The end-of-game announcement: a full-width band across the centre of the screen with the
-    /// result and how it was won, over a light dim. Tap anywhere to dismiss and inspect the final
-    /// board (the HUD banner keeps showing the result). Spawned by GameHud the moment the state
-    /// turns game-over — previously the only signal was a rejection toast when you tried to act.
+    /// result, how it was won, and a Main-menu button, over a light dim. Tap outside the button to
+    /// dismiss and inspect the final board (the HUD banner keeps showing the result). Spawned by
+    /// GameHud the moment the state turns game-over — previously the only signal was a rejection
+    /// toast when you tried to act.
     /// </summary>
     public static class GameOverBanner
     {
         public const string RootName = "GameOverBanner";
 
-        public static void Show(string title, string subtitle, Color accent)
+        public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null)
         {
             Dismiss(); // never stack two
 
@@ -44,12 +45,34 @@ namespace HexWars.Presentation
             var brt = band.GetComponent<RectTransform>();
             brt.anchorMin = new Vector2(0f, 0.5f); brt.anchorMax = new Vector2(1f, 0.5f);
             brt.pivot = new Vector2(0.5f, 0.5f);
-            brt.sizeDelta = new Vector2(0f, 150f);
+            brt.sizeDelta = new Vector2(0f, 200f);
             brt.anchoredPosition = Vector2.zero;
 
             var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            Text(band.transform, title, font, 46, FontStyle.Bold, new Vector2(0f, 14f));
-            Text(band.transform, subtitle + "   (tap to dismiss)", font, 19, FontStyle.Normal, new Vector2(0f, -38f));
+            Text(band.transform, title, font, 46, FontStyle.Bold, new Vector2(0f, 42f));
+            Text(band.transform, subtitle + "   (tap outside to look at the board)", font, 19, FontStyle.Normal, new Vector2(0f, -6f));
+
+            if (onMainMenu != null)
+            {
+                var btn = new GameObject("MainMenuButton");
+                btn.transform.SetParent(band.transform, false);
+                btn.AddComponent<Image>().color = new Color(0.16f, 0.19f, 0.26f, 1f);
+                btn.AddComponent<Button>().onClick.AddListener(() => { Dismiss(); onMainMenu(); });
+                var mrt = btn.GetComponent<RectTransform>();
+                mrt.anchorMin = mrt.anchorMax = new Vector2(0.5f, 0.5f);
+                mrt.sizeDelta = new Vector2(220f, 44f);
+                mrt.anchoredPosition = new Vector2(0f, -62f);
+
+                var label = new GameObject("Label");
+                label.transform.SetParent(btn.transform, false);
+                var lt = label.AddComponent<Text>();
+                lt.text = "Main menu";
+                lt.font = font; lt.fontSize = 20; lt.color = Color.white;
+                lt.alignment = TextAnchor.MiddleCenter; lt.raycastTarget = false;
+                var lrt = lt.GetComponent<RectTransform>();
+                lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
+                lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+            }
         }
 
         public static void Dismiss()

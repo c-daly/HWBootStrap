@@ -196,6 +196,21 @@ namespace HexWars.Presentation
             return null;
         }
 
+        /// <summary>Tear down the current game and return to the lobby: disconnect the socket, drop
+        /// the AI and seat, clear the state (the lobby dismisses itself whenever a state exists, so
+        /// a null state is what lets it come back). The next created game rebuilds everything.</summary>
+        public void ReturnToMenu()
+        {
+            GameOverBanner.Dismiss();
+            if (_net != null) { Destroy(_net); _net = null; }
+            Seat = null;
+            var ai = GetComponent<AiOpponent>();
+            if (ai != null) Destroy(ai);
+            State = null;
+            StateChanged?.Invoke();
+            if (GetComponent<LobbyPanel>() == null) gameObject.AddComponent<LobbyPanel>();
+        }
+
         /// <summary>Whose vision the fog renders: this browser's seat online, the human's seat vs AI,
         /// or the active player in hotseat (vision hands over with the turn). Null when fog is off
         /// or there is no seated human (spectators see everything).</summary>
