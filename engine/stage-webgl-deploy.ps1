@@ -15,4 +15,14 @@ Copy-Item (Join-Path $src "index.html") $dst -Force
 if (Test-Path (Join-Path $src "StreamingAssets")) {
     Copy-Item (Join-Path $src "StreamingAssets\*") (Join-Path $dst "StreamingAssets\") -Recurse -Force
 }
-Write-Host "Staged $src -> $dst  (now: git add/commit, then push from WSL)"
+
+# Cache-bust the payload URLs: builds ship under the SAME filenames, and Unity's IndexedDB cache
+# keys by URL — after a redeploy a browser can pair an old cached .data with the new .wasm and die
+# at boot ("RuntimeError: memory access out of bounds" in callMain). A per-deploy ?v= makes every
+# build's URLs unique so old and new can never mix.
+$v = (Get-FileHash (Join-Path $dst "Build\WebGL.data.unityweb") -Algorithm SHA256).Hash.Substring(0, 8).ToLower()
+$idx = Join-Path $dst "index.html"
+(Get-Content $idx -Raw) -replace '(Build/WebGL\.(?:data\.unityweb|framework\.js\.unityweb|wasm\.unityweb|loader\.js))', ('$1?v=' + $v) |
+    Set-Content $idx -Encoding utf8 -NoNewline
+
+Write-Host "Staged $src -> $dst with cache-bust v=$v  (now: git add/commit, then push from WSL)"

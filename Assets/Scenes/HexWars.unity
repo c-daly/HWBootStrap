@@ -159,7 +159,15 @@ MonoBehaviour:
   ForestWeight: 15
   RoughWeight: 10
   WaterWeight: 5
+  BiomesEnabled: 0
+  OneActionPerTurn: 0
+  FogOfWar: 0
+  TerritoryMode: 0
+  TerritoryStartingPoints: 40
+  VsAI: 0
+  Difficulty: 1
   DemoPieces: 1
+  Networked: 0
 --- !u!114 &222244462
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -224,6 +232,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9c0df82b4bb41424fad6143ae0fc6a9f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: HexWars.Presentation::HexWars.Presentation.UnitInputController
+  ReadOnly: 0
 --- !u!114 &604652324
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -367,6 +376,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d344474b22f04ff40ac5fbc56a0649de, type: 3}
   m_Name: 
   m_EditorClassIdentifier: HexWars.Presentation::HexWars.Presentation.BarracksPanel
+  ReadOnly: 0
 --- !u!21 &1880450647
 Material:
   serializedVersion: 8
