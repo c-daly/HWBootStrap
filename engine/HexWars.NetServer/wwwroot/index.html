@@ -22,16 +22,16 @@
     <script>
       var canvas = document.querySelector("#unity-canvas");
       var config = {
-        dataUrl: "Build/WebGL.data.unityweb?v=61a11eb1",
-        frameworkUrl: "Build/WebGL.framework.js.unityweb?v=61a11eb1",
-        codeUrl: "Build/WebGL.wasm.unityweb?v=61a11eb1",
+        dataUrl: "Build/WebGL.data.unityweb?v=45297700",
+        frameworkUrl: "Build/WebGL.framework.js.unityweb?v=45297700",
+        codeUrl: "Build/WebGL.wasm.unityweb?v=45297700",
         streamingAssetsUrl: "StreamingAssets",
         companyName: "DefaultCompany",
         productName: "HexWars",
         productVersion: "0.1.0",
       };
       var script = document.createElement("script");
-      script.src = "Build/WebGL.loader.js?v=61a11eb1";
+      script.src = "Build/WebGL.loader.js?v=45297700";
       script.onload = () => {
         createUnityInstance(canvas, config, (p) => {
           document.querySelector("#fill").style.width = (100 * p) + "%";
