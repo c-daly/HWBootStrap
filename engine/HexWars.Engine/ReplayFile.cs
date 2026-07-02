@@ -135,6 +135,7 @@ namespace HexWars.Engine
             sb.Append(" territoryIncome=").Append(c.TerritoryIncome);
             sb.Append(" generators=").Append(c.GeneratorsEnabled ? 1 : 0);
             sb.Append(" pointDecay=").Append(c.PointDecay.ToString("R", inv));
+            sb.Append(" fog=").Append(c.FogOfWar ? 1 : 0);
             sb.Append('\n');
         }
 
@@ -175,7 +176,8 @@ namespace HexWars.Engine
                 buildAnywhere: Gb("buildAnywhere", false),
                 territoryIncome: Gi("territoryIncome", 0),
                 generatorsEnabled: Gb("generators", true),
-                pointDecay: Gd("pointDecay", 0.0));
+                pointDecay: Gd("pointDecay", 0.0),
+                fogOfWar: Gb("fog", false));
         }
 
         private static void WriteControl(StringBuilder sb, string tag, Board board, PlayerId owner)

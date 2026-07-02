@@ -16,10 +16,18 @@ namespace HexWars.Presentation
         const string C0 = "#6FB1FF"; // Player0 = P1 (blue)
         const string C1 = "#FF7B6B"; // Player1 = P2 (red)
 
-        public static List<string> Diff(GameState prev, GameState cur)
+        /// <summary>With fog of war and a <paramref name="viewer"/>, the other army's moves and deploys
+        /// are logged only where the viewer's army has vision — otherwise the log is a wallhack.
+        /// Hits and kills always log (they involve units the viewer could target or owns).</summary>
+        public static List<string> Diff(GameState prev, GameState cur, PlayerId? viewer = null)
         {
             var lines = new List<string>();
             if (prev == null || cur == null) return lines;
+
+            bool fog = viewer.HasValue && cur.Config.FogOfWar;
+            bool SeesEnemy(PlayerId owner, Unit u) =>
+                !fog || owner == viewer.Value
+                || TargetingService.IsVisibleToArmy(cur, viewer.Value, u.Cell, u.Elevation);
 
             if (cur.Round > prev.Round) lines.Add($"<b>— Round {cur.Round} —</b>");
 
@@ -40,7 +48,7 @@ namespace HexWars.Presentation
                     }
 
                 foreach (var kv in after)                           // present now, absent before = deployed
-                    if (!before.ContainsKey(kv.Key))
+                    if (!before.ContainsKey(kv.Key) && SeesEnemy(pid, kv.Value))
                         lines.Add($"{Tag(pid)} deployed a {Role(kv.Value)} at {Cell(kv.Value.Cell)}");
 
                 foreach (var kv in after)                           // survived: took damage and/or moved
@@ -49,7 +57,7 @@ namespace HexWars.Presentation
                         var u = kv.Value;
                         if (u.CurrentHp < u0.CurrentHp)
                             lines.Add($"{Tag(actor)} hit {Tag(pid)}'s {Role(u)} at {Cell(u.Cell)} for {u0.CurrentHp - u.CurrentHp} (HP {u.CurrentHp})");
-                        else if (!u.Cell.Equals(u0.Cell))
+                        else if (!u.Cell.Equals(u0.Cell) && SeesEnemy(pid, u))
                             lines.Add($"{Tag(pid)} moved a {Role(u)} {Cell(u0.Cell)}→{Cell(u.Cell)}");
                     }
 

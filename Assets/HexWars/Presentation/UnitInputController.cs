@@ -203,7 +203,7 @@ namespace HexWars.Presentation
                 yield return null;
             }
             bool ok = _game.TryApply(new MoveUnit(_game.State.ActivePlayer, _selectedId, dest));
-            if (!ok && _board != null) _board.RenderEntities(_game.State); // illegal: snap back to truth
+            if (!ok && _board != null) _board.RenderEntities(_game.State, _game.FogViewer()); // illegal: snap back to truth
             ReacquireSelection();
             AutoAdvance();
             _animating = false;

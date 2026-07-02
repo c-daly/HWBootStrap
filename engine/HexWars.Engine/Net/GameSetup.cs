@@ -22,17 +22,20 @@ namespace HexWars.Engine
         public readonly int Strikers;   // with random roles (so all-zero = a fully random army)
         public readonly int Snipers;
         public readonly int TurnActions; // actions a player commits before auto-passing; 0 = whole army
+        public readonly bool Fog;        // hide enemy units outside your army's vision
 
         public GameSetup(GameMode mode, int width, int height, int startingPoints, int seed,
-                         int armySize = 3, int brutes = 1, int strikers = 1, int snipers = 1, int turnActions = 0)
+                         int armySize = 3, int brutes = 1, int strikers = 1, int snipers = 1, int turnActions = 0,
+                         bool fog = false)
         {
             Mode = mode; Width = width; Height = height; StartingPoints = startingPoints; Seed = seed;
             ArmySize = armySize; Brutes = brutes; Strikers = strikers; Snipers = snipers; TurnActions = turnActions;
+            Fog = fog;
         }
 
         public static GameSetup Default => new GameSetup(GameMode.Annihilation, 9, 7, 0, 7);
 
-        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers} {TurnActions}";
+        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers} {TurnActions} {(Fog ? 1 : 0)}";
 
         public static GameSetup Parse(string wire)
         {
@@ -40,7 +43,7 @@ namespace HexWars.Engine
             int G(int i, int def) => i < p.Length
                 && int.TryParse(p[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : def;
             return new GameSetup((GameMode)G(0, 0), G(1, 9), G(2, 7), G(3, 0), G(4, 7),
-                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0));
+                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0), G(10, 0) != 0);
         }
     }
 
@@ -73,9 +76,9 @@ namespace HexWars.Engine
             var config = territory
                 ? GameConfig.Default(biomesEnabled: false, winConditions: WinBy.Annihilation | WinBy.Score,
                                      startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1,
-                                     turnPolicy: turnPolicy)
+                                     turnPolicy: turnPolicy, fogOfWar: setup.Fog)
                 : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1,
-                                     turnPolicy: turnPolicy);
+                                     turnPolicy: turnPolicy, fogOfWar: setup.Fog);
 
             if (territory)
             {

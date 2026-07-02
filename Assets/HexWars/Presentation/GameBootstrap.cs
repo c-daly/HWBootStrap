@@ -36,6 +36,9 @@ namespace HexWars.Presentation
         [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]
         public bool OneActionPerTurn = false;
 
+        [Tooltip("On = enemy units/generators render only where your army has vision. Takes effect on a new game.")]
+        public bool FogOfWar = false;
+
         [Header("Territory mode")]
         [Tooltip("On = territory mode: control gates deploy/build, claiming a hex is a turn-exclusive action. Takes effect on a new game.")]
         public bool TerritoryMode = false;
@@ -96,10 +99,10 @@ namespace HexWars.Presentation
                                      turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
                                      winConditions: WinBy.Economy | WinBy.Annihilation,
                                      startingPoints: TerritoryStartingPoints,
-                                     territoryMode: true, damageFloor: 1)
+                                     territoryMode: true, damageFloor: 1, fogOfWar: FogOfWar)
                 : GameConfig.Default(biomesEnabled: BiomesEnabled,
                                      turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
-                                     damageFloor: 1);
+                                     damageFloor: 1, fogOfWar: FogOfWar);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
@@ -117,7 +120,7 @@ namespace HexWars.Presentation
 
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(board);
-            renderer.RenderEntities(State);
+            renderer.RenderEntities(State, FogViewer());
 
             var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
@@ -147,8 +150,8 @@ namespace HexWars.Presentation
             }
             var prev = State;
             State = result.NewState;
-            GetComponent<BoardRenderer>().RenderEntities(State);
-            EventConsole.Report(State, CombatLog.Diff(prev, State));
+            GetComponent<BoardRenderer>().RenderEntities(State, FogViewer());
+            EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
             PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
@@ -171,7 +174,7 @@ namespace HexWars.Presentation
             State = GameFactory.Build(setup);
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
-            renderer.RenderEntities(State);
+            renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
             EventConsole.Clear();
             EventConsole.Report(State, null);
@@ -193,6 +196,18 @@ namespace HexWars.Presentation
             return null;
         }
 
+        /// <summary>Whose vision the fog renders: this browser's seat online, the human's seat vs AI,
+        /// or the active player in hotseat (vision hands over with the turn). Null when fog is off
+        /// or there is no seated human (spectators see everything).</summary>
+        public PlayerId? FogViewer()
+        {
+            if (State == null || !State.Config.FogOfWar) return null;
+            if (Seat.HasValue) return Seat.Value;
+            var ai = FindAnyObjectByType<AiOpponent>();
+            if (ai != null) return ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            return State.ActivePlayer;
+        }
+
         // ---- server callbacks (online mode), invoked by NetClient ----
 
         internal void OnNetSeat(PlayerId seat) { Seat = seat; StateChanged?.Invoke(); }
@@ -205,7 +220,7 @@ namespace HexWars.Presentation
             State = ReplayFile.Read(startStateText).Start;
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
-            renderer.RenderEntities(State);
+            renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
             EventConsole.Clear();
             EventConsole.Report(State, null);
@@ -219,8 +234,8 @@ namespace HexWars.Presentation
             if (!result.Success) { Debug.LogWarning("[Net] server move rejected locally: " + result.Reason); return; }
             var prev = State;
             State = result.NewState;
-            GetComponent<BoardRenderer>().RenderEntities(State);
-            EventConsole.Report(State, CombatLog.Diff(prev, State));
+            GetComponent<BoardRenderer>().RenderEntities(State, FogViewer());
+            EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
             PlaySounds(cmd, prev, State);
             StateChanged?.Invoke();
@@ -230,7 +245,7 @@ namespace HexWars.Presentation
         {
             Debug.Log("[Net] move rejected: " + reason);
             Toast.Show(Friendly(reason));
-            if (State != null) GetComponent<BoardRenderer>().RenderEntities(State); // snap optimistic UI back to truth
+            if (State != null) GetComponent<BoardRenderer>().RenderEntities(State, FogViewer()); // snap optimistic UI back to truth
         }
 
         /// <summary>Turn a RejectionReason name into a plain-language explanation for the player.</summary>

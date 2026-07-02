@@ -41,6 +41,7 @@ namespace HexWars.Presentation
         int _w = 9, _h = 7, _pts = 0, _seed = 7;
         int _armySize = 3, _brutes = 1, _strikers = 1, _snipers = 1;
         int _turnActions = 3; // "Pace": 0 = whole army; K = commit K actions then auto-pass
+        bool _fog = false;    // hide enemy units outside your army's vision
 
         static readonly int[] PacePresets = { 3, 4, 0, 1 };
         static string PaceLabel(int k) => k <= 0 ? "whole army (fast)" : $"{k} action{(k == 1 ? "" : "s")}/turn";
@@ -125,7 +126,8 @@ namespace HexWars.Presentation
             paceLabel.text = "Pace:  " + PaceLabel(_turnActions) + "   ▸";
             y -= 48f;
 
-            ToggleBtn(_form.transform, "vs AI (single player)", -90f, y, 260f, 38f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
+            ToggleBtn(_form.transform, "vs AI (single player)", -140f, y, 260f, 38f, () => _vsAi, () => { _vsAi = !_vsAi; Refresh(); });
+            ToggleBtn(_form.transform, "Fog of war", 120f, y, 170f, 38f, () => _fog, () => { _fog = !_fog; Refresh(); });
             y -= 52f;
 
             Btn(_form.transform, "Create Game", 0f, y, 320f, 48f, OnCreate, big: true); y -= 46f;
@@ -212,7 +214,7 @@ namespace HexWars.Presentation
 
         void OnCreate()
         {
-            var setup = new GameSetup(_mode, _w, _h, _pts, _seed, _armySize, _brutes, _strikers, _snipers, _turnActions);
+            var setup = new GameSetup(_mode, _w, _h, _pts, _seed, _armySize, _brutes, _strikers, _snipers, _turnActions, _fog);
             if (_vsAi)
             {
                 _game.StartLocalGame(setup, true);

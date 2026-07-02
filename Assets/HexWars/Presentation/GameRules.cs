@@ -148,6 +148,11 @@ TERRITORY & ECONOMY (Territory mode)
     must be your turn's first action, and ends your turn — so expanding leaves you exposed.
   Points — fund claiming, building, and deploying more units. (Decay is off; you won't lose banked points.)
 
+FOG OF WAR (host setting, off by default)
+Enemy units are drawn only where your army can see (each unit's Vision, blocked by terrain and
+elevation like line of sight). The map itself is always visible. Cheap high-Vision scouts buy
+information; committing to a specialist without scouting is a bet.
+
 PACE (host setting)
 How many actions you take before the turn passes:
   Whole army — act with everything, then pass. Snappy, but going second is a real advantage.

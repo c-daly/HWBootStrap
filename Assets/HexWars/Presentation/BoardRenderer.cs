@@ -68,27 +68,39 @@ namespace HexWars.Presentation
 
         // ---- units / generators ----
 
-        public void RenderEntities(GameState state)
+        /// <summary>Render all units/generators. With fog of war on and a <paramref name="viewer"/>,
+        /// the other army's entities are drawn only where the viewer's army has vision (the same
+        /// TargetingService rule that gates attacks). Null viewer = omniscient (spectators, replays).</summary>
+        public void RenderEntities(GameState state, PlayerId? viewer = null)
         {
             EnsureMaterials();
             ClearChild("Entities");
             var root = ChildRoot("Entities");
 
+            bool fog = viewer.HasValue && state.Config.FogOfWar;
             foreach (var player in state.Players)
             {
                 bool isActive = player.Id == state.ActivePlayer;
+                bool hideUnseen = fog && player.Id != viewer.Value;
                 var bright = player.Id == PlayerId.Player0 ? _p0 : _p1;
                 var dim = player.Id == PlayerId.Player0 ? _p0Dim : _p1Dim;
 
                 foreach (var u in player.UnitsOnBoard)
                 {
                     if (!u.IsAlive) continue;
+                    if (hideUnseen && !TargetingService.IsVisibleToArmy(state, viewer.Value, u.Cell, u.Elevation))
+                        continue;
                     // dim if it's the opponent's, or it's yours but already spent (moved AND attacked)
                     bool spent = isActive && Contains(state.MovedUnitIds, u.Id) && Contains(state.AttackedUnitIds, u.Id);
                     BuildToken(root.transform, u, (!isActive || spent) ? dim : bright);
                 }
                 foreach (var g in player.Generators)
-                    if (g.IsAlive) BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
+                {
+                    if (!g.IsAlive) continue;
+                    if (hideUnseen && !TargetingService.IsVisibleToArmy(state, viewer.Value, g.Cell, g.Elevation))
+                        continue;
+                    BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
+                }
             }
 
             // control overlay: tint the controlled hex itself toward its owner's colour (no floating caps)
