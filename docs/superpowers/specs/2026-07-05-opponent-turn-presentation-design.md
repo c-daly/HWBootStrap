@@ -86,8 +86,10 @@ state.
 - `CombatFx.Report`'s popup timing moves into the presenter (popups at impact); its state-diff
   damage/kill detection and breakdown text are reused.
 
-Free win: `SpectatorDriver`, `ReplayPlayer`, and `ModelDuelDriver` drive games through the same
-apply path, so AI-vs-AI spectating and replay playback become fully animated with no extra work.
+Free win: `SpectatorDriver` (AI-vs-AI spectating) drives games through `TryApply`, so it becomes
+fully animated with no extra work. `ReplayPlayer` and `ModelDuelDriver` render reconstructed
+states directly (scrubbing needs instant snaps) and stay on the un-animated facade; animating
+sequential replay playback is a possible follow-up.
 
 ## 4. Fog rules
 
