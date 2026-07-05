@@ -21,6 +21,7 @@ namespace HexWars.Presentation
         /// (-1,-1) when none. Full span when there is no viewer or fog is off.</summary>
         public static (int First, int Last) VisibleSpan(GameState state, PlayerId? viewer, IReadOnlyList<HexCoord> path)
         {
+            if (path.Count == 0) return (-1, -1);
             if (!Fogged(state, viewer)) return (0, path.Count - 1);
             int first = -1, last = -1;
             for (int i = 0; i < path.Count; i++)
