@@ -59,6 +59,8 @@ namespace HexWars.Presentation
         public void Render(Board board)
         {
             EnsureMaterials();
+            var store = GetComponent<TokenStore>();
+            if (store != null) store.Clear();
             ClearChild("Columns");
             ClearChild("Control");
             var columns = ChildRoot("Columns");
@@ -68,136 +70,34 @@ namespace HexWars.Presentation
 
         // ---- units / generators ----
 
-        /// <summary>Render all units/generators. With fog of war on and a <paramref name="viewer"/>,
-        /// the other army's entities are drawn only where the viewer's army has vision (the same
-        /// TargetingService rule that gates attacks). Null viewer = omniscient (spectators, replays).</summary>
+        /// <summary>Snap all entities to <paramref name="state"/> (facade over TokenStore; kept so
+        /// replay/duel/bootstrap call sites are unchanged). With fog and a viewer, the other army's
+        /// entities exist only where the viewer's army has vision.</summary>
         public void RenderEntities(GameState state, PlayerId? viewer = null)
         {
             EnsureMaterials();
-            ClearChild("Entities");
-            var root = ChildRoot("Entities");
+            var store = GetComponent<TokenStore>();
+            if (store == null) store = gameObject.AddComponent<TokenStore>();
+            store.Sync(state, viewer);
+            UpdateControlTint(state);
+        }
 
-            bool fog = viewer.HasValue && state.Config.FogOfWar;
-            foreach (var player in state.Players)
-            {
-                bool isActive = player.Id == state.ActivePlayer;
-                bool hideUnseen = fog && player.Id != viewer.Value;
-                var bright = player.Id == PlayerId.Player0 ? _p0 : _p1;
-                var dim = player.Id == PlayerId.Player0 ? _p0Dim : _p1Dim;
-
-                foreach (var u in player.UnitsOnBoard)
-                {
-                    if (!u.IsAlive) continue;
-                    if (hideUnseen && !TargetingService.IsVisibleToArmy(state, viewer.Value, u.Cell, u.Elevation))
-                        continue;
-                    // dim if it's the opponent's, or it's yours but already spent (moved AND attacked)
-                    bool spent = isActive && Contains(state.MovedUnitIds, u.Id) && Contains(state.AttackedUnitIds, u.Id);
-                    BuildToken(root.transform, u, (!isActive || spent) ? dim : bright);
-                }
-                foreach (var g in player.Generators)
-                {
-                    if (!g.IsAlive) continue;
-                    if (hideUnseen && !TargetingService.IsVisibleToArmy(state, viewer.Value, g.Cell, g.Elevation))
-                        continue;
-                    BuildPylon(root.transform, g.Cell, g.Elevation, isActive ? bright : dim);
-                }
-            }
-
-            // control overlay: tint the controlled hex itself toward its owner's colour (no floating caps)
+        /// <summary>Tint controlled hexes toward their owner's colour (in-place material swap on the
+        /// tile fill; rides every entity sync and each presenter action commit).</summary>
+        public void UpdateControlTint(GameState state)
+        {
             var cols = transform.Find("Columns");
-            if (cols != null)
-                foreach (Transform col in cols)
-                {
-                    var tv = col.GetComponent<TileView>();
-                    var fillT = col.Find("Fill");
-                    if (tv == null || fillT == null) continue;
-                    var terrain = state.Board.TileAt(tv.Coord).Terrain;
-                    var owner = state.Board.Controller(tv.Coord);
-                    fillT.GetComponent<MeshRenderer>().sharedMaterial =
-                        owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);
-                }
-        }
-
-        static bool Contains(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
-        {
-            foreach (var i in ids) if (i == id) return true;
-            return false;
-        }
-
-        float TopY(int elevation) => (elevation + 1) * LevelHeight;
-
-        void BuildToken(Transform parent, Unit unit, Material color)
-        {
-            var w = HexLayout.ToWorld(unit.Cell, HexSize);
-            float topY = TopY(unit.Elevation);
-
-            // size scales with total points spent (bigger build = bigger token)
-            float sizeFactor = Mathf.Clamp(0.6f + unit.Stats.PointCost * 0.04f, 0.6f, 1.4f);
-            float radius = HexSize * 0.7f * sizeFactor;
-
-            // unscaled token root carries the data + a generous box collider for easy clicking
-            var token = new GameObject("Unit_" + unit.Id);
-            token.transform.SetParent(parent, false);
-            token.transform.localPosition = new Vector3((float)w.x, topY, (float)w.z);
-            token.AddComponent<UnitView>().Unit = unit;
-            var box = token.AddComponent<BoxCollider>();
-            box.center = new Vector3(0f, 0.35f, 0f);
-            box.size = new Vector3(HexSize * 1.3f, 0.9f, HexSize * 1.3f);
-
-            var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            disc.name = "Disc";
-            DestroyImmediate(disc.GetComponent<Collider>()); // hitbox is the token's box
-            disc.transform.SetParent(token.transform, false);
-            disc.transform.localPosition = new Vector3(0f, 0.18f, 0f);
-            disc.transform.localScale = new Vector3(radius, 0.16f, radius);
-            disc.GetComponent<MeshRenderer>().sharedMaterial = color;
-            AddHull(disc, 1.16f, 1.05f);
-
-            // role icon, transparent + flat on the disc top so it sits directly on the piece (double-sided)
-            var icon = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            icon.name = "RoleIcon";
-            DestroyImmediate(icon.GetComponent<Collider>());
-            icon.transform.SetParent(token.transform, false);
-            icon.transform.localPosition = new Vector3(0f, 0.345f, 0f); // just above the disc top (~0.34)
-            icon.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-            icon.transform.localScale = Vector3.one * (radius * 0.9f);
-            var mr = icon.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = IconMaterial(Roles.Dominant(unit.Stats));
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-
-            BuildHpBar(parent, (float)w.x, (float)w.z, topY, unit.CurrentHp, unit.Stats.Health);
-        }
-
-        void BuildHpBar(Transform parent, float wx, float wz, float topY, int cur, int max)
-        {
-            float frac = max <= 0 ? 0f : Mathf.Clamp01((float)cur / max);
-            float barW = HexSize * 0.85f;
-
-            // upright bar that billboards to the camera; quads live in its local plane
-            var root = new GameObject("HpBar");
-            root.transform.SetParent(parent, false);
-            root.transform.localPosition = new Vector3(wx, topY + 0.62f, wz);
-            root.AddComponent<Billboard>();
-
-            MakeBarQuad(root.transform, 0f, 0f, barW, 0.16f, new Color(0.18f, 0.03f, 0.03f));
-            float fw = Mathf.Max(0.001f, barW * frac);
-            float fx = -barW * 0.5f + fw * 0.5f; // left-anchored fill
-            var fill = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
-            MakeBarQuad(root.transform, fx, -0.01f, fw, 0.11f, fill); // toward camera so it draws over the bg
-        }
-
-        void MakeBarQuad(Transform parent, float x, float zTowardCam, float w, float h, Color c)
-        {
-            var q = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            q.name = "Bar";
-            DestroyImmediate(q.GetComponent<Collider>());
-            q.transform.SetParent(parent, false);
-            q.transform.localPosition = new Vector3(x, 0f, zTowardCam);
-            q.transform.localRotation = Quaternion.identity; // upright; the Billboard root faces the camera
-            q.transform.localScale = new Vector3(w, h, 1f);
-            var mr = q.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = UnlitColor(c);
-            mr.shadowCastingMode = ShadowCastingMode.Off;
+            if (cols == null) return;
+            foreach (Transform col in cols)
+            {
+                var tv = col.GetComponent<TileView>();
+                var fillT = col.Find("Fill");
+                if (tv == null || fillT == null) continue;
+                var terrain = state.Board.TileAt(tv.Coord).Terrain;
+                var owner = state.Board.Controller(tv.Coord);
+                fillT.GetComponent<MeshRenderer>().sharedMaterial =
+                    owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);
+            }
         }
 
         Material UnlitColor(Color c)
@@ -243,19 +143,6 @@ namespace HexWars.Presentation
             return m;
         }
 
-        void BuildPylon(Transform parent, HexCoord cell, int elevation, Material color)
-        {
-            var w = HexLayout.ToWorld(cell, HexSize);
-            var pylon = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            pylon.name = "Generator";
-            DestroyImmediate(pylon.GetComponent<Collider>());
-            pylon.transform.SetParent(parent, false);
-            pylon.transform.localPosition = new Vector3((float)w.x, TopY(elevation) + 0.45f, (float)w.z);
-            pylon.transform.localScale = new Vector3(HexSize * 0.45f, 0.9f, HexSize * 0.45f);
-            pylon.GetComponent<MeshRenderer>().sharedMaterial = color;
-            AddHull(pylon, 1.12f, 1.06f);
-        }
-
         // tint a controlled hex toward its owner's colour, keeping the matcap metal look (opaque → WebGL-safe)
         Material ControlTintMaterial(TerrainType terrain, PlayerId owner)
         {
@@ -269,54 +156,6 @@ namespace HexWars.Presentation
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", tint);
             m.color = tint;
             return _controlMats[key] = m;
-        }
-
-        void BuildControlCap(Transform parent, HexCoord cell, int elevation, PlayerId owner)
-        {
-            var w = HexLayout.ToWorld(cell, HexSize);
-            var cap = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            cap.name = "ControlCap";
-            DestroyImmediate(cap.GetComponent<Collider>());
-            cap.transform.SetParent(parent, false);
-            cap.transform.localPosition = new Vector3((float)w.x, TopY(elevation) + 0.03f, (float)w.z);
-            cap.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-            cap.transform.localScale = Vector3.one * (HexSize * 1.3f);
-            var c = owner == PlayerId.Player0
-                ? new Color(0.27f, 0.68f, 1f, 0.40f)    // cyan, semi-transparent
-                : new Color(0.92f, 0.28f, 0.28f, 0.40f); // red
-            var mr = cap.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = TransparentColor(c);
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-        }
-
-        Material TransparentColor(Color c)
-        {
-            var sh = Shader.Find("Universal Render Pipeline/Unlit");
-            if (sh == null) sh = Shader.Find("Unlit/Color");
-            var m = new Material(sh);
-            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
-            m.color = c;
-            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
-            m.SetFloat("_Surface", 1f);                                  // transparent
-            m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
-            m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
-            m.SetFloat("_ZWrite", 0f);
-            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-            m.renderQueue = (int)RenderQueue.Transparent;
-            return m;
-        }
-
-        void AddHull(GameObject host, float xz, float y)
-        {
-            var hull = new GameObject("Outline");
-            hull.transform.SetParent(host.transform, false);
-            hull.transform.localScale = new Vector3(xz, y, xz);
-            hull.AddComponent<MeshFilter>().sharedMesh = host.GetComponent<MeshFilter>().sharedMesh;
-            var mr = hull.AddComponent<MeshRenderer>();
-            var m = new Material(_black);
-            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 1f); // back faces only -> silhouette
-            mr.sharedMaterial = m;
-            mr.shadowCastingMode = ShadowCastingMode.Off;
         }
 
         // ---- internals ----
@@ -391,7 +230,13 @@ namespace HexWars.Presentation
             }
         }
 
-        void EnsureMaterials()
+        internal Material UnitMat(PlayerId owner, bool dim) =>
+            owner == PlayerId.Player0 ? (dim ? _p0Dim : _p0) : (dim ? _p1Dim : _p1);
+        internal Material IconMatFor(UnitRole role) => IconMaterial(role);
+        internal Material BlackMat => _black;
+        internal Material UnlitColorMat(Color c) => UnlitColor(c);
+
+        internal void EnsureMaterials()
         {
             if (_plains != null) return;
             var lit = Shader.Find("Universal Render Pipeline/Lit");
