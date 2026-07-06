@@ -44,6 +44,7 @@ namespace HexWars.Presentation
             if (_input != null) _input.ReadOnly = aiTurn;
             if (_barracks != null) _barracks.ReadOnly = aiTurn;
             if (!aiTurn) return;
+            if (_game.Presenter != null && _game.Presenter.IsBusy) { _timer = 0f; return; } // let the last action finish playing
 
             _timer += Time.deltaTime;
             if (_timer < SecondsPerAction) return;

@@ -67,8 +67,11 @@ namespace HexWars.Presentation
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
 
+        public ActionPresenter Presenter { get; private set; }
+
         void Start()
         {
+            Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
 #if UNITY_WEBGL && !UNITY_EDITOR
             Networked = true; // the deployed browser build is always the online client
 #endif
@@ -90,6 +93,7 @@ namespace HexWars.Presentation
 
         public void NewGame()
         {
+            Presenter?.ResetQueue();
             SetupEnvironment();
 
             // damageFloor 1 matches GameFactory (the lobby path): a landed hit always deals at least 1,
@@ -150,10 +154,8 @@ namespace HexWars.Presentation
             }
             var prev = State;
             State = result.NewState;
-            GetComponent<BoardRenderer>().RenderEntities(State, FogViewer());
             EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
-            CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
-            PlaySounds(cmd, prev, State);
+            Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             StateChanged?.Invoke();
             return true;
         }
@@ -170,6 +172,7 @@ namespace HexWars.Presentation
         /// adds an AI opponent on Player 2; otherwise it's a local hotseat. Used by the lobby's vs-AI option.</summary>
         public void StartLocalGame(GameSetup setup, bool vsAi)
         {
+            Presenter?.ResetQueue();
             Networked = false; // play locally — TryApply applies here instead of going to the server
             State = GameFactory.Build(setup);
             var renderer = GetComponent<BoardRenderer>();
@@ -201,6 +204,7 @@ namespace HexWars.Presentation
         /// a null state is what lets it come back). The next created game rebuilds everything.</summary>
         public void ReturnToMenu()
         {
+            Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
             if (_net != null) { Destroy(_net); _net = null; }
             Seat = null;
@@ -214,13 +218,26 @@ namespace HexWars.Presentation
         /// <summary>Whose vision the fog renders: this browser's seat online, the human's seat vs AI,
         /// or the active player in hotseat (vision hands over with the turn). Null when fog is off
         /// or there is no seated human (spectators see everything).</summary>
-        public PlayerId? FogViewer()
+        public PlayerId? FogViewer() => FogViewerFor(State);
+
+        /// <summary>Whose vision the fog renders for a given state (the presenter passes per-action
+        /// states while animations lag behind the live State).</summary>
+        public PlayerId? FogViewerFor(GameState s)
         {
-            if (State == null || !State.Config.FogOfWar) return null;
+            if (s == null || !s.Config.FogOfWar) return null;
             if (Seat.HasValue) return Seat.Value;
             var ai = FindAnyObjectByType<AiOpponent>();
             if (ai != null) return ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
-            return State.ActivePlayer;
+            return s.ActivePlayer;
+        }
+
+        /// <summary>Local = issued by a seat this human controls: your seat online; any non-AI seat
+        /// offline (hotseat = both). Local actions play immediately with no pacing gap.</summary>
+        bool IsLocalCommand(Command cmd)
+        {
+            if (Networked) return Seat.HasValue && cmd.Issuer == Seat.Value;
+            var ai = GetComponent<AiOpponent>();
+            return ai == null || cmd.Issuer != ai.AiSeat;
         }
 
         // ---- server callbacks (online mode), invoked by NetClient ----
@@ -232,6 +249,7 @@ namespace HexWars.Presentation
         /// <summary>The server dealt the authoritative start state — load and render it.</summary>
         internal void OnNetStart(string startStateText)
         {
+            Presenter?.ResetQueue();
             State = ReplayFile.Read(startStateText).Start;
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
@@ -249,10 +267,8 @@ namespace HexWars.Presentation
             if (!result.Success) { Debug.LogWarning("[Net] server move rejected locally: " + result.Reason); return; }
             var prev = State;
             State = result.NewState;
-            GetComponent<BoardRenderer>().RenderEntities(State, FogViewer());
             EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
-            CombatFx.Report(prev, State, GetComponent<BoardRenderer>(), cmd);
-            PlaySounds(cmd, prev, State);
+            Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             StateChanged?.Invoke();
         }
 
@@ -282,36 +298,6 @@ namespace HexWars.Presentation
             "GameAlreadyOver"       => "The game is over.",
             _                        => "That move isn't allowed right now.",
         };
-
-        // ---- sound ----
-
-        static void PlaySounds(Command cmd, GameState prev, GameState now)
-        {
-            switch (cmd)
-            {
-                case MoveUnit _: SoundManager.Play(SoundKind.Move); break;
-                case AttackUnit _: SoundManager.Play(SoundKind.Attack); break;
-                case CaptureHex _: SoundManager.Play(SoundKind.Claim); break;
-                case BuildGenerator _:
-                case DeployGenerator _:
-                case DeployUnit _:
-                case CreateUnit _: SoundManager.Play(SoundKind.Build); break;
-                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); break;
-            }
-            // a paced turn (K actions) auto-passes without an EndTurn command — still mark the handover
-            if (!(cmd is EndTurn) && now.ActivePlayer != prev.ActivePlayer) SoundManager.Play(SoundKind.EndTurn);
-            if (LiveUnits(now) < LiveUnits(prev)) SoundManager.Play(SoundKind.Death);
-            if (now.IsGameOver && !prev.IsGameOver) SoundManager.Play(SoundKind.Win);
-        }
-
-        static int LiveUnits(GameState s)
-        {
-            int n = 0;
-            foreach (var p in s.Players)
-                foreach (var u in p.UnitsOnBoard)
-                    if (u.IsAlive) n++;
-            return n;
-        }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints, ref int nextId)
         {
