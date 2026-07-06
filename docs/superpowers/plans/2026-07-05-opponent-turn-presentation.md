@@ -30,13 +30,13 @@
 | `Assets/HexWars/Presentation/TokenStore.cs` | Create | Persistent unit/generator tokens; diff-based `Sync` |
 | `Assets/HexWars/Presentation/ActionPresenter.cs` | Create | The single animation queue; per-command playback; sounds |
 | `Assets/HexWars/Presentation/BoardRenderer.cs` | Modify | Loses entity builders; keeps tiles/tint/materials; `RenderEntities` becomes a facade |
-| `Assets/HexWars/Presentation/GameBootstrap.cs` | Modify | Routes applies through the presenter; `FogViewerFor(state)`; queue reset on teardown |
-| `Assets/HexWars/Presentation/UnitInputController.cs` | Modify | Deletes `MoveSeq`/`AttackSeq`/projectile; fast-forward before issuing |
+| `Assets/HexWars/Presentation/GameBootstrap.cs` | Modify | Routes applies through the presenter; `FogViewerFor(state)`; queue reset on teardown; `WaitingHumanSeat()` |
+| `Assets/HexWars/Presentation/UnitInputController.cs` | Modify | Deletes `MoveSeq`/`AttackSeq`/projectile; fast-forward before issuing; reason toasts for refused clicks |
 | `Assets/HexWars/Presentation/CameraRig.cs` | Modify | `NudgeToward` (cancel on input) + `Shake` |
 | `Assets/HexWars/Presentation/AiOpponent.cs` | Modify | Waits for presenter idle between actions |
 | `Assets/HexWars/Presentation/GameHud.cs` | Modify | Game-over banner waits for the presenter to drain |
 
-Engine APIs consumed (read-only): `TargetingService.IsVisibleToArmy(state, army, cell, elevation)`, `MovementService`, `LineOfSight.IsClear(board, from, fromElev, to, toElev)`, `HexLayout.ToWorld(cell, hexSize)`, `HexCoord` (`.Q/.R/.S`, `Distance`, `Neighbors`), command records in `Command.cs` (`MoveUnit(Issuer, UnitId, Dest)`, `AttackUnit(Issuer, AttackerId, TargetId)`, `DeployUnit(Issuer, TemplateIndex, Cell)`, `CaptureHex`, `BuildGenerator`, `DeployGenerator`, `CreateUnit`, `EndTurn`), `Generator` (`Id`, `Cell`, `Elevation`, `IsAlive`), `Unit` (`Id`, `Owner`, `Cell`, `Elevation`, `CurrentHp`, `IsAlive`, `Stats`), `GameState` (`Players`, `Player(pid)`, `ActivePlayer`, `Board`, `Config`, `MovedUnitIds`, `AttackedUnitIds`, `IsGameOver`).
+Engine APIs consumed (read-only): `TargetingService.IsVisibleToArmy(state, army, cell, elevation)` (+ `InRange`/`HasShot`, the other two predicates `CanTarget` ANDs — used by Task 8's reason decomposition), `MovementService`, `LineOfSight.IsClear(board, from, fromElev, to, toElev)`, `HexLayout.ToWorld(cell, hexSize)`, `HexCoord` (`.Q/.R/.S`, `Distance`, `Neighbors`), command records in `Command.cs` (`MoveUnit(Issuer, UnitId, Dest)`, `AttackUnit(Issuer, AttackerId, TargetId)`, `DeployUnit(Issuer, TemplateIndex, Cell)`, `CaptureHex`, `BuildGenerator`, `DeployGenerator`, `CreateUnit`, `EndTurn`), `Generator` (`Id`, `Cell`, `Elevation`, `IsAlive`), `Unit` (`Id`, `Owner`, `Cell`, `Elevation`, `CurrentHp`, `IsAlive`, `Stats`), `GameState` (`Players`, `Player(pid)`, `ActivePlayer`, `Board`, `Config`, `MovedUnitIds`, `AttackedUnitIds`, `IsGameOver`).
 
 ---
 
@@ -1420,7 +1420,148 @@ git commit -m "feat(camera): glide to off-screen opponent actions (user input ca
 
 ---
 
-### Task 8: Full regression pass + WebGL build & stage
+### Task 8: Action-denied feedback — every refused click says why
+
+*(Added 2026-07-06 after user playtest: presentation-side guards eat clicks silently, so "the
+system isn't responding" has no visible cause. Engine-side rejections already toast via
+`GameBootstrap.TryApply` → `Toast.Show(Friendly(...))`; this task covers the guards that return
+BEFORE a command is ever issued. Depends on Task 4's rewritten `HandleClick` — the code below is
+its post-Task-4 shape.)*
+
+**Files:**
+- Modify: `Assets/HexWars/Presentation/GameBootstrap.cs` (add `WaitingHumanSeat()` next to `IsLocalCommand`)
+- Modify: `Assets/HexWars/Presentation/UnitInputController.cs` (guard branches in `HandleClick` toast their reason; `WhyCannotTarget` / `IsOccupied` / `NotifyIfWaiting` helpers)
+
+**Interfaces:**
+- Consumes: `Toast.Show(string)` (existing bottom-centre rejection toast — built for exactly this, see its doc comment), `TargetingService.InRange` / `IsVisibleToArmy` / `HasShot` (the three predicates `CanTarget` ANDs together, `TargetingService.cs:14-24` — asking them one at a time tells us WHICH refused), `MovementService.ReachableTiles` (already used by `IsReachable`).
+- Produces: a short reason toast for every refused click. No new UI surfaces, no engine changes.
+
+- [ ] **Step 1: `GameBootstrap.WaitingHumanSeat()`**
+
+Next to `IsLocalCommand` (same seat logic, opposite question):
+
+```csharp
+/// <summary>The seated human currently waiting out someone else's turn: your seat online when
+/// it isn't your turn; the human's seat while the AI plays. Null in hotseat (the active player
+/// IS the human at the screen), for unseated spectators, when the game is over, and when it is
+/// your turn — i.e. null means "no one to apologise to".</summary>
+public PlayerId? WaitingHumanSeat()
+{
+    if (State == null || State.IsGameOver) return null;
+    if (Networked) return Seat.HasValue && State.ActivePlayer != Seat.Value ? Seat : null;
+    var ai = GetComponent<AiOpponent>();
+    if (ai != null && State.ActivePlayer == ai.AiSeat)
+        return ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+    return null;
+}
+```
+
+- [ ] **Step 2: Reason toasts at every silent guard in `HandleClick`**
+
+Build-mode branch — split the compound condition so each refusal names itself:
+
+```csharp
+// build mode (territory): a tap places a generator on any empty hex you control
+if (_buildMode && _game.State.Config.TerritoryMode)
+{
+    var bst = _game.State;
+    HexCoord? target = tile != null ? (HexCoord?)tile.Coord : (unit != null ? (HexCoord?)unit.Unit.Cell : null);
+    if (!target.HasValue) return; // tapped past the board — no message
+    // guard first: during the opponent's turn "active" is them, so the controller check below
+    // would misreport YOUR OWN hex as not yours
+    if (_game.WaitingHumanSeat() != null) { Toast.Show("Opponent's turn — waiting for it to finish"); return; }
+    if (bst.Board.Controller(target.Value) != active) { Toast.Show("You don't control that hex"); return; }
+    if (HasGeneratorOn(bst, target.Value)) { Toast.Show("That hex already has a generator"); return; }
+    _game.TryApply(new BuildGenerator(active, target.Value));
+    return; // while building, taps only place generators
+}
+```
+
+Attack branch (post-Task-4 shape):
+
+```csharp
+if (ownSelected && unit != null && unit.Unit.Owner != active)
+{
+    if (HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)) { Toast.Show("Already attacked this turn"); return; }
+    if (!TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
+    { Toast.Show(WhyCannotTarget(_game.State, _selected.Unit, unit.Unit)); return; }
+    Issue(new AttackUnit(active, _selected.Unit.Id, unit.Unit.Id));
+    return;
+}
+```
+
+Move branch, and the fall-through gets the not-your-turn notice before selection proceeds:
+
+```csharp
+if (ownSelected && unit == null && tile != null)
+{
+    if (HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)) { Toast.Show("Already moved this turn"); return; }
+    if (!IsReachable(_selected.Unit, tile.Coord))
+    { Toast.Show(IsOccupied(_game.State, tile.Coord) ? "That hex is occupied" : "Out of movement reach"); return; }
+    Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
+    return;
+}
+NotifyIfWaiting(unit, tile);
+Select(unit);
+```
+
+Helpers:
+
+```csharp
+/// <summary>TargetingService.CanTarget's three ANDed predicates, asked one at a time so the
+/// toast can say WHICH one refused. Ends on a generic fallback so a future rules change can
+/// never make this method lie.</summary>
+static string WhyCannotTarget(GameState s, Unit attacker, Unit target)
+{
+    if (!TargetingService.InRange(attacker, target.Cell, target.Elevation, s.Config)) return "Out of range";
+    if (!TargetingService.IsVisibleToArmy(s, attacker.Owner, target.Cell, target.Elevation)) return "No friendly unit can see the target";
+    if (!TargetingService.HasShot(s, attacker, target.Cell, target.Elevation)) return "No line of sight";
+    return "Can't target that unit";
+}
+
+static bool IsOccupied(GameState s, HexCoord cell)
+{
+    foreach (var p in s.Players)
+        foreach (var u in p.UnitsOnBoard)
+            if (u.IsAlive && u.Cell == cell) return true;
+    return false;
+}
+
+/// <summary>A click that reads as an order (a live unit of the waiting human's is selected and
+/// they tapped a hex or an enemy) while the opponent's turn plays out: say why nothing will
+/// happen. Never fires in hotseat. Selection/inspection still proceeds after the toast.</summary>
+void NotifyIfWaiting(UnitView unit, TileView tile)
+{
+    var waiting = _game != null ? _game.WaitingHumanSeat() : null;
+    if (waiting == null || _selected == null || !_selected.Unit.IsAlive || _selected.Unit.Owner != waiting.Value) return;
+    bool looksLikeOrder = tile != null || (unit != null && unit.Unit.Owner != waiting.Value);
+    if (looksLikeOrder) Toast.Show("Opponent's turn — waiting for it to finish");
+}
+```
+
+Message wording is final as written (short, no punctuation soup, matches the `Friendly(...)` tone).
+
+- [ ] **Step 3: Verify (editor scripts, then compile)**
+
+RED first: `execute_script` reflecting `UnitInputController.WhyCannotTarget` fails before the method exists. Then implement, `check_compile_errors` → none, and GREEN via `execute_script`:
+- craft a `GameState` with an attacker (Range 1, RangeArc 0) and a target 3 hexes away → `WhyCannotTarget` returns `"Out of range"`;
+- target adjacent but behind a +2 elevation wall (no arc) with a spotter seeing it → `"No line of sight"`;
+- target in range/LOS but no friendly spotter sees it → `"No friendly unit can see the target"`;
+- `IsOccupied` true on a unit's cell, false on an empty one;
+- `WaitingHumanSeat()`: hotseat state → null; with an `AiOpponent` whose seat is active → the other seat; game over → null.
+
+The full click-through sweep (each toast appearing on a real refused click) rides Task 9's play-mode regression.
+
+- [ ] **Step 4: Commit**
+
+```powershell
+git add Assets/HexWars/Presentation/UnitInputController.cs Assets/HexWars/Presentation/GameBootstrap.cs
+git commit -m "feat(ui): every refused click says why - reason toasts for spent units, out-of-range/no-LOS/unseen targets, unreachable or occupied hexes, invalid build taps, and orders issued during the opponent's turn"
+```
+
+---
+
+### Task 9: Full regression pass + WebGL build & stage
 
 **Files:**
 - No new source. Build output under `wwwroot` via `engine/stage-webgl-deploy.ps1`.
@@ -1435,6 +1576,8 @@ Fog ON, vs AI (Hard), territory mode on, watch 2+ full games (a spectator AI-vs-
 - the game-over banner never cuts off the final kill.
 
 Regression checklist (spec §7 quiet details), all in the same session: spent-unit dimming flips per turn · unit click colliders/selection marker · hover + docked unit stats · territory tint updates on claim/build · HP bars track damage and ride moving tokens · barracks deploy flow · turn-handover toast · pace (K-actions) auto-pass beat · replay viewer still renders (`ReplayViewerMenu`) · lobby → game → Main menu → new game teardown leaves no stray tokens (`ReturnToMenu` resets the queue).
+
+Denial-toast sweep (Task 8): deliberately click each refused action and read its reason — spent unit's second move/attack · out-of-range target · adjacent target behind a wall (no LOS) · unreachable and occupied hexes · build-tap on enemy territory and on an existing generator · an order during the AI's turn ("Opponent's turn") · confirm hotseat shows NO not-your-turn toast.
 
 Fix anything found; commit fixes individually with plain `fix(fx): ...` messages.
 

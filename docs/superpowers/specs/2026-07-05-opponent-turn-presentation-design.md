@@ -31,6 +31,11 @@ wire, or Python changes.**
 - Damage popups synchronize with visual impact.
 - Modest own-action juice: ~50 ms hit-pause on attack impact; landing squash on deploy and
   move-end.
+- **Refused clicks say why** *(added 2026-07-06 from playtest feedback)*: every presentation-side
+  guard that silently eats a click — spent unit, out-of-range / no-LOS / unseen target,
+  unreachable or occupied hex, invalid build tap, orders during the opponent's turn — surfaces a
+  short reason toast through the existing `Toast`. Engine-side rejections already do; this
+  closes the gap for clicks that never reach the engine.
 
 **Non-goals**
 
@@ -128,6 +133,8 @@ If a local action touches a unit with queued animations, the queue **fast-forwar
   tokens, popups before impact, anything animating in unseen territory.
 - Explicit regression checks on the quiet details the `BoardRenderer` refactor could break:
   spent-unit dimming, click colliders, docked unit stats, territory tint.
+- Denial sweep: deliberately click every refused action and read its reason toast; hotseat must
+  show no "opponent's turn" notice (the active player is whoever holds the mouse).
 - WebGL build + live smoke on Render, including mobile.
 
 ## 8. Success criterion
