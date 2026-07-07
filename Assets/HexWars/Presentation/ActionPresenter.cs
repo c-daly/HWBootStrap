@@ -60,6 +60,7 @@ namespace HexWars.Presentation
         Item? _current;          // the item whose animation is mid-flight
         GameObject _projectile;  // live transient (attack tracer), destroyed on fast-forward
         bool _reported;          // did the mid-flight item already fire its CombatFx popups?
+        bool _presented;         // did the mid-flight item show/sound anything, or was it fully hidden by fog?
 
         /// <summary>Snap-commit the mid-flight item and everything still queued — synchronously,
         /// this frame. Called before local input issues a command so truth and visuals can't
@@ -91,11 +92,14 @@ namespace HexWars.Presentation
             {
                 _current = _queue.Dequeue();
                 _reported = false;
+                _presented = false;
                 yield return Play(_current.Value);
                 Commit(_current.Value, skipCombatFx: _reported);
                 bool wasLocal = _current.Value.IsLocal;
                 _current = null;
-                if (!wasLocal && _queue.Count > 0)
+                // no pacing beat after a fully-hidden (silent, zero-time) action: spec §4 forbids a
+                // timing side-channel that would let the gap itself leak "something happened in the fog"
+                if (!wasLocal && _presented && _queue.Count > 0)
                     yield return new WaitForSeconds(OpponentGap);
             }
             _playing = false;
@@ -121,8 +125,8 @@ namespace HexWars.Presentation
                 case DeployUnit dep: yield return PlayDeploy(item, dep, viewer); break;
                 case CaptureHex cap: yield return PlayClaim(item, cap, viewer); break;
                 case BuildGenerator bld: yield return PlayClaim(item, null, viewer, bld.Cell, SoundKind.Build); break;
-                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); yield return new WaitForSeconds(item.IsLocal ? 0f : OpponentGap); break;
-                default: PlayInstantSound(item); break;
+                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); _presented = true; yield return new WaitForSeconds(item.IsLocal ? 0f : OpponentGap); break;
+                default: PlayInstantSound(item); _presented = true; break;
             }
         }
 
@@ -155,6 +159,7 @@ namespace HexWars.Presentation
             if (token == null) yield break;
 
             SoundManager.Play(SoundKind.Move);
+            _presented = true;
             token.transform.localPosition = Tokens().CellTop(path[span.First], item.Next.Board.TileAt(path[span.First]).Elevation);
             if (span.First > 0) yield return PopIn(token.transform);            // enters vision mid-path
             int lastElev = item.Next.Board.TileAt(path[span.First]).Elevation;
@@ -229,6 +234,7 @@ namespace HexWars.Presentation
             float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f;
 
             SoundManager.Play(SoundKind.Attack);
+            _presented = true;
             _projectile = MakeProjectile(from, projScale, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
             {
@@ -261,6 +267,7 @@ namespace HexWars.Presentation
             var token = Tokens().UnitToken(fresh.Value.Id);
             if (token == null) yield break;   // deployed out of the viewer's sight — silent, zero time
             SoundManager.Play(SoundKind.Build); // visibility gate first, then sound (mirrors PlayClaim)
+            _presented = true;
 
             // drop-in: fall from above + landing squash
             var rest = token.transform.localPosition;
@@ -297,6 +304,7 @@ namespace HexWars.Presentation
             if (span.First < 0) yield break;
 
             SoundManager.Play(sound);
+            _presented = true;
             _board.UpdateControlTint(item.Next);
             // tint pulse: flash the tile fill toward white briefly by scaling the column's fill emission —
             // cheapest WebGL-safe pulse is a quick quad flash on the hex top
