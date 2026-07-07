@@ -232,10 +232,13 @@ namespace HexWars.Presentation
         }
 
         /// <summary>Local = issued by a seat this human controls: your seat online; any non-AI seat
-        /// offline (hotseat = both). Local actions play immediately with no pacing gap.</summary>
+        /// offline (hotseat = both) — but never local while spectating, since no seat is "yours" there
+        /// (spectators watch every action paced and animated, per spec). Local actions play immediately
+        /// with no pacing gap.</summary>
         bool IsLocalCommand(Command cmd)
         {
             if (Networked) return Seat.HasValue && cmd.Issuer == Seat.Value;
+            if (GetComponent<SpectatorDriver>() != null) return false;
             var ai = GetComponent<AiOpponent>();
             return ai == null || cmd.Issuer != ai.AiSeat;
         }

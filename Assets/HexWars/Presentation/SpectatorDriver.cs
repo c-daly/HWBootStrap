@@ -34,6 +34,7 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_game == null || _game.State == null || _game.State.IsGameOver) return;
+            if (_game.Presenter != null && _game.Presenter.IsBusy) { _timer = 0f; return; } // let the last action finish playing
 
             _timer += Time.deltaTime;
             if (_timer < SecondsPerAction) return;
