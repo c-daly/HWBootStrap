@@ -4,7 +4,7 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>Carries the engine <see cref="Unit"/> on its token so hover/click UI can read its
-    /// stats. Set by <see cref="BoardRenderer"/> when it builds the token.</summary>
+    /// stats. Set by <see cref="TokenStore"/> when it builds the token.</summary>
     public sealed class UnitView : MonoBehaviour
     {
         [System.NonSerialized] public Unit Unit; // engine object, set at runtime
