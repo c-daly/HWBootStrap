@@ -180,12 +180,12 @@ namespace HexWars.Presentation
             Unit? fresh = null;
             foreach (var u in item.Next.Player(dep.Issuer).UnitsOnBoard)
                 if (u.IsAlive && u.Cell == dep.Cell && FindUnit(item.Prev, dep.Issuer, u.Id) == null) { fresh = u; break; }
-            SoundManager.Play(SoundKind.Build);
             if (fresh == null) yield break;
 
             Tokens().Sync(item.Next, viewer); // spawns the token at its cell
             var token = Tokens().UnitToken(fresh.Value.Id);
-            if (token == null) yield break;   // deployed out of the viewer's sight
+            if (token == null) yield break;   // deployed out of the viewer's sight — silent, zero time
+            SoundManager.Play(SoundKind.Build); // visibility gate first, then sound (mirrors PlayClaim)
 
             // drop-in: fall from above + landing squash
             var rest = token.transform.localPosition;
