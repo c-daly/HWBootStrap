@@ -204,9 +204,17 @@ namespace HexWars.Presentation
                 _wasOver = true;
                 var accent = s.Winner == null ? new Color(0.25f, 0.27f, 0.33f, 0.96f)
                            : p0Won ? P0ToastBlue : P1ToastRed;
-                GameOverBanner.Show(result.ToUpperInvariant(), HowText(s), accent,
-                                    onMainMenu: () => _game.ReturnToMenu());
+                StartCoroutine(ShowBannerWhenQuiet(result.ToUpperInvariant(), HowText(s), accent));
             }
+        }
+
+        /// <summary>Hold the big banner until the final action's animation lands — the killing blow
+        /// is the climax; the banner must not cover it mid-flight.</summary>
+        System.Collections.IEnumerator ShowBannerWhenQuiet(string title, string how, Color accent)
+        {
+            var presenter = _game != null ? _game.Presenter : null;
+            while (presenter != null && presenter.IsBusy) yield return null;
+            GameOverBanner.Show(title, how, accent, onMainMenu: () => _game.ReturnToMenu());
         }
 
         static string ResultText(GameState s)

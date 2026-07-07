@@ -97,7 +97,10 @@ namespace HexWars.Presentation
             {
                 case MoveUnit mv: yield return PlayMove(item, mv, viewer); break;
                 case AttackUnit atk: yield return PlayAttack(item, atk, viewer); break;
-                // Deploy/Capture/Build/EndTurn in Task 5.
+                case DeployUnit dep: yield return PlayDeploy(item, dep, viewer); break;
+                case CaptureHex cap: yield return PlayClaim(item, cap, viewer); break;
+                case BuildGenerator bld: yield return PlayClaim(item, null, viewer, bld.Cell, SoundKind.Build); break;
+                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); yield return new WaitForSeconds(item.IsLocal ? 0f : OpponentGap); break;
                 default: PlayInstantSound(item); break;
             }
         }
@@ -120,6 +123,7 @@ namespace HexWars.Presentation
                     yield return null;
                 }
             }
+            yield return Squash(token.transform);
         }
         // (No cancellation flags inside the loops: FastForward stops the coroutines outright and
         // Commit's Sync re-snaps position and scale, so an interrupted tween can't strand a token.)
@@ -170,6 +174,64 @@ namespace HexWars.Presentation
             yield return new WaitForSeconds(ImpactHold);
         }
 
+        IEnumerator PlayDeploy(Item item, DeployUnit dep, PlayerId? viewer)
+        {
+            // find the newly deployed unit: present in Next, absent in Prev
+            Unit? fresh = null;
+            foreach (var u in item.Next.Player(dep.Issuer).UnitsOnBoard)
+                if (u.IsAlive && u.Cell == dep.Cell && FindUnit(item.Prev, dep.Issuer, u.Id) == null) { fresh = u; break; }
+            SoundManager.Play(SoundKind.Build);
+            if (fresh == null) yield break;
+
+            Tokens().Sync(item.Next, viewer); // spawns the token at its cell
+            var token = Tokens().UnitToken(fresh.Value.Id);
+            if (token == null) yield break;   // deployed out of the viewer's sight
+
+            // drop-in: fall from above + landing squash
+            var rest = token.transform.localPosition;
+            const float dur = 0.25f;
+            for (float t = 0f; t < dur; t += Time.deltaTime)
+            {
+                float f = Mathf.SmoothStep(0f, 1f, t / dur);
+                token.transform.localPosition = rest + Vector3.up * (1.6f * (1f - f));
+                yield return null;
+            }
+            token.transform.localPosition = rest;
+            yield return Squash(token.transform);
+        }
+
+        IEnumerator Squash(Transform tr) // landing: brief vertical squash, then restore
+        {
+            var s0 = tr.localScale;
+            tr.localScale = new Vector3(s0.x * 1.15f, s0.y * 0.7f, s0.z * 1.15f);
+            float t = 0f;
+            while (t < 0.12f)
+            {
+                t += Time.deltaTime;
+                tr.localScale = Vector3.Lerp(tr.localScale, s0, t / 0.12f);
+                yield return null;
+            }
+            tr.localScale = s0;
+        }
+
+        IEnumerator PlayClaim(Item item, CaptureHex cap, PlayerId? viewer, HexCoord? buildCell = null, SoundKind sound = SoundKind.Claim)
+        {
+            var cell = cap != null ? cap.Cell : buildCell.Value;
+            // hidden claims/builds are silent and instant (fog: zero time-cost, no sound leak)
+            var span = FogPresentation.VisibleSpan(item.Next, viewer, new[] { cell });
+            if (span.First < 0) yield break;
+
+            SoundManager.Play(sound);
+            _board.UpdateControlTint(item.Next);
+            // tint pulse: flash the tile fill toward white briefly by scaling the column's fill emission —
+            // cheapest WebGL-safe pulse is a quick quad flash on the hex top
+            var flashPos = Tokens().CellTop(cell, item.Next.Board.TileAt(cell).Elevation) + Vector3.up * 0.02f;
+            ExplosionFx.Spawn(flashPos, cap != null
+                ? (cap.Issuer == PlayerId.Player0 ? new Color(0.27f, 0.68f, 1f) : new Color(0.92f, 0.28f, 0.28f))
+                : new Color(0.9f, 0.9f, 0.6f), 0.5f, false);
+            yield return new WaitForSeconds(0.15f);
+        }
+
         /// <summary>World top of the attacked entity (unit or generator) in a state; null if gone.</summary>
         Vector3? TargetTop(GameState s, int targetId)
         {
@@ -216,12 +278,8 @@ namespace HexWars.Presentation
         {
             switch (item.Cmd)
             {
-                case CaptureHex _: SoundManager.Play(SoundKind.Claim); break;
-                case BuildGenerator _:
                 case DeployGenerator _:
-                case DeployUnit _:
                 case CreateUnit _: SoundManager.Play(SoundKind.Build); break;
-                case EndTurn _: SoundManager.Play(SoundKind.EndTurn); break;
             }
         }
 
