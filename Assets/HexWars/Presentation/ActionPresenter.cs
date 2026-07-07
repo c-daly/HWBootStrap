@@ -157,10 +157,15 @@ namespace HexWars.Presentation
             SoundManager.Play(SoundKind.Move);
             token.transform.localPosition = Tokens().CellTop(path[span.First], item.Next.Board.TileAt(path[span.First]).Elevation);
             if (span.First > 0) yield return PopIn(token.transform);            // enters vision mid-path
+            int lastElev = item.Next.Board.TileAt(path[span.First]).Elevation;
             for (int i = span.First + 1; i <= span.Last; i++)
             {
                 Vector3 from = token.transform.localPosition;
-                Vector3 to = Tokens().CellTop(path[i], item.Next.Board.TileAt(path[i]).Elevation);
+                // the board rectangle is not convex in cube space, so a hex-line between two on-board
+                // cells can cross cells that are off the board — same guard as LineOfSight's walk
+                int elev = item.Next.Board.Contains(path[i]) ? item.Next.Board.TileAt(path[i]).Elevation : lastElev;
+                lastElev = elev;
+                Vector3 to = Tokens().CellTop(path[i], elev);
                 for (float t = 0f; t < SecondsPerHop; t += Time.deltaTime)
                 {
                     token.transform.localPosition = Vector3.Lerp(from, to, Mathf.SmoothStep(0f, 1f, t / SecondsPerHop));
