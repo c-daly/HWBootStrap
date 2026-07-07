@@ -96,7 +96,8 @@ namespace HexWars.Presentation
             switch (item.Cmd)
             {
                 case MoveUnit mv: yield return PlayMove(item, mv, viewer); break;
-                // AttackUnit lands in Task 4; Deploy/Capture/Build/EndTurn in Task 5.
+                case AttackUnit atk: yield return PlayAttack(item, atk, viewer); break;
+                // Deploy/Capture/Build/EndTurn in Task 5.
                 default: PlayInstantSound(item); break;
             }
         }
@@ -123,11 +124,98 @@ namespace HexWars.Presentation
         // (No cancellation flags inside the loops: FastForward stops the coroutines outright and
         // Commit's Sync re-snaps position and scale, so an interrupted tween can't strand a token.)
 
+        const float ImpactHold = 0.05f; // spec: brief hold at impact; PauseToggle owns timeScale, so hold locally
+
+        IEnumerator PlayAttack(Item item, AttackUnit atk, PlayerId? viewer)
+        {
+            var attacker = FindUnit(item.Prev, atk.Issuer, atk.AttackerId);
+            if (attacker == null) yield break;
+            var targetPos = TargetTop(item.Prev, atk.TargetId);
+            if (targetPos == null) yield break;
+
+            int dmg = attacker.Value.Stats.Damage;
+            float power = Mathf.Clamp01(dmg / 8f);
+            float projScale = Mathf.Lerp(0.14f, 0.5f, power);
+            Color projColor = dmg >= 6 ? new Color(1f, 0.3f, 0.1f)
+                            : dmg >= 3 ? new Color(1f, 0.65f, 0.2f)
+                                       : new Color(1f, 0.95f, 0.5f);
+
+            Vector3 from = Tokens().CellTop(attacker.Value.Cell, attacker.Value.Elevation) + Vector3.up * 0.4f;
+            Vector3 to = targetPos.Value + Vector3.up * 0.4f;
+
+            bool directLos = LineOfSight.IsClear(item.Prev.Board, attacker.Value.Cell, attacker.Value.Elevation,
+                                                 TargetCell(item.Prev, atk.TargetId).Value.cell,
+                                                 TargetCell(item.Prev, atk.TargetId).Value.elev);
+            float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
+            float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f;
+
+            SoundManager.Play(SoundKind.Attack);
+            _projectile = MakeProjectile(from, projScale, projColor);
+            for (float t = 0f; t < flightDur; t += Time.deltaTime)
+            {
+                float f = t / flightDur;
+                var pos = Vector3.Lerp(from, to, f);
+                pos.y += Mathf.Sin(f * Mathf.PI) * arc;
+                _projectile.transform.position = pos;
+                yield return null;
+            }
+            Destroy(_projectile);
+            _projectile = null;
+
+            // impact: explosion, popup, and a short hold — the popup lands WITH the hit, not before.
+            // _reported tells FastForward/Commit the popups already fired (no doubles, no drops).
+            ExplosionFx.Spawn(to, projColor, Mathf.Lerp(0.4f, 0.9f, power), false);
+            CombatFx.Report(item.Prev, item.Next, _board, item.Cmd);
+            _reported = true;
+            yield return new WaitForSeconds(ImpactHold);
+        }
+
+        /// <summary>World top of the attacked entity (unit or generator) in a state; null if gone.</summary>
+        Vector3? TargetTop(GameState s, int targetId)
+        {
+            var t = TargetCell(s, targetId);
+            return t == null ? (Vector3?)null : Tokens().CellTop(t.Value.cell, t.Value.elev);
+        }
+
+        (HexCoord cell, int elev)? TargetCell(GameState s, int targetId)
+        {
+            foreach (var p in s.Players)
+            {
+                foreach (var u in p.UnitsOnBoard) if (u.IsAlive && u.Id == targetId) return (u.Cell, u.Elevation);
+                foreach (var g in p.Generators) if (g.IsAlive && g.Id == targetId) return (g.Cell, g.Elevation);
+            }
+            return null;
+        }
+
+        GameObject MakeProjectile(Vector3 pos, float scale, Color color)
+        {
+            var p = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            DestroyImmediate(p.GetComponent<Collider>());
+            p.transform.position = pos;
+            p.transform.localScale = Vector3.one * scale;
+            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            if (unlit == null) unlit = Shader.Find("Unlit/Color");
+            var m = new Material(unlit);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", color);
+            m.color = color;
+            var mr = p.GetComponent<MeshRenderer>();
+            mr.sharedMaterial = m;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            var trail = p.AddComponent<TrailRenderer>();
+            trail.time = 0.18f;
+            trail.startWidth = scale * 0.9f;
+            trail.endWidth = 0f;
+            trail.material = m;
+            trail.startColor = color;
+            trail.endColor = new Color(color.r, color.g, color.b, 0f);
+            trail.numCapVertices = 2;
+            return p;
+        }
+
         void PlayInstantSound(Item item)
         {
             switch (item.Cmd)
             {
-                case AttackUnit _: SoundManager.Play(SoundKind.Attack); break;
                 case CaptureHex _: SoundManager.Play(SoundKind.Claim); break;
                 case BuildGenerator _:
                 case DeployGenerator _:

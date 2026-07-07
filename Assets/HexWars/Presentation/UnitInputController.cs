@@ -25,7 +25,6 @@ namespace HexWars.Presentation
         int _selectedId = -1;
         GameObject _marker;
         Material _markerMat;
-        bool _animating;
         GameObject _actionGo;
         Image _actionBg;
         Text _actionLabel;
@@ -75,7 +74,7 @@ namespace HexWars.Presentation
 
             // act on a TAP (press + release without dragging) so a drag is free to pan the camera
             if (pointer.press.wasPressedThisFrame) { _pressPos = mp; _pressedOverUi = IsPointerOverUi(); }
-            bool blocked = _animating || (_barracks != null && _barracks.IsDeploying);
+            bool blocked = _barracks != null && _barracks.IsDeploying;
             if (pointer.press.wasReleasedThisFrame && !blocked && !_pressedOverUi
                 && Vector2.Distance(mp, _pressPos) <= TapThreshold)
                 HandleClick(hoveredUnit, hoveredTile);
@@ -118,7 +117,7 @@ namespace HexWars.Presentation
             {
                 if (!HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)
                     && TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
-                    StartCoroutine(AttackSeq(_selected, unit));
+                    Issue(new AttackUnit(active, _selected.Unit.Id, unit.Unit.Id));
                 return; // invalid / spent: nothing happens, keep selection
             }
             // territory claim/build is done via the explicit on-screen action button (UpdateActionButton),
@@ -129,7 +128,7 @@ namespace HexWars.Presentation
             {
                 if (!HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)
                     && IsReachable(_selected.Unit, tile.Coord))
-                    StartCoroutine(MoveSeq(_selected, tile.Coord));
+                    Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
                 return;
             }
             Select(unit);
@@ -192,73 +191,14 @@ namespace HexWars.Presentation
             UpdateMarker();
         }
 
-        IEnumerator MoveSeq(UnitView mover, HexCoord dest)
+        /// <summary>Issue a command through the one presentation pipeline: finish any queued playback
+        /// first (visuals catch up to truth), then apply. The presenter animates the result.</summary>
+        void Issue(Command cmd)
         {
-            _animating = true;
-            var tr = mover.transform;
-            Vector3 from = tr.position, to = HexTopWorld(dest);
-            for (float t = 0f; t < 0.3f; t += Time.deltaTime)
-            {
-                tr.position = Vector3.Lerp(from, to, Mathf.SmoothStep(0f, 1f, t / 0.3f));
-                yield return null;
-            }
-            bool ok = _game.TryApply(new MoveUnit(_game.State.ActivePlayer, _selectedId, dest));
-            if (!ok && _board != null) _board.RenderEntities(_game.State, _game.FogViewer()); // illegal: snap back to truth
+            _game.Presenter?.FastForward();
+            _game.TryApply(cmd);
             ReacquireSelection();
             AutoAdvance();
-            _animating = false;
-        }
-
-        IEnumerator AttackSeq(UnitView attacker, UnitView target)
-        {
-            _animating = true;
-
-            // attack VFX scales with the attacker's Damage: small fast bullet -> fat slow rocket
-            int dmg = attacker.Unit.Stats.Damage;
-            float power = Mathf.Clamp01(dmg / 8f);
-            float projScale = Mathf.Lerp(0.14f, 0.5f, power);
-            Color projColor = dmg >= 6 ? new Color(1f, 0.3f, 0.1f)
-                            : dmg >= 3 ? new Color(1f, 0.65f, 0.2f)
-                                       : new Color(1f, 0.95f, 0.5f);
-
-            int targetId = target.Unit.Id;
-            Vector3 targetPos = target.transform.position;
-            Vector3 from = attacker.transform.position + Vector3.up * 0.4f;
-            Vector3 to = targetPos + Vector3.up * 0.4f;
-
-            // direct shot flies straight; an indirect (LOS-blocked) shot lobs over the obstacles
-            bool directLos = LineOfSight.IsClear(_game.State.Board,
-                attacker.Unit.Cell, attacker.Unit.Elevation, target.Unit.Cell, target.Unit.Elevation);
-            float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
-            float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f; // slower, weightier
-
-            var proj = MakeProjectile(from, projScale, projColor);
-            for (float t = 0f; t < flightDur; t += Time.deltaTime)
-            {
-                float f = t / flightDur;
-                var pos = Vector3.Lerp(from, to, f);
-                pos.y += Mathf.Sin(f * Mathf.PI) * arc;
-                proj.transform.position = pos;
-                yield return null;
-            }
-            Destroy(proj);
-
-            // Damage numbers and kill explosions come from CombatFx when the state actually changes
-            // (online that's the server echo, a beat after this send) — here only the impact puff.
-            bool ok = _game.TryApply(new AttackUnit(_game.State.ActivePlayer, _selectedId, targetId));
-            if (ok) ExplosionFx.Spawn(to, projColor, Mathf.Lerp(0.4f, 0.9f, power), false);
-            ReacquireSelection();
-            AutoAdvance();
-            _animating = false;
-        }
-
-        Vector3 HexTopWorld(HexCoord cell)
-        {
-            float hexSize = _board != null ? _board.HexSize : 1f;
-            float levelH = _board != null ? _board.LevelHeight : 0.55f;
-            int elev = _game.State.Board.TileAt(cell).Elevation;
-            var w = HexLayout.ToWorld(cell, hexSize);
-            return new Vector3((float)w.x, (elev + 1) * levelH, (float)w.z);
         }
 
         void ReacquireSelection()
@@ -269,32 +209,6 @@ namespace HexWars.Presentation
                     if (v.Unit.Id == _selectedId && v.Unit.IsAlive) { _selected = v; break; }
             if (_selected == null) _selectedId = -1;
             UpdateMarker();
-        }
-
-        GameObject MakeProjectile(Vector3 pos, float scale, Color color)
-        {
-            var p = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            DestroyImmediate(p.GetComponent<Collider>());
-            p.transform.position = pos;
-            p.transform.localScale = Vector3.one * scale;
-            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlit == null) unlit = Shader.Find("Unlit/Color");
-            var m = new Material(unlit);
-            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", color);
-            m.color = color;
-            var mr = p.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = m;
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-
-            var trail = p.AddComponent<TrailRenderer>();
-            trail.time = 0.18f;
-            trail.startWidth = scale * 0.9f;
-            trail.endWidth = 0f;
-            trail.material = m;
-            trail.startColor = color;
-            trail.endColor = new Color(color.r, color.g, color.b, 0f);
-            trail.numCapVertices = 2;
-            return p;
         }
 
         static bool IsPointerOverUi()
