@@ -1058,12 +1058,13 @@ IEnumerator PlayDeploy(Item item, DeployUnit dep, PlayerId? viewer)
     Unit fresh = null;
     foreach (var u in item.Next.Player(dep.Issuer).UnitsOnBoard)
         if (u.IsAlive && u.Cell == dep.Cell && FindUnit(item.Prev, dep.Issuer, u.Id) == null) { fresh = u; break; }
-    SoundManager.Play(SoundKind.Build);
     if (fresh == null) yield break;
 
     Tokens().Sync(item.Next, viewer); // spawns the token at its cell
     var token = Tokens().UnitToken(fresh.Id);
-    if (token == null) yield break;   // deployed out of the viewer's sight
+    if (token == null) yield break;   // deployed out of the viewer's sight: no sound, zero time
+
+    SoundManager.Play(SoundKind.Build); // AFTER the visibility gate — a hidden deploy must not leak audio
 
     // drop-in: fall from above + landing squash
     var rest = token.transform.localPosition;
@@ -1603,6 +1604,11 @@ Then tell the user: push from WSL (Windows shell has no key — memory `hexwars-
 ---
 
 ## Self-review notes (resolved during writing)
+
+- **Fixed post-review (Task 5):** the original `PlayDeploy` snippet above played `SoundKind.Build`
+  *before* the token-visibility bail-out — a fog audio leak the reviewer caught (Task 6 only
+  covers `PlayMove`/`PlayAttack`, so nothing downstream would have fixed it). Snippet corrected
+  to gate the sound behind visibility, mirroring `PlayClaim`; code fixed in its own commit.
 
 - **Scope correction vs the spec's §3.3 "free win":** only `SpectatorDriver` and `AiOpponent` route through `TryApply` and therefore animate for free. `ReplayPlayer` scrubs arbitrary frames (including backwards) and `ModelDuelDriver` renders `DuelEnv` states directly — both stay on the instant `RenderEntities` facade, which is the correct behavior for a scrubber. Animating sequential replay playback is a follow-up (the `Replay` object does keep its command list). The spec has been amended to match.
 - **FastForward is synchronous** (StopAllCoroutines + drain), not a polled flag: a flag cleared on queue-empty would also snap-commit the local action enqueued immediately after the call — the exact action the player just clicked.
