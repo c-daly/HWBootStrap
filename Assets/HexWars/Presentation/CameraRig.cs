@@ -1,3 +1,4 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -19,6 +20,8 @@ namespace HexWars.Presentation
         public float ZoomSpeed = 40f;
 
         Vector3 _focus = Vector3.zero;
+        Coroutine _nudge;
+        Vector3 _shakeOffset;
 
         void Start() => Frame();
 
@@ -35,21 +38,60 @@ namespace HexWars.Presentation
             Apply();
         }
 
+        /// <summary>Glide the focus toward a world point (opponent action off-screen). User input wins:
+        /// the first pan/orbit/zoom keypress or touch cancels the glide.</summary>
+        public void NudgeToward(Vector3 world)
+        {
+            if (_nudge != null) StopCoroutine(_nudge);
+            _nudge = StartCoroutine(NudgeSeq(world));
+        }
+
+        IEnumerator NudgeSeq(Vector3 world)
+        {
+            Vector3 from = _focus;
+            for (float t = 0f; t < 0.4f; t += Time.deltaTime)
+            {
+                _focus = Vector3.Lerp(from, world, Mathf.SmoothStep(0f, 1f, t / 0.4f));
+                yield return null;
+            }
+            _focus = world;
+            _nudge = null;
+        }
+
+        public void Shake(float amplitude = 0.18f, float duration = 0.3f)
+        {
+            StartCoroutine(ShakeSeq(amplitude, duration));
+        }
+
+        IEnumerator ShakeSeq(float amplitude, float duration)
+        {
+            for (float t = 0f; t < duration; t += Time.deltaTime)
+            {
+                float damp = 1f - t / duration;
+                _shakeOffset = new Vector3(
+                    (Mathf.PerlinNoise(t * 40f, 0.3f) - 0.5f),
+                    (Mathf.PerlinNoise(0.7f, t * 40f) - 0.5f), 0f) * (2f * amplitude * damp);
+                yield return null;
+            }
+            _shakeOffset = Vector3.zero;
+        }
+
         void Update()
         {
             float dt = Time.unscaledDeltaTime;
+            bool userMoved = false;
 
             var kb = Keyboard.current;
             if (kb != null)
             {
                 Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
                 Vector3 right = transform.right;
-                if (kb.wKey.isPressed || kb.upArrowKey.isPressed) _focus += fwd * PanSpeed * dt;
-                if (kb.sKey.isPressed || kb.downArrowKey.isPressed) _focus -= fwd * PanSpeed * dt;
-                if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) _focus += right * PanSpeed * dt;
-                if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) _focus -= right * PanSpeed * dt;
-                if (kb.qKey.isPressed) Yaw -= RotateSpeed * dt;
-                if (kb.eKey.isPressed) Yaw += RotateSpeed * dt;
+                if (kb.wKey.isPressed || kb.upArrowKey.isPressed) { _focus += fwd * PanSpeed * dt; userMoved = true; }
+                if (kb.sKey.isPressed || kb.downArrowKey.isPressed) { _focus -= fwd * PanSpeed * dt; userMoved = true; }
+                if (kb.dKey.isPressed || kb.rightArrowKey.isPressed) { _focus += right * PanSpeed * dt; userMoved = true; }
+                if (kb.aKey.isPressed || kb.leftArrowKey.isPressed) { _focus -= right * PanSpeed * dt; userMoved = true; }
+                if (kb.qKey.isPressed) { Yaw -= RotateSpeed * dt; userMoved = true; }
+                if (kb.eKey.isPressed) { Yaw += RotateSpeed * dt; userMoved = true; }
             }
 
             var mouse = Mouse.current;
@@ -57,7 +99,10 @@ namespace HexWars.Presentation
             {
                 float scroll = mouse.scroll.ReadValue().y;
                 if (Mathf.Abs(scroll) > 0.01f)
+                {
                     Distance = Mathf.Clamp(Distance - scroll * ZoomSpeed * dt, 4f, 90f);
+                    userMoved = true;
+                }
             }
 
             // touch: one-finger drag pans, two-finger pinch zooms
@@ -75,14 +120,18 @@ namespace HexWars.Presentation
                     Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
                     float scale = Distance * 0.0016f;
                     _focus -= (transform.right * d.x + fwd * d.y) * scale; // drag the world under the finger
+                    userMoved = true;
                 }
                 else if (active >= 2)
                 {
                     Vector2 a = touches[i0].position.ReadValue(), b = touches[i1].position.ReadValue();
                     Vector2 pa = a - touches[i0].delta.ReadValue(), pb = b - touches[i1].delta.ReadValue();
                     Distance = Mathf.Clamp(Distance - (Vector2.Distance(a, b) - Vector2.Distance(pa, pb)) * 0.03f, 4f, 90f);
+                    userMoved = true;
                 }
             }
+
+            if (userMoved && _nudge != null) { StopCoroutine(_nudge); _nudge = null; }
 
             Apply();
         }
@@ -91,7 +140,7 @@ namespace HexWars.Presentation
         {
             var rot = Quaternion.Euler(Pitch, Yaw, 0f);
             transform.rotation = rot;
-            transform.position = _focus - rot * Vector3.forward * Distance;
+            transform.position = _focus - rot * Vector3.forward * Distance + _shakeOffset;
         }
 
         Transform ResolveTarget()

@@ -40,6 +40,17 @@ namespace HexWars.Presentation
 
         TokenStore Tokens() => _tokens != null ? _tokens : (_tokens = _board.GetComponent<TokenStore>());
 
+        CameraRig _rig;
+        CameraRig Rig() => _rig != null ? _rig : (_rig = FindAnyObjectByType<CameraRig>());
+
+        static bool OffScreen(Vector3 world)
+        {
+            var cam = Camera.main;
+            if (cam == null) return false;
+            var v = cam.WorldToViewportPoint(world);
+            return v.z < 0f || v.x < 0.06f || v.x > 0.94f || v.y < 0.06f || v.y > 0.94f;
+        }
+
         public void Enqueue(GameState prev, Command cmd, GameState next, bool isLocal)
         {
             _queue.Enqueue(new Item { Prev = prev, Cmd = cmd, Next = next, IsLocal = isLocal });
@@ -92,6 +103,16 @@ namespace HexWars.Presentation
 
         IEnumerator Play(Item item)
         {
+            if (!item.IsLocal)
+            {
+                var site = ActionSite(item);
+                if (site.HasValue && OffScreen(site.Value))
+                {
+                    Rig()?.NudgeToward(site.Value);
+                    yield return new WaitForSeconds(0.25f); // let the glide lead the action
+                }
+            }
+
             var viewer = _game.FogViewerFor(item.Next);
             switch (item.Cmd)
             {
@@ -281,6 +302,51 @@ namespace HexWars.Presentation
             yield return new WaitForSeconds(0.15f);
         }
 
+        /// <summary>World position of the action's focal cell, fog-clamped (reuses what playback already
+        /// computes). Null when there's nothing to nudge toward — including a fully hidden action, which
+        /// must not move the camera either (fog discipline: zero time, zero sound, zero camera motion).</summary>
+        Vector3? ActionSite(Item item)
+        {
+            var viewer = _game.FogViewerFor(item.Next);
+            switch (item.Cmd)
+            {
+                case MoveUnit mv:
+                {
+                    var u = FindUnit(item.Prev, mv.Issuer, mv.UnitId);
+                    if (u == null) return null;
+                    var span = FogPresentation.VisibleSpan(item.Next, viewer, HexPath.Line(u.Value.Cell, mv.Dest));
+                    if (span.First < 0) return null; // hidden: no nudge (and no playback)
+                    return Tokens().CellTop(mv.Dest, item.Next.Board.TileAt(mv.Dest).Elevation);
+                }
+                case AttackUnit atk:
+                {
+                    // mirror PlayAttack's own gate exactly: a null tracer origin means both ends are
+                    // dark, so PlayAttack shows nothing — the nudge must not leak that a shot happened
+                    var attacker = FindUnit(item.Prev, atk.Issuer, atk.AttackerId);
+                    var t = TargetCell(item.Prev, atk.TargetId);
+                    if (attacker == null || t == null) return null;
+                    var origin = FogPresentation.TracerOrigin(item.Prev, viewer, attacker.Value.Cell, t.Value.cell);
+                    return origin == null ? (Vector3?)null : Tokens().CellTop(t.Value.cell, t.Value.elev);
+                }
+                case DeployUnit dep:
+                {
+                    if (FogPresentation.VisibleSpan(item.Next, viewer, new[] { dep.Cell }).First < 0) return null;
+                    return Tokens().CellTop(dep.Cell, item.Next.Board.TileAt(dep.Cell).Elevation);
+                }
+                case CaptureHex cap:
+                {
+                    if (FogPresentation.VisibleSpan(item.Next, viewer, new[] { cap.Cell }).First < 0) return null;
+                    return Tokens().CellTop(cap.Cell, item.Next.Board.TileAt(cap.Cell).Elevation);
+                }
+                case BuildGenerator bld:
+                {
+                    if (FogPresentation.VisibleSpan(item.Next, viewer, new[] { bld.Cell }).First < 0) return null;
+                    return Tokens().CellTop(bld.Cell, item.Next.Board.TileAt(bld.Cell).Elevation);
+                }
+                default: return null;
+            }
+        }
+
         (HexCoord cell, int elev)? TargetCell(GameState s, int targetId)
         {
             foreach (var p in s.Players)
@@ -333,7 +399,7 @@ namespace HexWars.Presentation
                 CombatFx.Report(item.Prev, item.Next, _board, item.Cmd); // popups (attack timing refined in Task 4)
             if (!(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer)
                 SoundManager.Play(SoundKind.EndTurn); // paced turns auto-pass without an EndTurn command
-            if (LiveUnits(item.Next) < LiveUnits(item.Prev)) SoundManager.Play(SoundKind.Death);
+            if (LiveUnits(item.Next) < LiveUnits(item.Prev)) { SoundManager.Play(SoundKind.Death); Rig()?.Shake(); }
             if (item.Next.IsGameOver && !item.Prev.IsGameOver) SoundManager.Play(SoundKind.Win);
         }
 
