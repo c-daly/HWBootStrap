@@ -108,12 +108,35 @@ namespace HexWars.Presentation
         IEnumerator PlayMove(Item item, MoveUnit mv, PlayerId? viewer)
         {
             Unit? before = FindUnit(item.Prev, mv.Issuer, mv.UnitId);
+            if (before == null) yield break;
+
+            var path = HexPath.Line(before.Value.Cell, mv.Dest);
+            // own units are always fully visible to their viewer; enemy paths are clipped to vision
+            bool ownAction = !viewer.HasValue || mv.Issuer == viewer.Value;
+            var span = ownAction ? (First: 0, Last: path.Count - 1)
+                                 : FogPresentation.VisibleSpan(item.Next, viewer, path);
+            if (span.First < 0) yield break; // fully in the dark: silent, zero time
+
+            // a token may not exist yet (unit was out of sight): sync to Prev-visibility is stale, so
+            // sync Next first — the destination decides existence — then walk only the visible hops
+            Tokens().Sync(item.Next, viewer);
             var token = Tokens().UnitToken(mv.UnitId);
-            if (before == null || token == null) yield break; // hidden under fog (Task 6 refines) or gone
+            if (token == null && span.Last < path.Count - 1)
+            {
+                // popped back out of sight before its true (hidden) destination: Sync(Next) correctly
+                // prunes a token that isn't visible at rest, but the pop-out animation below still
+                // needs one for the visible middle stretch — re-sync as if the unit rested at the
+                // last visible cell instead. Commit() re-syncs to the true Next right after this
+                // coroutine returns, so this is purely a transient presentation fiction.
+                Tokens().Sync(WithUnitCell(item.Next, mv.Issuer, mv.UnitId, path[span.Last]), viewer);
+                token = Tokens().UnitToken(mv.UnitId);
+            }
+            if (token == null) yield break;
 
             SoundManager.Play(SoundKind.Move);
-            var path = HexPath.Line(before.Value.Cell, mv.Dest);
-            for (int i = 1; i < path.Count; i++)
+            token.transform.localPosition = Tokens().CellTop(path[span.First], item.Next.Board.TileAt(path[span.First]).Elevation);
+            if (span.First > 0) yield return PopIn(token.transform);            // enters vision mid-path
+            for (int i = span.First + 1; i <= span.Last; i++)
             {
                 Vector3 from = token.transform.localPosition;
                 Vector3 to = Tokens().CellTop(path[i], item.Next.Board.TileAt(path[i]).Elevation);
@@ -123,10 +146,34 @@ namespace HexWars.Presentation
                     yield return null;
                 }
             }
-            yield return Squash(token.transform);
+            if (span.Last < path.Count - 1) yield return PopOut(token.transform); // leaves vision mid-path
+            else yield return Squash(token.transform);
         }
         // (No cancellation flags inside the loops: FastForward stops the coroutines outright and
         // Commit's Sync re-snaps position and scale, so an interrupted tween can't strand a token.)
+
+        // WebGL-safe appear/disappear (no transparent variants): quick scale pop at the vision boundary
+        IEnumerator PopIn(Transform tr)
+        {
+            var s0 = tr.localScale;
+            for (float t = 0f; t < 0.15f; t += Time.deltaTime)
+            {
+                tr.localScale = s0 * Mathf.SmoothStep(0f, 1f, t / 0.15f);
+                yield return null;
+            }
+            tr.localScale = s0;
+        }
+
+        IEnumerator PopOut(Transform tr)
+        {
+            var s0 = tr.localScale;
+            for (float t = 0f; t < 0.15f; t += Time.deltaTime)
+            {
+                tr.localScale = s0 * (1f - Mathf.SmoothStep(0f, 1f, t / 0.15f));
+                yield return null;
+            }
+            tr.localScale = s0; // Commit's Sync decides whether it still exists; scale restored either way
+        }
 
         const float ImpactHold = 0.05f; // spec: brief hold at impact; PauseToggle owns timeScale, so hold locally
 
@@ -134,8 +181,11 @@ namespace HexWars.Presentation
         {
             var attacker = FindUnit(item.Prev, atk.Issuer, atk.AttackerId);
             if (attacker == null) yield break;
-            var targetPos = TargetTop(item.Prev, atk.TargetId);
-            if (targetPos == null) yield break;
+            var tgt = TargetCell(item.Prev, atk.TargetId);
+            if (tgt == null) yield break;
+
+            var origin = FogPresentation.TracerOrigin(item.Prev, viewer, attacker.Value.Cell, tgt.Value.cell);
+            if (origin == null) yield break; // both ends dark: nothing to show (state popups don't apply — your units are always visible to you)
 
             int dmg = attacker.Value.Stats.Damage;
             float power = Mathf.Clamp01(dmg / 8f);
@@ -144,12 +194,11 @@ namespace HexWars.Presentation
                             : dmg >= 3 ? new Color(1f, 0.65f, 0.2f)
                                        : new Color(1f, 0.95f, 0.5f);
 
-            Vector3 from = Tokens().CellTop(attacker.Value.Cell, attacker.Value.Elevation) + Vector3.up * 0.4f;
-            Vector3 to = targetPos.Value + Vector3.up * 0.4f;
+            Vector3 from = Tokens().CellTop(origin.Value, item.Prev.Board.Contains(origin.Value) ? item.Prev.Board.TileAt(origin.Value).Elevation : attacker.Value.Elevation) + Vector3.up * 0.4f;
+            Vector3 to = Tokens().CellTop(tgt.Value.cell, tgt.Value.elev) + Vector3.up * 0.4f;
 
             bool directLos = LineOfSight.IsClear(item.Prev.Board, attacker.Value.Cell, attacker.Value.Elevation,
-                                                 TargetCell(item.Prev, atk.TargetId).Value.cell,
-                                                 TargetCell(item.Prev, atk.TargetId).Value.elev);
+                                                 tgt.Value.cell, tgt.Value.elev);
             float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
             float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f;
 
@@ -232,13 +281,6 @@ namespace HexWars.Presentation
             yield return new WaitForSeconds(0.15f);
         }
 
-        /// <summary>World top of the attacked entity (unit or generator) in a state; null if gone.</summary>
-        Vector3? TargetTop(GameState s, int targetId)
-        {
-            var t = TargetCell(s, targetId);
-            return t == null ? (Vector3?)null : Tokens().CellTop(t.Value.cell, t.Value.elev);
-        }
-
         (HexCoord cell, int elev)? TargetCell(GameState s, int targetId)
         {
             foreach (var p in s.Players)
@@ -300,6 +342,23 @@ namespace HexWars.Presentation
             foreach (var u in s.Player(owner).UnitsOnBoard)
                 if (u.Id == id && u.IsAlive) return u;
             return null;
+        }
+
+        /// <summary>A copy of <paramref name="s"/> with one unit relocated — used to feed TokenStore a
+        /// presentation-only snapshot (see PlayMove's pop-out fix-up) without touching engine truth.</summary>
+        static GameState WithUnitCell(GameState s, PlayerId owner, int unitId, HexCoord cell)
+        {
+            var players = new List<PlayerState>(s.Players.Count);
+            foreach (var p in s.Players)
+            {
+                if (p.Id != owner) { players.Add(p); continue; }
+                var units = new List<Unit>(p.UnitsOnBoard);
+                for (int i = 0; i < units.Count; i++)
+                    if (units[i].Id == unitId) { units[i] = units[i].WithCell(cell, units[i].Elevation); break; }
+                players.Add(new PlayerState(p.Id, p.Points, p.Barracks, units, p.Generators, p.DestroyedValue));
+            }
+            return new GameState(s.Board, s.Config, players, s.ActivePlayer, s.Round, s.NextEntityId,
+                                  s.IsGameOver, s.Winner, s.MovedUnitIds, s.AttackedUnitIds, s.MovementSpent);
         }
 
         static int LiveUnits(GameState s)
