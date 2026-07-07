@@ -105,9 +105,14 @@ namespace HexWars.Presentation
             {
                 var bst = _game.State;
                 HexCoord? target = tile != null ? (HexCoord?)tile.Coord : (unit != null ? (HexCoord?)unit.Unit.Cell : null);
-                if (target.HasValue && bst.Board.Controller(target.Value) == active && !HasGeneratorOn(bst, target.Value))
-                    _game.TryApply(new BuildGenerator(active, target.Value));
-                return; // while building, taps only place generators (or do nothing)
+                if (!target.HasValue) return; // tapped past the board — no message
+                // guard first: during the opponent's turn "active" is them, so the controller check below
+                // would misreport YOUR OWN hex as not yours
+                if (_game.WaitingHumanSeat() != null) { Toast.Show("Opponent's turn — waiting for it to finish"); return; }
+                if (bst.Board.Controller(target.Value) != active) { Toast.Show("You don't control that hex"); return; }
+                if (HasGeneratorOn(bst, target.Value)) { Toast.Show("That hex already has a generator"); return; }
+                _game.TryApply(new BuildGenerator(active, target.Value));
+                return; // while building, taps only place generators
             }
 
             bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
@@ -115,10 +120,11 @@ namespace HexWars.Presentation
             // attack intent: only fire if not already attacked AND actually targetable (range/vision/LOS/arc)
             if (ownSelected && unit != null && unit.Unit.Owner != active)
             {
-                if (!HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)
-                    && TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
-                    Issue(new AttackUnit(active, _selected.Unit.Id, unit.Unit.Id));
-                return; // invalid / spent: nothing happens, keep selection
+                if (HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)) { Toast.Show("Already attacked this turn"); return; }
+                if (!TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
+                { Toast.Show(WhyCannotTarget(_game.State, _selected.Unit, unit.Unit)); return; }
+                Issue(new AttackUnit(active, _selected.Unit.Id, unit.Unit.Id));
+                return;
             }
             // territory claim/build is done via the explicit on-screen action button (UpdateActionButton),
             // never by tapping the hex — so a stray tap can't spend points or end your turn by accident.
@@ -126,11 +132,13 @@ namespace HexWars.Presentation
             // move intent: only if not already moved AND the hex is reachable
             if (ownSelected && unit == null && tile != null)
             {
-                if (!HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)
-                    && IsReachable(_selected.Unit, tile.Coord))
-                    Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
+                if (HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)) { Toast.Show("Already moved this turn"); return; }
+                if (!IsReachable(_selected.Unit, tile.Coord))
+                { Toast.Show(IsOccupied(_game.State, tile.Coord) ? "That hex is occupied" : "Out of movement reach"); return; }
+                Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
                 return;
             }
+            NotifyIfWaiting(unit, tile);
             Select(unit);
         }
 
@@ -153,6 +161,36 @@ namespace HexWars.Presentation
                 foreach (var g in p.Generators)
                     if (g.IsAlive && g.Cell == cell) return true;
             return false;
+        }
+
+        /// <summary>TargetingService.CanTarget's three ANDed predicates, asked one at a time so the
+        /// toast can say WHICH one refused. Ends on a generic fallback so a future rules change can
+        /// never make this method lie.</summary>
+        static string WhyCannotTarget(GameState s, Unit attacker, Unit target)
+        {
+            if (!TargetingService.InRange(attacker, target.Cell, target.Elevation, s.Config)) return "Out of range";
+            if (!TargetingService.IsVisibleToArmy(s, attacker.Owner, target.Cell, target.Elevation)) return "No friendly unit can see the target";
+            if (!TargetingService.HasShot(s, attacker, target.Cell, target.Elevation)) return "No line of sight";
+            return "Can't target that unit";
+        }
+
+        static bool IsOccupied(GameState s, HexCoord cell)
+        {
+            foreach (var p in s.Players)
+                foreach (var u in p.UnitsOnBoard)
+                    if (u.IsAlive && u.Cell == cell) return true;
+            return false;
+        }
+
+        /// <summary>A click that reads as an order (a live unit of the waiting human's is selected and
+        /// they tapped a hex or an enemy) while the opponent's turn plays out: say why nothing will
+        /// happen. Never fires in hotseat. Selection/inspection still proceeds after the toast.</summary>
+        void NotifyIfWaiting(UnitView unit, TileView tile)
+        {
+            var waiting = _game != null ? _game.WaitingHumanSeat() : null;
+            if (waiting == null || _selected == null || !_selected.Unit.IsAlive || _selected.Unit.Owner != waiting.Value) return;
+            bool looksLikeOrder = tile != null || (unit != null && unit.Unit.Owner != waiting.Value);
+            if (looksLikeOrder) Toast.Show("Opponent's turn — waiting for it to finish");
         }
 
         // once the acting unit has used both its move and attack, jump to the next unit with actions left

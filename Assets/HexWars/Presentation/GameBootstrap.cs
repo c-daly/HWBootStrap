@@ -240,6 +240,20 @@ namespace HexWars.Presentation
             return ai == null || cmd.Issuer != ai.AiSeat;
         }
 
+        /// <summary>The seated human currently waiting out someone else's turn: your seat online when
+        /// it isn't your turn; the human's seat while the AI plays. Null in hotseat (the active player
+        /// IS the human at the screen), for unseated spectators, when the game is over, and when it is
+        /// your turn — i.e. null means "no one to apologise to".</summary>
+        public PlayerId? WaitingHumanSeat()
+        {
+            if (State == null || State.IsGameOver) return null;
+            if (Networked) return Seat.HasValue && State.ActivePlayer != Seat.Value ? Seat : null;
+            var ai = GetComponent<AiOpponent>();
+            if (ai != null && State.ActivePlayer == ai.AiSeat)
+                return ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            return null;
+        }
+
         // ---- server callbacks (online mode), invoked by NetClient ----
 
         internal void OnNetSeat(PlayerId seat) { Seat = seat; StateChanged?.Invoke(); }
