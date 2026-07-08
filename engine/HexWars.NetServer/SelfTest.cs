@@ -43,15 +43,19 @@ namespace HexWars.NetServer
                 string applyA = await Recv(a);              // APPLY E 0 broadcast to both
                 string applyB = await Recv(b);
 
+                using var joiner = await Connect("ws://127.0.0.1:5234/ws?room=missing&join=1");
+                string joinerSeat = await Recv(joiner);       // a joiner must never mint a room for a typo'd code
+                bool joinOnlyTurnedAway = joinerSeat == "SEAT FULL";
+
                 bool ok =
                     seatA == "SEAT 0" && seatB == "SEAT 1" &&
                     startA.StartsWith("START ") && startB.StartsWith("START ") &&
                     applyA == "APPLY E 0" && applyB == "APPLY E 0" &&
-                    lobbyListsWaitingRoom && lobbyEmptiesOnStart;
+                    lobbyListsWaitingRoom && lobbyEmptiesOnStart && joinOnlyTurnedAway;
 
                 Console.WriteLine(ok
                     ? "SELFTEST PASS — two browsers can play head-to-head through this server"
-                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart}");
+                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart} joinOnly='{joinerSeat}'");
 
                 await app.StopAsync();
                 return ok ? 0 : 1;
@@ -64,10 +68,10 @@ namespace HexWars.NetServer
             }
         }
 
-        static async Task<ClientWebSocket> Connect()
+        static async Task<ClientWebSocket> Connect(string url = Ws)
         {
             var c = new ClientWebSocket();
-            await c.ConnectAsync(new Uri(Ws), CancellationToken.None);
+            await c.ConnectAsync(new Uri(url), CancellationToken.None);
             return c;
         }
 

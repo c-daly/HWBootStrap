@@ -51,13 +51,21 @@ namespace HexWars.Engine
         { _newGame = newGame; _now = utcNowTicks ?? (() => DateTime.UtcNow.Ticks); }
 
         /// <summary>Seat a connection. The first connection to a room creates it from <paramref name="setup"/>
-        /// (the host's lobby picks); later joiners' setups are ignored — they join the host's game.</summary>
-        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId, GameSetup setup = default, bool isPrivate = false)
+        /// (the host's lobby picks); later joiners' setups are ignored — they join the host's game.
+        /// <paramref name="joinOnly"/> marks a joiner (link/code/browser row, never a host): a joiner must
+        /// never mint a room, since a typo'd code would otherwise create a phantom public game and strand
+        /// the joiner with a seat in it. Missing room + joinOnly turns the connection away instead.</summary>
+        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId, GameSetup setup = default, bool isPrivate = false, bool joinOnly = false)
         {
             var outs = new List<Outbound>();
             if (!_rooms.TryGetValue(roomCode, out var room))
             {
-                room = new Room(_newGame(setup), setup, isPrivate, _now());
+                if (joinOnly)
+                {
+                    outs.Add(new Outbound(connectionId, NetProtocol.SeatFull));
+                    return outs;
+                }
+                room = new Room(_newGame(setup), setup.Sanitized(), isPrivate, _now());
                 _rooms[roomCode] = room;
             }
 

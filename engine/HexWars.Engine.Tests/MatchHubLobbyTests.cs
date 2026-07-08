@@ -84,5 +84,30 @@ namespace HexWars.Engine.Tests
             Assert.That(open.Count, Is.EqualTo(1), "room stays public: the creating connection's original flag governs");
             Assert.That(open[0].Code, Is.EqualTo("R"));
         }
+
+        [Test]
+        public void WaitingPublicRoom_IsListed_WithSanitizedSetup()
+        {
+            // an oversized/hostile setup is sanitized before the game is built (GameFactory.Build) —
+            // the lobby listing must show that same sanitized setup, not the raw request
+            var hub = NewHub();
+            hub.Connect("HUGE1", "host", GameSetup.Parse("0 9999 9999 0 7"));
+
+            var open = hub.OpenGames();
+            Assert.That(open.Count, Is.EqualTo(1));
+            Assert.That(open[0].Setup.Width, Is.EqualTo(24));
+            Assert.That(open[0].Setup.Height, Is.EqualTo(24));
+        }
+
+        [Test]
+        public void JoinOnly_MissingRoom_TurnedAway_NothingCreated()
+        {
+            var hub = NewHub();
+            var outs = hub.Connect("TYPO1", "joiner", joinOnly: true);
+            Assert.That(outs, Has.Some.Matches<Outbound>(o => o.ConnectionId == "joiner" && o.Message == NetProtocol.SeatFull));
+            Assert.That(hub.OpenGames(), Is.Empty, "a join attempt must not mint a room");
+            Assert.That(hub.Connect("TYPO1", "host"), Has.Some.Matches<Outbound>(o => o.Message == "SEAT 0"),
+                        "the code stays free for a real host");
+        }
     }
 }

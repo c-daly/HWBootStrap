@@ -87,6 +87,8 @@ namespace HexWars.Presentation
             }
             string url = origin + "/ws?room=" + Uri.EscapeDataString(room);
             if (!string.IsNullOrEmpty(setupWire)) url += "&setup=" + Uri.EscapeDataString(setupWire);
+            else url += "&join=1"; // a joiner (link/code/browser row) never carries setup — flag it so a
+                                    // missing room turns the connection away instead of minting a phantom game
             if (isPrivate) url += "&private=1";
             return url;
         }

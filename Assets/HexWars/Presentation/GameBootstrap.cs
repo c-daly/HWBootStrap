@@ -331,7 +331,7 @@ namespace HexWars.Presentation
 
         internal void OnNetSeatFull()
         {
-            Toast.Show("That game is already full.");
+            Toast.Show("That game is unavailable — it may have filled, or the code is wrong.");
             CancelHosting();
             TitleScreen.Reopen(this);
         }
