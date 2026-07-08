@@ -20,6 +20,7 @@ namespace HexWars.Presentation
         static readonly Color EndTurnUrge = new Color(0.16f, 0.52f, 0.28f, 1f); // nothing left to do
 
         GameBootstrap _game;
+        GameObject _canvasGo;
         Text _banner;
         Image _endBtn;
         PlayerId? _lastActive; // last seen active player, to detect handovers (incl. auto-pass)
@@ -54,6 +55,7 @@ namespace HexWars.Presentation
         void Build()
         {
             var canvasGo = new GameObject("HudCanvas");
+            _canvasGo = canvasGo;
             canvasGo.transform.SetParent(transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -122,6 +124,9 @@ namespace HexWars.Presentation
         void Refresh()
         {
             if (_game == null || _game.State == null) return;
+            if (_canvasGo != null && _canvasGo.activeSelf == _game.DemoMode)
+                _canvasGo.SetActive(!_game.DemoMode);
+            if (_game.DemoMode) return;
             var s = _game.State;
 
             if (s.IsGameOver)

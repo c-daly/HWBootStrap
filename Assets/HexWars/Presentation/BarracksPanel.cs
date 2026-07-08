@@ -15,6 +15,7 @@ namespace HexWars.Presentation
     public sealed class BarracksPanel : MonoBehaviour
     {
         GameBootstrap _game;
+        GameObject _canvasGo;
         Font _font;
         RectTransform _list;
         Text _hint;
@@ -72,6 +73,7 @@ namespace HexWars.Presentation
         void Build()
         {
             var canvasGo = new GameObject("BarracksCanvas");
+            _canvasGo = canvasGo;
             canvasGo.transform.SetParent(transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -109,6 +111,13 @@ namespace HexWars.Presentation
             foreach (var r in _rows) Destroy(r);
             _rows.Clear();
             if (_game == null || _game.State == null) return;
+
+            if (_game != null && _game.DemoMode)
+            {
+                if (_canvasGo != null) _canvasGo.SetActive(false);
+                return;
+            }
+            if (_canvasGo != null && !_canvasGo.activeSelf) _canvasGo.SetActive(true);
 
             var s = _game.State;
             var p = s.Player(s.ActivePlayer);

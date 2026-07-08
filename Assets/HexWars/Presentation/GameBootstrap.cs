@@ -64,6 +64,11 @@ namespace HexWars.Presentation
 
         public GameState State { get; private set; }
 
+        /// <summary>True while the title-screen demo game (AI vs AI, muted, gameplay UI hidden) is
+        /// running. Real-game starters clear it. HUD/panels early-out on it — see the spec's
+        /// suppression contract.</summary>
+        public bool DemoMode { get; private set; }
+
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
 
@@ -93,6 +98,7 @@ namespace HexWars.Presentation
 
         public void NewGame()
         {
+            EndDemo();
             Presenter?.ResetQueue();
             SetupEnvironment();
 
@@ -149,12 +155,12 @@ namespace HexWars.Presentation
             if (!result.Success)
             {
                 Debug.Log($"[HexWars] {cmd.GetType().Name} rejected: {result.Reason}");
-                Toast.Show(Friendly(result.Reason.ToString()));
+                if (!DemoMode) Toast.Show(Friendly(result.Reason.ToString()));
                 return false;
             }
             var prev = State;
             State = result.NewState;
-            EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
+            if (!DemoMode) EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             StateChanged?.Invoke();
             return true;
@@ -164,6 +170,7 @@ namespace HexWars.Presentation
         /// host (carries the lobby's game-setup picks); a joiner passes null and gets the host's game.</summary>
         public void StartNetGame(string room, string setupWire)
         {
+            EndDemo();
             _net = gameObject.AddComponent<NetClient>();
             _net.Connect(this, room, setupWire);
         }
@@ -172,6 +179,7 @@ namespace HexWars.Presentation
         /// adds an AI opponent on Player 2; otherwise it's a local hotseat. Used by the lobby's vs-AI option.</summary>
         public void StartLocalGame(GameSetup setup, bool vsAi)
         {
+            EndDemo();
             Presenter?.ResetQueue();
             Networked = false; // play locally — TryApply applies here instead of going to the server
             State = GameFactory.Build(setup);
@@ -183,6 +191,43 @@ namespace HexWars.Presentation
             EventConsole.Report(State, null);
             StateChanged?.Invoke();
             if (vsAi) gameObject.AddComponent<AiOpponent>();
+        }
+
+        /// <summary>The title screen's living background: a muted Greedy-vs-Random match on a fresh
+        /// standard map, driven by SpectatorDriver through the normal presenter path (camera glides
+        /// and all), with every gameplay UI surface suppressed via <see cref="DemoMode"/>.
+        /// Greedy-vs-Greedy is deliberately avoided: mirror matches draw ~93% as standoffs.</summary>
+        public void StartDemo()
+        {
+            Presenter?.ResetQueue();
+            Networked = false;
+            DemoMode = true;
+            SoundManager.Muted = true;
+            var setup = new GameSetup(GameMode.Annihilation, 11, 8, 0,
+                                      UnityEngine.Random.Range(1, 99999), 5, 2, 2, 1, 3);
+            State = GameFactory.Build(setup);
+            var renderer = GetComponent<BoardRenderer>();
+            renderer.Render(State.Board);
+            renderer.RenderEntities(State, FogViewer());
+            FindAnyObjectByType<CameraRig>()?.Frame();
+            EventConsole.Clear();
+            if (GetComponent<SpectatorDriver>() == null) gameObject.AddComponent<SpectatorDriver>();
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>Leave demo mode before a real game starts: drop the spectator driver, restore
+        /// sound, and give input back (the driver had set ReadOnly).</summary>
+        void EndDemo()
+        {
+            if (!DemoMode) return;
+            DemoMode = false;
+            SoundManager.Muted = false;
+            var driver = GetComponent<SpectatorDriver>();
+            if (driver != null) Destroy(driver);
+            var input = FindAnyObjectByType<UnitInputController>();
+            if (input != null) input.ReadOnly = false;
+            var barracks = FindAnyObjectByType<BarracksPanel>();
+            if (barracks != null) barracks.ReadOnly = false;
         }
 
         static string RoomFromPageUrl()

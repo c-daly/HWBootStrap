@@ -17,8 +17,12 @@ namespace HexWars.Presentation
         static AudioSource _src;
         static readonly Dictionary<SoundKind, AudioClip> _clips = new Dictionary<SoundKind, AudioClip>();
 
+        /// <summary>True while the title demo plays — the menu should be calm, not a battle radio.</summary>
+        public static bool Muted;
+
         public static void Play(SoundKind kind)
         {
+            if (Muted) return;
             Ensure();
             _src.PlayOneShot(Clip(kind));
         }
