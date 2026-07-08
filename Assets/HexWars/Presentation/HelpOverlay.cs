@@ -11,6 +11,8 @@ namespace HexWars.Presentation
     public sealed class HelpOverlay : MonoBehaviour
     {
         GameObject _panel;
+        GameObject _canvasGo;
+        GameBootstrap _game;
         Font _font;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -20,11 +22,22 @@ namespace HexWars.Presentation
             new GameObject("HelpOverlay").AddComponent<HelpOverlay>();
         }
 
+        // Hidden while the title demo runs (the title menu has its own How to Play). Poll with the
+        // same SetActive-when-different guard as GameHud, so the canvas flips once per mode change.
+        void Update()
+        {
+            if (_game == null || _canvasGo == null) return;
+            if (_canvasGo.activeSelf == _game.DemoMode)
+                _canvasGo.SetActive(!_game.DemoMode);
+        }
+
         void Start()
         {
             _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            _game = FindAnyObjectByType<GameBootstrap>();
 
             var canvasGo = new GameObject("HelpCanvas");
+            _canvasGo = canvasGo;
             canvasGo.transform.SetParent(transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;

@@ -24,15 +24,19 @@ namespace HexWars.Presentation
 
         bool _show;     // only shown in playback contexts (replay / spectator / model-duel), not live play
         float _nextCheck;
+        GameBootstrap _game; // cached: the title demo also runs a SpectatorDriver, but must show no chrome
 
         void Update()
         {
             if (Time.unscaledTime >= _nextCheck)
             {
                 _nextCheck = Time.unscaledTime + 0.5f;
-                bool show = FindAnyObjectByType<ReplayPlayer>() != null
-                         || FindAnyObjectByType<SpectatorDriver>() != null
-                         || FindAnyObjectByType<ModelDuelDriver>() != null;
+                if (_game == null) _game = FindAnyObjectByType<GameBootstrap>();
+                bool demo = _game != null && _game.DemoMode;
+                bool show = !demo
+                         && (FindAnyObjectByType<ReplayPlayer>() != null
+                          || FindAnyObjectByType<SpectatorDriver>() != null
+                          || FindAnyObjectByType<ModelDuelDriver>() != null);
                 if (_show && !show && _paused) { _paused = false; Apply(); } // left a playback context — don't leave it paused
                 _show = show;
             }

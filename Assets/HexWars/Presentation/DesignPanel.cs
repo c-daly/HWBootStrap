@@ -14,6 +14,7 @@ namespace HexWars.Presentation
             { "Health", "Damage", "Defense", "Movement", "Vertical Move", "Range", "Range Arc", "Vision", "Vision Arc" };
 
         GameBootstrap _game;
+        GameObject _canvasGo;
         readonly int[] _stats = new int[9];
         readonly Text[] _valueLabels = new Text[9];
         Text _summary;
@@ -28,9 +29,19 @@ namespace HexWars.Presentation
             RefreshSummary();
         }
 
+        // DesignPanel has no StateChanged-driven refresh, so poll: one SetActive per DemoMode flip
+        // (the equality guard keeps it from thrashing the canvas every frame), like GameHud's guard.
+        void Update()
+        {
+            if (_game == null || _canvasGo == null) return;
+            if (_canvasGo.activeSelf == _game.DemoMode)
+                _canvasGo.SetActive(!_game.DemoMode);
+        }
+
         void Build()
         {
             var canvasGo = new GameObject("DesignCanvas");
+            _canvasGo = canvasGo;
             canvasGo.transform.SetParent(transform, false);
             var canvas = canvasGo.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
