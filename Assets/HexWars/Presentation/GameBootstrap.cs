@@ -172,6 +172,10 @@ namespace HexWars.Presentation
         public void StartNetGame(string room, string setupWire, bool isPrivate = false)
         {
             EndDemo();
+            // the demo's state must not linger: panels dismiss on (State != null && !DemoMode), and
+            // the authoritative state arrives later via START — until then there is no game here
+            State = null;
+            StateChanged?.Invoke();
             Networked = true;
             if (_net != null) { Destroy(_net); _net = null; }
             _net = gameObject.AddComponent<NetClient>();
