@@ -11,6 +11,15 @@ namespace HexWars.Engine
         public Outbound(string connectionId, string message) { ConnectionId = connectionId; Message = message; }
     }
 
+    /// <summary>One joinable lobby entry: a public room with a host waiting and a game not yet begun.</summary>
+    public readonly struct OpenGame
+    {
+        public readonly string Code;
+        public readonly GameSetup Setup;
+        public readonly int AgeSeconds;
+        public OpenGame(string code, GameSetup setup, int ageSeconds) { Code = code; Setup = setup; AgeSeconds = ageSeconds; }
+    }
+
     /// <summary>
     /// Routes connections into rooms and drives each room's <see cref="GameSession"/>. Pure logic: every
     /// method returns the <see cref="Outbound"/> messages a transport should send, so the entire server
@@ -24,22 +33,31 @@ namespace HexWars.Engine
         {
             public readonly GameSession Session;
             public readonly List<string> Members = new List<string>(); // seated connections, broadcast targets
-            public Room(GameState start) { Session = new GameSession(start); }
+            public readonly GameSetup Setup;       // the host's picks — shown in the lobby browser
+            public readonly bool IsPrivate;        // private rooms are joinable by code/link only
+            public readonly long CreatedAtTicks;
+            public bool Started;                   // set when the start state is dealt; never cleared —
+                                                   // a started room that drops to one member must not re-list
+            public Room(GameState start, GameSetup setup, bool isPrivate, long nowTicks)
+            { Session = new GameSession(start); Setup = setup; IsPrivate = isPrivate; CreatedAtTicks = nowTicks; }
         }
 
         private readonly Func<GameSetup, GameState> _newGame;
+        private readonly Func<long> _now;
         private readonly Dictionary<string, Room> _rooms = new Dictionary<string, Room>();
 
-        public MatchHub(Func<GameSetup, GameState> newGame) { _newGame = newGame; }
+        /// <summary>The clock is injectable so lobby ages are exactly testable; production uses UTC.</summary>
+        public MatchHub(Func<GameSetup, GameState> newGame, Func<long> utcNowTicks = null)
+        { _newGame = newGame; _now = utcNowTicks ?? (() => DateTime.UtcNow.Ticks); }
 
         /// <summary>Seat a connection. The first connection to a room creates it from <paramref name="setup"/>
         /// (the host's lobby picks); later joiners' setups are ignored — they join the host's game.</summary>
-        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId, GameSetup setup = default)
+        public IReadOnlyList<Outbound> Connect(string roomCode, string connectionId, GameSetup setup = default, bool isPrivate = false)
         {
             var outs = new List<Outbound>();
             if (!_rooms.TryGetValue(roomCode, out var room))
             {
-                room = new Room(_newGame(setup));
+                room = new Room(_newGame(setup), setup, isPrivate, _now());
                 _rooms[roomCode] = room;
             }
 
@@ -57,10 +75,27 @@ namespace HexWars.Engine
             // The moment the second distinct player takes a seat, deal the authoritative start state to both.
             if (added && room.Members.Count == 2)
             {
+                room.Started = true;
                 string startMsg = NetProtocol.Start(ReplayFile.Write(room.Session.State, Array.Empty<Command>()));
                 foreach (var m in room.Members) outs.Add(new Outbound(m, startMsg));
             }
             return outs;
+        }
+
+        /// <summary>The lobby browser's view: public rooms with a waiting host and no game started,
+        /// newest first. Callers own thread-safety (the transport already serializes hub access).</summary>
+        public IReadOnlyList<OpenGame> OpenGames()
+        {
+            var list = new List<OpenGame>();
+            foreach (var kv in _rooms)
+            {
+                var r = kv.Value;
+                if (r.IsPrivate || r.Started || r.Members.Count != 1) continue;
+                int age = (int)((_now() - r.CreatedAtTicks) / TimeSpan.TicksPerSecond);
+                list.Add(new OpenGame(kv.Key, r.Setup, age));
+            }
+            list.Sort((a, b) => a.AgeSeconds.CompareTo(b.AgeSeconds)); // newest (smallest age) first
+            return list;
         }
 
         public IReadOnlyList<Outbound> Receive(string roomCode, string connectionId, string raw)
