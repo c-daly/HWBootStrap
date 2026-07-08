@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using HexWars.Engine;
@@ -36,6 +37,26 @@ namespace HexWars.NetServer
             types.Mappings[".wasm"] = "application/wasm";
             app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = types });
             app.MapGet("/healthz", () => "ok");
+            // The lobby browser: open public games as JSON. Same origin as the WebGL client, no CORS.
+            app.MapGet("/games", () =>
+            {
+                IReadOnlyList<OpenGame> open;
+                lock (HubLock) open = Hub.OpenGames();
+                return Results.Json(new
+                {
+                    games = open.Select(g => new
+                    {
+                        code = g.Code,
+                        mode = g.Setup.Mode.ToString(),
+                        width = g.Setup.Width,
+                        height = g.Setup.Height,
+                        fog = g.Setup.Fog,
+                        pace = g.Setup.TurnActions,
+                        army = g.Setup.ArmySize,
+                        ageSeconds = g.AgeSeconds,
+                    }).ToArray(),
+                });
+            });
             app.Map("/ws", Handle);
             await app.RunAsync();
             return 0;
@@ -45,8 +66,8 @@ namespace HexWars.NetServer
         internal static async Task Handle(HttpContext ctx)
         {
             if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
-            string room = ctx.Request.Query["room"].ToString();
-            if (string.IsNullOrWhiteSpace(room)) room = "default";
+            string room = NormalizeRoom(ctx.Request.Query["room"].ToString());
+            bool isPrivate = ctx.Request.Query["private"].ToString() == "1";
             var setup = ParseSetup(ctx.Request.Query["setup"].ToString());
 
             var socket = await ctx.WebSockets.AcceptWebSocketAsync();
@@ -55,7 +76,7 @@ namespace HexWars.NetServer
             Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} setup=({setup.Mode} {setup.Width}x{setup.Height} pts{setup.StartingPoints} seed{setup.Seed}) total={Conns.Count}");
             try
             {
-                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup)));
+                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate)));
                 while (socket.State == WebSocketState.Open)
                 {
                     string? text = await Receive(socket);
@@ -109,6 +130,23 @@ namespace HexWars.NetServer
             if (string.IsNullOrWhiteSpace(raw)) return GameSetup.Default;
             try { return GameSetup.Parse(raw); } catch { return GameSetup.Default; }
         }
+
+        /// <summary>Uppercase alphanumerics only, capped at 16 — so "kq7kp", " KQ7KP " and a pasted
+        /// URL fragment all land in the same room, and a hostile room string can't be huge.</summary>
+        internal static string NormalizeRoom(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "DEFAULT";
+            var sb = new StringBuilder();
+            foreach (char ch in raw.Trim().ToUpperInvariant())
+            {
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) sb.Append(ch);
+                if (sb.Length == 16) break;
+            }
+            return sb.Length == 0 ? "DEFAULT" : sb.ToString();
+        }
+
+        /// <summary>Selftest hook: a locked snapshot of the lobby list.</summary>
+        internal static IReadOnlyList<OpenGame> OpenGamesSnapshot() { lock (HubLock) return Hub.OpenGames(); }
     }
 
     /// <summary>One live connection: its id + socket, with sends serialized (one SendAsync at a time).</summary>

@@ -28,10 +28,16 @@ namespace HexWars.NetServer
                 using var a = await Connect();
                 string seatA = await Recv(a);               // SEAT 0 (room not full yet)
 
+                var lobby1 = Program.OpenGamesSnapshot();      // host waiting -> the room is browsable
+                bool lobbyListsWaitingRoom = lobby1.Count == 1 && lobby1[0].Code == "TEST";
+
                 using var b = await Connect();
                 string seatB = await Recv(b);               // SEAT 1
                 string startA = await Recv(a);              // START ... (dealt to both once full)
                 string startB = await Recv(b);
+
+                var lobby2 = Program.OpenGamesSnapshot();      // both seated -> started -> unlisted
+                bool lobbyEmptiesOnStart = lobby2.Count == 0;
 
                 await Send(a, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
                 string applyA = await Recv(a);              // APPLY E 0 broadcast to both
@@ -40,11 +46,12 @@ namespace HexWars.NetServer
                 bool ok =
                     seatA == "SEAT 0" && seatB == "SEAT 1" &&
                     startA.StartsWith("START ") && startB.StartsWith("START ") &&
-                    applyA == "APPLY E 0" && applyB == "APPLY E 0";
+                    applyA == "APPLY E 0" && applyB == "APPLY E 0" &&
+                    lobbyListsWaitingRoom && lobbyEmptiesOnStart;
 
                 Console.WriteLine(ok
                     ? "SELFTEST PASS — two browsers can play head-to-head through this server"
-                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}'");
+                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart}");
 
                 await app.StopAsync();
                 return ok ? 0 : 1;
