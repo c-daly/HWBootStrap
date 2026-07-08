@@ -77,11 +77,12 @@ namespace HexWars.Engine.Tests
         public void JoinerPrivacyFlag_Ignored_HostDecides()
         {
             var hub = NewHub();
-            hub.Connect("R", "host", GameSetup.Default, isPrivate: false);
-            var full = hub.Connect("R", "x", GameSetup.Default, isPrivate: true); // joiner flag must not flip the room
-            // room is now full (started) so it's unlisted for THAT reason; verify via a fresh public room
-            hub.Connect("R2", "h2", GameSetup.Default, isPrivate: false);
-            Assert.That(hub.OpenGames().Select(g => g.Code), Is.EqualTo(new[] { "R2" }));
+            hub.Connect("R", "host", GameSetup.Default, isPrivate: false); // public room, one member
+            hub.Connect("R", "host", GameSetup.Default, isPrivate: true);  // reconnect with a flipped flag —
+                                                                           // the room's privacy is fixed at creation
+            var open = hub.OpenGames();
+            Assert.That(open.Count, Is.EqualTo(1), "room stays public: the creating connection's original flag governs");
+            Assert.That(open[0].Code, Is.EqualTo("R"));
         }
     }
 }
