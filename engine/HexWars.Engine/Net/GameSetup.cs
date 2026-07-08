@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -45,6 +46,22 @@ namespace HexWars.Engine
             return new GameSetup((GameMode)G(0, 0), G(1, 9), G(2, 7), G(3, 0), G(4, 7),
                                  G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0), G(10, 0) != 0);
         }
+
+        /// <summary>Every field clamped to the lobby form's own ranges. GameFactory.Build calls this,
+        /// so no construction path — including a hostile ?setup= query on the public server — can
+        /// request an absurd board or army (that was a one-request OOM before).</summary>
+        public GameSetup Sanitized() => new GameSetup(
+            (GameMode)Math.Clamp((int)Mode, 0, 1),
+            Math.Clamp(Width, 5, 24),
+            Math.Clamp(Height, 5, 24),
+            Math.Clamp(StartingPoints, 0, 200),
+            Math.Clamp(Seed, 1, 99999),
+            Math.Clamp(ArmySize, 1, 12),
+            Math.Clamp(Brutes, 0, 12),
+            Math.Clamp(Strikers, 0, 12),
+            Math.Clamp(Snipers, 0, 12),
+            Math.Clamp(TurnActions, 0, 8),
+            Fog);
     }
 
     /// <summary>Builds a fresh <see cref="GameState"/> from a <see cref="GameSetup"/> — the one place that
@@ -60,6 +77,7 @@ namespace HexWars.Engine
 
         public static GameState Build(GameSetup setup)
         {
+            setup = setup.Sanitized();
             // maxElevation 2 keeps climbs within unit vertical budgets (no unclimbable cliffs)
             var board = new RandomBoardGenerator(new BoardGenConfig(setup.Width, setup.Height, maxElevation: 2)).Generate(setup.Seed);
 
