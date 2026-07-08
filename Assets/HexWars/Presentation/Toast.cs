@@ -58,19 +58,13 @@ namespace HexWars.Presentation
 
         void BuildUi()
         {
-            var canvasGo = new GameObject("ToastCanvas");
-            canvasGo.transform.SetParent(transform, false);
-            var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 800;
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1200f, 800f);
-            scaler.matchWidthOrHeight = 0.5f;
+            var canvasGo = UiKit.Canvas("ToastCanvas", UiKit.OrderToast, transform);
 
             _bg = new GameObject("Bg");
             _bg.transform.SetParent(canvasGo.transform, false);
             _bgImage = _bg.AddComponent<Image>();
+            _bgImage.sprite = UiKit.Rounded();
+            _bgImage.type = Image.Type.Sliced;
             _bgImage.color = RejectionRed;
             var brt = _bg.GetComponent<RectTransform>();
             brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f);
@@ -81,7 +75,7 @@ namespace HexWars.Presentation
             var tGo = new GameObject("Text");
             tGo.transform.SetParent(_bg.transform, false);
             _text = tGo.AddComponent<Text>();
-            _text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            _text.font = UiKit.Font();
             _text.fontSize = 19; _text.color = Color.white; _text.alignment = TextAnchor.MiddleCenter;
             _text.horizontalOverflow = HorizontalWrapMode.Overflow;
             var trt = tGo.GetComponent<RectTransform>();

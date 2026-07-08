@@ -19,20 +19,11 @@ namespace HexWars.Presentation
 
         void Awake()
         {
-            var canvasGo = new GameObject("UnitTooltipCanvas");
-            canvasGo.transform.SetParent(transform, false);
-            var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 410; // just above the barracks panel it docks under
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1600f, 900f); // same space as the barracks panel
-            scaler.matchWidthOrHeight = 0.5f;
+            var canvasGo = UiKit.Canvas("TooltipCanvas", UiKit.OrderTooltip, transform);
 
-            _panel = new GameObject("Panel");
-            _panel.transform.SetParent(canvasGo.transform, false);
-            var img = _panel.AddComponent<Image>();
-            img.color = new Color(0.05f, 0.06f, 0.10f, 0.86f);
+            var img = UiKit.Panel(canvasGo.transform, "Panel",
+                                  new Color(UiKit.Surface.r, UiKit.Surface.g, UiKit.Surface.b, 0.95f));
+            _panel = img.gameObject;
             img.raycastTarget = false; // informational only — never eat board clicks
             var prt = _panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(1f, 1f);
@@ -43,7 +34,7 @@ namespace HexWars.Presentation
             var textGo = new GameObject("Text");
             textGo.transform.SetParent(_panel.transform, false);
             _text = textGo.AddComponent<Text>();
-            _text.font = BuiltinFont();
+            _text.font = UiKit.Font();
             _text.fontSize = 14;
             _text.color = Color.white;
             _text.supportRichText = true;
@@ -58,13 +49,6 @@ namespace HexWars.Presentation
             trt.offsetMax = new Vector2(-12f, -8f);
 
             Hide();
-        }
-
-        static Font BuiltinFont()
-        {
-            var f = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            if (f == null) f = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            return f;
         }
 
         public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);

@@ -24,15 +24,7 @@ namespace HexWars.Presentation
             Dismiss(); // never stack two
             _shownAt = Time.unscaledTime;
 
-            var root = new GameObject(RootName);
-            var canvas = root.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 850; // above HUD/toasts, below the tooltip/lobby
-            var scaler = root.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1600f, 900f);
-            scaler.matchWidthOrHeight = 0.5f;
-            root.AddComponent<GraphicRaycaster>();
+            var root = UiKit.Canvas(RootName, UiKit.OrderBanner, null);
 
             // light dim; tapping anywhere dismisses so the final board stays inspectable
             var dim = new GameObject("Dim");
@@ -57,30 +49,17 @@ namespace HexWars.Presentation
             brt.sizeDelta = new Vector2(0f, 200f);
             brt.anchoredPosition = Vector2.zero;
 
-            var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            var font = UiKit.Font();
             Text(band.transform, title, font, 46, FontStyle.Bold, new Vector2(0f, 42f));
             Text(band.transform, subtitle + "   (tap outside to look at the board)", font, 19, FontStyle.Normal, new Vector2(0f, -6f));
 
             if (onMainMenu != null)
             {
-                var btn = new GameObject("MainMenuButton");
-                btn.transform.SetParent(band.transform, false);
-                btn.AddComponent<Image>().color = new Color(0.16f, 0.19f, 0.26f, 1f);
-                btn.AddComponent<Button>().onClick.AddListener(() => { Dismiss(); onMainMenu(); });
-                var mrt = btn.GetComponent<RectTransform>();
-                mrt.anchorMin = mrt.anchorMax = new Vector2(0.5f, 0.5f);
-                mrt.sizeDelta = new Vector2(220f, 44f);
-                mrt.anchoredPosition = new Vector2(0f, -62f);
-
-                var label = new GameObject("Label");
-                label.transform.SetParent(btn.transform, false);
-                var lt = label.AddComponent<Text>();
-                lt.text = "Main menu";
-                lt.font = font; lt.fontSize = 20; lt.color = Color.white;
-                lt.alignment = TextAnchor.MiddleCenter; lt.raycastTarget = false;
-                var lrt = lt.GetComponent<RectTransform>();
-                lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
-                lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
+                // band uses a centre anchor (pivot 0.5,0.5); UiKit.Button anchors top-centre (pivot
+                // 0.5,1), so the y offset is re-based from the band's centre to its top edge
+                // (half its 200-tall rect) to land the button on the exact same pixels as before.
+                UiKit.Button(band.transform, "Main menu", 0f, -140f, 220f, 44f,
+                             () => { Dismiss(); onMainMenu(); }, UiKit.ButtonStyle.Secondary);
             }
         }
 

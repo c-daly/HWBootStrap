@@ -1,7 +1,5 @@
 using UnityEngine;
 using UnityEngine.UI;
-using UnityEngine.EventSystems;
-using UnityEngine.InputSystem.UI;
 using HexWars.Engine;
 
 namespace HexWars.Presentation
@@ -28,7 +26,7 @@ namespace HexWars.Presentation
 
         void Start()
         {
-            EnsureEventSystem();
+            UiKit.EnsureEventSystem();
             Build();
             _game = FindAnyObjectByType<GameBootstrap>();
             if (_game != null)
@@ -43,32 +41,14 @@ namespace HexWars.Presentation
             if (_game != null) _game.StateChanged -= Refresh;
         }
 
-        static void EnsureEventSystem()
-        {
-            if (FindAnyObjectByType<EventSystem>() != null) return;
-            var es = new GameObject("EventSystem");
-            es.AddComponent<EventSystem>();
-            var module = es.AddComponent<InputSystemUIInputModule>();
-            module.AssignDefaultActions(); // without actions the module silently ignores UI input
-        }
-
         void Build()
         {
-            var canvasGo = new GameObject("HudCanvas");
+            var canvasGo = UiKit.Canvas("HudCanvas", UiKit.OrderHud, transform);
             _canvasGo = canvasGo;
-            canvasGo.transform.SetParent(transform, false);
-            var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 500;
-            var scaler = canvasGo.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1600f, 900f);
-            scaler.matchWidthOrHeight = 0.5f;
-            canvasGo.AddComponent<GraphicRaycaster>();
 
             var bar = new GameObject("Banner");
             bar.transform.SetParent(canvasGo.transform, false);
-            bar.AddComponent<Image>().color = new Color(0.05f, 0.06f, 0.10f, 0.88f);
+            bar.AddComponent<Image>().color = new Color(UiKit.Bg.r, UiKit.Bg.g, UiKit.Bg.b, 0.88f);
             var brt = bar.GetComponent<RectTransform>();
             brt.anchorMin = new Vector2(0f, 1f);
             brt.anchorMax = new Vector2(1f, 1f);
@@ -79,7 +59,7 @@ namespace HexWars.Presentation
             var textGo = new GameObject("BannerText");
             textGo.transform.SetParent(bar.transform, false);
             _banner = textGo.AddComponent<Text>();
-            _banner.font = BuiltinFont();
+            _banner.font = UiKit.Font();
             _banner.fontSize = 20;
             _banner.color = Color.white;
             _banner.alignment = TextAnchor.MiddleLeft;
@@ -92,6 +72,8 @@ namespace HexWars.Presentation
             var btn = new GameObject("EndTurnButton");
             btn.transform.SetParent(bar.transform, false);
             _endBtn = btn.AddComponent<Image>();
+            _endBtn.sprite = UiKit.Rounded();
+            _endBtn.type = Image.Type.Sliced;
             _endBtn.color = EndTurnIdle;
             btn.AddComponent<Button>().onClick.AddListener(OnEndTurn);
             var rt = btn.GetComponent<RectTransform>();
@@ -104,7 +86,7 @@ namespace HexWars.Presentation
             var btnTextGo = new GameObject("Text");
             btnTextGo.transform.SetParent(btn.transform, false);
             var btnText = btnTextGo.AddComponent<Text>();
-            btnText.font = BuiltinFont();
+            btnText.font = UiKit.Font();
             btnText.text = "End Turn";
             btnText.fontSize = 18;
             btnText.color = Color.white;
@@ -283,13 +265,6 @@ namespace HexWars.Presentation
             int score = WinCheck.Score(s, id);
             string sign = net >= 0 ? "+" : "";
             return $"{pts}p ({sign}{net}/t)  {hexes} hex  score {score}";
-        }
-
-        static Font BuiltinFont()
-        {
-            var f = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            if (f == null) f = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            return f;
         }
     }
 }

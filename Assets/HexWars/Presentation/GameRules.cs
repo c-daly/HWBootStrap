@@ -18,12 +18,8 @@ namespace HexWars.Presentation
             // overrideSorting (else sortingOrder is ignored). The card is clamped to the actually
             // available height — a fixed 720 was taller than many screens, pushing Close off-screen
             // with no way to dismiss.
-            var canvasGo = new GameObject("RulesCanvas");
-            canvasGo.transform.SetParent(canvasParent, false);
-            var canvas = canvasGo.AddComponent<Canvas>();
-            canvas.overrideSorting = true;
-            canvas.sortingOrder = sortingOrder;
-            canvasGo.AddComponent<GraphicRaycaster>();
+            var canvasGo = UiKit.Canvas("RulesCanvas", sortingOrder, canvasParent);
+            canvasGo.GetComponent<Canvas>().overrideSorting = true;
             Stretch((RectTransform)canvasGo.transform);
 
             var parentRt = canvasParent as RectTransform;
@@ -38,7 +34,7 @@ namespace HexWars.Presentation
             dim.gameObject.AddComponent<Button>().onClick.AddListener(() => UnityEngine.Object.Destroy(canvasGo));
 
             // card
-            var card = Panel(canvasGo.transform, new Color(0.10f, 0.12f, 0.18f, 1f));
+            var card = Panel(canvasGo.transform, UiKit.Surface);
             card.anchorMin = card.anchorMax = new Vector2(0.5f, 0.5f);
             card.pivot = new Vector2(0.5f, 0.5f);
             card.sizeDelta = new Vector2(cardW, cardH);
@@ -62,7 +58,7 @@ namespace HexWars.Presentation
             var contentGo = new GameObject("Content");
             contentGo.transform.SetParent(viewportGo.transform, false);
             var text = contentGo.AddComponent<Text>();
-            text.font = font; text.fontSize = 18; text.color = new Color(0.92f, 0.94f, 0.97f);
+            text.font = font; text.fontSize = 18; text.color = UiKit.TextMain;
             text.alignment = TextAnchor.UpperLeft; text.raycastTarget = false;
             text.horizontalOverflow = HorizontalWrapMode.Wrap; text.verticalOverflow = VerticalWrapMode.Overflow;
             text.text = RulesText;
@@ -78,14 +74,12 @@ namespace HexWars.Presentation
             Canvas.ForceUpdateCanvases();
             scroll.verticalNormalizedPosition = 1f; // 1 = top (the default 0 opens scrolled to the bottom)
 
-            // close button
-            var close = Panel(card.transform, new Color(0.22f, 0.36f, 0.58f, 1f));
-            close.anchorMin = close.anchorMax = new Vector2(0.5f, 0f);
-            close.pivot = new Vector2(0.5f, 0f);
-            close.sizeDelta = new Vector2(200f, 46f);
-            close.anchoredPosition = new Vector2(0f, 16f);
-            close.gameObject.AddComponent<Button>().onClick.AddListener(() => UnityEngine.Object.Destroy(canvasGo));
-            Label(close, "Close", font, 20, TextAnchor.MiddleCenter, Vector2.zero, new Vector2(200f, 46f));
+            // close button — card anchors its children centre-pivot; UiKit.Button anchors top-centre,
+            // so re-base the y offset from the card's centre to its top edge (half of cardH) to land
+            // on the same pixels as the old bottom-anchored (0, 16) placement.
+            float closeY = -cardH + 62f;
+            UiKit.Button(card.transform, "Close", 0f, closeY, 200f, 46f,
+                         () => UnityEngine.Object.Destroy(canvasGo), UiKit.ButtonStyle.Secondary);
         }
 
         static RectTransform Panel(Transform parent, Color color)
