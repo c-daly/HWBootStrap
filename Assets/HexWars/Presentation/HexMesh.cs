@@ -6,10 +6,20 @@ namespace HexWars.Presentation
     /// <summary>Procedural flat-top hex meshes used by <see cref="BoardRenderer"/>.</summary>
     public static class HexMesh
     {
+        // BoardRenderer rebuilds per game (a fresh new/local/net game, or the title demo restarting)
+        // and always assigns these to sharedMesh without ever mutating them, so identical (radius,
+        // height)/(outer,inner) columns can safely reuse one Mesh instead of allocating a new one each
+        // time — uncached, the title demo alone leaked hundreds of Mesh assets per restart on a WebGL heap.
+        static readonly Dictionary<(float, float), Mesh> _prisms = new Dictionary<(float, float), Mesh>();
+        static readonly Dictionary<(float, float), Mesh> _rings = new Dictionary<(float, float), Mesh>();
+
         /// <summary>A solid flat-top hex prism from y=0 to y=height. Faceted: every face has its own
         /// vertices so normals stay flat per face (no smoothing 'swoop' across the flat faces).</summary>
         public static Mesh Prism(float radius, float height)
         {
+            var key = (radius, height);
+            if (_prisms.TryGetValue(key, out var cached)) return cached;
+
             var top = new Vector3[6];
             var bot = new Vector3[6];
             for (int k = 0; k < 6; k++)
@@ -48,12 +58,16 @@ namespace HexWars.Presentation
             mesh.SetTriangles(tris, 0);
             mesh.RecalculateNormals(); // non-shared verts => flat per-face normals
             mesh.RecalculateBounds();
+            _prisms[key] = mesh;
             return mesh;
         }
 
         /// <summary>A flat hexagonal annulus at y=0 (outer radius -> inner radius).</summary>
         public static Mesh Ring(float outerR, float innerR)
         {
+            var key = (outerR, innerR);
+            if (_rings.TryGetValue(key, out var cached)) return cached;
+
             var mesh = new Mesh();
             var v = new Vector3[12];
             for (int k = 0; k < 6; k++)
@@ -74,6 +88,7 @@ namespace HexWars.Presentation
             mesh.triangles = t.ToArray();
             mesh.RecalculateNormals();
             mesh.RecalculateBounds();
+            _rings[key] = mesh;
             return mesh;
         }
     }
