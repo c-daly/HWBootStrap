@@ -71,8 +71,10 @@ game over / pause menu ─► ReturnToMenu ─► title + fresh demo
 
 Details:
 
-- **Demo:** Greedy vs Greedy on a standard random map (fresh seed each run), fog off, sound
-  muted, `SpectatorDriver` pacing, camera glides on. Suppressed while demo runs: GameHud,
+- **Demo:** Greedy vs Random on a standard random map (fresh seed each run) — self-play data
+  shows Greedy-mirror matches draw ~93% as cautious standoffs, which would make a lifeless title
+  screen; Greedy vs Random is decisive and lively. Fog off, sound muted, `SpectatorDriver`
+  pacing, camera glides on. Suppressed while demo runs: GameHud,
   BarracksPanel, EventConsole sidebar, toasts, game-over banner, unit input (ReadOnly). On
   `IsGameOver`, hold ~3 s, restart with a new seed. Sub-screens overlay it; it keeps playing.
 - **Browse list rows:** `CODE — Mode · W×H · Fog? · pace · N units · age` (e.g.
@@ -137,9 +139,9 @@ TurnActions [0,8], Seed [1,99999], Mode to defined enum values. `GameFactory.Bui
 - `/ws` reads `?private=1` and forwards to `Connect`; room codes normalized (trim, uppercase,
   strip non-alphanumerics, cap 16 chars; empty → "default"). (Audit M13, partial.)
 - New `GET /games`: under the existing hub lock, project `OpenGames()` to JSON via
-  System.Text.Json: `[{"code","mode","width","height","fog","pace","army","ageSeconds"}]`
-  (`mode` as string, `pace` = TurnActions, `army` = ArmySize). Same origin as the client —
-  no CORS.
+  System.Text.Json: `{"games":[{"code","mode","width","height","fog","pace","army","ageSeconds"}]}`
+  (`mode` as string, `pace` = TurnActions, `army` = ArmySize; object envelope because Unity's
+  `JsonUtility` cannot parse top-level arrays). Same origin as the client — no CORS.
 - Wire protocol (SEAT/START/APPLY/REJECT) unchanged. Old clients keep working.
 
 **Build chain note:** MatchHub/GameSetup live in the engine assembly →
