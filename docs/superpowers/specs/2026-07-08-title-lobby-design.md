@@ -162,9 +162,12 @@ boots to Safe Mode (and takes the Coplay MCP down).
 **Demo suppression contract:** `GameBootstrap.DemoMode` is true from demo start until a real
 game starts (any lobby-initiated game clears it). While true: `GameHud.Refresh` hides its root
 (which also silences its turn-handover toasts), `BarracksPanel.Rebuild` hides,
-`EventConsole.Report` ignores state (and draws nothing), `GameOverBanner` never shows,
-`UnitInputController.ReadOnly` = true, `SoundManager` muted. Each is a one-line early-out
-checking the flag — no new event plumbing. `Toast` itself is NOT suppressed: the title's own
+`DesignPanel` hides, `HelpOverlay`'s "?" button hides (the title menu has How to Play),
+`PauseToggle` stays hidden (its speed controls key off a SpectatorDriver existing — which the
+demo always has), `EventConsole.Report` ignores state (and draws nothing), `GameOverBanner`
+never shows, `UnitInputController.ReadOnly` = true, `SoundManager` muted. Each is a small
+early-out checking the flag — no new event plumbing. *(DesignPanel/PauseToggle/HelpOverlay
+added 2026-07-08 during implementation: they surfaced in the first demo screenshot.)* `Toast` itself is NOT suppressed: the title's own
 flows (join failures, cancel confirmations) toast over the demo deliberately.
 
 ## 7. Error handling

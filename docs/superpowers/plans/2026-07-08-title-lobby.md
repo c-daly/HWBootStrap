@@ -817,6 +817,9 @@ git commit -m "feat(ui): UiKit - one canvas convention, palette, type scale, rou
 - Modify: `Assets/HexWars/Presentation/SoundManager.cs` (mute flag)
 - Modify: `Assets/HexWars/Presentation/GameHud.cs` (hide while demo)
 - Modify: `Assets/HexWars/Presentation/BarracksPanel.cs` (hide while demo)
+- Modify: `Assets/HexWars/Presentation/DesignPanel.cs` (hide while demo — *amendment: surfaced in the first demo screenshot*)
+- Modify: `Assets/HexWars/Presentation/PauseToggle.cs` (skip while demo — its speed controls key off SpectatorDriver existing, which the demo always has)
+- Modify: `Assets/HexWars/Presentation/HelpOverlay.cs` (hide the "?" while demo — the title menu has How to Play)
 
 **Interfaces:**
 - Consumes: `GameFactory.Build`, `SpectatorDriver`, `EventConsole.Clear`.
@@ -1018,6 +1021,10 @@ git commit -m "feat(title): demo mode - StartDemo() runs a muted Greedy-vs-Rando
         public void StartNetGame(string room, string setupWire, bool isPrivate = false)
         {
             EndDemo();
+            // the demo's state must not linger: panels dismiss on (State != null && !DemoMode), and
+            // the authoritative state arrives later via START — until then there is no game here
+            State = null;
+            StateChanged?.Invoke();
             Networked = true;
             if (_net != null) { Destroy(_net); _net = null; }
             _net = gameObject.AddComponent<NetClient>();
@@ -1727,6 +1734,10 @@ namespace HexWars.Presentation
 
             // a real match started — the title is done (sub-screens dismiss themselves the same way)
             if (_game.State != null && !_game.DemoMode) { Close(); return; }
+
+            // back on the title with no demo running (cancelled hosting, seat-full bounce, dropped
+            // socket) — self-heal: the title always has a living background
+            if (!_game.DemoMode && _game.State == null) { _game.StartDemo(); return; }
 
             // demo ended: hold the final board a beat, then roll a fresh demo
             if (_game.DemoMode && _game.State != null && _game.State.IsGameOver)
