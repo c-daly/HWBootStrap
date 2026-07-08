@@ -85,7 +85,7 @@ namespace HexWars.Presentation
                 SetupEnvironment();          // light/skybox now; the board renders when the server deals the start state
                 string room = RoomFromPageUrl();
                 if (!string.IsNullOrEmpty(room)) StartNetGame(room, null); // opened via a shared ?room= link → join it
-                else gameObject.AddComponent<LobbyPanel>();                // otherwise show the lobby / setup screen
+                else { StartDemo(); SetupForm.Open(this, SetupForm.SetupMode.Host); } // otherwise show the demo + setup form
                 return;
             }
             NewGame();
@@ -166,18 +166,30 @@ namespace HexWars.Presentation
             return true;
         }
 
-        /// <summary>Connect to the server for a room. <paramref name="setupWire"/> is non-null only for the
-        /// host (carries the lobby's game-setup picks); a joiner passes null and gets the host's game.</summary>
-        public void StartNetGame(string room, string setupWire)
+        /// <summary>Connect to the server for a room. <paramref name="setupWire"/> is non-null only for
+        /// the host (carries the lobby picks); a joiner passes null and gets the host's game.
+        /// <paramref name="isPrivate"/> keeps the room out of the public browser list.</summary>
+        public void StartNetGame(string room, string setupWire, bool isPrivate = false)
         {
             EndDemo();
+            Networked = true;
+            if (_net != null) { Destroy(_net); _net = null; }
             _net = gameObject.AddComponent<NetClient>();
-            _net.Connect(this, room, setupWire);
+            _net.Connect(this, room, setupWire, isPrivate);
+        }
+
+        /// <summary>Host changed their mind while waiting: drop the socket and seat. State stays as it
+        /// was (null before START), so the title/demo behind the form is untouched.</summary>
+        public void CancelHosting()
+        {
+            if (_net != null) { Destroy(_net); _net = null; }
+            Seat = null;
         }
 
         /// <summary>Start a single-machine game from the lobby's setup (no server). <paramref name="vsAi"/>
-        /// adds an AI opponent on Player 2; otherwise it's a local hotseat. Used by the lobby's vs-AI option.</summary>
-        public void StartLocalGame(GameSetup setup, bool vsAi)
+        /// adds an AI opponent on Player 2 at <paramref name="level"/>; otherwise it's a local hotseat.
+        /// Used by the lobby's vs-AI option.</summary>
+        public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Hard)
         {
             EndDemo();
             Presenter?.ResetQueue();
@@ -190,7 +202,11 @@ namespace HexWars.Presentation
             EventConsole.Clear();
             EventConsole.Report(State, null);
             StateChanged?.Invoke();
-            if (vsAi) gameObject.AddComponent<AiOpponent>();
+            if (vsAi)
+            {
+                var ai = gameObject.AddComponent<AiOpponent>();
+                ai.Level = level;
+            }
         }
 
         /// <summary>The title screen's living background: a muted Greedy-vs-Random match on a fresh
@@ -257,7 +273,7 @@ namespace HexWars.Presentation
             if (ai != null) Destroy(ai);
             State = null;
             StateChanged?.Invoke();
-            if (GetComponent<LobbyPanel>() == null) gameObject.AddComponent<LobbyPanel>();
+            if (GetComponent<SetupForm>() == null) SetupForm.Open(this, SetupForm.SetupMode.Host);
         }
 
         /// <summary>Whose vision the fog renders: this browser's seat online, the human's seat vs AI,
@@ -306,7 +322,20 @@ namespace HexWars.Presentation
 
         internal void OnNetSeat(PlayerId seat) { Seat = seat; StateChanged?.Invoke(); }
 
-        internal void OnNetSeatFull() { Debug.LogWarning("[Net] room full — joined as a spectator (no seat)."); }
+        internal void OnNetSeatFull()
+        {
+            Toast.Show("That game is already full.");
+            CancelHosting();
+        }
+
+        /// <summary>The socket died before a match began (server down / network drop while hosting or
+        /// joining). Mid-game drops are the reconnect follow-up (audit U2) — pre-game, a toast plus the
+        /// waiting screen's Cancel is the whole story.</summary>
+        internal void OnNetClosed()
+        {
+            if (Networked && State == null && _net != null)
+                Toast.Show("Connection lost — check the link and try again.");
+        }
 
         /// <summary>The server dealt the authoritative start state — load and render it.</summary>
         internal void OnNetStart(string startStateText)

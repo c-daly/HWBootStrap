@@ -21,15 +21,17 @@ namespace HexWars.Presentation
         public PlayerId? Seat { get; private set; }
         public bool Connected { get; private set; }
 
-        public async void Connect(GameBootstrap game, string room, string setupWire)
+        bool _closing;
+
+        public async void Connect(GameBootstrap game, string room, string setupWire, bool isPrivate = false)
         {
             _game = game;
-            string url = ServerWsUrl(room, setupWire);
+            string url = ServerWsUrl(room, setupWire, isPrivate);
             Debug.Log("[Net] connecting to " + url);
             _ws = new WebSocket(url);
             _ws.OnOpen += () => { Connected = true; Debug.Log("[Net] open"); };
             _ws.OnError += e => Debug.LogError("[Net] error: " + e);
-            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); };
+            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); if (!_closing) _game.OnNetClosed(); };
             _ws.OnMessage += OnMessage;
             await _ws.Connect();
         }
@@ -64,12 +66,13 @@ namespace HexWars.Presentation
 
         async void OnDestroy()
         {
+            _closing = true;             // deliberate teardown (Cancel / ReturnToMenu) — not an error
             if (_ws != null) await _ws.Close();
         }
 
         /// <summary>Build the WebSocket URL for a room from the page origin: https://host → wss://host/ws?room=…
         /// (&amp;setup=… for the host). Falls back to ws://127.0.0.1:5234 in the editor (no page URL).</summary>
-        static string ServerWsUrl(string room, string setupWire)
+        static string ServerWsUrl(string room, string setupWire, bool isPrivate)
         {
             string origin = "ws://127.0.0.1:5234"; // dev default when there's no page URL (editor)
             string page = Application.absoluteURL;
@@ -84,6 +87,7 @@ namespace HexWars.Presentation
             }
             string url = origin + "/ws?room=" + Uri.EscapeDataString(room);
             if (!string.IsNullOrEmpty(setupWire)) url += "&setup=" + Uri.EscapeDataString(setupWire);
+            if (isPrivate) url += "&private=1";
             return url;
         }
     }
