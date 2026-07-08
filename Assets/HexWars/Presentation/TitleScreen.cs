@@ -17,6 +17,9 @@ namespace HexWars.Presentation
         GameBootstrap _game;
         GameObject _canvasGo;
         float _overSince = -1f;
+        bool _dead; // set the moment this screen closes/hides — Destroy is deferred to end-of-frame,
+                    // and a dying component's Update must not fire the self-heal (it would StartDemo()
+                    // mid-frame right after join-by-code's Hide()+StartNetGame, clobbering the connection)
 
         public static void Reopen(GameBootstrap game)
         {
@@ -32,7 +35,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            if (_game == null) return;
+            if (_dead || _game == null) return;
 
             // a real match started — the title is done (sub-screens dismiss themselves the same way)
             if (_game.State != null && !_game.DemoMode) { Close(); return; }
@@ -52,15 +55,12 @@ namespace HexWars.Presentation
 
         void Close()
         {
+            _dead = true;
             if (_canvasGo != null) Destroy(_canvasGo);
             Destroy(this);
         }
 
-        void Hide()  // a sub-screen takes over; demo keeps playing behind it
-        {
-            if (_canvasGo != null) Destroy(_canvasGo);
-            Destroy(this);
-        }
+        void Hide() => Close(); // sub-screen takeover — semantically "step aside", the demo keeps playing
 
         void Build()
         {
