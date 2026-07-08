@@ -47,7 +47,7 @@ namespace HexWars.Engine
         private readonly Dictionary<string, Room> _rooms = new Dictionary<string, Room>();
 
         /// <summary>The clock is injectable so lobby ages are exactly testable; production uses UTC.</summary>
-        public MatchHub(Func<GameSetup, GameState> newGame, Func<long> utcNowTicks = null)
+        public MatchHub(Func<GameSetup, GameState> newGame, Func<long>? utcNowTicks = null)
         { _newGame = newGame; _now = utcNowTicks ?? (() => DateTime.UtcNow.Ticks); }
 
         /// <summary>Seat a connection. The first connection to a room creates it from <paramref name="setup"/>
