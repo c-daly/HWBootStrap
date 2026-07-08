@@ -29,13 +29,15 @@ namespace HexWars.Presentation
             RefreshSummary();
         }
 
-        // DesignPanel has no StateChanged-driven refresh, so poll: one SetActive per DemoMode flip
-        // (the equality guard keeps it from thrashing the canvas every frame), like GameHud's guard.
+        // DesignPanel has no StateChanged-driven refresh, so poll: one SetActive per flip of the
+        // hide condition (the equality guard keeps it from thrashing the canvas every frame), like
+        // GameHud's guard. Hidden during the title demo and the connecting window (no state yet).
         void Update()
         {
             if (_game == null || _canvasGo == null) return;
-            if (_canvasGo.activeSelf == _game.DemoMode)
-                _canvasGo.SetActive(!_game.DemoMode);
+            bool hidden = _game.DemoMode || _game.State == null;
+            if (_canvasGo.activeSelf == hidden)
+                _canvasGo.SetActive(!hidden);
         }
 
         void Build()
@@ -91,7 +93,7 @@ namespace HexWars.Presentation
 
         void OnCreate()
         {
-            if (_game == null) return;
+            if (_game == null || _game.State == null) return;
             _game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats()));
         }
 

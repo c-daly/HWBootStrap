@@ -22,13 +22,15 @@ namespace HexWars.Presentation
             new GameObject("HelpOverlay").AddComponent<HelpOverlay>();
         }
 
-        // Hidden while the title demo runs (the title menu has its own How to Play). Poll with the
-        // same SetActive-when-different guard as GameHud, so the canvas flips once per mode change.
+        // Hidden while the title demo runs (the title menu has its own How to Play) and during the
+        // connecting window (no state yet). Poll with the same SetActive-when-different guard as
+        // GameHud, so the canvas flips once per change.
         void Update()
         {
             if (_game == null || _canvasGo == null) return;
-            if (_canvasGo.activeSelf == _game.DemoMode)
-                _canvasGo.SetActive(!_game.DemoMode);
+            bool hidden = _game.DemoMode || _game.State == null;
+            if (_canvasGo.activeSelf == hidden)
+                _canvasGo.SetActive(!hidden);
         }
 
         void Start()

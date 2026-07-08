@@ -23,7 +23,6 @@ namespace HexWars.Presentation
         Text _status;
         string _expandedCode;         // row currently expanded to the full-config card
         GameDto[] _lastGames = Array.Empty<GameDto>();
-        bool _fetchFailed;
 
         [Serializable] class GamesDto { public GameDto[] games; }
         [Serializable] public class GameDto
@@ -77,7 +76,8 @@ namespace HexWars.Presentation
             UiKit.Button(panel.transform, "Back", -330f, -26f, 90f, 34f,
                          () => { Close(); TitleScreen.Reopen(_game); }, UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
             UiKit.Button(panel.transform, "Refresh", 320f, -26f, 110f, 34f,
-                         () => StartCoroutine(FetchOnce()), UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
+                         () => { StopAllCoroutines(); StartCoroutine(PollLoop()); }, // restart: fetch now, resume cadence — never two in-flight fetches
+                         UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
 
             _status = UiKit.Label(panel.transform, "Loading…", 0f, -70f, 700f, 26f,
                                   UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
@@ -106,7 +106,6 @@ namespace HexWars.Presentation
                 yield return req.SendWebRequest();
                 if (req.result != UnityWebRequest.Result.Success)
                 {
-                    _fetchFailed = true;
                     if (_status != null) _status.text = "Can't reach the server — retrying…";
                     yield break;
                 }
@@ -115,11 +114,9 @@ namespace HexWars.Presentation
                 catch (Exception) { /* malformed = treat as fetch failure */ }
                 if (dto == null || dto.games == null)
                 {
-                    _fetchFailed = true;
                     if (_status != null) _status.text = "Can't reach the server — retrying…";
                     yield break;
                 }
-                _fetchFailed = false;
                 _lastGames = dto.games;
                 Rebuild();
             }
@@ -150,11 +147,13 @@ namespace HexWars.Presentation
             }
         }
 
+        static string PaceText(int k) => k <= 0 ? "whole army" : k + (k == 1 ? " action/turn" : " actions/turn");
+
         float BuildRow(GameDto g, float y, bool expanded)
         {
             string age = g.ageSeconds < 60 ? $"{g.ageSeconds}s" : $"{g.ageSeconds / 60}m";
             string summary = $"{g.code}   ·   {g.mode} · {g.width}×{g.height}{(g.fog ? " · Fog" : "")}" +
-                             $" · {(g.pace <= 0 ? "whole army" : g.pace + " acts/turn")} · {g.army} units · {age} ago";
+                             $" · {PaceText(g.pace)} · {g.army} units · {age} ago";
             var code = g.code;
             var row = UiKit.Button(_listRoot, summary, 0f, y, 700f, 42f, () =>
             {
@@ -173,7 +172,7 @@ namespace HexWars.Presentation
                 UiKit.SetRect(card.GetComponent<RectTransform>(), 0f, y, 700f, 96f);
                 UiKit.Label(card.transform,
                             $"Mode {g.mode}    Map {g.width}×{g.height}    Fog {(g.fog ? "on" : "off")}\n" +
-                            $"Pace {(g.pace <= 0 ? "whole army" : g.pace + " actions/turn")}    Army {g.army} units    Waiting {age}",
+                            $"Pace {PaceText(g.pace)}    Army {g.army} units    Waiting {age}",
                             -80f, -12f, 520f, 72f, UiKit.SizeBody, TextAnchor.UpperLeft, UiKit.TextDim);
                 UiKit.Button(card.transform, "Join", 260f, -26f, 140f, 44f, () =>
                 {

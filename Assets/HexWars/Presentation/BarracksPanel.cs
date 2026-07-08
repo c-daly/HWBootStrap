@@ -110,9 +110,10 @@ namespace HexWars.Presentation
         {
             foreach (var r in _rows) Destroy(r);
             _rows.Clear();
-            if (_game == null || _game.State == null) return;
+            if (_game == null) return;
 
-            if (_game != null && _game.DemoMode)
+            // hidden during the title demo and the connecting window (no state yet)
+            if (_game.DemoMode || _game.State == null)
             {
                 if (_canvasGo != null) _canvasGo.SetActive(false);
                 return;
