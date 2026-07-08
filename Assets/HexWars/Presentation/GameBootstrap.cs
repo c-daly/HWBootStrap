@@ -85,7 +85,7 @@ namespace HexWars.Presentation
                 SetupEnvironment();          // light/skybox now; the board renders when the server deals the start state
                 string room = RoomFromPageUrl();
                 if (!string.IsNullOrEmpty(room)) StartNetGame(room, null); // opened via a shared ?room= link → join it
-                else { StartDemo(); SetupForm.Open(this, SetupForm.SetupMode.Host); } // otherwise show the demo + setup form
+                else { StartDemo(); gameObject.AddComponent<TitleScreen>(); } // front door: demo + title menu
                 return;
             }
             NewGame();
@@ -277,7 +277,10 @@ namespace HexWars.Presentation
             if (ai != null) Destroy(ai);
             State = null;
             StateChanged?.Invoke();
-            if (GetComponent<SetupForm>() == null) SetupForm.Open(this, SetupForm.SetupMode.Host);
+            GetComponent<SetupForm>()?.Close();
+            GetComponent<GameBrowser>()?.Close();
+            StartDemo();
+            TitleScreen.Reopen(this);
         }
 
         /// <summary>Whose vision the fog renders: this browser's seat online, the human's seat vs AI,
@@ -330,6 +333,7 @@ namespace HexWars.Presentation
         {
             Toast.Show("That game is already full.");
             CancelHosting();
+            TitleScreen.Reopen(this);
         }
 
         /// <summary>The socket died before a match began (server down / network drop while hosting or
