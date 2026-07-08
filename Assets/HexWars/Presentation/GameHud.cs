@@ -21,6 +21,7 @@ namespace HexWars.Presentation
         GameObject _canvasGo;
         Text _banner;
         Image _endBtn;
+        Text _endBtnText;      // "End Turn" in play; "Main menu" once the game is over
         PlayerId? _lastActive; // last seen active player, to detect handovers (incl. auto-pass)
         bool _wasOver;         // so the game-over announcement fires exactly once per game
 
@@ -86,6 +87,7 @@ namespace HexWars.Presentation
             var btnTextGo = new GameObject("Text");
             btnTextGo.transform.SetParent(btn.transform, false);
             var btnText = btnTextGo.AddComponent<Text>();
+            _endBtnText = btnText;
             btnText.font = UiKit.Font();
             btnText.text = "End Turn";
             btnText.fontSize = 18;
@@ -100,7 +102,11 @@ namespace HexWars.Presentation
 
         void OnEndTurn()
         {
-            if (_game != null) _game.TryApply(new EndTurn(_game.State.ActivePlayer));
+            if (_game == null || _game.State == null) return;
+            // once the game is over this button IS the way back to the title — the centre banner is
+            // dismissible ("tap outside to look at the board"), so it can't be the only exit
+            if (_game.State.IsGameOver) { _game.ReturnToMenu(); return; }
+            _game.TryApply(new EndTurn(_game.State.ActivePlayer));
         }
 
         void Refresh()
@@ -121,6 +127,7 @@ namespace HexWars.Presentation
                 _wasOver = false;
                 GameOverBanner.Dismiss();
                 if (_endBtn != null) _endBtn.gameObject.SetActive(true);
+                if (_endBtnText != null) _endBtnText.text = "End Turn";
             }
 
             var p = s.Player(s.ActivePlayer);
@@ -173,9 +180,10 @@ namespace HexWars.Presentation
             AnnounceTurnIfChanged(s);
         }
 
-        /// <summary>The moment the game ends: result in the HUD banner, End Turn gone, and (once) the
-        /// big centre announcement. Previously nothing marked it — the first hint was a rejection
-        /// toast when you tried to keep playing.</summary>
+        /// <summary>The moment the game ends: result in the HUD banner, the End Turn button becomes a
+        /// persistent Main-menu button, and (once) the big centre announcement. The HUD button must
+        /// survive the banner's dismissal — otherwise inspecting the final board strands the player
+        /// with no way back to the title.</summary>
         void ShowGameOver(GameState s)
         {
             bool p0Won = s.Winner == PlayerId.Player0;
@@ -184,7 +192,12 @@ namespace HexWars.Presentation
             string result = ResultText(s);
             _banner.text = $"GAME OVER   {result}     Round {s.Round}     " +
                            $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}";
-            if (_endBtn != null) _endBtn.gameObject.SetActive(false);
+            if (_endBtn != null)
+            {
+                _endBtn.gameObject.SetActive(true);
+                _endBtn.color = EndTurnIdle;
+            }
+            if (_endBtnText != null) _endBtnText.text = "Main menu";
 
             if (!_wasOver)
             {
