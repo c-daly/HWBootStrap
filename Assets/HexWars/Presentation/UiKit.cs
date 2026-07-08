@@ -35,10 +35,11 @@ namespace HexWars.Presentation
         public const int OrderHud = 500;      // GameHud top bar
         public const int OrderPanels = 700;   // barracks / design side panels
         public const int OrderTooltip = 750;  // unit tooltip
-        public const int OrderToast = 800;    // toasts
         public const int OrderBanner = 850;   // game-over band
         public const int OrderRules = 900;    // rules/help popup
         public const int OrderMenu = 1000;    // title / lobby screens
+        public const int OrderToast = 1200;   // transient feedback outranks every screen, including
+                                               // menus (join errors must be visible over the title/browser)
 
         static Color Hex(string rgb)
         {

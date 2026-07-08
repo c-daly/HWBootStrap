@@ -271,6 +271,16 @@ namespace HexWars.Presentation
             crt.anchoredPosition = new Vector2(0f, -150f);
         }
 
+        /// <summary>The socket died while this form's waiting screen was up (host waiting for an
+        /// opponent, or a join in flight). No-op before Create (the form is still showing, not the
+        /// waiting screen) and after Close (nothing left to update) — the waiting screen is the only
+        /// state where the form is hidden with status text already up.</summary>
+        public void OnConnectionLost()
+        {
+            if (_form != null && !_form.activeSelf && _status != null && !string.IsNullOrEmpty(_status.text))
+                _status.text = "Connection lost — Cancel and try again.";
+        }
+
         internal static string RandomCode()
         {
             const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";

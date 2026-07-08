@@ -333,7 +333,10 @@ namespace HexWars.Presentation
         {
             Toast.Show("That game is unavailable — it may have filled, or the code is wrong.");
             CancelHosting();
-            TitleScreen.Reopen(this);
+            // don't stack the title over an open sub-screen: the browser's own poll refreshes its
+            // list, and the toast above is the feedback for a form's failed host/join attempt
+            if (GetComponent<GameBrowser>() == null && GetComponent<SetupForm>() == null)
+                TitleScreen.Reopen(this);
         }
 
         /// <summary>The socket died before a match began (server down / network drop while hosting or
@@ -343,6 +346,7 @@ namespace HexWars.Presentation
         {
             if (Networked && State == null && _net != null)
                 Toast.Show("Connection lost — check the link and try again.");
+            GetComponent<SetupForm>()?.OnConnectionLost();
         }
 
         /// <summary>The server dealt the authoritative start state — load and render it.</summary>

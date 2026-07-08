@@ -41,8 +41,10 @@ namespace HexWars.Presentation
             if (_game.State != null && !_game.DemoMode) { Close(); return; }
 
             // back on the title with no demo running (cancelled hosting, seat-full bounce, dropped
-            // socket) — self-heal: the title always has a living background
-            if (!_game.DemoMode && _game.State == null) { _game.StartDemo(); return; }
+            // socket) — self-heal: the title always has a living background. A connect may still be
+            // in flight here (e.g. a fresh join-by-code racing this Update); a START arriving into a
+            // demo would desync a seated match, so drop the socket first (CancelHosting is null-safe).
+            if (!_game.DemoMode && _game.State == null) { _game.CancelHosting(); _game.StartDemo(); return; }
 
             // demo ended: hold the final board a beat, then roll a fresh demo
             if (_game.DemoMode && _game.State != null && _game.State.IsGameOver)
