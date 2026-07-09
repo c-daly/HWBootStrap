@@ -76,8 +76,9 @@ namespace HexWars.Presentation
 
         /// <summary>The setup/difficulty of the most recent LOCAL vs-AI game — null whenever the most
         /// recent game start was anything else (hotseat, online). Set only by StartLocalGame's vsAi
-        /// path; cleared by NewGame()/StartNetGame() so a stale vs-AI setup can never make
-        /// RematchAvailable true for a hotseat or online game that started afterward.</summary>
+        /// path; cleared by NewGame(), StartNetGame(), and StartLocalGame's non-vsAi path so a stale
+        /// vs-AI setup can never make RematchAvailable true for a hotseat or online game that
+        /// started afterward.</summary>
         public GameSetup? LastLocalSetup { get; private set; }
         public AiLevel LastLocalAi { get; private set; }
 
@@ -245,10 +246,22 @@ namespace HexWars.Presentation
             StateChanged?.Invoke();
             if (vsAi)
             {
+                // destroy-before-add: Rematch() re-enters here with the previous game's AiOpponent
+                // still alive — an unconditional AddComponent would stack a second (then Nth) live
+                // AI all driving Player1 (doubled action rate), and ReturnToMenu destroys only one,
+                // leaking a phantom AI into the next game. Guarding here protects every caller.
+                var oldAi = GetComponent<AiOpponent>();
+                if (oldAi != null) Destroy(oldAi);
                 var ai = gameObject.AddComponent<AiOpponent>();
                 ai.Level = level;
                 LastLocalSetup = setup;
                 LastLocalAi = level;
+            }
+            else
+            {
+                // defensive: a hotseat game via this path isn't a vs-AI game either — without this,
+                // a future lobby hotseat option would leave RematchAvailable wrongly true
+                LastLocalSetup = null;
             }
         }
 
