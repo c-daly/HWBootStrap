@@ -112,14 +112,21 @@ namespace HexWars.Presentation
 
             for (int i = 0; i < p.Barracks.Count; i++)
             {
-                var stats = p.Barracks[i].Stats;   // Task 10 rebuilds this row properly (name + delete)
-                int cost = Economy.DeployCost(stats, s.Config);
+                var template = p.Barracks[i];
+                // Starter templates always have a name; player-created ones may not (blank until named).
+                string name = string.IsNullOrEmpty(template.Name) ? Roles.Dominant(template.Stats).ToString() : template.Name;
+                int cost = Economy.DeployCost(template.Stats, s.Config);
                 bool selected = i == _deployIndex;
                 int idx = i;
-                var row = UiKit.Button(_list, $"{Roles.Dominant(stats)}   deploy {cost}", 0f, -(4f + i * 34f), 214f, 30f,
+                var row = UiKit.Button(_list, $"{name}   deploy {cost}", -20f, -(4f + i * 34f), 170f, 30f,
                                        () => Select(idx), UiKit.ButtonStyle.Secondary);
                 UiKit.SetToggled(row, selected);
                 _rows.Add(row);
+
+                var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 34f), 32f, 30f,
+                                       () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
+                del.interactable = !ReadOnly;
+                _rows.Add(del);
             }
 
             _hint.text = _deployIndex >= 0
@@ -131,6 +138,19 @@ namespace HexWars.Presentation
         {
             _deployIndex = (_deployIndex == i) ? -1 : i; // toggle
             Rebuild();
+        }
+
+        /// <summary>Delete a barracks template — free, no turn cost (DeleteTemplate is administrative,
+        /// not a game move; it's not in LegalMoves). Bookkeeping mirrors spec §5: deleting the selected
+        /// row clears deploy mode; deleting a row before the selected one shifts the selected index down
+        /// so it still points at the same template after the barracks list re-indexes.</summary>
+        void DeleteAt(int index)
+        {
+            if (ReadOnly || _game == null || _game.State == null) return;
+            var seat = _game.State.ActivePlayer;
+            if (!_game.TryApply(new DeleteTemplate(seat, index))) return;
+            if (_deployIndex == index) _deployIndex = -1;
+            else if (_deployIndex > index) _deployIndex--;
         }
 
         static bool IsOverUi()
