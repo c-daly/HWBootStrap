@@ -104,6 +104,45 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TwoTabsSameToken_BeforeOpponent_DoesNotStart()
+        {
+            var hub = NewHub();
+            var t1 = hub.Connect("R", "conn-a1", token: "tok-a");   // host's first tab -> P0
+            var t2 = hub.Connect("R", "conn-a2", token: "tok-a");   // second tab, SAME identity, no disconnect
+
+            Assert.That(t1, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START ")));
+            Assert.That(t2, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START ")),
+                "two tabs of one player are one seat — the game must not start against yourself");
+            Assert.That(hub.OpenGames(), Has.Count.EqualTo(1),
+                "still a lone waiting host — the room stays browsable however many tabs the host has open");
+
+            var joined = hub.Connect("R", "conn-b", token: "tok-b"); // a real opponent -> P1, NOW it starts
+            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a1" && o.Message.StartsWith("START ")));
+            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a2" && o.Message.StartsWith("START ")));
+            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-b" && o.Message.StartsWith("START ")),
+                "START is dealt to every live connection, duplicate tabs included");
+        }
+
+        [Test]
+        public void JoinOnly_ReconnectIntoHeldRoom_ReclaimsSeat()
+        {
+            var hub = NewHub();
+            hub.Connect("R", "conn-a", token: "tok-a");
+            hub.Connect("R", "conn-b", token: "tok-b");
+            hub.Disconnect("R", "conn-a");
+            hub.Disconnect("R", "conn-b");                // room empty, started -> held
+
+            _now += TimeSpan.FromMinutes(5).Ticks;
+            // A reconnecting client arrives via the join link/code path (joinOnly) — the held room
+            // still exists, so joinOnly must not turn it away; the token reclaims its seat.
+            var back = hub.Connect("R", "conn-a-2", joinOnly: true, token: "tok-a");
+            Assert.That(back, Has.None.Matches<Outbound>(o => o.Message == NetProtocol.SeatFull));
+            Assert.That(back, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a-2" && o.Message == "SEAT 0"));
+            Assert.That(back, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a-2" && o.Message.StartsWith("START ")),
+                "a joinOnly reconnect into a held room gets its seat and a personal START re-deal");
+        }
+
+        [Test]
         public void OpenGames_NeverLists_AHeldEmptyRoom()
         {
             var hub = NewHub();

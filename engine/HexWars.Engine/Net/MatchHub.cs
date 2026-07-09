@@ -128,8 +128,12 @@ namespace HexWars.Engine
                 string startMsg = NetProtocol.Start(ReplayFile.Write(room.Session.State, Array.Empty<Command>()));
                 outs.Add(new Outbound(connectionId, startMsg));
             }
-            else if (added && room.Members.Count == 2)
+            else if (added && !room.Started && room.Session.SeatedCount == 2)
             {
+                // Start when the second SEAT fills, not the second connection: seats are token-keyed,
+                // so one player's extra tabs are extra connections but the same single seat — counting
+                // Members here would fire a bogus START at a lone host with two tabs open (and Started,
+                // never cleared, would silently delist the room from the lobby forever).
                 room.Started = true;
                 string startMsg = NetProtocol.Start(ReplayFile.Write(room.Session.State, Array.Empty<Command>()));
                 foreach (var m in room.Members) outs.Add(new Outbound(m, startMsg));
@@ -146,7 +150,9 @@ namespace HexWars.Engine
             foreach (var kv in _rooms)
             {
                 var r = kv.Value;
-                if (r.IsPrivate || r.Started || r.Members.Count != 1) continue;
+                // "A waiting host" is one claimed SEAT, not one connection — a host with two tabs open
+                // is still a lone waiting player and must stay browsable.
+                if (r.IsPrivate || r.Started || r.Session.SeatedCount != 1) continue;
                 int age = (int)((_now() - r.CreatedAtTicks) / TimeSpan.TicksPerSecond);
                 list.Add(new OpenGame(kv.Key, r.Setup, age));
             }

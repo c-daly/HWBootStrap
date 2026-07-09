@@ -53,6 +53,11 @@ namespace HexWars.Engine
 
         public GameSession(GameState start) { State = start; }
 
+        /// <summary>How many of the two seats are currently claimed (0–2). Each entry in the seat map
+        /// claims a distinct seat, so this is the number of distinct player identities in the match —
+        /// NOT the number of live connections (one token can have several tabs open).</summary>
+        public int SeatedCount => _seats.Count;
+
         /// <summary>Seat a token as P0, then P1; a returning token keeps its seat; null once full.</summary>
         public PlayerId? Join(string token)
         {
@@ -62,9 +67,10 @@ namespace HexWars.Engine
             return null;
         }
 
-        /// <summary>Release a token's seat so it can be re-taken (by any token) on the next Join. Used
-        /// only for un-started/lobby rooms — MatchHub never calls this for a Started room, since a
-        /// started room's seats must survive both players' sockets dropping (see MatchHub.Disconnect).</summary>
+        /// <summary>Release a token's seat so it can be re-taken (by any token) on the next Join.
+        /// Retained for the session-level API and its direct tests — MatchHub no longer calls this at
+        /// all: an un-started room is removed wholesale when it empties, and a Started room's seats
+        /// must survive every socket dropping (see MatchHub.Disconnect).</summary>
         public void Leave(string token) => _seats.Remove(token);
 
         /// <summary>Validate the issuer owns its seat, then apply through the engine. On Accepted, advances State.</summary>
