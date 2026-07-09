@@ -86,6 +86,7 @@ namespace HexWars.Presentation
                 src.playOnAwake = false;
                 src.loop = true;
                 src.volume = volume;
+                src.spatialBlend = 0f; // pin 2D: the imported WAV metas carry a legacy 3D flag
             }
             if (src.isPlaying) return; // idempotent: Start while already playing does not restart
             if (clip == null) clip = Resources.Load<AudioClip>(path); // load once, cache — null-safe below
@@ -106,6 +107,7 @@ namespace HexWars.Presentation
             Object.DontDestroyOnLoad(go);
             _src = go.AddComponent<AudioSource>();
             _src.playOnAwake = false;
+            _src.spatialBlend = 0f; // pin 2D: the imported WAV metas carry a legacy 3D flag
         }
 
         static AudioClip Clip(SoundKind kind)

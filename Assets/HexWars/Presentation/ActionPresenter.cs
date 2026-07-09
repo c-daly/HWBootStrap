@@ -413,10 +413,13 @@ namespace HexWars.Presentation
 
         void PlayInstantSound(Item item)
         {
+            // CreateUnit is deliberately absent: it is exclusively human-issued (the DesignPanel is
+            // the single construction site), and DesignPanel already plays SoundKind.Design
+            // synchronously on the successful apply — a second click here was a deterministic
+            // double-sound (Task 14 review).
             switch (item.Cmd)
             {
-                case DeployGenerator _:
-                case CreateUnit _: SoundManager.Play(SoundKind.Build); break;
+                case DeployGenerator _: SoundManager.Play(SoundKind.Build); break;
             }
         }
 
