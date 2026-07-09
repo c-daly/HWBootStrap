@@ -107,6 +107,12 @@ namespace HexWars.Presentation
 
             UiKit.Label(col.transform, "v" + Application.version + "   ·   two players, two browsers — share a room code",
                         0f, y - 6f, 520f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
+
+            var tipsBtn = TipsService.BuildToggle(_canvasGo.transform, 0f, 0f);
+            var trt = tipsBtn.GetComponent<RectTransform>();
+            trt.anchorMin = trt.anchorMax = new Vector2(0f, 0f);
+            trt.pivot = new Vector2(0f, 0f);
+            trt.anchoredPosition = new Vector2(12f, 12f);
         }
 
         void OnJoinByCode()

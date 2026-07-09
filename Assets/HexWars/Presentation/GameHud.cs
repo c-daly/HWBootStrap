@@ -158,6 +158,7 @@ namespace HexWars.Presentation
             string done = localHuman && !s.IsGameOver && !anyAction
                 ? "     Nothing left to do - press End Turn"
                 : "";
+            if (done.Length > 0) TipsService.Show("out-of-actions", "Nothing left this turn — End Turn passes play.");
 
             // the comeback rule keeps a unitless side alive while it can afford a redeploy — say so,
             // or (especially under fog) a wiped board reads as "the game ended and nothing happened"
@@ -216,6 +217,11 @@ namespace HexWars.Presentation
                 var accent = s.Winner == null ? new Color(0.25f, 0.27f, 0.33f, 0.96f)
                            : p0Won ? P0ToastBlue : P1ToastRed;
                 StartCoroutine(ShowBannerWhenQuiet(result.ToUpperInvariant(), HowText(s), accent));
+
+                // spec §6: game-over nudge, vs AI only. Informational only for now — Task 13 adds
+                // GameBootstrap.Rematch() and upgrades this exact call to a CTA that fires it.
+                if (FindAnyObjectByType<AiOpponent>() != null)
+                    TipsService.Show("game-over-rematch", "Run it back — you know what to build now.");
             }
         }
 

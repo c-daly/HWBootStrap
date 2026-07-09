@@ -110,12 +110,14 @@ namespace HexWars.Presentation
             var p = s.Player(s.ActivePlayer);
             if (_deployIndex >= p.Barracks.Count) _deployIndex = -1;
 
+            int cheapest = int.MaxValue;
             for (int i = 0; i < p.Barracks.Count; i++)
             {
                 var template = p.Barracks[i];
                 // Starter templates always have a name; player-created ones may not (blank until named).
                 string name = string.IsNullOrEmpty(template.Name) ? Roles.Dominant(template.Stats).ToString() : template.Name;
                 int cost = Economy.DeployCost(template.Stats, s.Config);
+                cheapest = Mathf.Min(cheapest, cost);
                 bool selected = i == _deployIndex;
                 int idx = i;
                 var row = UiKit.Button(_list, $"{name}   deploy {cost}", -20f, -(4f + i * 34f), 170f, 30f,
@@ -132,6 +134,11 @@ namespace HexWars.Presentation
             _hint.text = _deployIndex >= 0
                 ? "Click a zone hex to deploy - anywhere else to stop."
                 : (p.Barracks.Count == 0 ? "Design a unit, then deploy it here." : "Select a template to deploy.");
+
+            // spec §6: "First time points ≥ cheapest deploy cost with barracks open" — fires once per
+            // game the moment it becomes true, whichever Rebuild() call (StateChanged-driven) sees it first.
+            if (p.Barracks.Count > 0 && p.Points >= cheapest)
+                TipsService.Show("can-afford-deploy", "Deploying costs the unit's points.");
         }
 
         void Select(int i)

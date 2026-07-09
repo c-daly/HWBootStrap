@@ -227,6 +227,15 @@ namespace HexWars.Presentation
             _selected = unit;
             _selectedId = unit != null ? unit.Unit.Id : -1;
             UpdateMarker();
+
+            // gated on !DemoMode: the title-screen demo's units are hoverable/clickable (this class isn't
+            // demo-aware), but a Tips bubble popping up over the muted showcase would break DemoMode's
+            // whole point (suppressed gameplay UI) — see GameBootstrap.DemoMode's doc comment.
+            if (unit != null && _game != null && !_game.DemoMode && Camera.main != null)
+            {
+                Vector2 screenPos = Camera.main.WorldToScreenPoint(unit.transform.position);
+                TipsService.Show("first-select", "Green hexes = where it can go. Red = what it can hit.", screenPos);
+            }
         }
 
         /// <summary>Issue a command through the one presentation pipeline: finish any queued playback

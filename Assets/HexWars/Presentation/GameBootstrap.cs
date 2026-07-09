@@ -104,6 +104,7 @@ namespace HexWars.Presentation
         public void NewGame()
         {
             EndDemo();
+            TipsService.NewGame();
             Presenter?.ResetQueue();
             SetupEnvironment();
 
@@ -167,9 +168,25 @@ namespace HexWars.Presentation
             State = result.NewState;
             if (!DemoMode) EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
+            if (!DemoMode) CheckFirstBounty(prev, cmd);
             StateChanged?.Invoke();
             return true;
         }
+
+        /// <summary>Spec §6's "first bounty earned" reveal: a kill (AttackUnit that increases the
+        /// attacker's Points — CombatResolver awards bounty only on a kill, never a plain hit) issued by
+        /// a seat this human controls fires the tip once per game, CTA drawing attention to the Designer.</summary>
+        void CheckFirstBounty(GameState prev, Command cmd)
+        {
+            if (!(cmd is AttackUnit atk) || !IsLocalCommand(cmd)) return;
+            int gained = State.Player(atk.Issuer).Points - prev.Player(atk.Issuer).Points;
+            if (gained <= 0) return;
+            TipsService.Show("first-bounty",
+                $"You earned {gained} points. A wall? A sniper? Eyes that see everything? Design your answer.",
+                cta: "Design your answer", onCta: OpenDesigner);
+        }
+
+        void OpenDesigner() => FindAnyObjectByType<DesignPanel>()?.Highlight();
 
         /// <summary>Connect to the server for a room. <paramref name="setupWire"/> is non-null only for
         /// the host (carries the lobby picks); a joiner passes null and gets the host's game.
@@ -177,6 +194,7 @@ namespace HexWars.Presentation
         public void StartNetGame(string room, string setupWire, bool isPrivate = false)
         {
             EndDemo();
+            TipsService.NewGame();
             // the demo's state must not linger: panels dismiss on (State != null && !DemoMode), and
             // the authoritative state arrives later via START — until then there is no game here
             State = null;
@@ -202,6 +220,7 @@ namespace HexWars.Presentation
         public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Hard)
         {
             EndDemo();
+            TipsService.NewGame();
             Presenter?.ResetQueue();
             Networked = false; // play locally — TryApply applies here instead of going to the server
             State = GameFactory.Build(setup);
@@ -399,6 +418,7 @@ namespace HexWars.Presentation
             State = result.NewState;
             EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
+            CheckFirstBounty(prev, cmd);
             StateChanged?.Invoke();
         }
 
