@@ -107,10 +107,9 @@ namespace HexWars.Presentation
         static string Format(Unit u, GameState state)
         {
             var s = u.Stats;
-            string role = Roles.Dominant(s).ToString();
             string owner = u.Owner == PlayerId.Player0 ? "Player 1" : "Player 2";
             string text =
-                $"<b>{role}</b>  {s.PointCost} pts  ({owner})\n" +
+                $"<b>{u.DisplayName}</b>  {s.PointCost} pts  ({owner})\n" +
                 $"HP {u.CurrentHp}/{s.Health}\n" +
                 $"Damage {s.Damage}   Defense {s.Defense}\n" +
                 $"Move {s.Movement}   Vertical {s.VerticalMovement}\n" +

@@ -13,11 +13,16 @@ namespace HexWars.Presentation
         static readonly string[] Names =
             { "Health", "Damage", "Defense", "Movement", "Vertical Move", "Range", "Range Arc", "Vision", "Vision Arc" };
 
+        static readonly string[] NamePlaceholders = { "Doom Turtle", "Longshot", "Pathfinder" };
+
         GameBootstrap _game;
         GameObject _canvasGo;
         readonly int[] _stats = new int[9];
         readonly Text[] _valueLabels = new Text[9];
         Text _summary;
+        Text _nameBox;
+        string _name = "";
+        int _placeholderIdx;
 
         void Start()
         {
@@ -51,7 +56,8 @@ namespace HexWars.Presentation
             var prt = panelImg.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0f, 1f);
             prt.pivot = new Vector2(0f, 1f);
-            prt.sizeDelta = new Vector2(w, rowH * 9 + 120f);
+            prt.sizeDelta = new Vector2(w, rowH * 10 + 126f); // 9 stat rows + the Name row (rowH + 6f gap,
+                                                               // same as every other row-to-row gap here)
             prt.anchoredPosition = new Vector2(8f, -top);
             var panel = panelImg.transform;
 
@@ -60,15 +66,36 @@ namespace HexWars.Presentation
             for (int i = 0; i < 9; i++)
             {
                 float y = -(40f + i * rowH);
-                UiKit.Label(panel, Names[i], -63f, y, 120f, rowH, 15, TextAnchor.MiddleLeft);
-                _valueLabels[i] = UiKit.Label(panel, "0", 23f, y, 40f, rowH, 16, TextAnchor.MiddleCenter);
                 int idx = i;
+                // the label itself is the tap target — a stat name button with a text-only look, opening
+                // the verbatim description (spec §6: "always available, Tips or no Tips")
+                var nameBtn = UiKit.Button(panel, Names[i], -63f, y, 120f, rowH, () =>
+                {
+                    Vector3 world = panel.TransformPoint(new Vector3(-63f, y, 0f));
+                    Vector2 screenPos = RectTransformUtility.WorldToScreenPoint(null, world); // camera
+                                                                    // null — this canvas is ScreenSpaceOverlay
+                    TipBubble.Show(StatInfo.All[idx].Full, screenPos);
+                }, UiKit.ButtonStyle.Secondary, 15);
+                nameBtn.GetComponentInChildren<Text>().alignment = TextAnchor.MiddleLeft;
+                _valueLabels[i] = UiKit.Label(panel, "0", 23f, y, 40f, rowH, 16, TextAnchor.MiddleCenter);
                 UiKit.Button(panel, "-", 65f, y - 2f, 36f, rowH - 4f, () => Adjust(idx, -1));
                 UiKit.Button(panel, "+", 105f, y - 2f, 36f, rowH - 4f, () => Adjust(idx, +1));
             }
-            _valueLabels[0].text = "1";
+            for (int i = 0; i < 9; i++) _valueLabels[i].text = _stats[i].ToString(); // sync display to
+                                                                                      // current _stats — matters
+                                                                                      // once Task 12's Tips-toggle
+                                                                                      // rebuild can re-run this Build()
+                                                                                      // after the player has already
+                                                                                      // spent points (was a bare
+                                                                                      // "_valueLabels[0].text = "1";")
 
-            float sy = -(40f + 9 * rowH + 6f);
+            float nameY = -(40f + 9 * rowH + 6f);
+            UiKit.Label(panel, "Name", -63f, nameY, 60f, rowH, 15, TextAnchor.MiddleLeft);
+            _nameBox = UiKit.Button(panel, PlaceholderText(), 23f, nameY, w - 110f, rowH, OnTapName,
+                                    UiKit.ButtonStyle.Secondary, 14).GetComponentInChildren<Text>();
+            ApplyNameDisplay(); // sets the grey placeholder color (UiKit.Button's own label defaults to white)
+
+            float sy = nameY - rowH - 6f;
             _summary = UiKit.Label(panel, "", 0f, sy, w - 24f, 24f, 15, TextAnchor.MiddleLeft);
             UiKit.Button(panel, "Create (to Barracks)", 0f, sy - 30f, w - 24f, 30f, OnCreate, UiKit.ButtonStyle.Cta);
         }
@@ -78,6 +105,34 @@ namespace HexWars.Presentation
             _stats[i] = Mathf.Max(i == 0 ? 1 : 0, _stats[i] + delta);
             _valueLabels[i].text = _stats[i].ToString();
             RefreshSummary();
+        }
+
+        string PlaceholderText() => NamePlaceholders[_placeholderIdx];
+
+        /// <summary>Browser-prompt text entry (the established mobile pattern, same as join-by-code).
+        /// Empty stays legal — CreateUnit/UnitTemplate.Sanitize defaults an empty name to the dominant
+        /// role at the engine boundary.</summary>
+        void OnTapName()
+        {
+            string typed = UiKit.PromptText("Name your unit", _name);
+            if (typed == null) return; // cancelled, or no browser prompt available (editor) — leave as-is
+            _name = typed.Trim();
+            if (_name.Length == 0) RotatePlaceholder();
+            ApplyNameDisplay();
+        }
+
+        /// <summary>Advances to the next example (Task 12's Tips-toggle rebuild also calls
+        /// <see cref="ApplyNameDisplay"/> to resync the box's text/color after a rebuild, but must NOT
+        /// rotate the placeholder just because the panel redrew — only an actual "went back to empty"
+        /// user action should pick a new example, so the two are kept separate.</summary>
+        void RotatePlaceholder() => _placeholderIdx = (_placeholderIdx + 1) % NamePlaceholders.Length;
+
+        /// <summary>Pure display sync — safe to call any time the name box exists and needs to reflect
+        /// current state (after typing, after Create, after a rebuild).</summary>
+        void ApplyNameDisplay()
+        {
+            if (_name.Length > 0) { _nameBox.text = _name; _nameBox.color = UiKit.TextMain; }
+            else { _nameBox.text = PlaceholderText(); _nameBox.color = UiKit.TextFaint; } // grey, per spec
         }
 
         void RefreshSummary()
@@ -92,7 +147,12 @@ namespace HexWars.Presentation
         void OnCreate()
         {
             if (_game == null || _game.State == null) return;
-            _game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats()));
+            if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), _name)))
+            {
+                _name = "";
+                RotatePlaceholder(); // a fresh empty box next time shows a different example
+                ApplyNameDisplay();
+            }
         }
     }
 }

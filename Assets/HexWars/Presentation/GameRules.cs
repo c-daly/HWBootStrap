@@ -122,11 +122,19 @@ MODES
     points on more units. The economy funds your war; it does not win on its own.
 
 UNITS
-Each unit has: Health, Damage, Defense, Move, Vertical (climb), Range, and Vision.
-  Brute    — tough melee (high HP/defense, range 1).
-  Striker  — fast glass cannon (high damage, low HP).
-  Sniper   — fragile but long range.
-Hover (or touch) a unit in-game to see its full stats.
+Brute, Striker, Sniper, Artillery, Scout — these are just ideas that come pre-loaded in your barracks
+(delete them if you like). Any allocation you can imagine is a unit. Name it what it is.
+Each unit has: Health, Damage, Defense, Move, Vertical (climb), Range, Range Arc, Vision, and Vision Arc.
+Tap any stat name in the Designer, or hover/touch a unit in-game, to see what it does and why you'd buy it.
+
+DESIGN YOUR OWN
+Everything is points. See what your opponent built; build the answer.
+  Create — open the Designer, put points into whichever stats fit the plan, name it, and it lands in
+    your barracks as a reusable template.
+  Deploy — pick a template in the barracks and place a paid clone of it — the template itself is never
+    consumed, so deploy it again next turn or next game.
+  Adapt — a kill earns bounty points. Spend them on the answer to what you just saw, not a repeat of
+    what you already have.
 
 MOVING
 A unit has two separate budgets per turn:
