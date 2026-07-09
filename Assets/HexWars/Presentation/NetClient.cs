@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Text;
 using UnityEngine;
 using NativeWebSocket;
@@ -22,16 +23,85 @@ namespace HexWars.Presentation
         public bool Connected { get; private set; }
 
         bool _closing;
+        int _attempt;                 // 0 = first-ever attempt; >0 = a retry after a drop
+        string _room, _setupWire;
+        bool _isPrivate;
 
-        public async void Connect(GameBootstrap game, string room, string setupWire, bool isPrivate = false)
+        const string TokenPrefKey = "HexWars.SeatToken";
+        const string TokenAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
+        static readonly float[] BackoffSeconds = { 1f, 2f, 4f, 8f, 15f }; // caps at 15s, then repeats forever
+
+        /// <summary>One token per browser, minted once and kept in PlayerPrefs. The server seats by
+        /// token, not by socket (spec §3), so presenting the same token — after a refresh, a background
+        /// tab drop, or this class's own reconnect loop — reclaims the same seat.</summary>
+        public static string Token()
+        {
+            string t = PlayerPrefs.GetString(TokenPrefKey, "");
+            if (!string.IsNullOrEmpty(t)) return t;
+            var chars = new char[16];
+            for (int i = 0; i < chars.Length; i++) chars[i] = TokenAlphabet[UnityEngine.Random.Range(0, TokenAlphabet.Length)];
+            t = new string(chars);
+            PlayerPrefs.SetString(TokenPrefKey, t);
+            PlayerPrefs.Save();
+            return t;
+        }
+
+        /// <summary>Start the connection lifecycle for a room. Remembers the args so a dropped socket
+        /// can retry with the exact same request.</summary>
+        public void Connect(GameBootstrap game, string room, string setupWire, bool isPrivate = false)
         {
             _game = game;
-            string url = ServerWsUrl(room, setupWire, isPrivate);
+            _room = room;
+            _setupWire = setupWire;
+            _isPrivate = isPrivate;
+            StartCoroutine(Lifecycle());
+        }
+
+        /// <summary>Owns every connection attempt for this component's lifetime. A drop BEFORE a game
+        /// started (still on the host/join screen) is never retried — un-started rooms clean up
+        /// instantly server-side, so there's nothing left to reconnect into; that case keeps today's
+        /// toast-and-stop behavior via <see cref="GameBootstrap.OnNetClosed"/>. A drop AFTER a game
+        /// started retries with capped exponential backoff (1s, 2s, 4s, 8s, cap 15s) indefinitely —
+        /// until it reconnects or this component is destroyed (Cancel / Main menu both call
+        /// <c>Destroy(_net)</c>, which stops this coroutine along with everything else).</summary>
+        IEnumerator Lifecycle()
+        {
+            while (true)
+            {
+                var open = OpenOnce();
+                while (!open.IsCompleted) yield return null;
+                if (_closing) yield break;
+
+                if (_attempt == 0 && _game.State == null)
+                {
+                    _game.OnNetClosed();   // pre-start drop: existing toast + SetupForm status path, no retry
+                    yield break;
+                }
+
+                _game.OnNetReconnecting(_attempt);
+                float wait = BackoffSeconds[Mathf.Min(_attempt, BackoffSeconds.Length - 1)];
+                _attempt++;
+                yield return new WaitForSeconds(wait);
+                if (_closing) yield break;
+            }
+        }
+
+        /// <summary>One connection attempt. Resolves once that attempt's socket session ends — either
+        /// it never opened, or it opened and later closed. NativeWebSocket's <c>Connect()</c> task runs
+        /// the whole read loop internally, so awaiting it IS awaiting "this attempt is over".</summary>
+        async System.Threading.Tasks.Task OpenOnce()
+        {
+            string url = ServerWsUrl(_room, _setupWire, _isPrivate, Token());
             Debug.Log("[Net] connecting to " + url);
             _ws = new WebSocket(url);
-            _ws.OnOpen += () => { Connected = true; Debug.Log("[Net] open"); };
+            _ws.OnOpen += () =>
+            {
+                Connected = true;
+                Debug.Log("[Net] open");
+                if (_attempt > 0) { _attempt = 0; _game.OnNetReconnected(); }
+            };
             _ws.OnError += e => Debug.LogError("[Net] error: " + e);
-            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); if (!_closing) _game.OnNetClosed(); };
+            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); };
             _ws.OnMessage += OnMessage;
             await _ws.Connect();
         }
@@ -67,12 +137,14 @@ namespace HexWars.Presentation
         async void OnDestroy()
         {
             _closing = true;             // deliberate teardown (Cancel / ReturnToMenu) — not an error
+            StopAllCoroutines();         // Unity would stop Lifecycle() on destroy anyway; explicit for clarity
             if (_ws != null) await _ws.Close();
         }
 
         /// <summary>Build the WebSocket URL for a room from the page origin: https://host → wss://host/ws?room=…
-        /// (&amp;setup=… for the host). Falls back to ws://127.0.0.1:5234 in the editor (no page URL).</summary>
-        static string ServerWsUrl(string room, string setupWire, bool isPrivate)
+        /// (&amp;setup=… for the host). Falls back to ws://127.0.0.1:5234 in the editor (no page URL).
+        /// <paramref name="token"/> is always appended — the server seats by token, not connection id.</summary>
+        static string ServerWsUrl(string room, string setupWire, bool isPrivate, string token)
         {
             string origin = "ws://127.0.0.1:5234"; // dev default when there's no page URL (editor)
             string page = Application.absoluteURL;
@@ -90,6 +162,7 @@ namespace HexWars.Presentation
             else url += "&join=1"; // a joiner (link/code/browser row) never carries setup — flag it so a
                                     // missing room turns the connection away instead of minting a phantom game
             if (isPrivate) url += "&private=1";
+            url += "&token=" + Uri.EscapeDataString(token);
             return url;
         }
     }

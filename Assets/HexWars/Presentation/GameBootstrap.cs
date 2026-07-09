@@ -69,6 +69,11 @@ namespace HexWars.Presentation
         /// suppression contract.</summary>
         public bool DemoMode { get; private set; }
 
+        /// <summary>True while a started game's socket dropped and NetClient is retrying with backoff.
+        /// GameHud reads this to show a persistent status line; OnNetReconnecting Toasts once per drop
+        /// episode (not once per attempt).</summary>
+        public bool Reconnecting { get; private set; }
+
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
 
@@ -188,6 +193,7 @@ namespace HexWars.Presentation
         {
             if (_net != null) { Destroy(_net); _net = null; }
             Seat = null;
+            Reconnecting = false;
         }
 
         /// <summary>Start a single-machine game from the lobby's setup (no server). <paramref name="vsAi"/>
@@ -273,6 +279,7 @@ namespace HexWars.Presentation
             GameOverBanner.Dismiss();
             if (_net != null) { Destroy(_net); _net = null; }
             Seat = null;
+            Reconnecting = false;
             var ai = GetComponent<AiOpponent>();
             if (ai != null) Destroy(ai);
             State = null;
@@ -349,9 +356,29 @@ namespace HexWars.Presentation
             GetComponent<SetupForm>()?.OnConnectionLost();
         }
 
+        /// <summary>A started game's socket dropped and NetClient is retrying with backoff. Called once
+        /// per attempt (so a persistent status line can show progress); the Toast only fires transitioning
+        /// INTO reconnecting, not on every retry, matching spec §7 ("every attempt updates the status
+        /// line" — GameHud's banner text is that status line).</summary>
+        internal void OnNetReconnecting(int attempt)
+        {
+            if (!Reconnecting) Toast.Show("Connection lost — reconnecting…", new Color(0.42f, 0.34f, 0.12f, 0.94f));
+            Reconnecting = true;
+            StateChanged?.Invoke();
+        }
+
+        /// <summary>The socket reopened. The server re-deals START right behind this (OnNetStart also
+        /// clears Reconnecting, redundantly, so arrival order between the two can never leave it stuck).</summary>
+        internal void OnNetReconnected()
+        {
+            Reconnecting = false;
+            StateChanged?.Invoke();
+        }
+
         /// <summary>The server dealt the authoritative start state — load and render it.</summary>
         internal void OnNetStart(string startStateText)
         {
+            Reconnecting = false;      // a START re-deal (fresh join OR a reconnect) always means we're live
             Presenter?.ResetQueue();
             State = ReplayFile.Read(startStateText).Start;
             var renderer = GetComponent<BoardRenderer>();

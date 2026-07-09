@@ -174,6 +174,7 @@ namespace HexWars.Presentation
                 ? $"P{who}'s turn{pace}{done}{armies}     Round {s.Round}     " +
                   $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}"
                 : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}{armies}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
+            if (_game.Reconnecting) _banner.text = "⚠ Connection lost — reconnecting…     " + _banner.text;
 
             if (_endBtn != null) _endBtn.color = done.Length > 0 ? EndTurnUrge : EndTurnIdle;
 
