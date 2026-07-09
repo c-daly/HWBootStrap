@@ -244,6 +244,7 @@ namespace HexWars.Presentation
             EventConsole.Clear();
             EventConsole.Report(State, null);
             StateChanged?.Invoke();
+            SoundManager.StartAmbience();
             if (vsAi)
             {
                 // destroy-before-add: Rematch() re-enters here with the previous game's AiOpponent
@@ -288,6 +289,8 @@ namespace HexWars.Presentation
             Networked = false;
             DemoMode = true;
             SoundManager.Muted = true;
+            SoundManager.StartTitleMusic();
+            SoundManager.StopAmbience();
             var setup = new GameSetup(GameMode.Annihilation, 11, 8, 0,
                                       UnityEngine.Random.Range(1, 99999), 5, 2, 2, 1, 3);
             State = GameFactory.Build(setup);
@@ -307,6 +310,7 @@ namespace HexWars.Presentation
             if (!DemoMode) return;
             DemoMode = false;
             SoundManager.Muted = false;
+            SoundManager.StopTitleMusic();
             var driver = GetComponent<SpectatorDriver>();
             if (driver != null) Destroy(driver);
             var input = FindAnyObjectByType<UnitInputController>();
@@ -447,6 +451,7 @@ namespace HexWars.Presentation
             EventConsole.Clear();
             EventConsole.Report(State, null);
             StateChanged?.Invoke();
+            SoundManager.StartAmbience();
         }
 
         /// <summary>A validated move from the server — apply it locally (same engine, so identical result).</summary>

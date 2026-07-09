@@ -232,7 +232,7 @@ namespace HexWars.Presentation
             float arc = directLos ? 0f : Mathf.Max(2.5f, Vector3.Distance(from, to) * 0.35f);
             float flightDur = Mathf.Lerp(0.45f, 0.85f, power) + Vector3.Distance(from, to) * 0.035f;
 
-            SoundManager.Play(SoundKind.Attack);
+            SoundManager.PlayAttack(projTier); // tiered weapon shot — same tier value the projectile visual uses
             _presented = true;
             _projectile = MakeProjectile(from, projScale, projTier, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
@@ -265,7 +265,7 @@ namespace HexWars.Presentation
             Tokens().Sync(item.Next, viewer); // spawns the token at its cell
             var token = Tokens().UnitToken(fresh.Value.Id);
             if (token == null) yield break;   // deployed out of the viewer's sight — silent, zero time
-            SoundManager.Play(SoundKind.Build); // visibility gate first, then sound (mirrors PlayClaim)
+            SoundManager.Play(SoundKind.Deploy); // visibility gate first, then sound (mirrors PlayClaim)
             _presented = true;
 
             // drop-in: fall from above + landing squash

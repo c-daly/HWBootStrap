@@ -3,13 +3,17 @@ using UnityEngine;
 
 namespace HexWars.Presentation
 {
-    public enum SoundKind { Move, Attack, Death, EndTurn, Claim, Build, Win }
+    public enum SoundKind { Move, Attack, Death, EndTurn, Claim, Build, Win, Deploy, Design }
 
     /// <summary>
-    /// Procedural SFX synthesized in code (no audio assets to ship), but noise/filter-based rather than
-    /// arcade beeps: filtered-noise explosions with a low rumble, a swept "rocket" whoosh for attacks, and
-    /// soft sine clicks for UI. One persistent AudioSource plays one-shots; callers just say
-    /// <c>SoundManager.Play(SoundKind.Attack)</c>.
+    /// Procedural SFX synthesized in code as the baseline (no assets required to ship), layered with a
+    /// handful of user-supplied clips (title music, ambient bed, deploy door, designer hum, tiered weapon
+    /// shots, design-racked chime) loaded from Resources. Every asset-backed sound keeps its procedural
+    /// fallback so a missing/failed Resources.Load degrades silently, never throws. Procedural kit:
+    /// filtered-noise explosions with a low rumble, a swept "rocket" whoosh for attacks, and soft sine
+    /// clicks for UI. One persistent AudioSource plays one-shots; callers just say
+    /// <c>SoundManager.Play(SoundKind.Attack)</c>. Three more looping sources on the same GameObject carry
+    /// the title music, in-game ambience, and designer hum.
     /// </summary>
     public static class SoundManager
     {
@@ -17,7 +21,9 @@ namespace HexWars.Presentation
         static AudioSource _src;
         static readonly Dictionary<SoundKind, AudioClip> _clips = new Dictionary<SoundKind, AudioClip>();
 
-        /// <summary>True while the title demo plays — the menu should be calm, not a battle radio.</summary>
+        /// <summary>True while the title demo plays — the menu should be calm, not a battle radio.
+        /// Deliberately NOT checked by the music loop: the soundtrack owns the title screen even while
+        /// battle SFX are muted.</summary>
         public static bool Muted;
 
         public static void Play(SoundKind kind)
@@ -25,6 +31,72 @@ namespace HexWars.Presentation
             if (Muted) return;
             Ensure();
             _src.PlayOneShot(Clip(kind));
+        }
+
+        // ---- tiered weapon shots: 4 recorded variants per tier, random pick each hit, whoosh fallback ----
+        static readonly string[] AttackFamilies = { "Light", "Mid", "Heavy" };
+        static readonly Dictionary<int, AudioClip[]> _attackVariants = new Dictionary<int, AudioClip[]>();
+
+        /// <summary>tier 0/1/2 = light/mid/heavy, matching ActionPresenter's projectile-tier thresholds
+        /// exactly (same value drives the projectile color/scale). Picks a random one of 4 recorded
+        /// variants per tier; a variant that failed to load (or the whole family missing) falls back to
+        /// the procedural attack whoosh — never silent, never throws.</summary>
+        public static void PlayAttack(int tier)
+        {
+            if (Muted) return;
+            Ensure();
+            var variants = AttackVariants(tier);
+            var clip = variants[UnityEngine.Random.Range(0, 4)];
+            _src.PlayOneShot(clip != null ? clip : Clip(SoundKind.Attack));
+        }
+
+        static AudioClip[] AttackVariants(int tier)
+        {
+            int t = Mathf.Clamp(tier, 0, AttackFamilies.Length - 1);
+            if (_attackVariants.TryGetValue(t, out var cached)) return cached;
+            var arr = new AudioClip[4];
+            for (int i = 0; i < 4; i++)
+                arr[i] = Resources.Load<AudioClip>($"Audio/Attack{AttackFamilies[t]}_{i}");
+            _attackVariants[t] = arr; // cache regardless of hits/misses — never re-probe Resources per shot
+            return arr;
+        }
+
+        // ---- looping beds: title music, in-game ambience, designer hum ----
+        static AudioSource _music, _ambience, _hum;
+        static AudioClip _musicClip, _ambienceClip, _humClip;
+        const string MusicPath = "Audio/TitleMusic", AmbiencePath = "Audio/AmbientBed", HumPath = "Audio/DesignerHum";
+
+        /// <summary>Idempotent: already-playing is a no-op, so callers don't need to track state
+        /// themselves. Ignores <see cref="Muted"/> on purpose — see its doc comment.</summary>
+        public static void StartTitleMusic() => StartLoop(ref _music, ref _musicClip, MusicPath, 0.35f);
+        public static void StopTitleMusic() => StopLoop(_music);
+
+        public static void StartAmbience() => StartLoop(ref _ambience, ref _ambienceClip, AmbiencePath, 0.15f);
+        public static void StopAmbience() => StopLoop(_ambience);
+
+        public static void StartDesignerHum() => StartLoop(ref _hum, ref _humClip, HumPath, 0.12f);
+        public static void StopDesignerHum() => StopLoop(_hum);
+
+        static void StartLoop(ref AudioSource src, ref AudioClip clip, string path, float volume)
+        {
+            Ensure();
+            if (src == null)
+            {
+                src = _src.gameObject.AddComponent<AudioSource>();
+                src.playOnAwake = false;
+                src.loop = true;
+                src.volume = volume;
+            }
+            if (src.isPlaying) return; // idempotent: Start while already playing does not restart
+            if (clip == null) clip = Resources.Load<AudioClip>(path); // load once, cache — null-safe below
+            if (clip == null) return;  // missing asset: silent degrade, never throw
+            src.clip = clip;
+            src.Play();
+        }
+
+        static void StopLoop(AudioSource src)
+        {
+            if (src != null && src.isPlaying) src.Stop(); // idempotent: Stop while stopped is a no-op
         }
 
         static void Ensure()
@@ -53,6 +125,10 @@ namespace HexWars.Presentation
                 case SoundKind.Claim:   return Chime("claim", new[] { 523f, 784f }, 0.16f);
                 case SoundKind.Build:   return Click("build", 494f, 0.10f, 0.22f);
                 case SoundKind.Win:     return Chime("win", new[] { 523f, 659f, 784f, 1047f }, 0.16f);
+                // asset-backed one-shots: recorded clip when available, else the procedural click that
+                // best matches the moment (Build's construction thunk) — same fallback pattern as PlayAttack
+                case SoundKind.Deploy:  return Resources.Load<AudioClip>("Audio/DeployDoor") ?? Clip(SoundKind.Build);
+                case SoundKind.Design:  return Resources.Load<AudioClip>("Audio/CreateRacked") ?? Clip(SoundKind.Build);
                 default:                return Click("blip", 600f, 0.08f, 0.2f);
             }
         }

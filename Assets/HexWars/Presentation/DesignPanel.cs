@@ -44,7 +44,10 @@ namespace HexWars.Presentation
             if (_game == null || _canvasGo == null) return;
             bool hidden = _game.DemoMode || _game.State == null;
             if (_canvasGo.activeSelf == hidden)
+            {
                 _canvasGo.SetActive(!hidden);
+                if (hidden) SoundManager.StopDesignerHum(); else SoundManager.StartDesignerHum();
+            }
 
             if (TipsService.Enabled != _lastTipsEnabled)
             {
@@ -196,6 +199,7 @@ namespace HexWars.Presentation
             if (_game == null || _game.State == null) return;
             if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), _name)))
             {
+                SoundManager.Play(SoundKind.Design);
                 _name = "";
                 RotatePlaceholder(); // a fresh empty box next time shows a different example
                 ApplyNameDisplay();
