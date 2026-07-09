@@ -188,7 +188,10 @@ namespace HexWars.Presentation
             float frac = max <= 0 ? 0f : Mathf.Clamp01((float)cur / max);
             float fw = Mathf.Max(0.001f, refs.BarWidth * frac);
             float fx = -refs.BarWidth * 0.5f + fw * 0.5f;
-            refs.Fill.localPosition = new Vector3(fx, -0.01f, 0f);
+            // z=-0.01 keeps the fill riding toward the camera, matching MakeBarQuad's placement.
+            // A past edit put the offset in Y, leaving fill and background coplanar — they z-fight,
+            // and WebGL resolved it background-on-top: every live bar looked empty (black).
+            refs.Fill.localPosition = new Vector3(fx, 0f, -0.01f);
             refs.Fill.localScale = new Vector3(fw, 0.11f, 1f);
 
             var color = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
