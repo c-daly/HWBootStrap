@@ -21,6 +21,9 @@ namespace HexWars.Engine
         public static string Seat(PlayerId seat) => "SEAT " + (int)seat;
         /// <summary>The room is full; the connection is a spectator/turned away.</summary>
         public const string SeatFull = "SEAT FULL";
+        /// <summary>A CMD payload that failed to parse (CommandWire.TryRead returned false) — sent only
+        /// to the issuer, never broadcast.</summary>
+        public const string Malformed = "REJECT Malformed";
         /// <summary>The authoritative start state (a <see cref="ReplayFile"/> dump), sent once both seats are present.</summary>
         public static string Start(string startStateText) => "START " + startStateText;
         /// <summary>A validated command for every client to apply locally.</summary>

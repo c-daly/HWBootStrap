@@ -169,7 +169,12 @@ namespace HexWars.Engine
             var msg = NetProtocol.Parse(raw);
             if (msg.Type != "CMD") return outs; // v0: CMD is the only client→server message that does anything
 
-            var cmd = CommandWire.Read(msg.Payload);
+            if (!CommandWire.TryRead(msg.Payload, out var cmd) || cmd == null)
+            {
+                outs.Add(new Outbound(connectionId, NetProtocol.Malformed));
+                return outs;
+            }
+
             string token = room.ConnToToken.TryGetValue(connectionId, out var t) ? t : connectionId;
             var outcome = room.Session.Submit(token, cmd);
             switch (outcome.Status)

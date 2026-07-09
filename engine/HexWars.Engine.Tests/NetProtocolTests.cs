@@ -55,5 +55,13 @@ namespace HexWars.Engine.Tests
             Assert.That(msg.Type, Is.EqualTo("REJECT"));
             Assert.That(msg.Payload, Is.EqualTo("NotYourTurn"));
         }
+
+        [Test]
+        public void Malformed_IsAFixedRejectLine()
+        {
+            var msg = NetProtocol.Parse(NetProtocol.Malformed);
+            Assert.That(msg.Type, Is.EqualTo("REJECT"));
+            Assert.That(msg.Payload, Is.EqualTo("Malformed"));
+        }
     }
 }

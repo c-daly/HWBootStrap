@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
+using System.Threading.Channels;
 using HexWars.Engine;
 
 namespace HexWars.NetServer
@@ -18,6 +19,7 @@ namespace HexWars.NetServer
         static readonly ConcurrentDictionary<string, Conn> Conns = new();
         static readonly MatchHub Hub = new(GameFactory.Build);
         static readonly object HubLock = new();
+        const int MaxIncomingBytes = 64 * 1024;
 
         public static async Task<int> Main(string[] args)
         {
@@ -66,6 +68,7 @@ namespace HexWars.NetServer
         internal static async Task Handle(HttpContext ctx)
         {
             if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
+            if (!OriginAllowed(ctx)) { ctx.Response.StatusCode = 403; return; }
             string room = NormalizeRoom(ctx.Request.Query["room"].ToString());
             bool isPrivate = ctx.Request.Query["private"].ToString() == "1";
             var setup = ParseSetup(ctx.Request.Query["setup"].ToString());
@@ -79,36 +82,44 @@ namespace HexWars.NetServer
             Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} setup=({setup.Mode} {setup.Width}x{setup.Height} pts{setup.StartingPoints} seed{setup.Seed}) total={Conns.Count}");
             try
             {
-                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly, token)));
+                Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly, token));
                 while (socket.State == WebSocketState.Open)
                 {
                     string? text = await Receive(socket);
-                    if (text is null) break;          // closed / errored
+                    if (text is null) break;          // closed / errored / over the size cap
                     if (text.Length == 0) continue;
                     Console.WriteLine($"[ws] RECV  room={room} id={conn.Id[..8]}: {text}");
-                    await Dispatch(Locked(() => Hub.Receive(room, conn.Id, text)));
+                    Locked(() => Hub.Receive(room, conn.Id, text));
                 }
             }
             finally
             {
                 Console.WriteLine($"[ws] DISCONNECT room={room} id={conn.Id[..8]}");
-                Locked(() => Hub.Disconnect(room, conn.Id)); // free the seat so a refresh/rejoin can re-take it
+                // Only drops this connection's membership/token mapping — a Started room's seat itself is
+                // HELD (see MatchHub) for HoldWindowTicks so the same token can reclaim it on reconnect.
+                Locked(() => Hub.Disconnect(room, conn.Id));
                 Conns.TryRemove(conn.Id, out _);
+                conn.Close();
                 if (socket.State == WebSocketState.Open)
                     try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", default); } catch { }
             }
         }
 
-        // MatchHub isn't thread-safe; serialize all access. Calls are synchronous and fast (no awaits).
-        static IReadOnlyList<Outbound> Locked(Func<IReadOnlyList<Outbound>> f) { lock (HubLock) return f(); }
-
-        static async Task Dispatch(IReadOnlyList<Outbound> outs)
+        // MatchHub isn't thread-safe; serialize all access. The outbound Enqueue below is synchronous
+        // (a Channel Write never blocks/awaits), so it runs INSIDE the lock along with the hub call —
+        // this is what closes the APPLY-ordering race: two concurrent Handle() calls can no longer
+        // interleave their actual sends, because "compute the outbound messages" and "hand them to each
+        // connection's own ordered queue" are now one atomic, lock-serialized step (audit N2).
+        static void Locked(Func<IReadOnlyList<Outbound>> f)
         {
-            foreach (var o in outs)
+            lock (HubLock)
             {
-                Console.WriteLine($"[ws] SEND  -> {o.ConnectionId[..8]}: {(o.Message.Length > 60 ? o.Message[..60] + "…" : o.Message)}");
-                if (Conns.TryGetValue(o.ConnectionId, out var c))
-                    try { await c.Send(o.Message); } catch { /* drop a dead socket; cleanup happens on its own loop */ }
+                var outs = f();
+                foreach (var o in outs)
+                {
+                    Console.WriteLine($"[ws] SEND  -> {o.ConnectionId[..8]}: {(o.Message.Length > 60 ? o.Message[..60] + "…" : o.Message)}");
+                    if (Conns.TryGetValue(o.ConnectionId, out var c)) c.Enqueue(o.Message);
+                }
             }
         }
 
@@ -123,8 +134,27 @@ namespace HexWars.NetServer
                 catch { return null; }
                 if (res.MessageType == WebSocketMessageType.Close) return null;
                 ms.Write(buf, 0, res.Count);
+                if (ms.Length > MaxIncomingBytes)
+                {
+                    try { await socket.CloseAsync(WebSocketCloseStatus.MessageTooBig, "message too large", CancellationToken.None); } catch { }
+                    return null;
+                }
             } while (!res.EndOfMessage);
             return Encoding.UTF8.GetString(ms.ToArray());
+        }
+
+        /// <summary>When both an Origin header and a request Host are present, reject a mismatched
+        /// Origin before Accept (audit M13) — closes cross-site WebSocket hijacking of a logged-in
+        /// session. Absent/unparseable Origin (non-browser clients, the in-process selftest) is allowed
+        /// through unchanged, matching the spec's "when both present" scope.</summary>
+        static bool OriginAllowed(HttpContext ctx)
+        {
+            string origin = ctx.Request.Headers.Origin.ToString();
+            string host = ctx.Request.Host.Value;
+            if (string.IsNullOrEmpty(origin) || string.IsNullOrEmpty(host)) return true;
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri)) return true;
+            string originAuthority = originUri.IsDefaultPort ? originUri.Host : $"{originUri.Host}:{originUri.Port}";
+            return string.Equals(originAuthority, host, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>Parse the host's lobby picks from the connect query (?setup=...); default if absent/bad.</summary>
@@ -152,20 +182,37 @@ namespace HexWars.NetServer
         internal static IReadOnlyList<OpenGame> OpenGamesSnapshot() { lock (HubLock) return Hub.OpenGames(); }
     }
 
-    /// <summary>One live connection: its id + socket, with sends serialized (one SendAsync at a time).</summary>
+    /// <summary>One live connection: its id + socket, with an ordered per-connection outbound queue (a
+    /// single writer task drains it) instead of a semaphore around SendAsync — Enqueue is synchronous
+    /// and never blocks the hub-lock caller (see Program.Locked).</summary>
     sealed class Conn
     {
         public readonly string Id;
         public readonly WebSocket Socket;
-        readonly SemaphoreSlim _send = new(1, 1);
+        readonly Channel<string> _outbox = Channel.CreateUnbounded<string>();
+        readonly Task _writer;
 
-        public Conn(string id, WebSocket socket) { Id = id; Socket = socket; }
-
-        public async Task Send(string msg)
+        public Conn(string id, WebSocket socket)
         {
-            await _send.WaitAsync();
-            try { await Socket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None); }
-            finally { _send.Release(); }
+            Id = id;
+            Socket = socket;
+            _writer = Task.Run(PumpAsync);
         }
+
+        /// <summary>Enqueue a message for this connection's single writer task. Never blocks or throws —
+        /// an unbounded channel Write always succeeds synchronously.</summary>
+        public void Enqueue(string msg) => _outbox.Writer.TryWrite(msg);
+
+        async Task PumpAsync()
+        {
+            await foreach (var msg in _outbox.Reader.ReadAllAsync())
+            {
+                try { await Socket.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None); }
+                catch { /* dead socket; Handle's own receive loop notices and cleans up */ }
+            }
+        }
+
+        /// <summary>Stop accepting new messages and let the writer task drain what's already queued.</summary>
+        public void Close() => _outbox.Writer.TryComplete();
     }
 }

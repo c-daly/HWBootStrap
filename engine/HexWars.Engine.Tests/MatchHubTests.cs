@@ -97,6 +97,17 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Receive_MalformedCommand_RejectsIssuerOnly_NoBroadcast()
+        {
+            var hub = NewHub();
+            hub.Connect("r", "a");
+            hub.Connect("r", "b");
+            var outs = hub.Receive("r", "a", "CMD Z garbage");
+            Assert.That(outs, Has.Some.Matches<Outbound>(o => o.ConnectionId == "a" && o.Message == NetProtocol.Malformed));
+            Assert.That(outs, Has.None.Matches<Outbound>(o => o.Message.StartsWith("APPLY")));
+        }
+
+        [Test]
         public void Connect_RoomBuiltFromHostSetup_NotJoiners()
         {
             var hub = new MatchHub(GameFactory.Build); // the real factory turns the host's setup into the game

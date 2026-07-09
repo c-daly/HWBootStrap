@@ -47,6 +47,23 @@ namespace HexWars.Engine
             }
         }
 
+        /// <summary>Reads a wire line and returns false (instead of throwing) on any malformed input —
+        /// unknown token, truncated payload, non-numeric field. Used by the server so one garbled
+        /// client message can never crash the room (spec §3, audit N4).</summary>
+        public static bool TryRead(string line, out Command? command)
+        {
+            try
+            {
+                command = Read(line);
+                return true;
+            }
+            catch
+            {
+                command = null;
+                return false;
+            }
+        }
+
         internal static string WriteStats(UnitStats s) =>
             $"{s.Health} {s.Damage} {s.Defense} {s.Movement} {s.VerticalMovement} {s.Range} {s.RangeArc} {s.Vision} {s.VisionArc}";
 

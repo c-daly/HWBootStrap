@@ -61,6 +61,41 @@ namespace HexWars.Engine.Tests
         [Test] public void DeleteTemplate_RoundTrips() => RoundTrips(new DeleteTemplate(P0, 1));
 
         [Test]
+        public void TryRead_ValidLine_ReturnsTrueAndCommand()
+        {
+            Assert.That(CommandWire.TryRead("E 0", out var cmd), Is.True);
+            Assert.That(cmd, Is.EqualTo(new EndTurn(P0)));
+        }
+
+        [Test]
+        public void TryRead_UnknownToken_ReturnsFalse()
+        {
+            Assert.That(CommandWire.TryRead("Z 0", out var cmd), Is.False);
+            Assert.That(cmd, Is.Null);
+        }
+
+        [Test]
+        public void TryRead_TruncatedLine_ReturnsFalse()
+        {
+            Assert.That(CommandWire.TryRead("M 0", out var cmd), Is.False); // MoveUnit needs more tokens
+            Assert.That(cmd, Is.Null);
+        }
+
+        [Test]
+        public void TryRead_EmptyString_ReturnsFalse()
+        {
+            Assert.That(CommandWire.TryRead("", out var cmd), Is.False);
+            Assert.That(cmd, Is.Null);
+        }
+
+        [Test]
+        public void TryRead_NonNumericIssuer_ReturnsFalse()
+        {
+            Assert.That(CommandWire.TryRead("E notanumber", out var cmd), Is.False);
+            Assert.That(cmd, Is.Null);
+        }
+
+        [Test]
         public void Read_UnknownToken_Throws()
         {
             Assert.That(() => CommandWire.Read("Z 0"), Throws.Exception);
