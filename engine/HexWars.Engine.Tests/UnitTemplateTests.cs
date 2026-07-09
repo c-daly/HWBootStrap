@@ -44,5 +44,12 @@ namespace HexWars.Engine.Tests
             // the invariant that makes CommandWire.DecodeName (underscore -> space) lossless:
             // a sanitized name can never contain a literal underscore
             Assert.That(UnitTemplate.Sanitize("a_b_c"), Is.EqualTo("abc"));
+
+        [Test]
+        public void Sanitize_TrimsWhitespaceUncoveredByStrippingDisallowedChars() =>
+            // "♥ foo" has no leading/trailing whitespace before filtering — only after the '♥' is
+            // stripped does the leading space become an edge, so this only fails without the
+            // post-filter Trim().
+            Assert.That(UnitTemplate.Sanitize("♥ foo"), Is.EqualTo("foo"));
     }
 }
