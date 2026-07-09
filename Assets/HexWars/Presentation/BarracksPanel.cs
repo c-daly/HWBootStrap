@@ -143,15 +143,23 @@ namespace HexWars.Presentation
                 cheapest = Mathf.Min(cheapest, cost);
                 bool selected = i == _deployIndex;
                 int idx = i;
+                // Interactable is baked from isActiveHuman ONLY — deliberately NOT ReadOnly (final
+                // review N1): AiOpponent flips ReadOnly in its Update, one frame AFTER the AI's final
+                // EndTurn already ran this Rebuild (StateChanged fires synchronously inside TryApply),
+                // and nothing rebuilds again until the human acts — baking !ReadOnly here left the
+                // whole panel dead with silent clicks at the top of every human turn. isActiveHuman is
+                // computed from the STATE (ShownSeat vs ActivePlayer), so the hand-back rebuild enables
+                // the rows immediately. Spectators (ReadOnly, set once by SpectatorDriver) are stopped
+                // by the LIVE guards at click time instead: Select/DeleteAt/Update all check ReadOnly.
                 var row = UiKit.Button(_list, $"{name}   deploy {cost}", -20f, -(4f + i * 34f), 170f, 30f,
                                        () => Select(idx), UiKit.ButtonStyle.Secondary);
                 UiKit.SetToggled(row, selected);
-                row.interactable = !ReadOnly && isActiveHuman;
+                row.interactable = isActiveHuman;
                 _rows.Add(row);
 
                 var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 34f), 32f, 30f,
                                        () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
-                del.interactable = !ReadOnly && isActiveHuman;
+                del.interactable = isActiveHuman;
                 _rows.Add(del);
             }
 
@@ -173,6 +181,7 @@ namespace HexWars.Presentation
 
         void Select(int i)
         {
+            if (ReadOnly) return; // live spectator guard — rows render interactable (see Rebuild's N1 note)
             _deployIndex = (_deployIndex == i) ? -1 : i; // toggle
             Rebuild();
         }

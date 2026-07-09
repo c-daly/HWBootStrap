@@ -484,6 +484,15 @@ namespace HexWars.Presentation
             EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             CheckFirstBounty(prev, cmd);
+            // The server confirmed THIS client's own CreateUnit (final review N2): the success cues
+            // DesignPanel.OnCreate deliberately skips online (its optimistic TryApply `true` isn't a
+            // verdict) fire here instead, on the real APPLY — the same sound + name-box clear the
+            // local path plays synchronously. The opponent's creates stay silent, as before.
+            if (cmd is CreateUnit && IsLocalCommand(cmd))
+            {
+                SoundManager.Play(SoundKind.Design);
+                FindAnyObjectByType<DesignPanel>()?.ConfirmCreate();
+            }
             StateChanged?.Invoke();
         }
 

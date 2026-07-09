@@ -206,15 +206,28 @@ namespace HexWars.Presentation
             {
                 // TryApply's optimistic `true` for a Networked game isn't a server verdict — the server
                 // may yet reject it, so the visible "it worked" cues (sound + clearing the name box)
-                // must wait for the real APPLY/REJECT round-trip, not fire on the local guess.
+                // must wait for the real APPLY/REJECT round-trip: GameBootstrap.OnNetApply calls
+                // ConfirmCreate() below when the server echoes this client's own CreateUnit back.
                 if (!_game.Networked)
                 {
                     SoundManager.Play(SoundKind.Design);
-                    _name = "";
-                    RotatePlaceholder(); // a fresh empty box next time shows a different example
-                    ApplyNameDisplay();
+                    ConfirmCreate();
                 }
             }
+        }
+
+        /// <summary>The success bookkeeping shared by both create paths: clear the name box and rotate
+        /// to a fresh placeholder example. Local (hotseat/vs-AI) creates call it synchronously from
+        /// OnCreate above; online, GameBootstrap.OnNetApply calls it when the server's APPLY confirms
+        /// this client's own CreateUnit (final review N2 — the optimistic TryApply `true` was never a
+        /// verdict, so online the box used to stay stale and the create was silent). The Design sound
+        /// stays with the callers. Guard the label: the Tips-toggle rebuild in Update destroys and
+        /// recreates the canvas, so _nameBox can be a destroyed reference for a frame.</summary>
+        public void ConfirmCreate()
+        {
+            _name = "";
+            RotatePlaceholder(); // a fresh empty box next time shows a different example
+            if (_nameBox != null) ApplyNameDisplay();
         }
     }
 }
