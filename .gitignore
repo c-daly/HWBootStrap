@@ -91,3 +91,12 @@ engine/**/obj/
 # Engine DLL placed in Unity is a build artifact — regenerate with engine/build-to-unity.ps1
 Assets/HexWars/Plugins/HexWars.Engine.dll
 Assets/HexWars/Plugins/HexWars.Engine.dll.meta
+
+# Vendor asset kits: local-only, never committed (1.2GB model kit; the game copies the few
+# files it uses into Assets/HexWars/Audio, which IS tracked). Unity crash-recovery snapshots too.
+Assets/Creepy_Cat/
+Assets/Creepy_Cat.meta
+Assets/Deep_In_Space/
+Assets/Deep_In_Space.meta
+Assets/_Recovery/
+Assets/_Recovery.meta
