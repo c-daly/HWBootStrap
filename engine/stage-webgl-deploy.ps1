@@ -22,7 +22,10 @@ if (Test-Path (Join-Path $src "StreamingAssets")) {
 # build's URLs unique so old and new can never mix.
 $v = (Get-FileHash (Join-Path $dst "Build\WebGL.data.unityweb") -Algorithm SHA256).Hash.Substring(0, 8).ToLower()
 $idx = Join-Path $dst "index.html"
-$html = (Get-Content $idx -Raw) -replace '(Build/WebGL\.(?:data\.unityweb|framework\.js\.unityweb|wasm\.unityweb|loader\.js))', ('$1?v=' + $v)
+# Read/write via System.IO with explicit BOM-less UTF-8: PowerShell 5.1's Get-Content decodes
+# BOM-less files through the SYSTEM CODEPAGE, mojibake-ing the template's own non-ASCII (the
+# live loading screen showed "Loading HexWarsâ€¦" for weeks), and -Encoding utf8 writes a BOM.
+$html = [System.IO.File]::ReadAllText($idx, [System.Text.Encoding]::UTF8) -replace '(Build/WebGL\.(?:data\.unityweb|framework\.js\.unityweb|wasm\.unityweb|loader\.js))', ('$1?v=' + $v)
 
 # Share-card + PWA tags: the Unity template owns index.html, so staging is the one place post-build
 # HTML edits happen — this extends the same rewrite step above rather than adding a second pass.
@@ -50,6 +53,6 @@ if ($html -notmatch 'og:title') {
     $html = $html -replace '</head>', $headInject
 }
 
-Set-Content $idx -Value $html -Encoding utf8 -NoNewline
+[System.IO.File]::WriteAllText($idx, $html, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host "Staged $src -> $dst with cache-bust v=$v  (now: git add/commit, then push from WSL)"
