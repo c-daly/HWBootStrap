@@ -14,7 +14,7 @@ namespace HexWars.Engine.Tests
         {
             var board = new Board(new[] { new Tile(A, 0, TerrainType.Plains), new Tile(B, 0, TerrainType.Plains) })
                 .WithControl(A, PlayerId.Player0);
-            var p0 = new PlayerState(PlayerId.Player0, 100, new[] { S });
+            var p0 = new PlayerState(PlayerId.Player0, 100, new[] { new UnitTemplate("", S) });
             var p1 = new PlayerState(PlayerId.Player1, 0);
             var cfg = GameConfig.Default(biomesEnabled: false, territoryMode: true);
             return new GameState(board, cfg, new[] { p0, p1 }, PlayerId.Player0, 2, 9);

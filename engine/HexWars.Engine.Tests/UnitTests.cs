@@ -46,5 +46,35 @@ namespace HexWars.Engine.Tests
             Assert.That(moved.Elevation, Is.EqualTo(3));
             Assert.That(moved.CurrentHp, Is.EqualTo(3));
         }
+
+        [Test]
+        public void DisplayName_ReturnsName_WhenSet()
+        {
+            var u = new Unit(1, PlayerId.Player0, Hp(5), new HexCoord(0, 0), 0, "Doom Turtle");
+            Assert.That(u.DisplayName, Is.EqualTo("Doom Turtle"));
+        }
+
+        [Test]
+        public void DisplayName_FallsBackToDominantRole_WhenNameEmpty()
+        {
+            var brute = new UnitStats(7, 2, 2, 3, 2, 1, 1, 2, 1); // dominant stat: Health -> Brute
+            var u = new Unit(1, PlayerId.Player0, brute, new HexCoord(0, 0), 0);
+            Assert.That(u.Name, Is.EqualTo(""));
+            Assert.That(u.DisplayName, Is.EqualTo("Brute"));
+        }
+
+        [Test]
+        public void WithDamage_PreservesName()
+        {
+            var u = new Unit(1, PlayerId.Player0, Hp(5), new HexCoord(0, 0), 0, "Recon");
+            Assert.That(u.WithDamage(2).Name, Is.EqualTo("Recon"));
+        }
+
+        [Test]
+        public void WithCell_PreservesName()
+        {
+            var u = new Unit(1, PlayerId.Player0, Hp(5), new HexCoord(0, 0), 0, "Recon");
+            Assert.That(u.WithCell(new HexCoord(1, 1), 0).Name, Is.EqualTo("Recon"));
+        }
     }
 }

@@ -54,7 +54,8 @@ namespace HexWars.Engine.Rl
             var u0 = BuildRoster(board, PlayerId.Player0, ref nextId);
             var u1 = BuildRoster(board, PlayerId.Player1, ref nextId);
             // seed each side's barracks with the roster types so they can DEPLOY reinforcements from bounty
-            var templates = new List<UnitStats>(RosterStats);
+            var templates = new List<UnitTemplate>();
+            foreach (var s in RosterStats) templates.Add(new UnitTemplate("", s));
             var p0 = new PlayerState(PlayerId.Player0, 0, templates, u0, null);
             var p1 = new PlayerState(PlayerId.Player1, 0, templates, u1, null);
             var state = new GameState(board, Game, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);

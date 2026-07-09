@@ -53,8 +53,8 @@ namespace HexWars.Engine
             foreach (var u in p.UnitsOnBoard)
                 if (u.IsAlive) return false; // still has an army
 
-            foreach (var stats in p.Barracks)
-                if (p.Points >= Economy.DeployCost(stats, state.Config)) return false; // can redeploy
+            foreach (var t in p.Barracks)
+                if (p.Points >= Economy.DeployCost(t.Stats, state.Config)) return false; // can redeploy
 
             return true; // no units and nothing it can field
         }

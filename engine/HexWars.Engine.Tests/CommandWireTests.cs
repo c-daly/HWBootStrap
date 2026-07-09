@@ -24,6 +24,25 @@ namespace HexWars.Engine.Tests
         [Test] public void MoveUnit_RoundTrips() => RoundTrips(new MoveUnit(P0, 7, new HexCoord(3, -2)));
         [Test] public void AttackUnit_RoundTrips() => RoundTrips(new AttackUnit(P0, 7, 12));
         [Test] public void CreateUnit_RoundTrips() => RoundTrips(new CreateUnit(P1, new UnitStats(3, 4, 1, 2, 1, 2, 1, 3, 1)));
+
+        [Test]
+        public void CreateUnit_RoundTrips_WithName() =>
+            RoundTrips(new CreateUnit(P1, new UnitStats(3, 4, 1, 2, 1, 2, 1, 3, 1), "Doom Turtle"));
+
+        [Test]
+        public void CreateUnit_Read_OldFormatMissingNameToken_DefaultsToEmptyName()
+        {
+            var cmd = (CreateUnit)CommandWire.Read("C 1 3 4 1 2 1 2 1 3 1");
+            Assert.That(cmd.Name, Is.EqualTo(""));
+        }
+
+        [Test]
+        public void CreateUnit_Write_EncodesSpacesAsUnderscores()
+        {
+            var wire = CommandWire.Write(new CreateUnit(P0, new UnitStats(1, 0, 0, 0, 0, 0, 0, 0, 0), "Doom Turtle"));
+            Assert.That(wire, Does.EndWith(" Doom_Turtle"));
+        }
+
         [Test] public void DeployUnit_RoundTrips() => RoundTrips(new DeployUnit(P0, 2, new HexCoord(-1, 4)));
         [Test] public void DeployGenerator_RoundTrips() => RoundTrips(new DeployGenerator(P1, new HexCoord(0, 0)));
         [Test] public void CaptureHex_RoundTrips() => RoundTrips(new CaptureHex(P0, new HexCoord(5, -3)));

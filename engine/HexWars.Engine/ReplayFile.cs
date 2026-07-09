@@ -214,7 +214,8 @@ namespace HexWars.Engine
             {
                 sb.Append("U ").Append(u.Id).Append(' ').Append((int)u.Owner).Append(' ');
                 AppendStats(sb, u.Stats);
-                sb.Append(' ').Append(u.Cell.Q).Append(' ').Append(u.Cell.R).Append(' ').Append(u.Elevation).Append('\n');
+                sb.Append(' ').Append(u.Cell.Q).Append(' ').Append(u.Cell.R).Append(' ').Append(u.Elevation)
+                  .Append(' ').Append(CommandWire.EncodeName(u.Name)).Append('\n');
             }
             foreach (var g in p.Generators)
                 sb.Append("G ").Append(g.Id).Append(' ').Append((int)g.Owner).Append(' ')
@@ -222,7 +223,8 @@ namespace HexWars.Engine
             foreach (var b in p.Barracks)
             {
                 sb.Append("B ");
-                AppendStats(sb, b);
+                AppendStats(sb, b.Stats);
+                sb.Append(' ').Append(CommandWire.EncodeName(b.Name));
                 sb.Append('\n');
             }
         }
@@ -235,14 +237,15 @@ namespace HexWars.Engine
 
             var unitList = new List<Unit>(units);
             var genList = new List<Generator>(gens);
-            var barracks = new List<UnitStats>(barr);
+            var barracks = new List<UnitTemplate>(barr);
 
             for (int i = 0; i < units; i++)
             {
-                var p = next().Split(' ');           // U id owner <9 stats> q r elev
+                var p = next().Split(' ');           // U id owner <9 stats> q r elev [name]
                 int id = I(p[1]); var owner = (PlayerId)I(p[2]);
                 var stats = ReadStats(p, 3);
-                unitList.Add(new Unit(id, owner, stats, new HexCoord(I(p[12]), I(p[13])), I(p[14])));
+                string name = p.Length > 15 ? CommandWire.DecodeName(p[15]) : ""; // old payloads: no name token
+                unitList.Add(new Unit(id, owner, stats, new HexCoord(I(p[12]), I(p[13])), I(p[14]), name));
             }
             for (int i = 0; i < gens; i++)
             {
@@ -250,7 +253,12 @@ namespace HexWars.Engine
                 genList.Add(new Generator(I(p[1]), (PlayerId)I(p[2]), new HexCoord(I(p[3]), I(p[4])), I(p[5]), I(p[6])));
             }
             for (int i = 0; i < barr; i++)
-                barracks.Add(ReadStats(next().Split(' '), 1)); // B <9 stats>
+            {
+                var p = next().Split(' ');            // B <9 stats> [name]
+                var stats = ReadStats(p, 1);
+                string name = p.Length > 10 ? CommandWire.DecodeName(p[10]) : ""; // old payloads: no name token
+                barracks.Add(new UnitTemplate(name, stats));
+            }
 
             return new PlayerState(expected, points, barracks, unitList, genList);
         }

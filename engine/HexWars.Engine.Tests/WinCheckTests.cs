@@ -18,7 +18,7 @@ namespace HexWars.Engine.Tests
             var unit = new Unit(1, PlayerId.Player0, Cost(4), new HexCoord(0, 0), 0);
             var gen = new Generator(2, PlayerId.Player0, new HexCoord(0, 0), 0, 3);
             var p0 = new PlayerState(PlayerId.Player0, 5,
-                barracks: new[] { Cost(3) }, unitsOnBoard: new[] { unit }, generators: new[] { gen });
+                barracks: new[] { new UnitTemplate("", Cost(3)) }, unitsOnBoard: new[] { unit }, generators: new[] { gen });
 
             // 5 banked + 4 unit + 2 generator(cost) = 11 (free barracks template adds nothing)
             Assert.That(WinCheck.Evaluate(State(p0, new PlayerState(PlayerId.Player1, 0), 2), PlayerId.Player0),
@@ -36,7 +36,7 @@ namespace HexWars.Engine.Tests
         public void IsEliminated_False_WhenCanRedeployAnAffordableTemplate()
         {
             // no units, but an existing template you can pay to redeploy = a comeback is still possible
-            var s = State(new PlayerState(PlayerId.Player0, 1, barracks: new[] { Cost(1) }),
+            var s = State(new PlayerState(PlayerId.Player0, 1, barracks: new[] { new UnitTemplate("", Cost(1)) }),
                           new PlayerState(PlayerId.Player1, 0), 2);
             Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.False);
         }
@@ -54,7 +54,7 @@ namespace HexWars.Engine.Tests
         public void IsEliminated_True_WithBarracksTemplate_ButCannotAffordToDeployIt()
         {
             // a reusable template doesn't help if you can't pay the deploy cost
-            var s = State(new PlayerState(PlayerId.Player0, 0, barracks: new[] { Cost(1) }),
+            var s = State(new PlayerState(PlayerId.Player0, 0, barracks: new[] { new UnitTemplate("", Cost(1)) }),
                           new PlayerState(PlayerId.Player1, 0), 2);
             Assert.That(WinCheck.IsEliminated(s, PlayerId.Player0), Is.True);
         }

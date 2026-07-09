@@ -151,8 +151,11 @@ namespace HexWars.Engine
             var units = new List<Unit>();
             for (int i = 0; i < army.Length && i < flat.Count; i++)
                 units.Add(new Unit(nextId++, id, army[i], flat[i], 0));
-            // pre-seed the barracks with the default roster so players can deploy without designing first
-            return new PlayerState(id, startingPoints, new List<UnitStats>(Roster), units, null);
+            // pre-seed the barracks with the default roster so players can deploy without designing first.
+            // TODO(Task 3): replaced by the five-entry named starter set (GameFactory.StarterTemplates).
+            var barracks = new List<UnitTemplate>();
+            foreach (var s in Roster) barracks.Add(new UnitTemplate("", s));
+            return new PlayerState(id, startingPoints, barracks, units, null);
         }
     }
 }

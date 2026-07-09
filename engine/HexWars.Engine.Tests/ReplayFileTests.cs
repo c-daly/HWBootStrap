@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using HexWars.Engine;
 using NUnit.Framework;
@@ -126,7 +127,7 @@ namespace HexWars.Engine.Tests
 
             var u0 = new Unit(1, P0, stats, z0[0], board.TileAt(z0[0]).Elevation);
             var g0 = new Generator(2, P0, z0[1], board.TileAt(z0[1]).Elevation, 10);
-            var p0 = new PlayerState(P0, 15, new[] { stats }, new[] { u0 }, new[] { g0 });
+            var p0 = new PlayerState(P0, 15, new[] { new UnitTemplate("Vanguard", stats) }, new[] { u0 }, new[] { g0 });
             var u1 = new Unit(3, P1, stats, z1[0], board.TileAt(z1[0]).Elevation);
             var p1 = new PlayerState(P1, 15, null, new[] { u1 }, null);
             var start = new GameState(board, GameConfig.Default(), new[] { p0, p1 }, P0, 1, 4);
@@ -150,7 +151,61 @@ namespace HexWars.Engine.Tests
             Assert.That(rp0.Generators.Count, Is.EqualTo(1));
             Assert.That(rp0.Generators[0].CurrentHp, Is.EqualTo(10));
             Assert.That(rp0.Barracks.Count, Is.EqualTo(1));
+            Assert.That(rp0.Barracks[0].Name, Is.EqualTo("Vanguard"));
             Assert.That(s.Player(P1).UnitsOnBoard.Count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void UnitAndBarracks_Name_RoundTrip()
+        {
+            var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);
+            var stats = new UnitStats(3, 3, 1, 2, 1, 1, 1, 2, 1);
+            var z0 = new List<HexCoord>(board.DeploymentZone(P0));
+
+            var u0 = new Unit(1, P0, stats, z0[0], board.TileAt(z0[0]).Elevation, "Doom Turtle");
+            var p0 = new PlayerState(P0, 10, new[] { new UnitTemplate("Longshot", stats) }, new[] { u0 });
+            var p1 = new PlayerState(P1, 10);
+            var start = new GameState(board, GameConfig.Default(), new[] { p0, p1 }, P0, 1, 2);
+
+            var s = ReplayFile.Read(ReplayFile.Write(start, new List<Command>())).Start;
+            var rp0 = s.Player(P0);
+
+            Assert.That(rp0.UnitsOnBoard[0].Name, Is.EqualTo("Doom Turtle"));
+            Assert.That(rp0.Barracks[0].Name, Is.EqualTo("Longshot"));
+        }
+
+        [Test]
+        public void OldFormatReplay_MissingNameTokens_DefaultsToEmptyNames()
+        {
+            var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);
+            var stats = new UnitStats(3, 3, 1, 2, 1, 1, 1, 2, 1);
+            var z0 = new List<HexCoord>(board.DeploymentZone(P0));
+
+            var u0 = new Unit(1, P0, stats, z0[0], board.TileAt(z0[0]).Elevation, "Recon");
+            var p0 = new PlayerState(P0, 10, new[] { new UnitTemplate("Vanguard", stats) }, new[] { u0 });
+            var p1 = new PlayerState(P1, 10);
+            var start = new GameState(board, GameConfig.Default(), new[] { p0, p1 }, P0, 1, 2);
+
+            string modern = ReplayFile.Write(start, new List<Command>());
+
+            // Simulate a pre-name-feature payload by dropping the trailing name token from each U/B
+            // line — exactly what a file written before this feature shipped looks like.
+            var oldLines = modern.Replace("\r\n", "\n").Split('\n');
+            for (int i = 0; i < oldLines.Length; i++)
+            {
+                if (oldLines[i].StartsWith("U ", StringComparison.Ordinal) || oldLines[i].StartsWith("B ", StringComparison.Ordinal))
+                {
+                    int lastSpace = oldLines[i].LastIndexOf(' ');
+                    oldLines[i] = oldLines[i].Substring(0, lastSpace);
+                }
+            }
+            string old = string.Join("\n", oldLines);
+
+            var s = ReplayFile.Read(old).Start;
+            var rp0 = s.Player(P0);
+            Assert.That(rp0.UnitsOnBoard[0].Name, Is.EqualTo(""), "old payloads with no trailing unit-name token default to \"\"");
+            Assert.That(rp0.Barracks[0].Name, Is.EqualTo(""), "old payloads with no trailing barracks-name token default to \"\"");
+            Assert.That(rp0.UnitsOnBoard[0].Stats.Damage, Is.EqualTo(3), "everything else still parses");
         }
     }
 }

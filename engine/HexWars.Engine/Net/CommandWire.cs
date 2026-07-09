@@ -18,7 +18,7 @@ namespace HexWars.Engine
                 case MoveUnit m:        return $"M {(int)m.Issuer} {m.UnitId} {m.Dest.Q} {m.Dest.R}";
                 case AttackUnit a:      return $"A {(int)a.Issuer} {a.AttackerId} {a.TargetId}";
                 case EndTurn e:         return $"E {(int)e.Issuer}";
-                case CreateUnit cu:     return $"C {(int)cu.Issuer} {WriteStats(cu.Stats)}";
+                case CreateUnit cu:     return $"C {(int)cu.Issuer} {WriteStats(cu.Stats)} {EncodeName(cu.Name)}";
                 case DeployUnit d:      return $"D {(int)d.Issuer} {d.TemplateIndex} {d.Cell.Q} {d.Cell.R}";
                 case DeployGenerator g: return $"N {(int)g.Issuer} {g.Cell.Q} {g.Cell.R}";
                 case CaptureHex h:      return $"H {(int)h.Issuer} {h.Cell.Q} {h.Cell.R}";
@@ -36,7 +36,7 @@ namespace HexWars.Engine
                 case "M": return new MoveUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
                 case "A": return new AttackUnit(issuer, I(p[2]), I(p[3]));
                 case "E": return new EndTurn(issuer);
-                case "C": return new CreateUnit(issuer, ReadStats(p, 2));
+                case "C": return new CreateUnit(issuer, ReadStats(p, 2), p.Length > 11 ? DecodeName(p[11]) : "");
                 case "D": return new DeployUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
                 case "N": return new DeployGenerator(issuer, new HexCoord(I(p[2]), I(p[3])));
                 case "H": return new CaptureHex(issuer, new HexCoord(I(p[2]), I(p[3])));
@@ -51,6 +51,16 @@ namespace HexWars.Engine
         internal static UnitStats ReadStats(string[] p, int o) =>
             new UnitStats(I(p[o]), I(p[o + 1]), I(p[o + 2]), I(p[o + 3]), I(p[o + 4]),
                           I(p[o + 5]), I(p[o + 6]), I(p[o + 7]), I(p[o + 8]));
+
+        /// <summary>Wire-encode a sanitized name: spaces become underscores so it survives the
+        /// space-separated line (names never contain any other whitespace after Sanitize). Empty
+        /// name encodes to "" — on write this leaves a trailing space, so Split(' ') still yields an
+        /// (empty-string) final token; readers use that to distinguish "new format, no name" from
+        /// "old format, no token at all" (see Read/DecodeName call sites).</summary>
+        internal static string EncodeName(string name) => string.IsNullOrEmpty(name) ? "" : name.Replace(' ', '_');
+
+        /// <summary>Inverse of <see cref="EncodeName"/>.</summary>
+        internal static string DecodeName(string token) => string.IsNullOrEmpty(token) ? "" : token.Replace('_', ' ');
 
         private static int I(string s) => int.Parse(s, CultureInfo.InvariantCulture);
     }

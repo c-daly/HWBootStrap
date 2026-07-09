@@ -110,7 +110,7 @@ namespace HexWars.Presentation
 
             for (int i = 0; i < p.Barracks.Count; i++)
             {
-                var stats = p.Barracks[i];
+                var stats = p.Barracks[i].Stats;   // Task 10 rebuilds this row properly (name + delete)
                 int cost = Economy.DeployCost(stats, s.Config);
                 bool selected = i == _deployIndex;
                 int idx = i;

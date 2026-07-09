@@ -88,7 +88,8 @@ namespace HexWars.Engine
             int fee = state.Config.DesignFee;
             if (player.Points < fee) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
-            var barracks = new List<UnitStats>(player.Barracks) { c.Stats }; // reusable template
+            var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            var barracks = new List<UnitTemplate>(player.Barracks) { template }; // reusable template
             var updated = new PlayerState(player.Id, player.Points - fee, barracks,
                                           player.UnitsOnBoard, player.Generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated));
@@ -135,11 +136,11 @@ namespace HexWars.Engine
             if (!state.Config.Terrain(tile.Terrain).Passable) return Result.Reject(state, RejectionReason.TileImpassable);
             if (IsOccupied(state, c.Cell)) return Result.Reject(state, RejectionReason.TileOccupied);
 
-            var stats = player.Barracks[c.TemplateIndex];
-            int cost = Economy.DeployCost(stats, state.Config);
+            var template = player.Barracks[c.TemplateIndex];
+            int cost = Economy.DeployCost(template.Stats, state.Config);
             if (player.Points < cost) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
-            var unit = new Unit(state.NextEntityId, c.Issuer, stats, c.Cell, tile.Elevation);
+            var unit = new Unit(state.NextEntityId, c.Issuer, template.Stats, c.Cell, tile.Elevation, template.Name);
             var units = new List<Unit>(player.UnitsOnBoard) { unit };
 
             // barracks is unchanged — the template is reusable

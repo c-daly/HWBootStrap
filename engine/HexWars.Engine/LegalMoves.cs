@@ -28,7 +28,7 @@ namespace HexWars.Engine
 
             for (int i = 0; i < player.Barracks.Count; i++)
             {
-                if (player.Points < Economy.DeployCost(player.Barracks[i], state.Config)) continue;
+                if (player.Points < Economy.DeployCost(player.Barracks[i].Stats, state.Config)) continue;
                 foreach (var coord in emptyZone)
                     moves.Add(new DeployUnit(me, i, coord));
             }
