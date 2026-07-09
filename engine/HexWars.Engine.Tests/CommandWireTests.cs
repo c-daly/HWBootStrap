@@ -58,6 +58,8 @@ namespace HexWars.Engine.Tests
         [Test] public void CaptureHex_RoundTrips() => RoundTrips(new CaptureHex(P0, new HexCoord(5, -3)));
         [Test] public void BuildGenerator_RoundTrips() => RoundTrips(new BuildGenerator(P1, new HexCoord(2, 2)));
 
+        [Test] public void DeleteTemplate_RoundTrips() => RoundTrips(new DeleteTemplate(P0, 1));
+
         [Test]
         public void Read_UnknownToken_Throws()
         {

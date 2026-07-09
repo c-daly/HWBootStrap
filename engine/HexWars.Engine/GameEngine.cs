@@ -21,7 +21,9 @@ namespace HexWars.Engine
             var newState = Finalize(result.NewState);
 
             // One-action turn policies auto-end the turn after a single non-EndTurn action.
-            if (!newState.IsGameOver && !(command is EndTurn)
+            // DeleteTemplate is an administrative barracks edit, not a game move — it must never
+            // consume a turn action or trigger an auto-end (see DeleteTemplateTests).
+            if (!newState.IsGameOver && !(command is EndTurn) && !(command is DeleteTemplate)
                 && (newState.Config.TurnPolicy.AutoEndTurnAfter(command, newState)
                     || (newState.Config.TerritoryMode && newState.Config.ClaimEndsTurn && command is CaptureHex)))
             {
@@ -36,6 +38,7 @@ namespace HexWars.Engine
             switch (command)
             {
                 case CreateUnit c: return ApplyCreateUnit(state, c);
+                case DeleteTemplate c: return ApplyDeleteTemplate(state, c);
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
@@ -91,6 +94,19 @@ namespace HexWars.Engine
             var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
             var barracks = new List<UnitTemplate>(player.Barracks) { template }; // reusable template
             var updated = new PlayerState(player.Id, player.Points - fee, barracks,
+                                          player.UnitsOnBoard, player.Generators, player.DestroyedValue);
+            return Result.Ok(WithPlayer(state, updated));
+        }
+
+        private static Result ApplyDeleteTemplate(GameState state, DeleteTemplate c)
+        {
+            var player = state.Player(c.Issuer);
+            if (c.TemplateIndex < 0 || c.TemplateIndex >= player.Barracks.Count)
+                return Result.Reject(state, RejectionReason.TemplateNotFound);
+
+            var barracks = new List<UnitTemplate>(player.Barracks);
+            barracks.RemoveAt(c.TemplateIndex);
+            var updated = new PlayerState(player.Id, player.Points, barracks,
                                           player.UnitsOnBoard, player.Generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated));
         }

@@ -11,6 +11,11 @@ namespace HexWars.Engine
     /// dominant-role fallback happens on the deployed Unit's DisplayName, not here.</summary>
     public sealed record CreateUnit(PlayerId Issuer, UnitStats Stats, string Name = "") : Command(Issuer);
 
+    /// <summary>Delete a barracks template by index — a free administrative edit, not a game move: no
+    /// points, no turn action (see GameEngine.Apply's auto-end-turn guard), and never enumerated by
+    /// LegalMoves (keeps RL action masks untouched).</summary>
+    public sealed record DeleteTemplate(PlayerId Issuer, int TemplateIndex) : Command(Issuer);
+
     /// <summary>Pay for and place an income generator on a hex in the issuer's deployment zone.</summary>
     public sealed record DeployGenerator(PlayerId Issuer, HexCoord Cell) : Command(Issuer);
 
