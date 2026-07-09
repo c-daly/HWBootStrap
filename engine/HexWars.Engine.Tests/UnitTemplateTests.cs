@@ -36,7 +36,13 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Sanitize_KeepsWhitelistedPunctuation() =>
-            Assert.That(UnitTemplate.Sanitize("Mama's Boy_2-nd"), Is.EqualTo("Mama's Boy_2-nd"));
+        public void Sanitize_KeepsWhitelistedPunctuation_ButStripsUnderscore() =>
+            Assert.That(UnitTemplate.Sanitize("Mama's Boy_2-nd"), Is.EqualTo("Mama's Boy2-nd"));
+
+        [Test]
+        public void Sanitize_NeverEmitsUnderscore_SoWireDecodeIsSafe() =>
+            // the invariant that makes CommandWire.DecodeName (underscore -> space) lossless:
+            // a sanitized name can never contain a literal underscore
+            Assert.That(UnitTemplate.Sanitize("a_b_c"), Is.EqualTo("abc"));
     }
 }

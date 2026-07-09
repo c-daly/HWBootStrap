@@ -20,8 +20,11 @@ namespace HexWars.Engine
         }
 
         /// <summary>Sanitize a raw (possibly null, possibly attacker-supplied) name at the engine
-        /// boundary: trim, keep only <c>[A-Za-z0-9 _-']</c>, cap at 20 characters. Null/empty/fully
-        /// stripped input becomes "" — callers fall back to the dominant-role label for display.</summary>
+        /// boundary: trim, keep only <c>[A-Za-z0-9 -']</c>, cap at 20 characters. Null/empty/fully
+        /// stripped input becomes "" — callers fall back to the dominant-role label for display.
+        /// Underscore is deliberately excluded: the wire encoding maps spaces↔underscores
+        /// (CommandWire.EncodeName/DecodeName), so allowing a literal '_' in a name would corrupt
+        /// it on round-trip ("A_B" would come back as "A B").</summary>
         public static string Sanitize(string? raw)
         {
             if (string.IsNullOrEmpty(raw)) return "";
@@ -30,7 +33,7 @@ namespace HexWars.Engine
             {
                 if (sb.Length == 20) break;
                 bool allowed = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
-                               || ch == ' ' || ch == '_' || ch == '-' || ch == '\'';
+                               || ch == ' ' || ch == '-' || ch == '\'';
                 if (allowed) sb.Append(ch);
             }
             return sb.ToString();
