@@ -5,12 +5,6 @@ using HexWars.Engine;
 
 namespace HexWars.Presentation
 {
-    /// <summary>
-    /// Persistent tokens for units and generators, keyed by engine id. Sync() diffs the given
-    /// state against what exists: spawns the missing, destroys the gone, snaps survivors to
-    /// truth (position, HP bar, spent-dim material, UnitView payload). Replaces BoardRenderer's
-    /// destroy-and-rebuild so the ActionPresenter can tween tokens between states.
-    /// </summary>
     /// <summary>Persistent refs to one token's HP bar geometry, so RefreshHpBar can scale/position/tint
     /// in place instead of destroying and rebuilding two quads (and two Materials) every sync.</summary>
     sealed class HpBarRefs : MonoBehaviour
@@ -20,6 +14,12 @@ namespace HexWars.Presentation
         public float BarWidth;
     }
 
+    /// <summary>
+    /// Persistent tokens for units and generators, keyed by engine id. Sync() diffs the given
+    /// state against what exists: spawns the missing, destroys the gone, snaps survivors to
+    /// truth (position, HP bar, spent-dim material, UnitView payload). Replaces BoardRenderer's
+    /// destroy-and-rebuild so the ActionPresenter can tween tokens between states.
+    /// </summary>
     [RequireComponent(typeof(BoardRenderer))]
     public sealed class TokenStore : MonoBehaviour
     {

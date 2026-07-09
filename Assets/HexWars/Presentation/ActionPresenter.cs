@@ -234,7 +234,7 @@ namespace HexWars.Presentation
 
             SoundManager.Play(SoundKind.Attack);
             _presented = true;
-            _projectile = MakeProjectile(from, projScale, projTier);
+            _projectile = MakeProjectile(from, projScale, projTier, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
             {
                 float f = t / flightDur;
@@ -386,14 +386,13 @@ namespace HexWars.Presentation
             return m;
         }
 
-        GameObject MakeProjectile(Vector3 pos, float scale, int tier)
+        GameObject MakeProjectile(Vector3 pos, float scale, int tier, Color color)
         {
             var p = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             DestroyImmediate(p.GetComponent<Collider>());
             p.transform.position = pos;
             p.transform.localScale = Vector3.one * scale;
             var mat = ProjectileMaterial(tier);
-            var color = ProjectileTierColors[tier];
             var mr = p.GetComponent<MeshRenderer>();
             mr.sharedMaterial = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;

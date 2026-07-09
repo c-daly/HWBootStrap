@@ -53,7 +53,7 @@ namespace HexWars.Presentation
 
         int _cachedUnitId = -1;
         int _cachedHp = int.MinValue;
-        bool _cachedMoved, _cachedAttacked, _cachedGameOver;
+        bool _cachedMoved, _cachedAttacked, _cachedGameOver, _cachedIsOwnersTurn;
 
         public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);
 
@@ -72,12 +72,18 @@ namespace HexWars.Presentation
                 foreach (var id in state.AttackedUnitIds) if (id == unit.Id) { attacked = true; break; }
             }
             bool gameOver = state != null && state.IsGameOver;
+            // owner-turn bit mirrors Format()'s render condition for the "This turn" block: EndTurn
+            // resets MovedUnitIds/AttackedUnitIds, so across a turn handover every other key field is
+            // identical for an un-acted unit while the correct text differs
+            bool isOwnersTurn = state != null && unit.Owner == state.ActivePlayer;
             bool unchanged = _panel.activeSelf && unit.Id == _cachedUnitId && unit.CurrentHp == _cachedHp
-                            && moved == _cachedMoved && attacked == _cachedAttacked && gameOver == _cachedGameOver;
+                            && moved == _cachedMoved && attacked == _cachedAttacked && gameOver == _cachedGameOver
+                            && isOwnersTurn == _cachedIsOwnersTurn;
             if (unchanged) return;
 
             _cachedUnitId = unit.Id; _cachedHp = unit.CurrentHp;
             _cachedMoved = moved; _cachedAttacked = attacked; _cachedGameOver = gameOver;
+            _cachedIsOwnersTurn = isOwnersTurn;
 
             string text = Format(unit, state);
             _text.text = text;
