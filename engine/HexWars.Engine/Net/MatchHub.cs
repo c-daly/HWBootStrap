@@ -34,6 +34,15 @@ namespace HexWars.Engine
     /// its token→seat assignments — kept alive) for <see cref="HoldWindowTicks"/> instead of being
     /// deleted, so both players can survive a simultaneous drop; an un-started room (never dealt START)
     /// still cleans up the instant it empties, as before this feature.
+    ///
+    /// Every re-deal (initial deal AND reconnect) sends <c>Room.Start</c> + <c>Room.Log</c> (every
+    /// Accepted command, in order) through <see cref="ReplayFile.Write(GameState, System.Collections.Generic.IReadOnlyList{Command})"/>,
+    /// never the live <c>Session.State</c> directly — <see cref="ReplayFile"/>'s start-state encoding
+    /// assumes full-health units and omits per-turn tracking (MovedUnitIds/AttackedUnitIds/MovementSpent/
+    /// IsGameOver), which is exact for a FRESH state (that's all it's ever had to represent) but would
+    /// silently corrupt a mid-game re-deal. Replaying the command log through the same engine the client
+    /// already uses (GameEngine.Apply) reconstructs the exact state instead, by construction. The initial
+    /// deal's Log is empty, so this is byte-identical to writing Session.State directly, as before.
     /// </summary>
     public sealed class MatchHub
     {
@@ -42,6 +51,8 @@ namespace HexWars.Engine
 
         private sealed class Room
         {
+            public readonly GameState Start;       // the state at creation — paired with Log, replays exactly
+            public readonly List<Command> Log = new List<Command>(); // every Accepted command, in order
             public readonly GameSession Session;
             public readonly List<string> Members = new List<string>(); // seated connections, broadcast targets
             public readonly Dictionary<string, string> ConnToToken = new Dictionary<string, string>();
@@ -53,7 +64,7 @@ namespace HexWars.Engine
             public long? EmptySinceTicks;          // set when a Started room's Members hits zero; null while
                                                    // occupied or un-started — the held-room expiry clock
             public Room(GameState start, GameSetup setup, bool isPrivate, long nowTicks)
-            { Session = new GameSession(start); Setup = setup; IsPrivate = isPrivate; CreatedAtTicks = nowTicks; }
+            { Start = start; Session = new GameSession(start); Setup = setup; IsPrivate = isPrivate; CreatedAtTicks = nowTicks; }
         }
 
         private readonly Func<GameSetup, GameState> _newGame;
@@ -122,10 +133,11 @@ namespace HexWars.Engine
 
             if (room.Started)
             {
-                // (Re)connect into an already-started room: a personal re-deal of the current state — the
-                // same resync-by-replay mechanism used for the initial deal below, now also serving a
-                // reconnect after a drop.
-                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Session.State, Array.Empty<Command>()));
+                // (Re)connect into an already-started room: a personal re-deal — the start state PLUS
+                // every command accepted since, so the replay reconstructs the current state exactly
+                // (see class doc). Same resync-by-replay mechanism used for the initial deal below, now
+                // also serving a reconnect after a drop.
+                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start, room.Log));
                 outs.Add(new Outbound(connectionId, startMsg));
             }
             else if (added && !room.Started && room.Session.SeatedCount == 2)
@@ -135,7 +147,7 @@ namespace HexWars.Engine
                 // Members here would fire a bogus START at a lone host with two tabs open (and Started,
                 // never cleared, would silently delist the room from the lobby forever).
                 room.Started = true;
-                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Session.State, Array.Empty<Command>()));
+                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start, room.Log)); // Log is empty here — identical to the old Session.State dump
                 foreach (var m in room.Members) outs.Add(new Outbound(m, startMsg));
             }
             return outs;
@@ -180,6 +192,7 @@ namespace HexWars.Engine
             switch (outcome.Status)
             {
                 case SubmitStatus.Accepted:
+                    room.Log.Add(cmd);
                     string applyMsg = NetProtocol.Apply(cmd);
                     foreach (var m in room.Members) outs.Add(new Outbound(m, applyMsg));
                     break;

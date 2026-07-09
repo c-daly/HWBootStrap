@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using HexWars.Engine;
@@ -56,10 +57,51 @@ namespace HexWars.NetServer
                 string rStartA = await Recv(ra);
                 string rStartB = await Recv(rb);
 
+                // C1: damage a unit BEFORE the drop — the default (9x7, seed 7) army placement lets
+                // P0's Striker (unit 2) close to (3,0) and land a legal hit on P1's Striker (unit 5);
+                // exact coordinates come from GameFactory's deterministic seed, not a guess.
+                await Send(ra, NetProtocol.Cmd(new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0))));
+                string rMoveApplyA = await Recv(ra);
+                string rMoveApplyB = await Recv(rb);
+                await Send(ra, NetProtocol.Cmd(new AttackUnit(PlayerId.Player0, 2, 5)));
+                string rAttackApplyA = await Recv(ra);
+                string rAttackApplyB = await Recv(rb);
+
                 ra.Abort();                                     // simulate a dead socket (no clean close)
                 using var ra2 = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
                 string rSeatA2 = await Recv(ra2);                // SEAT 0 again — same token, same seat
                 string rStartA2 = await Recv(ra2);               // personal START re-deal
+
+                // The re-deal must carry the move + the attack (not a fresh, undamaged deal) — assert
+                // both the command count AND that fast-forwarding it (exactly what GameBootstrap.OnNetStart
+                // does client-side) lands on the SAME state an independent direct replay of the identical
+                // two commands produces from the same fresh start — the same field-level cross-check
+                // TokenRejoinTests uses engine-side, applied here end-to-end through the real socket.
+                var reDealt = ReplayFile.Read(rStartA2.Substring("START ".Length));
+                bool reDealCarriesBothCommands = reDealt.Commands.Count == 2;
+
+                var fastForwarded = reDealt.Start;
+                bool fastForwardOk = true;
+                foreach (var cmd in reDealt.Commands)
+                {
+                    var fr = GameEngine.Apply(fastForwarded, cmd);
+                    if (!fr.Success) { fastForwardOk = false; break; }
+                    fastForwarded = fr.NewState;
+                }
+
+                var freshP0PointsBefore = GameFactory.Build(GameSetup.Default).Player(PlayerId.Player0).Points;
+                var direct = GameEngine.Apply(GameFactory.Build(GameSetup.Default), new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
+                direct = GameEngine.Apply(direct.NewState, new AttackUnit(PlayerId.Player0, 2, 5));
+                var expected = direct.NewState;
+
+                bool targetPresenceMatches =
+                    fastForwarded.Player(PlayerId.Player1).UnitsOnBoard.Any(u => u.Id == 5) ==
+                    expected.Player(PlayerId.Player1).UnitsOnBoard.Any(u => u.Id == 5);
+                bool pointsMatch = fastForwarded.Player(PlayerId.Player0).Points == expected.Player(PlayerId.Player0).Points;
+                bool attackActuallyLanded = expected.Player(PlayerId.Player0).Points > freshP0PointsBefore // bounty proves the hit landed
+                    || expected.Player(PlayerId.Player1).UnitsOnBoard.Single(u => u.Id == 5).CurrentHp
+                       < GameFactory.Build(GameSetup.Default).Player(PlayerId.Player1).UnitsOnBoard.Single(u => u.Id == 5).CurrentHp;
+                bool reDealReflectsDamage = fastForwardOk && targetPresenceMatches && pointsMatch && attackActuallyLanded;
 
                 await Send(ra2, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
                 string rApplyA2 = await Recv(ra2);
@@ -68,7 +110,10 @@ namespace HexWars.NetServer
                 bool reconnectOk =
                     rSeatA == "SEAT 0" && rSeatB == "SEAT 1" &&
                     rStartA.StartsWith("START ") && rStartB.StartsWith("START ") &&
+                    rMoveApplyA.StartsWith("APPLY M ") && rMoveApplyA == rMoveApplyB &&
+                    rAttackApplyA.StartsWith("APPLY A ") && rAttackApplyA == rAttackApplyB &&
                     rSeatA2 == "SEAT 0" && rStartA2.StartsWith("START ") &&
+                    reDealCarriesBothCommands && reDealReflectsDamage &&
                     rApplyA2 == "APPLY E 0" && rApplyB == "APPLY E 0";
 
                 bool ok =
@@ -79,7 +124,7 @@ namespace HexWars.NetServer
 
                 Console.WriteLine(ok
                     ? "SELFTEST PASS — two browsers can play head-to-head through this server"
-                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart} joinOnly='{joinerSeat}' reconnectOk={reconnectOk}");
+                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart} joinOnly='{joinerSeat}' reconnectOk={reconnectOk} reDealCarriesBothCommands={reDealCarriesBothCommands} reDealReflectsDamage={reDealReflectsDamage} moveApply='{rMoveApplyA}' attackApply='{rAttackApplyA}'");
 
                 await app.StopAsync();
                 return ok ? 0 : 1;
