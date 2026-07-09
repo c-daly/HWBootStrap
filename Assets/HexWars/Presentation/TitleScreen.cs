@@ -75,7 +75,9 @@ namespace HexWars.Presentation
             var crt = col.AddComponent<RectTransform>();
             crt.anchorMin = crt.anchorMax = new Vector2(0.5f, 0.5f);
             crt.pivot = new Vector2(0.5f, 0.5f);
-            crt.sizeDelta = new Vector2(520f, 640f);
+            var canvasRt = _canvasGo.GetComponent<RectTransform>();
+            float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
+            crt.sizeDelta = new Vector2(Mathf.Min(520f, availW - 40f), 640f);
             crt.anchoredPosition = new Vector2(0f, 20f);
 
             var plate = UiKit.Panel(col.transform, "Plate", new Color(UiKit.Bg.r, UiKit.Bg.g, UiKit.Bg.b, 0.82f));

@@ -60,33 +60,44 @@ namespace HexWars.Presentation
             Destroy(this);
         }
 
+        float _panelW;
+
         void Build()
         {
             UiKit.EnsureEventSystem();
             _canvasGo = UiKit.Canvas("BrowserCanvas", UiKit.OrderMenu, transform);
+            _panelW = Mathf.Min(760f, AvailWidth() - 40f); // GameRules' clamp pattern — unchanged (700/720
+                                                            // math below) whenever the canvas is wide enough,
+                                                            // same as it always was at desktop/landscape widths
 
             var panel = UiKit.Panel(_canvasGo.transform, "Panel", UiKit.Surface).gameObject;
             var prt = panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0.5f, 0.5f);
             prt.pivot = new Vector2(0.5f, 0.5f);
-            prt.sizeDelta = new Vector2(760f, 640f);
+            prt.sizeDelta = new Vector2(_panelW, 640f);
             prt.anchoredPosition = Vector2.zero;
 
-            UiKit.Label(panel.transform, "Open Games", 0f, -24f, 760f, 36f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
-            UiKit.Button(panel.transform, "Back", -330f, -26f, 90f, 34f,
+            UiKit.Label(panel.transform, "Open Games", 0f, -24f, _panelW, 36f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
+            UiKit.Button(panel.transform, "Back", -_panelW * 0.5f + 55f, -26f, 90f, 34f,
                          () => { Close(); TitleScreen.Reopen(_game); }, UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
-            UiKit.Button(panel.transform, "Refresh", 320f, -26f, 110f, 34f,
+            UiKit.Button(panel.transform, "Refresh", _panelW * 0.5f - 60f, -26f, 110f, 34f,
                          () => { StopAllCoroutines(); StartCoroutine(PollLoop()); }, // restart: fetch now, resume cadence — never two in-flight fetches
                          UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
 
-            _status = UiKit.Label(panel.transform, "Loading…", 0f, -70f, 700f, 26f,
+            _status = UiKit.Label(panel.transform, "Loading…", 0f, -70f, _panelW - 60f, 26f,
                                   UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
 
             var listGo = new GameObject("List");
             listGo.transform.SetParent(panel.transform, false);
             var lrt = listGo.AddComponent<RectTransform>();
-            UiKit.SetRect(lrt, 0f, -100f, 720f, 520f);
+            UiKit.SetRect(lrt, 0f, -100f, _panelW - 40f, 520f);
             _listRoot = listGo.transform;
+        }
+
+        float AvailWidth()
+        {
+            var rt = _canvasGo.GetComponent<RectTransform>();
+            return rt != null && rt.rect.width > 0f ? rt.rect.width : 1200f;
         }
 
         IEnumerator PollLoop()
@@ -151,11 +162,12 @@ namespace HexWars.Presentation
 
         float BuildRow(GameDto g, float y, bool expanded)
         {
+            float rowW = _panelW - 60f; // == 700f at desktop widths, same as the literal it replaces
             string age = g.ageSeconds < 60 ? $"{g.ageSeconds}s" : $"{g.ageSeconds / 60}m";
             string summary = $"{g.code}   ·   {g.mode} · {g.width}×{g.height}{(g.fog ? " · Fog" : "")}" +
                              $" · {PaceText(g.pace)} · {g.army} units · {age} ago";
             var code = g.code;
-            var row = UiKit.Button(_listRoot, summary, 0f, y, 700f, 42f, () =>
+            var row = UiKit.Button(_listRoot, summary, 0f, y, rowW, 42f, () =>
             {
                 _expandedCode = _expandedCode == code ? null : code;
                 Rebuild();
@@ -169,12 +181,12 @@ namespace HexWars.Presentation
             if (expanded)
             {
                 var card = UiKit.Panel(_listRoot, "Detail", new Color(0.09f, 0.11f, 0.18f, 1f)).gameObject;
-                UiKit.SetRect(card.GetComponent<RectTransform>(), 0f, y, 700f, 96f);
+                UiKit.SetRect(card.GetComponent<RectTransform>(), 0f, y, rowW, 96f);
                 UiKit.Label(card.transform,
                             $"Mode {g.mode}    Map {g.width}×{g.height}    Fog {(g.fog ? "on" : "off")}\n" +
                             $"Pace {PaceText(g.pace)}    Army {g.army} units    Waiting {age}",
                             -80f, -12f, 520f, 72f, UiKit.SizeBody, TextAnchor.UpperLeft, UiKit.TextDim);
-                UiKit.Button(card.transform, "Join", 260f, -26f, 140f, 44f, () =>
+                UiKit.Button(card.transform, "Join", rowW * 0.5f - 90f, -26f, 140f, 44f, () =>
                 {
                     _status.text = $"Joining {g.code}…";
                     _game.StartNetGame(g.code, null);   // seat+start arrive via the normal net path

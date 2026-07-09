@@ -78,6 +78,16 @@ namespace HexWars.Presentation
             scaler.referenceResolution = new Vector2(1600f, 900f);
             scaler.matchWidthOrHeight = 0.5f;
             go.AddComponent<GraphicRaycaster>();
+            // Portrait pass (Task 8): callers read this canvas's own RectTransform.rect.width
+            // moments later (SetupForm/GameBrowser/TitleScreen/BarracksPanel/DesignPanel/Toast's
+            // AvailWidth clamps) to size children against the actually-available width. Without this,
+            // a freshly added CanvasScaler hasn't run its layout pass yet within the same synchronous
+            // call, so .rect still reports raw Screen.width/height (390 in portrait) instead of the
+            // scaled canvas-space size (~815 in portrait) — confirmed live: an unforced read clamped
+            // SetupForm's 700-wide card down to 350, which then let its fixed-offset children (e.g.
+            // the Back button at x=-300) overflow past the card's own shrunken edge. Forcing the
+            // layout pass here fixes it at the source for every caller.
+            UnityEngine.Canvas.ForceUpdateCanvases();
             return go;
         }
 

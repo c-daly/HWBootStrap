@@ -43,7 +43,10 @@ namespace HexWars.Presentation
             var canvasGo = UiKit.Canvas("DesignCanvas", UiKit.OrderPanels, transform);
             _canvasGo = canvasGo;
 
-            const float w = 270f, rowH = 30f, top = 58f;
+            var canvasRt = canvasGo.GetComponent<RectTransform>();
+            float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
+            const float rowH = 30f, top = 58f;
+            float w = Mathf.Min(270f, availW - 16f);
             var panelImg = UiKit.Panel(canvasGo.transform, "DesignPanel", UiKit.Surface);
             var prt = panelImg.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0f, 1f);

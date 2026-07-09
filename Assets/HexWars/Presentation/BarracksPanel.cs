@@ -73,7 +73,9 @@ namespace HexWars.Presentation
             var canvasGo = UiKit.Canvas("BarracksCanvas", UiKit.OrderPanels, transform);
             _canvasGo = canvasGo;
 
-            const float w = 230f;
+            var canvasRt = canvasGo.GetComponent<RectTransform>();
+            float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
+            float w = Mathf.Min(230f, availW - 16f);
             var panel = UiKit.Panel(canvasGo.transform, "BarracksPanel", UiKit.Surface);
             var prt = panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(1f, 1f);

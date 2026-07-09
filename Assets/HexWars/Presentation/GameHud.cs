@@ -170,11 +170,16 @@ namespace HexWars.Presentation
                     armies += $"     P{((int)pl.Id) + 1} has no army (can still deploy)";
             }
 
+            bool narrow = Screen.width < 700; // portrait phones; the full-detail banner only fits landscape
             _banner.text = s.Config.TerritoryMode
-                ? $"P{who}'s turn{pace}{done}{armies}     Round {s.Round}     " +
-                  $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}"
-                : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}{armies}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}";
-            if (_game.Reconnecting) _banner.text = "⚠ Connection lost — reconnecting…     " + _banner.text;
+                ? (narrow
+                    ? $"P{who}'s turn{pace}     Round {s.Round}     {p.Points} pts"
+                    : $"P{who}'s turn{pace}{done}{armies}     Round {s.Round}     " +
+                      $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}")
+                : (narrow
+                    ? $"Player {who}'s turn{pace}     {p.Points} pts     Round {s.Round}"
+                    : $"Player {who}'s turn  (move {(p0 ? "cyan" : "red")}){pace}{done}{armies}     {p.Points} pts     Round {s.Round}     Barracks {p.Barracks.Count}");
+            if (_game.Reconnecting) _banner.text = "⚠ Reconnecting…     " + _banner.text;
 
             if (_endBtn != null) _endBtn.color = done.Length > 0 ? EndTurnUrge : EndTurnIdle;
 

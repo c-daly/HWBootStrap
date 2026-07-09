@@ -77,10 +77,12 @@ namespace HexWars.Presentation
             t.text = s;
             t.font = font; t.fontSize = size; t.fontStyle = style;
             t.color = Color.white; t.alignment = TextAnchor.MiddleCenter;
-            t.horizontalOverflow = HorizontalWrapMode.Overflow; t.raycastTarget = false;
+            t.horizontalOverflow = HorizontalWrapMode.Wrap; t.raycastTarget = false; // was Overflow — a
+                                                                                      // narrow band must wrap, not run off-canvas
             var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.sizeDelta = new Vector2(1200f, 60f);
+            rt.anchorMin = new Vector2(0f, 0.5f); rt.anchorMax = new Vector2(1f, 0.5f); // stretch to the band's
+            rt.offsetMin = new Vector2(20f, 0f); rt.offsetMax = new Vector2(-20f, 0f);  // own width, not a fixed 1200
+            rt.sizeDelta = new Vector2(0f, 60f);
             rt.anchoredPosition = pos;
         }
     }

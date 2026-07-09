@@ -74,11 +74,13 @@ namespace HexWars.Presentation
             UiKit.EnsureEventSystem();
             _canvasGo = UiKit.Canvas("SetupCanvas", UiKit.OrderMenu, transform);
 
+            float formW = Mathf.Min(700f, AvailWidth() - 40f); // GameRules' clamp pattern — a fixed
+                                                                // 700-wide card must not overflow a narrow canvas
             _form = UiKit.Panel(_canvasGo.transform, "Form", UiKit.Surface).gameObject;
             var frt = _form.GetComponent<RectTransform>();
             frt.anchorMin = frt.anchorMax = new Vector2(0.5f, 0.5f);
             frt.pivot = new Vector2(0.5f, 0.5f);
-            frt.sizeDelta = new Vector2(700f, 640f);
+            frt.sizeDelta = new Vector2(formW, 640f);
             frt.anchoredPosition = Vector2.zero;
 
             float y = -24f;
@@ -147,13 +149,24 @@ namespace HexWars.Presentation
             string cta = _mode == SetupMode.Host ? "Create Game" : "Start Game";
             UiKit.Button(_form.transform, cta, 0f, y, 340f, 50f, OnCreate, UiKit.ButtonStyle.Cta);
 
-            _status = UiKit.Label(_canvasGo.transform, "", 0f, 0f, 1100f, 160f, UiKit.SizeHeading, TextAnchor.MiddleCenter);
+            _status = UiKit.Label(_canvasGo.transform, "", 0f, 0f, Mathf.Min(1100f, AvailWidth() - 40f), 160f,
+                                  UiKit.SizeHeading, TextAnchor.MiddleCenter);
+            _status.horizontalOverflow = HorizontalWrapMode.Wrap; // was Overflow — the clamp above only
+                                                                   // helps once long lines can actually wrap
             var srt = _status.GetComponent<RectTransform>();
             srt.anchorMin = srt.anchorMax = new Vector2(0.5f, 0.5f);
             srt.pivot = new Vector2(0.5f, 0.5f);
             srt.anchoredPosition = new Vector2(0f, 30f);
 
             BuildArmyPopup();
+        }
+
+        /// <summary>The canvas's actual rendered width (GameRules' clamp pattern) — a fixed layout must
+        /// not overflow a narrow/portrait screen.</summary>
+        float AvailWidth()
+        {
+            var rt = _canvasGo.GetComponent<RectTransform>();
+            return rt != null && rt.rect.width > 0f ? rt.rect.width : 1200f;
         }
 
         string ArmySummary()
@@ -181,7 +194,7 @@ namespace HexWars.Presentation
             var crt = card.GetComponent<RectTransform>();
             crt.anchorMin = crt.anchorMax = new Vector2(0.5f, 0.5f);
             crt.pivot = new Vector2(0.5f, 0.5f);
-            crt.sizeDelta = new Vector2(700f, 430f);
+            crt.sizeDelta = new Vector2(Mathf.Min(700f, AvailWidth() - 40f), 430f);
             crt.anchoredPosition = Vector2.zero;
 
             float y = -24f;

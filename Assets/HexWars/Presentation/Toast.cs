@@ -66,10 +66,12 @@ namespace HexWars.Presentation
             _bgImage.sprite = UiKit.Rounded();
             _bgImage.type = Image.Type.Sliced;
             _bgImage.color = RejectionRed;
+            var canvasRt = canvasGo.GetComponent<RectTransform>();
+            float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
             var brt = _bg.GetComponent<RectTransform>();
             brt.anchorMin = brt.anchorMax = new Vector2(0.5f, 0f);
             brt.pivot = new Vector2(0.5f, 0f);
-            brt.sizeDelta = new Vector2(580f, 50f);
+            brt.sizeDelta = new Vector2(Mathf.Min(580f, availW - 40f), 50f);
             brt.anchoredPosition = new Vector2(0f, 170f);
 
             var tGo = new GameObject("Text");
