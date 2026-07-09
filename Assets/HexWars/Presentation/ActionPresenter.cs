@@ -221,9 +221,8 @@ namespace HexWars.Presentation
             int dmg = attacker.Value.Stats.Damage;
             float power = Mathf.Clamp01(dmg / 8f);
             float projScale = Mathf.Lerp(0.14f, 0.5f, power);
-            Color projColor = dmg >= 6 ? new Color(1f, 0.3f, 0.1f)
-                            : dmg >= 3 ? new Color(1f, 0.65f, 0.2f)
-                                       : new Color(1f, 0.95f, 0.5f);
+            int projTier = dmg >= 6 ? 2 : dmg >= 3 ? 1 : 0;
+            Color projColor = ProjectileTierColors[projTier];
 
             Vector3 from = Tokens().CellTop(origin.Value, item.Prev.Board.Contains(origin.Value) ? item.Prev.Board.TileAt(origin.Value).Elevation : attacker.Value.Elevation) + Vector3.up * 0.4f;
             Vector3 to = Tokens().CellTop(tgt.Value.cell, tgt.Value.elev) + Vector3.up * 0.4f;
@@ -235,7 +234,7 @@ namespace HexWars.Presentation
 
             SoundManager.Play(SoundKind.Attack);
             _presented = true;
-            _projectile = MakeProjectile(from, projScale, projColor);
+            _projectile = MakeProjectile(from, projScale, projTier);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
             {
                 float f = t / flightDur;
@@ -370,25 +369,43 @@ namespace HexWars.Presentation
             return null;
         }
 
-        GameObject MakeProjectile(Vector3 pos, float scale, Color color)
+        static readonly Color[] ProjectileTierColors =
+            { new Color(1f, 0.95f, 0.5f), new Color(1f, 0.65f, 0.2f), new Color(1f, 0.3f, 0.1f) };
+        static readonly Dictionary<int, Material> ProjectileMats = new Dictionary<int, Material>();
+
+        static Material ProjectileMaterial(int tier)
+        {
+            if (ProjectileMats.TryGetValue(tier, out var m) && m != null) return m;
+            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            if (unlit == null) unlit = Shader.Find("Unlit/Color");
+            m = new Material(unlit);
+            var color = ProjectileTierColors[tier];
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", color);
+            m.color = color;
+            ProjectileMats[tier] = m;
+            return m;
+        }
+
+        GameObject MakeProjectile(Vector3 pos, float scale, int tier)
         {
             var p = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             DestroyImmediate(p.GetComponent<Collider>());
             p.transform.position = pos;
             p.transform.localScale = Vector3.one * scale;
-            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlit == null) unlit = Shader.Find("Unlit/Color");
-            var m = new Material(unlit);
-            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", color);
-            m.color = color;
+            var mat = ProjectileMaterial(tier);
+            var color = ProjectileTierColors[tier];
             var mr = p.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = m;
+            mr.sharedMaterial = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             var trail = p.AddComponent<TrailRenderer>();
             trail.time = 0.18f;
             trail.startWidth = scale * 0.9f;
             trail.endWidth = 0f;
-            trail.material = m;
+            trail.sharedMaterial = mat;   // shared tier material — TrailRenderer.material (the non-"shared"
+                                           // property) auto-instantiates a clone on assignment, which would
+                                           // silently defeat this cache one Material per projectile; tint
+                                           // goes through the TrailRenderer's own startColor/endColor instead,
+                                           // never through the material
             trail.startColor = color;
             trail.endColor = new Color(color.r, color.g, color.b, 0f);
             trail.numCapVertices = 2;

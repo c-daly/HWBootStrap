@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -15,10 +16,34 @@ namespace HexWars.Presentation
 
         float _t;
         Transform _flash;
-        Material _flashMat;
+        MeshRenderer _flashRenderer;
+        MaterialPropertyBlock _flashBlock;
         Light _light;
         Transform[] _debris;
         Vector3[] _vel;
+
+        static Material _sharedFlashMat;
+        static readonly Dictionary<Color, Material> DebrisMats = new Dictionary<Color, Material>();
+
+        static Material SharedFlashMat()
+        {
+            if (_sharedFlashMat != null) return _sharedFlashMat;
+            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            if (unlit == null) unlit = Shader.Find("Unlit/Color");
+            _sharedFlashMat = new Material(unlit);
+            return _sharedFlashMat;
+        }
+
+        static Material DebrisMat(Color tint)
+        {
+            if (DebrisMats.TryGetValue(tint, out var m) && m != null) return m;
+            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            if (unlit == null) unlit = Shader.Find("Unlit/Color");
+            m = new Material(unlit);
+            SetColor(m, tint);
+            DebrisMats[tint] = m;
+            return m;
+        }
 
         public static void Spawn(Vector3 pos, Color tint, float scale = 1f, bool debris = true)
         {
@@ -32,19 +57,17 @@ namespace HexWars.Presentation
 
         void Start()
         {
-            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlit == null) unlit = Shader.Find("Unlit/Color");
-
             var s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             DestroyImmediate(s.GetComponent<Collider>());
             s.transform.SetParent(transform, false);
             s.transform.localScale = Vector3.one * 0.3f * _scale;
             _flash = s.transform;
-            _flashMat = new Material(unlit);
-            SetColor(_flashMat, new Color(1f, 0.9f, 0.5f));
             var smr = s.GetComponent<MeshRenderer>();
-            smr.sharedMaterial = _flashMat;
-            smr.shadowCastingMode = ShadowCastingMode.Off;
+            smr.sharedMaterial = SharedFlashMat();   // one material for every explosion in the game — per-
+            smr.shadowCastingMode = ShadowCastingMode.Off;  // instance color goes through a property block below
+            _flashRenderer = smr;
+            _flashBlock = new MaterialPropertyBlock();
+            SetFlashColor(new Color(1f, 0.9f, 0.5f));
 
             var lgo = new GameObject("Flash");
             lgo.transform.SetParent(transform, false);
@@ -59,8 +82,8 @@ namespace HexWars.Presentation
             _vel = new Vector3[n];
             if (n > 0)
             {
-                var debrisMat = new Material(unlit);
-                SetColor(debrisMat, _tint);
+                var debrisMat = DebrisMat(_tint);    // constant color for this instance's whole lifetime —
+                                                      // safe to share across every same-tint explosion
                 for (int i = 0; i < n; i++)
                 {
                     var d = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -77,6 +100,14 @@ namespace HexWars.Presentation
             }
         }
 
+        void SetFlashColor(Color c)
+        {
+            _flashBlock.Clear();
+            if (_flashRenderer.sharedMaterial.HasProperty("_BaseColor")) _flashBlock.SetColor("_BaseColor", c);
+            _flashBlock.SetColor("_Color", c);
+            _flashRenderer.SetPropertyBlock(_flashBlock);
+        }
+
         void Update()
         {
             _t += Time.deltaTime;
@@ -86,7 +117,7 @@ namespace HexWars.Presentation
             float peak = 2.4f * _scale;
             float s = p < 0.35f ? Mathf.Lerp(0.3f * _scale, peak, p / 0.35f) : Mathf.Lerp(peak, 0f, (p - 0.35f) / 0.65f);
             _flash.localScale = Vector3.one * s;
-            SetColor(_flashMat, Color.Lerp(new Color(1f, 0.95f, 0.6f), _tint, p));
+            SetFlashColor(Color.Lerp(new Color(1f, 0.95f, 0.6f), _tint, p));
             _light.intensity = Mathf.Lerp(9f * _scale, 0f, p);
 
             float dt = Time.deltaTime;

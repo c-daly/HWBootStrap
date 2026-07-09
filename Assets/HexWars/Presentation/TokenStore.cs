@@ -11,6 +11,15 @@ namespace HexWars.Presentation
     /// truth (position, HP bar, spent-dim material, UnitView payload). Replaces BoardRenderer's
     /// destroy-and-rebuild so the ActionPresenter can tween tokens between states.
     /// </summary>
+    /// <summary>Persistent refs to one token's HP bar geometry, so RefreshHpBar can scale/position/tint
+    /// in place instead of destroying and rebuilding two quads (and two Materials) every sync.</summary>
+    sealed class HpBarRefs : MonoBehaviour
+    {
+        public Transform Fill;
+        public MeshRenderer FillRenderer;
+        public float BarWidth;
+    }
+
     [RequireComponent(typeof(BoardRenderer))]
     public sealed class TokenStore : MonoBehaviour
     {
@@ -18,6 +27,9 @@ namespace HexWars.Presentation
         Transform _root;
         readonly Dictionary<int, GameObject> _units = new Dictionary<int, GameObject>();
         readonly Dictionary<int, GameObject> _generators = new Dictionary<int, GameObject>();
+
+        static Material _hpBarMat;                 // ONE material for every background+fill quad, ever
+        MaterialPropertyBlock _mpb;                 // per-renderer color override — reused across calls
 
         void Awake() => _board = GetComponent<BoardRenderer>();
 
@@ -146,6 +158,16 @@ namespace HexWars.Presentation
             bar.transform.SetParent(token.transform, false);
             bar.transform.localPosition = new Vector3(0f, 0.62f, 0f);
             bar.AddComponent<Billboard>();
+
+            float hpBarW = _board.HexSize * 0.85f;
+            _mpb = _mpb ?? new MaterialPropertyBlock();
+            MakeBarQuad(bar.transform, 0f, 0f, hpBarW, 0.16f, new Color(0.18f, 0.03f, 0.03f)); // background — set once, never touched again
+            var fillRenderer = MakeBarQuad(bar.transform, 0f, -0.01f, hpBarW, 0.11f, new Color(0.25f, 0.85f, 0.25f)); // placeholder tint — RefreshHpBar (called immediately after BuildToken) paints the real fraction/color
+            var refs = bar.AddComponent<HpBarRefs>();
+            refs.Fill = fillRenderer.transform;
+            refs.FillRenderer = fillRenderer;
+            refs.BarWidth = hpBarW;
+
             return token;
         }
 
@@ -160,17 +182,20 @@ namespace HexWars.Presentation
 
         void RefreshHpBar(Transform bar, int cur, int max)
         {
-            for (int i = bar.childCount - 1; i >= 0; i--) Destroy(bar.GetChild(i).gameObject);
+            var refs = bar.GetComponent<HpBarRefs>();
+            if (refs == null) return; // built by BuildToken; defensive only
+
             float frac = max <= 0 ? 0f : Mathf.Clamp01((float)cur / max);
-            float barW = _board.HexSize * 0.85f;
-            MakeBarQuad(bar, 0f, 0f, barW, 0.16f, new Color(0.18f, 0.03f, 0.03f));
-            float fw = Mathf.Max(0.001f, barW * frac);
-            float fx = -barW * 0.5f + fw * 0.5f;
-            var fill = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
-            MakeBarQuad(bar, fx, -0.01f, fw, 0.11f, fill);
+            float fw = Mathf.Max(0.001f, refs.BarWidth * frac);
+            float fx = -refs.BarWidth * 0.5f + fw * 0.5f;
+            refs.Fill.localPosition = new Vector3(fx, -0.01f, 0f);
+            refs.Fill.localScale = new Vector3(fw, 0.11f, 1f);
+
+            var color = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
+            TintQuad(refs.FillRenderer, color);
         }
 
-        void MakeBarQuad(Transform parent, float x, float zTowardCam, float w, float h, Color c)
+        MeshRenderer MakeBarQuad(Transform parent, float x, float zTowardCam, float w, float h, Color c)
         {
             var q = GameObject.CreatePrimitive(PrimitiveType.Quad);
             q.name = "Bar";
@@ -179,8 +204,27 @@ namespace HexWars.Presentation
             q.transform.localPosition = new Vector3(x, 0f, zTowardCam);
             q.transform.localScale = new Vector3(w, h, 1f);
             var mr = q.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = _board.UnlitColorMat(c);
+            mr.sharedMaterial = HpBarMaterial();
             mr.shadowCastingMode = ShadowCastingMode.Off;
+            TintQuad(mr, c);
+            return mr;
+        }
+
+        Material HpBarMaterial()
+        {
+            if (_hpBarMat == null) _hpBarMat = _board.UnlitColorMat(Color.white); // base color unused — every
+                                                                                   // renderer tints via its own property block
+            return _hpBarMat;
+        }
+
+        /// <summary>Per-renderer color override on the ONE shared HP-bar material — many bars can differ
+        /// without a Material instance each (that was audit P1: two new Materials per unit per sync).</summary>
+        void TintQuad(MeshRenderer mr, Color c)
+        {
+            _mpb.Clear();
+            if (_hpBarMat.HasProperty("_BaseColor")) _mpb.SetColor("_BaseColor", c);
+            _mpb.SetColor("_Color", c);
+            mr.SetPropertyBlock(_mpb);
         }
 
         GameObject BuildPylon(Generator g)
@@ -196,6 +240,8 @@ namespace HexWars.Presentation
             return pylon;
         }
 
+        static Material _hullMat;
+
         void AddHull(GameObject host, float xz, float y)
         {
             var hull = new GameObject("Outline");
@@ -203,9 +249,12 @@ namespace HexWars.Presentation
             hull.transform.localScale = new Vector3(xz, y, xz);
             hull.AddComponent<MeshFilter>().sharedMesh = host.GetComponent<MeshFilter>().sharedMesh;
             var mr = hull.AddComponent<MeshRenderer>();
-            var m = new Material(_board.BlackMat);
-            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 1f);
-            mr.sharedMaterial = m;
+            if (_hullMat == null)
+            {
+                _hullMat = new Material(_board.BlackMat);
+                if (_hullMat.HasProperty("_Cull")) _hullMat.SetFloat("_Cull", 1f);
+            }
+            mr.sharedMaterial = _hullMat;
             mr.shadowCastingMode = ShadowCastingMode.Off;
         }
     }

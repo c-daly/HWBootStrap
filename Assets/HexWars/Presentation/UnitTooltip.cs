@@ -51,18 +51,46 @@ namespace HexWars.Presentation
             Hide();
         }
 
+        int _cachedUnitId = -1;
+        int _cachedHp = int.MinValue;
+        bool _cachedMoved, _cachedAttacked, _cachedGameOver;
+
         public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);
 
         /// <summary>Docked panel: <paramref name="screenPos"/> is ignored (kept for call-site
         /// compatibility). With <paramref name="state"/>, the active player's own units also get
-        /// "this turn" lines: movement/climb budget still unspent and whether the attack is ready.</summary>
+        /// "this turn" lines: movement/climb budget still unspent and whether the attack is ready.
+        /// Called every frame a unit is hovered/selected (UnitInputController.Update), so it early-outs
+        /// when nothing that affects the text has changed (audit P2 — this used to reformat and
+        /// re-Split every frame regardless).</summary>
         public void Show(Unit unit, Vector2 screenPos, GameState state)
         {
+            bool moved = false, attacked = false;
+            if (state != null)
+            {
+                foreach (var id in state.MovedUnitIds) if (id == unit.Id) { moved = true; break; }
+                foreach (var id in state.AttackedUnitIds) if (id == unit.Id) { attacked = true; break; }
+            }
+            bool gameOver = state != null && state.IsGameOver;
+            bool unchanged = _panel.activeSelf && unit.Id == _cachedUnitId && unit.CurrentHp == _cachedHp
+                            && moved == _cachedMoved && attacked == _cachedAttacked && gameOver == _cachedGameOver;
+            if (unchanged) return;
+
+            _cachedUnitId = unit.Id; _cachedHp = unit.CurrentHp;
+            _cachedMoved = moved; _cachedAttacked = attacked; _cachedGameOver = gameOver;
+
             string text = Format(unit, state);
             _text.text = text;
             var prt = _panel.GetComponent<RectTransform>();
-            prt.sizeDelta = new Vector2(Width, LineH * text.Split('\n').Length + 16f);
+            prt.sizeDelta = new Vector2(Width, LineH * LineCount(text) + 16f);
             _panel.SetActive(true);
+        }
+
+        static int LineCount(string s)
+        {
+            int n = 1;
+            for (int i = 0; i < s.Length; i++) if (s[i] == '\n') n++;
+            return n;
         }
 
         public void Hide()
