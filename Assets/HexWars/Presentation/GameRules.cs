@@ -19,7 +19,12 @@ namespace HexWars.Presentation
             // available height — a fixed 720 was taller than many screens, pushing Close off-screen
             // with no way to dismiss.
             var canvasGo = UiKit.Canvas("RulesCanvas", sortingOrder, canvasParent);
-            canvasGo.GetComponent<Canvas>().overrideSorting = true;
+            var canvas = canvasGo.GetComponent<Canvas>();
+            // Order matters on a nested canvas: a sortingOrder written while overrideSorting is
+            // still false is DISCARDED, leaving the popup at order 0 — behind the title menu
+            // (live bug, reported 2026-07-09). Enable the override first, then set the order.
+            canvas.overrideSorting = true;
+            canvas.sortingOrder = sortingOrder;
             Stretch((RectTransform)canvasGo.transform);
 
             var parentRt = canvasParent as RectTransform;
