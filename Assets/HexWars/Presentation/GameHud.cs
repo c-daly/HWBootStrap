@@ -170,7 +170,12 @@ namespace HexWars.Presentation
                     armies += $"     P{((int)pl.Id) + 1} has no army (can still deploy)";
             }
 
-            bool narrow = Screen.width < 700; // portrait phones; the full-detail banner only fits landscape
+            // Screen.width is DPI-scaled on-device (WebGL's matchWebGLToCanvasSize multiplies CSS px by
+            // devicePixelRatio, ≥2 on modern phones), so a 390-CSS-px phone reports 780-1170 and a
+            // Screen.width check never fires narrow. The CanvasScaler-scaled canvas rect is DPI-invariant
+            // — measured live via PortraitGameView: portrait 390x844 -> canvas rect width 815.7223,
+            // landscape 1920x1080 -> canvas rect width 1600. 1000f sits cleanly between both.
+            bool narrow = _canvasGo != null && ((RectTransform)_canvasGo.transform).rect.width < 1000f;
             _banner.text = s.Config.TerritoryMode
                 ? (narrow
                     ? $"P{who}'s turn{pace}     Round {s.Round}     {p.Points} pts"

@@ -51,7 +51,11 @@ namespace HexWars.Presentation
 
             var font = UiKit.Font();
             Text(band.transform, title, font, 46, FontStyle.Bold, new Vector2(0f, 42f));
-            Text(band.transform, subtitle + "   (tap outside to look at the board)", font, 19, FontStyle.Normal, new Vector2(0f, -6f));
+            var subtitleText = Text(band.transform, subtitle + "   (tap outside to look at the board)", font, 19, FontStyle.Normal, new Vector2(0f, -6f));
+            subtitleText.verticalOverflow = VerticalWrapMode.Overflow; // horizontalOverflow already wraps
+                                                                        // into this fixed-height box; without
+                                                                        // this a future two-line subtitle
+                                                                        // would silently lose its 2nd line
 
             if (onMainMenu != null)
             {
@@ -69,7 +73,7 @@ namespace HexWars.Presentation
             if (old != null) Object.Destroy(old);
         }
 
-        static void Text(Transform parent, string s, Font font, int size, FontStyle style, Vector2 pos)
+        static Text Text(Transform parent, string s, Font font, int size, FontStyle style, Vector2 pos)
         {
             var go = new GameObject("Text");
             go.transform.SetParent(parent, false);
@@ -84,6 +88,7 @@ namespace HexWars.Presentation
             rt.offsetMin = new Vector2(20f, 0f); rt.offsetMax = new Vector2(-20f, 0f);  // own width, not a fixed 1200
             rt.sizeDelta = new Vector2(0f, 60f);
             rt.anchoredPosition = pos;
+            return t;
         }
     }
 }

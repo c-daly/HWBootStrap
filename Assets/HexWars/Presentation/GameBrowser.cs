@@ -78,7 +78,7 @@ namespace HexWars.Presentation
             prt.anchoredPosition = Vector2.zero;
 
             UiKit.Label(panel.transform, "Open Games", 0f, -24f, _panelW, 36f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
-            UiKit.Button(panel.transform, "Back", -_panelW * 0.5f + 55f, -26f, 90f, 34f,
+            UiKit.Button(panel.transform, "Back", -_panelW * 0.5f + 50f, -26f, 90f, 34f,
                          () => { Close(); TitleScreen.Reopen(_game); }, UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
             UiKit.Button(panel.transform, "Refresh", _panelW * 0.5f - 60f, -26f, 110f, 34f,
                          () => { StopAllCoroutines(); StartCoroutine(PollLoop()); }, // restart: fetch now, resume cadence — never two in-flight fetches
