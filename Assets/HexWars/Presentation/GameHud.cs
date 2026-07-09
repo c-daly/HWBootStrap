@@ -218,10 +218,9 @@ namespace HexWars.Presentation
                            : p0Won ? P0ToastBlue : P1ToastRed;
                 StartCoroutine(ShowBannerWhenQuiet(result.ToUpperInvariant(), HowText(s), accent));
 
-                // spec §6: game-over nudge, vs AI only — now points at the real Rematch button.
-                if (_game.RematchAvailable)
-                    TipsService.Show("game-over-rematch", "Run it back — you know what to build now.",
-                                     cta: "Rematch", onCta: _game.Rematch);
+                // The game-over Tips nudge toward Rematch was removed (audit cheap-batch d): the banner
+                // itself now owns a real Rematch button (GameOverBanner), so the tip's CTA pointed at the
+                // same moment a tip bubble would render underneath/behind the banner — unreachable.
             }
         }
 

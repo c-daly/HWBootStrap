@@ -8,9 +8,11 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Right-side barracks: lists the active player's reusable templates. Select one, then click a
-    /// deployment-zone hex to deploy a paid clone (the template is not consumed). Stays in deploy
-    /// mode so you can place several; re-click the selected template to stop.
+    /// Right-side barracks: lists the LOCAL HUMAN's reusable templates (see <see cref="ShownSeat"/> —
+    /// NOT necessarily <c>State.ActivePlayer</c>: online, always your own seat, never the opponent's;
+    /// vs-AI, always your seat, never the AI's). Select one, then click a deployment-zone hex to deploy
+    /// a paid clone (the template is not consumed). Stays in deploy mode so you can place several;
+    /// re-click the selected template to stop.
     /// </summary>
     public sealed class BarracksPanel : MonoBehaviour
     {
@@ -92,6 +94,20 @@ namespace HexWars.Presentation
             UiKit.SetRect(_list, 0f, -60f, w, 360f);
         }
 
+        /// <summary>Which seat's barracks this panel shows — deliberately NOT always
+        /// <c>State.ActivePlayer</c> (audit I3): online, your own seat always, so the opponent's
+        /// designs are never shown (info leak) or deletable mid-their-turn; vs-AI, the human's seat
+        /// always, so the AI's templates are never shown/deletable mid-AI-turn; hotseat/spectator
+        /// (incl. <see cref="SpectatorDriver"/>'s AI-vs-AI demo, which has no <see cref="AiOpponent"/>
+        /// component), the active player — there's only ever one human at the screen either way.</summary>
+        PlayerId ShownSeat()
+        {
+            if (_game.Networked) return _game.Seat ?? _game.State.ActivePlayer;
+            var ai = _game.GetComponent<AiOpponent>();
+            if (ai != null) return ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            return _game.State.ActivePlayer;
+        }
+
         void Rebuild()
         {
             foreach (var r in _rows) Destroy(r.gameObject);
@@ -107,7 +123,14 @@ namespace HexWars.Presentation
             if (_canvasGo != null && !_canvasGo.activeSelf) _canvasGo.SetActive(true);
 
             var s = _game.State;
-            var p = s.Player(s.ActivePlayer);
+            var seat = ShownSeat();
+            // whether the shown seat is the one actually allowed to act right now — deploy/delete are
+            // both your-turn-only at the engine (top-level Apply() rejects any other issuer), so the
+            // shown seat being idle (vs-AI's AI turn, or an online opponent's turn) must disable both.
+            bool isActiveHuman = seat == s.ActivePlayer;
+            if (!isActiveHuman && _deployIndex >= 0) _deployIndex = -1; // drop a stale selection — can't deploy on someone else's turn
+
+            var p = s.Player(seat);
             if (_deployIndex >= p.Barracks.Count) _deployIndex = -1;
 
             int cheapest = int.MaxValue;
@@ -123,11 +146,12 @@ namespace HexWars.Presentation
                 var row = UiKit.Button(_list, $"{name}   deploy {cost}", -20f, -(4f + i * 34f), 170f, 30f,
                                        () => Select(idx), UiKit.ButtonStyle.Secondary);
                 UiKit.SetToggled(row, selected);
+                row.interactable = !ReadOnly && isActiveHuman;
                 _rows.Add(row);
 
                 var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 34f), 32f, 30f,
                                        () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
-                del.interactable = !ReadOnly;
+                del.interactable = !ReadOnly && isActiveHuman;
                 _rows.Add(del);
             }
 
@@ -140,8 +164,10 @@ namespace HexWars.Presentation
             // !s.IsGameOver guards a known trigger collision (Task 12 review): a winning kill can make a
             // deploy affordable the same frame the game ends, and TipsService.Show is last-wins — without
             // this guard the deploy tip would silently eat the game-over rematch nudge. A deploy tip on
-            // the game-over screen is useless anyway, so the guard is a pure win.
-            if (!s.IsGameOver && p.Barracks.Count > 0 && p.Points >= cheapest)
+            // the game-over screen is useless anyway, so the guard is a pure win. isActiveHuman guards a
+            // second collision (audit I3): without it, an AI's own barracks affording a deploy could fire
+            // this tip at a human who isn't even the one being shown/acting.
+            if (!s.IsGameOver && isActiveHuman && p.Barracks.Count > 0 && p.Points >= cheapest)
                 TipsService.Show("can-afford-deploy", "Deploying costs the unit's points.");
         }
 

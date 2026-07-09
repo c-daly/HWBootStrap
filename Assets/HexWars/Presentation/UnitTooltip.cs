@@ -54,6 +54,7 @@ namespace HexWars.Presentation
         int _cachedUnitId = -1;
         int _cachedHp = int.MinValue;
         bool _cachedMoved, _cachedAttacked, _cachedGameOver, _cachedIsOwnersTurn;
+        int _cachedSpentH = int.MinValue, _cachedSpentV = int.MinValue;
 
         public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);
 
@@ -66,24 +67,31 @@ namespace HexWars.Presentation
         public void Show(Unit unit, Vector2 screenPos, GameState state)
         {
             bool moved = false, attacked = false;
+            var spent = (H: 0, V: 0);
             if (state != null)
             {
                 foreach (var id in state.MovedUnitIds) if (id == unit.Id) { moved = true; break; }
                 foreach (var id in state.AttackedUnitIds) if (id == unit.Id) { attacked = true; break; }
+                if (state.MovementSpent.TryGetValue(unit.Id, out var sp)) spent = sp;
             }
             bool gameOver = state != null && state.IsGameOver;
             // owner-turn bit mirrors Format()'s render condition for the "This turn" block: EndTurn
             // resets MovedUnitIds/AttackedUnitIds, so across a turn handover every other key field is
             // identical for an un-acted unit while the correct text differs
             bool isOwnersTurn = state != null && unit.Owner == state.ActivePlayer;
+            // spent (H,V) matters on its own: a partial move (budget not exhausted) leaves moved=true
+            // but changes the "Move x/y" remaining-budget line Format() prints — without it in the key,
+            // hopping the same unit again wouldn't refresh the displayed remaining budget.
             bool unchanged = _panel.activeSelf && unit.Id == _cachedUnitId && unit.CurrentHp == _cachedHp
                             && moved == _cachedMoved && attacked == _cachedAttacked && gameOver == _cachedGameOver
-                            && isOwnersTurn == _cachedIsOwnersTurn;
+                            && isOwnersTurn == _cachedIsOwnersTurn
+                            && spent.H == _cachedSpentH && spent.V == _cachedSpentV;
             if (unchanged) return;
 
             _cachedUnitId = unit.Id; _cachedHp = unit.CurrentHp;
             _cachedMoved = moved; _cachedAttacked = attacked; _cachedGameOver = gameOver;
             _cachedIsOwnersTurn = isOwnersTurn;
+            _cachedSpentH = spent.H; _cachedSpentV = spent.V;
 
             string text = Format(unit, state);
             _text.text = text;

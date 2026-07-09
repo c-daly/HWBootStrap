@@ -107,7 +107,13 @@ namespace HexWars.Presentation
         void OpenOnce()
         {
             _attemptClosed = false;
-            string url = ServerWsUrl(_room, _setupWire, _isPrivate, Token());
+            // A retry (attempt > 0) only ever happens after a started game dropped (see Lifecycle) — by
+            // then the room already exists, so this must connect join-only (no setup=), same as any other
+            // joiner. Carrying setup= into a retry risked minting a fresh public room under the SAME code
+            // if the original room's hold window had since expired, stranding the player in a phantom
+            // game instead of hitting the existing SEAT FULL -> toast -> title path.
+            string setupWire = _attempt > 0 ? null : _setupWire;
+            string url = ServerWsUrl(_room, setupWire, _isPrivate, Token());
             Debug.Log("[Net] connecting to " + url);
             try { _ws = new WebSocket(url); }
             catch (Exception e)

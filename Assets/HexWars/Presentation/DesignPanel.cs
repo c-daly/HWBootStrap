@@ -197,12 +197,23 @@ namespace HexWars.Presentation
         void OnCreate()
         {
             if (_game == null || _game.State == null) return;
-            if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), _name)))
+            // Client-side sanitize before the command is even built — the engine still backstops this
+            // (UnitTemplate.Sanitize runs again at the CreateUnit boundary), but doing it here too means
+            // what's echoed back in APPLY / shown in the barracks matches what the player typed, instead
+            // of silently differing only after a round-trip.
+            string sanitized = UnitTemplate.Sanitize(_name);
+            if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), sanitized)))
             {
-                SoundManager.Play(SoundKind.Design);
-                _name = "";
-                RotatePlaceholder(); // a fresh empty box next time shows a different example
-                ApplyNameDisplay();
+                // TryApply's optimistic `true` for a Networked game isn't a server verdict — the server
+                // may yet reject it, so the visible "it worked" cues (sound + clearing the name box)
+                // must wait for the real APPLY/REJECT round-trip, not fire on the local guess.
+                if (!_game.Networked)
+                {
+                    SoundManager.Play(SoundKind.Design);
+                    _name = "";
+                    RotatePlaceholder(); // a fresh empty box next time shows a different example
+                    ApplyNameDisplay();
+                }
             }
         }
     }

@@ -63,20 +63,31 @@ namespace HexWars.Presentation
             if (onRematch != null && onMainMenu != null)
             {
                 UiKit.Button(band.transform, "Rematch", -120f, -140f, 220f, 44f,
-                             () => { Dismiss(); onRematch(); }, UiKit.ButtonStyle.Cta);
+                             () => Guarded(onRematch), UiKit.ButtonStyle.Cta);
                 UiKit.Button(band.transform, "Main menu", 120f, -140f, 220f, 44f,
-                             () => { Dismiss(); onMainMenu(); }, UiKit.ButtonStyle.Secondary);
+                             () => Guarded(onMainMenu), UiKit.ButtonStyle.Secondary);
             }
             else if (onMainMenu != null)
             {
                 UiKit.Button(band.transform, "Main menu", 0f, -140f, 220f, 44f,
-                             () => { Dismiss(); onMainMenu(); }, UiKit.ButtonStyle.Secondary);
+                             () => Guarded(onMainMenu), UiKit.ButtonStyle.Secondary);
             }
             else if (onRematch != null)
             {
                 UiKit.Button(band.transform, "Rematch", 0f, -140f, 220f, 44f,
-                             () => { Dismiss(); onRematch(); }, UiKit.ButtonStyle.Cta);
+                             () => Guarded(onRematch), UiKit.ButtonStyle.Cta);
             }
+        }
+
+        /// <summary>Same DismissGrace the dim's own tap-to-dismiss respects (see its handler above) —
+        /// without it, the click that ends the game (or a reflexive next one) could land square on a
+        /// button occupying the same screen position as whatever was just clicked, silently firing
+        /// Rematch/Main-menu before the player even registered the result.</summary>
+        static void Guarded(System.Action action)
+        {
+            if (Time.unscaledTime - _shownAt < DismissGrace) return;
+            Dismiss();
+            action();
         }
 
         public static void Dismiss()

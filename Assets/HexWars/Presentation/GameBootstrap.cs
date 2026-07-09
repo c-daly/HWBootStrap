@@ -411,12 +411,19 @@ namespace HexWars.Presentation
 
         /// <summary>The socket died before a match began (server down / network drop while hosting or
         /// joining). Mid-game drops are the reconnect follow-up (audit U2) — pre-game, a toast plus the
-        /// waiting screen's Cancel is the whole story.</summary>
+        /// waiting screen's Cancel is normally the whole story. But a shared <c>?room=</c> link auto-joins
+        /// straight from <see cref="Start"/> with none of SetupForm/GameBrowser/TitleScreen ever created
+        /// (see Start's Networked branch) — if THAT connection fails (bad/expired code, server down), none
+        /// of those exist to catch it, and the player is stranded on a blank screen forever with no way
+        /// back (audit I4). Self-heal the same way SEAT FULL already does: reopen the title screen, whose
+        /// own self-heal restores the demo + music.</summary>
         internal void OnNetClosed()
         {
             if (Networked && State == null && _net != null)
                 Toast.Show("Connection lost — check the link and try again.");
             GetComponent<SetupForm>()?.OnConnectionLost();
+            if (GetComponent<SetupForm>() == null && GetComponent<GameBrowser>() == null && GetComponent<TitleScreen>() == null)
+                TitleScreen.Reopen(this);
         }
 
         /// <summary>A started game's socket dropped and NetClient is retrying with backoff. Called once
@@ -438,12 +445,25 @@ namespace HexWars.Presentation
             StateChanged?.Invoke();
         }
 
-        /// <summary>The server dealt the authoritative start state — load and render it.</summary>
+        /// <summary>The server dealt the authoritative start state — load and render it. The payload is
+        /// the room's start state PLUS every command accepted since (see MatchHub) — a fresh join has an
+        /// empty command list, but a reconnect's re-deal does not, so it must be fast-forwarded through
+        /// the same engine that produced it rather than treated as a start state on its own: ReplayFile's
+        /// start-state encoding assumes full-health units and omits per-turn tracking (fine for a FRESH
+        /// deal, corrupting for a mid-game one). No per-command presentation here — this is a silent
+        /// resync, not a replay to watch.</summary>
         internal void OnNetStart(string startStateText)
         {
             Reconnecting = false;      // a START re-deal (fresh join OR a reconnect) always means we're live
             Presenter?.ResetQueue();
-            State = ReplayFile.Read(startStateText).Start;
+            var data = ReplayFile.Read(startStateText);
+            State = data.Start;
+            foreach (var cmd in data.Commands)
+            {
+                var result = GameEngine.Apply(State, cmd);
+                if (result.Success) State = result.NewState;
+                else Debug.LogError("[Net] re-deal fast-forward: a logged command failed to reapply — " + result.Reason);
+            }
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
