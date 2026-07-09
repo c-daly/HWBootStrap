@@ -56,6 +56,18 @@ Three gaps stand between the current build and inviting people:
     reveal. One bubble at a time, never blocks input, never appears when off.
   - *Rematch* (vs AI) on the game-over banner; *empty lobby* offers Play vs AI beside "host one";
     help screen gains a DESIGN YOUR OWN section and reframes roles as example templates.
+  - *Imported audio (added 2026-07-08, user-supplied assets):* title-screen music
+    (Deep_In_Space, loops under the demo, fades when a real game starts — title-only by explicit
+    decision), a quiet in-game ambient bed (Ambiant_Loop), a pneumatic-door one-shot for unit
+    deploys (new SoundKind.Deploy with the old procedural click as fallback), and a faint
+    computer hum while the Designer is open (Computer_loop). Machin_Loop deliberately unused
+    (generator hum wants positional audio — later). Music/ambience live on dedicated looping
+    AudioSources beside the one-shot SFX source; music ignores the demo's SFX-mute. All combat
+    SFX stay procedural; every asset-backed sound keeps a synthesized fallback. The four used
+    clips live under Assets/HexWars/Resources/Audio as role-named copies (TitleMusic, AmbientBed,
+    DeployDoor, DesignerHum — tracked); the 1.2 GB vendor kits were deleted after extraction
+    (user-authorized; .gitignore entries remain as re-import protection). WebGL constraint: no
+    Streaming load type — music is CompressedInMemory Vorbis.
 
 **Non-goals**
 

@@ -6986,9 +6986,39 @@ git commit -m "feat(delight): Rematch button on the game-over banner (vs-AI game
 ```
 
 ---
-### Task 14: Final regression + ship
+### Task 14: Imported audio — title music, ambient bed, deploy door, designer hum
 
-This task assumes Tasks 1-13 are all committed on the milestone branch (Tasks 1-5 above; Tasks 6-13 are
+*(Added mid-milestone from user-supplied assets; spec §2 "Imported audio" bullet is the contract.
+The four clips are ALREADY copied to `Assets/HexWars/Resources/Audio/` as `TitleMusic.wav` (23 MB),
+`AmbientBed.wav`, `DeployDoor.wav`, `DesignerHum.wav`, and the vendor kits are already deleted —
+this task wires them up. All four are currently untracked; this task's commit adds them.)*
+
+**Files:**
+- Modify: `Assets/HexWars/Presentation/SoundManager.cs`
+- Modify: `Assets/HexWars/Presentation/GameBootstrap.cs` (music/ambience lifecycle in StartDemo/EndDemo/starters)
+- Modify: `Assets/HexWars/Presentation/ActionPresenter.cs` (deploy sound → SoundKind.Deploy)
+- Modify: `Assets/HexWars/Presentation/DesignPanel.cs` (hum on open/close)
+- Create: `Assets/HexWars/Editor/AudioImportSettings.cs` (one-shot editor script setting importer settings)
+- Commit: the four WAVs + their generated .metas + code.
+
+**Interfaces:**
+- Consumes: existing `SoundKind`/`SoundManager.Play`, `GameBootstrap.StartDemo/EndDemo` seams, DemoMode.
+- Produces: `SoundKind.Deploy` (asset-backed, procedural-click fallback); `SoundManager.StartTitleMusic()/StopTitleMusic()`, `StartAmbience()/StopAmbience()`, `StartDesignerHum()/StopDesignerHum()` — all null-safe when the clip fails to load (`Resources.Load<AudioClip>("Audio/...")` returning null must degrade silently, never throw).
+
+- [ ] **Step 1: Import settings.** `AudioImportSettings.cs` editor script (a `[MenuItem]` one-shot) that sets, via `AudioImporter`: TitleMusic → `CompressedInMemory` + Vorbis quality 0.30 (NOT Streaming — unsupported on WebGL); AmbientBed/DesignerHum → `CompressedInMemory` + Vorbis 0.40; DeployDoor → `DecompressOnLoad` + Vorbis 0.45. All `forceToMono = false`, `loadInBackground = true` for the three loops. Run it via coplay execute_script; verify with a read-back of each importer's settings.
+- [ ] **Step 2: SoundManager.** Add three static looping sources on the existing persistent `HexWarsSound` GameObject (`_music`, `_ambience`, `_hum` — created lazily like `_src`), clips via `Resources.Load<AudioClip>("Audio/TitleMusic")` etc. cached in statics. Volumes: music 0.35f, ambience 0.15f, hum 0.12f. `Start*/Stop*` methods idempotent (Start while playing = no restart; Stop while stopped = no-op). Music deliberately IGNORES `Muted` (that flag silences battle SFX on the title; the soundtrack owns the title). Add `SoundKind.Deploy` to the enum; `Build(kind)` case Deploy: `Resources.Load<AudioClip>("Audio/DeployDoor")` with the existing Build click as the fallback when the load returns null (the result rides the existing `_clips` cache like every other kind).
+- [ ] **Step 3: Lifecycle wiring.** GameBootstrap: `StartDemo()` → `SoundManager.StartTitleMusic(); SoundManager.StopAmbience();`; `EndDemo()` → `SoundManager.StopTitleMusic();`; `StartLocalGame`/`OnNetStart` (after state set) → `SoundManager.StartAmbience();`; `ReturnToMenu` path already runs StartDemo (music resumes). The `?room=` boot never starts music (no demo) — ambience starts when START arrives via OnNetStart. ActionPresenter: the deploy playback's `SoundManager.Play(SoundKind.Build)` call in PlayDeploy — AFTER the visibility gate, do NOT move it before the fog bail-outs — becomes `SoundManager.Play(SoundKind.Deploy)`. DesignPanel: `StartDesignerHum()` when the panel opens/shows, `StopDesignerHum()` on close/hide — match whatever open/close seam the panel has after Task 11's changes (read the file as it exists when you implement).
+- [ ] **Step 4: Verify (coplay).** Play mode: StartDemo → music source playing (reflection read + positive control), battle SFX still silent (Muted true); start vs-AI game → music stops, ambience playing; deploy a unit → DeployDoor entry present in the `_clips` cache after the deploy (AudioSource.isPlaying does NOT track PlayOneShot — use the clip-cache probe); open Designer → hum playing; close → stopped; ReturnToMenu → music back. Report the assertion values.
+- [ ] **Step 5: Regression + commit.** No engine changes (confirm `git status` shows no engine files). Commit:
+```bash
+git add Assets/HexWars/Resources Assets/HexWars/Presentation/SoundManager.cs Assets/HexWars/Presentation/GameBootstrap.cs Assets/HexWars/Presentation/ActionPresenter.cs Assets/HexWars/Presentation/DesignPanel.cs Assets/HexWars/Editor/AudioImportSettings.cs
+git commit -m "feat(audio): user-supplied soundscape - title music over the demo, in-game ambient bed, pneumatic deploy door, designer hum; procedural SFX remain the fallback"
+```
+
+---
+### Task 15: Final regression + ship
+
+This task assumes Tasks 1-14 are all committed on the milestone branch (Tasks 1-5 above; Tasks 6-14 are
 the client/Unity half — Designer name field, DeleteTemplate ✕ button, Tips service, portrait pass,
 rematch, share/PWA — drafted separately, not in this file). It is a verification-and-release task, not a
 TDD task: there is no new production code here, so there is no red/green cycle — every step is a gate
