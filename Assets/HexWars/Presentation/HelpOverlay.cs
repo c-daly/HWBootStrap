@@ -63,6 +63,15 @@ namespace HexWars.Presentation
             trt.anchorMin = trt.anchorMax = new Vector2(1f, 1f);
             trt.pivot = new Vector2(1f, 1f);
             trt.anchoredPosition = new Vector2(-12f - 54f - 8f, -12f); // left of the "?" (54 wide, 8px gap)
+
+            // the escape menu's touch trigger — mobile has no Esc key; EscapeMenu owns the modal itself
+            var menuBtn = UiKit.Button(canvasGo.transform, "Menu", 0f, 0f, 80f, 34f,
+                                       () => FindAnyObjectByType<EscapeMenu>()?.Toggle(),
+                                       UiKit.ButtonStyle.Secondary, UiKit.SizeCaption);
+            var mrt = menuBtn.GetComponent<RectTransform>();
+            mrt.anchorMin = mrt.anchorMax = new Vector2(1f, 1f);
+            mrt.pivot = new Vector2(1f, 1f);
+            mrt.anchoredPosition = new Vector2(-12f - 54f - 8f - 110f - 8f, -12f); // left of the Tips toggle (110 wide)
         }
     }
 }
