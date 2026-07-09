@@ -156,6 +156,22 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void SeededStartState_RoundTrips_WithNames()
+        {
+            var start = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 12, 7));
+            var s = ReplayFile.Read(ReplayFile.Write(start, new List<Command>())).Start;
+
+            var expected = new[] { "Brute", "Striker", "Sniper", "Artillery", "Scout" };
+            foreach (var pid in new[] { PlayerId.Player0, PlayerId.Player1 })
+            {
+                var barracks = s.Player(pid).Barracks;
+                Assert.That(barracks.Count, Is.EqualTo(5));
+                for (int i = 0; i < 5; i++)
+                    Assert.That(barracks[i].Name, Is.EqualTo(expected[i]), $"{pid} slot {i}");
+            }
+        }
+
+        [Test]
         public void UnitAndBarracks_Name_RoundTrip()
         {
             var board = new RandomBoardGenerator(BoardGenConfig.Default()).Generate(7);

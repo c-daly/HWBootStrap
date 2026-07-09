@@ -75,6 +75,19 @@ namespace HexWars.Engine
             new UnitStats(2, 2, 0, 2, 2, 6, 1, 4, 1), // Sniper
         };
 
+        // Barracks starter set (invite-readiness spec §5): five named example designs, deployable turn
+        // one, deletable per-game. The first three intentionally match Roster[0..2] exactly — the
+        // classic trio stays at indices 0-2, matching the on-board starting army and the RL contract
+        // (TacticalLayout keeps its own separate roster, so this table never touches the RL surface).
+        static readonly UnitTemplate[] StarterTemplates =
+        {
+            new UnitTemplate("Brute",     Roster[0]),
+            new UnitTemplate("Striker",   Roster[1]),
+            new UnitTemplate("Sniper",    Roster[2]),
+            new UnitTemplate("Artillery", new UnitStats(3, 6, 0, 0, 0, 5, 2, 2, 1)),
+            new UnitTemplate("Scout",     new UnitStats(2, 0, 0, 4, 3, 0, 0, 7, 2)),
+        };
+
         public static GameState Build(GameSetup setup)
         {
             setup = setup.Sanitized();
@@ -151,11 +164,8 @@ namespace HexWars.Engine
             var units = new List<Unit>();
             for (int i = 0; i < army.Length && i < flat.Count; i++)
                 units.Add(new Unit(nextId++, id, army[i], flat[i], 0));
-            // pre-seed the barracks with the default roster so players can deploy without designing first.
-            // TODO(Task 3): replaced by the five-entry named starter set (GameFactory.StarterTemplates).
-            var barracks = new List<UnitTemplate>();
-            foreach (var s in Roster) barracks.Add(new UnitTemplate("", s));
-            return new PlayerState(id, startingPoints, barracks, units, null);
+            // pre-seed the barracks with the named starter set so players can deploy without designing first
+            return new PlayerState(id, startingPoints, new List<UnitTemplate>(StarterTemplates), units, null);
         }
     }
 }
