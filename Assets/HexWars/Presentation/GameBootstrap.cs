@@ -74,6 +74,16 @@ namespace HexWars.Presentation
         /// episode (not once per attempt).</summary>
         public bool Reconnecting { get; private set; }
 
+        /// <summary>The setup/difficulty of the most recent LOCAL vs-AI game — null whenever the most
+        /// recent game start was anything else (hotseat, online). Set only by StartLocalGame's vsAi
+        /// path; cleared by NewGame()/StartNetGame() so a stale vs-AI setup can never make
+        /// RematchAvailable true for a hotseat or online game that started afterward.</summary>
+        public GameSetup? LastLocalSetup { get; private set; }
+        public AiLevel LastLocalAi { get; private set; }
+
+        /// <summary>Game-over banner shows Rematch only for a local vs-AI game (spec §6).</summary>
+        public bool RematchAvailable => LastLocalSetup.HasValue;
+
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
 
@@ -105,6 +115,7 @@ namespace HexWars.Presentation
         {
             EndDemo();
             TipsService.NewGame();
+            LastLocalSetup = null; // hotseat isn't a vs-AI game — a stale Rematch target must not survive into it
             Presenter?.ResetQueue();
             SetupEnvironment();
 
@@ -195,6 +206,7 @@ namespace HexWars.Presentation
         {
             EndDemo();
             TipsService.NewGame();
+            LastLocalSetup = null; // online isn't a vs-AI game — same reasoning as NewGame() above
             // the demo's state must not linger: panels dismiss on (State != null && !DemoMode), and
             // the authoritative state arrives later via START — until then there is no game here
             State = null;
@@ -235,7 +247,22 @@ namespace HexWars.Presentation
             {
                 var ai = gameObject.AddComponent<AiOpponent>();
                 ai.Level = level;
+                LastLocalSetup = setup;
+                LastLocalAi = level;
             }
+        }
+
+        /// <summary>Game-over banner's Rematch button: same setup, fresh seed, instant restart. A no-op
+        /// if the last game wasn't local vs-AI (defensive — the banner only shows the button when
+        /// RematchAvailable is already true, so this guard should never actually trigger).</summary>
+        public void Rematch()
+        {
+            if (!LastLocalSetup.HasValue) return;
+            var s = LastLocalSetup.Value;
+            var reseeded = new GameSetup(s.Mode, s.Width, s.Height, s.StartingPoints,
+                                         UnityEngine.Random.Range(1, 99999), s.ArmySize, s.Brutes, s.Strikers,
+                                         s.Snipers, s.TurnActions, s.Fog);
+            StartLocalGame(reseeded, true, LastLocalAi);
         }
 
         /// <summary>The title screen's living background: a muted Greedy-vs-Random match on a fresh

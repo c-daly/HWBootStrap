@@ -137,7 +137,11 @@ namespace HexWars.Presentation
 
             // spec §6: "First time points ≥ cheapest deploy cost with barracks open" — fires once per
             // game the moment it becomes true, whichever Rebuild() call (StateChanged-driven) sees it first.
-            if (p.Barracks.Count > 0 && p.Points >= cheapest)
+            // !s.IsGameOver guards a known trigger collision (Task 12 review): a winning kill can make a
+            // deploy affordable the same frame the game ends, and TipsService.Show is last-wins — without
+            // this guard the deploy tip would silently eat the game-over rematch nudge. A deploy tip on
+            // the game-over screen is useless anyway, so the guard is a pure win.
+            if (!s.IsGameOver && p.Barracks.Count > 0 && p.Points >= cheapest)
                 TipsService.Show("can-afford-deploy", "Deploying costs the unit's points.");
         }
 

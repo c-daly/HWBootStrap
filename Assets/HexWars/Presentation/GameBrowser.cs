@@ -140,8 +140,13 @@ namespace HexWars.Presentation
 
             if (_lastGames.Length == 0)
             {
-                _status.text = "No open games right now — host one!";
-                UiKit.Button(_listRoot, "Host Game", 0f, -40f, 260f, 48f, () =>
+                _status.text = "No open games right now — host one, or play the AI while you wait.";
+                UiKit.Button(_listRoot, "Play vs AI", -140f, -40f, 260f, 48f, () =>
+                {
+                    Close();
+                    SetupForm.Open(_game, SetupForm.SetupMode.VsAi);
+                }, UiKit.ButtonStyle.Primary);
+                UiKit.Button(_listRoot, "Host Game", 140f, -40f, 260f, 48f, () =>
                 {
                     Close();
                     SetupForm.Open(_game, SetupForm.SetupMode.Host);

@@ -19,7 +19,7 @@ namespace HexWars.Presentation
         const float DismissGrace = 0.8f;
         static float _shownAt;
 
-        public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null)
+        public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null, System.Action onRematch = null)
         {
             Dismiss(); // never stack two
             _shownAt = Time.unscaledTime;
@@ -57,13 +57,25 @@ namespace HexWars.Presentation
                                                                         // this a future two-line subtitle
                                                                         // would silently lose its 2nd line
 
-            if (onMainMenu != null)
+            // band uses a centre anchor (pivot 0.5,0.5); UiKit.Button anchors top-centre (pivot 0.5,1),
+            // so the y offset is re-based from the band's centre to its top edge (half its 200-tall
+            // rect) to land buttons on the exact same pixels the single Main-menu button always used.
+            if (onRematch != null && onMainMenu != null)
             {
-                // band uses a centre anchor (pivot 0.5,0.5); UiKit.Button anchors top-centre (pivot
-                // 0.5,1), so the y offset is re-based from the band's centre to its top edge
-                // (half its 200-tall rect) to land the button on the exact same pixels as before.
+                UiKit.Button(band.transform, "Rematch", -120f, -140f, 220f, 44f,
+                             () => { Dismiss(); onRematch(); }, UiKit.ButtonStyle.Cta);
+                UiKit.Button(band.transform, "Main menu", 120f, -140f, 220f, 44f,
+                             () => { Dismiss(); onMainMenu(); }, UiKit.ButtonStyle.Secondary);
+            }
+            else if (onMainMenu != null)
+            {
                 UiKit.Button(band.transform, "Main menu", 0f, -140f, 220f, 44f,
                              () => { Dismiss(); onMainMenu(); }, UiKit.ButtonStyle.Secondary);
+            }
+            else if (onRematch != null)
+            {
+                UiKit.Button(band.transform, "Rematch", 0f, -140f, 220f, 44f,
+                             () => { Dismiss(); onRematch(); }, UiKit.ButtonStyle.Cta);
             }
         }
 

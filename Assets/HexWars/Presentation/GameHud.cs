@@ -218,10 +218,10 @@ namespace HexWars.Presentation
                            : p0Won ? P0ToastBlue : P1ToastRed;
                 StartCoroutine(ShowBannerWhenQuiet(result.ToUpperInvariant(), HowText(s), accent));
 
-                // spec §6: game-over nudge, vs AI only. Informational only for now — Task 13 adds
-                // GameBootstrap.Rematch() and upgrades this exact call to a CTA that fires it.
-                if (FindAnyObjectByType<AiOpponent>() != null)
-                    TipsService.Show("game-over-rematch", "Run it back — you know what to build now.");
+                // spec §6: game-over nudge, vs AI only — now points at the real Rematch button.
+                if (_game.RematchAvailable)
+                    TipsService.Show("game-over-rematch", "Run it back — you know what to build now.",
+                                     cta: "Rematch", onCta: _game.Rematch);
             }
         }
 
@@ -231,7 +231,8 @@ namespace HexWars.Presentation
         {
             var presenter = _game != null ? _game.Presenter : null;
             while (presenter != null && presenter.IsBusy) yield return null;
-            GameOverBanner.Show(title, how, accent, onMainMenu: () => _game.ReturnToMenu());
+            System.Action onRematch = _game.RematchAvailable ? (System.Action)_game.Rematch : null;
+            GameOverBanner.Show(title, how, accent, onMainMenu: () => _game.ReturnToMenu(), onRematch: onRematch);
         }
 
         static string ResultText(GameState s)
