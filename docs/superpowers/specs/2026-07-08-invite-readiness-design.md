@@ -128,7 +128,10 @@ payloads (N4).
 replaces bare `UnitStats` in the barracks (`PlayerState.Barracks : IReadOnlyList<UnitTemplate>`).
 `CreateUnit` gains the name; `DeployUnit` copies the template's name onto the spawned unit;
 `Unit.Name` defaults to the dominant-role string when absent. Names are sanitized at the engine
-boundary: trimmed, length-capped at 20, restricted to `[A-Za-z0-9 _\-']`, empty → dominant role.
+boundary: trimmed, length-capped at 20, restricted to `[A-Za-z0-9 \-']`, empty → dominant role.
+(Underscore is deliberately NOT allowed: the wire encoding maps spaces↔underscores, so allowing
+literal underscores would make names lossy across a round-trip — the whitelist keeps the encoding
+bijective.)
 
 **Wire/replay compatibility (the one format-touching change):** `CreateUnit`'s wire line carries the
 name as the final token with spaces encoded as underscores; wherever `ReplayFile` currently encodes
