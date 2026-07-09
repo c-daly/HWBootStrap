@@ -36,12 +36,14 @@ namespace HexWars.Engine
     }
 
     /// <summary>
-    /// One authoritative head-to-head match, independent of any transport. It seats two connections
-    /// (P0 then P1), and on every command enforces the one rule the engine can't: a connection may only
-    /// issue as the seat it actually holds (anti-impersonation). Everything else — turn order, legality,
-    /// win/elimination — is delegated to <see cref="GameEngine.Apply"/>, the single source of truth.
-    /// A WebSocket layer just turns sockets into <see cref="Join"/>/<see cref="Submit"/> calls and
-    /// relays the accepted command (via <see cref="CommandWire"/>) to both seats.
+    /// One authoritative head-to-head match, independent of any transport. It seats two IDENTITIES
+    /// (P0 then P1) — historically a raw socket connection id, now a client-minted <c>token</c> that
+    /// survives a refresh/reconnect — and on every command enforces the one rule the engine can't: an
+    /// identity may only issue as the seat it actually holds (anti-impersonation). Everything else —
+    /// turn order, legality, win/elimination — is delegated to <see cref="GameEngine.Apply"/>, the
+    /// single source of truth. <see cref="MatchHub"/> maps each live connection to a token and calls
+    /// <see cref="Join"/>/<see cref="Submit"/> with that token, so a dropped-and-reconnected socket with
+    /// the same token reclaims the same seat.
     /// </summary>
     public sealed class GameSession
     {
@@ -51,22 +53,24 @@ namespace HexWars.Engine
 
         public GameSession(GameState start) { State = start; }
 
-        /// <summary>Seat a connection as P0, then P1; a returning connection keeps its seat; null once full.</summary>
-        public PlayerId? Join(string connectionId)
+        /// <summary>Seat a token as P0, then P1; a returning token keeps its seat; null once full.</summary>
+        public PlayerId? Join(string token)
         {
-            if (_seats.TryGetValue(connectionId, out var existing)) return existing;
-            if (!_seats.ContainsValue(PlayerId.Player0)) return _seats[connectionId] = PlayerId.Player0;
-            if (!_seats.ContainsValue(PlayerId.Player1)) return _seats[connectionId] = PlayerId.Player1;
+            if (_seats.TryGetValue(token, out var existing)) return existing;
+            if (!_seats.ContainsValue(PlayerId.Player0)) return _seats[token] = PlayerId.Player0;
+            if (!_seats.ContainsValue(PlayerId.Player1)) return _seats[token] = PlayerId.Player1;
             return null;
         }
 
-        /// <summary>Release a connection's seat (on disconnect) so it can be re-taken by a reconnect.</summary>
-        public void Leave(string connectionId) => _seats.Remove(connectionId);
+        /// <summary>Release a token's seat so it can be re-taken (by any token) on the next Join. Used
+        /// only for un-started/lobby rooms — MatchHub never calls this for a Started room, since a
+        /// started room's seats must survive both players' sockets dropping (see MatchHub.Disconnect).</summary>
+        public void Leave(string token) => _seats.Remove(token);
 
         /// <summary>Validate the issuer owns its seat, then apply through the engine. On Accepted, advances State.</summary>
-        public SubmitOutcome Submit(string connectionId, Command cmd)
+        public SubmitOutcome Submit(string token, Command cmd)
         {
-            if (!_seats.TryGetValue(connectionId, out var seat)) return SubmitOutcome.NoSeat();
+            if (!_seats.TryGetValue(token, out var seat)) return SubmitOutcome.NoSeat();
             if (cmd.Issuer != seat) return SubmitOutcome.WrongSeat();
 
             var result = GameEngine.Apply(State, cmd);

@@ -70,6 +70,8 @@ namespace HexWars.NetServer
             bool isPrivate = ctx.Request.Query["private"].ToString() == "1";
             var setup = ParseSetup(ctx.Request.Query["setup"].ToString());
             bool joinOnly = ctx.Request.Query["join"].ToString() == "1";
+            string? token = ctx.Request.Query["token"].ToString();
+            if (string.IsNullOrWhiteSpace(token)) token = null; // absent/garbled -> fresh identity (today's behavior)
 
             var socket = await ctx.WebSockets.AcceptWebSocketAsync();
             var conn = new Conn(Guid.NewGuid().ToString("N"), socket);
@@ -77,7 +79,7 @@ namespace HexWars.NetServer
             Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} setup=({setup.Mode} {setup.Width}x{setup.Height} pts{setup.StartingPoints} seed{setup.Seed}) total={Conns.Count}");
             try
             {
-                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly)));
+                await Dispatch(Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly, token)));
                 while (socket.State == WebSocketState.Open)
                 {
                     string? text = await Receive(socket);

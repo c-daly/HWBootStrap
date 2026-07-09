@@ -47,15 +47,39 @@ namespace HexWars.NetServer
                 string joinerSeat = await Recv(joiner);       // a joiner must never mint a room for a typo'd code
                 bool joinOnlyTurnedAway = joinerSeat == "SEAT FULL";
 
+                // Reconnect: kill A's socket, reconnect with the SAME token, and confirm the server
+                // seats it back into P0 and re-deals START (the game must survive a background/refresh).
+                using var ra = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
+                string rSeatA = await Recv(ra);               // SEAT 0
+                using var rb = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-b");
+                string rSeatB = await Recv(rb);                // SEAT 1
+                string rStartA = await Recv(ra);
+                string rStartB = await Recv(rb);
+
+                ra.Abort();                                     // simulate a dead socket (no clean close)
+                using var ra2 = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
+                string rSeatA2 = await Recv(ra2);                // SEAT 0 again — same token, same seat
+                string rStartA2 = await Recv(ra2);               // personal START re-deal
+
+                await Send(ra2, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
+                string rApplyA2 = await Recv(ra2);
+                string rApplyB = await Recv(rb);
+
+                bool reconnectOk =
+                    rSeatA == "SEAT 0" && rSeatB == "SEAT 1" &&
+                    rStartA.StartsWith("START ") && rStartB.StartsWith("START ") &&
+                    rSeatA2 == "SEAT 0" && rStartA2.StartsWith("START ") &&
+                    rApplyA2 == "APPLY E 0" && rApplyB == "APPLY E 0";
+
                 bool ok =
                     seatA == "SEAT 0" && seatB == "SEAT 1" &&
                     startA.StartsWith("START ") && startB.StartsWith("START ") &&
                     applyA == "APPLY E 0" && applyB == "APPLY E 0" &&
-                    lobbyListsWaitingRoom && lobbyEmptiesOnStart && joinOnlyTurnedAway;
+                    lobbyListsWaitingRoom && lobbyEmptiesOnStart && joinOnlyTurnedAway && reconnectOk;
 
                 Console.WriteLine(ok
                     ? "SELFTEST PASS — two browsers can play head-to-head through this server"
-                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart} joinOnly='{joinerSeat}'");
+                    : $"SELFTEST FAIL seatA='{seatA}' seatB='{seatB}' startA?={startA.StartsWith("START ")} applyA='{applyA}' applyB='{applyB}' lobby1={lobbyListsWaitingRoom} lobby2={lobbyEmptiesOnStart} joinOnly='{joinerSeat}' reconnectOk={reconnectOk}");
 
                 await app.StopAsync();
                 return ok ? 0 : 1;

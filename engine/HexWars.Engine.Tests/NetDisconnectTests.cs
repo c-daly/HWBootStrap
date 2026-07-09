@@ -38,27 +38,27 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Hub_Disconnect_FreesSeat_SoANewJoinerIsSeatedNotTurnedAway()
+        public void Hub_Disconnect_OneOfTwo_SeatStaysReservedToItsToken_NotFreedForAnyComer()
         {
             var hub = new MatchHub(_ => TwoUnitGame());
-            hub.Connect("r", "a"); // P0
-            hub.Connect("r", "b"); // P1 — room full
+            hub.Connect("r", "a"); // P0, token defaults to "a"
+            hub.Connect("r", "b"); // P1 — room full, Started
             hub.Disconnect("r", "a");
-            var c = hub.Connect("r", "c");
-            Assert.That(c, Has.Some.Matches<Outbound>(o => o.ConnectionId == "c" && o.Message == "SEAT 0"));
-            Assert.That(c, Has.None.Matches<Outbound>(o => o.Message == NetProtocol.SeatFull));
+            var c = hub.Connect("r", "c"); // a stranger, a different token — a's seat is reserved, not freed
+            Assert.That(c, Has.Some.Matches<Outbound>(o => o.ConnectionId == "c" && o.Message == NetProtocol.SeatFull));
         }
 
         [Test]
-        public void Hub_Disconnect_LastMember_ResetsRoomForAFreshGame()
+        public void Hub_Disconnect_LastMember_OfAStartedRoom_IsHeldNotReset()
         {
             var hub = new MatchHub(_ => TwoUnitGame());
             hub.Connect("r", "a");
             hub.Connect("r", "b");
             hub.Disconnect("r", "a");
-            hub.Disconnect("r", "b"); // room now empty
-            var d = hub.Connect("r", "d");
-            Assert.That(d, Has.Some.Matches<Outbound>(o => o.ConnectionId == "d" && o.Message == "SEAT 0"));
+            hub.Disconnect("r", "b"); // room now empty, but it Started — held, not reset
+            var d = hub.Connect("r", "d"); // a stranger's token, no time advance
+            Assert.That(d, Has.Some.Matches<Outbound>(o => o.ConnectionId == "d" && o.Message == NetProtocol.SeatFull),
+                "a started room's seats survive both players dropping — reconnect must use the same token (see TokenRejoinTests)");
         }
     }
 }
