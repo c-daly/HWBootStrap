@@ -215,7 +215,10 @@ on the title screen and beside the in-game "?"; off = the coaching layer is comp
 → gone), never blocks input, each trigger fires at most once per game. Triggers:
 
 - First unit selection → "Green hexes = where it can go. Red = what it can hit."
-- Designer opened → stat rows show their one-line captions inline (the §6 descriptions, short form).
+- Designer opened → ~~stat rows show their one-line captions inline~~ *(amended 2026-07-09: the
+  captions structurally cannot fit the docked panel's width — replaced by one Tips-gated hint line
+  under the title, "Tap a stat name to see what it does", pointing at the §6 tap-bubbles, which
+  remain always available and carry the full descriptions)*.
 - First time points ≥ cheapest deploy cost with barracks open → "Deploying costs the unit's points."
 - Out of actions with turn not ended → "Nothing left this turn — End Turn passes play."
 - **First bounty earned (the reveal)** → "You earned N points. A wall? A sniper? Eyes that see
