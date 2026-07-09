@@ -24,6 +24,7 @@ namespace HexWars.Presentation
 
         bool _closing;
         int _attempt;                 // 0 = first-ever attempt; >0 = a retry after a drop
+        volatile bool _attemptClosed; // current attempt's socket session ended (OnClose fired, or connect failed)
         string _room, _setupWire;
         bool _isPrivate;
 
@@ -63,13 +64,19 @@ namespace HexWars.Presentation
         /// toast-and-stop behavior via <see cref="GameBootstrap.OnNetClosed"/>. A drop AFTER a game
         /// started retries with capped exponential backoff (1s, 2s, 4s, 8s, cap 15s) indefinitely —
         /// until it reconnects or this component is destroyed (Cancel / Main menu both call
-        /// <c>Destroy(_net)</c>, which stops this coroutine along with everything else).</summary>
+        /// <c>Destroy(_net)</c>, which stops this coroutine along with everything else). "This attempt
+        /// is over" is signalled by the socket's OnClose EVENT (via <see cref="_attemptClosed"/>), never
+        /// by Connect()'s Task — on WebGL that Task completes immediately (see <see cref="OpenOnce"/>),
+        /// so a Task-driven loop would treat every attempt as instantly over on the deployed platform:
+        /// spurious "Connection lost" on every host/join, and a new socket spun up per iteration while
+        /// the previous ones were still live. Waiting on the event also guarantees the next attempt's
+        /// socket is only constructed after the previous session actually ended — no stacking.</summary>
         IEnumerator Lifecycle()
         {
             while (true)
             {
-                var open = OpenOnce();
-                while (!open.IsCompleted) yield return null;
+                OpenOnce();
+                while (!_attemptClosed) yield return null;
                 if (_closing) yield break;
 
                 if (_attempt == 0 && _game.State == null)
@@ -86,14 +93,29 @@ namespace HexWars.Presentation
             }
         }
 
-        /// <summary>One connection attempt. Resolves once that attempt's socket session ends — either
-        /// it never opened, or it opened and later closed. NativeWebSocket's <c>Connect()</c> task runs
-        /// the whole read loop internally, so awaiting it IS awaiting "this attempt is over".</summary>
-        async System.Threading.Tasks.Task OpenOnce()
+        /// <summary>One connection attempt, event-driven: the attempt ends when this socket's OnClose
+        /// fires (sets <see cref="_attemptClosed"/>), or when construction/connect fails outright.
+        /// NativeWebSocket's <c>Connect()</c> Task must NOT be treated as the attempt's lifetime: on
+        /// standalone/editor it runs the whole read loop, but on WebGL it kicks the JS socket and
+        /// returns <c>Task.CompletedTask</c> immediately. The OnOpen/OnClose events — fired by the
+        /// JSLIB bridge on WebGL, and from Connect()'s own read loop/catch on standalone — are the only
+        /// signals that mean the same thing on both platforms, and they are exactly what this class's
+        /// pre-reconnect code relied on in the live WebGL deployment. Connect()'s Task is still observed
+        /// for faults so a faulted connect counts as a closed attempt instead of vanishing as an
+        /// unobserved exception (standalone Connect() routes all its errors to OnError/OnClose and never
+        /// faults; WebGL's throws synchronously — both covered — so the continuation is a backstop).</summary>
+        void OpenOnce()
         {
+            _attemptClosed = false;
             string url = ServerWsUrl(_room, _setupWire, _isPrivate, Token());
             Debug.Log("[Net] connecting to " + url);
-            _ws = new WebSocket(url);
+            try { _ws = new WebSocket(url); }
+            catch (Exception e)
+            {
+                Debug.LogError("[Net] socket create failed: " + e.Message);
+                _attemptClosed = true;   // an instantly-closed attempt: the normal backoff path applies
+                return;
+            }
             _ws.OnOpen += () =>
             {
                 Connected = true;
@@ -101,9 +123,22 @@ namespace HexWars.Presentation
                 if (_attempt > 0) { _attempt = 0; _game.OnNetReconnected(); }
             };
             _ws.OnError += e => Debug.LogError("[Net] error: " + e);
-            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); };
+            _ws.OnClose += c => { Connected = false; Debug.Log("[Net] closed: " + c); _attemptClosed = true; };
             _ws.OnMessage += OnMessage;
-            await _ws.Connect();
+            try
+            {
+                _ws.Connect().ContinueWith(t =>
+                {
+                    if (!t.IsFaulted) return;
+                    Debug.LogError("[Net] connect faulted: " + t.Exception.GetBaseException().Message);
+                    _attemptClosed = true;
+                }, System.Threading.Tasks.TaskScheduler.Default);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Net] connect failed: " + e.Message);
+                _attemptClosed = true;
+            }
         }
 
         public async void Send(string message)
