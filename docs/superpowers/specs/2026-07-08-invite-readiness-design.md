@@ -61,7 +61,14 @@ Three gaps stand between the current build and inviting people:
     decision), a quiet in-game ambient bed (Ambiant_Loop), a pneumatic-door one-shot for unit
     deploys (new SoundKind.Deploy with the old procedural click as fallback), and a faint
     computer hum while the Designer is open (Computer_loop). Machin_Loop deliberately unused
-    (generator hum wants positional audio — later). Music/ambience live on dedicated looping
+    (generator hum wants positional audio — later). *Weapon sounds (second user pack, Scifi Guns
+    SFX):* attacks play asset shots matched to the projectile's existing damage tier — light/mid/
+    heavy = Gun1/Gun3/Gun5 families (size-ordered; remappable by ear after live play), each
+    rotating 4 variants randomly so repeated attacks never sound stamped; a gun-rack clip plays
+    when a design is created into the barracks (SoundKind.Design). Deaths deliberately keep the
+    procedural explosion (no explosion in the pack; the synth boom is the strongest procedural
+    sound). Extracted role-named: AttackLight/Mid/Heavy_0-3 + CreateRacked; both vendor packs
+    deleted after extraction. Music/ambience live on dedicated looping
     AudioSources beside the one-shot SFX source; music ignores the demo's SFX-mute. All combat
     SFX stay procedural; every asset-backed sound keeps a synthesized fallback. The four used
     clips live under Assets/HexWars/Resources/Audio as role-named copies (TitleMusic, AmbientBed,

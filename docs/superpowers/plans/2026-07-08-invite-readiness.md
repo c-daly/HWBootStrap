@@ -7009,10 +7009,28 @@ this task wires them up. All four are currently untracked; this task's commit ad
 - [ ] **Step 2: SoundManager.** Add three static looping sources on the existing persistent `HexWarsSound` GameObject (`_music`, `_ambience`, `_hum` — created lazily like `_src`), clips via `Resources.Load<AudioClip>("Audio/TitleMusic")` etc. cached in statics. Volumes: music 0.35f, ambience 0.15f, hum 0.12f. `Start*/Stop*` methods idempotent (Start while playing = no restart; Stop while stopped = no-op). Music deliberately IGNORES `Muted` (that flag silences battle SFX on the title; the soundtrack owns the title). Add `SoundKind.Deploy` to the enum; `Build(kind)` case Deploy: `Resources.Load<AudioClip>("Audio/DeployDoor")` with the existing Build click as the fallback when the load returns null (the result rides the existing `_clips` cache like every other kind).
 - [ ] **Step 3: Lifecycle wiring.** GameBootstrap: `StartDemo()` → `SoundManager.StartTitleMusic(); SoundManager.StopAmbience();`; `EndDemo()` → `SoundManager.StopTitleMusic();`; `StartLocalGame`/`OnNetStart` (after state set) → `SoundManager.StartAmbience();`; `ReturnToMenu` path already runs StartDemo (music resumes). The `?room=` boot never starts music (no demo) — ambience starts when START arrives via OnNetStart. ActionPresenter: the deploy playback's `SoundManager.Play(SoundKind.Build)` call in PlayDeploy — AFTER the visibility gate, do NOT move it before the fog bail-outs — becomes `SoundManager.Play(SoundKind.Deploy)`. DesignPanel: `StartDesignerHum()` when the panel opens/shows, `StopDesignerHum()` on close/hide — match whatever open/close seam the panel has after Task 11's changes (read the file as it exists when you implement).
 - [ ] **Step 4: Verify (coplay).** Play mode: StartDemo → music source playing (reflection read + positive control), battle SFX still silent (Muted true); start vs-AI game → music stops, ambience playing; deploy a unit → DeployDoor entry present in the `_clips` cache after the deploy (AudioSource.isPlaying does NOT track PlayOneShot — use the clip-cache probe); open Designer → hum playing; close → stopped; ReturnToMenu → music back. Report the assertion values.
+- [ ] **Step 4b: Weapon sounds (second user pack, already extracted).** 13 more clips sit in
+`Assets/HexWars/Resources/Audio/`: `AttackLight_0..3`, `AttackMid_0..3`, `AttackHeavy_0..3`,
+`CreateRacked`. Wire them:
+  - Import settings (extend the Step 1 script): all 13 → `DecompressOnLoad` + Vorbis 0.45, forceToMono false.
+  - `SoundManager.PlayAttack(int tier)` (tier 0/1/2 = light/mid/heavy): picks the tier's family and
+    a random variant (`UnityEngine.Random.Range(0,4)`), cached `AudioClip[4]` per tier loaded via
+    `Resources.Load` on first use; null-safe fallback = the existing procedural `SoundKind.Attack`
+    whoosh. ActionPresenter's attack playback currently calls `SoundManager.Play(SoundKind.Attack)`
+    — replace with `SoundManager.PlayAttack(tier)` using THE SAME tier value/thresholds the
+    projectile visual already computes (read MakeProjectile's tier logic and reuse its result; do
+    not invent new thresholds).
+  - `SoundKind.Design` added to the enum: asset clip `CreateRacked`, procedural fallback = the
+    existing Build click. DesignPanel plays it on a SUCCESSFUL `CreateUnit` apply (TryApply returned
+    true), right where the create happens.
+  - Verify (same play-mode session as Step 4): three attacks at different damage tiers → distinct
+    families audible in the `_clips`/tier-cache probes; two attacks same tier → variant rotation
+    observed (cache array populated, chosen indices vary across ~6 shots); create a design → Design
+    entry cached. Deaths still procedural (positive control: Death clip still the synthesized one).
 - [ ] **Step 5: Regression + commit.** No engine changes (confirm `git status` shows no engine files). Commit:
 ```bash
 git add Assets/HexWars/Resources Assets/HexWars/Presentation/SoundManager.cs Assets/HexWars/Presentation/GameBootstrap.cs Assets/HexWars/Presentation/ActionPresenter.cs Assets/HexWars/Presentation/DesignPanel.cs Assets/HexWars/Editor/AudioImportSettings.cs
-git commit -m "feat(audio): user-supplied soundscape - title music over the demo, in-game ambient bed, pneumatic deploy door, designer hum; procedural SFX remain the fallback"
+git commit -m "feat(audio): user-supplied soundscape - title music, ambient bed, deploy door, designer hum, tiered weapon shots with variant rotation, design-racked clip; procedural SFX remain the fallback"
 ```
 
 ---
