@@ -220,7 +220,8 @@ on the title screen and beside the in-game "?"; off = the coaching layer is comp
 - Out of actions with turn not ended → "Nothing left this turn — End Turn passes play."
 - **First bounty earned (the reveal)** → "You earned N points. A wall? A sniper? Eyes that see
   everything? **Design your answer.**" — with a button that opens the Designer.
-- Game over (vs AI) → "Run it back — you know what to build now." pointing at Rematch.
+- ~~Game over (vs AI) → "Run it back" tip~~ *(removed during final review: the game-over banner's
+  own Rematch button owns that moment, and the tip rendered unreachably beneath the banner's dim)*.
 
 **Copy voice everywhere:** the templates are *examples of imagination applied to points* — help
 screen's unit section becomes: *"Brute, Striker, Sniper, Artillery, Scout — these are just ideas that
