@@ -68,22 +68,27 @@ namespace HexWars.Presentation
             float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
             const float rowH = 30f, top = 58f;
             float w = Mathf.Min(270f, availW - 16f);
-            bool tipsOn = TipsService.Enabled;         // an inline caption line under each stat row while on
-            float rowSlot = tipsOn ? rowH + 15f : rowH;
+            bool tipsOn = TipsService.Enabled;   // one hint line under the title while on (spec §6)
+            float rowsTop = tipsOn ? 52f : 40f;  // the hint sits between the title and the first stat row
             var panelImg = UiKit.Panel(canvasGo.transform, "DesignPanel", UiKit.Surface);
             var prt = panelImg.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0f, 1f);
             prt.pivot = new Vector2(0f, 1f);
-            prt.sizeDelta = new Vector2(w, rowSlot * 9 + rowH + 126f); // 9 (slotted) stat rows + the Name
-                                                               // row (fixed rowH, no caption) + 126f padding
+            prt.sizeDelta = new Vector2(w, rowsTop + rowH * 10 + 86f); // 9 stat rows + the Name row
+                                                                       // + summary/Create padding
             prt.anchoredPosition = new Vector2(8f, -top);
             var panel = panelImg.transform;
 
             UiKit.Label(panel, "DESIGN UNIT", 0f, -8f, w - 24f, 24f, 18, TextAnchor.MiddleLeft);
+            if (tipsOn) // spec §6 discoverability: the full stat descriptions live in the tap bubbles —
+                        // a 60-char caption under every row can't fit this panel's width, so one pointer
+                        // to the bubbles replaces the per-row inline captions
+                UiKit.Label(panel, "Tap a stat name to see what it does", 0f, -32f, w - 24f, 15f,
+                            11, TextAnchor.UpperLeft, UiKit.TextFaint);
 
             for (int i = 0; i < 9; i++)
             {
-                float y = -(40f + i * rowSlot);
+                float y = -(rowsTop + i * rowH);
                 int idx = i;
                 // the label itself is the tap target — a stat name button with a text-only look, opening
                 // the verbatim description (spec §6: "always available, Tips or no Tips")
@@ -98,13 +103,6 @@ namespace HexWars.Presentation
                 _valueLabels[i] = UiKit.Label(panel, "0", 23f, y, 40f, rowH, 16, TextAnchor.MiddleCenter);
                 UiKit.Button(panel, "-", 65f, y - 2f, 36f, rowH - 4f, () => Adjust(idx, -1));
                 UiKit.Button(panel, "+", 105f, y - 2f, 36f, rowH - 4f, () => Adjust(idx, +1));
-                if (tipsOn) // spec §6: designer-opened stat rows show their one-line captions inline while Tips is on
-                    // x=0, width w-24: same full-width-minus-padding convention as the "DESIGN UNIT" header
-                    // and _summary below (UiKit.Label's anchor pivot is the label's CENTER, not its left
-                    // edge — the original x=-63/w-90 pairing put the caption's left edge ~18px past the
-                    // panel's own left border, clipping the first couple of characters of every caption).
-                    UiKit.Label(panel, StatInfo.All[i].Caption, 0f, y - rowH + 2f, w - 24f, 15f,
-                               11, TextAnchor.UpperLeft, UiKit.TextFaint);
             }
             for (int i = 0; i < 9; i++) _valueLabels[i].text = _stats[i].ToString(); // sync display to
                                                                                       // current _stats — matters
@@ -113,7 +111,7 @@ namespace HexWars.Presentation
                                                                                       // after the player has already
                                                                                       // spent points
 
-            float nameY = -(40f + 9 * rowSlot + 6f);
+            float nameY = -(rowsTop + 9 * rowH + 6f);
             UiKit.Label(panel, "Name", -63f, nameY, 60f, rowH, 15, TextAnchor.MiddleLeft);
             _nameBox = UiKit.Button(panel, PlaceholderText(), 23f, nameY, w - 110f, rowH, OnTapName,
                                     UiKit.ButtonStyle.Secondary, 14).GetComponentInChildren<Text>();
@@ -181,7 +179,7 @@ namespace HexWars.Presentation
         /// current state (after typing, after Create, after a rebuild).</summary>
         void ApplyNameDisplay()
         {
-            if (_name.Length > 0) { _nameBox.text = _name; _nameBox.color = UiKit.TextMain; }
+            if (_name.Length > 0) { _nameBox.text = UiKit.Ellipsize(_name, 16); _nameBox.color = UiKit.TextMain; }
             else { _nameBox.text = PlaceholderText(); _nameBox.color = UiKit.TextFaint; } // grey, per spec
         }
 

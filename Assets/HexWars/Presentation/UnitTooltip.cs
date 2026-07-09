@@ -116,8 +116,11 @@ namespace HexWars.Presentation
         {
             var s = u.Stats;
             string owner = u.Owner == PlayerId.Player0 ? "Player 1" : "Player 2";
+            // The name gets its own line: sharing it with cost+owner overflowed the fixed Width with
+            // 20-char player names, and alone even the longest allowed name fits.
             string text =
-                $"<b>{u.DisplayName}</b>  {s.PointCost} pts  ({owner})\n" +
+                $"<b>{u.DisplayName}</b>\n" +
+                $"{s.PointCost} pts  ({owner})\n" +
                 $"HP {u.CurrentHp}/{s.Health}\n" +
                 $"Damage {s.Damage}   Defense {s.Defense}\n" +
                 $"Move {s.Movement}   Vertical {s.VerticalMovement}\n" +
@@ -131,7 +134,10 @@ namespace HexWars.Presentation
                 int climbLeft = Mathf.Max(0, s.VerticalMovement - spent.V);
                 bool attacked = false;
                 foreach (var id in state.AttackedUnitIds) if (id == u.Id) { attacked = true; break; }
-                text += $"\n<color=#9FD68C>This turn:  Move {moveLeft}/{s.Movement}  Climb {climbLeft}/{s.VerticalMovement}" +
+                // "This turn:" heads its own line — sharing it with the move/climb budgets was wider
+                // than the fixed Width at fontSize 14 and wrapped past the panel's computed height.
+                text += $"\n<color=#9FD68C>This turn:" +
+                        $"\nMove {moveLeft}/{s.Movement}   Climb {climbLeft}/{s.VerticalMovement}" +
                         $"\nAttack {(attacked ? "used" : "ready")}</color>";
             }
             return text;

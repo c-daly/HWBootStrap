@@ -37,6 +37,7 @@ namespace HexWars.Presentation
         public const int OrderTooltip = 750;  // unit tooltip
         public const int OrderBanner = 850;   // game-over band
         public const int OrderRules = 900;    // rules/help popup
+        public const int OrderEscape = 980;   // in-game escape menu — above rules, below title/lobby
         public const int OrderMenu = 1000;    // title / lobby screens
         public const int OrderToast = 1200;   // transient feedback outranks every screen, including
                                                // menus (join errors must be visible over the title/browser)
@@ -208,6 +209,15 @@ namespace HexWars.Presentation
             cb.pressedColor = baseC * 0.82f;
             cb.selectedColor = baseC;
             b.colors = cb;
+        }
+
+        /// <summary>Character-budget truncation for player-authored names in fixed-width slots
+        /// ("Maximilian Longname" → "Maximilian…"). uGUI Text has no per-string ellipsis mode, and
+        /// names may be up to 20 chars (UnitTemplate.Sanitize) while row/header slots fit fewer.</summary>
+        public static string Ellipsize(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length <= max) return s;
+            return s.Substring(0, max - 1).TrimEnd() + "…";
         }
 
 #if UNITY_WEBGL && !UNITY_EDITOR

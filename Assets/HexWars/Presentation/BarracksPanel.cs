@@ -151,8 +151,16 @@ namespace HexWars.Presentation
                 // computed from the STATE (ShownSeat vs ActivePlayer), so the hand-back rebuild enables
                 // the rows immediately. Spectators (ReadOnly, set once by SpectatorDriver) are stopped
                 // by the LIVE guards at click time instead: Select/DeleteAt/Update all check ReadOnly.
-                var row = UiKit.Button(_list, $"{name}   deploy {cost}", -20f, -(4f + i * 34f), 170f, 30f,
-                                       () => Select(idx), UiKit.ButtonStyle.Secondary);
+                // Name and cost are separate texts so a 20-char player name can't shove "deploy N" out
+                // of the 170px row: the name is ellipsized left, the cost rides right-aligned on top
+                // (UiKit.Label never raycasts, so clicks land on the select button underneath).
+                var row = UiKit.Button(_list, UiKit.Ellipsize(name, 11), -20f, -(4f + i * 34f), 170f, 30f,
+                                       () => Select(idx), UiKit.ButtonStyle.Secondary, 14);
+                var rowText = row.GetComponentInChildren<Text>();
+                rowText.alignment = TextAnchor.MiddleLeft;
+                UiKit.SetRect(rowText.rectTransform, 0f, 0f, 150f, 30f); // 10px side insets inside the button
+                UiKit.Label(row.transform, $"deploy {cost}", 0f, 0f, 150f, 30f, 11,
+                            TextAnchor.MiddleRight, UiKit.TextFaint);
                 UiKit.SetToggled(row, selected);
                 row.interactable = isActiveHuman;
                 _rows.Add(row);
