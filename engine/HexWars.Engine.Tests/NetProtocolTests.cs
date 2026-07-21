@@ -32,6 +32,17 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Catalog_PreservesBarracksPayloadExactly()
+        {
+            const string payload = "V1\nQQ==|1|2|3|4|5|6|7|8|9";
+
+            var msg = NetProtocol.Parse(NetProtocol.Catalog(payload));
+
+            Assert.That(msg.Type, Is.EqualTo("CATALOG"));
+            Assert.That(msg.Payload, Is.EqualTo(payload));
+        }
+
+        [Test]
         public void Start_PreservesMultiLinePayloadExactly()
         {
             string startState = "META 3 0 1 0\nTILES 1\n0 0 0 0\nPLAYER 0 10 0 0 0";

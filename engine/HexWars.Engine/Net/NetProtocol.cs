@@ -34,6 +34,8 @@ namespace HexWars.Engine
         // ---- client -> server ----
         /// <summary>A client's attempted command.</summary>
         public static string Cmd(Command c) => "CMD " + CommandWire.Write(c);
+        /// <summary>A client's normalized starting barracks catalog.</summary>
+        public static string Catalog(string payload) => "CATALOG " + payload;
 
         // ---- shared ----
         /// <summary>Split a raw message into TYPE + payload on the first space (payload defaults to "").</summary>
