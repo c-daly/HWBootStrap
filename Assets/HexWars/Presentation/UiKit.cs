@@ -199,6 +199,72 @@ namespace HexWars.Presentation
             return b;
         }
 
+        /// <summary>A complete legacy uGUI input field, styled to match the game's light input boxes.</summary>
+        public static InputField InputField(Transform parent, string initial, float x, float y,
+                                            float w, float h, string placeholder = "")
+        {
+            EnsureEventSystem();
+
+            var go = new GameObject("InputField");
+            go.transform.SetParent(parent, false);
+            var image = go.AddComponent<Image>();
+            image.sprite = Rounded();
+            image.type = Image.Type.Sliced;
+            image.color = InputBg;
+            SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
+
+            var valueGo = new GameObject("Text");
+            valueGo.transform.SetParent(go.transform, false);
+            var valueText = valueGo.AddComponent<Text>();
+            valueText.font = Font();
+            valueText.fontSize = SizeBody + 2;
+            valueText.color = InputText;
+            valueText.alignment = TextAnchor.MiddleLeft;
+            valueText.supportRichText = false;
+            StretchWithInset(valueGo.GetComponent<RectTransform>(), 12f, 8f);
+
+            var placeholderGo = new GameObject("Placeholder");
+            placeholderGo.transform.SetParent(go.transform, false);
+            var placeholderText = placeholderGo.AddComponent<Text>();
+            placeholderText.font = Font();
+            placeholderText.fontSize = SizeBody + 2;
+            placeholderText.fontStyle = FontStyle.Italic;
+            placeholderText.color = new Color(InputText.r, InputText.g, InputText.b, 0.45f);
+            placeholderText.alignment = TextAnchor.MiddleLeft;
+            placeholderText.supportRichText = false;
+            placeholderText.text = placeholder ?? string.Empty;
+            placeholderText.raycastTarget = false;
+            StretchWithInset(placeholderGo.GetComponent<RectTransform>(), 12f, 8f);
+
+            var field = go.AddComponent<InputField>();
+            field.targetGraphic = image;
+            field.textComponent = valueText;
+            field.placeholder = placeholderText;
+            field.lineType = UnityEngine.UI.InputField.LineType.SingleLine;
+            field.text = initial ?? string.Empty;
+            return field;
+        }
+
+        /// <summary>Numeric input plus committed-value bookkeeping and an inline validation message.</summary>
+        public static InlineIntBinding IntField(Transform parent, int initial, float x, float y,
+                                                float w, float h, int min, int max,
+                                                bool blankMeansZero, Action<int> setter)
+        {
+            var field = InputField(parent, initial.ToString(), x, y, w, h);
+            field.contentType = UnityEngine.UI.InputField.ContentType.IntegerNumber;
+            var error = Label(parent, string.Empty, x, y - h - 2f, w, 20f,
+                              SizeCaption, TextAnchor.UpperLeft, Danger);
+            return new InlineIntBinding(field, error, initial, min, max, blankMeansZero, setter);
+        }
+
+        static void StretchWithInset(RectTransform rt, float horizontal, float vertical)
+        {
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = new Vector2(horizontal, vertical);
+            rt.offsetMax = new Vector2(-horizontal, -vertical);
+        }
+
         /// <summary>Selected-state tint for toggle-style buttons (mode pickers, checkboxes-as-buttons).</summary>
         public static void SetToggled(Button b, bool on)
         {
@@ -258,6 +324,71 @@ namespace HexWars.Presentation
             var t = Label(go.transform, get().ToString(), 0f, 0f, w, h, SizeBody + 4, TextAnchor.MiddleCenter, InputText);
             btn.onClick.AddListener(() => { set(Mathf.Clamp(PromptInt(label, get()), min, max)); t.text = get().ToString(); });
             return t;
+        }
+    }
+
+    public sealed class InlineIntBinding
+    {
+        readonly int _min;
+        readonly int _max;
+        readonly bool _blankMeansZero;
+        readonly Action<int> _setter;
+        int _committed;
+        bool _suppressNextEndEdit;
+
+        public InputField Field { get; }
+        public Text Error { get; }
+
+        internal InlineIntBinding(InputField field, Text error, int initial, int min, int max,
+                                  bool blankMeansZero, Action<int> setter)
+        {
+            Field = field;
+            Error = error;
+            _committed = initial;
+            _min = min;
+            _max = max;
+            _blankMeansZero = blankMeansZero;
+            _setter = setter ?? (_ => { });
+            Field.onEndEdit.AddListener(_ =>
+            {
+                if (_suppressNextEndEdit)
+                {
+                    _suppressNextEndEdit = false;
+                    return;
+                }
+                Commit();
+            });
+        }
+
+        public bool Commit()
+        {
+            if (!InlineFieldRules.TryInt(Field.text, _min, _max, _blankMeansZero,
+                                         out int value, out string error))
+            {
+                Error.text = error;
+                return false;
+            }
+
+            _committed = value;
+            Field.SetTextWithoutNotify(value.ToString());
+            Error.text = string.Empty;
+            _setter(value);
+            return true;
+        }
+
+        public void Restore()
+        {
+            _suppressNextEndEdit = true;
+            Field.SetTextWithoutNotify(_committed.ToString());
+            Error.text = string.Empty;
+        }
+
+        public void SetCommittedValue(int value)
+        {
+            _committed = value;
+            _suppressNextEndEdit = false;
+            Field.SetTextWithoutNotify(value.ToString());
+            Error.text = string.Empty;
         }
     }
 }
