@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using HexWars.Engine;
 using NUnit.Framework;
@@ -72,6 +73,76 @@ namespace HexWars.Engine.Tests
                 new EndTurn(PlayerId.Player1)).NewState;
             Assert.That(afterRound.Player(PlayerId.Player0).Barracks.Count, Is.EqualTo(4),
                 "a full round must not re-seed the deleted template back in");
+        }
+
+        [Test]
+        public void Build_CustomBarracks_NormalizesEachPlayerAndDoesNotShareMutableLists()
+        {
+            var p0Source = new List<UnitTemplate>
+            {
+                new UnitTemplate("  Alpha_One! ", new UnitStats(3, 1, 0, 1, 0, 1, 0, 1, 0)),
+                new UnitTemplate("  Alpha_One! ", new UnitStats(3, 1, 0, 1, 0, 1, 0, 1, 0)),
+            };
+            var p1Source = new List<UnitTemplate>
+            {
+                new UnitTemplate("Bravo", new UnitStats(2, 2, 0, 1, 0, 1, 0, 1, 0)),
+            };
+
+            var state = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 12, 7), p0Source, p1Source);
+            p0Source.Clear();
+            p1Source[0] = new UnitTemplate("Changed", new UnitStats(9, 0, 0, 0, 0, 0, 0, 0, 0));
+
+            Assert.That(state.Player(PlayerId.Player0).Barracks, Has.Count.EqualTo(1));
+            Assert.That(state.Player(PlayerId.Player0).Barracks[0].Name, Is.EqualTo("AlphaOne"));
+            Assert.That(state.Player(PlayerId.Player1).Barracks, Has.Count.EqualTo(1));
+            Assert.That(state.Player(PlayerId.Player1).Barracks[0].Name, Is.EqualTo("Bravo"));
+            Assert.That(state.Player(PlayerId.Player0).Barracks, Is.Not.SameAs(state.Player(PlayerId.Player1).Barracks));
+        }
+
+        [Test]
+        public void CreateUnit_RejectsAnExactDuplicateOfExistingBarracksTemplate()
+        {
+            var state = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 12, 7));
+
+            var result = GameEngine.Apply(state,
+                new CreateUnit(PlayerId.Player0, Expected[0].Stats, "  Brute  "));
+
+            Assert.That(result.Success, Is.False);
+            Assert.That(result.Reason, Is.EqualTo(RejectionReason.DuplicateTemplate));
+            Assert.That(result.NewState.Player(PlayerId.Player0).Barracks, Has.Count.EqualTo(5));
+        }
+
+        [Test]
+        public void CreateUnit_RejectsDuplicateAfterNormalizingAnExistingBarracksName()
+        {
+            var state = TestStates.Fresh();
+            var withRawBarracksName = new GameState(state.Board, state.Config, new[]
+            {
+                new PlayerState(PlayerId.Player0, 12,
+                    new[] { new UnitTemplate(" Brute! ", Expected[0].Stats) }),
+                state.Player(PlayerId.Player1),
+            }, state.ActivePlayer, state.Round, state.NextEntityId);
+
+            var result = GameEngine.Apply(withRawBarracksName,
+                new CreateUnit(PlayerId.Player0, Expected[0].Stats, "Brute"));
+
+            Assert.That(result.Success, Is.False);
+            Assert.That(result.Reason, Is.EqualTo(RejectionReason.DuplicateTemplate));
+        }
+
+        [Test]
+        public void CreateUnit_RejectsWhenBarracksAlreadyContainsSixtyFourTemplates()
+        {
+            var fullBarracks = Enumerable.Range(1, 64)
+                .Select(i => new UnitTemplate($"Unit {i}", new UnitStats(i, 0, 0, 0, 0, 0, 0, 0, 0)))
+                .ToArray();
+            var state = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 12, 7), fullBarracks, null);
+
+            var result = GameEngine.Apply(state,
+                new CreateUnit(PlayerId.Player0, new UnitStats(65, 0, 0, 0, 0, 0, 0, 0, 0), "Unit 65"));
+
+            Assert.That(result.Success, Is.False);
+            Assert.That(result.Reason, Is.EqualTo(RejectionReason.BarracksFull));
         }
     }
 }

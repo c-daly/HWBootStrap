@@ -92,6 +92,11 @@ namespace HexWars.Engine
             if (player.Points < fee) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
             var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            if (player.Barracks.Count >= BarracksCatalog.ProtocolMaximumTemplates)
+                return Result.Reject(state, RejectionReason.BarracksFull);
+            if (player.Barracks.Any(x => BarracksCatalog.Same(x, template)))
+                return Result.Reject(state, RejectionReason.DuplicateTemplate);
+
             var barracks = new List<UnitTemplate>(player.Barracks) { template }; // reusable template
             var updated = new PlayerState(player.Id, player.Points - fee, barracks,
                                           player.UnitsOnBoard, player.Generators, player.DestroyedValue);

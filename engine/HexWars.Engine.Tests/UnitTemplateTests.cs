@@ -51,5 +51,13 @@ namespace HexWars.Engine.Tests
             // stripped does the leading space become an edge, so this only fails without the
             // post-filter Trim().
             Assert.That(UnitTemplate.Sanitize("♥ foo"), Is.EqualTo("foo"));
+
+        [Test]
+        public void Ctor_DoesNotSilentlyNormalizeNames_AtTheRawValueBoundary()
+        {
+            var t = new UnitTemplate("  Raw_Name  ", new UnitStats(1, 0, 0, 0, 0, 0, 0, 0, 0));
+
+            Assert.That(t.Name, Is.EqualTo("  Raw_Name  "));
+        }
     }
 }

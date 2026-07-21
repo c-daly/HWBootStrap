@@ -75,20 +75,12 @@ namespace HexWars.Engine
             new UnitStats(2, 2, 0, 2, 2, 6, 1, 4, 1), // Sniper
         };
 
-        // Barracks starter set (invite-readiness spec §5): five named example designs, deployable turn
-        // one, deletable per-game. The first three intentionally match Roster[0..2] exactly — the
-        // classic trio stays at indices 0-2, matching the on-board starting army and the RL contract
-        // (TacticalLayout keeps its own separate roster, so this table never touches the RL surface).
-        static readonly UnitTemplate[] StarterTemplates =
-        {
-            new UnitTemplate("Brute",     Roster[0]),
-            new UnitTemplate("Striker",   Roster[1]),
-            new UnitTemplate("Sniper",    Roster[2]),
-            new UnitTemplate("Artillery", new UnitStats(3, 6, 0, 0, 0, 5, 2, 2, 1)),
-            new UnitTemplate("Scout",     new UnitStats(2, 0, 0, 4, 3, 0, 0, 7, 2)),
-        };
+        public static GameState Build(GameSetup setup) => Build(setup, null, null);
 
-        public static GameState Build(GameSetup setup)
+        public static GameState Build(GameSetup setup,
+                                      IReadOnlyList<UnitTemplate>? p0Barracks,
+                                      IReadOnlyList<UnitTemplate>? p1Barracks,
+                                      bool beginInDeployment = true)
         {
             setup = setup.Sanitized();
             // maxElevation 2 keeps climbs within unit vertical budgets (no unclimbable cliffs)
@@ -119,8 +111,10 @@ namespace HexWars.Engine
 
             var army = BuildArmy(setup);
             int nextId = 1;
-            var p0 = SeedPlayer(board, PlayerId.Player0, setup.StartingPoints, army, ref nextId);
-            var p1 = SeedPlayer(board, PlayerId.Player1, setup.StartingPoints, army, ref nextId);
+            var p0 = SeedPlayer(board, PlayerId.Player0, setup.StartingPoints, army,
+                                CopyBarracks(p0Barracks), ref nextId);
+            var p1 = SeedPlayer(board, PlayerId.Player1, setup.StartingPoints, army,
+                                CopyBarracks(p1Barracks), ref nextId);
             return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
         }
 
@@ -133,8 +127,10 @@ namespace HexWars.Engine
             board = board.WithControl(board.DeploymentZone(PlayerId.Player1), PlayerId.Player1);
             var army = BuildArmy(new GameSetup(GameMode.Territory, width, height, config.StartingPoints, seed));
             int nextId = 1;
-            var p0 = SeedPlayer(board, PlayerId.Player0, config.StartingPoints, army, ref nextId);
-            var p1 = SeedPlayer(board, PlayerId.Player1, config.StartingPoints, army, ref nextId);
+            var p0 = SeedPlayer(board, PlayerId.Player0, config.StartingPoints, army,
+                                CopyBarracks(null), ref nextId);
+            var p1 = SeedPlayer(board, PlayerId.Player1, config.StartingPoints, army,
+                                CopyBarracks(null), ref nextId);
             return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
         }
 
@@ -154,7 +150,12 @@ namespace HexWars.Engine
             return list.ToArray();
         }
 
-        static PlayerState SeedPlayer(Board board, PlayerId id, int startingPoints, UnitStats[] army, ref int nextId)
+        // Each game owns a separately mutable copy of its normalized supplied catalog or starter defaults.
+        static IReadOnlyList<UnitTemplate> CopyBarracks(IReadOnlyList<UnitTemplate>? source) =>
+            new List<UnitTemplate>(BarracksCatalog.Normalize(source ?? BarracksCatalog.DefaultTemplates));
+
+        static PlayerState SeedPlayer(Board board, PlayerId id, int startingPoints, UnitStats[] army,
+                                      IReadOnlyList<UnitTemplate> barracks, ref int nextId)
         {
             var flat = new List<HexCoord>();
             foreach (var c in board.DeploymentZone(id))
@@ -164,8 +165,7 @@ namespace HexWars.Engine
             var units = new List<Unit>();
             for (int i = 0; i < army.Length && i < flat.Count; i++)
                 units.Add(new Unit(nextId++, id, army[i], flat[i], 0));
-            // pre-seed the barracks with the named starter set so players can deploy without designing first
-            return new PlayerState(id, startingPoints, new List<UnitTemplate>(StarterTemplates), units, null);
+            return new PlayerState(id, startingPoints, barracks, units, null);
         }
     }
 }

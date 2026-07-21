@@ -28,5 +28,7 @@ namespace HexWars.Engine
         AlreadyControlled,
         HexNotControlled,
         MustClaimFirst,
+        DuplicateTemplate,
+        BarracksFull,
     }
 }
