@@ -39,6 +39,31 @@ namespace HexWars.Engine.Tests
             Assert.That(LegalMoves.For(MidGame()).OfType<AttackUnit>().Any(a => a.TargetId == 2), Is.True);
 
         [Test]
+        public void For_DoesNotIncludeAttackAgainstGenerator()
+        {
+            var cell0 = new HexCoord(0, 0);
+            var cell1 = new HexCoord(1, 0);
+            var board = new Board(new[]
+            {
+                new Tile(cell0, 0, TerrainType.Plains),
+                new Tile(cell1, 0, TerrainType.Plains)
+            });
+            var attacker = new Unit(1, PlayerId.Player0,
+                TestStates.Stats(damage: 2, range: 2, vision: 3), cell0, 0);
+            var generator = new Generator(4, PlayerId.Player1, cell1, 0, maxHp: 3);
+            var state = new GameState(board, GameConfig.Default(),
+                new[]
+                {
+                    new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { attacker }),
+                    new PlayerState(PlayerId.Player1, 0, generators: new[] { generator })
+                },
+                PlayerId.Player0, round: 2, nextEntityId: 10);
+
+            Assert.That(LegalMoves.For(state).OfType<AttackUnit>()
+                .Any(attack => attack.TargetId == generator.Id), Is.False);
+        }
+
+        [Test]
         public void For_IncludesDeployForTemplateIntoEmptyZone() =>
             Assert.That(LegalMoves.For(MidGame()).OfType<DeployUnit>().Any(d => d.TemplateIndex == 0), Is.True);
 

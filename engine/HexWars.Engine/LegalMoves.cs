@@ -51,9 +51,6 @@ namespace HexWars.Engine
                     foreach (var t in enemy.UnitsOnBoard)
                         if (t.IsAlive && TargetingService.CanTarget(state, unit, t.Cell, t.Elevation))
                             moves.Add(new AttackUnit(me, unit.Id, t.Id));
-                    foreach (var g in enemy.Generators)
-                        if (g.IsAlive && TargetingService.CanTarget(state, unit, g.Cell, g.Elevation))
-                            moves.Add(new AttackUnit(me, unit.Id, g.Id));
                 }
 
                 if (claimLegal

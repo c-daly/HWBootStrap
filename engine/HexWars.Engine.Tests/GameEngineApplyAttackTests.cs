@@ -87,13 +87,15 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void AttackUnit_CanDestroyGenerator_AndPaysBounty()
+        public void AttackUnit_RejectsGenerator_TargetMustBeUnit()
         {
             var gen = new Generator(3, PlayerId.Player1, new HexCoord(1, 0), 0, 3);
             var r = GameEngine.Apply(Scene(Atk(5), enemyGens: new[] { gen }), new AttackUnit(PlayerId.Player0, 1, 3));
 
-            Assert.That(r.NewState.Player(PlayerId.Player1).Generators, Is.Empty);
-            Assert.That(r.NewState.Player(PlayerId.Player0).Points, Is.EqualTo(1)); // floor(GeneratorCost 2 * 0.5)
+            Assert.That(r.Success, Is.False);
+            Assert.That(r.Reason, Is.EqualTo(RejectionReason.TargetNotEnemy));
+            Assert.That(r.NewState.Player(PlayerId.Player1).Generators.Single().Id, Is.EqualTo(gen.Id));
+            Assert.That(r.NewState.Player(PlayerId.Player0).Points, Is.Zero);
         }
 
         [Test]
