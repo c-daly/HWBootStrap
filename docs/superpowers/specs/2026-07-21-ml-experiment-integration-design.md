@@ -92,6 +92,10 @@ Monitoring does not require Unity and does not turn training episodes into rende
 
 Training emits TensorBoard-compatible metrics under the run directory. An intern can run `tensorboard --logdir python/runs` to inspect reward, episode length, PPO KL/entropy/value loss or DQN loss/exploration rate, throughput, and evaluation curves in a browser. CSV/JSON artifacts remain the source of record; TensorBoard is a view over them rather than the only copy.
 
+External experiment tracking is adapter-based rather than built into individual trainers. A small tracking interface receives normalized run-start, metric, checkpoint, evaluation, replay, failure, and run-end events. The built-in adapters are `local` (always enabled), TensorBoard, and Weights & Biases; later services can be registered without changing PPO, DQN, the evaluator, or the Unity Editor window. The ML Lab and CLI accept zero or more tracker names plus adapter-specific configuration. Secrets come from each service's normal environment or credential store and are never copied into manifests, logs, presets, or Unity project settings.
+
+The local adapter is authoritative and training continues if an optional remote tracker is offline or fails. Remote adapters report a degraded status and retry from locally queued event/artifact metadata where the service supports it. W&B supports its normal online, offline, and disabled modes, with project/entity/group/tags exposed as optional run settings. Tracker integrations must not upload model checkpoints or replays unless artifact upload is explicitly enabled for that adapter.
+
 At a configurable checkpoint cadence, a separate headless evaluator tests the latest complete checkpoint from both seats against the selected opponent and Greedy. It updates `evaluation.json` atomically and never reads a partial checkpoint. Evaluation can be disabled or assigned fewer workers when CPU contention would reduce training throughput. Training reward is never presented as a substitute for reciprocal W/L/D.
 
 Unity may attach later to any local run directory and select `Watch Latest`. The arena consumes published checkpoints and plays separate visualization matches; starting or stopping it does not alter the trainer or evaluator. A run started from the CLI and one started from the ML Lab therefore have the same monitoring and attachment behavior.
@@ -150,6 +154,7 @@ Documentation is a tested deliverable. It includes:
 - an exact `doctor` workflow covering Python, dependencies, Torch/CUDA or CPU fallback, .NET, GymServer build, reset/step, model load, and schema comparison;
 - a headless-training section showing how to run with Unity closed, benchmark worker counts, select parallelism, and confirm that the optional arena is not pacing training;
 - a monitoring section demonstrating `status --follow`, TensorBoard, reciprocal evaluation files, later Unity attachment, and which metric answers which question;
+- a tracker section showing local-only, TensorBoard, and W&B online/offline setup, credential handling, explicit artifact-upload policy, and how to add another tracking adapter;
 - checked-in smoke, PPO-versus-Greedy, PPO-versus-model, resume, live-opponent, and reciprocal-evaluation presets;
 - an experiment method: hypothesis, one controlled change, train seeds, held-out seeds, watch, evaluate, save representative replays, and promote/reject;
 - a run-directory and cleanup reference, including checkpoint retention and disk-size estimates;
@@ -178,7 +183,7 @@ If a model outputs an illegal or invalid action during evaluation, the event is 
 
 ## Verification
 
-Python tests cover manifest atomicity, legacy inspection, algorithm adapters, scripted/model opponent routing, alternating learner seats, vectorized action masks, disjoint worker seed streams, checkpoint retention, complete-file publication, crash/resume, mask-aware inference, reciprocal evaluation accounting, and arena independence from trainer pacing.
+Python tests cover manifest atomicity, legacy inspection, algorithm adapters, scripted/model opponent routing, alternating learner seats, vectorized action masks, disjoint worker seed streams, checkpoint retention, complete-file publication, crash/resume, mask-aware inference, reciprocal evaluation accounting, tracker event normalization, optional-tracker failure isolation, secret redaction, explicit artifact-upload consent, and arena independence from trainer pacing.
 
 Engine contract tests pin observation channels, globals, action regions, mask/decode round trips, GymServer handshake, and semantic contract hash. The current deployed-reinforcement slot limitation is recorded as a known tactical-contract constraint rather than silently treated as full-game support.
 
