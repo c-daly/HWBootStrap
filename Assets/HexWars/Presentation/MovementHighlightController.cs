@@ -74,9 +74,9 @@ namespace HexWars.Presentation
             if (_reachableMaterial == null)
             {
                 _reachableMaterial = CreateMaterial(new Color(0.20f, 0.78f, 0.30f));
-                _routeMaterial = CreateMaterial(new Color(0.18f, 0.52f, 1.00f));
+                _routeMaterial = CreateMaterial(new Color(1.00f, 0.88f, 0.20f));
                 _expensiveMaterial = CreateMaterial(new Color(1.00f, 0.58f, 0.08f));
-                _destinationMaterial = CreateMaterial(new Color(0.70f, 0.95f, 1.00f));
+                _destinationMaterial = CreateMaterial(new Color(1.00f, 1.00f, 0.88f));
             }
         }
 

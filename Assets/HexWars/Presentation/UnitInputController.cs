@@ -23,6 +23,7 @@ namespace HexWars.Presentation
         BarracksPanel _barracks;
         BoardRenderer _board;
         MovementHighlightController _movementHighlights;
+        AttackTargetHighlightController _attackHighlights;
         readonly MovementPreviewState _movementPreview = new MovementPreviewState();
         readonly Dictionary<HexCoord, MovementRoute> _routes = new Dictionary<HexCoord, MovementRoute>();
         GameState _routesState;
@@ -53,8 +54,12 @@ namespace HexWars.Presentation
             _barracks = FindAnyObjectByType<BarracksPanel>();
             _board = FindAnyObjectByType<BoardRenderer>();
             if (_board != null)
+            {
                 _movementHighlights = _board.GetComponent<MovementHighlightController>()
                     ?? _board.gameObject.AddComponent<MovementHighlightController>();
+                _attackHighlights = _board.GetComponent<AttackTargetHighlightController>()
+                    ?? _board.gameObject.AddComponent<AttackTargetHighlightController>();
+            }
             MakeActionButton();
         }
 
@@ -254,6 +259,7 @@ namespace HexWars.Presentation
             _routesUnitId = -1;
             _movementPreview.Clear();
             if (_movementHighlights != null) _movementHighlights.Clear();
+            if (_attackHighlights != null) _attackHighlights.Clear();
         }
 
         void RefreshMovementHighlights()
@@ -261,6 +267,17 @@ namespace HexWars.Presentation
             if (_movementHighlights == null || _game == null || _game.State == null)
                 return;
             _movementHighlights.Show(_game.State, _routes, _movementPreview.Destination);
+
+            if (_attackHighlights == null) return;
+            if (!TryGetSelectedStateUnit(out var attacker))
+            {
+                _attackHighlights.Clear();
+                return;
+            }
+
+            var viewer = _game.FogViewer() ?? attacker.Owner;
+            _attackHighlights.Show(AttackPreviewTargets.Resolve(
+                _game.State, attacker, _movementPreview.Destination, viewer));
         }
 
         static bool HasGeneratorOn(GameState s, HexCoord cell)
@@ -347,7 +364,8 @@ namespace HexWars.Presentation
             {
                 Vector2 screenPos = Camera.main.WorldToScreenPoint(unit.transform.position);
                 TipsService.Show("first-select",
-                    "Green rings show reachable hexes. Hover to preview the route.", screenPos);
+                    "Green rings show movement. Blue halos mark enemies you can hit; hover a move to preview both.",
+                    screenPos);
             }
         }
 
