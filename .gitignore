@@ -27,6 +27,9 @@
 # Visual Studio cache directory
 .vs/
 
+# JetBrains Rider project settings
+.idea/
+
 # Gradle cache directory
 .gradle/
 
@@ -39,6 +42,7 @@ ExportedObj/
 !engine/**/*.csproj
 *.unityproj
 *.sln
+*.slnx
 *.suo
 *.tmp
 *.user
@@ -87,6 +91,9 @@ engine/**/obj/
 
 # Local Claude Code tooling (workflow scripts, etc.)
 .claude/
+
+# Local Superpowers brainstorming previews and transient preview-server state
+.superpowers/
 
 # Engine DLL placed in Unity is a build artifact — regenerate with engine/build-to-unity.ps1
 Assets/HexWars/Plugins/HexWars.Engine.dll
