@@ -132,10 +132,8 @@ namespace HexWars.Presentation
 
         IEnumerator PlayMove(Item item, MoveUnit mv, PlayerId? viewer)
         {
-            Unit? before = FindUnit(item.Prev, mv.Issuer, mv.UnitId);
-            if (before == null) yield break;
-
-            var path = HexPath.Line(before.Value.Cell, mv.Dest);
+            var path = MovementPresentationRoute.Resolve(item.Prev, mv);
+            if (path.Count == 0) yield break;
             // own units are always fully visible to their viewer; enemy paths are clipped to vision
             bool ownAction = !viewer.HasValue || mv.Issuer == viewer.Value;
             var span = ownAction ? (First: 0, Last: path.Count - 1)
@@ -166,8 +164,8 @@ namespace HexWars.Presentation
             for (int i = span.First + 1; i <= span.Last; i++)
             {
                 Vector3 from = token.transform.localPosition;
-                // the board rectangle is not convex in cube space, so a hex-line between two on-board
-                // cells can cross cells that are off the board — same guard as LineOfSight's walk
+                // A historical/replayed state can be incomplete, so keep the elevation lookup defensive
+                // even though current authoritative routes contain only on-board cells.
                 int elev = item.Next.Board.Contains(path[i]) ? item.Next.Board.TileAt(path[i]).Elevation : lastElev;
                 lastElev = elev;
                 Vector3 to = Tokens().CellTop(path[i], elev);
@@ -324,9 +322,9 @@ namespace HexWars.Presentation
             {
                 case MoveUnit mv:
                 {
-                    var u = FindUnit(item.Prev, mv.Issuer, mv.UnitId);
-                    if (u == null) return null;
-                    var span = FogPresentation.VisibleSpan(item.Next, viewer, HexPath.Line(u.Value.Cell, mv.Dest));
+                    var path = MovementPresentationRoute.Resolve(item.Prev, mv);
+                    if (path.Count == 0) return null;
+                    var span = FogPresentation.VisibleSpan(item.Next, viewer, path);
                     if (span.First < 0) return null; // hidden: no nudge (and no playback)
                     return Tokens().CellTop(mv.Dest, item.Next.Board.TileAt(mv.Dest).Elevation);
                 }
