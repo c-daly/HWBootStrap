@@ -15,57 +15,140 @@ namespace HexWars.Engine
     /// </summary>
     public static class MovementService
     {
-        public static IReadOnlyCollection<HexCoord> ReachableTiles(GameState state, Unit unit)
-            => ReachableCosts(state, unit).Keys;
-
-        /// <summary>Every hex the unit can still reach this turn, with the (horizontal, vertical)
-        /// cost the hop would charge against its remaining budgets — the cheapest-horizontal
-        /// (then cheapest-vertical) of the Pareto-optimal paths.</summary>
-        public static Dictionary<HexCoord, (int H, int V)> ReachableCosts(GameState state, Unit unit)
+        private sealed class RouteLabel
         {
-            var costs = new Dictionary<HexCoord, (int H, int V)>();
+            public HexCoord Coord { get; }
+            public int H { get; }
+            public int V { get; }
+            public HexCoord[] Cells { get; }
+
+            public RouteLabel(HexCoord coord, int h, int v, HexCoord[] cells)
+            {
+                Coord = coord;
+                H = h;
+                V = v;
+                Cells = cells;
+            }
+
+            public RouteLabel Extend(HexCoord next, int h, int v)
+            {
+                var cells = new HexCoord[Cells.Length + 1];
+                Array.Copy(Cells, cells, Cells.Length);
+                cells[cells.Length - 1] = next;
+                return new RouteLabel(next, h, v, cells);
+            }
+        }
+
+        public static Dictionary<HexCoord, MovementRoute> Routes(GameState state, Unit unit)
+        {
+            var routes = new Dictionary<HexCoord, MovementRoute>();
             var spent = state.MovementSpent.TryGetValue(unit.Id, out var sp) ? sp : (H: 0, V: 0);
             int maxH = unit.Stats.Movement - spent.H;
             int maxV = unit.Stats.VerticalMovement - spent.V;
-            if (maxH <= 0) return costs; // horizontal budget gone — no hop can enter any hex
+            if (maxH <= 0) return routes;
 
             var board = state.Board;
-            var config = state.Config;
             var occupied = OccupiedCells(state, unit);
-
-            var frontier = new Dictionary<HexCoord, List<(int h, int v)>>();
-            var queue = new Queue<(HexCoord coord, int h, int v)>();
-
-            var start = unit.Cell;
-            frontier[start] = new List<(int, int)> { (0, 0) };
-            queue.Enqueue((start, 0, 0));
+            var frontier = new Dictionary<HexCoord, List<RouteLabel>>();
+            var queue = new Queue<RouteLabel>();
+            var start = new RouteLabel(unit.Cell, 0, 0, new[] { unit.Cell });
+            frontier[start.Coord] = new List<RouteLabel> { start };
+            queue.Enqueue(start);
 
             while (queue.Count > 0)
             {
-                var (coord, h, v) = queue.Dequeue();
-                int fromElev = board.TileAt(coord).Elevation;
+                var current = queue.Dequeue();
+                if (!frontier.TryGetValue(current.Coord, out var active) || !active.Contains(current))
+                    continue;
 
-                foreach (var n in coord.Neighbors())
+                int fromElevation = board.TileAt(current.Coord).Elevation;
+                var neighbors = new List<HexCoord>(current.Coord.Neighbors());
+                neighbors.Sort(CompareRouteCoords);
+                foreach (var next in neighbors)
                 {
-                    if (!board.Contains(n) || occupied.Contains(n)) continue;
-
-                    var tile = board.TileAt(n);
-                    var terrain = config.Terrain(tile.Terrain);
+                    if (!board.Contains(next) || occupied.Contains(next)) continue;
+                    var tile = board.TileAt(next);
+                    var terrain = state.Config.Terrain(tile.Terrain);
                     if (!terrain.Passable) continue;
 
-                    int nh = h + terrain.MoveCost;
-                    int nv = v + Math.Max(0, tile.Elevation - fromElev);
-                    if (nh > maxH || nv > maxV) continue;
-                    if (IsDominated(frontier, n, nh, nv)) continue;
+                    int h = current.H + terrain.MoveCost;
+                    int v = current.V + Math.Max(0, tile.Elevation - fromElevation);
+                    if (h > maxH || v > maxV) continue;
 
-                    AddToFrontier(frontier, n, nh, nv);
-                    if (!costs.TryGetValue(n, out var best) || nh < best.H || (nh == best.H && nv < best.V))
-                        costs[n] = (nh, nv);
-                    queue.Enqueue((n, nh, nv));
+                    var candidate = current.Extend(next, h, v);
+                    if (!TryAddRouteLabel(frontier, candidate)) continue;
+                    queue.Enqueue(candidate);
                 }
             }
 
-            costs.Remove(start);
+            foreach (var pair in frontier)
+            {
+                if (pair.Key == unit.Cell) continue;
+                var best = pair.Value[0];
+                for (int i = 1; i < pair.Value.Count; i++)
+                    if (CompareRouteLabels(pair.Value[i], best) < 0) best = pair.Value[i];
+                routes[pair.Key] = new MovementRoute(best.Cells, best.H, best.V,
+                    maxH - best.H, maxV - best.V);
+            }
+            return routes;
+        }
+
+        private static bool TryAddRouteLabel(
+            Dictionary<HexCoord, List<RouteLabel>> frontier, RouteLabel candidate)
+        {
+            if (!frontier.TryGetValue(candidate.Coord, out var labels))
+            {
+                frontier[candidate.Coord] = new List<RouteLabel> { candidate };
+                return true;
+            }
+
+            foreach (var existing in labels)
+            {
+                if (existing.H > candidate.H || existing.V > candidate.V) continue;
+                if (existing.H < candidate.H || existing.V < candidate.V
+                    || CompareRouteLabels(existing, candidate) <= 0)
+                    return false;
+            }
+
+            labels.RemoveAll(existing =>
+                candidate.H <= existing.H && candidate.V <= existing.V
+                && (candidate.H < existing.H || candidate.V < existing.V
+                    || CompareRouteLabels(candidate, existing) < 0));
+            labels.Add(candidate);
+            return true;
+        }
+
+        private static int CompareRouteLabels(RouteLabel a, RouteLabel b)
+        {
+            int comparison = a.H.CompareTo(b.H);
+            if (comparison != 0) return comparison;
+            comparison = a.V.CompareTo(b.V);
+            if (comparison != 0) return comparison;
+            comparison = a.Cells.Length.CompareTo(b.Cells.Length);
+            if (comparison != 0) return comparison;
+            for (int i = 0; i < a.Cells.Length; i++)
+            {
+                comparison = CompareRouteCoords(a.Cells[i], b.Cells[i]);
+                if (comparison != 0) return comparison;
+            }
+            return 0;
+        }
+
+        private static int CompareRouteCoords(HexCoord a, HexCoord b)
+        {
+            int comparison = a.Q.CompareTo(b.Q);
+            return comparison != 0 ? comparison : a.R.CompareTo(b.R);
+        }
+
+        public static IReadOnlyCollection<HexCoord> ReachableTiles(GameState state, Unit unit)
+            => Routes(state, unit).Keys;
+
+        /// <summary>Compatibility projection for callers that need only movement costs.</summary>
+        public static Dictionary<HexCoord, (int H, int V)> ReachableCosts(GameState state, Unit unit)
+        {
+            var costs = new Dictionary<HexCoord, (int H, int V)>();
+            foreach (var pair in Routes(state, unit))
+                costs[pair.Key] = (pair.Value.HorizontalCost, pair.Value.VerticalCost);
             return costs;
         }
 
@@ -77,27 +160,6 @@ namespace HexWars.Engine
                     if (u.IsAlive) set.Add(u.Cell);
             set.Remove(mover.Cell);
             return set;
-        }
-
-        private static bool IsDominated(Dictionary<HexCoord, List<(int h, int v)>> frontier,
-                                        HexCoord coord, int h, int v)
-        {
-            if (!frontier.TryGetValue(coord, out var list)) return false;
-            foreach (var (eh, ev) in list)
-                if (eh <= h && ev <= v) return true;
-            return false;
-        }
-
-        private static void AddToFrontier(Dictionary<HexCoord, List<(int h, int v)>> frontier,
-                                          HexCoord coord, int h, int v)
-        {
-            if (!frontier.TryGetValue(coord, out var list))
-            {
-                list = new List<(int, int)>();
-                frontier[coord] = list;
-            }
-            list.RemoveAll(p => h <= p.h && v <= p.v);
-            list.Add((h, v));
         }
     }
 }
