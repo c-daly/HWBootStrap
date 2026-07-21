@@ -21,8 +21,10 @@
   <ItemGroup>
     <Compile Include="../../Assets/HexWars/Presentation/MovementPreviewState.cs" Link="Presentation/MovementPreviewState.cs" />
     <Compile Include="../../Assets/HexWars/Presentation/MovementHighlightClassifier.cs" Link="Presentation/MovementHighlightClassifier.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/MovementTooltipFormatter.cs" Link="Presentation/MovementTooltipFormatter.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementPreviewStateTests.cs" Link="Presentation/MovementPreviewStateTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementHighlightClassifierTests.cs" Link="Presentation/MovementHighlightClassifierTests.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/MovementTooltipFormatterTests.cs" Link="Presentation/MovementTooltipFormatterTests.cs" />
   </ItemGroup>
 
 </Project>

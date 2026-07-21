@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.InputSystem;
@@ -21,6 +22,11 @@ namespace HexWars.Presentation
         GameBootstrap _game;
         BarracksPanel _barracks;
         BoardRenderer _board;
+        MovementHighlightController _movementHighlights;
+        readonly MovementPreviewState _movementPreview = new MovementPreviewState();
+        readonly Dictionary<HexCoord, MovementRoute> _routes = new Dictionary<HexCoord, MovementRoute>();
+        GameState _routesState;
+        int _routesUnitId = -1;
         UnitView _selected;
         int _selectedId = -1;
         GameObject _marker;
@@ -46,6 +52,9 @@ namespace HexWars.Presentation
             _game = FindAnyObjectByType<GameBootstrap>();
             _barracks = FindAnyObjectByType<BarracksPanel>();
             _board = FindAnyObjectByType<BoardRenderer>();
+            if (_board != null)
+                _movementHighlights = _board.GetComponent<MovementHighlightController>()
+                    ?? _board.gameObject.AddComponent<MovementHighlightController>();
             MakeActionButton();
         }
 
@@ -68,8 +77,18 @@ namespace HexWars.Presentation
                 hoveredTile = hit.collider.GetComponentInParent<TileView>();
             }
 
-            if (hoveredUnit != null) _tooltip.Show(hoveredUnit.Unit, mp, _game.State);
-            else if (_selected != null) _tooltip.Show(_selected.Unit, mp, _game.State);
+            RefreshMovementRoutes();
+            bool isTouch = pointer is Touchscreen;
+            if (!isTouch) UpdateDesktopMovementPreview(hoveredTile);
+
+            var previewRoute = PreviewRoute();
+            if (hoveredUnit != null)
+            {
+                var hoveredRoute = hoveredUnit.Unit.Id == _selectedId ? previewRoute : null;
+                _tooltip.Show(hoveredUnit.Unit, mp, _game.State, hoveredRoute);
+            }
+            else if (_selected != null)
+                _tooltip.Show(_selected.Unit, mp, _game.State, previewRoute);
             else _tooltip.Hide();
 
             // act on a TAP (press + release without dragging) so a drag is free to pan the camera
@@ -77,7 +96,7 @@ namespace HexWars.Presentation
             bool blocked = _barracks != null && _barracks.IsDeploying;
             if (pointer.press.wasReleasedThisFrame && !blocked && !_pressedOverUi
                 && Vector2.Distance(mp, _pressPos) <= TapThreshold)
-                HandleClick(hoveredUnit, hoveredTile);
+                HandleClick(hoveredUnit, hoveredTile, isTouch);
 
             if (_selected != null && _marker.activeSelf)
             {
@@ -94,7 +113,7 @@ namespace HexWars.Presentation
             UpdateActionButton();
         }
 
-        void HandleClick(UnitView unit, TileView tile)
+        void HandleClick(UnitView unit, TileView tile, bool isTouch)
         {
             if (ReadOnly) { Select(unit); return; } // spectating: inspect any unit, but issue no commands
             if (_game == null || _game.State == null) { Select(unit); return; }
@@ -129,12 +148,27 @@ namespace HexWars.Presentation
             // territory claim/build is done via the explicit on-screen action button (UpdateActionButton),
             // never by tapping the hex — so a stray tap can't spend points or end your turn by accident.
 
-            // move intent: only if not already moved AND the hex is reachable
+            // move intent: repeated commands are legal while the engine route map has the destination
             if (ownSelected && unit == null && tile != null)
             {
-                if (HasActed(_game.State.MovedUnitIds, _selected.Unit.Id)) { Toast.Show("Already moved this turn"); return; }
-                if (!IsReachable(_selected.Unit, tile.Coord))
-                { Toast.Show(IsOccupied(_game.State, tile.Coord) ? "That hex is occupied" : "Out of movement reach"); return; }
+                RefreshMovementRoutes();
+                if (!_routes.ContainsKey(tile.Coord))
+                {
+                    CancelMovementPreview();
+                    Toast.Show(IsOccupied(_game.State, tile.Coord)
+                        ? "That hex is occupied"
+                        : "Out of movement reach");
+                    return;
+                }
+
+                if (isTouch)
+                {
+                    var decision = _movementPreview.Tap(tile.Coord, reachable: true);
+                    RefreshMovementHighlights();
+                    if (decision != MovementPreviewDecision.Confirm) return;
+                }
+
+                CancelMovementPreview();
                 Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
                 return;
             }
@@ -142,17 +176,91 @@ namespace HexWars.Presentation
             Select(unit);
         }
 
-        bool IsReachable(Unit unit, HexCoord dest)
-        {
-            foreach (var c in MovementService.ReachableTiles(_game.State, unit))
-                if (c == dest) return true;
-            return false;
-        }
-
         static bool HasActed(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
         {
             foreach (var i in ids) if (i == id) return true;
             return false;
+        }
+
+        void RefreshMovementRoutes()
+        {
+            if (!TryGetSelectedStateUnit(out var selectedUnit))
+            {
+                ClearMovementRoutes();
+                return;
+            }
+
+            var state = _game.State;
+            if (object.ReferenceEquals(_routesState, state) && _routesUnitId == selectedUnit.Id)
+                return;
+
+            _routes.Clear();
+            foreach (var pair in MovementService.Routes(state, selectedUnit))
+                _routes[pair.Key] = pair.Value;
+            _routesState = state;
+            _routesUnitId = selectedUnit.Id;
+            _movementPreview.Clear();
+            RefreshMovementHighlights();
+        }
+
+        bool TryGetSelectedStateUnit(out Unit selectedUnit)
+        {
+            selectedUnit = default;
+            if (_game == null || _game.State == null || _selectedId < 0
+                || ReadOnly || _game.DemoMode || _game.State.IsGameOver || _buildMode
+                || (_barracks != null && _barracks.IsDeploying)
+                || _game.WaitingHumanSeat() != null)
+                return false;
+
+            var state = _game.State;
+            foreach (var unit in state.Player(state.ActivePlayer).UnitsOnBoard)
+            {
+                if (unit.Id != _selectedId || !unit.IsAlive) continue;
+                selectedUnit = unit;
+                return true;
+            }
+            return false;
+        }
+
+        void UpdateDesktopMovementPreview(TileView hoveredTile)
+        {
+            if (_movementPreview.TouchLocked) return;
+            HexCoord? destination = hoveredTile != null && _routes.ContainsKey(hoveredTile.Coord)
+                ? (HexCoord?)hoveredTile.Coord
+                : null;
+            if (_movementPreview.Destination == destination) return;
+            _movementPreview.Hover(destination);
+            RefreshMovementHighlights();
+        }
+
+        MovementRoute PreviewRoute()
+        {
+            if (_movementPreview.Destination.HasValue
+                && _routes.TryGetValue(_movementPreview.Destination.Value, out var route))
+                return route;
+            return null;
+        }
+
+        void CancelMovementPreview()
+        {
+            _movementPreview.Clear();
+            RefreshMovementHighlights();
+        }
+
+        void ClearMovementRoutes()
+        {
+            _routes.Clear();
+            _routesState = null;
+            _routesUnitId = -1;
+            _movementPreview.Clear();
+            if (_movementHighlights != null) _movementHighlights.Clear();
+        }
+
+        void RefreshMovementHighlights()
+        {
+            if (_movementHighlights == null || _game == null || _game.State == null)
+                return;
+            _movementHighlights.Show(_game.State, _routes, _movementPreview.Destination);
         }
 
         static bool HasGeneratorOn(GameState s, HexCoord cell)
@@ -193,11 +301,11 @@ namespace HexWars.Presentation
             if (looksLikeOrder) Toast.Show("Opponent's turn — waiting for it to finish");
         }
 
-        // once the acting unit has used both its move and attack, jump to the next unit with actions left
+        // attacking closes movement, so an attacker is immediately finished for this turn
         void AutoAdvance()
         {
             if (_game == null || _game.State == null || _selectedId < 0) return;
-            bool spent = HasActed(_game.State.MovedUnitIds, _selectedId) && HasActed(_game.State.AttackedUnitIds, _selectedId);
+            bool spent = HasActed(_game.State.AttackedUnitIds, _selectedId);
             if (spent) SelectNextActionable();
         }
 
@@ -207,7 +315,7 @@ namespace HexWars.Presentation
             foreach (var u in _game.State.Player(active).UnitsOnBoard)
             {
                 if (!u.IsAlive) continue;
-                bool spent = HasActed(_game.State.MovedUnitIds, u.Id) && HasActed(_game.State.AttackedUnitIds, u.Id);
+                bool spent = HasActed(_game.State.AttackedUnitIds, u.Id);
                 if (!spent) { SelectById(u.Id); return; }
             }
             Select(null); // every unit has acted this turn
@@ -215,18 +323,22 @@ namespace HexWars.Presentation
 
         void SelectById(int id)
         {
+            ClearMovementRoutes();
             _selectedId = id;
             _selected = null;
             foreach (var v in FindObjectsByType<UnitView>(FindObjectsSortMode.None))
                 if (v.Unit.Id == id && v.Unit.IsAlive) { _selected = v; break; }
             UpdateMarker();
+            RefreshMovementRoutes();
         }
 
         void Select(UnitView unit)
         {
+            ClearMovementRoutes();
             _selected = unit;
             _selectedId = unit != null ? unit.Unit.Id : -1;
             UpdateMarker();
+            RefreshMovementRoutes();
 
             // gated on !DemoMode: the title-screen demo's units are hoverable/clickable (this class isn't
             // demo-aware), but a Tips bubble popping up over the muted showcase would break DemoMode's
@@ -234,7 +346,8 @@ namespace HexWars.Presentation
             if (unit != null && _game != null && !_game.DemoMode && Camera.main != null)
             {
                 Vector2 screenPos = Camera.main.WorldToScreenPoint(unit.transform.position);
-                TipsService.Show("first-select", "Green hexes = where it can go. Red = what it can hit.", screenPos);
+                TipsService.Show("first-select",
+                    "Green rings show reachable hexes. Hover to preview the route.", screenPos);
             }
         }
 
@@ -243,19 +356,25 @@ namespace HexWars.Presentation
         void Issue(Command cmd)
         {
             _game.Presenter?.FastForward();
-            _game.TryApply(cmd);
+            if (!_game.TryApply(cmd))
+            {
+                CancelMovementPreview();
+                return;
+            }
             ReacquireSelection();
             AutoAdvance();
         }
 
         void ReacquireSelection()
         {
+            ClearMovementRoutes();
             _selected = null;
             if (_selectedId >= 0)
                 foreach (var v in FindObjectsByType<UnitView>(FindObjectsSortMode.None))
                     if (v.Unit.Id == _selectedId && v.Unit.IsAlive) { _selected = v; break; }
             if (_selected == null) _selectedId = -1;
             UpdateMarker();
+            RefreshMovementRoutes();
         }
 
         static bool IsPointerOverUi()
@@ -326,6 +445,14 @@ namespace HexWars.Presentation
             _actionGo.SetActive(false);
         }
 
+        void SetBuildMode(bool enabled)
+        {
+            if (_buildMode == enabled) return;
+            _buildMode = enabled;
+            ClearMovementRoutes();
+            if (!enabled) RefreshMovementRoutes();
+        }
+
         // Shows the one relevant territory action (claim or build) for the selected unit, with its cost and
         // consequence; greyed (no-op) with a reason when it can't be done. The only path to claim/build.
         void UpdateActionButton()
@@ -343,7 +470,7 @@ namespace HexWars.Presentation
             // build mode: tap any hex you control to place a generator there
             if (_buildMode)
             {
-                ShowAction("Building — tap your hexes to place   ·   Done", () => _buildMode = false);
+                ShowAction("Building — tap your hexes to place   ·   Done", () => SetBuildMode(false));
                 return;
             }
 
@@ -363,7 +490,7 @@ namespace HexWars.Presentation
 
             // standing on your own territory: place generators on any hex you control
             if (points >= buildCost)
-                ShowAction("Build generators   ·   tap your hexes", () => _buildMode = true);
+                ShowAction("Build generators   ·   tap your hexes", () => SetBuildMode(true));
             else
                 ShowAction($"Build generator  —  need {buildCost} pts (have {points})", null);
         }

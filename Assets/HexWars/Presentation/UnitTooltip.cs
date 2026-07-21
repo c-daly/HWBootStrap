@@ -55,8 +55,11 @@ namespace HexWars.Presentation
         int _cachedHp = int.MinValue;
         bool _cachedMoved, _cachedAttacked, _cachedGameOver, _cachedIsOwnersTurn;
         int _cachedSpentH = int.MinValue, _cachedSpentV = int.MinValue;
+        int _cachedRouteH = int.MinValue, _cachedRouteV = int.MinValue;
+        int _cachedRouteRemainingH = int.MinValue, _cachedRouteRemainingV = int.MinValue;
 
         public void Show(Unit unit, Vector2 screenPos) => Show(unit, screenPos, null);
+        public void Show(Unit unit, Vector2 screenPos, GameState state) => Show(unit, screenPos, state, null);
 
         /// <summary>Docked panel: <paramref name="screenPos"/> is ignored (kept for call-site
         /// compatibility). With <paramref name="state"/>, the active player's own units also get
@@ -64,7 +67,7 @@ namespace HexWars.Presentation
         /// Called every frame a unit is hovered/selected (UnitInputController.Update), so it early-outs
         /// when nothing that affects the text has changed (audit P2 — this used to reformat and
         /// re-Split every frame regardless).</summary>
-        public void Show(Unit unit, Vector2 screenPos, GameState state)
+        public void Show(Unit unit, Vector2 screenPos, GameState state, MovementRoute route)
         {
             bool moved = false, attacked = false;
             var spent = (H: 0, V: 0);
@@ -82,21 +85,32 @@ namespace HexWars.Presentation
             // spent (H,V) matters on its own: a partial move (budget not exhausted) leaves moved=true
             // but changes the "Move x/y" remaining-budget line Format() prints — without it in the key,
             // hopping the same unit again wouldn't refresh the displayed remaining budget.
+            int routeH = route != null ? route.HorizontalCost : int.MinValue;
+            int routeV = route != null ? route.VerticalCost : int.MinValue;
+            int routeRemainingH = route != null ? route.HorizontalRemaining : int.MinValue;
+            int routeRemainingV = route != null ? route.VerticalRemaining : int.MinValue;
             bool unchanged = _panel.activeSelf && unit.Id == _cachedUnitId && unit.CurrentHp == _cachedHp
                             && moved == _cachedMoved && attacked == _cachedAttacked && gameOver == _cachedGameOver
                             && isOwnersTurn == _cachedIsOwnersTurn
-                            && spent.H == _cachedSpentH && spent.V == _cachedSpentV;
+                            && spent.H == _cachedSpentH && spent.V == _cachedSpentV
+                            && routeH == _cachedRouteH && routeV == _cachedRouteV
+                            && routeRemainingH == _cachedRouteRemainingH
+                            && routeRemainingV == _cachedRouteRemainingV;
             if (unchanged) return;
 
             _cachedUnitId = unit.Id; _cachedHp = unit.CurrentHp;
             _cachedMoved = moved; _cachedAttacked = attacked; _cachedGameOver = gameOver;
             _cachedIsOwnersTurn = isOwnersTurn;
             _cachedSpentH = spent.H; _cachedSpentV = spent.V;
+            _cachedRouteH = routeH; _cachedRouteV = routeV;
+            _cachedRouteRemainingH = routeRemainingH;
+            _cachedRouteRemainingV = routeRemainingV;
 
-            string text = Format(unit, state);
+            string text = Format(unit, state, route);
             _text.text = text;
             var prt = _panel.GetComponent<RectTransform>();
-            prt.sizeDelta = new Vector2(Width, LineH * LineCount(text) + 16f);
+            int wrappedRouteLine = route != null ? 1 : 0;
+            prt.sizeDelta = new Vector2(Width, LineH * (LineCount(text) + wrappedRouteLine) + 16f);
             _panel.SetActive(true);
         }
 
@@ -112,7 +126,7 @@ namespace HexWars.Presentation
             if (_panel != null) _panel.SetActive(false);
         }
 
-        static string Format(Unit u, GameState state)
+        static string Format(Unit u, GameState state, MovementRoute route)
         {
             var s = u.Stats;
             string owner = u.Owner == PlayerId.Player0 ? "Player 1" : "Player 2";
@@ -129,16 +143,15 @@ namespace HexWars.Presentation
 
             if (state != null && !state.IsGameOver && u.Owner == state.ActivePlayer)
             {
-                var spent = state.MovementSpent.TryGetValue(u.Id, out var sp) ? sp : (H: 0, V: 0);
-                int moveLeft = Mathf.Max(0, s.Movement - spent.H);
-                int climbLeft = Mathf.Max(0, s.VerticalMovement - spent.V);
                 bool attacked = false;
                 foreach (var id in state.AttackedUnitIds) if (id == u.Id) { attacked = true; break; }
                 // "This turn:" heads its own line — sharing it with the move/climb budgets was wider
                 // than the fixed Width at fontSize 14 and wrapped past the panel's computed height.
                 text += $"\n<color=#9FD68C>This turn:" +
-                        $"\nMove {moveLeft}/{s.Movement}   Climb {climbLeft}/{s.VerticalMovement}" +
+                        $"\n{MovementTooltipFormatter.FormatMovementStatus(u, state)}" +
                         $"\nAttack {(attacked ? "used" : "ready")}</color>";
+                if (route != null)
+                    text += $"\n<color=#76C7FF>{MovementTooltipFormatter.FormatRoute(route)}</color>";
             }
             return text;
         }

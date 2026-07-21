@@ -513,6 +513,7 @@ namespace HexWars.Presentation
             "TileImpassable"        => "A unit can't go there.",
             "NotYourTurn"           => "It's not your turn.",
             "UnitAlreadyMoved"      => "That unit has no movement left this turn.",
+            "MovementEndedByAttack" => "Attacking ends movement for this unit.",
             "UnitAlreadyAttacked"   => "That unit already attacked this turn.",
             "OutOfMovementRange"    => "Too far — not enough movement left this turn.",
             "MustClaimFirst"        => "Claiming has to be your turn's first action.",
