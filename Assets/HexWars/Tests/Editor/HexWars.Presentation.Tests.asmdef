@@ -1,0 +1,22 @@
+{
+    "name": "HexWars.Presentation.Tests",
+    "rootNamespace": "HexWars.Presentation.Tests",
+    "references": [
+        "HexWars.Presentation",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false,
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}

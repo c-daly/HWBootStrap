@@ -18,4 +18,9 @@
     <ProjectReference Include="..\HexWars.Engine\HexWars.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="../../Assets/HexWars/Presentation/MovementPreviewState.cs" Link="Presentation/MovementPreviewState.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/MovementPreviewStateTests.cs" Link="Presentation/MovementPreviewStateTests.cs" />
+  </ItemGroup>
+
 </Project>
