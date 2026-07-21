@@ -58,5 +58,17 @@ namespace HexWars.Engine.Tests
             foreach (var cmd in LegalMoves.For(s))
                 Assert.That(GameEngine.Apply(s, cmd).Success, Is.True, $"expected legal: {cmd}");
         }
+
+        [Test]
+        public void For_OmitsMovesForAUnitAfterItAttacks()
+        {
+            var state = MidGame();
+            var attacked = GameEngine.Apply(state,
+                new AttackUnit(PlayerId.Player0, 1, 2));
+
+            Assert.That(attacked.Success, Is.True);
+            Assert.That(LegalMoves.For(attacked.NewState).OfType<MoveUnit>()
+                .Any(move => move.UnitId == 1), Is.False);
+        }
     }
 }

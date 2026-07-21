@@ -42,6 +42,9 @@ namespace HexWars.Engine
         public static Dictionary<HexCoord, MovementRoute> Routes(GameState state, Unit unit)
         {
             var routes = new Dictionary<HexCoord, MovementRoute>();
+            foreach (var attackedId in state.AttackedUnitIds)
+                if (attackedId == unit.Id) return routes;
+
             var spent = state.MovementSpent.TryGetValue(unit.Id, out var sp) ? sp : (H: 0, V: 0);
             int maxH = unit.Stats.Movement - spent.H;
             int maxV = unit.Stats.VerticalMovement - spent.V;

@@ -105,5 +105,57 @@ namespace HexWars.Engine.Tests
             Assert.That(r.NewState.IsGameOver, Is.True);
             Assert.That(r.NewState.Winner, Is.EqualTo(PlayerId.Player0));
         }
+
+        [Test]
+        public void MoveThenAttack_RemainsLegal()
+        {
+            var stats = TestStates.Stats(health: 5, damage: 1, movement: 2, range: 2, vision: 3);
+            var enemy = new Unit(2, PlayerId.Player1, TestStates.Stats(health: 10), new HexCoord(2, 0), 0);
+            var initial = Scene(stats, new[] { enemy });
+
+            var moved = GameEngine.Apply(initial,
+                new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 0)));
+            var attacked = GameEngine.Apply(moved.NewState,
+                new AttackUnit(PlayerId.Player0, 1, 2));
+
+            Assert.That(moved.Success, Is.True);
+            Assert.That(attacked.Success, Is.True);
+        }
+
+        [Test]
+        public void AttackThenMove_IsRejected_AndRoutesAreClosedWithoutFakingSpentPoints()
+        {
+            var stats = TestStates.Stats(health: 5, damage: 1, movement: 2, range: 2, vision: 3);
+            var enemy = new Unit(2, PlayerId.Player1, TestStates.Stats(health: 10), new HexCoord(2, 0), 0);
+            var attacked = GameEngine.Apply(Scene(stats, new[] { enemy }),
+                new AttackUnit(PlayerId.Player0, 1, 2));
+            var attacker = attacked.NewState.Player(PlayerId.Player0).UnitsOnBoard.Single();
+
+            var move = GameEngine.Apply(attacked.NewState,
+                new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 0)));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(attacked.Success, Is.True);
+                Assert.That(move.Success, Is.False);
+                Assert.That(move.Reason.ToString(), Is.EqualTo("MovementEndedByAttack"));
+                Assert.That(MovementService.Routes(attacked.NewState, attacker), Is.Empty);
+                Assert.That(attacked.NewState.MovementSpent, Is.Empty);
+            });
+        }
+
+        [Test]
+        public void NewTurn_RestoresRoutesAfterAttack()
+        {
+            var stats = TestStates.Stats(health: 5, damage: 1, movement: 2, range: 2, vision: 3);
+            var enemy = new Unit(2, PlayerId.Player1, TestStates.Stats(health: 10), new HexCoord(2, 0), 0);
+            var state = GameEngine.Apply(Scene(stats, new[] { enemy }),
+                new AttackUnit(PlayerId.Player0, 1, 2)).NewState;
+            state = GameEngine.Apply(state, new EndTurn(PlayerId.Player0)).NewState;
+            state = GameEngine.Apply(state, new EndTurn(PlayerId.Player1)).NewState;
+            var attacker = state.Player(PlayerId.Player0).UnitsOnBoard.Single();
+
+            Assert.That(MovementService.Routes(state, attacker), Does.ContainKey(new HexCoord(1, 0)));
+        }
     }
 }

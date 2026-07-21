@@ -172,13 +172,16 @@ namespace HexWars.Engine
 
             var unit = player.UnitsOnBoard[idx];
 
+            if (state.AttackedUnitIds.Contains(c.UnitId))
+                return Result.Reject(state, RejectionReason.MovementEndedByAttack);
+
             // hops spend the per-turn movement budgets incrementally; when they're gone, the unit
             // has "already moved" (its move — possibly several hops — is complete)
             var spent = state.MovementSpent.TryGetValue(c.UnitId, out var sp) ? sp : (H: 0, V: 0);
             if (spent.H >= unit.Stats.Movement) return Result.Reject(state, RejectionReason.UnitAlreadyMoved);
 
-            var costs = MovementService.ReachableCosts(state, unit);
-            if (!costs.TryGetValue(c.Dest, out var cost))
+            var routes = MovementService.Routes(state, unit);
+            if (!routes.TryGetValue(c.Dest, out var route))
                 return Result.Reject(state, RejectionReason.OutOfMovementRange);
 
             var moved = unit.WithCell(c.Dest, state.Board.TileAt(c.Dest).Elevation);
@@ -189,7 +192,8 @@ namespace HexWars.Engine
             var movedIds = new HashSet<int>(state.MovedUnitIds) { c.UnitId };
             var newSpent = new Dictionary<int, (int H, int V)>(state.MovementSpent.Count + 1);
             foreach (var kv in state.MovementSpent) newSpent[kv.Key] = kv.Value;
-            newSpent[c.UnitId] = (spent.H + cost.H, spent.V + cost.V);
+            newSpent[c.UnitId] = (spent.H + route.HorizontalCost,
+                                  spent.V + route.VerticalCost);
             return Result.Ok(WithPlayer(state, updated, movedUnitIds: movedIds, movementSpent: newSpent));
         }
 

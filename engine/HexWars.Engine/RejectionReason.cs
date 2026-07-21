@@ -18,6 +18,7 @@ namespace HexWars.Engine
         OutsideDeploymentZone,
         OutOfMovementRange,
         UnitAlreadyMoved,
+        MovementEndedByAttack,
         UnitAlreadyAttacked,
         TargetNotEnemy,
         TargetNotInRange,
