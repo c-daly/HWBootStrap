@@ -41,7 +41,7 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(resolved, Is.EqualTo(authoritative));
             Assert.That(resolved, Is.EqualTo(new[] { start, aroundFirst, aroundSecond, destination }));
-            Assert.That(resolved, Does.Not.Contain(blocked));
+            CollectionAssert.DoesNotContain(resolved, blocked);
         }
 
         [Test]
