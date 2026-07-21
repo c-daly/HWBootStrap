@@ -34,6 +34,8 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(image, Is.Not.Null);
             Assert.That(field.targetGraphic, Is.SameAs(image));
+            Assert.That(field.colors.normalColor, Is.EqualTo(UiKit.InputBg));
+            Assert.That(image.color, Is.EqualTo(UiKit.InputBg));
             Assert.That(field.textComponent, Is.SameAs(text));
             Assert.That(field.placeholder, Is.SameAs(placeholder));
             Assert.That(field.text, Is.EqualTo("Room 42"));
@@ -58,7 +60,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(committed, Is.EqualTo(-1));
 
             binding.Field.text = "64";
-            Assert.That(binding.Commit(), Is.True);
+            binding.Field.onEndEdit.Invoke(binding.Field.text);
             Assert.That(committed, Is.EqualTo(64));
             Assert.That(binding.Error.text, Is.Empty);
         }
@@ -77,8 +79,10 @@ namespace HexWars.Presentation.Tests
             binding.Restore(); // screen-level Escape handling calls this before focus changes
             Assert.That(binding.Field.text, Is.EqualTo("24"));
 
+            binding.Field.text = "36";
             binding.Field.onEndEdit.Invoke(binding.Field.text);
-            Assert.That(setterCalls, Is.EqualTo(0));
+            Assert.That(setterCalls, Is.EqualTo(1),
+                "restoring an unfocused field must not suppress the next real end-edit");
         }
     }
 }

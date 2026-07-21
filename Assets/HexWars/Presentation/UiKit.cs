@@ -238,6 +238,14 @@ namespace HexWars.Presentation
 
             var field = go.AddComponent<InputField>();
             field.targetGraphic = image;
+            var colors = field.colors;
+            colors.normalColor = InputBg;
+            colors.highlightedColor = Color.Lerp(InputBg, Color.white, 0.12f);
+            colors.pressedColor = Color.Lerp(InputBg, Color.black, 0.08f);
+            colors.selectedColor = InputBg;
+            colors.disabledColor = new Color(InputBg.r, InputBg.g, InputBg.b, 0.55f);
+            field.colors = colors;
+            image.color = InputBg;
             field.textComponent = valueText;
             field.placeholder = placeholderText;
             field.lineType = UnityEngine.UI.InputField.LineType.SingleLine;
@@ -334,7 +342,7 @@ namespace HexWars.Presentation
         readonly bool _blankMeansZero;
         readonly Action<int> _setter;
         int _committed;
-        bool _suppressNextEndEdit;
+        bool _restoring;
 
         public InputField Field { get; }
         public Text Error { get; }
@@ -351,11 +359,7 @@ namespace HexWars.Presentation
             _setter = setter ?? (_ => { });
             Field.onEndEdit.AddListener(_ =>
             {
-                if (_suppressNextEndEdit)
-                {
-                    _suppressNextEndEdit = false;
-                    return;
-                }
+                if (_restoring) return;
                 Commit();
             });
         }
@@ -378,15 +382,17 @@ namespace HexWars.Presentation
 
         public void Restore()
         {
-            _suppressNextEndEdit = true;
+            _restoring = true;
             Field.SetTextWithoutNotify(_committed.ToString());
             Error.text = string.Empty;
+            Field.DeactivateInputField();
+            _restoring = false;
         }
 
         public void SetCommittedValue(int value)
         {
             _committed = value;
-            _suppressNextEndEdit = false;
+            _restoring = false;
             Field.SetTextWithoutNotify(value.ToString());
             Error.text = string.Empty;
         }
