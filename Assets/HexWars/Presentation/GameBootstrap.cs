@@ -142,8 +142,12 @@ namespace HexWars.Presentation
 
             int nextId = 1;
             int startPts = TerritoryMode ? config.StartingPoints : 0;
-            var p0 = BuildPlayer(board, PlayerId.Player0, startPts, ref nextId);
-            var p1 = BuildPlayer(board, PlayerId.Player1, startPts, ref nextId);
+            var p0 = BuildPlayer(board, PlayerId.Player0, startPts,
+                                 SessionBarracksCache.ForLocalPlayer(0).Snapshot(), ref nextId);
+            var p1Barracks = VsAI
+                ? BarracksCatalog.DefaultTemplates
+                : SessionBarracksCache.ForLocalPlayer(1).Snapshot();
+            var p1 = BuildPlayer(board, PlayerId.Player1, startPts, p1Barracks, ref nextId);
             State = new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
 
             var renderer = GetComponent<BoardRenderer>();
@@ -178,6 +182,7 @@ namespace HexWars.Presentation
             }
             var prev = State;
             State = result.NewState;
+            UpdateSessionBarracks(cmd);
             if (!DemoMode) EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             if (!DemoMode) CheckFirstBounty(prev, cmd);
@@ -236,7 +241,11 @@ namespace HexWars.Presentation
             TipsService.NewGame();
             Presenter?.ResetQueue();
             Networked = false; // play locally — TryApply applies here instead of going to the server
-            State = GameFactory.Build(setup);
+            var p0Barracks = SessionBarracksCache.ForLocalPlayer(0).Snapshot();
+            var p1Barracks = vsAi
+                ? BarracksCatalog.DefaultTemplates
+                : SessionBarracksCache.ForLocalPlayer(1).Snapshot();
+            State = GameFactory.Build(setup, p0Barracks, p1Barracks);
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
@@ -520,14 +529,27 @@ namespace HexWars.Presentation
             "AlreadyControlled"     => "You already control that hex.",
             "NoUnitOnHex"           => "You need one of your units on that hex.",
             "TemplateNotFound"      => "Pick a unit to deploy first.",
+            "DuplicateTemplate"     => "That exact design is already in your barracks.",
+            "BarracksFull"          => "Your barracks is full. Delete a design before adding another.",
             "GameAlreadyOver"       => "The game is over.",
             _                        => "That move isn't allowed right now.",
         };
 
-        PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints, ref int nextId)
+        void UpdateSessionBarracks(Command cmd)
+        {
+            if (DemoMode || Networked || !IsLocalCommand(cmd)) return;
+            var cache = SessionBarracksCache.ForLocalPlayer((int)cmd.Issuer);
+            if (cmd is CreateUnit created)
+                cache.Add(new UnitTemplate(UnitTemplate.Sanitize(created.Name), created.Stats));
+            else if (cmd is DeleteTemplate deleted)
+                cache.RemoveAt(deleted.TemplateIndex);
+        }
+
+        PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints,
+                                IReadOnlyList<UnitTemplate> barracks, ref int nextId)
         {
             if (!DemoPieces)
-                return new PlayerState(id, startingPoints);
+                return new PlayerState(id, startingPoints, new List<UnitTemplate>(barracks));
 
             var flatZone = board.DeploymentZone(id)
                 .Where(c => board.TileAt(c).Elevation == 0)
@@ -550,7 +572,7 @@ namespace HexWars.Presentation
             for (; placed < demos.Length && placed < flatZone.Count; placed++)
                 units.Add(new Unit(nextId++, id, demos[placed], flatZone[placed], 0));
 
-            return new PlayerState(id, startingPoints, unitsOnBoard: units);
+            return new PlayerState(id, startingPoints, new List<UnitTemplate>(barracks), unitsOnBoard: units);
         }
 
         static Cubemap _reflection;
