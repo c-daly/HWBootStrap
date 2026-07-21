@@ -95,6 +95,9 @@ engine/**/obj/
 # Local Superpowers brainstorming previews and transient preview-server state
 .superpowers/
 
+# Local isolated feature worktrees
+.worktrees/
+
 # Engine DLL placed in Unity is a build artifact — regenerate with engine/build-to-unity.ps1
 Assets/HexWars/Plugins/HexWars.Engine.dll
 Assets/HexWars/Plugins/HexWars.Engine.dll.meta
