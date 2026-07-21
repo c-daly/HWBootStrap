@@ -30,6 +30,9 @@ namespace HexWars.Presentation.Tests
                 Assert.That(halo.name, Is.EqualTo("AttackTarget_7"));
                 Assert.That(halo.GetComponent<Collider>(), Is.Null);
                 Assert.That(halo.GetComponent<MeshFilter>().sharedMesh.vertexCount, Is.GreaterThan(12));
+                Assert.That(halo.localPosition.y,
+                    Is.GreaterThan(boardObject.GetComponent<BoardRenderer>().LevelHeight + 0.70f),
+                    "the halo must render above the unit disc, icon, and health bar");
             }
             finally
             {

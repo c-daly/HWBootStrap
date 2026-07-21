@@ -87,7 +87,7 @@ namespace HexWars.Presentation
             halo.GetComponent<MeshRenderer>().sharedMaterial = _haloMaterial;
             var world = HexLayout.ToWorld(target.Cell, _board.HexSize);
             float top = (target.Elevation + 1) * _board.LevelHeight;
-            halo.transform.localPosition = new Vector3((float)world.x, top + 0.085f, (float)world.z);
+            halo.transform.localPosition = new Vector3((float)world.x, top + 0.72f, (float)world.z);
             halo.SetActive(true);
         }
 
