@@ -137,7 +137,9 @@ namespace HexWars.Engine.Rl
                 return MakeView(0f);
             }
 
-            float reward = transition.Intermediate ? -_cfg.IntermediateDecisionPenalty : 0f;
+            float reward = transition.Intermediate && seat == _learner
+                ? -_cfg.IntermediateDecisionPenalty
+                : 0f;
             if (wasDeployment)
             {
                 CompleteRevealIfReady();

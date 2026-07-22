@@ -121,6 +121,101 @@ namespace HexWars.Engine.Tests
             Assert.That(view.Reward, Is.EqualTo(-env.Config.IntermediateDecisionPenalty));
         }
 
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void ExternalOpponentDeploymentMenu_DoesNotChargeLearnerShaping(PlayerId learner)
+        {
+            var env = new AdaptiveDuelEnv();
+            IDeploymentPolicy? deployment0 = learner == PlayerId.Player0
+                ? new CombinedArmsDeploymentPolicy(1)
+                : null;
+            IDeploymentPolicy? deployment1 = learner == PlayerId.Player1
+                ? new CombinedArmsDeploymentPolicy(2)
+                : null;
+            var view = env.Reset(58, null, null, deployment0, deployment1, learner);
+
+            Assert.That(view.Seat, Is.Not.EqualTo((int)learner));
+            Assert.That(view.ActionMask[(int)AdaptiveCommandChoice.DeployStartingUnit], Is.True);
+
+            view = env.Step((int)AdaptiveCommandChoice.DeployStartingUnit);
+
+            Assert.That(view.Reward, Is.Zero,
+                "an externally driven/model-like opponent menu decision is not learner shaping");
+        }
+
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void ExternalLearnerDeploymentMenu_ChargesLearnerShaping(PlayerId learner)
+        {
+            var env = new AdaptiveDuelEnv();
+            IDeploymentPolicy? deployment0 = learner == PlayerId.Player0
+                ? null
+                : new CombinedArmsDeploymentPolicy(1);
+            IDeploymentPolicy? deployment1 = learner == PlayerId.Player1
+                ? null
+                : new CombinedArmsDeploymentPolicy(2);
+            var view = env.Reset(59, null, null, deployment0, deployment1, learner);
+
+            Assert.That(view.Seat, Is.EqualTo((int)learner));
+            Assert.That(view.ActionMask[(int)AdaptiveCommandChoice.DeployStartingUnit], Is.True);
+
+            view = env.Step((int)AdaptiveCommandChoice.DeployStartingUnit);
+
+            Assert.That(view.Reward, Is.EqualTo(-env.Config.IntermediateDecisionPenalty));
+        }
+
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void ExternalOpponentGameplayMenu_DoesNotChargeLearnerShaping(PlayerId learner)
+        {
+            var env = new AdaptiveDuelEnv();
+            var view = env.Reset(60, null, null,
+                new CombinedArmsDeploymentPolicy(1),
+                new CombinedArmsDeploymentPolicy(2), learner);
+            if (view.Seat == (int)learner)
+            {
+                Assert.That(view.ActionMask[(int)AdaptiveCommandChoice.EndTurn], Is.True);
+                view = env.Step((int)AdaptiveCommandChoice.EndTurn);
+            }
+
+            Assert.That(view.Seat, Is.Not.EqualTo((int)learner));
+            Assert.That(view.ActionMask[(int)AdaptiveCommandChoice.ChooseUnit], Is.True);
+
+            view = env.Step((int)AdaptiveCommandChoice.ChooseUnit);
+
+            Assert.That(view.Reward, Is.Zero,
+                "opponent gameplay hierarchy depth must not affect learner return");
+        }
+
+        [TestCase(PlayerId.Player0, 1f)]
+        [TestCase(PlayerId.Player1, -1f)]
+        public void TerminalReward_UsesLearnerPerspectiveWhenSeatZeroActionTerminates(
+            PlayerId learner, float expectedReward)
+        {
+            var config = AdaptiveEnvConfig.Default();
+            config.Game = GameConfig.Default(
+                biomesEnabled: false,
+                fogOfWar: true,
+                winConditions: WinBy.Economy,
+                economyWinThreshold: 0,
+                maxDesignPointCost: config.MaxDesignPointCost,
+                fixedTemplateCount: config.FixedTemplateCount,
+                templateSlotCount: config.Templates.Count);
+            var env = new AdaptiveDuelEnv(config);
+            var view = env.Reset(61, null, null,
+                new CombinedArmsDeploymentPolicy(1),
+                new CombinedArmsDeploymentPolicy(2), learner);
+
+            Assert.That(view.Seat, Is.Zero);
+            Assert.That(view.ActionMask[(int)AdaptiveCommandChoice.EndTurn], Is.True);
+
+            view = env.Step((int)AdaptiveCommandChoice.EndTurn);
+
+            Assert.That(view.Terminated, Is.True);
+            Assert.That(view.Winner, Is.Zero);
+            Assert.That(view.Reward, Is.EqualTo(expectedReward));
+        }
+
         [Test]
         public void InvalidGameplayAction_ReturnsLegalRootMaskWithoutApplyingFallback()
         {

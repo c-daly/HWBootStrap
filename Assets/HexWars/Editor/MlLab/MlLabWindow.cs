@@ -581,11 +581,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return;
             }
             SyncTrackers();
-            string args = "doctor --runs-root " + MlCliProcess.QuoteArgument(RunsRoot) +
-                          " --server " + MlCliProcess.QuoteArgument(GymServer);
-            foreach (var tracker in _config.Trackers)
-                args += " --tracker " + MlCliProcess.QuoteArgument(tracker.ToCliValue());
-            args += " --json";
+            string args = _config.BuildDoctorArguments(RunsRoot, GymServer);
             RunCommand(args, "Environment doctor started.", CommandKind.Doctor);
         }
 

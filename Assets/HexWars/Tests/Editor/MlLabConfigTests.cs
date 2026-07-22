@@ -108,6 +108,22 @@ namespace HexWars.Presentation.Tests
             Assert.That(config.BuildTrainArguments(), Does.Contain("--environment adaptive-v1"));
         }
 
+        [TestCase(MlEnvironmentContract.TacticalV1, "tactical-v1")]
+        [TestCase(MlEnvironmentContract.AdaptiveV1, "adaptive-v1")]
+        public void BuildDoctorArguments_EmitsSelectedEnvironment(
+            MlEnvironmentContract environment, string cliValue)
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = environment;
+
+            string args = config.BuildDoctorArguments(@"C:\runs root", @"C:\server.dll");
+
+            Assert.That(args, Does.StartWith("doctor --environment " + cliValue + " "));
+            Assert.That(args, Does.Contain("--runs-root \"C:\\runs root\""));
+            Assert.That(args, Does.Contain("--server C:\\server.dll"));
+            Assert.That(args, Does.EndWith("--json"));
+        }
+
         [Test]
         public void AdaptivePreflight_UsesManifestSemanticsForExistingRun()
         {

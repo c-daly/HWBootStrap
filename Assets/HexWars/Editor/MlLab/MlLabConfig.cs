@@ -125,6 +125,25 @@ namespace HexWars.Presentation.EditorTools.MlLab
             });
         }
 
+        public string BuildDoctorArguments(string runsRoot, string server)
+        {
+            var args = new List<string>
+            {
+                "doctor",
+                "--environment", MlEnvironmentContracts.CliValue(Environment),
+                "--runs-root", Q(runsRoot),
+                "--server", Q(server),
+            };
+            foreach (var tracker in Trackers ?? new List<MlTrackerConfig>())
+            {
+                if (tracker == null || string.IsNullOrWhiteSpace(tracker.Kind)) continue;
+                args.Add("--tracker");
+                args.Add(Q(tracker.ToCliValue()));
+            }
+            args.Add("--json");
+            return string.Join(" ", args);
+        }
+
         string OpponentValue()
         {
             switch (OpponentKind)
