@@ -44,24 +44,33 @@ IAgent? MakeController(string? spec, int agentSeed)
 
 // Handshake: obs/action sizes + the spatial obs shape (so Python reshapes the board part to (C,H,W))
 // + the env config (recorded into each run's params for reproducibility).
-object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, EnvConfig c) => new
+object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, EnvConfig c)
 {
-    obs_len = obsLen,
-    n_actions = nActions,
-    channels,
-    board_h = boardH,
-    board_w = boardW,
-    globals = TacticalCoding.Globals,
-    roster = c.Roster.Count,
-    biomes = c.Game.BiomesEnabled,
-    round_cap = c.Game.RoundCap,
-    max_steps = c.MaxSteps,
-    shape_scale = c.ShapeScale,
-    step_penalty = c.StepPenalty,
-    closing_weight = c.ClosingWeight,
-    draw_credit_weight = c.DrawCreditWeight,
-    points_weight = c.PointsWeight,
-};
+    var contract = MlContract.Create(c);
+    return new
+    {
+        contract_version = contract.Version,
+        contract_hash = contract.ContractHash,
+        obs_len = obsLen,
+        n_actions = nActions,
+        channels,
+        board_h = boardH,
+        board_w = boardW,
+        globals = TacticalCoding.Globals,
+        board = contract.Board,
+        roster = c.Roster.Count,
+        contract_roster = contract.Roster,
+        reward = contract.Reward,
+        biomes = c.Game.BiomesEnabled,
+        round_cap = c.Game.RoundCap,
+        max_steps = c.MaxSteps,
+        shape_scale = c.ShapeScale,
+        step_penalty = c.StepPenalty,
+        closing_weight = c.ClosingWeight,
+        draw_credit_weight = c.DrawCreditWeight,
+        points_weight = c.PointsWeight,
+    };
+}
 
 string? line;
 while ((line = Console.ReadLine()) != null)
