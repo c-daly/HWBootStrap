@@ -95,8 +95,8 @@ namespace HexWars.Engine.Tests
 
             var open = hub.OpenGames();
             Assert.That(open.Count, Is.EqualTo(1));
-            Assert.That(open[0].Setup.Width, Is.EqualTo(24));
-            Assert.That(open[0].Setup.Height, Is.EqualTo(24));
+            Assert.That(open[0].Setup.Width, Is.EqualTo(64));
+            Assert.That(open[0].Setup.Height, Is.EqualTo(64));
         }
 
         [Test]

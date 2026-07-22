@@ -12,14 +12,14 @@ namespace HexWars.Engine.Tests
         public void Sanitized_ClampsOversizedBoardAndArmy()
         {
             var s = new GameSetup(GameMode.Annihilation, 9999, 9999, 100000, 7, 500000, 99, 99, 99, 99).Sanitized();
-            Assert.That(s.Width, Is.EqualTo(24));
-            Assert.That(s.Height, Is.EqualTo(24));
+            Assert.That(s.Width, Is.EqualTo(64));
+            Assert.That(s.Height, Is.EqualTo(64));
             Assert.That(s.StartingPoints, Is.EqualTo(200));
             Assert.That(s.ArmySize, Is.EqualTo(12));
             Assert.That(s.Brutes, Is.EqualTo(12));
             Assert.That(s.Strikers, Is.EqualTo(12));
             Assert.That(s.Snipers, Is.EqualTo(12));
-            Assert.That(s.TurnActions, Is.EqualTo(8));
+            Assert.That(s.TurnActions, Is.EqualTo(99));
         }
 
         [Test]
@@ -45,11 +45,22 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Sanitized_AllowsMaximumBoardAndUnboundedPositiveTurnActions()
+        {
+            var s = new GameSetup(GameMode.Annihilation, 64, 64, 0, 7,
+                turnActions: int.MaxValue).Sanitized();
+
+            Assert.That(s.Width, Is.EqualTo(64));
+            Assert.That(s.Height, Is.EqualTo(64));
+            Assert.That(s.TurnActions, Is.EqualTo(int.MaxValue));
+        }
+
+        [Test]
         public void GameFactoryBuild_SanitizesHostileSetup()
         {
             // must complete instantly with a clamped board, not build 9999x9999 tiles
             var state = GameFactory.Build(GameSetup.Parse("0 9999 9999 0 7"));
-            Assert.That(state.Board.Tiles.Count, Is.EqualTo(24 * 24));
+            Assert.That(state.Board.Tiles.Count, Is.EqualTo(64 * 64));
         }
     }
 }

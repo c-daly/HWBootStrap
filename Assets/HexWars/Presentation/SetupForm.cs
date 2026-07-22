@@ -1,6 +1,8 @@
 using System;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 using HexWars.Engine;
 
 namespace HexWars.Presentation
@@ -9,8 +11,8 @@ namespace HexWars.Presentation
     /// The game-settings form, opened from the title screen in one of two modes: <b>Host</b> (online —
     /// adds a Private toggle; Create connects and shows a waiting screen with the room code, share link
     /// and Cancel) and <b>VsAi</b> (adds a Difficulty row; Create starts the local game immediately).
-    /// Numeric fields are tap-to-type value boxes (browser prompt — the only reliable mobile-WebGL
-    /// keyboard) flanked by −/+ steppers. Removes itself when a real match starts.
+    /// Numeric settings use ordinary, prefilled in-game text fields with inline validation.
+    /// Removes itself when a real match starts.
     /// </summary>
     public sealed class SetupForm : MonoBehaviour
     {
@@ -24,6 +26,7 @@ namespace HexWars.Presentation
         Text _armyLabel;
         Text _status;
         GameObject _cancelBtn;
+        InlineIntBinding _seedBinding;
 
         GameMode _gameMode = GameMode.Annihilation;
         int _w = 9, _h = 7, _pts = 0, _seed = 7;
@@ -33,11 +36,12 @@ namespace HexWars.Presentation
         bool _private = false;
         AiLevel _ai = AiLevel.Hard;
 
-        static readonly int[] PacePresets = { 3, 4, 0, 1 };
-        static string PaceLabel(int k) => k <= 0 ? "whole army (fast)" : $"{k} action{(k == 1 ? "" : "s")}/turn";
-
         readonly System.Collections.Generic.List<(Button btn, Func<bool> selected)> _toggles
             = new System.Collections.Generic.List<(Button, Func<bool>)>();
+        readonly System.Collections.Generic.List<InlineIntBinding> _bindings
+            = new System.Collections.Generic.List<InlineIntBinding>();
+        readonly System.Collections.Generic.List<InlineIntBinding> _armyBindings
+            = new System.Collections.Generic.List<InlineIntBinding>();
 
         public static SetupForm Open(GameBootstrap game, SetupMode mode)
         {
@@ -59,6 +63,20 @@ namespace HexWars.Presentation
 
         void Update()
         {
+            if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            {
+                var selected = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+                foreach (var binding in _bindings)
+                {
+                    if (selected == binding.Field.gameObject)
+                    {
+                        binding.Restore();
+                        EventSystem.current.SetSelectedGameObject(null);
+                        return;
+                    }
+                }
+            }
+
             // a real match started (host's START arrived, or the vs-AI game began) — this form is done
             if (_game != null && _game.State != null && !_game.DemoMode) Close();
         }
@@ -89,7 +107,7 @@ namespace HexWars.Presentation
             UiKit.Button(_form.transform, "Back", -300f, y - 2f, 90f, 34f, () => { Close(); TitleScreen.Reopen(_game); },
                          UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
             y -= 44f;
-            UiKit.Label(_form.transform, "tap a value to type it, or use − / +", 0f, y, 700f, 22f,
+            UiKit.Label(_form.transform, "Tap a value and type the number you want", 0f, y, 700f, 22f,
                         UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint); y -= 40f;
 
             ToggleBtn("Annihilation", -95f, y, 180f, 38f, () => _gameMode == GameMode.Annihilation,
@@ -98,14 +116,21 @@ namespace HexWars.Presentation
                       () => { _gameMode = GameMode.Territory; RefreshToggles(); });
             y -= 48f;
 
-            NumberRow("Map width", y, () => _w, v => _w = v, 5, 24, 1); y -= 46f;
-            NumberRow("Map height", y, () => _h, v => _h = v, 5, 24, 1); y -= 46f;
-            NumberRow("Start points", y, () => _pts, v => _pts = v, 0, 200, 10); y -= 46f;
+            NumberFieldRow(_form.transform, "Map width", y, _w, v => _w = v, 5, 64, false); y -= 46f;
+            NumberFieldRow(_form.transform, "Map height", y, _h, v => _h = v, 5, 64, false); y -= 46f;
+            NumberFieldRow(_form.transform, "Start points", y, _pts, v => _pts = v, 0, 200, true); y -= 46f;
 
             UiKit.Label(_form.transform, "Seed", -245f, y, 210f, 38f, UiKit.SizeBody + 2, TextAnchor.MiddleLeft, UiKit.TextDim);
-            var seedDisp = UiKit.ValueBox(_form.transform, "Seed", 60f, y, 130f, 38f, () => _seed, v => _seed = v, 1, 99999);
+            _seedBinding = UiKit.IntField(_form.transform, _seed, 60f, y, 130f, 38f,
+                                          1, 99999, false, v => _seed = v);
+            _seedBinding.Field.gameObject.name = "Seed";
+            _bindings.Add(_seedBinding);
             UiKit.Button(_form.transform, "Reroll", 190f, y, 100f, 38f,
-                         () => { _seed = UnityEngine.Random.Range(1, 9999); seedDisp.text = _seed.ToString(); },
+                         () =>
+                         {
+                             _seed = UnityEngine.Random.Range(1, 9999);
+                             _seedBinding.SetCommittedValue(_seed);
+                         },
                          UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
             y -= 48f;
 
@@ -114,15 +139,10 @@ namespace HexWars.Presentation
             _armyLabel.text = ArmySummary();
             y -= 48f;
 
-            Text paceLabel = null;
-            var paceBtn = UiKit.Button(_form.transform, "", 0f, y, 500f, 40f, () =>
-            {
-                int idx = Array.IndexOf(PacePresets, _turnActions);
-                _turnActions = PacePresets[(idx + 1) % PacePresets.Length];
-                if (paceLabel != null) paceLabel.text = "Pace:  " + PaceLabel(_turnActions) + "   ▸";
-            }, UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
-            paceLabel = paceBtn.GetComponentInChildren<Text>();
-            paceLabel.text = "Pace:  " + PaceLabel(_turnActions) + "   ▸";
+            NumberFieldRow(_form.transform, "Units acting per turn", y, _turnActions,
+                           v => _turnActions = v, 0, int.MaxValue, true);
+            UiKit.Label(_form.transform, "0 = whole team / unlimited", 155f, y - 28f, 300f, 18f,
+                        UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.TextFaint);
             y -= 48f;
 
             if (_mode == SetupMode.Host)
@@ -199,10 +219,10 @@ namespace HexWars.Presentation
 
             float y = -24f;
             UiKit.Label(card.transform, "Starting army", 0f, y, 700f, 34f, UiKit.SizeTitle - 3, TextAnchor.MiddleCenter); y -= 48f;
-            NumberRowIn(card.transform, "Army size", y, () => _armySize, v => _armySize = v, 1, 12); y -= 46f;
-            NumberRowIn(card.transform, "Brutes", y, () => _brutes, v => _brutes = v, 0, 12); y -= 46f;
-            NumberRowIn(card.transform, "Strikers", y, () => _strikers, v => _strikers = v, 0, 12); y -= 46f;
-            NumberRowIn(card.transform, "Snipers", y, () => _snipers, v => _snipers = v, 0, 12); y -= 44f;
+            NumberFieldRow(card.transform, "Army size", y, _armySize, v => _armySize = v, 1, 12, false, true); y -= 46f;
+            NumberFieldRow(card.transform, "Brutes", y, _brutes, v => _brutes = v, 0, 12, true, true); y -= 46f;
+            NumberFieldRow(card.transform, "Strikers", y, _strikers, v => _strikers = v, 0, 12, true, true); y -= 46f;
+            NumberFieldRow(card.transform, "Snipers", y, _snipers, v => _snipers = v, 0, 12, true, true); y -= 44f;
             UiKit.Label(card.transform, "Leave roles at 0 for a random army; extra slots fill randomly.",
                         0f, y, 700f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint); y -= 40f;
             UiKit.Button(card.transform, "Done", 0f, y, 220f, 44f, CloseArmy, UiKit.ButtonStyle.Cta, UiKit.SizeHeading);
@@ -214,27 +234,24 @@ namespace HexWars.Presentation
 
         void CloseArmy()
         {
+            bool valid = true;
+            foreach (var binding in _armyBindings) valid &= binding.Commit();
+            if (!valid) return;
             if (_armyPanel != null) _armyPanel.SetActive(false);
             if (_armyLabel != null) _armyLabel.text = ArmySummary();
         }
 
-        void NumberRow(string label, float y, Func<int> get, Action<int> set, int min, int max, int step)
-            => NumberRowOn(_form.transform, label, y, get, set, min, max, step);
-
-        void NumberRowIn(Transform parent, string label, float y, Func<int> get, Action<int> set, int min, int max)
-            => NumberRowOn(parent, label, y, get, set, min, max, 1);
-
-        void NumberRowOn(Transform parent, string label, float y, Func<int> get, Action<int> set, int min, int max, int step)
+        InlineIntBinding NumberFieldRow(Transform parent, string label, float y, int initial,
+                                        Action<int> set, int min, int max, bool blankMeansZero,
+                                        bool armyField = false)
         {
             UiKit.Label(parent, label, -245f, y, 210f, 38f, UiKit.SizeBody + 2, TextAnchor.MiddleLeft, UiKit.TextDim);
-            Text disp = null;
-            UiKit.Button(parent, "−", -10f, y, 54f, 38f,
-                         () => { set(Mathf.Clamp(get() - step, min, max)); if (disp != null) disp.text = get().ToString(); },
-                         UiKit.ButtonStyle.Secondary, 24);
-            disp = UiKit.ValueBox(parent, label, 80f, y, 90f, 38f, get, set, min, max);
-            UiKit.Button(parent, "+", 170f, y, 54f, 38f,
-                         () => { set(Mathf.Clamp(get() + step, min, max)); if (disp != null) disp.text = get().ToString(); },
-                         UiKit.ButtonStyle.Secondary, 24);
+            var binding = UiKit.IntField(parent, initial, 80f, y, 150f, 38f,
+                                         min, max, blankMeansZero, set);
+            binding.Field.gameObject.name = label;
+            _bindings.Add(binding);
+            if (armyField) _armyBindings.Add(binding);
+            return binding;
         }
 
         void ToggleBtn(string text, float x, float y, float w, float h, Func<bool> selected, Action onClick)
@@ -250,6 +267,14 @@ namespace HexWars.Presentation
 
         void OnCreate()
         {
+            bool valid = true;
+            foreach (var binding in _bindings) valid &= binding.Commit();
+            if (!valid)
+            {
+                if (_armyBindings.Exists(binding => !string.IsNullOrEmpty(binding.Error.text))) OpenArmy();
+                return;
+            }
+
             var setup = new GameSetup(_gameMode, _w, _h, _pts, _seed,
                                       _armySize, _brutes, _strikers, _snipers, _turnActions, _fog);
             if (_mode == SetupMode.VsAi)

@@ -52,15 +52,15 @@ namespace HexWars.Engine
         /// request an absurd board or army (that was a one-request OOM before).</summary>
         public GameSetup Sanitized() => new GameSetup(
             (GameMode)Math.Clamp((int)Mode, 0, 1),
-            Math.Clamp(Width, 5, 24),
-            Math.Clamp(Height, 5, 24),
+            Math.Clamp(Width, 5, 64),
+            Math.Clamp(Height, 5, 64),
             Math.Clamp(StartingPoints, 0, 200),
             Math.Clamp(Seed, 1, 99999),
             Math.Clamp(ArmySize, 1, 12),
             Math.Clamp(Brutes, 0, 12),
             Math.Clamp(Strikers, 0, 12),
             Math.Clamp(Snipers, 0, 12),
-            Math.Clamp(TurnActions, 0, 8),
+            Math.Max(0, TurnActions),
             Fog);
     }
 
