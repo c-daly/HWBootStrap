@@ -45,7 +45,9 @@ namespace HexWars.Engine.Tests
         {
             var hub = NewHub();
             hub.Connect("R", "a");
-            hub.Connect("R", "b");                       // second seat -> START dealt -> Started
+            hub.Connect("R", "b");
+            hub.Receive("R", "a", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
+            hub.Receive("R", "b", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
             Assert.That(hub.OpenGames(), Is.Empty, "full room is not open");
             hub.Disconnect("R", "b");                    // back to one member, but the game began
             Assert.That(hub.OpenGames(), Is.Empty, "a started room must never re-list");

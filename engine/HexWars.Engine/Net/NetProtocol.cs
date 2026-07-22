@@ -26,6 +26,8 @@ namespace HexWars.Engine
         public const string Malformed = "REJECT Malformed";
         /// <summary>The authoritative start state (a <see cref="ReplayFile"/> dump), sent once both seats are present.</summary>
         public static string Start(string startStateText) => "START " + startStateText;
+        /// <summary>Ask a waiting client for its process-lifetime barracks catalog.</summary>
+        public const string CatalogRequest = "CATALOG?";
         /// <summary>A validated command for every client to apply locally.</summary>
         public static string Apply(Command c) => "APPLY " + CommandWire.Write(c);
         /// <summary>Tell the issuer their command was rejected, and why.</summary>

@@ -164,20 +164,20 @@ namespace HexWars.Presentation
                     {
                         Seat = (PlayerId)int.Parse(msg.Payload);
                         _game.OnNetSeat(Seat.Value);
-                        // A fresh match has no state yet: send this seat's process-lifetime catalog as
-                        // a bounded message, never in the URL. A live reconnect already has State and
-                        // reclaims the server's started session, so it must not attempt to replace it.
-                        if (_game.State == null)
-                        {
-                            var catalog = SessionBarracksCache.ForLocalPlayer((int)Seat.Value).Snapshot();
-                            Send(NetProtocol.Catalog(BarracksWire.Write(catalog)));
-                        }
                     }
                     break;
+                case "CATALOG?": Send(StartingCatalogMessage()); break;
                 case "START":  _game.OnNetStart(msg.Payload); break;
                 case "APPLY":  _game.OnNetApply(CommandWire.Read(msg.Payload)); break;
                 case "REJECT": _game.OnNetReject(msg.Payload); break;
             }
+        }
+
+        string StartingCatalogMessage()
+        {
+            var seat = Seat ?? PlayerId.Player0;
+            var catalog = SessionBarracksCache.ForLocalPlayer((int)seat).Snapshot();
+            return NetProtocol.Catalog(BarracksWire.Write(catalog));
         }
 
         void Update()

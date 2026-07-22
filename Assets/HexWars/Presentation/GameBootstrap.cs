@@ -473,6 +473,8 @@ namespace HexWars.Presentation
                 if (result.Success) State = result.NewState;
                 else Debug.LogError("[Net] re-deal fast-forward: a logged command failed to reapply — " + result.Reason);
             }
+            if (Seat.HasValue)
+                ReconcileOnlineSessionBarracks(Seat.Value);
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());

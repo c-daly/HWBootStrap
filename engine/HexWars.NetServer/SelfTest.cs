@@ -28,6 +28,7 @@ namespace HexWars.NetServer
             {
                 using var a = await Connect();
                 string seatA = await Recv(a);               // SEAT 0 (room not full yet)
+                string catalogRequestA = await Recv(a);     // CATALOG? while the room is waiting
                 await Send(a, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
 
                 var lobby1 = Program.OpenGamesSnapshot();      // host waiting -> the room is browsable
@@ -35,6 +36,7 @@ namespace HexWars.NetServer
 
                 using var b = await Connect();
                 string seatB = await Recv(b);               // SEAT 1
+                string catalogRequestB = await Recv(b);
                 await Send(b, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 string startA = await Recv(a);              // START ... (dealt to both once full)
                 string startB = await Recv(b);
@@ -54,9 +56,11 @@ namespace HexWars.NetServer
                 // seats it back into P0 and re-deals START (the game must survive a background/refresh).
                 using var ra = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
                 string rSeatA = await Recv(ra);               // SEAT 0
+                string rCatalogRequestA = await Recv(ra);
                 await Send(ra, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 using var rb = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-b");
                 string rSeatB = await Recv(rb);                // SEAT 1
+                string rCatalogRequestB = await Recv(rb);
                 await Send(rb, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 string rStartA = await Recv(ra);
                 string rStartB = await Recv(rb);
@@ -113,6 +117,8 @@ namespace HexWars.NetServer
 
                 bool reconnectOk =
                     rSeatA == "SEAT 0" && rSeatB == "SEAT 1" &&
+                    rCatalogRequestA == NetProtocol.CatalogRequest &&
+                    rCatalogRequestB == NetProtocol.CatalogRequest &&
                     rStartA.StartsWith("START ") && rStartB.StartsWith("START ") &&
                     rMoveApplyA.StartsWith("APPLY M ") && rMoveApplyA == rMoveApplyB &&
                     rAttackApplyA.StartsWith("APPLY A ") && rAttackApplyA == rAttackApplyB &&
@@ -122,6 +128,8 @@ namespace HexWars.NetServer
 
                 bool ok =
                     seatA == "SEAT 0" && seatB == "SEAT 1" &&
+                    catalogRequestA == NetProtocol.CatalogRequest &&
+                    catalogRequestB == NetProtocol.CatalogRequest &&
                     startA.StartsWith("START ") && startB.StartsWith("START ") &&
                     applyA == "APPLY E 0" && applyB == "APPLY E 0" &&
                     lobbyListsWaitingRoom && lobbyEmptiesOnStart && joinOnlyTurnedAway && reconnectOk;

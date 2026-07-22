@@ -146,6 +146,13 @@ namespace HexWars.Engine
                 string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start!, room.Log));
                 outs.Add(new Outbound(connectionId, startMsg));
             }
+            else if (!room.Catalogs.ContainsKey(seat.Value))
+            {
+                // The server explicitly requests setup data only while the room is waiting. This makes
+                // reconnect unambiguous: a started reconnect receives START, never a timing-based client
+                // guess that can race the re-deal and provoke CatalogClosed.
+                outs.Add(new Outbound(connectionId, NetProtocol.CatalogRequest));
+            }
             return outs;
         }
 
@@ -268,8 +275,17 @@ namespace HexWars.Engine
             Sweep();
             if (_rooms.TryGetValue(roomCode, out var room))
             {
+                room.ConnToToken.TryGetValue(connectionId, out var token);
                 room.Members.Remove(connectionId);
                 room.ConnToToken.Remove(connectionId);
+                if (!room.Started && token != null && !room.ConnToToken.ContainsValue(token)
+                    && room.TokenToSeat.TryGetValue(token, out var waitingSeat))
+                {
+                    // Before START, a vanished identity must not reserve a seat forever. Keep the seat
+                    // while any same-token tab remains, but otherwise let the waiting player be replaced.
+                    room.TokenToSeat.Remove(token);
+                    room.Catalogs.Remove(waitingSeat);
+                }
                 if (room.Members.Count == 0)
                 {
                     if (room.Started) room.EmptySinceTicks = _now();

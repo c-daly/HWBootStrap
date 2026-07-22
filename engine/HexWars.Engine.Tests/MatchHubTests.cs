@@ -65,10 +65,12 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             var a = hub.Connect("r", "a");
             Assert.That(a, Has.Some.Matches<Outbound>(o => o.ConnectionId == "a" && o.Message == "SEAT 0"));
+            Assert.That(a, Has.Some.Matches<Outbound>(o => o.ConnectionId == "a" && o.Message == "CATALOG?"));
             Assert.That(a, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START")));
 
             var b = hub.Connect("r", "b");
             Assert.That(b, Has.Some.Matches<Outbound>(o => o.ConnectionId == "b" && o.Message == "SEAT 1"));
+            Assert.That(b, Has.Some.Matches<Outbound>(o => o.ConnectionId == "b" && o.Message == "CATALOG?"));
             Assert.That(b, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START")),
                 "two occupied seats are not enough until their barracks arrive");
 
@@ -81,6 +83,22 @@ namespace HexWars.Engine.Tests
             var start = ReplayFile.Read(started.First(o => o.Message.StartsWith("START ")).Message.Substring("START ".Length)).Start;
             Assert.That(start.Player(P0).Barracks.Select(x => x.Name), Is.EqualTo(new[] { "Alpha" }));
             Assert.That(start.Player(P1).Barracks.Select(x => x.Name), Is.EqualTo(new[] { "Bravo" }));
+        }
+
+        [Test]
+        public void StartedReconnect_RedealsWithoutRequestingAnotherCatalog()
+        {
+            var hub = NewHub();
+            hub.Connect("r", "a", token: "token-a");
+            hub.Connect("r", "b", token: "token-b");
+            Catalog(hub, "a", Template("Alpha", 2));
+            Catalog(hub, "b", Template("Bravo", 3));
+            hub.Disconnect("r", "a");
+
+            var reconnect = hub.Connect("r", "a2", joinOnly: true, token: "token-a");
+
+            Assert.That(reconnect, Has.Some.Matches<Outbound>(o => o.Message.StartsWith("START ")));
+            Assert.That(reconnect, Has.None.Matches<Outbound>(o => o.Message == "CATALOG?"));
         }
 
         [Test]

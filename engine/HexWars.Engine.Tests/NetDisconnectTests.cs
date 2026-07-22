@@ -42,7 +42,9 @@ namespace HexWars.Engine.Tests
         {
             var hub = new MatchHub(_ => TwoUnitGame());
             hub.Connect("r", "a"); // P0, token defaults to "a"
-            hub.Connect("r", "b"); // P1 — room full, Started
+            hub.Connect("r", "b"); // P1 — room full once both catalogs arrive
+            hub.Receive("r", "a", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
+            hub.Receive("r", "b", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
             hub.Disconnect("r", "a");
             var c = hub.Connect("r", "c"); // a stranger, a different token — a's seat is reserved, not freed
             Assert.That(c, Has.Some.Matches<Outbound>(o => o.ConnectionId == "c" && o.Message == NetProtocol.SeatFull));
@@ -61,6 +63,24 @@ namespace HexWars.Engine.Tests
             var d = hub.Connect("r", "d"); // a stranger's token, no time advance
             Assert.That(d, Has.Some.Matches<Outbound>(o => o.ConnectionId == "d" && o.Message == NetProtocol.SeatFull),
                 "a started room's seats survive both players dropping — reconnect must use the same token (see TokenRejoinTests)");
+        }
+
+        [Test]
+        public void Hub_Disconnect_PreStartGuest_FreesSeatForReplacement()
+        {
+            var hub = new MatchHub(_ => TwoUnitGame());
+            hub.Connect("r", "host", token: "host-token");
+            hub.Receive("r", "host", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
+            hub.Connect("r", "guest", token: "guest-token");
+
+            hub.Disconnect("r", "guest");
+            var replacement = hub.Connect("r", "replacement", token: "replacement-token");
+
+            Assert.That(replacement, Has.Some.Matches<Outbound>(o =>
+                o.ConnectionId == "replacement" && o.Message == "SEAT 1"));
+            var started = hub.Receive("r", "replacement",
+                NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
+            Assert.That(started, Has.Some.Matches<Outbound>(o => o.Message.StartsWith("START ")));
         }
     }
 }
