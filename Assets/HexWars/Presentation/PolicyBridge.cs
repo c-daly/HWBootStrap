@@ -16,6 +16,7 @@ namespace HexWars.Presentation
         public string Path { get; internal set; }
         public string Algorithm { get; internal set; }
         public long Step { get; internal set; }
+        public bool HasStep { get; internal set; }
         public string ContractHash { get; internal set; }
     }
 
@@ -210,6 +211,7 @@ namespace HexWars.Presentation
                     Path = seat.path ?? string.Empty,
                     Algorithm = seat.algorithm ?? string.Empty,
                     Step = seat.step,
+                    HasStep = seat.step >= 0,
                     ContractHash = seat.contract_hash ?? string.Empty,
                 };
             }
@@ -302,7 +304,7 @@ namespace HexWars.Presentation
             public string kind;
             public string path;
             public string algorithm;
-            public long step;
+            public long step = -1;
             public string contract_hash;
         }
     }

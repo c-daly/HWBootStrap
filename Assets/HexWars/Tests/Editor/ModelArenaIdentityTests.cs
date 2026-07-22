@@ -22,14 +22,15 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Driver_IdentitySnapshotBeforeStart_IsSafeAndMarksP1Active()
+        public void Driver_IdentitySnapshotBeforeStart_IsSafeAndMarksNeitherSeatActive()
         {
             var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
             try
             {
                 var rows = go.GetComponent<ModelDuelDriver>().IdentitySnapshot();
 
-                Assert.That(rows[0].IsActive, Is.True);
+                Assert.That(rows[0].IsActive, Is.False);
+                Assert.That(rows[1].IsActive, Is.False);
             }
             finally { Object.DestroyImmediate(go); }
         }
@@ -68,6 +69,85 @@ namespace HexWars.Presentation.Tests
             var row = ModelArenaIdentity.Build("greedy", "random", null, null, 0, 0, 0, 0)[0];
 
             Assert.That(ModelArenaIdentityOverlay.RowText(row, 72), Does.StartWith("▶"));
+        }
+
+        [Test]
+        public void Build_LiveJsonSpecWithoutResolvedMetadata_UsesSafeRunLeaf()
+        {
+            string spec = new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = "C:/runs/alpha",
+            }.BuildSpec();
+
+            var row = ModelArenaIdentity.Build(spec, "greedy", null, null, -1, 0, 0, 0)[0];
+
+            Assert.That(row.Controller, Is.EqualTo("alpha"));
+            Assert.That(row.Checkpoint, Is.EqualTo("loading checkpoint"));
+        }
+
+        [TestCase("")]
+        [TestCase("{malformed")]
+        [TestCase("run:")]
+        public void Build_BlankOrMalformedModelSpec_FallsBackSafely(string spec)
+        {
+            Assert.DoesNotThrow(() => ModelArenaIdentity.Build(spec, "greedy", null, null, -1, 0, 0, 0));
+            Assert.That(ModelArenaIdentity.Build(spec, "greedy", null, null, -1, 0, 0, 0)[0].Controller,
+                Is.EqualTo("model"));
+        }
+
+        [TestCase("run:C:/runs/alpha", "alpha")]
+        [TestCase("ppo:C:/models/alpha.zip", "alpha.zip")]
+        [TestCase("dqn:C:/models/beta.zip", "beta.zip")]
+        public void Build_PrefixedSpecs_UseSafePathLeaf(string spec, string expected)
+        {
+            Assert.That(ModelArenaIdentity.Build(spec, "greedy", null, null, -1, 0, 0, 0)[0].Controller,
+                Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void Build_ResolvedIdentity_IncludesReloadFailureStatus()
+        {
+            var resolved = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"path\":\"model_128_steps.zip\",\"step\":128}]}"
+            ).Seats[0];
+
+            var row = ModelArenaIdentity.Build("ppo:model.zip", "greedy", resolved, null, -1, 0, 0, 0,
+                "reload failed", null)[0];
+
+            Assert.That(row.Checkpoint, Is.EqualTo("model_128_steps.zip"));
+            Assert.That(row.Status, Is.EqualTo("reload failed"));
+            Assert.That(ModelArenaIdentityOverlay.RowText(row, 72), Does.Contain("reload failed"));
+        }
+
+        [Test]
+        public void Overlay_Layout_StacksLandscapeRowsLeftOfEventConsole()
+        {
+            Rect first = ModelArenaIdentityOverlay.RowRect(0, 1280f, false);
+            Rect second = ModelArenaIdentityOverlay.RowRect(1, 1280f, false);
+
+            Assert.That(first.xMax, Is.LessThanOrEqualTo(850f));
+            Assert.That(second.y, Is.GreaterThan(first.y));
+            Assert.That(second.x, Is.EqualTo(first.x));
+        }
+
+        [Test]
+        public void Overlay_PortraitText_UsesTwoLinesAndKeepsMetricsOffIdentityLine()
+        {
+            var resolved = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"path\":\"model_128_steps.zip\",\"step\":128}]}"
+            ).Seats[0];
+            var row = ModelArenaIdentity.Build("ppo:model.zip", "greedy", resolved, null, -1, 2, 1, 0)[0];
+            float width = ModelArenaIdentityOverlay.RowWidth(390f, true);
+
+            string[] lines = ModelArenaIdentityOverlay.PortraitLines(
+                row, ModelArenaIdentityOverlay.CharacterBudget(width, true));
+
+            Assert.That(lines, Has.Length.EqualTo(2));
+            Assert.That(lines[0], Does.Not.Contain(".zip"));
+            Assert.That(lines[0], Does.Not.Contain(row.Record));
+            Assert.That(lines[1], Does.Contain("step 128"));
+            Assert.That(lines[1], Does.Contain(row.Record));
         }
 
         [Test]
@@ -112,7 +192,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(row.Controller, Is.EqualTo("model"));
             Assert.That(row.Checkpoint, Is.EqualTo(string.Empty));
             Assert.That(row.Algorithm, Is.EqualTo("Maskable PPO"));
-            Assert.That(row.Step, Is.EqualTo(string.Empty));
+            Assert.That(row.Step, Is.EqualTo("step unknown"));
         }
 
         [Test]

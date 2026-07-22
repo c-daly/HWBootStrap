@@ -83,17 +83,19 @@ namespace HexWars.Presentation
 
         public bool Paused { get; private set; }
         public bool IsDone => _done;
-        public int CurrentSeat => _view.Seat;
+        public int CurrentSeat => _duel == null ? -1 : _view.Seat;
         public int GamesPlayed { get; private set; }
         public int P0Wins { get; private set; }
         public int P1Wins { get; private set; }
         public int Draws { get; private set; }
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
+        public string P0ArenaStatus { get; private set; }
+        public string P1ArenaStatus { get; private set; }
 
         public ModelArenaSeatIdentity[] IdentitySnapshot() => ModelArenaIdentity.Build(
             P0Spec, P1Spec, P0Resolved, P1Resolved, CurrentSeat,
-            P0Wins, P1Wins, Draws);
+            P0Wins, P1Wins, Draws, P0ArenaStatus, P1ArenaStatus);
 
         BoardRenderer _board;
         DuelEnv _duel;
@@ -121,7 +123,15 @@ namespace HexWars.Presentation
                     PolicyBridge.DefaultStartupTimeoutMs, _startupCancellation.Token);
                 IsStarting = false;
                 if (_done || this == null) return;
-                if (!ok) { Debug.LogError("ModelDuelDriver: policy bridge failed to start."); _done = true; return; }
+                if (!ok)
+                {
+                    P0ArenaStatus = _p0Model ? "load failed" : string.Empty;
+                    P1ArenaStatus = _p1Model ? "load failed" : string.Empty;
+                    Debug.LogError("ModelDuelDriver: policy bridge failed to start.");
+                    _done = true;
+                    return;
+                }
+                P0ArenaStatus = P1ArenaStatus = string.Empty;
             }
             var input = FindAnyObjectByType<UnitInputController>();
             if (input != null) input.ReadOnly = true;
@@ -158,10 +168,22 @@ namespace HexWars.Presentation
                 if (_restTimer < SecondsBetweenGames) return;
                 if ((_p0Live || _p1Live) && _bridge != null)
                 {
-                    var reload = _bridge.Reload();
-                    if (!string.IsNullOrWhiteSpace(reload.Error))
+                    try
                     {
-                        Debug.LogError("ModelDuelDriver: live reload failed. " + reload.Error);
+                        var reload = _bridge.Reload();
+                        if (!string.IsNullOrWhiteSpace(reload.Error))
+                        {
+                            MarkLiveReloadStatus("reload failed");
+                            Debug.LogError("ModelDuelDriver: live reload failed. " + reload.Error);
+                            _done = true;
+                            return;
+                        }
+                        MarkLiveReloadStatus(string.Empty);
+                    }
+                    catch (Exception error)
+                    {
+                        MarkLiveReloadStatus("reload failed");
+                        Debug.LogError("ModelDuelDriver: live reload failed. " + error.Message);
                         _done = true;
                         return;
                     }
@@ -204,6 +226,11 @@ namespace HexWars.Presentation
         }
 
         public void SetPaused(bool paused) => Paused = paused;
+        void MarkLiveReloadStatus(string status)
+        {
+            if (_p0Live) P0ArenaStatus = status;
+            if (_p1Live) P1ArenaStatus = status;
+        }
         public void StopDuel()
         {
             _done = true;

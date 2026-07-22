@@ -20,6 +20,24 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void SeatStepMetadata_DistinguishesMissingFromExplicitZero()
+        {
+            var missing = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0}]}"
+            ).Seats[0];
+            var zero = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"step\":0}]}"
+            ).Seats[0];
+
+            Assert.That(missing.HasStep, Is.False);
+            Assert.That(zero.HasStep, Is.True);
+            Assert.That(ModelArenaIdentity.Build("ppo:a.zip", "greedy", missing, null, -1, 0, 0, 0)[0].Step,
+                Is.EqualTo("step unknown"));
+            Assert.That(ModelArenaIdentity.Build("ppo:a.zip", "greedy", zero, null, -1, 0, 0, 0)[0].Step,
+                Is.EqualTo("step 0"));
+        }
+
+        [Test]
         public void ActionAndReloadMessages_ParseWithoutSubstringOrManualIntegerLogic()
         {
             Assert.That(PolicyBridge.ParseAction("{\"action\":123}").Action, Is.EqualTo(123));

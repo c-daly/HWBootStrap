@@ -1,5 +1,5 @@
 using System;
-using System.IO;
+using UnityEngine;
 
 namespace HexWars.Presentation
 {
@@ -11,6 +11,7 @@ namespace HexWars.Presentation
         public string Checkpoint { get; internal set; }
         public string Step { get; internal set; }
         public string Record { get; internal set; }
+        public string Status { get; internal set; }
         public bool IsActive { get; internal set; }
     }
 
@@ -18,15 +19,16 @@ namespace HexWars.Presentation
     {
         public static ModelArenaSeatIdentity[] Build(
             string p0Spec, string p1Spec, PolicySeatInfo p0, PolicySeatInfo p1,
-            int currentSeat, int p0Wins, int p1Wins, int draws) => new[]
+            int currentSeat, int p0Wins, int p1Wins, int draws,
+            string p0Status = null, string p1Status = null) => new[]
         {
-            BuildSeat(0, p0Spec, p0, currentSeat == 0, p0Wins, p1Wins, draws),
-            BuildSeat(1, p1Spec, p1, currentSeat == 1, p1Wins, p0Wins, draws),
+            BuildSeat(0, p0Spec, p0, currentSeat == 0, p0Wins, p1Wins, draws, p0Status),
+            BuildSeat(1, p1Spec, p1, currentSeat == 1, p1Wins, p0Wins, draws, p1Status),
         };
 
         static ModelArenaSeatIdentity BuildSeat(
             int seat, string spec, PolicySeatInfo resolved, bool active,
-            int wins, int losses, int draws)
+            int wins, int losses, int draws, string status)
         {
             bool scripted = string.Equals(spec, "greedy", StringComparison.OrdinalIgnoreCase)
                            || string.Equals(spec, "random", StringComparison.OrdinalIgnoreCase);
@@ -35,9 +37,10 @@ namespace HexWars.Presentation
                 Player = seat == 0 ? "P1" : "P2",
                 Controller = scripted ? Capitalize(spec) : RunName(spec, resolved),
                 Algorithm = resolved == null ? string.Empty : FriendlyAlgorithm(resolved.Algorithm),
-                Checkpoint = resolved == null ? (scripted ? string.Empty : "loading checkpoint") : Path.GetFileName(resolved.Path) ?? string.Empty,
-                Step = resolved == null || resolved.Step <= 0 ? string.Empty : $"step {resolved.Step:N0}",
+                Checkpoint = resolved == null ? (scripted ? string.Empty : "loading checkpoint") : SafePathLeaf(resolved.Path),
+                Step = resolved == null ? string.Empty : resolved.HasStep ? $"step {resolved.Step:N0}" : "step unknown",
                 Record = FormatRecord(wins, losses, draws),
+                Status = status ?? string.Empty,
                 IsActive = active,
             };
         }
@@ -65,16 +68,49 @@ namespace HexWars.Presentation
 
         static string RunName(string spec, PolicySeatInfo resolved)
         {
-            string path = resolved?.Kind == "run" && !string.IsNullOrWhiteSpace(resolved.Path)
-                ? Directory.GetParent(resolved.Path)?.Parent?.FullName
-                : null;
-            if (string.IsNullOrWhiteSpace(path))
+            if (resolved?.Kind == "run" && !string.IsNullOrWhiteSpace(resolved.Path))
             {
-                int colon = (spec ?? string.Empty).IndexOf(':');
-                path = colon >= 0 ? spec.Substring(colon + 1) : spec;
+                string root = ParentPath(ParentPath(resolved.Path));
+                string leaf = SafePathLeaf(root);
+                if (!string.IsNullOrWhiteSpace(leaf)) return leaf;
             }
-            return string.IsNullOrWhiteSpace(path) ? "model" : new DirectoryInfo(path).Name;
+            string path = SpecPath(spec);
+            string name = SafePathLeaf(path);
+            return string.IsNullOrWhiteSpace(name) ? "model" : name;
         }
+
+        static string SpecPath(string spec)
+        {
+            if (string.IsNullOrWhiteSpace(spec)) return string.Empty;
+            string trimmed = spec.Trim();
+            if (trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                try { return JsonUtility.FromJson<ModelSpecDto>(trimmed)?.path ?? string.Empty; }
+                catch (Exception) { return string.Empty; }
+            }
+            foreach (string prefix in new[] { "run:", "ppo:", "dqn:" })
+                if (trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return trimmed.Substring(prefix.Length).Trim();
+            return string.Empty;
+        }
+
+        static string ParentPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+            string value = path.Trim().TrimEnd('/', '\\');
+            int split = Math.Max(value.LastIndexOf('/'), value.LastIndexOf('\\'));
+            return split <= 0 ? string.Empty : value.Substring(0, split);
+        }
+
+        static string SafePathLeaf(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+            string value = path.Trim().TrimEnd('/', '\\');
+            int split = Math.Max(value.LastIndexOf('/'), value.LastIndexOf('\\'));
+            return split >= 0 ? value.Substring(split + 1) : value;
+        }
+
+        [Serializable] sealed class ModelSpecDto { public string kind; public string path; public string mode; }
 
         static string Capitalize(string value) => string.IsNullOrEmpty(value)
             ? string.Empty : char.ToUpperInvariant(value[0]) + value.Substring(1).ToLowerInvariant();

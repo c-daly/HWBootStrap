@@ -5,8 +5,9 @@ namespace HexWars.Presentation
 {
     public sealed class ModelArenaIdentityOverlay : MonoBehaviour
     {
-        const float RowWidth = 430f;
-        const float RowHeight = 32f;
+        const float EventConsoleWidth = 430f;
+        const float LandscapeRowHeight = 32f;
+        const float PortraitRowHeight = 58f;
         const float Padding = 8f;
 
         ModelDuelDriver _driver;
@@ -30,9 +31,7 @@ namespace HexWars.Presentation
                 float logicalWidth = Screen.width / scale;
                 for (int index = 0; index < rows.Length; index++)
                 {
-                    float x = Padding + (narrow ? 0f : index * (RowWidth + Padding));
-                    float y = Padding + (narrow ? index * (RowHeight + Padding) : 0f);
-                    DrawRow(rows[index], x, y, narrow, logicalWidth);
+                    DrawRow(rows[index], RowRect(index, logicalWidth, narrow), narrow);
                 }
             }
             finally { GUI.matrix = previousMatrix; }
@@ -43,12 +42,42 @@ namespace HexWars.Presentation
         public static int CharacterBudget(float rowWidth, bool narrow) => !narrow ? 72
             : Mathf.Clamp(Mathf.FloorToInt(rowWidth / 8f), 24, 72);
 
+        public static float RowWidth(float logicalWidth, bool narrow) => narrow
+            ? Mathf.Max(160f, logicalWidth - 2f * Padding)
+            : Mathf.Max(160f, logicalWidth - EventConsoleWidth - 2f * Padding);
+
+        public static Rect RowRect(int index, float logicalWidth, bool narrow)
+        {
+            float height = narrow ? PortraitRowHeight : LandscapeRowHeight;
+            return new Rect(Padding, Padding + index * (height + Padding), RowWidth(logicalWidth, narrow), height);
+        }
+
+        public static string PrefixText(ModelArenaSeatIdentity row) => (row.IsActive ? "▶ " : "  ") + row.Player;
+
+        public static string IdentityText(ModelArenaSeatIdentity row, bool narrow)
+        {
+            string controller = narrow ? StripZip(row.Controller) : row.Controller;
+            string checkpoint = narrow ? StripZip(row.Checkpoint) : row.Checkpoint;
+            return string.Join(" · ", new[] { controller, row.Algorithm, checkpoint, row.Status }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+        }
+
+        static string StripZip(string value) => !string.IsNullOrWhiteSpace(value)
+            && value.EndsWith(".zip", System.StringComparison.OrdinalIgnoreCase)
+                ? value.Substring(0, value.Length - 4) : value ?? string.Empty;
+
+        public static string MetricsText(ModelArenaSeatIdentity row) => string.Join(" · ",
+            new[] { row.Step, row.Record }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        public static string[] PortraitLines(ModelArenaSeatIdentity row, int characterBudget) => new[]
+        {
+            $"{PrefixText(row)}  {ModelArenaIdentity.MiddleTruncate(IdentityText(row, true), characterBudget)}",
+            MetricsText(row),
+        };
+
         public static string RowText(ModelArenaSeatIdentity row, int characterBudget)
         {
-            string marker = row.IsActive ? "▶ " : "  ";
-            string model = string.Join(" · ", new[] { row.Controller, row.Algorithm, row.Checkpoint, row.Step }
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
-            return $"{marker}{row.Player}  {ModelArenaIdentity.MiddleTruncate(model, characterBudget)}  ·  {row.Record}";
+            return $"{PrefixText(row)}  {ModelArenaIdentity.MiddleTruncate(IdentityText(row, false), characterBudget)}  ·  {MetricsText(row)}";
         }
 
         void EnsureStyles()
@@ -60,18 +89,37 @@ namespace HexWars.Presentation
             _p2Style.normal.textColor = new Color(1f, 0.48f, 0.42f);
         }
 
-        void DrawRow(ModelArenaSeatIdentity row, float x, float y, bool narrow, float logicalWidth)
+        void DrawRow(ModelArenaSeatIdentity row, Rect rect, bool narrow)
         {
-            float width = narrow ? logicalWidth - 2f * Padding : RowWidth;
-            var rect = new Rect(x, y, width, RowHeight);
             var previousColor = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.72f);
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = previousColor;
 
-            string text = RowText(row, CharacterBudget(width, narrow));
-            GUI.Label(new Rect(x + Padding, y, width - 2f * Padding, RowHeight), text,
-                row.Player == "P1" ? _p1Style : _p2Style);
+            GUIStyle style = row.Player == "P1" ? _p1Style : _p2Style;
+            string prefix = PrefixText(row);
+            string identity = IdentityText(row, narrow);
+            string metrics = MetricsText(row);
+            float contentX = rect.x + Padding;
+            float contentWidth = rect.width - 2f * Padding;
+            float prefixWidth = style.CalcSize(new GUIContent(prefix + "  ")).x;
+
+            if (narrow)
+            {
+                GUI.Label(new Rect(contentX, rect.y, prefixWidth, 28f), prefix, style);
+                GUI.Label(new Rect(contentX + prefixWidth, rect.y, contentWidth - prefixWidth, 28f),
+                    ModelArenaIdentity.MiddleTruncate(identity, CharacterBudget(rect.width, true)), style);
+                GUI.Label(new Rect(contentX + prefixWidth, rect.y + 27f, contentWidth - prefixWidth, 28f), metrics, style);
+                return;
+            }
+
+            float metricsWidth = style.CalcSize(new GUIContent(metrics)).x;
+            float metricsX = rect.xMax - Padding - metricsWidth;
+            float identityWidth = Mathf.Max(0f, metricsX - contentX - prefixWidth - Padding);
+            GUI.Label(new Rect(contentX, rect.y, prefixWidth, rect.height), prefix, style);
+            GUI.Label(new Rect(contentX + prefixWidth, rect.y, identityWidth, rect.height),
+                ModelArenaIdentity.MiddleTruncate(identity, Mathf.Clamp(Mathf.FloorToInt(identityWidth / 8f), 8, 72)), style);
+            GUI.Label(new Rect(metricsX, rect.y, metricsWidth, rect.height), metrics, style);
         }
     }
 }
