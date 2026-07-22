@@ -20,6 +20,7 @@ namespace HexWars.Presentation
         GameObject _canvasGo;
         RectTransform _list;
         Text _hint;
+        BarracksTemplateTooltip _tooltip;
         int _deployIndex = -1;
         readonly List<Button> _rows = new List<Button>();
 
@@ -32,12 +33,14 @@ namespace HexWars.Presentation
         void Start()
         {
             _game = FindAnyObjectByType<GameBootstrap>();
+            _tooltip = GetComponent<BarracksTemplateTooltip>() ?? gameObject.AddComponent<BarracksTemplateTooltip>();
             Build();
             if (_game != null) { _game.StateChanged += Rebuild; Rebuild(); }
         }
 
         void OnDestroy()
         {
+            _tooltip?.Hide();
             if (_game != null) _game.StateChanged -= Rebuild;
         }
 
@@ -110,6 +113,7 @@ namespace HexWars.Presentation
 
         void Rebuild()
         {
+            _tooltip?.Hide();
             foreach (var r in _rows) Destroy(r.gameObject);
             _rows.Clear();
             if (_game == null) return;
@@ -154,16 +158,24 @@ namespace HexWars.Presentation
                 // Name and cost are separate texts so a 20-char player name can't shove "deploy N" out
                 // of the 170px row: the name is ellipsized left, the cost rides right-aligned on top
                 // (UiKit.Label never raycasts, so clicks land on the select button underneath).
-                var row = UiKit.Button(_list, UiKit.Ellipsize(name, 11), -20f, -(4f + i * 34f), 170f, 30f,
+                var row = UiKit.Button(_list, UiKit.Ellipsize(name, 11), -28f, -(4f + i * 34f), 150f, 30f,
                                        () => Select(idx), UiKit.ButtonStyle.Secondary, 14);
                 var rowText = row.GetComponentInChildren<Text>();
                 rowText.alignment = TextAnchor.MiddleLeft;
-                UiKit.SetRect(rowText.rectTransform, 0f, 0f, 150f, 30f); // 10px side insets inside the button
-                UiKit.Label(row.transform, $"deploy {cost}", 0f, 0f, 150f, 30f, 11,
+                UiKit.SetRect(rowText.rectTransform, 0f, 0f, 132f, 30f); // 9px side insets inside the button
+                UiKit.Label(row.transform, $"deploy {cost}", 0f, 0f, 132f, 30f, 11,
                             TextAnchor.MiddleRight, UiKit.TextFaint);
                 UiKit.SetToggled(row, selected);
                 row.interactable = isActiveHuman;
+                row.gameObject.AddComponent<BarracksTemplateTooltipTarget>()
+                    .Init(_tooltip, row.GetComponent<RectTransform>(), template, s.Config);
                 _rows.Add(row);
+
+                // Explicit touch target opens info without selecting/deploying the template.
+                var info = UiKit.Button(_list, "i", 62f, -(4f + i * 34f), 28f, 30f,
+                                        () => _tooltip.Show(row.GetComponent<RectTransform>(), template, s.Config),
+                                        UiKit.ButtonStyle.Secondary, 13);
+                _rows.Add(info);
 
                 var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 34f), 32f, 30f,
                                        () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
