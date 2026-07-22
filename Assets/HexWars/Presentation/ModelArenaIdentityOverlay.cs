@@ -18,24 +18,37 @@ namespace HexWars.Presentation
         void OnGUI()
         {
             EnsureStyles();
-            if (_driver == null) _driver = GetComponent<ModelDuelDriver>();
-            if (_driver == null) return;
+            if (!ShouldRender(_driver)) return;
 
             float scale = Mathf.Max(1f, Screen.height / 1080f);
             var previousMatrix = GUI.matrix;
-            GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(scale, scale, 1f));
-
-            var rows = _driver.IdentitySnapshot();
-            bool narrow = Screen.width < Screen.height;
-            float logicalWidth = Screen.width / scale;
-            for (int index = 0; index < rows.Length; index++)
+            try
             {
-                float x = Padding + (narrow ? 0f : index * (RowWidth + Padding));
-                float y = Padding + (narrow ? index * (RowHeight + Padding) : 0f);
-                DrawRow(rows[index], x, y, narrow, logicalWidth);
+                GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(scale, scale, 1f));
+                var rows = _driver.IdentitySnapshot();
+                bool narrow = Screen.width < Screen.height;
+                float logicalWidth = Screen.width / scale;
+                for (int index = 0; index < rows.Length; index++)
+                {
+                    float x = Padding + (narrow ? 0f : index * (RowWidth + Padding));
+                    float y = Padding + (narrow ? index * (RowHeight + Padding) : 0f);
+                    DrawRow(rows[index], x, y, narrow, logicalWidth);
+                }
             }
+            finally { GUI.matrix = previousMatrix; }
+        }
 
-            GUI.matrix = previousMatrix;
+        public static bool ShouldRender(ModelDuelDriver driver) => driver != null && driver.isActiveAndEnabled;
+
+        public static int CharacterBudget(float rowWidth, bool narrow) => !narrow ? 72
+            : Mathf.Clamp(Mathf.FloorToInt(rowWidth / 8f), 24, 72);
+
+        public static string RowText(ModelArenaSeatIdentity row, int characterBudget)
+        {
+            string marker = row.IsActive ? "▶ " : "  ";
+            string model = string.Join(" · ", new[] { row.Controller, row.Algorithm, row.Checkpoint, row.Step }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+            return $"{marker}{row.Player}  {ModelArenaIdentity.MiddleTruncate(model, characterBudget)}  ·  {row.Record}";
         }
 
         void EnsureStyles()
@@ -56,10 +69,7 @@ namespace HexWars.Presentation
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = previousColor;
 
-            string marker = row.IsActive ? "▶ " : "  ";
-            string model = string.Join(" · ", new[] { row.Controller, row.Algorithm, row.Checkpoint, row.Step }
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
-            string text = $"{marker}{row.Player}  {ModelArenaIdentity.MiddleTruncate(model, narrow ? 42 : 72)}  ·  {row.Record}";
+            string text = RowText(row, CharacterBudget(width, narrow));
             GUI.Label(new Rect(x + Padding, y, width - 2f * Padding, RowHeight), text,
                 row.Player == "P1" ? _p1Style : _p2Style);
         }

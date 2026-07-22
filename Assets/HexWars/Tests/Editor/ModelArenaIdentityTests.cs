@@ -22,6 +22,55 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Driver_IdentitySnapshotBeforeStart_IsSafeAndMarksP1Active()
+        {
+            var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var rows = go.GetComponent<ModelDuelDriver>().IdentitySnapshot();
+
+                Assert.That(rows[0].IsActive, Is.True);
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void Overlay_ShouldRender_RequiresAnEnabledActiveDriver()
+        {
+            var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = go.GetComponent<ModelDuelDriver>();
+                Assert.That(ModelArenaIdentityOverlay.ShouldRender(driver), Is.True);
+
+                driver.enabled = false;
+                Assert.That(ModelArenaIdentityOverlay.ShouldRender(driver), Is.False);
+
+                driver.enabled = true;
+                go.SetActive(false);
+                Assert.That(ModelArenaIdentityOverlay.ShouldRender(driver), Is.False);
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void Overlay_CharacterBudget_ShrinksForNarrowerRowsAndCapsLandscape()
+        {
+            Assert.That(ModelArenaIdentityOverlay.CharacterBudget(160f, true), Is.LessThan(
+                ModelArenaIdentityOverlay.CharacterBudget(320f, true)));
+            Assert.That(ModelArenaIdentityOverlay.CharacterBudget(4f, true), Is.GreaterThanOrEqualTo(24));
+            Assert.That(ModelArenaIdentityOverlay.CharacterBudget(430f, false), Is.EqualTo(72));
+        }
+
+        [Test]
+        public void Overlay_RowText_BeginsWithRequestedActiveArrow()
+        {
+            var row = ModelArenaIdentity.Build("greedy", "random", null, null, 0, 0, 0, 0)[0];
+
+            Assert.That(ModelArenaIdentityOverlay.RowText(row, 72), Does.StartWith("▶"));
+        }
+
+        [Test]
         public void Build_LabelsScriptedSeatsAndMarksCurrentSeat()
         {
             var rows = ModelArenaIdentity.Build("greedy", "random", null, null, 1, 0, 0, 0);
