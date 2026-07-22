@@ -20,81 +20,64 @@ Protocol (one JSON object per line):
 Greedy/Random seats are NOT served here — Unity drives those with its own C# agents.
 """
 import argparse
-import glob
 import json
 import os
 import sys
 
 import numpy as np
 
+from ml_lab.controllers import (
+    ControllerResolutionError,
+    ControllerResolver,
+    normalize_controller_spec,
+    predict,
+    validate_inference_input,
+)
+
 # So models that reference a custom feature extractor (hex_cnn.HexCNN) load no matter what cwd Unity
 # spawns us from — SB3 imports the class by module path on load.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def newest_zip(path):
-    """The model .zip to load. A file path is used as-is. A directory resolves to the newest .zip in it,
-    or — if it has none — the newest .zip in its checkpoints/ subfolder, so you can point at a run dir
-    (e.g. runs/sp9base) and get its latest checkpoint. None if nothing is found."""
-    if not os.path.isdir(path):
-        return path
-    zips = glob.glob(os.path.join(path, "*.zip")) or glob.glob(os.path.join(path, "checkpoints", "*.zip"))
-    return max(zips, key=os.path.getmtime) if zips else None
-
-
-def load(kind, file):
-    if kind == "ppo":
-        from sb3_contrib import MaskablePPO
-        return MaskablePPO.load(file, device="cpu")
-    if kind == "dqn":
-        from stable_baselines3 import DQN
-        return DQN.load(file, device="cpu")
-    raise ValueError(f"unknown model kind '{kind}' (expected ppo/dqn)")
-
-
-def predict(kind, model, obs, mask):
-    if kind == "ppo":
-        action, _ = model.predict(obs, action_masks=mask, deterministic=True)
-        return int(action)
-    import torch
-    with torch.no_grad():
-        q = model.q_net(torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)).cpu().numpy()[0]
-    q[~mask] = -np.inf
-    return int(q.argmax())
-
-
 class Seat:
     def __init__(self, spec):
-        self.kind, _, self.path = spec.partition(":")  # path may be a file or a directory
-        self.loaded_from = None
-        self.model = None
-        self.reload()
-        if self.model is None:
-            sys.exit(f"policy_server: no model .zip found for '{spec}' (looked in '{self.path}' and its "
-                     f"checkpoints/ subfolder). Point the seat at a model .zip or a run/checkpoints dir.")
+        self.binding = ControllerResolver().bind(spec)
+        if self.binding.resolved.model is None:
+            raise ControllerResolutionError("policy_server only serves trained checkpoint or run controllers")
+
+    @property
+    def resolved(self):
+        return self.binding.resolved
 
     def reload(self):
-        """Load the newest checkpoint if it changed. Returns True if a (re)load happened."""
-        file = newest_zip(self.path)
-        if file is None or file == self.loaded_from:
-            return False
-        self.model = load(self.kind, file)
-        self.loaded_from = file
-        return True
+        """Reload an explicitly-live run only after a bridge reload command."""
+        return self.binding.reload()
+
+    def metadata(self):
+        return self.resolved.metadata()
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--p0", default=None, help="ppo:PATH / dqn:PATH (PATH = .zip or checkpoint dir)")
-    ap.add_argument("--p1", default=None)
+    ap.add_argument("--p0", default=None, help="legacy spec, JSON controller, run:PATH, or @controller.json")
+    ap.add_argument("--p1", default=None, help="legacy spec, JSON controller, run:PATH, or @controller.json")
     args = ap.parse_args()
 
     seats = {}
     for i, spec in ((0, args.p0), (1, args.p1)):
-        if spec and spec.split(":", 1)[0] in ("ppo", "dqn"):
-            seats[i] = Seat(spec)
+        if not spec:
+            continue
+        try:
+            normalized = normalize_controller_spec(spec)
+            if normalized.kind != "scripted":
+                seats[i] = Seat(normalized)
+        except ControllerResolutionError as error:
+            sys.exit(f"policy_server: {error}")
 
-    print(json.dumps({"ready": True, "model_seats": sorted(seats.keys())}), flush=True)
+    def seat_metadata():
+        return {str(index): seat.metadata() for index, seat in seats.items()}
+
+    print(json.dumps({"ready": True, "model_seats": sorted(seats.keys()), "seats": seat_metadata()}), flush=True)
 
     for line in sys.stdin:
         line = line.strip()
@@ -106,12 +89,14 @@ def main():
             break
         if cmd == "reload":
             changed = [i for i, s in seats.items() if s.reload()]
-            print(json.dumps({"reloaded": changed}), flush=True)
+            print(json.dumps({"reloaded": changed, "seats": seat_metadata()}), flush=True)
             continue
         seat = seats[int(msg["seat"])]
         obs = np.asarray(msg["obs"], dtype=np.float32)
         mask = np.asarray(msg["mask"], dtype=bool)
-        print(json.dumps({"action": predict(seat.kind, seat.model, obs, mask)}), flush=True)
+        validate_inference_input(seat.resolved, obs, mask)
+        assert seat.resolved.model is not None and seat.resolved.algorithm is not None
+        print(json.dumps({"action": predict(seat.resolved.model, seat.resolved.algorithm, obs, mask)}), flush=True)
 
 
 if __name__ == "__main__":
