@@ -3,6 +3,7 @@
     "rootNamespace": "HexWars.Presentation.Tests",
     "references": [
         "HexWars.Presentation",
+        "HexWars.Presentation.Editor",
         "Unity.InputSystem"
     ],
     "includePlatforms": [
