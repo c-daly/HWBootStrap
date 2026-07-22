@@ -281,7 +281,9 @@ namespace HexWars.Engine.Rl
                 ["intermediate_decision_penalty"] = config.IntermediateDecisionPenalty,
                 ["deployment_completion_bonus"] = config.DeploymentCompletionBonus,
                 ["effective_horizon"] = maxSteps,
-                ["fog_rule"] = "hide_current_enemy_units_and_all_opponent_deployment_until_both_confirm",
+                ["fog_rule"] = "hide_current_enemy_units_and_all_opponent_deployment_until_both_confirm;"
+                    + "derive_action_masks_from_seat_visible_projection;"
+                    + "authoritative_hidden_blocker_rejection_is_only_allowed_mask_rejection",
                 ["templates"] = Array.AsReadOnly(templates),
                 ["stat_values"] = ReadOnlyMap(statValues),
                 ["phases"] = AdaptivePhases,

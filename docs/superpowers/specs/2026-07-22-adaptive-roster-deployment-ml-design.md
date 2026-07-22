@@ -66,7 +66,7 @@ The adaptive observation keeps seat-relative board planes and adds:
 - decision phase and pending parameter selections;
 - the existing points, round, army-count, and relevant rules globals.
 
-Enemy units hidden by fog are never encoded as current units, legal targets, deployment hints, or Unity arena labels. The pregame deployment phase applies the stricter rule that all opposing placements are hidden until both players confirm, even if starting zones would otherwise be visible.
+Enemy units hidden by fog are never encoded as current units, legal targets, deployment hints, Unity arena labels, or action-mask differences. Gameplay masks are derived by running `LegalMoves` on a new seat-visible projection that retains public terrain, the acting seat's complete state, and only currently visible enemy units and generators; the authoritative `GameState` is never mutated. Because a hidden blocker is deliberately absent from that projection, the authoritative engine may reject an otherwise masked move or reinforcement deployment that collides with it. That precisely classified hidden-blocker rejection is the sole permitted exception to completed masked-sequence acceptance. The pregame deployment phase applies the stricter rule that all opposing placements are hidden until both players confirm, even if starting zones would otherwise be visible.
 
 ## Environment boundary and compatibility
 
@@ -101,9 +101,8 @@ If a seat cannot complete deployment because configuration exceeds available cel
 
 ## Verification
 
-Engine tests pin the complete phase/action table, mask/decode round trips, custom-slot replacement, fixed-slot immutability, unit-slot reuse, deployment hiding, confirm rules, deterministic setup, fog-safe observations, and semantic contract hash. Property-style tests sample masked actions across many seeds and assert that every exposed completed sequence is accepted by `GameEngine`.
+Engine tests pin the complete phase/action table, mask/decode round trips, custom-slot replacement, fixed-slot immutability, unit-slot reuse, deployment hiding, confirm rules, deterministic setup, fog-safe observations and masks, and semantic contract hash. Adversarial tests vary hidden-enemy presence and location while requiring identical observations and gameplay masks. Property-style tests sample completed masked sequences across both seats and require `GameEngine` acceptance, except for a move or reinforcement deployment that succeeds on the seat-visible projection and is rejected authoritatively only because hidden enemy occupancy omitted from that projection blocks an intermediate route or destination.
 
 GymServer and Python tests verify explicit environment selection, stable spaces, vectorized masks, run-manifest compatibility, legacy checkpoint isolation, and headless throughput. Duel tests run two external controllers through deployment and combat and reconstruct the final replay.
 
 Unity EditMode tests cover ML Lab summaries and observer-safe deployment presentation. Manual verification watches two adaptive checkpoints deploy and play several games, confirms that live reloading occurs only between games, and checks that no hidden enemy placement or fogged unit appears.
-

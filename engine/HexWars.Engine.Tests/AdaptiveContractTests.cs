@@ -91,7 +91,10 @@ namespace HexWars.Engine.Tests
             Assert.That(a.ObservationSize, Is.EqualTo(5974));
             Assert.That(a.Semantics["max_controllable_units"], Is.EqualTo(24));
             Assert.That(a.Semantics["effective_horizon"], Is.EqualTo(900));
-            Assert.That(a.Semantics["fog_rule"], Is.EqualTo("hide_current_enemy_units_and_all_opponent_deployment_until_both_confirm"));
+            Assert.That(a.Semantics["fog_rule"], Is.EqualTo(
+                "hide_current_enemy_units_and_all_opponent_deployment_until_both_confirm;" +
+                "derive_action_masks_from_seat_visible_projection;" +
+                "authoritative_hidden_blocker_rejection_is_only_allowed_mask_rejection"));
             Assert.That((IReadOnlyList<string>)a.Semantics["phases"], Is.EqualTo(new[]
             {
                 "deployment_root", "deployment_template", "deployment_cell", "deployment_placed_unit",

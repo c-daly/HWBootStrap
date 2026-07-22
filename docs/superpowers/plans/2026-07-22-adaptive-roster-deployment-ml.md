@@ -254,7 +254,7 @@ public readonly struct AdaptiveTransition
 
 - [ ] **Step 4: Implement one source of truth for masks, decoding, and observations**
 
-Implement `AdaptiveCoding.Mask` as a switch on the 14 phases. In every non-root phase, set `mask[(int)AdaptiveCommandChoice.Cancel] = true`. In `GameplayRoot`, always expose EndTurn, expose ChooseUnit only when at least one stable slot has a legal move/attack, expose DeployReinforcement only when a template is affordable, a legal deployment cell exists, and a unit slot is free, and expose RedesignCustom only when the design fee is affordable. In cell phases, derive allowed cells from `LegalMoves.For(game)` and never synthesize legality.
+Implement `AdaptiveCoding.Mask` as a switch on the 14 phases. In every non-root phase, set `mask[(int)AdaptiveCommandChoice.Cancel] = true`. In `GameplayRoot`, expose EndTurn only for the active non-terminal seat, expose ChooseUnit only when at least one stable slot has a legal move/attack, expose DeployReinforcement only when a template is affordable, a legal deployment cell exists, and a unit slot is free, and expose RedesignCustom only when the design fee is affordable. Under fog, derive gameplay masks and completed move/attack commands from `LegalMoves.For` on a fresh seat-visible projection: retain public terrain and the acting seat's complete state, retain only currently visible enemy units/generators, and never mutate the authoritative state. Without fog, use `LegalMoves.For(game)` directly. This projection rule makes hidden-enemy presence and location observationally indistinguishable. The authoritative engine may therefore reject a projected move or reinforcement deployment because of hidden occupancy omitted from the projection, including an intermediate move-route blocker or occupied destination; a rejection caused solely by that removed hidden occupancy is the sole permitted completed-mask rejection. Never synthesize any other legality.
 
 The observation channel order is exactly: elevation, terrain-plains, terrain-forest, terrain-rough, terrain-water, deployment-zone-self, current-visibility, previously-seen, 9 friendly-role HP planes, 9 visible-enemy-role HP planes, and 24 friendly-slot occupancy planes. Append globals in this order: own points, visible opponent points (zero under fog), round, own living count, visible foe count, remaining setup budget, unplaced count, 14 phase one-hot values, pending unit/template/stat/value normalized values, then 9 templates × (9 normalized stats + normalized cost + fixed flag). Hidden enemies never contribute to role planes, counts, target masks, or pending values.
 
@@ -263,15 +263,16 @@ The observation channel order is exactly: elevation, terrain-plains, terrain-for
 - [ ] **Step 5: Add phase-round-trip and property tests**
 
 ```csharp
-[TestCase(1)] [TestCase(7)] [TestCase(31)] [TestCase(97)]
-public void EveryMaskedGameplaySequence_ProducesAnEngineAcceptedCommand(int seed)
+[TestCase(1, PlayerId.Player0)] [TestCase(7, PlayerId.Player0)] [TestCase(31, PlayerId.Player0)]
+[TestCase(61, PlayerId.Player1)] [TestCase(97, PlayerId.Player1)]
+public void EveryMaskedGameplaySequence_IsAcceptedOrPreciselyHiddenBlocked(int seed, PlayerId seat)
 {
-    var f = AdaptiveFixtures.RevealedGame(seed);
+    var f = AdaptiveFixtures.RevealedGame(seed, seat);
     foreach (var sequence in AdaptiveFixtures.CompletedMaskedSequences(f))
     {
         var transition = AdaptiveFixtures.ApplySequence(f, sequence);
         Assert.That(transition.Command, Is.Not.Null);
-        Assert.That(GameEngine.Apply(f.Game, transition.Command!).Success, Is.True);
+        AssertAcceptedOrPreciselyHiddenBlocked(f.Game, transition.Command!);
     }
 }
 
@@ -286,6 +287,8 @@ public void EveryNonRootPhase_AlwaysOffersCancel()
     }
 }
 ```
+
+`AssertAcceptedOrPreciselyHiddenBlocked` first applies the command to the authoritative state. Its only accepted rejection is a move or reinforcement deployment rejected for occupancy/range, which must succeed when applied to an independently constructed seat-visible projection and for which the projection removed hidden enemy occupancy. This covers a hidden unit on an intermediate move route as well as an occupied destination. Add an adversarial regression proving that changing hidden-enemy presence and location leaves both the observation and every gameplay phase mask identical.
 
 Run: `dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter AdaptiveCodingTests`
 
@@ -794,7 +797,7 @@ Expected: all selected EditMode tests pass and Unity reports zero compiler error
 
 - [ ] **Step 9: Perform the deterministic adaptive smoke and manual secrecy check**
 
-Build GymServer Release, run 10,000 masked actions across seeds 0-31 with no invalid exposed sequence, train a 50,000-step four-worker MaskablePPO smoke run, and duel its first two validated checkpoints. Confirm the server reports an unchanged action/observation size after every reset, deployment completes, at least one replay reconstructs its final winner, and adaptive episode diagnostics remain separate from W-L-D.
+Build GymServer Release, run 10,000 masked actions across seeds 0-31 with no invalid exposed sequence except the precisely classified authoritative rejection caused solely by hidden occupancy omitted from the seat-visible projection, train a 50,000-step four-worker MaskablePPO smoke run, and duel its first two validated checkpoints. Confirm the server reports an unchanged action/observation size after every reset, deployment completes, at least one replay reconstructs its final winner, and adaptive episode diagnostics remain separate from W-L-D.
 
 In Unity, watch adaptive checkpoint vs Greedy and adaptive checkpoint vs checkpoint. Confirm nothing on screen/logs identifies either hidden army before reveal, no fogged enemy appears afterward, models/checkpoints reload only between games, and the arena renders normal combat after reveal.
 
@@ -809,7 +812,7 @@ git commit -m "feat(ml): integrate adaptive training and arena"
 
 - `tactical-v1` remains the default and loads every existing tactical run accepted before this work.
 - `adaptive-v1` refuses tactical checkpoints before inference and records all semantic contract fields in `run.json` and `params.json`.
-- Every masked completed sequence is accepted by `GameEngine`; invalidated sequences return safely to a root mask.
+- Every masked completed sequence is accepted by `GameEngine` except a move or reinforcement deployment rejected solely because hidden occupancy was omitted from its seat-visible legality projection; all invalidated sequences return safely to a root mask.
 - Both seats deploy six affordable units without observing the opponent; identical seeds/actions reproduce identical starts and games.
 - Fixed templates cannot be redesigned, custom replacements preserve slots 6-8, dead unit slots are reused, and reinforcement deployment masks at 24 living units.
 - Current observations and Unity presentation never reveal hidden deployment or fogged enemies.
