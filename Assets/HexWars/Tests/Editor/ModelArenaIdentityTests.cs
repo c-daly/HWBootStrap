@@ -1,10 +1,26 @@
 using HexWars.Presentation;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace HexWars.Presentation.Tests
 {
     public sealed class ModelArenaIdentityTests
     {
+        [Test]
+        public void Driver_AlwaysCarriesIndependentIdentityOverlay()
+        {
+            var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                Assert.That(go.GetComponent<ModelArenaIdentityOverlay>(), Is.Not.Null);
+                var driver = go.GetComponent<ModelDuelDriver>();
+                driver.P0Spec = "greedy";
+                driver.P1Spec = "random";
+                Assert.That(driver.IdentitySnapshot()[0].Controller, Is.EqualTo("Greedy"));
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
         [Test]
         public void Build_LabelsScriptedSeatsAndMarksCurrentSeat()
         {

@@ -68,6 +68,7 @@ namespace HexWars.Presentation
     }
 
     [RequireComponent(typeof(BoardRenderer))]
+    [RequireComponent(typeof(ModelArenaIdentityOverlay))]
     public sealed class ModelDuelDriver : MonoBehaviour
     {
         public string PythonExe;
@@ -89,6 +90,10 @@ namespace HexWars.Presentation
         public int Draws { get; private set; }
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
+
+        public ModelArenaSeatIdentity[] IdentitySnapshot() => ModelArenaIdentity.Build(
+            P0Spec, P1Spec, P0Resolved, P1Resolved, CurrentSeat,
+            P0Wins, P1Wins, Draws);
 
         BoardRenderer _board;
         DuelEnv _duel;
