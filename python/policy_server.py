@@ -104,6 +104,19 @@ def seat_models(seats):
     ]
 
 
+def predict_for_seat(seat, observation, mask) -> int:
+    """Choose an action using the inference mode carried by the resolved spec."""
+    resolved = seat.resolved
+    assert resolved.model is not None and resolved.algorithm is not None
+    return predict(
+        resolved.model,
+        resolved.algorithm,
+        observation,
+        mask,
+        deterministic=resolved.spec.inference_mode == "deterministic",
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--p0", default=None, help="legacy spec, JSON controller, run:PATH, or @controller.json")
@@ -189,8 +202,7 @@ def main():
                 action_size=seat.resolved.action_size,
             )
             validate_inference_input(seat.resolved, obs, mask)
-            assert seat.resolved.model is not None and seat.resolved.algorithm is not None
-            print(json.dumps({"action": predict(seat.resolved.model, seat.resolved.algorithm, obs, mask)}), flush=True)
+            print(json.dumps({"action": predict_for_seat(seat, obs, mask)}), flush=True)
         except Exception as error:
             print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
 

@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
@@ -33,6 +34,7 @@ def test_seat_models_is_structured_and_stably_ordered() -> None:
         def metadata(self) -> dict:
             return {
                 "kind": "run",
+                "inference_mode": "deterministic",
                 "path": f"{self.algorithm}.zip",
                 "algorithm": self.algorithm,
                 "step": self.step,
@@ -48,6 +50,7 @@ def test_seat_models_is_structured_and_stably_ordered() -> None:
         {
             "seat": 0,
             "kind": "run",
+            "inference_mode": "deterministic",
             "path": "maskable_ppo.zip",
             "algorithm": "maskable_ppo",
             "step": 64,
@@ -59,6 +62,7 @@ def test_seat_models_is_structured_and_stably_ordered() -> None:
         {
             "seat": 1,
             "kind": "run",
+            "inference_mode": "deterministic",
             "path": "masked_dqn.zip",
             "algorithm": "masked_dqn",
             "step": 96,
@@ -68,6 +72,34 @@ def test_seat_models_is_structured_and_stably_ordered() -> None:
             "encoding_hash": "d" * 64,
         },
     ]
+
+
+def test_predict_for_seat_uses_resolved_stochastic_mode(monkeypatch) -> None:
+    import policy_server
+
+    calls: list[bool] = []
+    resolved = SimpleNamespace(
+        model=object(),
+        algorithm="maskable_ppo",
+        spec=SimpleNamespace(inference_mode="stochastic"),
+    )
+    seat = SimpleNamespace(resolved=resolved)
+    monkeypatch.setattr(
+        policy_server,
+        "predict",
+        lambda model, algorithm, observation, mask, *, deterministic: (
+            calls.append(deterministic) or 4
+        ),
+    )
+
+    action = policy_server.predict_for_seat(
+        seat,
+        np.zeros(3, dtype=np.float32),
+        np.array([True, False]),
+    )
+
+    assert action == 4
+    assert calls == [False]
 
 
 def test_policy_expectation_rejects_model_encoding_mismatch() -> None:
