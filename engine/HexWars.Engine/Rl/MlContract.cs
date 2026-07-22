@@ -95,6 +95,9 @@ namespace HexWars.Engine.Rl
             MlEnvironmentKind environmentKind = MlEnvironmentKind.AdaptiveTactical)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
+            var designErrors = config.ValidateDesignRuleConsistency();
+            if (designErrors.Count > 0)
+                throw new ArgumentException(string.Join("; ", designErrors), nameof(config));
 
             string kind = AdaptiveEnvironmentKindName(environmentKind);
             int maxSteps = AdaptiveEffectiveMaxSteps(config, environmentKind);

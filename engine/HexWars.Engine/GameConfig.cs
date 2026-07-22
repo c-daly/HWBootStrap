@@ -36,6 +36,17 @@ namespace HexWars.Engine
         /// <summary>Points to add a unit design to the barracks (default 0 = free; configurable).</summary>
         public int DesignFee { get; }
 
+        /// <summary>Maximum point cost of a designed unit. Zero means unlimited.</summary>
+        public int MaxDesignPointCost { get; }
+
+        /// <summary>Number of leading barracks slots that cannot be replaced. Zero preserves legacy
+        /// behavior for games without a fixed roster prefix.</summary>
+        public int FixedTemplateCount { get; }
+
+        /// <summary>Fixed barracks capacity for roster-locked games. Zero means legacy/unbounded
+        /// behavior up to the wire protocol maximum.</summary>
+        public int TemplateSlotCount { get; }
+
         /// <summary>Multiplier on a unit's PointCost when deploying a clone of a barracks template.</summary>
         public double DeployCostMultiplier { get; }
 
@@ -125,7 +136,10 @@ namespace HexWars.Engine
             int territoryIncome = 0,
             bool generatorsEnabled = true,
             double pointDecay = 0.0,
-            bool fogOfWar = false)
+            bool fogOfWar = false,
+            int maxDesignPointCost = 0,
+            int fixedTemplateCount = 0,
+            int templateSlotCount = 0)
         {
             _terrain = terrain;
             StartingPoints = startingPoints;
@@ -138,6 +152,9 @@ namespace HexWars.Engine
             RangeHighGroundBonus = rangeHighGroundBonus;
             RoundCap = roundCap;
             DesignFee = designFee;
+            MaxDesignPointCost = maxDesignPointCost;
+            FixedTemplateCount = fixedTemplateCount;
+            TemplateSlotCount = templateSlotCount;
             DeployCostMultiplier = deployCostMultiplier;
             TurnPolicy = turnPolicy ?? new AllUnitsPolicy();
             BiomesEnabled = biomesEnabled;
@@ -179,7 +196,11 @@ namespace HexWars.Engine
             int territoryIncome = 0,
             bool generatorsEnabled = true,
             double pointDecay = 0.0,
-            bool fogOfWar = false) =>
+            bool fogOfWar = false,
+            int designFee = 0,
+            int maxDesignPointCost = 0,
+            int fixedTemplateCount = 0,
+            int templateSlotCount = 0) =>
             new GameConfig(new Dictionary<TerrainType, TerrainDef>
         {
             { TerrainType.Plains, new TerrainDef(moveCost: 1, concealment: 0, defense: 0, passable: true) },
@@ -193,6 +214,8 @@ namespace HexWars.Engine
            generatorOutput: generatorOutput, startingPoints: startingPoints, damageFloor: damageFloor,
            territoryMode: territoryMode, claimEndsTurn: claimEndsTurn,
            buildAnywhere: buildAnywhere, territoryIncome: territoryIncome,
-           generatorsEnabled: generatorsEnabled, pointDecay: pointDecay, fogOfWar: fogOfWar);
+           generatorsEnabled: generatorsEnabled, pointDecay: pointDecay, fogOfWar: fogOfWar,
+           designFee: designFee, maxDesignPointCost: maxDesignPointCost,
+           fixedTemplateCount: fixedTemplateCount, templateSlotCount: templateSlotCount);
     }
 }

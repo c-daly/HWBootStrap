@@ -64,11 +64,12 @@ namespace HexWars.Engine.Tests
 
             var errors = c.Validate(board);
 
-            Assert.That(errors, Has.Count.EqualTo(4));
-            Assert.That(errors[0], Does.Contain("requires 6 cells per seat").And.Contain("only 5"));
-            Assert.That(errors[1], Does.Contain("starting deployment requires at least").And.Contain("only 1"));
-            Assert.That(errors[2], Is.EqualTo("adaptive roster must contain exactly 9 templates"));
-            Assert.That(errors[3], Is.EqualTo("maximum controllable units must cover the starting army"));
+            Assert.That(errors, Has.Count.EqualTo(5));
+            Assert.That(errors[0], Does.Contain("runtime template slot count").And.Contain("template roster"));
+            Assert.That(errors[1], Does.Contain("requires 6 cells per seat").And.Contain("only 5"));
+            Assert.That(errors[2], Does.Contain("starting deployment requires at least").And.Contain("only 1"));
+            Assert.That(errors[3], Is.EqualTo("adaptive roster must contain exactly 9 templates"));
+            Assert.That(errors[4], Is.EqualTo("maximum controllable units must cover the starting army"));
         }
 
         [Test]

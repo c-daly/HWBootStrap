@@ -82,8 +82,10 @@ namespace HexWars.Engine.Rl
             if (board == null) throw new ArgumentNullException(nameof(board));
             var source = config ?? AdaptiveEnvConfig.Default();
             _board = CopyBoard(board);
-            _game = CopyGameConfig(source.Game
-                ?? throw new ArgumentException("adaptive deployment requires game rules", nameof(config)));
+            var configErrors = source.ValidateDesignRuleConsistency();
+            if (configErrors.Count > 0)
+                throw new ArgumentException(string.Join("; ", configErrors), nameof(config));
+            _game = CopyGameConfig(source.Game);
             _requiredUnits = source.StartingUnitCount;
             _startingBudget = source.StartingArmyBudget;
             var templates = source.Templates?.ToArray()
@@ -305,6 +307,9 @@ namespace HexWars.Engine.Rl
                 rangeHighGroundBonus: source.RangeHighGroundBonus,
                 roundCap: source.RoundCap,
                 designFee: source.DesignFee,
+                maxDesignPointCost: source.MaxDesignPointCost,
+                fixedTemplateCount: source.FixedTemplateCount,
+                templateSlotCount: source.TemplateSlotCount,
                 deployCostMultiplier: source.DeployCostMultiplier,
                 turnPolicy: source.TurnPolicy,
                 biomesEnabled: source.BiomesEnabled,

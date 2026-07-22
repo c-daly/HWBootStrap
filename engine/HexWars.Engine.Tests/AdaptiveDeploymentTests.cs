@@ -229,7 +229,8 @@ namespace HexWars.Engine.Tests
             var mutableTerrain = Enum.GetValues(typeof(TerrainType)).Cast<TerrainType>()
                 .ToDictionary(type => type, type => config.Game.Terrain(type));
             config.Game = new GameConfig(mutableTerrain, startingPoints: 17, biomesEnabled: true,
-                fogOfWar: true);
+                fogOfWar: true, maxDesignPointCost: 24, fixedTemplateCount: 6,
+                templateSlotCount: 9);
             var originalGame = config.Game;
             var originalBoard = new RandomBoardGenerator(config.BoardGen).Generate(34);
             var legal = originalBoard.DeploymentZone(P0).OrderBy(c => c.Q).ThenBy(c => c.R).First();
@@ -239,7 +240,8 @@ namespace HexWars.Engine.Tests
             mutableTemplates.Clear();
             config.StartingUnitCount = 1;
             config.StartingArmyBudget = 0;
-            config.Game = GameConfig.Default(startingPoints: 199);
+            config.Game = GameConfig.Default(startingPoints: 199, maxDesignPointCost: 24,
+                fixedTemplateCount: 6, templateSlotCount: 9);
             foreach (var type in mutableTerrain.Keys.ToArray())
                 mutableTerrain[type] = new TerrainDef(1, 0, 0, passable: false);
 
@@ -260,6 +262,8 @@ namespace HexWars.Engine.Tests
             countBypass.Templates = countBypass.Templates.Take(8).ToArray();
             countBypass.FixedTemplateCount = 5;
             countBypass.CustomTemplateCount = 3;
+            countBypass.Game = GameConfig.Default(biomesEnabled: false, fogOfWar: true,
+                maxDesignPointCost: 24, fixedTemplateCount: 5, templateSlotCount: 8);
             var countBoard = new RandomBoardGenerator(countBypass.BoardGen).Generate(35);
 
             Assert.That(() => new AdaptiveDeployment(countBoard, countBypass),
@@ -318,7 +322,8 @@ namespace HexWars.Engine.Tests
                 [TerrainType.Water] = new TerrainDef(3, 0, 0, false),
             };
             var config = AdaptiveEnvConfig.Default();
-            config.Game = new GameConfig(terrain, startingPoints: 17, biomesEnabled: true, fogOfWar: true);
+            config.Game = new GameConfig(terrain, startingPoints: 17, biomesEnabled: true, fogOfWar: true,
+                maxDesignPointCost: 24, fixedTemplateCount: 6, templateSlotCount: 9);
             var zone0 = Enumerable.Range(0, 7).Select(r => new HexCoord(0, r)).ToArray();
             var zone1 = Enumerable.Range(0, 7).Select(r => new HexCoord(10, r)).ToArray();
             var impassable = zone0[0];

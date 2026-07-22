@@ -57,7 +57,12 @@ namespace HexWars.Engine.Rl
     public sealed class AdaptiveEnvConfig
     {
         public BoardGenConfig BoardGen { get; set; } = BoardGenConfig.Default();
-        public GameConfig Game { get; set; } = GameConfig.Default(biomesEnabled: false, fogOfWar: true);
+        public GameConfig Game { get; set; } = GameConfig.Default(
+            biomesEnabled: false,
+            fogOfWar: true,
+            maxDesignPointCost: 24,
+            fixedTemplateCount: 6,
+            templateSlotCount: 9);
         public IReadOnlyList<UnitTemplate> Templates { get; set; } = AdaptiveContractData.Templates;
         public IReadOnlyDictionary<AdaptiveStat, IReadOnlyList<int>> StatValues { get; set; } = AdaptiveContractData.StatValues;
         public int FixedTemplateCount { get; set; } = 6;
@@ -72,11 +77,30 @@ namespace HexWars.Engine.Rl
 
         public static AdaptiveEnvConfig Default() => new AdaptiveEnvConfig();
 
+        internal IReadOnlyList<string> ValidateDesignRuleConsistency()
+        {
+            var errors = new List<string>();
+            if (Game == null)
+            {
+                errors.Add("adaptive configuration requires game rules");
+                return errors;
+            }
+            if (Game.MaxDesignPointCost != MaxDesignPointCost)
+                errors.Add("adaptive maximum design point cost must match runtime game rules");
+            if (Game.FixedTemplateCount != FixedTemplateCount)
+                errors.Add("adaptive fixed template count must match runtime game rules");
+            if (Game.TemplateSlotCount != Templates.Count)
+                errors.Add("adaptive runtime template slot count must match the template roster");
+            if (Game.TemplateSlotCount != FixedTemplateCount + CustomTemplateCount)
+                errors.Add("adaptive runtime template slot count must match fixed plus custom templates");
+            return errors;
+        }
+
         public IReadOnlyList<string> Validate(Board board)
         {
             if (board == null) throw new ArgumentNullException(nameof(board));
 
-            var errors = new List<string>();
+            var errors = new List<string>(ValidateDesignRuleConsistency());
             int cells = Math.Min(
                 board.DeploymentZone(PlayerId.Player0).Count,
                 board.DeploymentZone(PlayerId.Player1).Count);

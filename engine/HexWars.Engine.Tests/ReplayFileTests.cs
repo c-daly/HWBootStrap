@@ -77,6 +77,24 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void OldConfigWithoutDesignKeys_UsesBackwardCompatibleDefaults()
+        {
+            string modern = ReplayFile.Write(AgentGame(), new List<Command>());
+            string old = modern
+                .Replace(" designFee=0", "")
+                .Replace(" maxDesignCost=0", "")
+                .Replace(" fixedTemplates=0", "")
+                .Replace(" templateSlots=0", "");
+
+            var s = ReplayFile.Read(old).Start;
+
+            Assert.That(s.Config.DesignFee, Is.EqualTo(0));
+            Assert.That(s.Config.MaxDesignPointCost, Is.EqualTo(0));
+            Assert.That(s.Config.FixedTemplateCount, Is.EqualTo(0));
+            Assert.That(s.Config.TemplateSlotCount, Is.EqualTo(0));
+        }
+
+        [Test]
         public void TerritoryControl_RoundTrips_ThroughTheWire()
         {
             var start = GameFactory.Build(new GameSetup(GameMode.Territory, 11, 9, 40, 7));
