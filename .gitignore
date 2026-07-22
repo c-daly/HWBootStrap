@@ -102,6 +102,16 @@ engine/**/obj/
 Assets/HexWars/Plugins/HexWars.Engine.dll
 Assets/HexWars/Plugins/HexWars.Engine.dll.meta
 
+# Local ML environments, experiments, trackers, and generated replays
+__pycache__/
+*.py[cod]
+.pytest_cache/
+python/winenv/
+python/runs/
+python/wandb/
+python/events.out.tfevents.*
+python/**/*.replay
+
 # Vendor asset kits: local-only, never committed (1.2GB model kit; the game copies the few
 # files it uses into Assets/HexWars/Audio, which IS tracked). Unity crash-recovery snapshots too.
 Assets/Creepy_Cat/
