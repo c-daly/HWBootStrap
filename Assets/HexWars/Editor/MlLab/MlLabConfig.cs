@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 using HexWars.Presentation;
 using UnityEngine;
@@ -9,6 +10,47 @@ namespace HexWars.Presentation.EditorTools.MlLab
     public enum MlAlgorithm { MaskablePpo, MaskedDqn }
     public enum MlOpponentKind { Greedy, Random, FixedRun, LiveRun }
     public enum MlLearnerSeat { Alternating, Seat0, Seat1 }
+
+    public static class MlLabPaths
+    {
+        public static string ResolvePythonExecutable(string projectRoot)
+        {
+            string local = PythonExecutableUnder(projectRoot);
+            if (File.Exists(local)) return local;
+
+            try
+            {
+                string marker = Path.Combine(projectRoot, ".git");
+                if (!File.Exists(marker)) return local;
+                string text = File.ReadAllText(marker).Trim();
+                const string prefix = "gitdir:";
+                if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return local;
+
+                string gitDirectory = text.Substring(prefix.Length).Trim();
+                if (!Path.IsPathRooted(gitDirectory))
+                    gitDirectory = Path.GetFullPath(Path.Combine(projectRoot, gitDirectory));
+                string commonMarker = Path.Combine(gitDirectory, "commondir");
+                if (!File.Exists(commonMarker)) return local;
+
+                string commonDirectory = File.ReadAllText(commonMarker).Trim();
+                if (!Path.IsPathRooted(commonDirectory))
+                    commonDirectory = Path.GetFullPath(Path.Combine(gitDirectory, commonDirectory));
+                var repository = Directory.GetParent(commonDirectory);
+                if (repository == null) return local;
+
+                string shared = PythonExecutableUnder(repository.FullName);
+                return File.Exists(shared) ? shared : local;
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException
+                                           || error is ArgumentException || error is NotSupportedException)
+            {
+                return local;
+            }
+        }
+
+        static string PythonExecutableUnder(string root) =>
+            Path.Combine(root, "python", "winenv", "Scripts", "python.exe");
+    }
 
     [Serializable]
     public sealed class MlTrackerConfig

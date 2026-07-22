@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
 
@@ -5,6 +7,49 @@ namespace HexWars.Presentation.Tests
 {
     public sealed class MlLabConfigTests
     {
+        [Test]
+        public void ResolvePythonExecutable_UsesCommonRepositoryEnvironmentForLinkedWorktree()
+        {
+            string scratch = Path.Combine(Path.GetTempPath(), "hexwars-ml-path-" + Guid.NewGuid().ToString("N"));
+            string repository = Path.Combine(scratch, "repo");
+            string worktree = Path.Combine(scratch, "worktree");
+            string gitDirectory = Path.Combine(repository, ".git", "worktrees", "feature");
+            string expected = Path.Combine(repository, "python", "winenv", "Scripts", "python.exe");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(expected));
+                File.WriteAllText(expected, string.Empty);
+                Directory.CreateDirectory(gitDirectory);
+                Directory.CreateDirectory(worktree);
+                File.WriteAllText(Path.Combine(worktree, ".git"), "gitdir: " + gitDirectory);
+                File.WriteAllText(Path.Combine(gitDirectory, "commondir"), "../..");
+
+                Assert.That(MlLabPaths.ResolvePythonExecutable(worktree), Is.EqualTo(expected));
+            }
+            finally
+            {
+                if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ResolvePythonExecutable_PrefersEnvironmentInsideCurrentProject()
+        {
+            string scratch = Path.Combine(Path.GetTempPath(), "hexwars-ml-local-" + Guid.NewGuid().ToString("N"));
+            string expected = Path.Combine(scratch, "python", "winenv", "Scripts", "python.exe");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(expected));
+                File.WriteAllText(expected, string.Empty);
+
+                Assert.That(MlLabPaths.ResolvePythonExecutable(scratch), Is.EqualTo(expected));
+            }
+            finally
+            {
+                if (Directory.Exists(scratch)) Directory.Delete(scratch, recursive: true);
+            }
+        }
+
         [Test]
         public void Validate_RejectsUnsafeOrIncompleteTrainingConfiguration()
         {

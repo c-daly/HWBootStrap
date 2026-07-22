@@ -121,7 +121,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         string ProjectRoot => Directory.GetParent(Application.dataPath).FullName;
         string PythonDir => Path.Combine(ProjectRoot, "python");
-        string PythonExe => Path.Combine(PythonDir, "winenv", "Scripts", "python.exe");
+        string PythonExe => MlLabPaths.ResolvePythonExecutable(ProjectRoot);
         string CliScript => Path.Combine(PythonDir, "hexwars_ml.py");
         string RunsRoot => Path.Combine(PythonDir, "runs");
         string GymServer => Path.Combine(ProjectRoot, "engine", "HexWars.GymServer", "bin", "Release", "net8.0", "HexWars.GymServer.dll");
