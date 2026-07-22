@@ -16,6 +16,7 @@ from ml_lab.controllers import (
     ControllerResolver,
     _validate_contract_compatibility,
     normalize_controller_spec,
+    predict,
 )
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.io import atomic_write_json
@@ -142,6 +143,60 @@ def test_normalize_legacy_checkpoint_spec_without_inferring_algorithm(tmp_path: 
     assert spec.path == checkpoint
     with pytest.raises(ControllerResolutionError, match="algorithm"):
         normalize_controller_spec({"kind": "checkpoint", "path": str(checkpoint)})
+
+
+def test_run_inference_mode_defaults_to_deterministic() -> None:
+    spec = normalize_controller_spec({"kind": "run", "path": "run-a", "mode": "live"})
+
+    assert spec.inference_mode == "deterministic"
+
+
+def test_stochastic_run_inference_mode_survives_resolution_and_reload(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    binding = ControllerResolver(contract, model_loader=loader).bind(
+        {
+            "kind": "run",
+            "path": str(run),
+            "mode": "live",
+            "inference_mode": "stochastic",
+        }
+    )
+
+    assert binding.resolved.spec.inference_mode == "stochastic"
+    assert binding.resolved.metadata()["inference_mode"] == "stochastic"
+    assert binding.reload() is False
+    assert binding.resolved.spec.inference_mode == "stochastic"
+
+
+def test_unknown_run_inference_mode_is_rejected() -> None:
+    with pytest.raises(ControllerResolutionError, match="inference mode"):
+        normalize_controller_spec(
+            {"kind": "run", "path": "run-a", "inference_mode": "epsilon"}
+        )
+
+
+def test_maskable_ppo_prediction_defaults_to_deterministic_and_can_sample() -> None:
+    calls: list[dict] = []
+
+    class Model:
+        def predict(self, observation, **kwargs):
+            calls.append(kwargs)
+            return np.int64(3), None
+
+    observation = np.zeros(4, dtype=np.float32)
+    mask = np.array([True, False, True, True])
+
+    assert predict(Model(), "maskable_ppo", observation, mask) == 3
+    assert predict(
+        Model(), "maskable_ppo", observation, mask, deterministic=False
+    ) == 3
+    assert len(calls) == 2
+    assert calls[0]["deterministic"] is True
+    assert calls[1]["deterministic"] is False
+    np.testing.assert_array_equal(calls[0]["action_masks"], mask)
+    np.testing.assert_array_equal(calls[1]["action_masks"], mask)
 
 
 def test_rejects_fixed_checkpoint_even_when_algorithm_is_explicit(

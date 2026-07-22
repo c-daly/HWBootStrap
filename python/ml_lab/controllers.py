@@ -20,6 +20,7 @@ from .io import read_json
 
 
 Algorithm = Literal["maskable_ppo", "masked_dqn"]
+InferenceMode = Literal["deterministic", "stochastic"]
 SCRIPTED_NAMES = frozenset({"greedy", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
 SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "adaptive-v1"})
@@ -36,6 +37,7 @@ class ControllerSpec:
     path: Path | None = None
     algorithm: Algorithm | None = None
     mode: Literal["fixed", "live"] = "fixed"
+    inference_mode: InferenceMode = "deterministic"
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class ResolvedController:
         """JSON-safe information for policy-server status replies."""
         return {
             "kind": self.spec.kind,
+            "inference_mode": self.spec.inference_mode,
             "path": str(self.path) if self.path is not None else None,
             "algorithm": self.algorithm,
             "step": self.step,
@@ -98,12 +101,18 @@ def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> 
             path=_path_field(raw),
             algorithm=_algorithm_field(raw),
             mode=mode,
+            inference_mode=_inference_mode_field(raw),
         )
     if kind == "run":
         mode = raw.get("mode", "fixed")
         if mode not in {"fixed", "live"}:
             raise ControllerResolutionError("run controller mode must be 'fixed' or 'live'")
-        return ControllerSpec(kind="run", path=_path_field(raw), mode=mode)
+        return ControllerSpec(
+            kind="run",
+            path=_path_field(raw),
+            mode=mode,
+            inference_mode=_inference_mode_field(raw),
+        )
     raise ControllerResolutionError("controller kind must be 'scripted', 'checkpoint', or 'run'")
 
 
@@ -158,6 +167,15 @@ def _algorithm_field(raw: Mapping[str, Any]) -> Algorithm:
     return algorithm
 
 
+def _inference_mode_field(raw: Mapping[str, Any]) -> InferenceMode:
+    inference_mode = raw.get("inference_mode", "deterministic")
+    if inference_mode not in {"deterministic", "stochastic"}:
+        raise ControllerResolutionError(
+            "controller inference mode must be 'deterministic' or 'stochastic'"
+        )
+    return inference_mode
+
+
 class ControllerResolver:
     """Resolve immutable controller specs against an optional runtime contract."""
 
@@ -190,10 +208,24 @@ class ControllerResolver:
         if spec.kind == "run":
             return self._resolve_run(spec)
         if spec.path.is_dir() and (spec.path / "run.json").is_file():
-            return self._resolve_run(ControllerSpec(kind="run", path=spec.path, mode=spec.mode), spec.algorithm)
+            return self._resolve_run(
+                ControllerSpec(
+                    kind="run",
+                    path=spec.path,
+                    mode=spec.mode,
+                    inference_mode=spec.inference_mode,
+                ),
+                spec.algorithm,
+            )
         if spec.path.is_dir() and spec.path.name == "checkpoints" and (spec.path.parent / "run.json").is_file():
             return self._resolve_run(
-                ControllerSpec(kind="run", path=spec.path.parent, mode=spec.mode), spec.algorithm
+                ControllerSpec(
+                    kind="run",
+                    path=spec.path.parent,
+                    mode=spec.mode,
+                    inference_mode=spec.inference_mode,
+                ),
+                spec.algorithm,
             )
         return self._resolve_legacy_checkpoint(spec)
 
@@ -412,10 +444,21 @@ def load_model(path: Path, algorithm: Algorithm) -> Any:
     raise AssertionError(f"unreachable algorithm {algorithm!r}")
 
 
-def predict(model: Any, algorithm: Algorithm, observation: np.ndarray, mask: np.ndarray) -> int:
-    """Choose a legal deterministic action for either supported model family."""
+def predict(
+    model: Any,
+    algorithm: Algorithm,
+    observation: np.ndarray,
+    mask: np.ndarray,
+    *,
+    deterministic: bool = True,
+) -> int:
+    """Choose a legal action, optionally sampling a MaskablePPO policy."""
     if algorithm == "maskable_ppo":
-        action, _ = model.predict(observation, action_masks=mask, deterministic=True)
+        action, _ = model.predict(
+            observation,
+            action_masks=mask,
+            deterministic=deterministic,
+        )
         return int(action)
     import torch
 
