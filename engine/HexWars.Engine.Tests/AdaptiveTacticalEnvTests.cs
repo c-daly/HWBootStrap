@@ -117,6 +117,36 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void RevealContinuation_PreservesDeploymentAndTerminalRewardsExactlyOnce()
+        {
+            var config = AdaptiveEnvConfig.Default();
+            config.Game = GameConfig.Default(
+                biomesEnabled: false,
+                winConditions: WinBy.Economy,
+                economyWinThreshold: 0,
+                fogOfWar: true,
+                maxDesignPointCost: 24,
+                fixedTemplateCount: 6,
+                templateSlotCount: 9);
+            config.DeploymentCompletionBonus = 0.25f;
+            var opponent = new CountingEndTurnAgent();
+            var env = new AdaptiveTacticalEnv(
+                seed => opponent, seed => new CombinedArmsDeploymentPolicy(seed),
+                PlayerId.Player1, config);
+            env.Reset(21);
+
+            for (int template = 0; template < 6; template++) Place(env, template);
+            StepResult reveal = env.Step((int)AdaptiveCommandChoice.ConfirmDeployment);
+
+            Assert.That(opponent.Calls, Is.EqualTo(1));
+            Assert.That(reveal.Terminated, Is.True);
+            Assert.That(env.State.Winner.HasValue, Is.True);
+            float terminal = env.State.Winner == PlayerId.Player1 ? 1f : -1f;
+            Assert.That(reveal.Reward, Is.EqualTo(
+                config.DeploymentCompletionBonus - config.IntermediateDecisionPenalty + terminal));
+        }
+
+        [Test]
         public void MaskedDeployment_IsDeterministicAndRevealsAtomically()
         {
             var a = NewEnv();

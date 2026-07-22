@@ -133,6 +133,17 @@ object Diagnostics(AdaptiveDiagnostics value) => new
     deployment_completed = value.DeploymentCompleted,
 };
 
+AdaptiveDuelEnv.View ContinueHeadlessReveal(AdaptiveDuelEnv.View view)
+{
+    if (adaptiveDuel == null || !adaptiveDuel.AwaitingPostRevealAdvance) return view;
+    var continued = adaptiveDuel.ContinueAfterReveal();
+    return new AdaptiveDuelEnv.View(
+        continued.Observation, continued.ActionMask, continued.Seat,
+        view.Reward + continued.Reward, continued.Winner,
+        continued.Terminated, continued.Truncated,
+        continued.DeploymentComplete, continued.Diagnostics);
+}
+
 string? line;
 while ((line = Console.ReadLine()) != null)
 {
@@ -231,6 +242,7 @@ while ((line = Console.ReadLine()) != null)
                     MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
                     MakeDeployment(p0, seed * 2 + 1), MakeDeployment(p1, seed * 2 + 2),
                     learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
+                v = ContinueHeadlessReveal(v);
                 Send(new
                 {
                     obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward,
@@ -253,7 +265,7 @@ while ((line = Console.ReadLine()) != null)
             else
             {
                 adaptiveDuel ??= new AdaptiveDuelEnv();
-                var v = adaptiveDuel.Step(action);
+                var v = ContinueHeadlessReveal(adaptiveDuel.Step(action));
                 Send(new
                 {
                     obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward,

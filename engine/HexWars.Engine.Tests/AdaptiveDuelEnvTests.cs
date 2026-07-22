@@ -194,6 +194,60 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        [TestCase("greedy", null, 1)]
+        [TestCase(null, "greedy", 0)]
+        public void AdaptiveDuelRpc_ConsumesRevealPauseForReciprocalExternalSeat(
+            string? p0, string? p1, int externalSeat)
+        {
+            using var server = new ServerProcess("--environment", "adaptive-v1");
+            using JsonDocument reset = server.Exchange(new { cmd = "duel_reset", seed = 91, p0, p1 });
+            JsonElement reply = reset.RootElement.Clone();
+
+            int guard = 0;
+            while (!reply.GetProperty("deployment_complete").GetBoolean() && guard++ < 100)
+            {
+                Assert.That(reply.GetProperty("seat").GetInt32(), Is.EqualTo(externalSeat));
+                bool[] mask = reply.GetProperty("mask").EnumerateArray().Select(x => x.GetBoolean()).ToArray();
+                using JsonDocument stepped = server.Exchange(new
+                {
+                    cmd = "duel_step",
+                    action = ChooseProgressAction(mask),
+                });
+                reply = stepped.RootElement.Clone();
+            }
+
+            Assert.That(reply.GetProperty("deployment_complete").GetBoolean(), Is.True);
+            Assert.That(reply.GetProperty("terminated").GetBoolean()
+                || reply.GetProperty("truncated").GetBoolean()
+                || reply.GetProperty("seat").GetInt32() == externalSeat, Is.True,
+                "headless reciprocal evaluation must receive the next external decision, not Unity's reveal pause");
+        }
+
+        [Test]
+        public void AdaptiveDuelRpc_BothScriptedCompletesAndSavesTerminalReplay()
+        {
+            string replayPath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "adaptive-scripted-" + Guid.NewGuid().ToString("N") + ".replay");
+            try
+            {
+                using var server = new ServerProcess("--environment", "adaptive-v1");
+                using JsonDocument reset = server.Exchange(new
+                {
+                    cmd = "duel_reset", seed = 92, p0 = "greedy", p1 = "greedy",
+                });
+
+                Assert.That(reset.RootElement.GetProperty("terminated").GetBoolean(), Is.True);
+                using JsonDocument saved = server.Exchange(new { cmd = "duel_save", path = replayPath });
+                Assert.That(saved.RootElement.GetProperty("saved").GetString(), Is.EqualTo(replayPath));
+                ReplayData replay = ReplayFile.Read(File.ReadAllText(replayPath));
+                Assert.That(new Replay(replay.Start, replay.Commands).Final.IsGameOver, Is.True);
+            }
+            finally
+            {
+                if (File.Exists(replayPath)) File.Delete(replayPath);
+            }
+        }
+
         [Test]
         public void GymServer_UnknownEnvironmentExitsTwoBeforeReadingInput()
         {

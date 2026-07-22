@@ -12,6 +12,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from hexwars_gym.env import parse_contract
+
 
 PackageVersion = Callable[[str], str]
 DotnetVersion = Callable[[], str]
@@ -68,6 +70,12 @@ def _gymserver_handshake(command: Sequence[str]) -> dict[str, Any]:
         raise RuntimeError("GymServer handshake omitted contract_hash")
     if not isinstance(encoding_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", encoding_hash):
         raise RuntimeError("GymServer handshake omitted a valid lowercase encoding_hash")
+    return response
+
+
+def _validate_selected_contract(response: dict[str, Any], environment: str) -> dict[str, Any]:
+    required_kind = "adaptive_tactical" if environment == "adaptive-v1" else "tactical"
+    parse_contract(response, environment=environment, required_kind=required_kind)
     return response
 
 
@@ -148,7 +156,9 @@ def doctor_environment(
         _attempt(
             "gymserver_handshake",
             True,
-            lambda: handshake((*server_cmd, "--environment", environment)),
+            lambda: _validate_selected_contract(
+                handshake((*server_cmd, "--environment", environment)), environment
+            ),
             lambda value: (
                 f"{value.get('contract_version')} {value.get('contract_hash')}"
             ),

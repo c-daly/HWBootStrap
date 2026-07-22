@@ -161,17 +161,19 @@ class SelfPlayEnv(gym.Env):
 
     def _validate_opponent_geometry(self) -> None:
         for binding in self.opp_pool:
-            resolved = binding.resolved
-            if resolved.model is None:
-                continue
-            _validate_contract_compatibility(resolved.contract, getattr(self, "contract", None))
-            if resolved.observation_size != self.obs_len or resolved.action_size != self.n_actions:
-                raise ControllerResolutionError("self-play opponent geometry does not match duel spaces")
+            self._validate_opponent_candidate(binding.resolved)
+
+    def _validate_opponent_candidate(self, resolved: ResolvedController) -> None:
+        if resolved.model is None:
+            return
+        _validate_contract_compatibility(resolved.contract, self.contract)
+        if resolved.observation_size != self.obs_len or resolved.action_size != self.n_actions:
+            raise ControllerResolutionError("self-play opponent geometry does not match duel spaces")
 
     def _reload_live_opponents(self) -> None:
         """Refresh live sources only between episodes, before the next duel reset."""
         for binding in self.opp_pool:
-            binding.reload()
+            binding.reload(self._validate_opponent_candidate)
         self._validate_opponent_geometry()
 
     def _play_opponent(self, v):

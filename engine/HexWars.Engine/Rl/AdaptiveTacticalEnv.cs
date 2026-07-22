@@ -56,7 +56,7 @@ namespace HexWars.Engine.Rl
         {
             _view = _duel.Step(action);
             float reward = _view.Reward;
-            ContinuePastPresentationBoundary();
+            reward += ContinuePastPresentationBoundary();
             EnsureLearnerView();
             _steps++;
             bool truncated = !_view.Terminated && (_view.Truncated || _steps >= _cfg.MaxSteps);
@@ -66,9 +66,11 @@ namespace HexWars.Engine.Rl
 
         public bool[] LegalActionMask() => _view.ActionMask;
 
-        private void ContinuePastPresentationBoundary()
+        private float ContinuePastPresentationBoundary()
         {
-            if (_duel.AwaitingPostRevealAdvance) _view = _duel.ContinueAfterReveal();
+            if (!_duel.AwaitingPostRevealAdvance) return 0f;
+            _view = _duel.ContinueAfterReveal();
+            return _view.Reward;
         }
 
         private void EnsureLearnerView()

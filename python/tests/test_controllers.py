@@ -432,6 +432,7 @@ def test_selfplay_reloads_live_bindings_at_reset_boundary(
     env._next_seed = 0
     env.obs_len = contract.observation_size
     env.n_actions = contract.action_size
+    env.contract = contract
     env._mask = None
     env._rpc = lambda message: {
         "reward": 0.0,
@@ -444,6 +445,36 @@ def test_selfplay_reloads_live_bindings_at_reset_boundary(
     SelfPlayEnv.reset(env, seed=1)
 
     assert binding.resolved.path == second
+
+
+def test_selfplay_rejects_incompatible_live_candidate_before_replacing_active_binding(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    binding = ControllerResolver(model_loader=loader).bind(
+        {"kind": "run", "path": str(run), "mode": "live"}
+    )
+    previous = binding.resolved
+    second = run / "checkpoints" / "step_000000020.zip"
+    second.write_bytes(b"model")
+    incompatible = dataclass_replace(contract, encoding_hash="c" * 64)
+    atomic_write_json(run / "run.json", {
+        "schema_version": 1,
+        "config": {"algorithm": "maskable_ppo"},
+        "contract": incompatible.to_dict(),
+        "latest_checkpoint": "checkpoints/step_000000020.zip",
+        "latest_checkpoint_step": 20,
+    })
+    env = object.__new__(SelfPlayEnv)
+    env.opp_pool = [binding]
+    env.contract = contract
+    env.obs_len = contract.observation_size
+    env.n_actions = contract.action_size
+
+    with pytest.raises(ControllerResolutionError, match="encoding hash"):
+        env._reload_live_opponents()
+
+    assert binding.resolved is previous
 
 
 def test_selfplay_rejects_raw_models_without_resolver_metadata(

@@ -116,7 +116,7 @@ namespace HexWars.Engine.Rl
                 throw new InvalidOperationException("there is no pending post-reveal continuation");
             _awaitingPostRevealAdvance = false;
             AdvancePastInternal();
-            return MakeView(0f);
+            return MakeView(TerminalReward());
         }
 
         /// <summary>Apply one hierarchical action for the currently exposed external seat.</summary>

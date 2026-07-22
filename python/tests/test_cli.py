@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from dataclasses import replace
@@ -153,6 +154,8 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
     }
     handshakes: list[tuple[str, ...]] = []
 
+    from .test_gym_client import _valid_adaptive_spaces
+
     result = doctor_environment(
         server_cmd=["dotnet", "fake-server.dll"],
         environment="adaptive-v1",
@@ -161,7 +164,7 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
         package_version=lambda name: package_versions[name],
         dotnet_version=lambda: "8.0.18",
         handshake=lambda command: handshakes.append(tuple(command))
-        or {"contract_version": "adaptive-v1", "contract_hash": "c" * 64},
+        or _valid_adaptive_spaces(),
         cuda_info=lambda: {"available": False, "detail": "CPU-only host"},
         tracker_available=lambda name: False,
         write_probe=lambda path: path == tmp_path,
@@ -181,6 +184,47 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
         "detail": "CPU-only host",
     }
     assert checks["tracker:wandb"]["required"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (lambda value: value.update(contract_version="tactical-v1"), "contract_version"),
+        (
+            lambda value: (
+                value.update(environment_kind="adaptive_duel"),
+                value["board"].update(environment_kind="adaptive_duel"),
+                value["adaptive"].update(environment_kind="adaptive_duel"),
+            ),
+            "environment_kind",
+        ),
+        (lambda value: value["adaptive"].pop("phases"), "phases"),
+    ],
+)
+def test_doctor_rejects_wrong_or_malformed_selected_contract(
+    tmp_path: Path, mutation, expected: str
+) -> None:
+    from .test_gym_client import _valid_adaptive_spaces
+    from ml_lab.doctor import doctor_environment
+
+    response = copy.deepcopy(_valid_adaptive_spaces())
+    mutation(response)
+    result = doctor_environment(
+        server_cmd=["dotnet", "fake-server.dll"],
+        environment="adaptive-v1",
+        runs_root=tmp_path,
+        package_version=lambda _name: "1.0",
+        dotnet_version=lambda: "8.0",
+        handshake=lambda _command: response,
+        cuda_info=lambda: {"available": False, "detail": "CPU"},
+        tracker_available=lambda _name: True,
+        write_probe=lambda _path: True,
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "gymserver_handshake")
+    assert check["ok"] is False
+    assert expected in check["detail"]
+    assert result["ok"] is False
 
 
 def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
