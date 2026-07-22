@@ -203,6 +203,93 @@ namespace HexWars.Engine.Tests
             AssertPolicyChoiceIsLegal(a.View(P0), choiceA);
         }
 
+        [Test]
+        public void MutatingAViewBoard_DoesNotChangeAuthoritativeDeploymentZones()
+        {
+            var deployment = NewDeployment(seed: 33);
+            var legal = FirstLegalCell(deployment, P0);
+            int originalCount = deployment.Board.DeploymentZone(P0).Count;
+            var view = deployment.View(P0);
+            var exposedZone = view.Board.DeploymentZone(P0) as ICollection<HexCoord>;
+            Assert.That(exposedZone, Is.Not.Null, "exercise the current Board collection mutability directly");
+
+            exposedZone!.Clear();
+
+            Assert.That(deployment.Board.DeploymentZone(P0), Has.Count.EqualTo(originalCount));
+            Assert.That(deployment.View(P0).Board.DeploymentZone(P0), Has.Count.EqualTo(originalCount));
+            Assert.That(deployment.TryPlace(P0, 0, legal), Is.True);
+        }
+
+        [Test]
+        public void ConstructorSnapshotsBoardConfigScalarsGameAndTemplatePool()
+        {
+            var config = AdaptiveEnvConfig.Default();
+            var mutableTemplates = config.Templates.ToList();
+            config.Templates = mutableTemplates;
+            var mutableTerrain = Enum.GetValues(typeof(TerrainType)).Cast<TerrainType>()
+                .ToDictionary(type => type, type => config.Game.Terrain(type));
+            config.Game = new GameConfig(mutableTerrain, startingPoints: 17, biomesEnabled: true,
+                fogOfWar: true);
+            var originalGame = config.Game;
+            var originalBoard = new RandomBoardGenerator(config.BoardGen).Generate(34);
+            var legal = originalBoard.DeploymentZone(P0).OrderBy(c => c.Q).ThenBy(c => c.R).First();
+            var deployment = new AdaptiveDeployment(originalBoard, config);
+
+            ((ICollection<HexCoord>)originalBoard.DeploymentZone(P0)).Clear();
+            mutableTemplates.Clear();
+            config.StartingUnitCount = 1;
+            config.StartingArmyBudget = 0;
+            config.Game = GameConfig.Default(startingPoints: 199);
+            foreach (var type in mutableTerrain.Keys.ToArray())
+                mutableTerrain[type] = new TerrainDef(1, 0, 0, passable: false);
+
+            Assert.That(deployment.Game, Is.Not.SameAs(originalGame));
+            Assert.That(deployment.Game.StartingPoints, Is.EqualTo(17));
+            Assert.That(deployment.Game.Terrain(TerrainType.Plains).Passable, Is.True);
+            Assert.That(deployment.View(P0).RequiredUnits, Is.EqualTo(6));
+            Assert.That(deployment.View(P0).RemainingBudget, Is.EqualTo(132));
+            Assert.That(deployment.View(P0).Templates, Has.Count.EqualTo(9));
+            Assert.That(deployment.Board.DeploymentZone(P0), Is.Not.Empty);
+            Assert.That(deployment.TryPlace(P0, 0, legal), Is.True);
+        }
+
+        [Test]
+        public void ConstructorRejectsCountBypassAndChangedFixedRosterPositions()
+        {
+            var countBypass = AdaptiveEnvConfig.Default();
+            countBypass.Templates = countBypass.Templates.Take(8).ToArray();
+            countBypass.FixedTemplateCount = 5;
+            countBypass.CustomTemplateCount = 3;
+            var countBoard = new RandomBoardGenerator(countBypass.BoardGen).Generate(35);
+
+            Assert.That(() => new AdaptiveDeployment(countBoard, countBypass),
+                Throws.ArgumentException.With.Message.Contains("exactly 9 templates"));
+
+            var reordered = AdaptiveEnvConfig.Default();
+            var reorderedTemplates = reordered.Templates.ToArray();
+            (reorderedTemplates[0], reorderedTemplates[1]) = (reorderedTemplates[1], reorderedTemplates[0]);
+            reordered.Templates = reorderedTemplates;
+            var reorderedBoard = new RandomBoardGenerator(reordered.BoardGen).Generate(36);
+
+            Assert.That(() => new AdaptiveDeployment(reorderedBoard, reordered),
+                Throws.ArgumentException.With.Message.Contains("fixed template slot 0"));
+        }
+
+        [Test]
+        public void CombinedArmsPolicy_FillsFirstMissingRoleIndependentOfFreeSlot()
+        {
+            var deployment = NewDeployment(seed: 37);
+            Assert.That(deployment.TryPlace(P0, 4, FirstLegalCell(deployment, P0)), Is.True,
+                "Recon deliberately occupies placement slot zero");
+
+            var choice = new CombinedArmsDeploymentPolicy(101).Choose(deployment.View(P0));
+
+            Assert.That(choice[0].Slot, Is.EqualTo(1));
+            Assert.That(choice[0].TemplateIndex, Is.EqualTo(0), "Frontline is the first missing role");
+            Assert.That(choice.Select(p => p.TemplateIndex), Is.EqualTo(new[] { 0, 1, 2, 3, 5 }));
+            AssertPolicyChoiceIsLegal(deployment.View(P0), choice);
+        }
+
         private static AdaptiveDeployment NewDeployment(int seed, AdaptiveEnvConfig? config = null)
         {
             config ??= AdaptiveEnvConfig.Default();

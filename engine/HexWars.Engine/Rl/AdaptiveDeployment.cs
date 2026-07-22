@@ -50,7 +50,7 @@ namespace HexWars.Engine.Rl
             int remainingBudget, int requiredUnits)
         {
             Seat = seat;
-            Board = board;
+            Board = AdaptiveDeployment.CopyBoard(board);
             Game = game;
             Templates = templates.ToArray();
             OwnPlacements = ownPlacements.OrderBy(p => p.Slot).ToArray();
@@ -65,26 +65,36 @@ namespace HexWars.Engine.Rl
     /// </summary>
     public sealed class AdaptiveDeployment
     {
-        private readonly AdaptiveEnvConfig _config;
+        private readonly Board _board;
+        private readonly GameConfig _game;
+        private readonly int _requiredUnits;
+        private readonly int _startingBudget;
         private readonly List<DeploymentPlacement>[] _placements;
         private readonly List<UnitTemplate>[] _barracks;
         private readonly bool[] _confirmed = new bool[2];
 
-        public Board Board { get; }
-        public GameConfig Game => _config.Game;
+        public Board Board => CopyBoard(_board);
+        public GameConfig Game => _game;
         public bool IsRevealed => _confirmed[0] && _confirmed[1];
 
         public AdaptiveDeployment(Board board, AdaptiveEnvConfig? config = null)
         {
-            Board = board ?? throw new ArgumentNullException(nameof(board));
-            _config = config ?? AdaptiveEnvConfig.Default();
-            ValidateConfiguration();
+            if (board == null) throw new ArgumentNullException(nameof(board));
+            var source = config ?? AdaptiveEnvConfig.Default();
+            _board = CopyBoard(board);
+            _game = CopyGameConfig(source.Game
+                ?? throw new ArgumentException("adaptive deployment requires game rules", nameof(config)));
+            _requiredUnits = source.StartingUnitCount;
+            _startingBudget = source.StartingArmyBudget;
+            var templates = source.Templates?.ToArray()
+                ?? throw new ArgumentException("adaptive deployment requires templates", nameof(config));
+            ValidateConfiguration(templates, source.FixedTemplateCount, source.CustomTemplateCount);
 
             _placements = new[] { new List<DeploymentPlacement>(), new List<DeploymentPlacement>() };
             _barracks = new[]
             {
-                new List<UnitTemplate>(_config.Templates),
-                new List<UnitTemplate>(_config.Templates),
+                new List<UnitTemplate>(templates),
+                new List<UnitTemplate>(templates),
             };
         }
 
@@ -99,15 +109,15 @@ namespace HexWars.Engine.Rl
         public AdaptiveDeploymentView View(PlayerId seat)
         {
             int index = RequiredSeatIndex(seat);
-            return new AdaptiveDeploymentView(seat, Board, Game, _barracks[index], _placements[index],
-                RemainingBudget(index), _config.StartingUnitCount);
+            return new AdaptiveDeploymentView(seat, _board, _game, _barracks[index], _placements[index],
+                RemainingBudget(index), _requiredUnits);
         }
 
         public bool TryPlace(PlayerId seat, int templateIndex, HexCoord cell)
         {
             int index = SeatIndex(seat);
             if (index < 0 || _confirmed[index] || !ValidTemplate(index, templateIndex)) return false;
-            if (_placements[index].Count >= _config.StartingUnitCount || !ValidCell(seat, index, cell, -1))
+            if (_placements[index].Count >= _requiredUnits || !ValidCell(seat, index, cell, -1))
                 return false;
 
             int cost = _barracks[index][templateIndex].Stats.PointCost;
@@ -144,7 +154,7 @@ namespace HexWars.Engine.Rl
         public bool CanConfirm(PlayerId seat)
         {
             int index = SeatIndex(seat);
-            if (index < 0 || _confirmed[index] || _placements[index].Count != _config.StartingUnitCount)
+            if (index < 0 || _confirmed[index] || _placements[index].Count != _requiredUnits)
                 return false;
             if (RemainingBudget(index) < 0) return false;
 
@@ -153,7 +163,7 @@ namespace HexWars.Engine.Rl
             foreach (var placement in _placements[index])
             {
                 if (!slots.Add(placement.Slot) || !cells.Add(placement.Cell)) return false;
-                if (placement.Slot < 0 || placement.Slot >= _config.StartingUnitCount) return false;
+                if (placement.Slot < 0 || placement.Slot >= _requiredUnits) return false;
                 if (!ValidTemplate(index, placement.TemplateIndex)) return false;
                 if (!ValidCell(seat, index, placement.Cell, placement.Slot)) return false;
             }
@@ -187,17 +197,17 @@ namespace HexWars.Engine.Rl
                 new List<UnitTemplate>(_barracks[0]), units0, null);
             var player1 = new PlayerState(PlayerId.Player1, Game.StartingPoints,
                 new List<UnitTemplate>(_barracks[1]), units1, null);
-            return new GameState(Board, Game, new[] { player0, player1 }, firstPlayer, round: 1,
+            return new GameState(CopyBoard(_board), _game, new[] { player0, player1 }, firstPlayer, round: 1,
                 nextEntityId: nextEntityId);
         }
 
         private IReadOnlyList<Unit> BuildUnits(PlayerId seat, int index, ref int nextEntityId)
         {
-            var units = new List<Unit>(_config.StartingUnitCount);
+            var units = new List<Unit>(_requiredUnits);
             foreach (var placement in _placements[index].OrderBy(p => p.Slot))
             {
                 var template = _barracks[index][placement.TemplateIndex];
-                var tile = Board.TileAt(placement.Cell);
+                var tile = _board.TileAt(placement.Cell);
                 units.Add(new Unit(nextEntityId++, seat, template.Stats, placement.Cell, tile.Elevation,
                     template.Name));
             }
@@ -209,43 +219,112 @@ namespace HexWars.Engine.Rl
 
         private bool ValidCell(PlayerId seat, int index, HexCoord cell, int ignoredSlot)
         {
-            if (!Board.Contains(cell) || !Board.IsInDeploymentZone(seat, cell)) return false;
-            if (!Game.Terrain(Board.TileAt(cell).Terrain).Passable) return false;
+            if (!_board.Contains(cell) || !_board.IsInDeploymentZone(seat, cell)) return false;
+            if (!_game.Terrain(_board.TileAt(cell).Terrain).Passable) return false;
             return !_placements[index].Any(p => p.Slot != ignoredSlot && p.Cell == cell);
         }
 
-        private int RemainingBudget(int index) => _config.StartingArmyBudget
+        private int RemainingBudget(int index) => _startingBudget
             - _placements[index].Sum(p => _barracks[index][p.TemplateIndex].Stats.PointCost);
 
         private int LowestFreeSlot(int index)
         {
-            for (int slot = 0; slot < _config.StartingUnitCount; slot++)
+            for (int slot = 0; slot < _requiredUnits; slot++)
                 if (_placements[index].All(p => p.Slot != slot)) return slot;
             return -1;
         }
 
-        private void ValidateConfiguration()
+        private void ValidateConfiguration(IReadOnlyList<UnitTemplate> templates, int fixedTemplateCount,
+            int customTemplateCount)
         {
-            if (_config.Game == null) throw new ArgumentException("adaptive deployment requires game rules", nameof(_config));
-            if (_config.Templates == null) throw new ArgumentException("adaptive deployment requires templates", nameof(_config));
-            var errors = new List<string>(_config.Validate(Board));
-            if (_config.StartingUnitCount <= 0) errors.Add("starting deployment must require at least one unit");
-            if (_config.StartingArmyBudget < 0) errors.Add("starting deployment budget cannot be negative");
+            var errors = new List<string>();
+            if (fixedTemplateCount != 6) errors.Add("adaptive deployment requires exactly 6 fixed templates");
+            if (customTemplateCount != 3) errors.Add("adaptive deployment requires exactly 3 custom templates");
+            if (templates.Count != 9) errors.Add("adaptive deployment requires exactly 9 templates");
+            if (_requiredUnits <= 0) errors.Add("starting deployment must require at least one unit");
+            if (_startingBudget < 0) errors.Add("starting deployment budget cannot be negative");
+
+            int cheapest = templates.Count == 0 ? 0 : templates.Min(t => t.Stats.PointCost);
+            if (_startingBudget < cheapest * _requiredUnits)
+                errors.Add($"starting deployment requires at least {cheapest * _requiredUnits} points but only {_startingBudget} are available");
+
+            int pinnedCount = Math.Min(templates.Count, AdaptiveContractData.Templates.Count);
+            for (int slot = 0; slot < pinnedCount; slot++)
+            {
+                var actual = templates[slot];
+                var pinned = AdaptiveContractData.Templates[slot];
+                if (!string.Equals(actual.Name, pinned.Name, StringComparison.Ordinal))
+                    errors.Add($"template slot {slot} must remain {pinned.Name}");
+                if (slot < 6 && !actual.Stats.Equals(pinned.Stats))
+                    errors.Add($"fixed template slot {slot} must retain its pinned stat line");
+            }
 
             foreach (var seat in new[] { PlayerId.Player0, PlayerId.Player1 })
             {
                 int legal = 0;
-                foreach (var cell in Board.DeploymentZone(seat))
-                    if (Board.Contains(cell) && Game.Terrain(Board.TileAt(cell).Terrain).Passable) legal++;
-                if (legal < _config.StartingUnitCount)
-                    errors.Add($"starting deployment requires {_config.StartingUnitCount} passable cells for {seat} but only {legal} are available");
+                foreach (var cell in _board.DeploymentZone(seat))
+                    if (_board.Contains(cell) && _game.Terrain(_board.TileAt(cell).Terrain).Passable) legal++;
+                if (legal < _requiredUnits)
+                    errors.Add($"starting deployment requires {_requiredUnits} passable cells for {seat} but only {legal} are available");
             }
 
-            if (Board.DeploymentZone(PlayerId.Player0)
-                .Any(cell => Board.IsInDeploymentZone(PlayerId.Player1, cell)))
+            if (_board.DeploymentZone(PlayerId.Player0)
+                .Any(cell => _board.IsInDeploymentZone(PlayerId.Player1, cell)))
                 errors.Add("adaptive deployment zones must not overlap");
 
-            if (errors.Count > 0) throw new ArgumentException(string.Join("; ", errors), nameof(_config));
+            if (errors.Count > 0) throw new ArgumentException(string.Join("; ", errors), "config");
+        }
+
+        internal static Board CopyBoard(Board source)
+        {
+            var control = new Dictionary<HexCoord, PlayerId>();
+            foreach (var tile in source.Tiles)
+            {
+                var owner = source.Controller(tile.Coord);
+                if (owner.HasValue) control[tile.Coord] = owner.Value;
+            }
+            return new Board(source.Tiles.ToArray(),
+                source.DeploymentZone(PlayerId.Player0).ToArray(),
+                source.DeploymentZone(PlayerId.Player1).ToArray(),
+                control);
+        }
+
+        private static GameConfig CopyGameConfig(GameConfig source)
+        {
+            var terrain = Enum.GetValues(typeof(TerrainType)).Cast<TerrainType>()
+                .ToDictionary(type => type, type => source.Terrain(type));
+            return new GameConfig(
+                terrain,
+                startingPoints: source.StartingPoints,
+                bountyRate: source.BountyRate,
+                generatorCost: source.GeneratorCost,
+                generatorOutput: source.GeneratorOutput,
+                generatorHealth: source.GeneratorHealth,
+                damageFloor: source.DamageFloor,
+                dmgHighGroundBonus: source.DmgHighGroundBonus,
+                rangeHighGroundBonus: source.RangeHighGroundBonus,
+                roundCap: source.RoundCap,
+                designFee: source.DesignFee,
+                deployCostMultiplier: source.DeployCostMultiplier,
+                turnPolicy: source.TurnPolicy,
+                biomesEnabled: source.BiomesEnabled,
+                winConditions: source.WinConditions,
+                captureCost: source.CaptureCost,
+                economyWinThreshold: source.EconomyWinThreshold,
+                scoreKills: source.ScoreKills,
+                scorePoints: source.ScorePoints,
+                scoreArmy: source.ScoreArmy,
+                scoreTerritory: source.ScoreTerritory,
+                upkeepFactor: source.UpkeepFactor,
+                captureFactor: source.CaptureFactor,
+                buildFactor: source.BuildFactor,
+                territoryMode: source.TerritoryMode,
+                claimEndsTurn: source.ClaimEndsTurn,
+                buildAnywhere: source.BuildAnywhere,
+                territoryIncome: source.TerritoryIncome,
+                generatorsEnabled: source.GeneratorsEnabled,
+                pointDecay: source.PointDecay,
+                fogOfWar: source.FogOfWar);
         }
 
         private static int RequiredSeatIndex(PlayerId seat)
@@ -311,11 +390,20 @@ namespace HexWars.Engine.Rl
             int needed = Math.Min(slots.Count, cells.Count);
             int remainingBudget = view.RemainingBudget;
             var occupied = view.OwnPlacements.Select(p => p.Cell).ToList();
+            var selectedFixedTemplates = new HashSet<int>(view.OwnPlacements
+                .Where(p => p.TemplateIndex >= 0 && p.TemplateIndex < 6)
+                .Select(p => p.TemplateIndex));
             var result = new List<DeploymentPlacement>(needed);
 
             for (int i = 0; i < needed; i++)
             {
-                int desired = slots[i] < 6 ? slots[i] : slots[i] % 6;
+                int desired = -1;
+                for (int template = 0; template < 6; template++)
+                    if (!selectedFixedTemplates.Contains(template))
+                    {
+                        desired = template;
+                        break;
+                    }
                 int leftAfterThis = needed - i - 1;
                 int templateIndex = AffordableTemplate(view, desired, remainingBudget, leftAfterThis);
                 if (templateIndex < 0) break;
@@ -334,6 +422,7 @@ namespace HexWars.Engine.Rl
                 var chosen = ranked[0].Cell;
                 result.Add(new DeploymentPlacement(slots[i], templateIndex, chosen));
                 occupied.Add(chosen);
+                if (templateIndex < 6) selectedFixedTemplates.Add(templateIndex);
                 cells.Remove(chosen);
                 remainingBudget -= view.Templates[templateIndex].Stats.PointCost;
             }
