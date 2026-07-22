@@ -16,6 +16,24 @@ This guide is written for an intern who can use a terminal and the Unity Editor 
 
 A useful name includes the algorithm, opponent or hypothesis, and seed, for example `ppo_counter_run1_s1701`. Never reuse a run name: the tool refuses to overwrite an existing directory. Keep experiment and held-out seeds disjoint; the default evaluation range begins at `1000000`.
 
+## Local headless benchmark record
+
+The following Task 11 verification was recorded on 2026-07-22 on the Windows development host reported by `benchmark` as 16 logical CPUs. Each command used 20 games and held the seed range and engine build constant:
+
+```powershell
+& $hexwarsPython .\python\hexwars_ml.py benchmark --games 20 --workers 1 --json
+& $hexwarsPython .\python\hexwars_ml.py benchmark --games 20 --workers 2 --json
+& $hexwarsPython .\python\hexwars_ml.py benchmark --games 20 --workers 4 --json
+```
+
+| Workers | Elapsed | Resets/second | Decisions/second |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.250 s | 6.15 | 357.22 |
+| 2 | 2.290 s | 8.73 | 506.90 |
+| 4 | 1.827 s | 10.95 | 635.50 |
+
+Four workers were fastest in this short local engine benchmark. That is evidence for this host and workload, not a universal default; repeat the commands after hardware, engine, policy, or background-load changes. A full training run also includes model-update cost and can have a different optimum.
+
 ## Worked scenario: `ppo_counter_run1`
 
 ### 1. Question and hypothesis
