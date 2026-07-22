@@ -54,6 +54,8 @@ def _parse_contract(spaces_info: Mapping[str, Any]) -> EnvironmentContract:
     environment_kind = spaces_info["environment_kind"]
     if environment_kind not in {"tactical", "duel"}:
         raise ValueError("GymServer environment_kind must be 'tactical' or 'duel'")
+    if environment_kind != "tactical":
+        raise ValueError("HexWarsEnv requires a tactical environment_kind")
     observation_size = _positive_int(spaces_info["obs_len"], "obs_len")
     action_size = _positive_int(spaces_info["n_actions"], "n_actions")
     channels = _positive_int(spaces_info["channels"], "channels")

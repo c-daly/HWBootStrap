@@ -124,3 +124,15 @@ def test_invalid_handshake_closes_server_process(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="contract_hash"):
         HexWarsEnv(_fake_server(tmp_path, spaces, close_marker))
     assert close_marker.read_text(encoding="utf-8") == "closed"
+
+
+def test_tactical_client_rejects_duel_handshake_and_closes_server_process(tmp_path: Path) -> None:
+    spaces = _valid_spaces()
+    spaces["environment_kind"] = "duel"
+    spaces["board"]["environment_kind"] = "duel"
+    close_marker = tmp_path / "duel-server-closed.txt"
+
+    with pytest.raises(ValueError, match="environment_kind"):
+        HexWarsEnv(_fake_server(tmp_path, spaces, close_marker))
+
+    assert close_marker.read_text(encoding="utf-8") == "closed"
