@@ -62,6 +62,20 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void BuildTrainArguments_LiveRunOpponentRequestsCheckpointReloading()
+        {
+            var config = MlLabConfig.Default();
+            config.OpponentKind = MlOpponentKind.LiveRun;
+            config.OpponentPath = @"C:\runs\live opponent";
+
+            string args = config.BuildTrainArguments();
+
+            Assert.That(args, Does.Contain("\\\"kind\\\":\\\"run\\\""));
+            Assert.That(args, Does.Contain("\\\"mode\\\":\\\"live\\\""));
+            Assert.That(args, Does.Not.Contain("--opponent \\\"run:"));
+        }
+
+        [Test]
         public void BuildTrainArguments_DoesNotLeakDisabledWandbOptions()
         {
             var config = MlLabConfig.Default();

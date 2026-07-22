@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using HexWars.Presentation;
 
 namespace HexWars.Presentation.EditorTools.MlLab
 {
@@ -129,7 +130,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 case MlOpponentKind.Random: return "random";
                 case MlOpponentKind.FixedCheckpoint:
                     return (OpponentAlgorithm == MlAlgorithm.MaskablePpo ? "ppo:" : "dqn:") + OpponentPath;
-                case MlOpponentKind.LiveRun: return "run:" + OpponentPath;
+                case MlOpponentKind.LiveRun:
+                    return new ModelSeatConfiguration
+                    {
+                        Kind = ModelControllerKind.LiveRun,
+                        Path = OpponentPath,
+                    }.BuildSpec();
                 default: return "greedy";
             }
         }
