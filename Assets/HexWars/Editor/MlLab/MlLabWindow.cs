@@ -95,6 +95,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [SerializeField] bool _useCustomTracker;
         [SerializeField] string _customTrackerAdapter = string.Empty;
         [SerializeField] bool _showAdvanced;
+        [SerializeField] int _tab;
+        [SerializeField] ModelDuelConfiguration _arena = new ModelDuelConfiguration();
 
         MlLabWindowState _state = new MlLabWindowState();
         MlCliProcess _training;
@@ -113,6 +115,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         bool _watchWhenReady;
         bool _watchLaunched;
         string _notice = string.Empty;
+        string _arenaError = string.Empty;
+        string _arenaNotice = string.Empty;
         CommandKind _activeCommand;
 
         enum CommandKind { None, Doctor, Control }
@@ -196,18 +200,162 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("HexWars ML Lab", EditorStyles.boldLabel);
             EditorGUILayout.LabelField("Configure, launch, monitor, reconnect to, and watch headless experiments.", EditorStyles.wordWrappedMiniLabel);
             EditorGUILayout.Space(4);
+            _tab = GUILayout.Toolbar(_tab, new[] { "Train", "Arena" });
+            EditorGUILayout.Space(4);
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
-            DrawRunPicker();
-            EditorGUILayout.Space(6);
-            DrawTrainingForm();
-            EditorGUILayout.Space(8);
-            DrawControls();
-            EditorGUILayout.Space(8);
-            DrawStatus();
-            EditorGUILayout.Space(8);
-            DrawLogs();
+            if (_tab == 0)
+            {
+                DrawRunPicker();
+                EditorGUILayout.Space(6);
+                DrawTrainingForm();
+                EditorGUILayout.Space(8);
+                DrawControls();
+                EditorGUILayout.Space(8);
+                DrawStatus();
+                EditorGUILayout.Space(8);
+                DrawLogs();
+            }
+            else DrawArena();
             EditorGUILayout.EndScrollView();
         }
+
+        void DrawArena()
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Arbitrary model arena", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField(
+                "Each seat may be scripted, a fixed checkpoint/run, or a live run. Live weights refresh only between games.",
+                EditorStyles.wordWrappedMiniLabel);
+            DrawArenaSeat("Seat 0", _arena.P0);
+            EditorGUILayout.Space(4);
+            DrawArenaSeat("Seat 1", _arena.P1);
+            EditorGUILayout.Space(5);
+            _arena.Seed = EditorGUILayout.IntField("Initial seed", _arena.Seed);
+            _arena.SecondsPerAction = EditorGUILayout.FloatField("Seconds per action", _arena.SecondsPerAction);
+            _arena.Loop = EditorGUILayout.ToggleLeft("Loop games", _arena.Loop);
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.Space(6);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Resolved before launch", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Seat 0", DescribeSeat(_arena.P0), EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("Seat 1", DescribeSeat(_arena.P1), EditorStyles.wordWrappedLabel);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Launch arena", GUILayout.Height(28))) LaunchArena();
+            var driver = EditorApplication.isPlaying ? FindAnyObjectByType<ModelDuelDriver>() : null;
+            using (new EditorGUI.DisabledScope(driver == null))
+            {
+                if (GUILayout.Button(driver != null && driver.Paused ? "Resume" : "Pause", GUILayout.Height(28)))
+                    driver.SetPaused(!driver.Paused);
+                if (GUILayout.Button("Stop", GUILayout.Height(28)))
+                {
+                    driver.StopDuel();
+                    EditorApplication.ExitPlaymode();
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            if (!string.IsNullOrWhiteSpace(_arenaNotice)) EditorGUILayout.HelpBox(_arenaNotice, MessageType.Info);
+            if (!string.IsNullOrWhiteSpace(_arenaError)) EditorGUILayout.HelpBox(_arenaError, MessageType.Error);
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.Space(6);
+            DrawArenaRuntime(driver);
+        }
+
+        void DrawArenaSeat(string label, ModelSeatConfiguration seat)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            seat.Kind = (ModelControllerKind)EditorGUILayout.EnumPopup("Controller", seat.Kind);
+            if (seat.IsModel)
+            {
+                EditorGUILayout.BeginHorizontal();
+                seat.Path = EditorGUILayout.TextField(seat.Kind == ModelControllerKind.FixedCheckpoint
+                    ? "Checkpoint" : "Run directory", seat.Path);
+                if ((seat.Kind == ModelControllerKind.FixedRun || seat.Kind == ModelControllerKind.LiveRun) &&
+                    GUILayout.Button("Use selected", GUILayout.Width(92))) seat.Path = _selectedRun;
+                EditorGUILayout.EndHorizontal();
+                if (seat.Kind == ModelControllerKind.FixedCheckpoint)
+                    seat.Algorithm = (MlModelAlgorithm)EditorGUILayout.EnumPopup("Algorithm", seat.Algorithm);
+            }
+        }
+
+        string DescribeSeat(ModelSeatConfiguration seat)
+        {
+            if (seat == null) return "missing configuration";
+            if (!seat.IsModel) return seat.Kind.ToString();
+            if (string.IsNullOrWhiteSpace(seat.Path)) return "model path required";
+            if (seat.Kind == ModelControllerKind.FixedCheckpoint)
+                return $"fixed legacy checkpoint · {seat.Algorithm} · {seat.Path}";
+            string manifest = Path.Combine(seat.Path, "run.json");
+            if (!File.Exists(manifest)) return "run metadata not found · " + manifest;
+            try
+            {
+                var data = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifest));
+                string mode = seat.Kind == ModelControllerKind.LiveRun ? "live (reloads between games)" : "fixed";
+                return $"{mode} · {data?.config?.algorithm ?? "unknown algorithm"} · " +
+                       $"step {data?.latest_checkpoint_step ?? 0:N0} · {data?.latest_checkpoint ?? "no checkpoint"}";
+            }
+            catch (Exception error) { return "invalid run metadata · " + error.Message; }
+        }
+
+        void LaunchArena()
+        {
+            _arenaError = string.Empty;
+            _arenaNotice = string.Empty;
+            var errors = new List<string>(_arena.Validate());
+            ValidateSeatFiles(_arena.P0, "Seat 0", errors);
+            ValidateSeatFiles(_arena.P1, "Seat 1", errors);
+            if (!File.Exists(PythonExe)) errors.Add("Python environment not found: " + PythonExe);
+            if (errors.Count > 0) { _arenaError = string.Join("\n", errors); return; }
+            ReplayViewerMenu.LaunchDuel(
+                PythonDir, _arena.P0.BuildSpec(), _arena.P1.BuildSpec(), _arena.Loop,
+                _arena.Seed, _arena.SecondsPerAction);
+            _arenaNotice = "Arena launched. Resolved checkpoints appear here after the policy bridge is ready.";
+        }
+
+        static void ValidateSeatFiles(ModelSeatConfiguration seat, string label, List<string> errors)
+        {
+            if (seat == null || !seat.IsModel || string.IsNullOrWhiteSpace(seat.Path)) return;
+            if (seat.Kind == ModelControllerKind.FixedCheckpoint && !File.Exists(seat.Path))
+                errors.Add(label + " checkpoint does not exist: " + seat.Path);
+            if ((seat.Kind == ModelControllerKind.FixedRun || seat.Kind == ModelControllerKind.LiveRun) &&
+                !File.Exists(Path.Combine(seat.Path, "run.json")))
+                errors.Add(label + " run.json does not exist: " + seat.Path);
+        }
+
+        void DrawArenaRuntime(ModelDuelDriver driver)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Arena runtime", EditorStyles.boldLabel);
+            if (driver == null)
+            {
+                EditorGUILayout.LabelField("Arena is not running.");
+                EditorGUILayout.EndVertical();
+                return;
+            }
+            driver.SecondsPerAction = Mathf.Max(0.01f, _arena.SecondsPerAction);
+            driver.Loop = _arena.Loop;
+            EditorGUILayout.LabelField("State", driver.IsDone ? "stopped" : driver.IsStarting ? "loading models" : driver.Paused ? "paused" : "playing");
+            EditorGUILayout.LabelField("Seed", driver.Seed.ToString());
+            EditorGUILayout.LabelField("Current seat", driver.CurrentSeat.ToString());
+            EditorGUILayout.LabelField("Tally (P0 / P1 / Draw)", $"{driver.P0Wins} / {driver.P1Wins} / {driver.Draws}");
+            EditorGUILayout.LabelField("Seat 0 loaded", FormatResolved(driver.P0Resolved), EditorStyles.wordWrappedLabel);
+            EditorGUILayout.LabelField("Seat 1 loaded", FormatResolved(driver.P1Resolved), EditorStyles.wordWrappedLabel);
+            EditorGUILayout.EndVertical();
+            Repaint();
+        }
+
+        static string FormatResolved(PolicySeatInfo info) => info == null
+            ? "scripted or loading"
+            : $"{info.Algorithm} · step {info.Step:N0} · {info.Path} · contract {info.ContractHash}";
+
+        [Serializable] sealed class ArenaRunManifest
+        {
+            public ArenaRunConfig config;
+            public string latest_checkpoint;
+            public long latest_checkpoint_step;
+        }
+        [Serializable] sealed class ArenaRunConfig { public string algorithm; }
 
         void DrawRunPicker()
         {

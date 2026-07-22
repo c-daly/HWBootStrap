@@ -58,6 +58,14 @@ class Seat:
         return self.resolved.metadata()
 
 
+def seat_models(seats):
+    """Array-shaped metadata for Unity's structured JSON DTO parser."""
+    return [
+        {"seat": index, **seat.metadata()}
+        for index, seat in sorted(seats.items())
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--p0", default=None, help="legacy spec, JSON controller, run:PATH, or @controller.json")
@@ -78,7 +86,12 @@ def main():
     def seat_metadata():
         return {str(index): seat.metadata() for index, seat in seats.items()}
 
-    print(json.dumps({"ready": True, "model_seats": sorted(seats.keys()), "seats": seat_metadata()}), flush=True)
+    print(json.dumps({
+        "ready": True,
+        "model_seats": sorted(seats.keys()),
+        "seats": seat_metadata(),
+        "seat_models": seat_models(seats),
+    }), flush=True)
 
     for line in sys.stdin:
         line = line.strip()
@@ -89,15 +102,25 @@ def main():
         if cmd == "close":
             break
         if cmd == "reload":
-            changed = [i for i, s in seats.items() if s.reload()]
-            print(json.dumps({"reloaded": changed, "seats": seat_metadata()}), flush=True)
+            try:
+                changed = [i for i, s in seats.items() if s.reload()]
+                print(json.dumps({
+                    "reloaded": changed,
+                    "seats": seat_metadata(),
+                    "seat_models": seat_models(seats),
+                }), flush=True)
+            except Exception as error:
+                print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
             continue
-        seat = seats[int(msg["seat"])]
-        obs = np.asarray(msg["obs"], dtype=np.float32)
-        mask = np.asarray(msg["mask"], dtype=bool)
-        validate_inference_input(seat.resolved, obs, mask)
-        assert seat.resolved.model is not None and seat.resolved.algorithm is not None
-        print(json.dumps({"action": predict(seat.resolved.model, seat.resolved.algorithm, obs, mask)}), flush=True)
+        try:
+            seat = seats[int(msg["seat"])]
+            obs = np.asarray(msg["obs"], dtype=np.float32)
+            mask = np.asarray(msg["mask"], dtype=bool)
+            validate_inference_input(seat.resolved, obs, mask)
+            assert seat.resolved.model is not None and seat.resolved.algorithm is not None
+            print(json.dumps({"action": predict(seat.resolved.model, seat.resolved.algorithm, obs, mask)}), flush=True)
+        except Exception as error:
+            print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
 
 
 if __name__ == "__main__":

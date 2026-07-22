@@ -93,7 +93,7 @@ namespace HexWars.Presentation.EditorTools
             if (string.IsNullOrEmpty(dir)) return;
             string p1 = PickSpec("Opponent model — Cancel for greedy", pyDir);
             if (p1 == null) return;
-            string learner = ResolveModelSpec(dir);
+            string learner = ResolveLiveRunSpec(dir);
             if (learner == null) return;
             LaunchDuel(pyDir, learner, p1, loop: true);
         }
@@ -104,8 +104,11 @@ namespace HexWars.Presentation.EditorTools
             if (string.IsNullOrWhiteSpace(runDirectory)) return;
             string pyDir = PyDir();
             if (!PyReady(pyDir)) return;
-            string checkpoints = System.IO.Path.Combine(runDirectory, "checkpoints");
-            string learner = ResolveModelSpec(checkpoints);
+            string learner = new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = runDirectory,
+            }.BuildSpec();
             if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true);
         }
 
@@ -123,7 +126,8 @@ namespace HexWars.Presentation.EditorTools
             return false;
         }
 
-        static void LaunchDuel(string pyDir, string p0, string p1, bool loop)
+        public static void LaunchDuel(
+            string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f)
         {
             string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
             string server = System.IO.Path.Combine(pyDir, "policy_server.py");
@@ -141,7 +145,8 @@ namespace HexWars.Presentation.EditorTools
             go.AddComponent<BoardRenderer>();
             var d = go.AddComponent<ModelDuelDriver>();
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
-            d.P0Spec = p0; d.P1Spec = p1; d.Seed = 0; d.Loop = loop;
+            d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
+            d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 
             var es = new GameObject("EventSystem");
@@ -203,6 +208,21 @@ namespace HexWars.Presentation.EditorTools
                 if (System.IO.File.Exists(manifest)) return manifest;
             }
             return null;
+        }
+
+        static string ResolveLiveRunSpec(string modelPath)
+        {
+            string manifest = FindRunManifest(modelPath);
+            if (manifest == null)
+            {
+                UnityEngine.Debug.LogError("HexWars: live training requires a metadata-backed run.");
+                return null;
+            }
+            return new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = System.IO.Path.GetDirectoryName(manifest),
+            }.BuildSpec();
         }
     }
 }
