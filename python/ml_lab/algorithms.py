@@ -210,7 +210,10 @@ class MaskedDQNAdapter:
 
 def _checkpoint_info(contract: EnvironmentContract) -> dict[str, Any]:
     return {
+        "environment": contract.environment,
+        "contract_version": contract.version,
         "contract_hash": contract.contract_hash,
+        "encoding_hash": contract.encoding_hash,
         "observation_size": contract.observation_size,
         "action_size": contract.action_size,
     }
@@ -251,12 +254,9 @@ def resolve_resume_checkpoint(
         checkpoint = Path(run_or_checkpoint)
         if checkpoint.suffix.lower() != ".zip":
             raise ValueError("legacy resume source must be a .zip checkpoint")
-        if not allow_unsafe_legacy_resume:
-            raise ValueError(
-                "resume requires authoritative run metadata; use the explicit unsafe legacy "
-                "resume option only for trusted standalone checkpoints"
-            )
-        return checkpoint.resolve()
+        raise ValueError(
+            "standalone checkpoint resume is unsupported; use a metadata-backed run directory"
+        )
 
     manifest = read_json(manifest_path)
     config = manifest.get("config", {})

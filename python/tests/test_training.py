@@ -25,11 +25,18 @@ from ml_lab.tracking import TrackerHub
 from ml_lab.training import run_training
 
 
+ADAPTIVE_MONITOR_HEADER = [
+    "episode", "design_count", "distinct_custom_templates_deployed",
+    "deployment_completed", "invalid_sequences", "pregame_decisions",
+]
+
+
 @pytest.fixture
 def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="b" * 64,
+        encoding_hash="c" * 64,
         observation_size=3,
         action_size=2,
         board={"width": 1, "height": 1},
@@ -84,6 +91,7 @@ class FakeGymEnv(gym.Env):
         self.contract = EnvironmentContract(
             version="tactical-v1",
             contract_hash="b" * 64,
+            encoding_hash="c" * 64,
             observation_size=3,
             action_size=2,
             board={"width": 1, "height": 1},
@@ -123,6 +131,7 @@ class SpawnCleanupProbeEnv(gym.Env):
         self.contract = EnvironmentContract(
             version="tactical-v1",
             contract_hash="b" * 64,
+            encoding_hash="c" * 64,
             observation_size=3,
             action_size=2,
             board={"width": 1, "height": 1},
@@ -151,6 +160,17 @@ class SpawnCleanupProbeEnv(gym.Env):
 
     def close(self) -> None:
         self._record("closed")
+
+
+class AdaptiveVectorProbeEnv(FakeGymEnv):
+    def __init__(self, worker: int) -> None:
+        super().__init__(worker)
+        self.contract = replace(
+            self.contract,
+            version="adaptive-v1",
+            contract_hash="f" * 64,
+            semantics={"max_controllable_units": 24},
+        )
 
 
 def _spawn_cleanup_probe(marker_path: str, *, fail_step: bool = False) -> SpawnCleanupProbeEnv:
@@ -308,6 +328,138 @@ def test_episode_monitor_emits_sb3_episode_info(tmp_path: Path) -> None:
     assert info["episode"]["episode_number"] == 1
 
 
+class AdaptiveEpisodeEnv(FakeGymEnv):
+    def __init__(self) -> None:
+        super().__init__(0)
+        self.contract = replace(
+            self.contract,
+            version="adaptive-v1",
+            contract_hash="e" * 64,
+            semantics={"max_controllable_units": 24},
+        )
+
+    def step(self, action):
+        observation, reward, terminated, truncated, _ = super().step(action)
+        return observation, reward, terminated, truncated, {
+            "diagnostics": {
+                "design_count": 2,
+                "distinct_custom_templates_deployed": 1,
+                "deployment_completed": True,
+                "invalid_sequences": 3,
+                "pregame_decisions": 12,
+            }
+        }
+
+
+def test_adaptive_episode_monitor_writes_exactly_one_diagnostic_row(tmp_path: Path) -> None:
+    monitored = EpisodeMonitor(
+        AdaptiveEpisodeEnv(), tmp_path / "monitor.csv", threading.Lock()
+    )
+
+    monitored.reset(seed=1)
+    monitored.step(0)
+
+    with (tmp_path / "adaptive_episodes.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.reader(stream))
+    assert rows == [ADAPTIVE_MONITOR_HEADER, ["0:1", "2", "1", "True", "3", "12"]]
+
+
+def test_tactical_episode_monitor_does_not_create_adaptive_sidecar(tmp_path: Path) -> None:
+    monitored = EpisodeMonitor(FakeGymEnv(0), tmp_path / "monitor.csv", threading.Lock())
+
+    monitored.reset(seed=1)
+    monitored.step(0)
+
+    assert not (tmp_path / "adaptive_episodes.csv").exists()
+
+
+def test_training_factory_forwards_environment_to_worker_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[str] = []
+
+    def fake_client(server_cmd, *, opponent, seat, base_seed, environment):
+        del server_cmd, opponent
+        captured.append(environment)
+        return FakeGymEnv(0, seat, base_seed)
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_client)
+    adaptive = replace(config("adaptive-worker"), workers=1, environment="adaptive-v1")
+    vector = env_module.TrainingEnvironmentFactory(["fake-server"])(adaptive, tmp_path)
+    try:
+        assert captured == ["adaptive-v1"]
+        assert vector.action_masks().shape == (1, adaptive.workers + 1)
+    finally:
+        vector.close()
+
+
+@pytest.mark.parametrize("worker_count,subprocess_workers", [(1, False), (2, True)])
+def test_adaptive_vector_workers_keep_identical_contract_and_boolean_masks(
+    worker_count: int, subprocess_workers: bool
+) -> None:
+    vector = build_vector_env(
+        worker_count,
+        lambda worker_index: AdaptiveVectorProbeEnv(worker_index),
+        subprocess_workers=subprocess_workers,
+    )
+    try:
+        masks = vector.action_masks()
+        assert vector.contract.version == "adaptive-v1"
+        assert masks.shape == (worker_count, 2)
+        assert masks.dtype == np.bool_
+        assert all(contract == vector.contract for contract in vector.get_attr("contract"))
+    finally:
+        vector.close()
+
+
+def _write_adaptive_diagnostics(worker_index: int, root: str, episode_count: int) -> None:
+    path = Path(root)
+    monitored = EpisodeMonitor(
+        AdaptiveEpisodeEnv(),
+        path / f"monitor.worker_{worker_index}.csv",
+        threading.Lock(),
+        worker_id=worker_index,
+        adaptive_path=path / f"adaptive_episodes.worker_{worker_index}.csv",
+    )
+    for episode in range(episode_count):
+        monitored.reset(seed=worker_index * episode_count + episode)
+        monitored.step(0)
+    monitored.close()
+
+
+def test_four_spawned_workers_write_unambiguous_diagnostics_without_contention(
+    tmp_path: Path,
+) -> None:
+    context = mp.get_context("spawn")
+    processes = [
+        context.Process(target=_write_adaptive_diagnostics, args=(worker, str(tmp_path), 25))
+        for worker in range(4)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15.0)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=2.0)
+
+    identities: list[str] = []
+    for worker_index in range(4):
+        path = tmp_path / f"adaptive_episodes.worker_{worker_index}.csv"
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 25
+        identities.extend(row["episode"] for row in rows)
+    assert len(identities) == len(set(identities)) == 100
+
+
 class FakeCheckpointAdapter:
     name = "maskable_ppo"
     policy_name = "HexCNN"
@@ -328,7 +480,10 @@ class FakeCheckpointAdapter:
         self.inspected.append(path)
         assert path.read_bytes().startswith(b"model-")
         return {
+            "environment": expected_contract.environment,
+            "contract_version": expected_contract.version,
             "contract_hash": expected_contract.contract_hash,
+            "encoding_hash": expected_contract.encoding_hash,
             "observation_size": expected_contract.observation_size,
             "action_size": expected_contract.action_size,
         }

@@ -24,6 +24,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="abc123",
+        encoding_hash="a" * 64,
         observation_size=761,
         action_size=379,
         board={"width": 13, "height": 9},
@@ -186,7 +187,10 @@ def test_publish_checkpoint_validates_then_atomically_updates_latest(
         step=100,
         expected_contract=contract,
         inspector=lambda _: {
+            "environment": contract.environment,
+            "contract_version": contract.version,
             "contract_hash": contract.contract_hash,
+            "encoding_hash": contract.encoding_hash,
             "observation_size": contract.observation_size,
             "action_size": contract.action_size,
         },
@@ -227,7 +231,10 @@ def test_publish_checkpoint_stages_final_replace_inside_checkpoint_directory(
         step=200,
         expected_contract=contract,
         inspector=lambda _: {
+            "environment": contract.environment,
+            "contract_version": contract.version,
             "contract_hash": contract.contract_hash,
+            "encoding_hash": contract.encoding_hash,
             "observation_size": contract.observation_size,
             "action_size": contract.action_size,
         },
@@ -244,16 +251,19 @@ def test_publish_checkpoint_rejects_incompatible_model_without_mutating_run(
     run = create_run(tmp_path, config, contract)
     pending = tmp_path / "pending.zip"
     pending.write_bytes(b"model")
-    incompatible = replace(contract, contract_hash="different")
+    incompatible = replace(contract, encoding_hash="b" * 64)
 
-    with pytest.raises(ContractMismatch, match="contract hash"):
+    with pytest.raises(ContractMismatch, match="encoding hash"):
         publish_checkpoint(
             source=pending,
             run_dir=run,
             step=100,
             expected_contract=contract,
             inspector=lambda _: {
+                "environment": incompatible.environment,
+                "contract_version": incompatible.version,
                 "contract_hash": incompatible.contract_hash,
+                "encoding_hash": incompatible.encoding_hash,
                 "observation_size": incompatible.observation_size,
                 "action_size": incompatible.action_size,
             },

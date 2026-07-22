@@ -73,6 +73,7 @@ object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, En
     {
         contract_version = contract.Version,
         contract_hash = contract.ContractHash,
+        encoding_hash = contract.EncodingHash,
         environment_kind = contract.EnvironmentKind,
         obs_len = obsLen,
         n_actions = nActions,
@@ -101,6 +102,7 @@ object AdaptiveSpaces(AdaptiveLayout layout, AdaptiveEnvConfig config, MlContrac
     {
         contract_version = contract.Version,
         contract_hash = contract.ContractHash,
+        encoding_hash = contract.EncodingHash,
         environment_kind = contract.EnvironmentKind,
         obs_len = layout.ObservationLength,
         n_actions = layout.ActionCount,

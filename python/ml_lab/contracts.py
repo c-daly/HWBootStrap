@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -20,6 +20,14 @@ RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_STATES = {"created", "running", "stopping", "stopped", "completed", "failed"}
 PROGRESS_HEADER = ["timestamp", "timesteps", "episodes", "mean_reward", "steps_per_second"]
 MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
+ADAPTIVE_MONITOR_HEADER = [
+    "episode",
+    "design_count",
+    "distinct_custom_templates_deployed",
+    "deployment_completed",
+    "invalid_sequences",
+    "pregame_decisions",
+]
 TRACKER_CREDENTIAL_PARTS = {"token", "secret", "password"}
 
 
@@ -31,14 +39,24 @@ class ContractMismatch(ValueError):
 class EnvironmentContract:
     version: str
     contract_hash: str
+    encoding_hash: str
     observation_size: int
     action_size: int
     board: Mapping[str, Any]
     roster: list[str]
     reward: Mapping[str, Any]
+    semantics: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.encoding_hash):
+            raise ValueError("encoding_hash must be a lowercase SHA-256 hex digest")
+
+    @property
+    def environment(self) -> str:
+        return self.version
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {"environment": self.environment, **asdict(self)}
 
 
 @dataclass(frozen=True)
@@ -58,11 +76,14 @@ class RunConfig:
     resume_source: str | None
     timestep_mode: str = "absolute"
     allow_unsafe_legacy_resume: bool = False
+    environment: str = "tactical-v1"
 
     def to_dict(self) -> dict[str, Any]:
         validate_tracker_specs(self.trackers)
         if self.timestep_mode not in {"absolute", "additional"}:
             raise ValueError("timestep mode must be 'absolute' or 'additional'")
+        if self.environment not in {"tactical-v1", "adaptive-v1"}:
+            raise ValueError("environment must be 'tactical-v1' or 'adaptive-v1'")
         return asdict(self)
 
 
@@ -116,6 +137,8 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     """Create a new experiment directory; existing runs are never overwritten."""
     validate_run_name(config.run_name)
     config_data = config.to_dict()
+    if config.environment != contract.environment:
+        raise ContractMismatch("run environment does not match the environment contract")
     contract_data = contract.to_dict()
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -153,6 +176,14 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     for monitor_file in monitor_files:
         if monitor_file != "monitor.csv":
             _write_csv_header(run_dir / monitor_file, MONITOR_HEADER)
+    if config.environment == "adaptive-v1":
+        adaptive_monitor_files = (
+            ["adaptive_episodes.csv"]
+            if config.workers == 1
+            else [f"adaptive_episodes.worker_{index}.csv" for index in range(config.workers)]
+        )
+        for monitor_file in adaptive_monitor_files:
+            _write_csv_header(run_dir / monitor_file, ADAPTIVE_MONITOR_HEADER)
     (run_dir / "train.log").touch(exist_ok=False)
     return run_dir
 
@@ -183,10 +214,14 @@ def request_stop(run_dir: Path, *, after_checkpoint: bool) -> dict[str, Any]:
 
 
 def _validate_model_contract(model_info: Mapping[str, Any], expected: EnvironmentContract) -> None:
-    if model_info.get("contract_hash") != expected.contract_hash:
+    if model_info.get("environment") != expected.environment:
+        raise ContractMismatch("model environment does not match the environment contract")
+    if model_info.get("contract_version") != expected.version:
+        raise ContractMismatch("model contract version does not match the environment contract")
+    if model_info.get("encoding_hash") != expected.encoding_hash:
         raise ContractMismatch(
-            f"model contract hash {model_info.get('contract_hash')!r} does not match "
-            f"environment contract hash {expected.contract_hash!r}"
+            f"model encoding hash {model_info.get('encoding_hash')!r} does not match "
+            f"environment encoding hash {expected.encoding_hash!r}"
         )
     if model_info.get("observation_size") != expected.observation_size:
         raise ContractMismatch("model observation size does not match the environment")

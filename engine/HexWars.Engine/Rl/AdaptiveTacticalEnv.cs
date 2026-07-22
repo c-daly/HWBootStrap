@@ -46,6 +46,7 @@ namespace HexWars.Engine.Rl
             _view = _seat == PlayerId.Player0
                 ? _duel.Reset(seed, null, opponent, null, deployment, _seat)
                 : _duel.Reset(seed, opponent, null, deployment, null, _seat);
+            ContinuePastPresentationBoundary();
             EnsureLearnerView();
             _steps = 0;
             return _view.Observation;
@@ -54,14 +55,21 @@ namespace HexWars.Engine.Rl
         public StepResult Step(int action)
         {
             _view = _duel.Step(action);
+            float reward = _view.Reward;
+            ContinuePastPresentationBoundary();
             EnsureLearnerView();
             _steps++;
             bool truncated = !_view.Terminated && (_view.Truncated || _steps >= _cfg.MaxSteps);
-            return new StepResult(_view.Observation, _view.Reward,
+            return new StepResult(_view.Observation, reward,
                 _view.Terminated, truncated, _view.ActionMask);
         }
 
         public bool[] LegalActionMask() => _view.ActionMask;
+
+        private void ContinuePastPresentationBoundary()
+        {
+            if (_duel.AwaitingPostRevealAdvance) _view = _duel.ContinueAfterReveal();
+        }
 
         private void EnsureLearnerView()
         {

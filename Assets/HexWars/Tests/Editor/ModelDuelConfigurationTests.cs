@@ -1,3 +1,5 @@
+using System;
+using HexWars.Engine;
 using HexWars.Presentation;
 using NUnit.Framework;
 
@@ -5,13 +7,13 @@ namespace HexWars.Presentation.Tests
 {
     public sealed class ModelDuelConfigurationTests
     {
-        [TestCase(ModelControllerKind.Greedy, "", MlModelAlgorithm.MaskablePpo, "greedy")]
-        [TestCase(ModelControllerKind.Random, "", MlModelAlgorithm.MaskablePpo, "random")]
-        [TestCase(ModelControllerKind.FixedCheckpoint, "C:/models/a.zip", MlModelAlgorithm.MaskedDqn, "dqn:C:/models/a.zip")]
+        [TestCase(ModelControllerKind.Greedy, "", "greedy")]
+        [TestCase(ModelControllerKind.Random, "", "random")]
+        [TestCase(ModelControllerKind.FixedRun, "C:/runs/a", "run:C:/runs/a")]
         public void SeatSpec_BuildsExplicitControllerIdentity(
-            ModelControllerKind kind, string path, MlModelAlgorithm algorithm, string expected)
+            ModelControllerKind kind, string path, string expected)
         {
-            var seat = new ModelSeatConfiguration { Kind = kind, Path = path, Algorithm = algorithm };
+            var seat = new ModelSeatConfiguration { Kind = kind, Path = path };
 
             Assert.That(seat.BuildSpec(), Is.EqualTo(expected));
         }
@@ -42,10 +44,9 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void LegacyCheckpointDirectory_RemainsLiveForCompatibility()
+        public void ControllerChoices_ExcludeManifestlessCheckpointPaths()
         {
-            Assert.That(ModelDuelDriver.IsLiveRun("ppo:C:/runs/one/checkpoints", _ => true), Is.True);
-            Assert.That(ModelDuelDriver.IsLiveRun("ppo:C:/runs/one/model.zip", _ => false), Is.False);
+            Assert.That(Enum.GetNames(typeof(ModelControllerKind)), Does.Not.Contain("FixedCheckpoint"));
         }
 
         [Test]
@@ -53,12 +54,193 @@ namespace HexWars.Presentation.Tests
         {
             var config = new ModelDuelConfiguration
             {
-                P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.FixedCheckpoint },
+                P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.FixedRun },
                 SecondsPerAction = 0,
             };
 
             Assert.That(config.Validate(), Has.Some.Contains("Seat 0"));
             Assert.That(config.Validate(), Has.Some.Contains("pacing"));
+        }
+
+        [Test]
+        public void Defaults_SelectTacticalEnvironment()
+        {
+            var config = new ModelDuelConfiguration();
+
+            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV1));
+            Assert.That(config.Observer, Is.EqualTo(ModelDuelObserverSeat.Player1));
+            Assert.That(ModelDuelObserver.Resolve(config.Observer), Is.EqualTo(PlayerId.Player0));
+        }
+
+        [Test]
+        public void FixedObserver_DoesNotFollowTheEnvironmentCurrentSeat()
+        {
+            var observer = ModelDuelObserverSeat.Player2;
+
+            Assert.That(ModelDuelObserver.Resolve(observer), Is.EqualTo(PlayerId.Player1));
+            foreach (int currentSeat in new[] { 0, 1 })
+                Assert.That(ModelDuelObserver.Resolve(observer), Is.EqualTo(PlayerId.Player1),
+                    "observer changed with current seat " + currentSeat);
+        }
+
+        [Test]
+        public void ModelContracts_MustMatchSelectedEnvironmentWhileScriptedSeatsInheritIt()
+        {
+            var expected = ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.AdaptiveV1);
+            var adaptive = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"environment\":\"adaptive-v1\",\"contract_version\":\"adaptive-v1\",\"encoding_hash\":\"" + expected.EncodingHash + "\"}]}"
+            ).Seats[0];
+            var tactical = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"environment\":\"tactical-v1\",\"contract_version\":\"tactical-v1\",\"encoding_hash\":\"" + expected.EncodingHash + "\"}]}"
+            ).Seats[0];
+
+            Assert.That(ModelDuelContractCompatibility.Validate(
+                expected, true, adaptive, false, null), Is.Empty);
+            Assert.That(ModelDuelContractCompatibility.Validate(
+                expected, true, tactical, false, null),
+                Has.Some.Contains("Seat 0").And.Contains("adaptive-v1"));
+            Assert.That(ModelDuelContractCompatibility.Validate(
+                expected, false, null, false, null), Is.Empty);
+        }
+
+        [Test]
+        public void ModelContracts_RejectMissingVersionMetadata()
+        {
+            var missing = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":1}]}"
+            ).Seats[0];
+
+            Assert.That(ModelDuelContractCompatibility.Validate(
+                ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.AdaptiveV1),
+                false, null, true, missing),
+                Has.Some.Contains("Seat 1").And.Contains("contract_version"));
+        }
+
+        [Test]
+        public void ModelContracts_RejectMissingOrMismatchedEncodingHash()
+        {
+            var expected = ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.AdaptiveV1);
+            var missing = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"environment\":\"adaptive-v1\",\"contract_version\":\"adaptive-v1\"}]}"
+            ).Seats[0];
+            var mismatched = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"environment\":\"adaptive-v1\",\"contract_version\":\"adaptive-v1\",\"encoding_hash\":\"" + new string('f', 64) + "\"}]}"
+            ).Seats[0];
+
+            Assert.That(ModelDuelContractCompatibility.Validate(expected, true, missing, false, null),
+                Has.Some.Contains("encoding_hash"));
+            Assert.That(ModelDuelContractCompatibility.Validate(expected, true, mismatched, false, null),
+                Has.Some.Contains("encoding hash"));
+        }
+
+        [Test]
+        public void EnvironmentFactory_DerivesExpectedEncodingIdentityFromEngineContract()
+        {
+            var tactical = ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.TacticalV1);
+            var adaptive = ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.AdaptiveV1);
+
+            Assert.That(tactical.Environment, Is.EqualTo("tactical-v1"));
+            Assert.That(tactical.Version, Is.EqualTo("tactical-v1"));
+            Assert.That(tactical.EncodingHash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(adaptive.Environment, Is.EqualTo("adaptive-v1"));
+            Assert.That(adaptive.Version, Is.EqualTo("adaptive-v1"));
+            Assert.That(adaptive.EncodingHash, Does.Match("^[0-9a-f]{64}$"));
+        }
+
+        [Test]
+        public void PresentationState_RendersTacticalThroughoutAndAdaptiveOnlyAfterReveal()
+        {
+            var tactical = new ModelDuelPresentationState(MlEnvironmentContract.TacticalV1);
+            var adaptive = new ModelDuelPresentationState(MlEnvironmentContract.AdaptiveV1);
+
+            Assert.That(tactical.ShouldRender(deploymentComplete: false), Is.True);
+            Assert.That(tactical.ShouldRender(deploymentComplete: true), Is.True);
+            Assert.That(adaptive.ShouldRender(deploymentComplete: false), Is.False);
+            Assert.That(adaptive.ShouldRender(deploymentComplete: true), Is.True);
+        }
+
+        [Test]
+        public void AdaptivePresentation_InitializesExactlyOnceOnAtomicReveal()
+        {
+            var state = new ModelDuelPresentationState(MlEnvironmentContract.AdaptiveV1);
+
+            Assert.That(state.Next(deploymentComplete: false), Is.EqualTo(ModelDuelRenderDirective.Suppress));
+            Assert.That(state.Next(deploymentComplete: false), Is.EqualTo(ModelDuelRenderDirective.Suppress));
+            Assert.That(state.Next(deploymentComplete: true), Is.EqualTo(ModelDuelRenderDirective.Initialize));
+            Assert.That(state.Next(deploymentComplete: true), Is.EqualTo(ModelDuelRenderDirective.Update));
+        }
+
+        [Test]
+        public void EnvironmentFactory_RoutesSelectedContractToMatchingEngineEnvironment()
+        {
+            Assert.That(ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.TacticalV1).Environment,
+                Is.EqualTo(MlEnvironmentContract.TacticalV1));
+            Assert.That(ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1).Environment,
+                Is.EqualTo(MlEnvironmentContract.AdaptiveV1));
+        }
+
+        [Test]
+        public void AdaptiveAdapter_RequestsExternalActionsWithoutExposingStateBeforeReveal()
+        {
+            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
+
+            ModelDuelView view = environment.Reset(seed: 41, controller0: null, controller1: null);
+
+            Assert.That(view.DeploymentComplete, Is.False);
+            Assert.That(environment.CurrentState, Is.Null);
+            int action = Array.FindIndex(view.ActionMask, legal => legal);
+            Assert.That(action, Is.GreaterThanOrEqualTo(0));
+
+            view = environment.Step(action);
+
+            Assert.That(view.DeploymentComplete, Is.False);
+            Assert.That(environment.CurrentState, Is.Null);
+            Assert.That(view.ActionMask, Has.Some.True);
+        }
+
+        [Test]
+        public void AdaptiveAdapter_ExposesRevealBeforeContinuingScriptedGameplay()
+        {
+            var first = new CountingEndTurnAgent();
+            var second = new CountingEndTurnAgent();
+            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
+
+            ModelDuelView reveal = environment.Reset(seed: 43, controller0: first, controller1: second);
+
+            Assert.That(reveal.DeploymentComplete, Is.True);
+            Assert.That(reveal.Seat, Is.Zero);
+            Assert.That(environment.RequiresContinuation, Is.True);
+            Assert.That(first.Calls, Is.Zero);
+
+            environment.Continue();
+
+            Assert.That(environment.RequiresContinuation, Is.False);
+            Assert.That(first.Calls, Is.GreaterThan(0));
+        }
+
+        [Test]
+        public void TacticalAdapter_PreservesImmediateScriptedSeatAdvance()
+        {
+            var first = new CountingEndTurnAgent();
+            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.TacticalV1);
+
+            ModelDuelView view = environment.Reset(seed: 44, controller0: first, controller1: null);
+
+            Assert.That(first.Calls, Is.EqualTo(1));
+            Assert.That(view.Seat, Is.EqualTo(1));
+            Assert.That(view.DeploymentComplete, Is.True);
+            Assert.That(environment.RequiresContinuation, Is.False);
+        }
+
+        sealed class CountingEndTurnAgent : IAgent
+        {
+            public int Calls { get; private set; }
+
+            public Command Decide(GameState state)
+            {
+                Calls++;
+                return new EndTurn(state.ActivePlayer);
+            }
         }
     }
 }

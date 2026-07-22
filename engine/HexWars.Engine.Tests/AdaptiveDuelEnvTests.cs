@@ -63,7 +63,34 @@ namespace HexWars.Engine.Tests
 
             view = DeployExternalSeat(env, view, useCustomTemplate: false);
             Assert.That(env.DeploymentComplete, Is.True);
-            Assert.That(view.Seat, Is.EqualTo(1), "the internal gameplay seat must be guarded past");
+            Assert.That(view.Seat, Is.EqualTo(0), "the atomic reveal must be observable before scripted gameplay");
+            view = env.ContinueAfterReveal();
+            Assert.That(view.Seat, Is.EqualTo(1), "continuation must guard past the internal gameplay seat");
+        }
+
+        [Test]
+        public void Reveal_PausesBeforeScriptedFirstPlayerGameplayUntilExplicitContinuation()
+        {
+            var firstPlayer = new RecordingEndTurnAgent();
+            var env = new AdaptiveDuelEnv();
+            var view = env.Reset(45, firstPlayer, null,
+                new CombinedArmsDeploymentPolicy(1), null, PlayerId.Player1);
+
+            view = DeployExternalSeat(env, view, useCustomTemplate: false);
+
+            Assert.That(env.DeploymentComplete, Is.True);
+            Assert.That(env.AwaitingPostRevealAdvance, Is.True);
+            Assert.That(firstPlayer.Calls, Is.Zero);
+            Assert.That(env.State.ActivePlayer, Is.EqualTo(PlayerId.Player0));
+            Assert.That(view.Seat, Is.Zero);
+
+            view = env.ContinueAfterReveal();
+
+            Assert.That(firstPlayer.Calls, Is.EqualTo(1));
+            Assert.That(env.AwaitingPostRevealAdvance, Is.False);
+            Assert.That(env.State.ActivePlayer, Is.EqualTo(PlayerId.Player1));
+            Assert.That(view.Seat, Is.EqualTo(1));
+            Assert.That(() => env.ContinueAfterReveal(), Throws.InvalidOperationException);
         }
 
         [Test]
@@ -135,9 +162,15 @@ namespace HexWars.Engine.Tests
             using var adaptive = new ServerProcess("--environment", "adaptive-v1");
             using JsonDocument spaces = adaptive.Exchange(new { cmd = "spaces" });
             Assert.That(spaces.RootElement.GetProperty("contract_version").GetString(), Is.EqualTo("adaptive-v1"));
+            string encodingHash = spaces.RootElement.GetProperty("encoding_hash").GetString();
+            Assert.That(encodingHash, Does.Match("^[0-9a-f]{64}$"));
             Assert.That(spaces.RootElement.GetProperty("n_actions").GetInt32(), Is.EqualTo(182));
             Assert.That(spaces.RootElement.GetProperty("obs_len").GetInt32(), Is.EqualTo(5974));
             Assert.That(spaces.RootElement.GetProperty("adaptive").GetProperty("phases").GetArrayLength(), Is.EqualTo(14));
+            using JsonDocument duelSpaces = adaptive.Exchange(new { cmd = "duel_spaces" });
+            Assert.That(duelSpaces.RootElement.GetProperty("encoding_hash").GetString(), Is.EqualTo(encodingHash));
+            Assert.That(duelSpaces.RootElement.GetProperty("contract_hash").GetString(),
+                Is.Not.EqualTo(spaces.RootElement.GetProperty("contract_hash").GetString()));
 
             using JsonDocument reset = adaptive.Exchange(new { cmd = "reset", seed = 77 });
             JsonElement reply = reset.RootElement.Clone();
@@ -229,6 +262,17 @@ namespace HexWars.Engine.Tests
                     new CombinedArmsDeploymentPolicy(13).Choose(view));
                 placements.Add(placements[0]);
                 return placements;
+            }
+        }
+
+        private sealed class RecordingEndTurnAgent : IAgent
+        {
+            public int Calls { get; private set; }
+
+            public Command Decide(GameState state)
+            {
+                Calls++;
+                return new EndTurn(state.ActivePlayer);
             }
         }
 

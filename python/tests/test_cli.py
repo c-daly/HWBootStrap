@@ -19,6 +19,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="c" * 64,
+        encoding_hash="d" * 64,
         observation_size=12,
         action_size=7,
         board={"width": 2, "height": 2},
@@ -43,6 +44,67 @@ def _config(run_name: str) -> RunConfig:
         trackers=[{"kind": "local"}],
         resume_source=None,
     )
+
+
+def test_cli_records_explicit_adaptive_environment(tmp_path: Path) -> None:
+    received: list[RunConfig] = []
+
+    def runner(config: RunConfig, **_kwargs) -> Path:
+        received.append(config)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "adaptive-one", "--environment", "adaptive-v1",
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].environment == "adaptive-v1"
+
+
+def test_resume_manifest_without_explicit_environment_fails_closed(tmp_path: Path) -> None:
+    source = create_run(tmp_path, _config("old-source"), EnvironmentContract(
+        version="tactical-v1", contract_hash="c" * 64, encoding_hash="d" * 64, observation_size=12,
+        action_size=7, board={"width": 2, "height": 2}, roster=["scout"],
+        reward={"terminal_win": 1.0},
+    ))
+    manifest = read_json(source / "run.json")
+    del manifest["config"]["environment"]
+    atomic_write_json(source / "run.json", manifest)
+    output = StringIO()
+    assert cli_module.main([
+        "resume", str(source), "--run", "old-resumed", "--timesteps", "128",
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=lambda *_args, **_kwargs: source, stdout=output) == 1
+    assert "environment" in output.getvalue()
+
+
+def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> None:
+    adaptive_contract = replace(
+        EnvironmentContract(
+            version="tactical-v1", contract_hash="c" * 64, encoding_hash="d" * 64, observation_size=12,
+            action_size=7, board={"width": 2, "height": 2}, roster=["scout"],
+            reward={"terminal_win": 1.0},
+        ),
+        version="adaptive-v1",
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    source = create_run(
+        tmp_path,
+        replace(_config("adaptive-source"), environment="adaptive-v1"),
+        adaptive_contract,
+    )
+    received: list[RunConfig] = []
+
+    def runner(config: RunConfig, **_kwargs) -> Path:
+        received.append(config)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "adaptive-resumed", "--resume", str(source),
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].environment == "adaptive-v1"
 
 
 def _complete_fake_run(runs_root: Path, config: RunConfig) -> Path:
@@ -93,19 +155,20 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
 
     result = doctor_environment(
         server_cmd=["dotnet", "fake-server.dll"],
+        environment="adaptive-v1",
         runs_root=tmp_path,
         trackers=["wandb"],
         package_version=lambda name: package_versions[name],
         dotnet_version=lambda: "8.0.18",
         handshake=lambda command: handshakes.append(tuple(command))
-        or {"contract_version": "tactical-v1", "contract_hash": "c" * 64},
+        or {"contract_version": "adaptive-v1", "contract_hash": "c" * 64},
         cuda_info=lambda: {"available": False, "detail": "CPU-only host"},
         tracker_available=lambda name: False,
         write_probe=lambda path: path == tmp_path,
     )
 
     assert result["ok"] is True
-    assert handshakes == [("dotnet", "fake-server.dll")]
+    assert handshakes == [("dotnet", "fake-server.dll", "--environment", "adaptive-v1")]
     checks = {check["name"]: check for check in result["checks"]}
     assert checks["python:gymnasium"]["detail"] == "1.2.3"
     assert checks["dotnet"]["required"] is True
@@ -134,6 +197,8 @@ def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
     exit_code, payload = _invoke_json(
         [
             "doctor",
+            "--environment",
+            "adaptive-v1",
             "--server",
             "fake-server.dll",
             "--runs-root",
@@ -152,6 +217,7 @@ def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
     assert received == [
         {
             "server_cmd": ["dotnet", "fake-server.dll"],
+            "environment": "adaptive-v1",
             "runs_root": tmp_path,
             "trackers": ["wandb"],
         }
@@ -735,6 +801,8 @@ def test_benchmark_json_reports_headless_protocol_metrics(
     exit_code, payload = _invoke_json(
         [
             "benchmark",
+            "--environment",
+            "adaptive-v1",
             "--games",
             "4",
             "--seed-start",
@@ -755,6 +823,7 @@ def test_benchmark_json_reports_headless_protocol_metrics(
             "seed_start": 50_000,
             "workers": 2,
             "server_cmd": ["dotnet", "fake-server.dll"],
+            "environment": "adaptive-v1",
         }
     ]
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,10 +61,13 @@ def _gymserver_handshake(command: Sequence[str]) -> dict[str, Any]:
     response = json.loads(lines[0])
     version = response.get("contract_version")
     contract_hash = response.get("contract_hash")
+    encoding_hash = response.get("encoding_hash")
     if not isinstance(version, str) or not version:
         raise RuntimeError("GymServer handshake omitted contract_version")
     if not isinstance(contract_hash, str) or not contract_hash:
         raise RuntimeError("GymServer handshake omitted contract_hash")
+    if not isinstance(encoding_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", encoding_hash):
+        raise RuntimeError("GymServer handshake omitted a valid lowercase encoding_hash")
     return response
 
 
@@ -120,6 +124,7 @@ def _attempt(
 def doctor_environment(
     *,
     server_cmd: Sequence[str],
+    environment: str = "tactical-v1",
     runs_root: Path,
     trackers: Sequence[str] = (),
     package_version: PackageVersion = _package_version,
@@ -143,7 +148,7 @@ def doctor_environment(
         _attempt(
             "gymserver_handshake",
             True,
-            lambda: handshake(tuple(server_cmd)),
+            lambda: handshake((*server_cmd, "--environment", environment)),
             lambda value: (
                 f"{value.get('contract_version')} {value.get('contract_hash')}"
             ),

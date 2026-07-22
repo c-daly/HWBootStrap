@@ -82,14 +82,13 @@ namespace HexWars.Presentation.Tests
             Assert.That(report.Summary, Does.Contain("unreadable"));
         }
 
-        [TestCase("maskable_ppo", "ppo:")]
-        [TestCase("masked_dqn", "dqn:")]
-        [TestCase("other", null)]
-        public void ModelAlgorithm_IsResolvedOnlyFromRunMetadata(string algorithm, string expected)
+        [TestCase("tactical-v1", MlEnvironmentContract.TacticalV1)]
+        [TestCase("adaptive-v1", MlEnvironmentContract.AdaptiveV1)]
+        public void ArenaEnvironment_IsResolvedFromRunMetadata(string contract, MlEnvironmentContract expected)
         {
-            string json = "{\"config\":{\"algorithm\":\"" + algorithm + "\"}}";
+            string json = "{\"contract\":{\"version\":\"" + contract + "\"}}";
 
-            Assert.That(HexWars.Presentation.EditorTools.ReplayViewerMenu.AlgorithmPrefixFromManifest(json),
+            Assert.That(HexWars.Presentation.EditorTools.ReplayViewerMenu.EnvironmentFromRunManifest(json),
                 Is.EqualTo(expected));
         }
     }

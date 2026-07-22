@@ -222,8 +222,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Arbitrary model arena", EditorStyles.boldLabel);
             EditorGUILayout.LabelField(
-                "Each seat may be scripted, a fixed checkpoint/run, or a live run. Live weights refresh only between games.",
+                "Each seat may be scripted, a metadata-backed fixed run, or a live run. Live weights refresh only between games.",
                 EditorStyles.wordWrappedMiniLabel);
+            _arena.Environment = (MlEnvironmentContract)EditorGUILayout.EnumPopup(
+                "Environment", _arena.Environment);
+            _arena.Observer = (ModelDuelObserverSeat)EditorGUILayout.EnumPopup(
+                "Observer", _arena.Observer);
+            DrawEnvironmentSummary(MlEnvironmentSummary.ForSelection(_arena.Environment), "Arena preflight");
             DrawArenaSeat("Seat 0", _arena.P0);
             EditorGUILayout.Space(4);
             DrawArenaSeat("Seat 1", _arena.P1);
@@ -267,13 +272,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (seat.IsModel)
             {
                 EditorGUILayout.BeginHorizontal();
-                seat.Path = EditorGUILayout.TextField(seat.Kind == ModelControllerKind.FixedCheckpoint
-                    ? "Checkpoint" : "Run directory", seat.Path);
+                seat.Path = EditorGUILayout.TextField("Run directory", seat.Path);
                 if ((seat.Kind == ModelControllerKind.FixedRun || seat.Kind == ModelControllerKind.LiveRun) &&
                     GUILayout.Button("Use selected", GUILayout.Width(92))) seat.Path = _selectedRun;
                 EditorGUILayout.EndHorizontal();
-                if (seat.Kind == ModelControllerKind.FixedCheckpoint)
-                    seat.Algorithm = (MlModelAlgorithm)EditorGUILayout.EnumPopup("Algorithm", seat.Algorithm);
             }
         }
 
@@ -282,15 +284,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (seat == null) return "missing configuration";
             if (!seat.IsModel) return seat.Kind.ToString();
             if (string.IsNullOrWhiteSpace(seat.Path)) return "model path required";
-            if (seat.Kind == ModelControllerKind.FixedCheckpoint)
-                return $"fixed legacy checkpoint · {seat.Algorithm} · {seat.Path}";
             string manifest = Path.Combine(seat.Path, "run.json");
             if (!File.Exists(manifest)) return "run metadata not found · " + manifest;
             try
             {
                 var data = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifest));
+                var environment = MlEnvironmentSummary.FromRunManifest(File.ReadAllText(manifest));
                 string mode = seat.Kind == ModelControllerKind.LiveRun ? "live (reloads between games)" : "fixed";
-                return $"{mode} · {data?.config?.algorithm ?? "unknown algorithm"} · " +
+                return $"{mode} · {environment.ContractVersion} · {data?.config?.algorithm ?? "unknown algorithm"} · " +
                        $"step {data?.latest_checkpoint_step ?? 0:N0} · {data?.latest_checkpoint ?? "no checkpoint"}";
             }
             catch (Exception error) { return "invalid run metadata · " + error.Message; }
@@ -307,15 +308,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (errors.Count > 0) { _arenaError = string.Join("\n", errors); return; }
             ReplayViewerMenu.LaunchDuel(
                 PythonDir, _arena.P0.BuildSpec(), _arena.P1.BuildSpec(), _arena.Loop,
-                _arena.Seed, _arena.SecondsPerAction);
+                _arena.Seed, _arena.SecondsPerAction, _arena.Environment, _arena.Observer);
             _arenaNotice = "Arena launched. Resolved checkpoints appear here after the policy bridge is ready.";
         }
 
         static void ValidateSeatFiles(ModelSeatConfiguration seat, string label, List<string> errors)
         {
             if (seat == null || !seat.IsModel || string.IsNullOrWhiteSpace(seat.Path)) return;
-            if (seat.Kind == ModelControllerKind.FixedCheckpoint && !File.Exists(seat.Path))
-                errors.Add(label + " checkpoint does not exist: " + seat.Path);
             if ((seat.Kind == ModelControllerKind.FixedRun || seat.Kind == ModelControllerKind.LiveRun) &&
                 !File.Exists(Path.Combine(seat.Path, "run.json")))
                 errors.Add(label + " run.json does not exist: " + seat.Path);
@@ -334,6 +333,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             driver.SecondsPerAction = Mathf.Max(0.01f, _arena.SecondsPerAction);
             driver.Loop = _arena.Loop;
             EditorGUILayout.LabelField("State", driver.IsDone ? "stopped" : driver.IsStarting ? "loading models" : driver.Paused ? "paused" : "playing");
+            EditorGUILayout.LabelField("Environment", MlEnvironmentContracts.CliValue(driver.Environment));
             EditorGUILayout.LabelField("Seed", driver.Seed.ToString());
             EditorGUILayout.LabelField("Current seat", driver.CurrentSeat.ToString());
             EditorGUILayout.LabelField("Tally (P0 / P1 / Draw)", $"{driver.P0Wins} / {driver.P1Wins} / {driver.Draws}");
@@ -345,7 +345,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         static string FormatResolved(PolicySeatInfo info) => info == null
             ? "scripted or loading"
-            : $"{info.Algorithm} · step {info.Step:N0} · {info.Path} · contract {info.ContractHash}";
+            : $"{info.Algorithm} · step {info.Step:N0} · {info.Path} · " +
+              $"{info.ContractVersion} contract {info.ContractHash}";
 
         [Serializable] sealed class ArenaRunManifest
         {
@@ -390,6 +391,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 EditorGUILayout.EndHorizontal();
             }
             _config.RunName = EditorGUILayout.TextField("New run name", _config.RunName);
+            using (new EditorGUI.DisabledScope(_resume))
+                _config.Environment = (MlEnvironmentContract)EditorGUILayout.EnumPopup(
+                    "Environment", _config.Environment);
+            MlEnvironmentSummary trainingSummary = _resume
+                ? LoadRunEnvironmentSummary(_config.ResumeSource)
+                : MlEnvironmentSummary.ForSelection(_config.Environment);
+            DrawEnvironmentSummary(trainingSummary, _resume ? "Source run contract" : "Training preflight");
             _config.Algorithm = (MlAlgorithm)EditorGUILayout.EnumPopup("SB3 algorithm", _config.Algorithm);
             _config.TotalTimesteps = EditorGUILayout.LongField("Target timesteps", _config.TotalTimesteps);
             _config.Seed = EditorGUILayout.IntField("Seed", _config.Seed);
@@ -400,11 +408,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!_resume)
             {
                 _config.OpponentKind = (MlOpponentKind)EditorGUILayout.EnumPopup("Opponent", _config.OpponentKind);
-                if (_config.OpponentKind == MlOpponentKind.FixedCheckpoint || _config.OpponentKind == MlOpponentKind.LiveRun)
+                if (_config.OpponentKind == MlOpponentKind.FixedRun || _config.OpponentKind == MlOpponentKind.LiveRun)
                 {
                     _config.OpponentPath = EditorGUILayout.TextField("Opponent path", _config.OpponentPath);
-                    if (_config.OpponentKind == MlOpponentKind.FixedCheckpoint)
-                        _config.OpponentAlgorithm = (MlAlgorithm)EditorGUILayout.EnumPopup("Opponent algorithm", _config.OpponentAlgorithm);
                 }
             }
 
@@ -481,9 +487,30 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 : string.Empty;
             EditorGUILayout.LabelField("Latest evaluation", File.Exists(evaluation) ? evaluation : "none");
             EditorGUILayout.LabelField("Trackers", _status != null && _status.TrackerDegraded ? "degraded (see run.json/log)" : "healthy or local-only");
+            if (!string.IsNullOrWhiteSpace(_selectedRun))
+                DrawEnvironmentSummary(LoadRunEnvironmentSummary(_selectedRun), "Run contract");
             if (!string.IsNullOrWhiteSpace(_lastMetricTime))
                 EditorGUILayout.LabelField("Last metric", _lastMetricTime);
             EditorGUILayout.EndVertical();
+        }
+
+        static MlEnvironmentSummary LoadRunEnvironmentSummary(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) return new MlEnvironmentSummary();
+            try
+            {
+                string manifest = Path.Combine(runDirectory, "run.json");
+                return File.Exists(manifest)
+                    ? MlEnvironmentSummary.FromRunManifest(File.ReadAllText(manifest))
+                    : new MlEnvironmentSummary();
+            }
+            catch (Exception) { return new MlEnvironmentSummary(); }
+        }
+
+        static void DrawEnvironmentSummary(MlEnvironmentSummary summary, string label)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(summary.DisplayText, MessageType.None);
         }
 
         void DrawLogs()

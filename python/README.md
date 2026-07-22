@@ -69,9 +69,29 @@ $hexwarsPython = ".\python\winenv\Scripts\python.exe"
 
 Run names are 1–64 characters, start with a letter or number, and contain only letters, numbers, `.`, `_`, or `-`. Existing run directories are never overwritten.
 
-Controller specifications accepted by evaluation and model tooling are `greedy`, `random`, `ppo:PATH`, `dqn:PATH`, and `run:PATH`. Prefer `run:PATH`: its metadata declares the algorithm and training contract instead of relying on a legacy standalone zip.
+Controller specifications accepted by evaluation and model tooling are `greedy`, `random`, and `run:PATH`. Standalone checkpoints and legacy `ppo:PATH` / `dqn:PATH` sources are rejected because they lack authoritative contract metadata.
+
+Every current run manifest records `environment`, `version`, and a lowercase SHA-256 `encoding_hash`. Inference and resume require all three values to match the selected engine environment exactly; observation/action geometry is checked as a separate guard. `contract_hash` remains the full run-contract identity and can legitimately differ between training and duel horizons, while `encoding_hash` covers only the semantics that determine what observations and actions mean. Manifests created before `encoding_hash` was introduced are intentionally rejected rather than guessed compatible. The Unity arena passes its engine-derived expected identity to `policy_server.py`, and a rejected live reload leaves the previously validated model active.
 
 Runs created by `hexwars_ml.py` use absolute timestep targets. A manifest created by a legacy compatibility trainer can declare `config.timestep_mode: "additional"`; the resume command preserves that declaration, so inspect it before resuming an old run.
+
+## Adaptive v1 intern experiment
+
+Run this smoke experiment from the repository root. It deliberately selects the adaptive contract; omitting `--environment` selects the legacy `tactical-v1` contract. Do not mix checkpoints between those contracts.
+
+```powershell
+dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj -c Release
+python python/hexwars_ml.py doctor --environment adaptive-v1 --json
+python python/hexwars_ml.py train --run adaptive-smoke --environment adaptive-v1 --algorithm maskable_ppo --opponent greedy --timesteps 50000 --checkpoint-every 10000 --workers 4 --learner-seat alternating --tracker local
+python python/hexwars_ml.py status python/runs/adaptive-smoke --json
+python python/duel.py --environment adaptive-v1 --p0 run:python/runs/adaptive-smoke --p1 greedy --out replays/adaptive-smoke.replay
+```
+
+This is the concrete scenario the experiment exercises: the policy privately selects six affordable units and deployment cells, then confirms its hidden setup. During play it may redesign Custom A as a high-vision counter, deploy that template after earning enough points, and control the reinforcement through the lowest free unit slot. Python never reconstructs deployment, design, movement, attack, cost, fog, or turn legality; it uses the fixed action space and authoritative masks reported by the adaptive GymServer.
+
+Adaptive training writes the exact diagnostic header to `adaptive_episodes.csv` for one worker, or to `adaptive_episodes.worker_N.csv` for multiple workers. Episode identities are globally unambiguous `worker:episode` values. Evaluation consumes worker files in numeric worker order and keeps these diagnostics separate from W-L-D and win rate.
+
+In Unity, open **HexWars > ML Lab**, select **Adaptive v1**, choose `adaptive-smoke` as P1, and choose Greedy or another compatible adaptive run as P2. Start the Arena only after checking the resolved checkpoint identities and W-L-D summary. Hidden deployment is intentionally not rendered before both seats confirm. A run in progress, including `adaptive-smoke`, is an unfinished lab artifact. Regular players should receive only a separately reviewed and promoted official adaptive checkpoint through the existing AI-opponent packaging path; never expose a live or unfinished run as official game content.
 
 ## Where to go next
 

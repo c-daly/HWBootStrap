@@ -19,7 +19,7 @@ from stable_baselines3.common.vec_env.patch_gym import _patch_env
 from hexwars_gym import HexWarsEnv
 from selfplay_env import SelfPlayEnv
 
-from .contracts import EnvironmentContract, MONITOR_HEADER, RunConfig
+from .contracts import ADAPTIVE_MONITOR_HEADER, EnvironmentContract, MONITOR_HEADER, RunConfig
 from .controllers import ControllerBinding, ControllerResolver
 
 
@@ -121,6 +121,7 @@ class EpisodeMonitor(gym.Wrapper):
         lock: threading.Lock,
         *,
         worker_id: int = 0,
+        adaptive_path: Path | None = None,
     ) -> None:
         super().__init__(env)
         self.contract = _environment_contract(env)
@@ -128,24 +129,35 @@ class EpisodeMonitor(gym.Wrapper):
         self._path = Path(path)
         self._lock = lock
         self._worker_id = worker_id
+        self._adaptive_path = (
+            Path(adaptive_path) if adaptive_path is not None
+            else self._path.parent / "adaptive_episodes.csv"
+        )
         self._episode_number = 0
         self._started = time.monotonic()
         self._reward = 0.0
         self._length = 0
+        self._diagnostics: dict[str, Any] = {}
 
     def reset(self, **kwargs):
         self._reward = 0.0
         self._length = 0
+        self._diagnostics = {}
         return self.env.reset(**kwargs)
 
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
         self._reward += float(reward)
         self._length += 1
+        diagnostics = info.get("diagnostics") if isinstance(info, Mapping) else None
+        if isinstance(diagnostics, Mapping):
+            self._diagnostics = dict(diagnostics)
         if terminated or truncated:
             self._episode_number += 1
             elapsed = time.monotonic() - self._started
             self._append_episode(elapsed)
+            if self.contract.version == "adaptive-v1":
+                self._append_adaptive_episode()
             info = dict(info)
             info["episode"] = {
                 "r": self._reward,
@@ -170,6 +182,28 @@ class EpisodeMonitor(gym.Wrapper):
                     pass
             with self._path.open("a", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow([self._reward, self._length, elapsed])
+
+    def _append_adaptive_episode(self) -> None:
+        path = self._adaptive_path
+        values = self._diagnostics
+        row = [
+            f"{self._worker_id}:{self._episode_number}",
+            int(values.get("design_count", 0)),
+            int(values.get("distinct_custom_templates_deployed", 0)),
+            bool(values.get("deployment_completed", False)),
+            int(values.get("invalid_sequences", 0)),
+            int(values.get("pregame_decisions", 0)),
+        ]
+        with self._lock:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with path.open("x", newline="", encoding="utf-8") as stream:
+                        csv.writer(stream).writerow(ADAPTIVE_MONITOR_HEADER)
+                except FileExistsError:
+                    pass
+            with path.open("a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow(row)
 
 
 class MaskingDummyVecEnv(DummyVecEnv):
@@ -419,6 +453,7 @@ def _environment_contract(env: Any) -> EnvironmentContract:
     required = (
         "contract_version",
         "contract_hash",
+        "encoding_hash",
         "obs_len",
         "n_actions",
         "board",
@@ -431,11 +466,13 @@ def _environment_contract(env: Any) -> EnvironmentContract:
     return EnvironmentContract(
         version=str(spaces_info["contract_version"]),
         contract_hash=str(spaces_info["contract_hash"]),
+        encoding_hash=str(spaces_info["encoding_hash"]),
         observation_size=int(spaces_info["obs_len"]),
         action_size=int(spaces_info["n_actions"]),
         board=dict(spaces_info["board"]),
         roster=list(spaces_info["contract_roster"]),
         reward=dict(spaces_info["reward"]),
+        semantics=dict(spaces_info.get("adaptive", {})),
     )
 
 
@@ -481,12 +518,14 @@ class TrainingEnvironmentFactory:
                     opponent=bindings[0].resolved.server_controller,
                     seat=seat,
                     base_seed=seed,
+                    environment=config.environment,
                 )
             return SelfPlayEnv(
                 self.server_cmd,
                 bindings,
                 learner_seat=seat,
                 base_seed=seed,
+                environment=config.environment,
             )
 
         scheduled = ScheduledEnvironment(
@@ -499,9 +538,15 @@ class TrainingEnvironmentFactory:
             build,
         )
         monitor_name = "monitor.csv" if config.workers == 1 else f"monitor.worker_{worker_index}.csv"
+        adaptive_name = (
+            "adaptive_episodes.csv"
+            if config.workers == 1
+            else f"adaptive_episodes.worker_{worker_index}.csv"
+        )
         return EpisodeMonitor(
             scheduled,
             Path(run_dir) / monitor_name,
             threading.Lock(),
             worker_id=worker_index,
+            adaptive_path=Path(run_dir) / adaptive_name,
         )

@@ -10,9 +10,43 @@ import numpy as np
 from gymnasium import spaces
 
 from ml_lab.contracts import EnvironmentContract
+from ml_lab.protocol import validate_json_object, validate_step_payload, validate_view_payload
 
 
-_CONTRACT_VERSION = "tactical-v1"
+SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "adaptive-v1"})
+_ADAPTIVE_PHASES = (
+    "deployment_root", "deployment_template", "deployment_cell", "deployment_placed_unit",
+    "deployment_move_cell", "gameplay_root", "gameplay_unit", "gameplay_unit_command",
+    "gameplay_move_cell", "gameplay_attack_cell", "design_slot", "design_stat", "design_value",
+    "design_confirm",
+)
+_ADAPTIVE_TEMPLATES = (
+    ("Frontline", (7, 2, 3, 2, 2, 1, 1, 3, 1)),
+    ("Assault", (3, 6, 0, 3, 2, 2, 1, 3, 1)),
+    ("Marksman", (2, 3, 0, 2, 2, 6, 1, 5, 1)),
+    ("Artillery", (3, 6, 0, 1, 1, 5, 2, 3, 1)),
+    ("Recon", (2, 1, 0, 5, 3, 1, 0, 7, 2)),
+    ("Support", (4, 3, 2, 3, 2, 3, 1, 4, 1)),
+    ("Custom A", (4, 3, 1, 3, 2, 2, 1, 3, 1)),
+    ("Custom B", (5, 2, 2, 2, 2, 3, 1, 3, 1)),
+    ("Custom C", (3, 4, 1, 3, 2, 2, 1, 4, 1)),
+)
+_ADAPTIVE_STAT_VALUES = {
+    "health": tuple(range(1, 9)),
+    "damage": tuple(range(0, 9)),
+    "defense": tuple(range(0, 9)),
+    "movement": tuple(range(0, 7)),
+    "vertical_movement": tuple(range(0, 5)),
+    "range": tuple(range(0, 9)),
+    "range_arc": tuple(range(0, 5)),
+    "vision": tuple(range(0, 11)),
+    "vision_arc": tuple(range(0, 5)),
+}
+_ADAPTIVE_FOG_RULE = (
+    "hide_current_enemy_units_and_all_opponent_deployment_until_both_confirm;"
+    "derive_action_masks_from_seat_visible_projection;"
+    "authoritative_hidden_blocker_rejection_is_only_allowed_mask_rejection"
+)
 _BOARD_INT_FIELDS = (
     "width", "height", "max_elevation", "max_steps", "zone_depth", "plains_weight", "forest_weight",
     "rough_weight", "water_weight", "starting_points", "generator_cost", "generator_output",
@@ -35,9 +69,16 @@ _REWARD_FIELDS = (
 )
 
 
-def _parse_contract(spaces_info: Mapping[str, Any]) -> EnvironmentContract:
+def parse_contract(
+    spaces_info: Mapping[str, Any],
+    *,
+    environment: str = "tactical-v1",
+    required_kind: str | None = None,
+) -> EnvironmentContract:
+    if environment not in SUPPORTED_ENVIRONMENTS:
+        raise ValueError(f"unsupported environment {environment!r}")
     required = (
-        "contract_version", "contract_hash", "environment_kind", "obs_len", "n_actions", "channels",
+        "contract_version", "contract_hash", "encoding_hash", "environment_kind", "obs_len", "n_actions", "channels",
         "globals", "board", "roster", "contract_roster", "reward",
     )
     for field in required:
@@ -46,16 +87,24 @@ def _parse_contract(spaces_info: Mapping[str, Any]) -> EnvironmentContract:
 
     version = spaces_info["contract_version"]
     contract_hash = spaces_info["contract_hash"]
-    if version != _CONTRACT_VERSION:
-        raise ValueError(f"GymServer contract_version must be {_CONTRACT_VERSION!r}")
+    encoding_hash = spaces_info["encoding_hash"]
+    if version != environment:
+        raise ValueError(f"GymServer contract_version must be {environment!r}")
     if not isinstance(contract_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", contract_hash):
         raise ValueError("GymServer contract_hash must be a lowercase SHA-256 hex digest")
+    if not isinstance(encoding_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", encoding_hash):
+        raise ValueError("GymServer encoding_hash must be a lowercase SHA-256 hex digest")
 
     environment_kind = spaces_info["environment_kind"]
-    if environment_kind not in {"tactical", "duel"}:
-        raise ValueError("GymServer environment_kind must be 'tactical' or 'duel'")
-    if environment_kind != "tactical":
-        raise ValueError("HexWarsEnv requires a tactical environment_kind")
+    allowed_kinds = (
+        {"tactical", "duel"}
+        if version == "tactical-v1"
+        else {"adaptive_tactical", "adaptive_duel"}
+    )
+    if environment_kind not in allowed_kinds:
+        raise ValueError(f"GymServer environment_kind is invalid for {version}")
+    if required_kind is not None and environment_kind != required_kind:
+        raise ValueError(f"client requires environment_kind {required_kind!r}")
     observation_size = _positive_int(spaces_info["obs_len"], "obs_len")
     action_size = _positive_int(spaces_info["n_actions"], "n_actions")
     channels = _positive_int(spaces_info["channels"], "channels")
@@ -66,8 +115,11 @@ def _parse_contract(spaces_info: Mapping[str, Any]) -> EnvironmentContract:
     reward = _mapping(spaces_info["reward"], "reward")
 
     _validate_board(board, environment_kind)
-    _validate_reward(reward)
-    _validate_roster(roster)
+    if version == "tactical-v1":
+        _validate_reward(reward)
+        _validate_roster(roster)
+    else:
+        _validate_adaptive_reward(reward)
     if roster_count != len(roster):
         raise ValueError("GymServer contract roster count does not match contract_roster")
 
@@ -77,22 +129,41 @@ def _parse_contract(spaces_info: Mapping[str, Any]) -> EnvironmentContract:
         raise ValueError("GymServer contract board.width does not match board_w")
     if _positive_int(spaces_info["board_h"], "board_h") != board_height:
         raise ValueError("GymServer contract board.height does not match board_h")
-    if channels != 2 * len(roster) + 1:
-        raise ValueError("GymServer contract channels does not match contract_roster")
-    if observation_size != channels * board_width * board_height + globals_count:
-        raise ValueError("GymServer contract obs_len does not match board geometry")
-    if action_size != 1 + 3 * len(roster) * board_width * board_height:
-        raise ValueError("GymServer contract n_actions does not match board geometry")
+    semantics: Mapping[str, Any] = {}
+    if version == "tactical-v1":
+        if channels != 2 * len(roster) + 1:
+            raise ValueError("GymServer contract channels does not match contract_roster")
+        if observation_size != channels * board_width * board_height + globals_count:
+            raise ValueError("GymServer contract obs_len does not match board geometry")
+        if action_size != 1 + 3 * len(roster) * board_width * board_height:
+            raise ValueError("GymServer contract n_actions does not match board geometry")
+    else:
+        semantics = _validate_adaptive_v1(
+            spaces_info,
+            board=board,
+            roster=roster,
+            reward=reward,
+            observation_size=observation_size,
+            action_size=action_size,
+            channels=channels,
+            globals_count=globals_count,
+            environment_kind=environment_kind,
+        )
 
     return EnvironmentContract(
         version=version,
         contract_hash=contract_hash,
+        encoding_hash=encoding_hash,
         observation_size=observation_size,
         action_size=action_size,
         board=dict(board),
         roster=list(roster),
         reward=dict(reward),
+        semantics=dict(semantics),
     )
+
+
+_parse_contract = parse_contract
 
 
 def _validate_board(board: Mapping[str, Any], environment_kind: str) -> None:
@@ -120,6 +191,23 @@ def _validate_reward(reward: Mapping[str, Any]) -> None:
         _number(reward.get(field), f"reward.{field}")
 
 
+def _validate_adaptive_reward(reward: Mapping[str, Any]) -> None:
+    for field in (
+        "intermediate_decision_penalty", "deployment_completion_bonus",
+        "terminal_win", "terminal_loss",
+    ):
+        _number(reward.get(field), f"reward.{field}")
+    expected = {
+        "intermediate_decision_penalty": 0.001,
+        "deployment_completion_bonus": 0.0,
+        "terminal_win": 1.0,
+        "terminal_loss": -1.0,
+    }
+    for field, value in expected.items():
+        if reward.get(field) != value:
+            raise ValueError(f"GymServer contract reward.{field} must be {value}")
+
+
 def _validate_roster(roster: Any) -> None:
     if not isinstance(roster, list) or not roster:
         raise ValueError("GymServer contract contract_roster must be a non-empty list")
@@ -128,6 +216,132 @@ def _validate_roster(roster: Any) -> None:
             raise ValueError("GymServer contract contract_roster entries must contain nine integer stats")
         if any(not re.fullmatch(r"-?\d+", stat) for stat in entry.split(",")):
             raise ValueError("GymServer contract contract_roster entries must contain nine integer stats")
+
+
+def _adaptive_channels() -> list[str]:
+    return [
+        "elevation", "terrain_plains", "terrain_forest", "terrain_rough", "terrain_water",
+        "deployment_zone_self", "current_visibility", "previously_seen",
+        *[f"friendly_role_hp_{index}" for index in range(9)],
+        *[f"visible_enemy_role_hp_{index}" for index in range(9)],
+        *[f"friendly_slot_occupancy_{index}" for index in range(24)],
+    ]
+
+
+def _validate_adaptive_v1(
+    spaces_info: Mapping[str, Any],
+    *,
+    board: Mapping[str, Any],
+    roster: Any,
+    reward: Mapping[str, Any],
+    observation_size: int,
+    action_size: int,
+    channels: int,
+    globals_count: int,
+    environment_kind: str,
+) -> Mapping[str, Any]:
+    semantics = _mapping(spaces_info.get("adaptive"), "adaptive")
+    pinned_scalars = {
+        "adaptive": True,
+        "contract_version": "adaptive-v1",
+        "environment_kind": environment_kind,
+        "fixed_template_count": 6,
+        "custom_template_count": 3,
+        "max_controllable_units": 24,
+        "starting_unit_count": 6,
+        "starting_army_budget": 132,
+        "max_design_point_cost": 24,
+    }
+    for name, expected in pinned_scalars.items():
+        if semantics.get(name) != expected:
+            raise ValueError(f"GymServer contract adaptive.{name} must be {expected!r}")
+    if semantics.get("adaptive") is not True:
+        raise ValueError("GymServer contract adaptive.adaptive must be true")
+    for name in (
+        "fixed_template_count", "custom_template_count", "max_controllable_units",
+        "starting_unit_count", "starting_army_budget", "max_design_point_cost",
+    ):
+        _integer(semantics.get(name), f"adaptive.{name}")
+    for name in ("intermediate_decision_penalty", "deployment_completion_bonus"):
+        _number(semantics.get(name), f"adaptive.{name}")
+    if semantics["intermediate_decision_penalty"] != 0.001:
+        raise ValueError("GymServer contract adaptive.intermediate_decision_penalty must be 0.001")
+    if semantics["deployment_completion_bonus"] != 0.0:
+        raise ValueError("GymServer contract adaptive.deployment_completion_bonus must be 0")
+    if semantics["intermediate_decision_penalty"] != reward["intermediate_decision_penalty"]:
+        raise ValueError("GymServer contract adaptive penalty does not match reward")
+    if semantics["deployment_completion_bonus"] != reward["deployment_completion_bonus"]:
+        raise ValueError("GymServer contract adaptive.deployment_completion_bonus does not match reward")
+    if _positive_int(semantics.get("effective_horizon"), "adaptive.effective_horizon") != board["max_steps"]:
+        raise ValueError("GymServer contract adaptive effective_horizon does not match board")
+    if semantics.get("fog_rule") != _ADAPTIVE_FOG_RULE:
+        raise ValueError("GymServer contract adaptive.fog_rule is not canonical")
+    if semantics.get("board") != board:
+        raise ValueError("GymServer contract adaptive.board does not match board")
+
+    templates = semantics.get("templates")
+    if not isinstance(templates, list) or len(templates) != 9:
+        raise ValueError("GymServer contract adaptive.templates must contain exactly 9 templates")
+    expected_roster: list[str] = []
+    for index, ((expected_name, expected_stats), raw_template) in enumerate(
+        zip(_ADAPTIVE_TEMPLATES, templates, strict=True)
+    ):
+        template = _mapping(raw_template, f"adaptive.templates[{index}]")
+        if template.get("slot") != index or template.get("name") != expected_name:
+            raise ValueError("GymServer contract adaptive.templates slots or names are invalid")
+        stats = template.get("stats")
+        if not isinstance(stats, list) or tuple(stats) != expected_stats:
+            raise ValueError("GymServer contract adaptive.templates stats do not match adaptive-v1")
+        if template.get("fixed") is not (index < 6):
+            raise ValueError("GymServer contract adaptive.templates fixed flags are invalid")
+        cost = _integer(template.get("cost"), f"adaptive.templates[{index}].cost")
+        if cost != sum(expected_stats):
+            raise ValueError(f"GymServer contract adaptive.templates[{index}].cost is invalid")
+        expected_roster.append(f"{expected_name}:{','.join(map(str, expected_stats))}")
+    if roster != expected_roster:
+        raise ValueError("GymServer contract contract_roster does not match adaptive templates")
+
+    stat_values = _mapping(semantics.get("stat_values"), "adaptive.stat_values")
+    if set(stat_values) != set(_ADAPTIVE_STAT_VALUES):
+        raise ValueError("GymServer contract adaptive.stat_values must contain all nine catalogs")
+    for name, expected_values in _ADAPTIVE_STAT_VALUES.items():
+        if not isinstance(stat_values[name], list) or tuple(stat_values[name]) != expected_values:
+            raise ValueError(f"GymServer contract adaptive.stat_values.{name} is invalid")
+
+    phases = semantics.get("phases")
+    if not isinstance(phases, list) or tuple(phases) != _ADAPTIVE_PHASES:
+        raise ValueError("GymServer contract adaptive.phases must contain the 14 adaptive-v1 phases")
+    if spaces_info.get("phases") != phases:
+        raise ValueError("GymServer contract phases does not match adaptive.phases")
+
+    cell_count = _positive_int(board["width"], "board.width") * _positive_int(board["height"], "board.height")
+    expected_counts = (("command", 12), ("unit", 24), ("template", 9), ("cell", cell_count),
+                       ("stat", 9), ("value", 11))
+    regions = _mapping(semantics.get("action_regions"), "adaptive.action_regions")
+    if set(regions) != {name for name, _ in expected_counts}:
+        raise ValueError("GymServer contract adaptive.action_regions must contain all six regions")
+    offset = 0
+    for name, expected_count in expected_counts:
+        region = _mapping(regions[name], f"adaptive.action_regions.{name}")
+        if region.get("offset") != offset or region.get("count") != expected_count:
+            raise ValueError(f"GymServer contract adaptive.action_regions.{name} is invalid")
+        offset += expected_count
+    if offset != action_size or semantics.get("action_size") != action_size:
+        raise ValueError("GymServer contract adaptive action regions do not match n_actions")
+    if spaces_info.get("action_regions") != regions:
+        raise ValueError("GymServer contract action_regions does not match adaptive.action_regions")
+
+    expected_channels = _adaptive_channels()
+    observation_channels = semantics.get("observation_channels")
+    if observation_channels != expected_channels or spaces_info.get("observation_channels") != expected_channels:
+        raise ValueError("GymServer contract adaptive observation_channels are incomplete")
+    if channels != len(expected_channels) or globals_count != 124:
+        raise ValueError("GymServer contract adaptive observation geometry is invalid")
+    if observation_size != channels * cell_count + globals_count:
+        raise ValueError("GymServer contract adaptive obs_len does not match board geometry")
+    if semantics.get("observation_size") != observation_size:
+        raise ValueError("GymServer contract adaptive observation_size does not match obs_len")
+    return semantics
 
 
 def _mapping(value: Any, field: str) -> Mapping[str, Any]:
@@ -157,14 +371,28 @@ def _number(value: Any, field: str) -> float | int:
 class HexWarsEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, server_cmd: List[str], opponent: str = "greedy", seat: int = 0, base_seed: int = 0):
+    def __init__(
+        self,
+        server_cmd: List[str],
+        opponent: str = "greedy",
+        seat: int = 0,
+        base_seed: int = 0,
+        environment: str = "tactical-v1",
+    ):
         super().__init__()
-        cmd = list(server_cmd) + ["--opponent", opponent, "--seat", str(seat)]
+        if environment not in SUPPORTED_ENVIRONMENTS:
+            raise ValueError(f"unsupported environment {environment!r}")
+        cmd = list(server_cmd) + [
+            "--opponent", opponent, "--seat", str(seat), "--environment", environment,
+        ]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         self._next_seed = base_seed
         try:
             self.spaces_info = self._rpc({"cmd": "spaces"})
-            self.contract = _parse_contract(self.spaces_info)
+            expected_kind = "tactical" if environment == "tactical-v1" else "adaptive_tactical"
+            self.contract = parse_contract(
+                self.spaces_info, environment=environment, required_kind=expected_kind
+            )
             self.n_actions = self.contract.action_size
             self.obs_len = self.contract.observation_size
             self.action_space = spaces.Discrete(self.n_actions)
@@ -182,7 +410,7 @@ class HexWarsEnv(gym.Env):
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("HexWars server closed unexpectedly")
-            return json.loads(line)
+            return dict(validate_json_object(json.loads(line), "GymServer response"))
         except BaseException:
             self._shutdown()
             raise
@@ -223,8 +451,10 @@ class HexWarsEnv(gym.Env):
             self._next_seed += 1
         try:
             response = self._rpc({"cmd": "reset", "seed": int(seed)})
-            self._mask = np.asarray(response["mask"], dtype=bool)
-            return np.asarray(response["obs"], dtype=np.float32), {}
+            observation, self._mask = validate_view_payload(
+                response, observation_size=self.obs_len, action_size=self.n_actions
+            )
+            return observation, _response_info(response)
         except BaseException:
             self._shutdown()
             raise
@@ -232,9 +462,12 @@ class HexWarsEnv(gym.Env):
     def step(self, action):
         try:
             response = self._rpc({"cmd": "step", "action": int(action)})
-            self._mask = np.asarray(response["mask"], dtype=bool)
-            return (np.asarray(response["obs"], dtype=np.float32), float(response["reward"]),
-                    bool(response["terminated"]), bool(response["truncated"]), {})
+            observation, self._mask = validate_step_payload(
+                response, observation_size=self.obs_len, action_size=self.n_actions
+            )
+            return (observation, float(response["reward"]),
+                    bool(response["terminated"]), bool(response["truncated"]),
+                    _response_info(response))
         except BaseException:
             self._shutdown()
             raise
@@ -244,3 +477,21 @@ class HexWarsEnv(gym.Env):
 
     def close(self):
         self._shutdown()
+
+
+def _response_info(response: Mapping[str, Any]) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    diagnostics = response.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        info["diagnostics"] = dict(diagnostics)
+    if "deployment_complete" in response:
+        info["deployment_complete"] = bool(response["deployment_complete"])
+    return info
+
+
+def _response_arrays(
+    response: Mapping[str, Any], observation_size: int, action_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    return validate_view_payload(
+        response, observation_size=observation_size, action_size=action_size
+    )

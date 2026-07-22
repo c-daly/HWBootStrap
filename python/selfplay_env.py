@@ -19,9 +19,17 @@ from ml_lab.controllers import (
     ControllerResolutionError,
     ControllerResolver,
     ResolvedController,
+    _validate_contract_compatibility,
     predict as predict_resolved,
     validate_inference_input,
 )
+from hexwars_gym.env import (
+    SUPPORTED_ENVIRONMENTS,
+    _response_arrays,
+    _response_info,
+    parse_contract,
+)
+from ml_lab.protocol import validate_json_object, validate_step_payload
 
 
 def bind_opponents(opponents, resolver: ControllerResolver) -> list[ControllerBinding]:
@@ -43,9 +51,19 @@ def bind_opponents(opponents, resolver: ControllerResolver) -> list[ControllerBi
 class SelfPlayEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, server_cmd, opponent_models, learner_seat: int = 0, base_seed: int = 0):
+    def __init__(
+        self,
+        server_cmd,
+        opponent_models,
+        learner_seat: int = 0,
+        base_seed: int = 0,
+        environment: str = "tactical-v1",
+    ):
         super().__init__()
-        self.proc = subprocess.Popen(list(server_cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        if environment not in SUPPORTED_ENVIRONMENTS:
+            raise ValueError(f"unsupported environment {environment!r}")
+        self.proc = subprocess.Popen(list(server_cmd) + ["--environment", environment],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1)
         try:
             self.learner = learner_seat
@@ -57,6 +75,12 @@ class SelfPlayEnv(gym.Env):
             self.spaces_info = sp  # full handshake: shapes + env config (for params)
             self.n_actions = int(sp["n_actions"])
             self.obs_len = int(sp["obs_len"])
+            expected_kind = "duel" if environment == "tactical-v1" else "adaptive_duel"
+            self.contract = parse_contract(
+                sp, environment=environment, required_kind=expected_kind
+            )
+            self.n_actions = self.contract.action_size
+            self.obs_len = self.contract.observation_size
             self.action_space = spaces.Discrete(self.n_actions)
             self.observation_space = spaces.Box(0.0, 1.0, shape=(self.obs_len,), dtype=np.float32)
             self._mask = np.ones(self.n_actions, dtype=bool)
@@ -77,7 +101,7 @@ class SelfPlayEnv(gym.Env):
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("server closed unexpectedly")
-            return json.loads(line)
+            return dict(validate_json_object(json.loads(line), "GymServer response"))
         except BaseException:
             self._shutdown()
             raise
@@ -140,6 +164,7 @@ class SelfPlayEnv(gym.Env):
             resolved = binding.resolved
             if resolved.model is None:
                 continue
+            _validate_contract_compatibility(resolved.contract, getattr(self, "contract", None))
             if resolved.observation_size != self.obs_len or resolved.action_size != self.n_actions:
                 raise ControllerResolutionError("self-play opponent geometry does not match duel spaces")
 
@@ -154,8 +179,9 @@ class SelfPlayEnv(gym.Env):
         Scripted opponents are played server-side, so this is only used for model opponents."""
         acc = 0.0
         while not v["terminated"] and not v["truncated"] and int(v["seat"]) == self.opp_seat:
-            observation = np.asarray(v["obs"], dtype=np.float32)
-            mask = np.asarray(v["mask"], dtype=bool)
+            observation, mask = validate_step_payload(
+                v, observation_size=self.obs_len, action_size=self.n_actions
+            )
             resolved = self.opp.resolved
             assert resolved.model is not None and resolved.algorithm is not None
             validate_inference_input(resolved, observation, mask)
@@ -180,8 +206,10 @@ class SelfPlayEnv(gym.Env):
         v = self._rpc(msg)
         if not self._scripted():
             v, _ = self._play_opponent(v)  # model opponent: Python drives it (incl. if it moves first)
-        self._mask = np.asarray(v["mask"], dtype=bool)
-        return np.asarray(v["obs"], dtype=np.float32), {}
+        observation, self._mask = validate_step_payload(
+            v, observation_size=self.obs_len, action_size=self.n_actions
+        )
+        return observation, _response_info(v)
 
     def step(self, action):
         # one duel_step covers the learner's move; for a scripted opponent the server also plays its reply
@@ -191,9 +219,11 @@ class SelfPlayEnv(gym.Env):
         if not self._scripted():
             v, acc = self._play_opponent(v)
             reward += acc
-        self._mask = np.asarray(v["mask"], dtype=bool)
-        return (np.asarray(v["obs"], dtype=np.float32), reward,
-                bool(v["terminated"]), bool(v["truncated"]), {})
+        observation, self._mask = validate_step_payload(
+            v, observation_size=self.obs_len, action_size=self.n_actions
+        )
+        return (observation, reward,
+                bool(v["terminated"]), bool(v["truncated"]), _response_info(v))
 
     def action_masks(self):
         return self._mask

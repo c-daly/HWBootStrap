@@ -30,6 +30,7 @@ def run_dir(tmp_path: Path) -> Path:
     contract = EnvironmentContract(
         version="tactical-v1",
         contract_hash="abc123",
+        encoding_hash="a" * 64,
         observation_size=761,
         action_size=379,
         board={"width": 13, "height": 9},

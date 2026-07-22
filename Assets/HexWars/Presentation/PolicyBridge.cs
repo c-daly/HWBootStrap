@@ -17,7 +17,10 @@ namespace HexWars.Presentation
         public string Algorithm { get; internal set; }
         public long Step { get; internal set; }
         public bool HasStep { get; internal set; }
+        public string ContractVersion { get; internal set; }
         public string ContractHash { get; internal set; }
+        public string Environment { get; internal set; }
+        public string EncodingHash { get; internal set; }
     }
 
     public sealed class PolicyReadyResult
@@ -67,19 +70,18 @@ namespace HexWars.Presentation
 
         public async Task<bool> StartAsync(
             string pythonExe, string serverScript, string p0Spec, string p1Spec, string workingDir,
+            string expectedEnvironment, string expectedContractVersion, string expectedEncodingHash,
             int timeoutMs = DefaultStartupTimeoutMs, CancellationToken cancellationToken = default)
         {
             if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
             Dispose();
             lock (_stderrGate) _stderr.Clear();
             ReadyInfo = null;
-            var args = new List<string> { QuoteArgument(serverScript) };
-            if (!string.IsNullOrEmpty(p0Spec)) { args.Add("--p0"); args.Add(QuoteArgument(p0Spec)); }
-            if (!string.IsNullOrEmpty(p1Spec)) { args.Add("--p1"); args.Add(QuoteArgument(p1Spec)); }
             var psi = new ProcessStartInfo
             {
                 FileName = pythonExe,
-                Arguments = string.Join(" ", args),
+                Arguments = BuildArguments(serverScript, p0Spec, p1Spec,
+                    expectedEnvironment, expectedContractVersion, expectedEncodingHash),
                 WorkingDirectory = workingDir,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -212,7 +214,10 @@ namespace HexWars.Presentation
                     Algorithm = seat.algorithm ?? string.Empty,
                     Step = seat.step,
                     HasStep = seat.step >= 0,
+                    ContractVersion = seat.contract_version ?? string.Empty,
                     ContractHash = seat.contract_hash ?? string.Empty,
+                    Environment = seat.environment ?? string.Empty,
+                    EncodingHash = seat.encoding_hash ?? string.Empty,
                 };
             }
             return result;
@@ -275,6 +280,32 @@ namespace HexWars.Presentation
             process.Dispose();
         }
 
+        public static string BuildArguments(string serverScript, string p0Spec, string p1Spec,
+            string expectedEnvironment, string expectedContractVersion, string expectedEncodingHash)
+        {
+            if (string.IsNullOrWhiteSpace(expectedEnvironment))
+                throw new ArgumentException("expected environment is required", nameof(expectedEnvironment));
+            if (string.IsNullOrWhiteSpace(expectedContractVersion))
+                throw new ArgumentException("expected contract version is required", nameof(expectedContractVersion));
+            if (!IsLowerSha256(expectedEncodingHash))
+                throw new ArgumentException("expected encoding hash must be lowercase SHA-256", nameof(expectedEncodingHash));
+            var args = new List<string> { QuoteArgument(serverScript) };
+            if (!string.IsNullOrEmpty(p0Spec)) { args.Add("--p0"); args.Add(QuoteArgument(p0Spec)); }
+            if (!string.IsNullOrEmpty(p1Spec)) { args.Add("--p1"); args.Add(QuoteArgument(p1Spec)); }
+            args.Add("--expected-environment"); args.Add(QuoteArgument(expectedEnvironment));
+            args.Add("--expected-contract-version"); args.Add(QuoteArgument(expectedContractVersion));
+            args.Add("--expected-encoding-hash"); args.Add(QuoteArgument(expectedEncodingHash));
+            return string.Join(" ", args);
+        }
+
+        static bool IsLowerSha256(string value)
+        {
+            if (value == null || value.Length != 64) return false;
+            foreach (char ch in value)
+                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
+            return true;
+        }
+
         static string QuoteArgument(string value)
         {
             if (value == null) value = string.Empty;
@@ -305,7 +336,10 @@ namespace HexWars.Presentation
             public string path;
             public string algorithm;
             public long step = -1;
+            public string contract_version;
             public string contract_hash;
+            public string environment;
+            public string encoding_hash;
         }
     }
 }

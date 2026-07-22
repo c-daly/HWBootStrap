@@ -37,7 +37,8 @@ namespace HexWars.Presentation
             finally { GUI.matrix = previousMatrix; }
         }
 
-        public static bool ShouldRender(ModelDuelDriver driver) => driver != null && driver.isActiveAndEnabled;
+        public static bool ShouldRender(ModelDuelDriver driver) => driver != null
+            && driver.isActiveAndEnabled && driver.ShouldShowArenaOverlays;
 
         public static int CharacterBudget(float rowWidth, bool narrow) => !narrow ? 72
             : Mathf.Clamp(Mathf.FloorToInt(rowWidth / 8f), 24, 72);

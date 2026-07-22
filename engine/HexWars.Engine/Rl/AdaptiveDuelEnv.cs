@@ -48,6 +48,7 @@ namespace HexWars.Engine.Rl
         private int _designCount;
         private int _pregameDecisions;
         private int _invalidSequences;
+        private bool _awaitingPostRevealAdvance;
 
         public AdaptiveDuelEnv(AdaptiveEnvConfig? config = null)
         {
@@ -65,6 +66,7 @@ namespace HexWars.Engine.Rl
         public AdaptiveLayout Layout => _layout;
         public MlContract Contract => _contract;
         public bool DeploymentComplete => _state != null;
+        public bool AwaitingPostRevealAdvance => _awaitingPostRevealAdvance;
         public GameState State => _state ?? throw new InvalidOperationException("deployment is not complete");
         public AdaptiveDiagnostics Diagnostics => new AdaptiveDiagnostics(
             _designCount, _customTemplatesDeployed.Count, _pregameDecisions,
@@ -95,6 +97,7 @@ namespace HexWars.Engine.Rl
             _designCount = 0;
             _pregameDecisions = 0;
             _invalidSequences = 0;
+            _awaitingPostRevealAdvance = false;
             _customTemplatesDeployed.Clear();
             _log.Clear();
 
@@ -102,7 +105,17 @@ namespace HexWars.Engine.Rl
             ApplyScriptedDeployment(PlayerId.Player1, deployment1);
             CompleteRevealIfReady();
             if (!DeploymentComplete) SelectNextDeploymentSeat();
-            else AdvancePastInternal();
+            else if (!AwaitingPostRevealAdvance) AdvancePastInternal();
+            return MakeView(0f);
+        }
+
+        /// <summary>Resume scripted gameplay only after a caller has presented the atomic reveal.</summary>
+        public View ContinueAfterReveal()
+        {
+            if (!AwaitingPostRevealAdvance)
+                throw new InvalidOperationException("there is no pending post-reveal continuation");
+            _awaitingPostRevealAdvance = false;
+            AdvancePastInternal();
             return MakeView(0f);
         }
 
@@ -131,7 +144,7 @@ namespace HexWars.Engine.Rl
                 if (DeploymentComplete)
                 {
                     reward += _cfg.DeploymentCompletionBonus;
-                    AdvancePastInternal();
+                    if (!AwaitingPostRevealAdvance) AdvancePastInternal();
                 }
                 else SelectNextDeploymentSeat(prefer: seat);
                 return MakeView(reward + TerminalReward());
@@ -220,6 +233,7 @@ namespace HexWars.Engine.Rl
             _start = _state;
             _decision0.Clear(AdaptivePhase.GameplayRoot);
             _decision1.Clear(AdaptivePhase.GameplayRoot);
+            _awaitingPostRevealAdvance = Controller(State.ActivePlayer) != null;
             foreach (PlayerId seat in new[] { PlayerId.Player0, PlayerId.Player1 })
                 foreach (DeploymentPlacement placement in _setup.Placements(seat))
                     if (placement.TemplateIndex >= _cfg.FixedTemplateCount)

@@ -17,6 +17,8 @@ namespace HexWars.Engine.Tests
             var second = MlContract.Create(config);
 
             Assert.That(first.ContractHash, Is.EqualTo(second.ContractHash));
+            Assert.That(first.EncodingHash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(first.EncodingHash, Is.EqualTo(second.EncodingHash));
             Assert.That(first.ObservationSize, Is.EqualTo(layout.ObservationLength));
             Assert.That(first.ActionSize, Is.EqualTo(layout.ActionCount));
             Assert.That(first.Board["width"], Is.EqualTo(layout.BoardW));
@@ -47,6 +49,10 @@ namespace HexWars.Engine.Tests
             Assert.That(changedRoster.ContractHash, Is.Not.EqualTo(baseline.ContractHash));
             Assert.That(changedReward.ContractHash, Is.Not.EqualTo(baseline.ContractHash));
             Assert.That(changedHorizon.ContractHash, Is.Not.EqualTo(baseline.ContractHash));
+            Assert.That(changedBoard.EncodingHash, Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(changedRoster.EncodingHash, Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(changedReward.EncodingHash, Is.EqualTo(baseline.EncodingHash));
+            Assert.That(changedHorizon.EncodingHash, Is.EqualTo(baseline.EncodingHash));
         }
 
         [Test]
@@ -62,6 +68,7 @@ namespace HexWars.Engine.Tests
             Assert.That(tactical.Board["max_steps"], Is.EqualTo(123));
             Assert.That(duel.Board["max_steps"], Is.EqualTo(246));
             Assert.That(duel.ContractHash, Is.Not.EqualTo(tactical.ContractHash));
+            Assert.That(duel.EncodingHash, Is.EqualTo(tactical.EncodingHash));
         }
     }
 }

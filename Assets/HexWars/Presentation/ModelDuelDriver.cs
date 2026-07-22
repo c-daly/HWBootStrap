@@ -7,23 +7,26 @@ using HexWars.Engine.Rl;
 
 namespace HexWars.Presentation
 {
-    public enum ModelControllerKind { Greedy, Random, FixedCheckpoint, FixedRun, LiveRun }
-    public enum MlModelAlgorithm { MaskablePpo, MaskedDqn }
+    public enum ModelControllerKind { Greedy, Random, FixedRun, LiveRun }
+    public enum ModelDuelObserverSeat { Player1, Player2 }
+
+    public static class ModelDuelObserver
+    {
+        public static PlayerId Resolve(ModelDuelObserverSeat observer) =>
+            observer == ModelDuelObserverSeat.Player2 ? PlayerId.Player1 : PlayerId.Player0;
+    }
 
     [Serializable]
     public sealed class ModelSeatConfiguration
     {
         public ModelControllerKind Kind = ModelControllerKind.Greedy;
         public string Path = string.Empty;
-        public MlModelAlgorithm Algorithm = MlModelAlgorithm.MaskablePpo;
 
         public string BuildSpec()
         {
             switch (Kind)
             {
                 case ModelControllerKind.Random: return "random";
-                case ModelControllerKind.FixedCheckpoint:
-                    return (Algorithm == MlModelAlgorithm.MaskedDqn ? "dqn:" : "ppo:") + Path;
                 case ModelControllerKind.FixedRun: return "run:" + Path;
                 case ModelControllerKind.LiveRun:
                     return JsonUtility.ToJson(new RunSpec { kind = "run", path = Path, mode = "live" });
@@ -48,6 +51,8 @@ namespace HexWars.Presentation
     {
         public ModelSeatConfiguration P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.LiveRun };
         public ModelSeatConfiguration P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy };
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop = true;
@@ -76,6 +81,8 @@ namespace HexWars.Presentation
         public string WorkingDir;
         public string P0Spec = "greedy";
         public string P1Spec = "greedy";
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop;
@@ -88,6 +95,9 @@ namespace HexWars.Presentation
         public int P0Wins { get; private set; }
         public int P1Wins { get; private set; }
         public int Draws { get; private set; }
+        public PlayerId ObserverPlayer => ModelDuelObserver.Resolve(Observer);
+        public bool ShouldShowArenaOverlays => Environment == MlEnvironmentContract.TacticalV1
+            || (_duel != null && _view.DeploymentComplete);
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
         public string P0ArenaStatus { get; private set; }
@@ -98,9 +108,11 @@ namespace HexWars.Presentation
             P0Wins, P1Wins, Draws, P0ArenaStatus, P1ArenaStatus);
 
         BoardRenderer _board;
-        DuelEnv _duel;
+        IModelDuelEnvironment _duel;
         PolicyBridge _bridge;
-        DuelEnv.View _view;
+        ModelDuelContractIdentity _contractIdentity;
+        ModelDuelView _view;
+        ModelDuelPresentationState _presentation;
         bool _p0Model, _p1Model, _p0Live, _p1Live, _done, _ended;
         float _timer, _restTimer;
         CancellationTokenSource _startupCancellation;
@@ -113,6 +125,7 @@ namespace HexWars.Presentation
             _p1Model = IsModel(P1Spec);
             _p0Live = IsLiveRun(P0Spec);
             _p1Live = IsLiveRun(P1Spec);
+            _contractIdentity = ModelDuelEnvironmentFactory.ContractIdentity(Environment);
             if (_p0Model || _p1Model)
             {
                 _bridge = new PolicyBridge();
@@ -120,6 +133,7 @@ namespace HexWars.Presentation
                 IsStarting = true;
                 bool ok = await _bridge.StartAsync(PythonExe, ServerScript,
                     _p0Model ? P0Spec : null, _p1Model ? P1Spec : null, WorkingDir,
+                    _contractIdentity.Environment, _contractIdentity.Version, _contractIdentity.EncodingHash,
                     PolicyBridge.DefaultStartupTimeoutMs, _startupCancellation.Token);
                 IsStarting = false;
                 if (_done || this == null) return;
@@ -132,6 +146,7 @@ namespace HexWars.Presentation
                     return;
                 }
                 P0ArenaStatus = P1ArenaStatus = string.Empty;
+                if (!ValidateResolvedContracts()) return;
             }
             var input = FindAnyObjectByType<UnitInputController>();
             if (input != null) input.ReadOnly = true;
@@ -143,18 +158,23 @@ namespace HexWars.Presentation
         {
             IAgent c0 = _p0Model ? null : Scripted(P0Spec, Seed * 2 + 1);
             IAgent c1 = _p1Model ? null : Scripted(P1Spec, Seed * 2 + 2);
-            _duel = new DuelEnv();
-            _view = _duel.Reset(Seed, c0, c1, PlayerId.Player0);
-            _board.Render(_duel.State.Board);
-            _board.RenderEntities(_duel.State);
-            EventConsole.Clear();
-            EventConsole.Report(_duel.State, null);
+            _duel = ModelDuelEnvironmentFactory.Create(Environment);
+            _presentation = new ModelDuelPresentationState(Environment);
+            _view = _duel.Reset(Seed, c0, c1);
+            Present(previous: null);
             _timer = 0;
         }
 
         void Update()
         {
             if (_done || Paused || _duel == null) return;
+            if (_duel.RequiresContinuation)
+            {
+                var previous = _duel.CurrentState;
+                _view = _duel.Continue();
+                Present(previous);
+                return;
+            }
             if (_view.Terminated || _view.Truncated)
             {
                 if (!_ended)
@@ -179,6 +199,7 @@ namespace HexWars.Presentation
                             return;
                         }
                         MarkLiveReloadStatus(string.Empty);
+                        if (!ValidateResolvedContracts()) return;
                     }
                     catch (Exception error)
                     {
@@ -203,10 +224,9 @@ namespace HexWars.Presentation
             try
             {
                 int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
-                var prev = _duel.State;
+                var prev = _duel.CurrentState;
                 _view = _duel.Step(action);
-                _board.RenderEntities(_duel.State);
-                EventConsole.Report(_duel.State, CombatLog.Diff(prev, _duel.State));
+                Present(prev);
             }
             catch (Exception error)
             {
@@ -226,6 +246,39 @@ namespace HexWars.Presentation
         }
 
         public void SetPaused(bool paused) => Paused = paused;
+        bool ValidateResolvedContracts()
+        {
+            var errors = ModelDuelContractCompatibility.Validate(
+                _contractIdentity, _p0Model, _bridge?.Seat0, _p1Model, _bridge?.Seat1);
+            if (errors.Count == 0) return true;
+            if (_p0Model) P0ArenaStatus = "contract mismatch";
+            if (_p1Model) P1ArenaStatus = "contract mismatch";
+            Debug.LogError("ModelDuelDriver: " + string.Join(" ", errors));
+            _done = true;
+            return false;
+        }
+
+        void Present(GameState previous)
+        {
+            ModelDuelRenderDirective directive = _presentation.Next(_view.DeploymentComplete);
+            if (directive == ModelDuelRenderDirective.Suppress) return;
+            GameState current = _duel.CurrentState;
+            if (current == null) throw new InvalidOperationException(
+                "arena presentation became visible before the environment exposed a revealed state");
+            PlayerId viewer = ObserverPlayer;
+            if (directive == ModelDuelRenderDirective.Initialize)
+            {
+                _board.Render(current.Board);
+                _board.RenderEntities(current, viewer);
+                EventConsole.Clear();
+                EventConsole.Report(current, null, viewer);
+                FindAnyObjectByType<CameraRig>()?.Frame();
+                return;
+            }
+            _board.RenderEntities(current, viewer);
+            EventConsole.Report(current, CombatLog.Diff(previous, current, viewer), viewer);
+        }
+
         void MarkLiveReloadStatus(string status)
         {
             if (_p0Live) P0ArenaStatus = status;
@@ -244,12 +297,10 @@ namespace HexWars.Presentation
         void OnDestroy() => StopDuel();
 
         public static bool IsModel(string spec) => !string.IsNullOrWhiteSpace(spec) && spec != "greedy" && spec != "random";
-        public static bool IsLiveRun(string spec, Func<string, bool> directoryExists = null)
+        public static bool IsLiveRun(string spec)
         {
             if (string.IsNullOrWhiteSpace(spec)) return false;
             string trimmed = spec.TrimStart();
-            if (trimmed.StartsWith("ppo:", StringComparison.Ordinal) || trimmed.StartsWith("dqn:", StringComparison.Ordinal))
-                return (directoryExists ?? System.IO.Directory.Exists)(trimmed.Substring(4));
             if (!trimmed.StartsWith("{", StringComparison.Ordinal)) return false;
             try { return JsonUtility.FromJson<LiveSpec>(trimmed)?.mode == "live"; }
             catch (Exception) { return false; }

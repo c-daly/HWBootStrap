@@ -87,6 +87,10 @@ namespace HexWars.Engine.Tests
             Assert.That(a.ContractHash, Is.EqualTo(b.ContractHash));
             Assert.That(a.ContractHash, Is.Not.EqualTo(duel.ContractHash));
             Assert.That(a.ContractHash, Is.Not.EqualTo(legacy.ContractHash));
+            Assert.That(a.EncodingHash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(a.EncodingHash, Is.EqualTo(b.EncodingHash));
+            Assert.That(a.EncodingHash, Is.EqualTo(duel.EncodingHash));
+            Assert.That(a.EncodingHash, Is.Not.EqualTo(legacy.EncodingHash));
             Assert.That(a.ActionSize, Is.EqualTo(182));
             Assert.That(a.ObservationSize, Is.EqualTo(5974));
             Assert.That(a.Semantics["max_controllable_units"], Is.EqualTo(24));
@@ -158,6 +162,19 @@ namespace HexWars.Engine.Tests
                 Is.Not.EqualTo(baseline.ContractHash));
             Assert.That(MlContract.CreateAdaptive(changedCatalog, MlEnvironmentKind.AdaptiveTactical).ContractHash,
                 Is.Not.EqualTo(baseline.ContractHash));
+
+            Assert.That(MlContract.CreateAdaptive(changedBudget, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(MlContract.CreateAdaptive(changedBoard, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(MlContract.CreateAdaptive(changedTemplate, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(MlContract.CreateAdaptive(changedCatalog, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.Not.EqualTo(baseline.EncodingHash));
+            Assert.That(MlContract.CreateAdaptive(changedHorizon, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.EqualTo(baseline.EncodingHash), "execution horizon is not part of inference encoding");
+            Assert.That(MlContract.CreateAdaptive(changedPenalty, MlEnvironmentKind.AdaptiveTactical).EncodingHash,
+                Is.EqualTo(baseline.EncodingHash), "reward shaping is not part of inference encoding");
         }
 
         [Test]

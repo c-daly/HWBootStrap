@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import json
+import csv
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
@@ -21,10 +22,14 @@ from .contracts import EnvironmentContract, utc_now, validate_run_name
 from .controllers import (
     ControllerResolver,
     ResolvedController,
+    _validate_contract_compatibility,
     normalize_controller_spec,
     predict,
     validate_inference_input,
 )
+from hexwars_gym.env import parse_contract
+from .contracts import ADAPTIVE_MONITOR_HEADER
+from .protocol import validate_json_object, validate_step_payload
 from .io import atomic_write_json, read_json
 
 
@@ -76,9 +81,11 @@ def controller_identity(resolved: ResolvedController) -> dict[str, Any]:
 class DuelClient:
     """One reusable JSONL GymServer process for evaluation games."""
 
-    def __init__(self, server_cmd: Sequence[str]) -> None:
+    def __init__(
+        self, server_cmd: Sequence[str], *, environment: str = "tactical-v1"
+    ) -> None:
         self.proc = subprocess.Popen(
-            list(server_cmd),
+            list(server_cmd) + ["--environment", environment],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -86,7 +93,10 @@ class DuelClient:
         )
         try:
             spaces = self._rpc({"cmd": "duel_spaces"})
-            self.contract = _contract_from_spaces(spaces)
+            required_kind = "duel" if environment == "tactical-v1" else "adaptive_duel"
+            self.contract = parse_contract(
+                spaces, environment=environment, required_kind=required_kind
+            )
         except BaseException:
             self.close()
             raise
@@ -99,18 +109,27 @@ class DuelClient:
         line = self.proc.stdout.readline()
         if not line:
             raise RuntimeError("GymServer closed unexpectedly")
-        response = json.loads(line)
-        if not isinstance(response, dict):
-            raise RuntimeError("GymServer response must be an object")
-        return response
+        return dict(validate_json_object(json.loads(line), "GymServer response"))
 
     def reset(self, *, seed: int, p0: str, p1: str) -> dict[str, Any]:
-        return self._rpc(
+        response = self._rpc(
             {"cmd": "duel_reset", "seed": seed, "p0": p0, "p1": p1, "learner": 0}
         )
+        validate_step_payload(
+            response,
+            observation_size=self.contract.observation_size,
+            action_size=self.contract.action_size,
+        )
+        return response
 
     def step(self, action: int) -> dict[str, Any]:
-        return self._rpc({"cmd": "duel_step", "action": action})
+        response = self._rpc({"cmd": "duel_step", "action": action})
+        validate_step_payload(
+            response,
+            observation_size=self.contract.observation_size,
+            action_size=self.contract.action_size,
+        )
+        return response
 
     def close(self) -> None:
         proc = getattr(self, "proc", None)
@@ -142,6 +161,7 @@ def _contract_from_spaces(spaces: dict[str, Any]) -> EnvironmentContract:
     required = (
         "contract_version",
         "contract_hash",
+        "encoding_hash",
         "obs_len",
         "n_actions",
         "board",
@@ -154,11 +174,13 @@ def _contract_from_spaces(spaces: dict[str, Any]) -> EnvironmentContract:
     return EnvironmentContract(
         version=str(spaces["contract_version"]),
         contract_hash=str(spaces["contract_hash"]),
+        encoding_hash=str(spaces["encoding_hash"]),
         observation_size=int(spaces["obs_len"]),
         action_size=int(spaces["n_actions"]),
         board=dict(spaces["board"]),
         roster=list(spaces["contract_roster"]),
         reward=dict(spaces["reward"]),
+        semantics=dict(spaces.get("adaptive", {})),
     )
 
 
@@ -168,6 +190,7 @@ def _validate_against_client(
     contract = getattr(client, "contract", None)
     if not isinstance(contract, EnvironmentContract) or controller.model is None:
         return
+    _validate_contract_compatibility(controller.contract, contract)
     if controller.observation_size != contract.observation_size:
         raise ValueError("controller observation size does not match duel server")
     if controller.action_size != contract.action_size:
@@ -325,9 +348,60 @@ def evaluate_matchup(
         "seat_results": seat_results,
         "matches": matches,
     }
+    if candidate.contract is not None and candidate.contract.version == "adaptive-v1":
+        source_run = candidate.spec.path if candidate.spec.kind == "run" else None
+        result.update(
+            _adaptive_diagnostic_aggregates(Path(source_run) if source_run is not None else None)
+        )
     if output_path is not None:
         atomic_write_json(Path(output_path), result)
     return result
+
+
+def _adaptive_sidecars(run_dir: Path | None) -> list[Path]:
+    if run_dir is None:
+        return []
+    workers = list(run_dir.glob("adaptive_episodes.worker_*.csv"))
+    if workers:
+        def worker_index(path: Path) -> int:
+            try:
+                return int(path.stem.rsplit("_", 1)[1])
+            except ValueError as error:
+                raise ValueError(f"adaptive worker sidecar has invalid name: {path.name}") from error
+        return sorted(workers, key=worker_index)
+    central = run_dir / "adaptive_episodes.csv"
+    return [central] if central.is_file() else []
+
+
+def _adaptive_diagnostic_aggregates(run_dir: Path | None) -> dict[str, float | int]:
+    rows: list[dict[str, str]] = []
+    for path in _adaptive_sidecars(run_dir):
+        with path.open(newline="", encoding="utf-8") as stream:
+            reader = csv.DictReader(stream)
+            if reader.fieldnames != ADAPTIVE_MONITOR_HEADER:
+                raise ValueError("adaptive episode sidecar header is invalid")
+            rows.extend(reader)
+    count = len(rows)
+
+    def total(name: str) -> int:
+        try:
+            return sum(int(row[name]) for row in rows)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"adaptive episode sidecar field {name!r} is invalid") from error
+
+    completed = 0
+    for row in rows:
+        value = row.get("deployment_completed", "").strip().lower()
+        if value not in {"true", "false"}:
+            raise ValueError("adaptive episode sidecar deployment_completed is invalid")
+        completed += int(value == "true")
+    return {
+        "design_count": total("design_count"),
+        "distinct_custom_templates_deployed": total("distinct_custom_templates_deployed"),
+        "deployment_completion_rate": completed / count if count else 0.0,
+        "invalid_sequences": total("invalid_sequences"),
+        "average_pregame_decisions": total("pregame_decisions") / count if count else 0.0,
+    }
 
 
 def _default_output_path(raw: str) -> Path | None:
@@ -355,6 +429,15 @@ def evaluate_controllers(
     resolver = ControllerResolver()
     candidate = resolver.resolve(p0)
     opponent = resolver.resolve(p1)
+    _validate_contract_compatibility(candidate.contract, opponent.contract)
+    environment = next(
+        (
+            controller.contract.version
+            for controller in (candidate, opponent)
+            if controller.contract is not None
+        ),
+        "tactical-v1",
+    )
     destination = Path(output_path) if output_path is not None else _default_output_path(p0)
     return evaluate_matchup(
         candidate,
@@ -363,7 +446,7 @@ def evaluate_controllers(
         seed_start=seed_start,
         both_seats=both_seats,
         workers=workers,
-        client_factory=lambda _index: DuelClient(server_cmd),
+        client_factory=lambda _index: DuelClient(server_cmd, environment=environment),
         output_path=destination,
     )
 

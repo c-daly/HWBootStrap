@@ -44,7 +44,8 @@ namespace HexWars.Engine.Rl
             IReadOnlyDictionary<string, object> reward,
             IReadOnlyDictionary<string, object> semantics,
             string environmentKind,
-            string contractHash)
+            string contractHash,
+            string encodingHash)
         {
             Version = version;
             ObservationSize = observationSize;
@@ -55,10 +56,12 @@ namespace HexWars.Engine.Rl
             Semantics = semantics;
             EnvironmentKind = environmentKind;
             ContractHash = contractHash;
+            EncodingHash = encodingHash;
         }
 
         public string Version { get; }
         public string ContractHash { get; }
+        public string EncodingHash { get; }
         public int ObservationSize { get; }
         public int ActionSize { get; }
         public IReadOnlyDictionary<string, object> Board { get; }
@@ -87,7 +90,9 @@ namespace HexWars.Engine.Rl
                 reward,
                 new Dictionary<string, object>(),
                 kind,
-                Sha256(canonical));
+                Sha256(canonical),
+                Sha256(CanonicalEncodingJson(CurrentVersion, layout.ObservationLength,
+                    layout.ActionCount, board, roster, new Dictionary<string, object>())));
         }
 
         public static MlContract CreateAdaptive(
@@ -139,7 +144,9 @@ namespace HexWars.Engine.Rl
                 reward,
                 semantics,
                 kind,
-                Sha256(canonical));
+                Sha256(canonical),
+                Sha256(CanonicalEncodingJson(AdaptiveVersion, observationSize,
+                    actionSize, board, roster, semantics)));
         }
 
         private static string AdaptiveEnvironmentKindName(MlEnvironmentKind kind) => kind switch
@@ -420,6 +427,50 @@ namespace HexWars.Engine.Rl
                 ["semantics"] = semantics,
             });
             return AppendCanonicalValue(new StringBuilder(), document).ToString();
+        }
+
+        private static string CanonicalEncodingJson(
+            string version,
+            int observationSize,
+            int actionSize,
+            IReadOnlyDictionary<string, object> board,
+            IReadOnlyList<string> roster,
+            IReadOnlyDictionary<string, object> semantics)
+        {
+            var document = ReadOnlyMap(new Dictionary<string, object>
+            {
+                ["action_size"] = actionSize,
+                ["board"] = NormalizeEncodingValue(board),
+                ["contract_version"] = version,
+                ["observation_size"] = observationSize,
+                ["roster"] = roster,
+                ["semantics"] = NormalizeEncodingValue(semantics),
+            });
+            return AppendCanonicalValue(new StringBuilder(), document).ToString();
+        }
+
+        private static object NormalizeEncodingValue(object value)
+        {
+            if (value is IReadOnlyDictionary<string, object> dictionary)
+            {
+                var normalized = new Dictionary<string, object>();
+                foreach (var pair in dictionary)
+                {
+                    if (pair.Key == "environment_kind" || pair.Key == "effective_horizon"
+                        || pair.Key == "max_steps" || pair.Key == "intermediate_decision_penalty"
+                        || pair.Key == "deployment_completion_bonus") continue;
+                    normalized[pair.Key] = NormalizeEncodingValue(pair.Value);
+                }
+                return ReadOnlyMap(normalized);
+            }
+            if (value is IEnumerable sequence && value is not string)
+            {
+                var normalized = new List<object?>();
+                foreach (object? item in sequence)
+                    normalized.Add(item == null ? null : NormalizeEncodingValue(item));
+                return Array.AsReadOnly(normalized.ToArray());
+            }
+            return value;
         }
 
         private static StringBuilder AppendCanonicalValue(StringBuilder text, object? value)

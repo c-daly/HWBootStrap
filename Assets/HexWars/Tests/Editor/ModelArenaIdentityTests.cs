@@ -55,6 +55,22 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Overlay_HidesAdaptiveIdentityBeforeAtomicReveal()
+        {
+            var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = go.GetComponent<ModelDuelDriver>();
+                driver.Environment = MlEnvironmentContract.AdaptiveV1;
+                Assert.That(ModelArenaIdentityOverlay.ShouldRender(driver), Is.False);
+
+                driver.Environment = MlEnvironmentContract.TacticalV1;
+                Assert.That(ModelArenaIdentityOverlay.ShouldRender(driver), Is.True);
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
+        [Test]
         public void Overlay_CharacterBudget_ShrinksForNarrowerRowsAndCapsLandscape()
         {
             Assert.That(ModelArenaIdentityOverlay.CharacterBudget(160f, true), Is.LessThan(

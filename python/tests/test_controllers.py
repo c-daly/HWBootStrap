@@ -4,7 +4,7 @@ import os
 import sys
 import time
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +14,7 @@ import selfplay_env as selfplay_module
 from ml_lab.controllers import (
     ControllerResolutionError,
     ControllerResolver,
+    _validate_contract_compatibility,
     normalize_controller_spec,
 )
 from ml_lab.contracts import EnvironmentContract
@@ -65,6 +66,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="a" * 64,
+        encoding_hash="b" * 64,
         observation_size=12,
         action_size=7,
         board={"width": 2, "height": 2},
@@ -84,21 +86,14 @@ def loader():
 def test_resolver_accepts_gymnasium_numpy_integer_action_count(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
-    checkpoint = tmp_path / "numpy-space.zip"
-    checkpoint.write_bytes(b"model")
+    run = _write_run(tmp_path, contract)
 
     resolved = ControllerResolver(
         contract,
         model_loader=lambda _path, _algorithm: _Model(
             _Space(shape=(12,)), _Space(n=np.int64(7))
         ),
-    ).resolve(
-        {
-            "kind": "checkpoint",
-            "path": str(checkpoint),
-            "algorithm": "maskable_ppo",
-        }
-    )
+    ).resolve({"kind": "run", "path": str(run), "mode": "fixed"})
 
     assert resolved.action_size == 7
 
@@ -149,22 +144,16 @@ def test_normalize_legacy_checkpoint_spec_without_inferring_algorithm(tmp_path: 
         normalize_controller_spec({"kind": "checkpoint", "path": str(checkpoint)})
 
 
-def test_resolves_fixed_checkpoint_as_legacy_when_algorithm_is_explicit(
+def test_rejects_fixed_checkpoint_even_when_algorithm_is_explicit(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:
     checkpoint = tmp_path / "old-experiment.zip"
     checkpoint.write_bytes(b"model")
 
-    resolved = ControllerResolver(contract, model_loader=loader).resolve(
-        {"kind": "checkpoint", "path": str(checkpoint), "algorithm": "masked_dqn"}
-    )
-
-    assert resolved.path == checkpoint
-    assert resolved.algorithm == "masked_dqn"
-    assert resolved.step is None
-    assert resolved.contract is None
-    assert resolved.legacy is True
-    assert resolved.promotable is False
+    with pytest.raises(ControllerResolutionError, match="contract metadata"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {"kind": "checkpoint", "path": str(checkpoint), "algorithm": "masked_dqn"}
+        )
 
 
 def test_resolves_run_manifest_checkpoint_and_contract(
@@ -182,9 +171,94 @@ def test_resolves_run_manifest_checkpoint_and_contract(
     assert resolved.contract == contract
     assert resolved.legacy is False
     assert resolved.promotable is True
+    assert resolved.metadata()["contract_version"] == "tactical-v1"
+    assert resolved.metadata()["environment"] == "tactical-v1"
+    assert resolved.metadata()["encoding_hash"] == "b" * 64
 
 
-def test_resolves_legacy_checkpoints_directory_with_explicit_algorithm(
+def test_controller_rejects_wrong_environment_for_adaptive_runtime(
+    contract: EnvironmentContract,
+) -> None:
+    adaptive = dataclass_replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="d" * 64,
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    with pytest.raises(ControllerResolutionError, match="environment"):
+        _validate_contract_compatibility(contract, adaptive)
+
+
+def test_controller_accepts_adaptive_tactical_run_for_duel_with_shared_encoding_hash(
+    contract: EnvironmentContract,
+) -> None:
+    adaptive = dataclass_replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="d" * 64,
+        board={**contract.board, "environment_kind": "adaptive_tactical"},
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    duel = dataclass_replace(
+        adaptive,
+        contract_hash="e" * 64,
+        board={**adaptive.board, "environment_kind": "adaptive_duel"},
+        semantics={"environment_kind": "adaptive_duel"},
+    )
+
+    _validate_contract_compatibility(adaptive, duel)
+
+
+def test_controller_rejects_encoding_hash_mismatch_before_inference(
+    contract: EnvironmentContract,
+) -> None:
+    incompatible = dataclass_replace(contract, encoding_hash="c" * 64)
+
+    with pytest.raises(ControllerResolutionError, match="encoding hash"):
+        _validate_contract_compatibility(contract, incompatible)
+
+
+def test_run_manifest_without_encoding_hash_is_rejected(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    manifest = __import__("json").loads((run / "run.json").read_text(encoding="utf-8"))
+    del manifest["contract"]["encoding_hash"]
+    atomic_write_json(run / "run.json", manifest)
+
+    with pytest.raises(ControllerResolutionError, match="encoding_hash"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {"kind": "run", "path": str(run), "mode": "fixed"}
+        )
+
+
+def test_adaptive_runtime_rejects_contractless_checkpoint_before_loading(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    checkpoint = tmp_path / "contractless.zip"
+    checkpoint.write_bytes(b"model")
+    adaptive = dataclass_replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="d" * 64,
+        board={**contract.board, "environment_kind": "adaptive_tactical"},
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    loaded = False
+
+    def loader(_path, _algorithm):
+        nonlocal loaded
+        loaded = True
+        return _Model(_Space(shape=(12,)), _Space(n=7))
+
+    with pytest.raises(ControllerResolutionError, match="contract metadata"):
+        ControllerResolver(adaptive, model_loader=loader).resolve(
+            {"kind": "checkpoint", "path": str(checkpoint), "algorithm": "maskable_ppo"}
+        )
+    assert loaded is False
+
+
+def test_rejects_legacy_checkpoints_directory_with_explicit_algorithm(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:
     checkpoints = tmp_path / "legacy" / "checkpoints"
@@ -196,11 +270,8 @@ def test_resolves_legacy_checkpoints_directory_with_explicit_algorithm(
     os.utime(old, (1, 1))
     os.utime(latest, (2, 2))
 
-    resolved = ControllerResolver(contract, model_loader=loader).resolve(f"dqn:{checkpoints}")
-
-    assert resolved.path == latest
-    assert resolved.algorithm == "masked_dqn"
-    assert resolved.legacy is True
+    with pytest.raises(ControllerResolutionError, match="contract metadata"):
+        ControllerResolver(contract, model_loader=loader).resolve(f"dqn:{checkpoints}")
 
 
 def test_rejects_run_without_published_checkpoint_metadata(
@@ -220,6 +291,7 @@ def test_rejects_incompatible_model_geometry_even_when_contract_hash_differs(
     run_contract = EnvironmentContract(
         version=contract.version,
         contract_hash="b" * 64,
+        encoding_hash=contract.encoding_hash,
         observation_size=contract.observation_size,
         action_size=contract.action_size,
         board=contract.board,
@@ -261,6 +333,31 @@ def test_live_run_only_advances_after_explicit_reload(
     assert binding.resolved.step == 20
 
 
+def test_rejected_live_reload_keeps_previous_resolved_model(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    binding = ControllerResolver(contract, model_loader=loader).bind(
+        {"kind": "run", "path": str(run), "mode": "live"}
+    )
+    previous = binding.resolved
+    incompatible = dataclass_replace(contract, encoding_hash="c" * 64)
+    second = run / "checkpoints" / "step_000000020.zip"
+    second.write_bytes(b"model")
+    atomic_write_json(run / "run.json", {
+        "schema_version": 1,
+        "config": {"algorithm": "maskable_ppo"},
+        "contract": incompatible.to_dict(),
+        "latest_checkpoint": "checkpoints/step_000000020.zip",
+        "latest_checkpoint_step": 20,
+    })
+
+    with pytest.raises(ControllerResolutionError, match="encoding hash"):
+        binding.reload(lambda candidate: _validate_contract_compatibility(candidate.contract, contract))
+
+    assert binding.resolved is previous
+
+
 def test_fixed_run_does_not_advance_when_reload_is_requested(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:
@@ -272,26 +369,18 @@ def test_fixed_run_does_not_advance_when_reload_is_requested(
     assert binding.reload() is False
 
 
-def test_legacy_checkpoint_directory_advances_only_after_explicit_reload(
+def test_legacy_checkpoint_directory_cannot_create_live_binding(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:
     checkpoints = tmp_path / "legacy" / "checkpoints"
     checkpoints.mkdir(parents=True)
     first = checkpoints / "first.zip"
     first.write_bytes(b"first")
-    binding = ControllerResolver(contract, model_loader=loader).bind(f"ppo:{checkpoints}")
-    second = checkpoints / "second.zip"
-    second.write_bytes(b"second")
-    os.utime(first, (1, 1))
-    os.utime(second, (2, 2))
-
-    assert binding.resolved.path == first
-    assert binding.resolved.legacy is True
-    assert binding.reload() is True
-    assert binding.resolved.path == second
+    with pytest.raises(ControllerResolutionError, match="contract metadata"):
+        ControllerResolver(contract, model_loader=loader).bind(f"ppo:{checkpoints}")
 
 
-def test_legacy_unversioned_run_directory_reloads_nested_checkpoints_only_explicitly(
+def test_legacy_unversioned_run_directory_cannot_create_live_binding(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:
     run = tmp_path / "old-run"
@@ -299,18 +388,8 @@ def test_legacy_unversioned_run_directory_reloads_nested_checkpoints_only_explic
     checkpoints.mkdir(parents=True)
     first = checkpoints / "first.zip"
     first.write_bytes(b"first")
-    binding = ControllerResolver(contract, model_loader=loader).bind(f"dqn:{run}")
-    second = checkpoints / "second.zip"
-    second.write_bytes(b"second")
-    os.utime(first, (1, 1))
-    os.utime(second, (2, 2))
-
-    assert binding.resolved.path == first
-    assert binding.resolved.legacy is True
-    assert binding.resolved.promotable is False
-    assert binding.resolved.path == first
-    assert binding.reload() is True
-    assert binding.resolved.path == second
+    with pytest.raises(ControllerResolutionError, match="contract metadata"):
+        ControllerResolver(contract, model_loader=loader).bind(f"dqn:{run}")
 
 
 def test_legacy_run_checkpoints_directory_uses_published_manifest_metadata(
@@ -355,6 +434,7 @@ def test_selfplay_reloads_live_bindings_at_reset_boundary(
     env.n_actions = contract.action_size
     env._mask = None
     env._rpc = lambda message: {
+        "reward": 0.0,
         "terminated": True,
         "truncated": False,
         "obs": [0.0] * contract.observation_size,
@@ -396,6 +476,7 @@ def test_selfplay_pool_sampling_is_seeded_per_episode_not_global_random(
         env.n_actions = contract.action_size
         env._mask = None
         env._rpc = lambda message: {
+            "reward": 0.0,
             "terminated": True,
             "truncated": False,
             "obs": [0.0] * contract.observation_size,

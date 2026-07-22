@@ -50,7 +50,7 @@
 
 **Interfaces:**
 - Produces: `AdaptiveEnvConfig.Default()`, `AdaptiveEnvConfig.Validate(Board)`, `AdaptiveContractData.Templates`, `AdaptiveContractData.StatValues`, and `MlContract.CreateAdaptive(AdaptiveEnvConfig, MlEnvironmentKind)`.
-- Produces handshake fields later consumed verbatim by Python: `contract_version`, `contract_hash`, `environment_kind`, `adaptive`, `action_regions`, and `observation_channels`.
+- Produces handshake fields later consumed verbatim by Python: `contract_version`, `contract_hash`, `encoding_hash`, `environment_kind`, `adaptive`, `action_regions`, and `observation_channels`.
 - Preserves: `MlContract.Create(EnvConfig, ...)` and `MlContract.CurrentVersion == "tactical-v1"`.
 
 - [ ] **Step 1: Write contract tests before implementation**
@@ -721,13 +721,13 @@ class RunConfig:
     environment: str = "tactical-v1"
 ```
 
-Split `_parse_contract` into the shared hash/shape parser plus `_validate_tactical_v1` and `_validate_adaptive_v1`. Adaptive validation must require exactly 9 templates, 6 fixed, 3 custom, maximum 24 units, 14 named phases, all six action regions with offsets matching `n_actions`, every listed observation channel, and all nine stat catalogs. It must calculate no legal masks itself. Add `environment` to `params.json` through the existing `RunConfig.to_dict`; resumes whose older manifest lacks the field receive `tactical-v1`. Require exact version equality in controller compatibility so tactical and adaptive checkpoints cannot be resumed or inferred across contracts even if tensor sizes happen to match.
+Split `_parse_contract` into the shared hash/shape parser plus `_validate_tactical_v1` and `_validate_adaptive_v1`. Adaptive validation must require exactly 9 templates, 6 fixed, 3 custom, maximum 24 units, 14 named phases, all six action regions with offsets matching `n_actions`, every listed observation channel, and all nine stat catalogs. It must calculate no legal masks itself. Persist `environment`, `version`, and semantic `encoding_hash` in run and checkpoint metadata. Compatibility requires an exact `(environment, version, encoding_hash)` match plus separate observation/action geometry checks. Older manifests missing any identity field fail closed; no compatibility is inferred from geometry or the broader `contract_hash`.
 
 Update `TrainingEnvironmentFactory` and `SelfPlayEnv` to pass `config.environment`; both single-worker and subprocess-vector tests must assert every worker reports an identical adaptive contract and a boolean mask shaped `(workers, action_size)`.
 
 - [ ] **Step 4: Record adaptive episode diagnostics without changing win-rate semantics**
 
-Have both Python envs return GymServer's `diagnostics` in `info`. Extend `EpisodeMonitor` to sum the last values and create `adaptive_episodes.csv` only for adaptive runs with the exact header:
+Have both Python envs return GymServer's `diagnostics` in `info`. Extend `EpisodeMonitor` to record the last values only for adaptive runs. A one-worker run creates `adaptive_episodes.csv`; a multi-worker run creates one contention-free `adaptive_episodes.worker_N.csv` per worker. Every file uses the exact header:
 
 ```python
 ADAPTIVE_MONITOR_HEADER = [
@@ -736,9 +736,9 @@ ADAPTIVE_MONITOR_HEADER = [
 ]
 ```
 
-Do not add these values to reward or win rate. Add pytest assertions that a completed adaptive episode writes one row and a tactical episode creates no adaptive file.
+The episode field is a globally unambiguous `worker:episode` identity. Do not add these values to reward or win rate. Add pytest assertions that a completed adaptive episode writes one row, a tactical episode creates no adaptive file, and four spawned writers produce 100 unique rows without loss or corruption.
 
-Extend `python/ml_lab/evaluation.py` so evaluation JSON reads this sidecar and reports `design_count`, `distinct_custom_templates_deployed`, `deployment_completion_rate`, `invalid_sequences`, and `average_pregame_decisions` beside—not inside—the existing W-L-D/win-rate fields. Add `test_evaluation.py` assertions that changing any adaptive diagnostic leaves the calculated win rate unchanged.
+Extend `python/ml_lab/evaluation.py` so evaluation JSON reads the central sidecar or all worker sidecars in numeric worker order and reports `design_count`, `distinct_custom_templates_deployed`, `deployment_completion_rate`, `invalid_sequences`, and `average_pregame_decisions` beside—not inside—the existing W-L-D/win-rate fields. Add `test_evaluation.py` assertions that changing any adaptive diagnostic leaves the calculated win rate unchanged and that worker-sidecar aggregation loses no rows.
 
 - [ ] **Step 5: Write Unity red tests for explicit ML Lab and arena contract selection**
 
@@ -765,7 +765,7 @@ public void AdaptiveArena_SkipsHiddenDeploymentAndRendersOnlyAfterReveal()
 
 Add an Environment dropdown to Train and Arena. For adaptive training, display a read-only preflight block with: `adaptive-v1`, six fixed roles, three custom slots, 24 maximum units, six starting units, 132 setup points, combined-arms scripted deployment, and hidden deployment. `BuildTrainArguments()` always emits the explicit environment. Existing run details read the manifest contract and display the same semantic values rather than current UI defaults.
 
-Extend policy-server metadata and `PolicySeatInfo` with `contract_version`. Before `BeginGame`, `ModelDuelDriver` must require both model seats to match the selected environment; a scripted opponent inherits the selected environment. Construct `DuelEnv` for `tactical-v1` and `AdaptiveDuelEnv` for `adaptive-v1`. During adaptive deployment, continue requesting model actions but do not call `BoardRenderer.Render` or `RenderEntities`, do not emit `EventConsole` entries, and do not frame the camera. On `DeploymentComplete`, render the atomically revealed state once and resume normal paced combat. Live checkpoint reload remains between completed games only.
+Extend policy-server metadata and `PolicySeatInfo` with `environment`, `contract_version`, and `encoding_hash`. Before `BeginGame`, `ModelDuelDriver` derives the expected identity from the selected engine duel contract, passes it as required policy-server CLI arguments, and requires both model seats to match it exactly; a scripted opponent needs no model metadata. Construct `DuelEnv` for `tactical-v1` and `AdaptiveDuelEnv` for `adaptive-v1`. During adaptive deployment, continue requesting model actions but do not call `BoardRenderer.Render` or `RenderEntities`, do not emit `EventConsole` entries, and do not frame the camera. On `DeploymentComplete`, render the atomically revealed state once and resume normal paced combat. Live checkpoint reload remains between completed games only, and an incompatible candidate is rejected before it can replace the active binding.
 
 - [ ] **Step 7: Add the intern workflow to `python/README.md`**
 
@@ -773,7 +773,7 @@ Document this concrete experiment:
 
 ```powershell
 dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj -c Release
-python python/hexwars_ml.py doctor --json
+python python/hexwars_ml.py doctor --environment adaptive-v1 --json
 python python/hexwars_ml.py train --run adaptive-smoke --environment adaptive-v1 --algorithm maskable_ppo --opponent greedy --timesteps 50000 --checkpoint-every 10000 --workers 4 --learner-seat alternating --tracker local
 python python/hexwars_ml.py status python/runs/adaptive-smoke --json
 python python/duel.py --environment adaptive-v1 --p0 run:python/runs/adaptive-smoke --p1 greedy --out replays/adaptive-smoke.replay
@@ -810,8 +810,8 @@ git commit -m "feat(ml): integrate adaptive training and arena"
 
 ## Completion Gate
 
-- `tactical-v1` remains the default and loads every existing tactical run accepted before this work.
-- `adaptive-v1` refuses tactical checkpoints before inference and records all semantic contract fields in `run.json` and `params.json`.
+- `tactical-v1` remains the default; runs must carry the current explicit environment/version/encoding identity, so pre-`encoding_hash` manifests are rejected.
+- `adaptive-v1` refuses tactical or encoding-incompatible checkpoints before inference and records environment, version, full contract hash, semantic encoding hash, and geometry in durable metadata.
 - Every masked completed sequence is accepted by `GameEngine` except a move or reinforcement deployment rejected solely because hidden occupancy was omitted from its seat-visible legality projection; all invalidated sequences return safely to a root mask.
 - Both seats deploy six affordable units without observing the opponent; identical seeds/actions reproduce identical starts and games.
 - Fixed templates cannot be redesigned, custom replacements preserve slots 6-8, dead unit slots are reused, and reinforcement deployment masks at 24 living units.

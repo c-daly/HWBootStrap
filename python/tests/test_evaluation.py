@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -18,6 +20,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="d" * 64,
+        encoding_hash="e" * 64,
         observation_size=3,
         action_size=3,
         board={"width": 1, "height": 1},
@@ -187,6 +190,82 @@ def test_evaluation_uses_held_out_seeds_reciprocal_seats_masks_and_identity(
     assert len(predictions) == 8
     assert all(mask == [False, True, False] for _, _, _, mask in predictions)
     assert clients[0].closed is True
+
+
+def test_adaptive_diagnostics_are_reported_without_changing_win_rate(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.contracts import ADAPTIVE_MONITOR_HEADER
+    from ml_lab.evaluation import evaluate_matchup
+
+    adaptive = replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="e" * 64,
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    candidate = _model_controller(tmp_path, adaptive, "adaptive-candidate", 64)
+    opponent = _model_controller(tmp_path, adaptive, "adaptive-opponent", 96)
+    sidecar = candidate.spec.path / "adaptive_episodes.csv"
+
+    def write_sidecar(rows: list[list[object]]) -> None:
+        with sidecar.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(ADAPTIVE_MONITOR_HEADER)
+            writer.writerows(rows)
+
+    def evaluate() -> dict:
+        return evaluate_matchup(
+            candidate,
+            opponent,
+            games=2,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0, 1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        )
+
+    write_sidecar([[1, 2, 1, True, 0, 10], [2, 3, 2, False, 4, 20]])
+    first = evaluate()
+    write_sidecar([[1, 99, 8, False, 77, 100], [2, 101, 9, False, 88, 200]])
+    second = evaluate()
+
+    assert first["rates"] == second["rates"] == {"win": 0.5, "loss": 0.5, "draw": 0.0}
+    assert first["design_count"] == 5
+    assert first["distinct_custom_templates_deployed"] == 3
+    assert first["deployment_completion_rate"] == 0.5
+    assert first["invalid_sequences"] == 4
+    assert first["average_pregame_decisions"] == 15.0
+
+
+def test_adaptive_evaluation_aggregates_sorted_worker_sidecars_without_loss(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.contracts import ADAPTIVE_MONITOR_HEADER
+    from ml_lab.evaluation import _adaptive_diagnostic_aggregates, _adaptive_sidecars
+
+    for worker, design_count in ((10, 11), (2, 3), (0, 1), (1, 2)):
+        with (tmp_path / f"adaptive_episodes.worker_{worker}.csv").open(
+            "w", newline="", encoding="utf-8"
+        ) as stream:
+            writer = csv.writer(stream)
+            writer.writerow(ADAPTIVE_MONITOR_HEADER)
+            writer.writerow([f"{worker}:1", design_count, 1, True, worker, 10])
+
+    assert [path.name for path in _adaptive_sidecars(tmp_path)] == [
+        "adaptive_episodes.worker_0.csv",
+        "adaptive_episodes.worker_1.csv",
+        "adaptive_episodes.worker_2.csv",
+        "adaptive_episodes.worker_10.csv",
+    ]
+    result = _adaptive_diagnostic_aggregates(tmp_path)
+    assert result == {
+        "design_count": 17,
+        "distinct_custom_templates_deployed": 4,
+        "deployment_completion_rate": 1.0,
+        "invalid_sequences": 13,
+        "average_pregame_decisions": 10.0,
+    }
 
 
 def test_evaluation_reuses_exactly_one_client_per_worker(

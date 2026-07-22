@@ -100,6 +100,23 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Player1Learner_ContinuesPastPausedScriptedFirstGameplaySeat()
+        {
+            var opponent = new CountingEndTurnAgent();
+            var env = new AdaptiveTacticalEnv(
+                seed => opponent, seed => new CombinedArmsDeploymentPolicy(seed), PlayerId.Player1);
+            env.Reset(20);
+
+            for (int template = 0; template < 6; template++) Place(env, template);
+            StepResult reveal = env.Step((int)AdaptiveCommandChoice.ConfirmDeployment);
+
+            Assert.That(env.DeploymentComplete, Is.True);
+            Assert.That(opponent.Calls, Is.EqualTo(1));
+            Assert.That(env.State.ActivePlayer, Is.EqualTo(PlayerId.Player1));
+            Assert.That(reveal.ActionMask.Any(value => value), Is.True);
+        }
+
+        [Test]
         public void MaskedDeployment_IsDeterministicAndRevealsAtomically()
         {
             var a = NewEnv();
@@ -144,6 +161,17 @@ namespace HexWars.Engine.Tests
             {
                 Calls++;
                 return new CombinedArmsDeploymentPolicy(91).Choose(view);
+            }
+        }
+
+        private sealed class CountingEndTurnAgent : IAgent
+        {
+            public int Calls { get; private set; }
+
+            public Command Decide(GameState state)
+            {
+                Calls++;
+                return new EndTurn(state.ActivePlayer);
             }
         }
 

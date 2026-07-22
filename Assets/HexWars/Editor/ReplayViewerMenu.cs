@@ -65,18 +65,21 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
-        // Watch two *trained models* (or a model vs greedy/random) fight once, via the Windows-venv
-        // policy_server.py bridge. Pick a .zip per seat (Cancel = greedy).
+        // Watch two metadata-backed runs (or a run vs greedy) fight once via policy_server.py.
+        // Cancel either folder picker to use greedy for that seat.
         [MenuItem("HexWars/Watch Model Duel...")]
         public static void WatchModelDuel()
         {
             string pyDir = PyDir();
             if (!PyReady(pyDir)) return;
-            string p0 = PickSpec("Seat 0 (Player 1) model — Cancel for greedy", pyDir);
+            string p0 = PickRunSpec("Seat 0 (Player 1) run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string run0);
             if (p0 == null) return;
-            string p1 = PickSpec("Seat 1 (Player 2) model — Cancel for greedy", pyDir);
+            string p1 = PickRunSpec("Seat 1 (Player 2) run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string run1);
             if (p1 == null) return;
-            LaunchDuel(pyDir, p0, p1, loop: false);
+            if (!TryResolveDuelEnvironment(run0, run1, out MlEnvironmentContract environment)) return;
+            LaunchDuel(pyDir, p0, p1, loop: false, environment: environment);
         }
 
         // Watch LIVE training: seat 0 = the newest checkpoint in a run's folder, reloaded between games as
@@ -91,11 +94,19 @@ namespace HexWars.Presentation.EditorTools
                 "Pick the learner's checkpoint folder (runs/<run>/checkpoints)",
                 System.IO.Path.Combine(pyDir, "runs"), "");
             if (string.IsNullOrEmpty(dir)) return;
-            string p1 = PickSpec("Opponent model — Cancel for greedy", pyDir);
+            string learnerRun = NormalizeRunDirectory(dir);
+            if (learnerRun == null) return;
+            string p1 = PickRunSpec("Opponent run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string opponentRun);
             if (p1 == null) return;
-            string learner = ResolveLiveRunSpec(dir);
-            if (learner == null) return;
-            LaunchDuel(pyDir, learner, p1, loop: true);
+            if (!TryResolveDuelEnvironment(learnerRun, opponentRun,
+                    out MlEnvironmentContract environment)) return;
+            string learner = new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = learnerRun,
+            }.BuildSpec();
+            LaunchDuel(pyDir, learner, p1, loop: true, environment: environment);
         }
 
         /// <summary>Open a live run from ML Lab, resolving its algorithm from run metadata.</summary>
@@ -109,11 +120,9 @@ namespace HexWars.Presentation.EditorTools
                 Kind = ModelControllerKind.LiveRun,
                 Path = runDirectory,
             }.BuildSpec();
-            if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true);
+            if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true,
+                environment: EnvironmentFromRun(runDirectory));
         }
-
-        [System.Serializable] sealed class RunManifest { public RunConfig config; }
-        [System.Serializable] sealed class RunConfig { public string algorithm; }
 
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
@@ -127,7 +136,9 @@ namespace HexWars.Presentation.EditorTools
         }
 
         public static void LaunchDuel(
-            string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f)
+            string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f,
+            MlEnvironmentContract environment = MlEnvironmentContract.TacticalV1,
+            ModelDuelObserverSeat observer = ModelDuelObserverSeat.Player1)
         {
             string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
             string server = System.IO.Path.Combine(pyDir, "policy_server.py");
@@ -146,6 +157,8 @@ namespace HexWars.Presentation.EditorTools
             var d = go.AddComponent<ModelDuelDriver>();
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
+            d.Environment = environment;
+            d.Observer = observer;
             d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 
@@ -156,45 +169,19 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
-        static string PickSpec(string title, string pyDir)
+        static string PickRunSpec(string title, string pyDir, ModelControllerKind kind,
+            out string runDirectory)
         {
-            string path = EditorUtility.OpenFilePanel(title, pyDir, "zip");
-            if (string.IsNullOrEmpty(path)) return "greedy";
-            return ResolveModelSpec(path);
-        }
-
-        internal static string ResolveModelSpec(string modelPath)
-        {
-            string manifest = FindRunManifest(modelPath);
-            if (manifest == null)
+            string path = EditorUtility.OpenFolderPanel(title,
+                System.IO.Path.Combine(pyDir, "runs"), "");
+            if (string.IsNullOrEmpty(path))
             {
-                UnityEngine.Debug.LogError(
-                    "HexWars: model is not backed by run metadata. Choose its algorithm explicitly in " +
-                    "the ML Lab Arena; filenames are never used to infer algorithms.");
-                return null;
+                runDirectory = null;
+                return "greedy";
             }
-            string prefix;
-            try { prefix = AlgorithmPrefixFromManifest(System.IO.File.ReadAllText(manifest)); }
-            catch (System.Exception error)
-            {
-                UnityEngine.Debug.LogError("HexWars: could not read model run metadata: " + error.Message);
-                return null;
-            }
-            if (prefix == null)
-            {
-                UnityEngine.Debug.LogError("HexWars: model run metadata has no supported algorithm.");
-                return null;
-            }
-            return prefix + modelPath;
-        }
-
-        public static string AlgorithmPrefixFromManifest(string json)
-        {
-            var data = JsonUtility.FromJson<RunManifest>(json);
-            string algorithm = data?.config?.algorithm;
-            if (algorithm == "maskable_ppo") return "ppo:";
-            if (algorithm == "masked_dqn") return "dqn:";
-            return null;
+            runDirectory = NormalizeRunDirectory(path);
+            if (runDirectory == null) return null;
+            return new ModelSeatConfiguration { Kind = kind, Path = runDirectory }.BuildSpec();
         }
 
         static string FindRunManifest(string modelPath)
@@ -210,7 +197,7 @@ namespace HexWars.Presentation.EditorTools
             return null;
         }
 
-        static string ResolveLiveRunSpec(string modelPath)
+        static string NormalizeRunDirectory(string modelPath)
         {
             string manifest = FindRunManifest(modelPath);
             if (manifest == null)
@@ -218,11 +205,34 @@ namespace HexWars.Presentation.EditorTools
                 UnityEngine.Debug.LogError("HexWars: live training requires a metadata-backed run.");
                 return null;
             }
-            return new ModelSeatConfiguration
+            return System.IO.Path.GetDirectoryName(manifest);
+        }
+
+        static MlEnvironmentContract EnvironmentFromRun(string runDirectory)
+        {
+            try
             {
-                Kind = ModelControllerKind.LiveRun,
-                Path = System.IO.Path.GetDirectoryName(manifest),
-            }.BuildSpec();
+                string json = System.IO.File.ReadAllText(System.IO.Path.Combine(runDirectory, "run.json"));
+                return EnvironmentFromRunManifest(json);
+            }
+            catch (System.Exception) { return MlEnvironmentContract.TacticalV1; }
+        }
+
+        public static MlEnvironmentContract EnvironmentFromRunManifest(string json) =>
+            MlEnvironmentSummary.FromRunManifest(json).ContractVersion == "adaptive-v1"
+                ? MlEnvironmentContract.AdaptiveV1
+                : MlEnvironmentContract.TacticalV1;
+
+        static bool TryResolveDuelEnvironment(string run0, string run1,
+            out MlEnvironmentContract environment)
+        {
+            environment = run0 != null ? EnvironmentFromRun(run0)
+                : run1 != null ? EnvironmentFromRun(run1)
+                : MlEnvironmentContract.TacticalV1;
+            if (run0 == null || run1 == null || EnvironmentFromRun(run1) == environment) return true;
+            EditorUtility.DisplayDialog("HexWars",
+                "The selected runs use different environment contracts.", "OK");
+            return false;
         }
     }
 }

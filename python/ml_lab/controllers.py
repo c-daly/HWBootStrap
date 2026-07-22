@@ -1,14 +1,13 @@
 """Normalize and resolve scripted and trained HexWars controllers.
 
-Run manifests are authoritative for published model checkpoints.  Older standalone
-checkpoints are intentionally supported only through an explicit algorithm choice;
-they can be used for inference after inspecting their spaces, but are never treated
-as promotable experiment artifacts.
+Run manifests are authoritative for published model checkpoints. Standalone
+checkpoints are rejected because they do not carry authoritative contract metadata.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
@@ -23,7 +22,7 @@ from .io import read_json
 Algorithm = Literal["maskable_ppo", "masked_dqn"]
 SCRIPTED_NAMES = frozenset({"greedy", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
-SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1"})
+SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "adaptive-v1"})
 
 
 class ControllerResolutionError(ValueError):
@@ -61,6 +60,9 @@ class ResolvedController:
             "algorithm": self.algorithm,
             "step": self.step,
             "contract_hash": self.contract.contract_hash if self.contract is not None else None,
+            "contract_version": self.contract.version if self.contract is not None else None,
+            "environment": self.contract.environment if self.contract is not None else None,
+            "encoding_hash": self.contract.encoding_hash if self.contract is not None else None,
             "contract": self.contract.to_dict() if self.contract is not None else None,
             "observation_size": self.observation_size,
             "action_size": self.action_size,
@@ -73,7 +75,7 @@ ModelLoader = Callable[[Path, Algorithm], Any]
 
 
 def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> ControllerSpec:
-    """Parse a JSON-compatible controller spec and the old ``ppo:PATH`` boundary form."""
+    """Parse a controller spec; legacy path forms survive only for clear rejection."""
     if isinstance(raw, ControllerSpec):
         return raw
     if isinstance(raw, str):
@@ -111,8 +113,8 @@ def _parse_string_spec(raw: str) -> Mapping[str, Any]:
         return {"kind": "scripted", "name": value}
     if value.startswith("ppo:") or value.startswith("dqn:"):
         alias, path = value.split(":", 1)
-        # The old directory form was a live checkpoint source. Keep that behavior,
-        # but only refresh it when the caller explicitly invokes ControllerBinding.reload().
+        # Preserve legacy syntax at the parsing boundary so resolution can explain
+        # that contract metadata is required instead of reporting an unknown format.
         return {
             "kind": "checkpoint",
             "path": path,
@@ -136,7 +138,7 @@ def _parse_string_spec(raw: str) -> Mapping[str, Any]:
     if path.is_dir() and (path / "run.json").is_file():
         return {"kind": "run", "path": value, "mode": "fixed"}
     raise ControllerResolutionError(
-        "controller strings must be random, greedy, ppo:PATH, dqn:PATH, run:PATH, JSON, or @spec.json"
+        "controller strings must be random, greedy, run:PATH, JSON, or @spec.json"
     )
 
 
@@ -228,9 +230,9 @@ class ControllerResolver:
         return self._load_model(spec, checkpoint_path, algorithm, step, contract, legacy=False)
 
     def _resolve_legacy_checkpoint(self, spec: ControllerSpec) -> ResolvedController:
-        assert spec.path is not None and spec.algorithm is not None
-        path = _latest_legacy_checkpoint(spec.path)
-        return self._load_model(spec, path, spec.algorithm, None, None, legacy=True)
+        raise ControllerResolutionError(
+            "standalone checkpoints lack contract metadata; use a metadata-backed run:PATH"
+        )
 
     def _load_model(
         self,
@@ -242,6 +244,14 @@ class ControllerResolver:
         *,
         legacy: bool,
     ) -> ResolvedController:
+        if (
+            contract is None
+            and self.runtime_contract is not None
+            and self.runtime_contract.version == "adaptive-v1"
+        ):
+            raise ControllerResolutionError(
+                "adaptive inference requires checkpoint contract metadata"
+            )
         _validate_contract_compatibility(contract, self.runtime_contract)
         model = self.model_loader(path, algorithm)
         observation_size, action_size = _model_geometry(model)
@@ -274,12 +284,14 @@ class ControllerBinding:
         self.spec = spec
         self.resolved = resolver._resolve(spec)
 
-    def reload(self) -> bool:
+    def reload(self, validator: Callable[[ResolvedController], None] | None = None) -> bool:
         if self.spec.mode != "live":
             return False
         if self.spec.kind == "checkpoint" and (self.spec.path is None or not self.spec.path.is_dir()):
             return False
         updated = self._resolver._resolve(self.spec)
+        if validator is not None:
+            validator(updated)
         if _resolution_key(updated) == _resolution_key(self.resolved):
             return False
         self.resolved = updated
@@ -310,7 +322,7 @@ def _latest_legacy_checkpoint(path: Path) -> Path:
 def _contract_from_manifest(value: Any) -> EnvironmentContract:
     if not isinstance(value, Mapping):
         raise ControllerResolutionError("run manifest is missing contract metadata")
-    required = ("version", "contract_hash", "observation_size", "action_size", "board", "roster", "reward")
+    required = ("environment", "version", "contract_hash", "encoding_hash", "observation_size", "action_size", "board", "roster", "reward")
     missing = [field for field in required if field not in value]
     if missing:
         raise ControllerResolutionError(f"run manifest contract is missing {', '.join(missing)}")
@@ -325,16 +337,29 @@ def _contract_from_manifest(value: Any) -> EnvironmentContract:
         raise ControllerResolutionError("run manifest contract action_size must be positive")
     if not isinstance(value["contract_hash"], str) or not value["contract_hash"]:
         raise ControllerResolutionError("run manifest contract_hash must be a non-empty string")
-    if not isinstance(value["board"], Mapping) or not isinstance(value["roster"], list) or not isinstance(value["reward"], Mapping):
+    if value["environment"] != version:
+        raise ControllerResolutionError("run manifest contract environment does not match version")
+    if not isinstance(value["encoding_hash"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", value["encoding_hash"]
+    ):
+        raise ControllerResolutionError("run manifest encoding_hash must be a lowercase SHA-256 hex digest")
+    if (
+        not isinstance(value["board"], Mapping)
+        or not isinstance(value["roster"], list)
+        or not isinstance(value["reward"], Mapping)
+        or ("semantics" in value and not isinstance(value["semantics"], Mapping))
+    ):
         raise ControllerResolutionError("run manifest contract metadata has invalid semantic fields")
     return EnvironmentContract(
         version=version,
         contract_hash=value["contract_hash"],
+        encoding_hash=value["encoding_hash"],
         observation_size=observation_size,
         action_size=action_size,
         board=dict(value["board"]),
         roster=list(value["roster"]),
         reward=dict(value["reward"]),
+        semantics=dict(value.get("semantics", {})),
     )
 
 
@@ -345,15 +370,16 @@ def _validate_contract_compatibility(
         return
     if runtime_contract.version not in SUPPORTED_ENCODING_VERSIONS:
         raise ControllerResolutionError(f"unsupported inference encoding version {runtime_contract.version!r}")
+    if model_contract.environment != runtime_contract.environment:
+        raise ControllerResolutionError("model environment does not match the inference environment")
     if model_contract.version != runtime_contract.version:
         raise ControllerResolutionError("model encoding version does not match the inference environment")
-    # Contract hashes include reward and horizon semantics. Tactical training and duel
-    # inference intentionally have different hashes, so only representation geometry is shared here.
+    if model_contract.encoding_hash != runtime_contract.encoding_hash:
+        raise ControllerResolutionError("model encoding hash does not match the inference environment")
     if model_contract.observation_size != runtime_contract.observation_size:
         raise ControllerResolutionError("model contract observation size does not match the inference environment")
     if model_contract.action_size != runtime_contract.action_size:
         raise ControllerResolutionError("model contract action size does not match the inference environment")
-
 
 def _model_geometry(model: Any) -> tuple[int, int]:
     observation_space = getattr(model, "observation_space", None)
