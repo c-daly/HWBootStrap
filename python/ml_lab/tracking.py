@@ -9,7 +9,7 @@ from numbers import Real
 from pathlib import Path
 from typing import Any
 
-from .contracts import PROGRESS_HEADER, utc_now
+from .contracts import PROGRESS_HEADER, utc_now, validate_tracker_specs
 from .io import atomic_write_json, read_json
 
 
@@ -27,6 +27,7 @@ class TrackerHub:
         *,
         tensorboard_writer: Any | None = None,
     ) -> None:
+        validate_tracker_specs(tracker_specs)
         self.run_dir = Path(run_dir)
         self._tensorboard_writer = tensorboard_writer
         self._adapters: dict[str, TrackerCallback] = {}
@@ -87,7 +88,7 @@ class TrackerHub:
     def _configure_tensorboard(self, index: int) -> None:
         name = self._tracker_name("tensorboard", index, {})
         if self._tensorboard_writer is None:
-            return
+            raise RuntimeError("TensorBoard tracker requires an injected writer")
 
         def record(event: MetricEvent) -> None:
             if event["type"] == "metrics":
@@ -203,7 +204,7 @@ class TrackerHub:
     @staticmethod
     def _tracker_name(kind: str, index: int, spec: Mapping[str, Any]) -> str:
         if kind == "custom":
-            return f"custom:{spec.get('adapter', index)}"
+            return f"custom:{index}:{spec.get('adapter', index)}"
         return f"{kind}:{index}"
 
 

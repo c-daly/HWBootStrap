@@ -98,6 +98,32 @@ def test_create_run_refuses_existing_directory(
         create_run(tmp_path, config, contract)
 
 
+@pytest.mark.parametrize(
+    "tracker",
+    [
+        {"kind": "wandb", "api_key": "do-not-leak-value"},
+        {"kind": "custom", "settings": {"token": "do-not-leak-value"}},
+        {"kind": "custom", "settings": [{"password": "do-not-leak-value"}]},
+        {"kind": "wandb", "authentication": {"secret": "do-not-leak-value"}},
+    ],
+)
+def test_create_run_rejects_recursive_tracker_credentials_before_writing_files(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    tracker: dict[str, object],
+) -> None:
+    unsafe = replace(config, trackers=[tracker])
+
+    with pytest.raises(
+        ValueError, match="tracker configuration contains forbidden credential key"
+    ) as error:
+        create_run(tmp_path, unsafe, contract)
+
+    assert "do-not-leak-value" not in str(error.value)
+    assert not (tmp_path / unsafe.run_name).exists()
+
+
 def test_atomic_write_json_replaces_document_without_leaving_temp_file(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     atomic_write_json(path, {"generation": 1})

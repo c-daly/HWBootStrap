@@ -73,13 +73,13 @@ def test_optional_tracker_failure_degrades_without_stopping_local_tracking(
     trackers.start_run()
     trackers.log_metrics({"mean_reward": 2.0}, step=10)
 
-    assert trackers.degraded["custom:failing_tracker:record"] == (
+    assert trackers.degraded["custom:0:failing_tracker:record"] == (
         "log_metrics failed: remote service unavailable"
     )
     assert read_json(run_dir / "run.json")["tracker_status"] == [
         {
             "message": "log_metrics failed: remote service unavailable",
-            "name": "custom:failing_tracker:record",
+            "name": "custom:0:failing_tracker:record",
             "status": "degraded",
         }
     ]
@@ -87,7 +87,7 @@ def test_optional_tracker_failure_degrades_without_stopping_local_tracking(
         assert list(csv.DictReader(stream))[-1]["timesteps"] == "10"
 
 
-def test_wandb_is_imported_only_when_selected_and_never_serializes_credentials(
+def test_wandb_is_imported_only_when_selected_and_receives_safe_configuration(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_wandb = types.ModuleType("wandb")
@@ -111,7 +111,6 @@ def test_wandb_is_imported_only_when_selected_and_never_serializes_credentials(
     assert "wandb" not in sys.modules
 
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
-    secret = "not-a-serialized-api-key"
     trackers = TrackerHub(
         run_dir,
         [
@@ -120,7 +119,6 @@ def test_wandb_is_imported_only_when_selected_and_never_serializes_credentials(
                 "project": "hexwars",
                 "entity": "training-team",
                 "mode": "offline",
-                "api_key": secret,
             }
         ],
     )
@@ -137,7 +135,25 @@ def test_wandb_is_imported_only_when_selected_and_never_serializes_credentials(
             "project": "hexwars",
         }
     ]
-    assert secret not in (run_dir / "run.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "tracker",
+    [
+        {"kind": "wandb", "api_key": "do-not-leak-value"},
+        {"kind": "custom", "settings": {"access_token": "do-not-leak-value"}},
+        {"kind": "custom", "settings": [{"password": "do-not-leak-value"}]},
+    ],
+)
+def test_tracker_hub_rejects_recursive_credentials_before_configuring_adapters(
+    run_dir: Path, tracker: dict[str, object]
+) -> None:
+    original_manifest = read_json(run_dir / "run.json")
+
+    with pytest.raises(ValueError, match="tracker configuration contains forbidden credential key"):
+        TrackerHub(run_dir, [tracker])
+
+    assert read_json(run_dir / "run.json") == original_manifest
 
 
 def test_custom_adapter_receives_normalized_metric_event(
@@ -158,6 +174,64 @@ def test_custom_adapter_receives_normalized_metric_event(
     assert event["step"] == 20
     assert event["metrics"] == {"loss": 0.125, "reward": 4}
     assert isinstance(event["timestamp"], str)
+
+
+def test_duplicate_custom_adapter_specs_each_receive_events(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = types.ModuleType("duplicate_recorder")
+    received: list[dict[str, object]] = []
+    module.record = received.append
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    spec = {"kind": "custom", "adapter": "duplicate_recorder:record"}
+    trackers = TrackerHub(run_dir, [spec, spec])
+
+    trackers.start_run()
+    trackers.log_metrics({"loss": 0.25}, step=40)
+
+    metric_events = [event for event in received if event["type"] == "metrics"]
+    assert len(metric_events) == 2
+    assert all(event["step"] == 40 for event in metric_events)
+
+
+def test_custom_adapter_receives_normalized_lifecycle_and_artifact_events(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = types.ModuleType("lifecycle_recorder")
+    received: list[dict[str, object]] = []
+    module.record = received.append
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    trackers = TrackerHub(run_dir, [{"kind": "custom", "adapter": "lifecycle_recorder:record"}])
+    checkpoint = run_dir / "checkpoints" / "step_000000100.zip"
+    checkpoint.write_bytes(b"model")
+
+    trackers.start_run()
+    trackers.log_artifact(checkpoint, name="checkpoint-100")
+    trackers.finish("completed")
+
+    assert [event["type"] for event in received] == ["start", "artifact", "finish"]
+    assert received[1]["path"] == str(checkpoint)
+    assert received[1]["name"] == "checkpoint-100"
+    assert received[2]["status"] == "completed"
+    assert all(event["run_name"] == "tracking_run" for event in received)
+    assert all(isinstance(event["timestamp"], str) for event in received)
+
+
+def test_tensorboard_without_writer_is_recorded_as_degraded(run_dir: Path) -> None:
+    trackers = TrackerHub(run_dir, [{"kind": "tensorboard"}])
+
+    trackers.start_run()
+
+    assert trackers.degraded == {
+        "tensorboard:0": "configure failed: TensorBoard tracker requires an injected writer"
+    }
+    assert read_json(run_dir / "run.json")["tracker_status"] == [
+        {
+            "message": "configure failed: TensorBoard tracker requires an injected writer",
+            "name": "tensorboard:0",
+            "status": "degraded",
+        }
+    ]
 
 
 def test_tensorboard_writer_and_sb3_facade_do_not_require_live_sb3(run_dir: Path) -> None:

@@ -20,6 +20,7 @@ RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_STATES = {"created", "running", "stopping", "stopped", "completed", "failed"}
 PROGRESS_HEADER = ["timestamp", "timesteps", "episodes", "mean_reward", "steps_per_second"]
 MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
+TRACKER_CREDENTIAL_PARTS = {"token", "secret", "password"}
 
 
 class ContractMismatch(ValueError):
@@ -57,6 +58,7 @@ class RunConfig:
     resume_source: str | None
 
     def to_dict(self) -> dict[str, Any]:
+        validate_tracker_specs(self.trackers)
         return asdict(self)
 
 
@@ -73,6 +75,34 @@ def validate_run_name(name: str) -> str:
     return name
 
 
+def _is_tracker_credential_key(key: str) -> bool:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    parts = [part for part in re.sub(r"[^A-Za-z0-9]+", "_", separated).lower().split("_") if part]
+    if TRACKER_CREDENTIAL_PARTS.intersection(parts):
+        return True
+    return any(left == "api" and right == "key" for left, right in zip(parts, parts[1:]))
+
+
+def _validate_tracker_value(value: Any, path: str) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            child_path = f"{path}.{key}"
+            if isinstance(key, str) and _is_tracker_credential_key(key):
+                raise ValueError(
+                    f"tracker configuration contains forbidden credential key at {child_path}"
+                )
+            _validate_tracker_value(nested, child_path)
+    elif isinstance(value, (list, tuple)):
+        for index, nested in enumerate(value):
+            _validate_tracker_value(nested, f"{path}[{index}]")
+
+
+def validate_tracker_specs(trackers: list[Mapping[str, Any]]) -> None:
+    """Reject credentials before tracker configuration can enter durable run metadata."""
+    for index, tracker in enumerate(trackers):
+        _validate_tracker_value(tracker, f"trackers[{index}]")
+
+
 def _write_csv_header(path: Path, header: list[str]) -> None:
     with path.open("x", newline="", encoding="utf-8") as stream:
         csv.writer(stream).writerow(header)
@@ -81,6 +111,8 @@ def _write_csv_header(path: Path, header: list[str]) -> None:
 def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract) -> Path:
     """Create a new experiment directory; existing runs are never overwritten."""
     validate_run_name(config.run_name)
+    config_data = config.to_dict()
+    contract_data = contract.to_dict()
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
     run_dir = runs_root / config.run_name
@@ -89,8 +121,6 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     (run_dir / "replays").mkdir()
 
     created_at = utc_now()
-    config_data = config.to_dict()
-    contract_data = contract.to_dict()
     manifest = {
         "schema_version": RUN_SCHEMA_VERSION,
         "created_at": created_at,
