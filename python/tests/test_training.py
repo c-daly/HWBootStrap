@@ -461,6 +461,40 @@ def test_periodic_checkpoint_waits_until_next_rollout_start_after_policy_update(
         assert list(csv.DictReader(stream))[-1]["timesteps"] == "32"
 
 
+def test_overshot_periodic_checkpoint_publishes_actual_post_update_step(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, config("checkpoint-overshoot"), contract)
+    adapter = FakeCheckpointAdapter(contract)
+    times = iter([10.0, 12.0, 14.0])
+    lifecycle = TrainingLifecycle(
+        run_dir,
+        contract,
+        adapter,
+        TrackerHub(run_dir, []),
+        checkpoint_interval=25_000,
+        clock=lambda: next(times),
+    )
+    model = fake_model(25_000)
+    model.update_generation = 0
+
+    assert lifecycle.on_step(model) is True
+    model.num_timesteps = 25_088
+    lifecycle.on_rollout_end(model)
+    model.update_generation = 1
+    lifecycle.on_rollout_start(model)
+
+    manifest = read_json(run_dir / "run.json")
+    checkpoint = run_dir / manifest["latest_checkpoint"]
+    assert manifest["latest_checkpoint_step"] == 25_088
+    assert checkpoint.name == "step_000025088.zip"
+    assert checkpoint.read_bytes() == b"model-25088-generation-1"
+    with (run_dir / "progress.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [int(row["timesteps"]) for row in rows] == [25_088]
+    assert all(float(row["steps_per_second"]) >= 0 for row in rows)
+
+
 def test_stop_after_checkpoint_publishes_post_update_then_stops_cleanly(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -609,6 +643,16 @@ class FakeVectorEnv:
         self.closed = True
 
 
+class OrderedCloseVectorEnv(FakeVectorEnv):
+    def __init__(self, contract: EnvironmentContract, order: list[str]) -> None:
+        super().__init__(contract)
+        self._order = order
+
+    def close(self) -> None:
+        self._order.append("env")
+        super().close()
+
+
 class FakeTrainingModel:
     def __init__(self, fail: bool = False, initial_step: int = 0) -> None:
         self.num_timesteps = initial_step
@@ -642,6 +686,28 @@ class StopAfterFinalRolloutModel(FakeTrainingModel):
         assert lifecycle.on_step(self) is True
         lifecycle.on_rollout_end(self)
         self.update_generation += 1
+        return self
+
+
+class ResumeBufferProbeModel(FakeTrainingModel):
+    def __init__(self) -> None:
+        super().__init__(initial_step=64)
+        self._episode_num = 200
+        self.ep_info_buffer = [
+            {"r": 1.0, "worker_id": 0, "episode_number": 125},
+            {"r": 1.0, "worker_id": 1, "episode_number": 75},
+        ]
+        self.ep_success_buffer = [True, False]
+        self.buffers_at_learn: tuple[list[object], list[object]] | None = None
+
+    def learn(self, **kwargs):
+        self.learn_calls.append(kwargs)
+        self.buffers_at_learn = (
+            list(self.ep_info_buffer),
+            list(self.ep_success_buffer),
+        )
+        kwargs["callback"].lifecycle.on_rollout_end(self)
+        self.num_timesteps += int(kwargs["total_timesteps"])
         return self
 
 
@@ -718,6 +784,73 @@ def test_training_runner_marks_failure_and_closes_env(
     assert env.closed is True
 
 
+@pytest.mark.parametrize("failing_cleanup", ["tracker", "writer", "logger"])
+def test_training_cleanup_closes_env_first_and_preserves_primary_error(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_cleanup: str,
+) -> None:
+    import ml_lab.training as training_module
+
+    order: list[str] = []
+    env = OrderedCloseVectorEnv(contract, order)
+    model = FakeTrainingModel(fail=True)
+    adapter = FakeTrainingAdapter(contract, model)
+
+    class CleanupTracker:
+        def start_run(self) -> None:
+            pass
+
+        def finish(self, status: str) -> None:
+            del status
+            order.append("tracker")
+            if failing_cleanup == "tracker":
+                raise RuntimeError("tracker cleanup exploded")
+
+    class CleanupWriter:
+        def close(self) -> None:
+            order.append("writer")
+            if failing_cleanup == "writer":
+                raise RuntimeError("writer cleanup exploded")
+
+    class CleanupLogger:
+        def close(self) -> None:
+            order.append("logger")
+            if failing_cleanup == "logger":
+                raise RuntimeError("logger cleanup exploded")
+
+    monkeypatch.setattr(
+        training_module,
+        "build_sb3_logger",
+        lambda _run_dir: CleanupLogger(),
+    )
+    writer = CleanupWriter()
+    run_config = replace(
+        config(f"cleanup-{failing_cleanup}"),
+        trackers=(
+            [{"kind": "tensorboard"}]
+            if failing_cleanup == "writer"
+            else [{"kind": "local"}]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="training exploded"):
+        run_training(
+            run_config,
+            runs_root=tmp_path,
+            environment_factory=lambda _config, _run_dir: env,
+            algorithm_adapter=adapter,
+            tracker_factory=lambda *_args, **_kwargs: CleanupTracker(),
+            summary_writer_factory=lambda _log_dir: writer,
+        )
+
+    assert order[0] == "env"
+    assert env.closed is True
+    log_text = (tmp_path / run_config.run_name / "train.log").read_text(encoding="utf-8")
+    assert f"cleanup failed: {failing_cleanup}" in log_text
+
+
 def test_absolute_resume_treats_timesteps_as_final_target(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -767,6 +900,32 @@ def test_legacy_additional_resume_trains_requested_extra_steps(
     assert model.learn_calls[0]["total_timesteps"] == 32
     assert model.num_timesteps == 96
     assert read_json(run_dir / "run.json")["config"]["timestep_mode"] == "additional"
+
+
+def test_resume_clears_loaded_episode_buffers_before_applying_source_offset(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    source = _resume_source(tmp_path, contract)
+    source_manifest = read_json(source / "run.json")
+    source_manifest["episodes"] = 200
+    atomic_write_json(source / "run.json", source_manifest)
+    env = FakeVectorEnv(contract)
+    model = ResumeBufferProbeModel()
+    adapter = FakeTrainingAdapter(contract, model)
+
+    run_dir = run_training(
+        replace(
+            config("resume-buffer-reset"),
+            resume_source=str(source),
+            total_timesteps=96,
+        ),
+        runs_root=tmp_path,
+        environment_factory=lambda _config, _run_dir: env,
+        algorithm_adapter=adapter,
+    )
+
+    assert model.buffers_at_learn == ([], [])
+    assert read_json(run_dir / "run.json")["episodes"] == 200
 
 
 def test_legacy_ppo_wrapper_persists_unsafe_additional_resume_mode() -> None:

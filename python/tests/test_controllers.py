@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import sys
+import time
+import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +19,33 @@ from ml_lab.controllers import (
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.io import atomic_write_json
 from selfplay_env import SelfPlayEnv, bind_opponents
+
+
+def _pid_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 @dataclass
@@ -379,3 +409,44 @@ def test_selfplay_pool_sampling_is_seeded_per_episode_not_global_random(
     SelfPlayEnv.reset(second, seed=37)
 
     assert first.opp.resolved.server_controller == second.opp.resolved.server_controller
+
+
+def test_selfplay_constructor_failure_closes_and_reaps_server_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid_path = tmp_path / "selfplay-child.pid"
+    marker_path = tmp_path / "selfplay-child.closed"
+    child_code = (
+        "import os, pathlib, sys; "
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+        "sys.stdin.readline(); print('{}', flush=True); "
+        "sys.stdin.read(); "
+        f"pathlib.Path({str(marker_path)!r}).write_text('closed')"
+    )
+
+    real_popen = selfplay_module.subprocess.Popen
+    children = []
+
+    def capture_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        children.append(process)
+        return process
+
+    monkeypatch.setattr(selfplay_module.subprocess, "Popen", capture_popen)
+
+    with pytest.raises(KeyError) as constructor_error:
+        SelfPlayEnv([sys.executable, "-c", child_code], ["greedy"])
+
+    process = children[0]
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    try:
+        assert marker_path.read_text(encoding="utf-8") == "closed"
+        assert process.poll() is not None
+        assert _wait_for_pid_exit(child_pid)
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+    del constructor_error

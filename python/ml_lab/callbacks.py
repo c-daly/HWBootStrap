@@ -51,7 +51,7 @@ class TrainingLifecycle:
         base_step = latest if isinstance(latest, int) and not isinstance(latest, bool) else 0
         base_step = max(base_step, initial_step)
         self._next_checkpoint = (base_step // checkpoint_interval + 1) * checkpoint_interval
-        self._pending_checkpoint_step: int | None = None
+        self._pending_checkpoint_threshold: int | None = None
         self._last_progress_step: int | None = None
         self._last_metric_step = base_step
         self._last_metric_time = clock()
@@ -162,20 +162,21 @@ class TrainingLifecycle:
                 latest_message="stop requested after next checkpoint",
             )
 
-        if step >= self._next_checkpoint and self._pending_checkpoint_step is None:
-            self._pending_checkpoint_step = step
+        if step >= self._next_checkpoint and self._pending_checkpoint_threshold is None:
+            self._pending_checkpoint_threshold = self._next_checkpoint
         return True
 
     def on_rollout_start(self, model: Any) -> None:
         """Publish a due checkpoint only after the previous rollout's policy update."""
-        if self._pending_checkpoint_step is None:
+        if self._pending_checkpoint_threshold is None:
             return
-        checkpoint_step = self._pending_checkpoint_step
-        self.publish_checkpoint(model, checkpoint_step)
-        self._pending_checkpoint_step = None
-        self._next_checkpoint = (
-            checkpoint_step // self.checkpoint_interval + 1
-        ) * self.checkpoint_interval
+        due_threshold = self._pending_checkpoint_threshold
+        actual_step = int(model.num_timesteps)
+        self.publish_checkpoint(model, actual_step)
+        self._pending_checkpoint_threshold = None
+        self._next_checkpoint = due_threshold + self.checkpoint_interval
+        while self._next_checkpoint <= actual_step:
+            self._next_checkpoint += self.checkpoint_interval
         if self.stop_mode == "stop_after_checkpoint":
             self.stop_requested = True
             raise TrainingStopRequested("stop after checkpoint completed")

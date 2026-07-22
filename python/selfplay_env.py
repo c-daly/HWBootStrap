@@ -47,31 +47,75 @@ class SelfPlayEnv(gym.Env):
         super().__init__()
         self.proc = subprocess.Popen(list(server_cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1)
-        self.learner = learner_seat
-        self.opp_seat = 1 - learner_seat
-        self._next_seed = base_seed
-        self._rng = random.Random(base_seed)
+        try:
+            self.learner = learner_seat
+            self.opp_seat = 1 - learner_seat
+            self._next_seed = base_seed
+            self._rng = random.Random(base_seed)
 
-        sp = self._rpc({"cmd": "duel_spaces"})
-        self.spaces_info = sp  # full handshake: shapes + env config (for params)
-        self.n_actions = int(sp["n_actions"])
-        self.obs_len = int(sp["obs_len"])
-        self.action_space = spaces.Discrete(self.n_actions)
-        self.observation_space = spaces.Box(0.0, 1.0, shape=(self.obs_len,), dtype=np.float32)
-        self._mask = np.ones(self.n_actions, dtype=bool)
-        # Every opponent keeps its resolver binding, so live sources can refresh only at a reset boundary.
-        resolver = ControllerResolver()
-        self.opp_pool = bind_opponents(opponent_models, resolver)
-        self._validate_opponent_geometry()
-        self.opp = self.opp_pool[0]
+            sp = self._rpc({"cmd": "duel_spaces"})
+            self.spaces_info = sp  # full handshake: shapes + env config (for params)
+            self.n_actions = int(sp["n_actions"])
+            self.obs_len = int(sp["obs_len"])
+            self.action_space = spaces.Discrete(self.n_actions)
+            self.observation_space = spaces.Box(0.0, 1.0, shape=(self.obs_len,), dtype=np.float32)
+            self._mask = np.ones(self.n_actions, dtype=bool)
+            # Resolver bindings let live sources refresh only at a reset boundary.
+            resolver = ControllerResolver()
+            self.opp_pool = bind_opponents(opponent_models, resolver)
+            self._validate_opponent_geometry()
+            self.opp = self.opp_pool[0]
+        except BaseException:
+            self._shutdown()
+            raise
 
     def _rpc(self, msg: dict) -> dict:
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            raise RuntimeError("server closed unexpectedly")
-        return json.loads(line)
+        try:
+            assert self.proc.stdin is not None and self.proc.stdout is not None
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+            if not line:
+                raise RuntimeError("server closed unexpectedly")
+            return json.loads(line)
+        except BaseException:
+            self._shutdown()
+            raise
+
+    def _shutdown(self) -> None:
+        proc = getattr(self, "proc", None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None and proc.stdin is not None:
+                proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
+                proc.stdin.flush()
+        except Exception:
+            pass
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:
+            pass
 
     def _scripted(self):
         """True if the current opponent is a server-side scripted agent ('greedy'/'random'), not a model."""
@@ -155,12 +199,4 @@ class SelfPlayEnv(gym.Env):
         return self._mask
 
     def close(self):
-        try:
-            self.proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
-            self.proc.stdin.flush()
-        except Exception:
-            pass
-        try:
-            self.proc.terminate()
-        except Exception:
-            pass
+        self._shutdown()

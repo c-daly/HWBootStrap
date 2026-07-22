@@ -86,6 +86,21 @@ def _resume_episode_count(source: Path | None, model: Any) -> int:
     return max(counts)
 
 
+def _clear_loaded_episode_buffers(model: Any) -> None:
+    for attribute in ("ep_info_buffer", "ep_success_buffer"):
+        buffer = getattr(model, attribute, None)
+        clear = getattr(buffer, "clear", None)
+        if callable(clear):
+            clear()
+
+
+def _log_cleanup_failure(run_dir: Path, label: str, error: BaseException) -> None:
+    try:
+        _log(run_dir, f"cleanup failed: {label}: {type(error).__name__}: {error}")
+    except BaseException:
+        pass
+
+
 def run_training(
     config: RunConfig,
     *,
@@ -161,6 +176,9 @@ def run_training(
         if callable(set_logger):
             set_logger(sb3_logger)
         current_step = int(getattr(model, "num_timesteps", 0))
+        episode_offset = _resume_episode_count(resume_source, model)
+        if resumed:
+            _clear_loaded_episode_buffers(model)
         lifecycle = TrainingLifecycle(
             run_dir,
             contract,
@@ -168,7 +186,7 @@ def run_training(
             trackers,
             checkpoint_interval=config.checkpoint_interval,
             initial_step=current_step,
-            episode_offset=_resume_episode_count(resume_source, model),
+            episode_offset=episode_offset,
         )
         remaining = (
             config.total_timesteps
@@ -234,13 +252,29 @@ def run_training(
             _log(run_dir, f"training failed: {type(error).__name__}: {error}")
         raise
     finally:
+        if env is not None:
+            try:
+                env.close()
+            except BaseException as cleanup_error:
+                if run_created:
+                    _log_cleanup_failure(run_dir, "env", cleanup_error)
         if trackers is not None:
-            trackers.finish(final_status)
+            try:
+                trackers.finish(final_status)
+            except BaseException as cleanup_error:
+                if run_created:
+                    _log_cleanup_failure(run_dir, "tracker", cleanup_error)
         if tensorboard_writer is not None:
             close_writer = getattr(tensorboard_writer, "close", None)
             if callable(close_writer):
-                close_writer()
+                try:
+                    close_writer()
+                except BaseException as cleanup_error:
+                    if run_created:
+                        _log_cleanup_failure(run_dir, "writer", cleanup_error)
         if sb3_logger is not None:
-            sb3_logger.close()
-        if env is not None:
-            env.close()
+            try:
+                sb3_logger.close()
+            except BaseException as cleanup_error:
+                if run_created:
+                    _log_cleanup_failure(run_dir, "logger", cleanup_error)
