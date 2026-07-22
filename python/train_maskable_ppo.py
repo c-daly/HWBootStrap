@@ -1,78 +1,67 @@
-"""Train a HexWars tactical agent with MaskablePPO (sb3-contrib) against a scripted baseline.
+"""Deprecated compatibility wrapper for the unified HexWars ML trainer."""
 
-Writes logs/results to disk under --logdir:
-  - progress.csv : training curve (ep_rew_mean, loss, etc.) over time
-  - monitor.csv  : per-episode reward + length
-  - <out>.zip    : the trained model
-
-Train two *different* agents, then duel them (see duel.py):
-    python train_maskable_ppo.py --opponent greedy --seed 1 --out ppo_a --timesteps 200000
-    python train_maskable_ppo.py --opponent random --seed 2 --out ppo_b --timesteps 200000
-    python duel.py ppo_a.zip ppo_b.zip --out ../replays/ppo_a_vs_b.replay
-"""
 import argparse
 import os
+import shutil
+from pathlib import Path
 
-from sb3_contrib import MaskablePPO
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
-from sb3_contrib.common.wrappers import ActionMasker
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.logger import configure
-from stable_baselines3.common.callbacks import CheckpointCallback
+from ml_lab.cli import controller_config
+from ml_lab.contracts import RunConfig
+from ml_lab.io import read_json
+from ml_lab.training import run_training
 
-from hexwars_gym import HexWarsEnv
-from hex_cnn import cnn_policy_kwargs
-from experiment import write_params
 
 DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll"
 
 
-def mask_fn(env):
-    # gymnasium 1.x wrappers don't auto-forward attributes; reach the base env's method
-    return env.unwrapped.action_masks()
+def _export_latest(run_dir: Path, output: str) -> Path:
+    manifest = read_json(run_dir / "run.json")
+    source = run_dir / manifest["latest_checkpoint"]
+    destination = Path(output)
+    if destination.suffix.lower() != ".zip":
+        destination = Path(f"{destination}.zip")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--opponent", choices=["greedy", "random"], default="greedy")
-    ap.add_argument("--seat", type=int, default=0)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--timesteps", type=int, default=200_000)
-    ap.add_argument("--out", default="hexwars_ppo")
-    ap.add_argument("--logdir", default=None)
-    ap.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
-    ap.add_argument("--resume", default=None, help="path to a saved model/checkpoint .zip to continue from")
-    ap.add_argument("--checkpoint-freq", type=int, default=25_000, help="save a checkpoint every N steps")
-    args = ap.parse_args()
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--opponent", choices=["greedy", "random"], default="greedy")
+    parser.add_argument("--seat", type=int, choices=[0, 1], default=0)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--timesteps", type=int, default=200_000)
+    parser.add_argument("--out", default="hexwars_ppo")
+    parser.add_argument("--logdir", default=None)
+    parser.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
+    parser.add_argument("--resume", default=None)
+    parser.add_argument("--checkpoint-freq", type=int, default=25_000)
+    args = parser.parse_args()
 
-    logdir = args.logdir or os.path.join("runs", args.out)
-    os.makedirs(logdir, exist_ok=True)
-
-    server_cmd = ["dotnet", args.server]
-    base = HexWarsEnv(server_cmd, opponent=args.opponent, seat=args.seat, base_seed=args.seed)
-    env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
-
-    # record params (env config from the handshake + training args) for reproducibility
-    write_params(logdir, base.spaces_info,
-                 dict(out=args.out, opponent=args.opponent, seat=args.seat, seed=args.seed,
-                      timesteps=args.timesteps, n_steps=512, policy="CNN", resume=args.resume))
-
-    # periodic checkpoints so an interrupted run is resumable (--resume runs/.../checkpoints/...zip)
-    ckpt = CheckpointCallback(save_freq=args.checkpoint_freq,
-                              save_path=os.path.join(logdir, "checkpoints"), name_prefix=args.out)
-
-    if args.resume:
-        model = MaskablePPO.load(args.resume, env=env)
-        print(f"resuming from {args.resume}")
-    else:
-        model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=args.seed, verbose=1,
-                            policy_kwargs=cnn_policy_kwargs(base.spaces_info))
-
-    model.set_logger(configure(logdir, ["stdout", "csv"]))  # add "tensorboard" if installed
-    model.learn(total_timesteps=args.timesteps, callback=ckpt, reset_num_timesteps=(args.resume is None))
-    model.save(args.out)
-    print(f"done -> {args.out}.zip  (vs {args.opponent}, seed {args.seed})  logs: {logdir}/")
-    env.close()
+    print("DEPRECATED: use hexwars_ml.py train --algorithm maskable_ppo")
+    run_path = Path(args.logdir or Path("runs") / args.out)
+    config = RunConfig(
+        backend="sb3",
+        algorithm="maskable_ppo",
+        policy="HexCNN",
+        run_name=run_path.name,
+        seed=args.seed,
+        total_timesteps=args.timesteps,
+        checkpoint_interval=args.checkpoint_freq,
+        workers=1,
+        device="auto",
+        learner_seat=str(args.seat),
+        opponent=controller_config(args.opponent),
+        trackers=[{"kind": "local"}],
+        resume_source=args.resume,
+    )
+    run_dir = run_training(
+        config,
+        runs_root=run_path.parent,
+        server_cmd=["dotnet", args.server],
+    )
+    exported = _export_latest(run_dir, args.out)
+    print(f"done -> {exported}  logs: {run_dir}")
 
 
 if __name__ == "__main__":

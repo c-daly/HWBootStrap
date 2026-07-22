@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
@@ -359,11 +360,17 @@ def _model_geometry(model: Any) -> tuple[int, int]:
     action_space = getattr(model, "action_space", None)
     shape = getattr(observation_space, "shape", None)
     action_size = getattr(action_space, "n", None)
-    if not isinstance(shape, tuple) or len(shape) != 1 or not isinstance(shape[0], int) or shape[0] <= 0:
+    if (
+        not isinstance(shape, tuple)
+        or len(shape) != 1
+        or isinstance(shape[0], bool)
+        or not isinstance(shape[0], Integral)
+        or shape[0] <= 0
+    ):
         raise ControllerResolutionError("model does not expose a one-dimensional observation space")
-    if isinstance(action_size, bool) or not isinstance(action_size, int) or action_size <= 0:
+    if isinstance(action_size, bool) or not isinstance(action_size, Integral) or action_size <= 0:
         raise ControllerResolutionError("model does not expose a discrete action space")
-    return shape[0], action_size
+    return int(shape[0]), int(action_size)
 
 
 def load_model(path: Path, algorithm: Algorithm) -> Any:

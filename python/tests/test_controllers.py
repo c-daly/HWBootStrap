@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ml_lab.controllers import (
@@ -47,6 +48,28 @@ def loader():
         return _Model(_Space(shape=(12,)), _Space(n=7))
 
     return load
+
+
+def test_resolver_accepts_gymnasium_numpy_integer_action_count(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    checkpoint = tmp_path / "numpy-space.zip"
+    checkpoint.write_bytes(b"model")
+
+    resolved = ControllerResolver(
+        contract,
+        model_loader=lambda _path, _algorithm: _Model(
+            _Space(shape=(12,)), _Space(n=np.int64(7))
+        ),
+    ).resolve(
+        {
+            "kind": "checkpoint",
+            "path": str(checkpoint),
+            "algorithm": "maskable_ppo",
+        }
+    )
+
+    assert resolved.action_size == 7
 
 
 def _write_run(
