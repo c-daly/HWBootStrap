@@ -78,6 +78,20 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Designer_CommittedUnitNameAppearsInSummary()
+        {
+            var designer = BuildDesigner();
+            var field = FindField(designer, "Unit name");
+            string expected = UnitTemplate.Sanitize("  Iron Wolf  ");
+
+            field.text = "  Iron Wolf  ";
+            Invoke(designer, "CommitName");
+
+            var summary = FindPrivate<Text>(designer, "_summary");
+            Assert.That(summary.text, Does.Contain("Name: " + expected));
+        }
+
+        [Test]
         public void FocusHelpers_DistinguishTheSelectedFieldAndAnyActiveTextEntry()
         {
             var title = BuildTitle();
