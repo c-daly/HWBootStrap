@@ -31,6 +31,28 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void LiveRunArenaDefaultsToDeterministicInference()
+        {
+            var seat = new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = "C:/runs/arena",
+            };
+
+            Assert.That(seat.BuildSpec(), Does.Contain("\"inference_mode\":\"deterministic\""));
+        }
+
+        [Test]
+        public void LiveTrainingViewerExplicitlyRequestsStochasticInference()
+        {
+            string spec = HexWars.Presentation.EditorTools.ReplayViewerMenu
+                .BuildLiveTrainingSpec("C:/runs/training");
+
+            Assert.That(spec, Does.Contain("\"mode\":\"live\""));
+            Assert.That(spec, Does.Contain("\"inference_mode\":\"stochastic\""));
+        }
+
+        [Test]
         public void Reload_IsAllowedOnlyAtGameBoundaryForLiveSeats()
         {
             var config = new ModelDuelConfiguration

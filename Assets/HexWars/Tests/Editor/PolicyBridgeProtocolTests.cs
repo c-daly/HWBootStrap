@@ -8,7 +8,7 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void ReadyMessage_ParsesStructuredMetadataForBothSeats()
         {
-            const string json = "{\"ready\":true,\"model_seats\":[0,1],\"seat_models\":[{\"seat\":0,\"kind\":\"run\",\"path\":\"a.zip\",\"algorithm\":\"maskable_ppo\",\"step\":64,\"environment\":\"adaptive-v1\",\"contract_version\":\"adaptive-v1\",\"contract_hash\":\"abc\",\"encoding_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"seat\":1,\"kind\":\"checkpoint\",\"path\":\"b.zip\",\"algorithm\":\"masked_dqn\",\"step\":96,\"environment\":\"tactical-v1\",\"contract_version\":\"tactical-v1\",\"contract_hash\":\"def\",\"encoding_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}";
+            const string json = "{\"ready\":true,\"model_seats\":[0,1],\"seat_models\":[{\"seat\":0,\"kind\":\"run\",\"inference_mode\":\"stochastic\",\"path\":\"a.zip\",\"algorithm\":\"maskable_ppo\",\"step\":64,\"environment\":\"adaptive-v1\",\"contract_version\":\"adaptive-v1\",\"contract_hash\":\"abc\",\"encoding_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},{\"seat\":1,\"kind\":\"checkpoint\",\"path\":\"b.zip\",\"algorithm\":\"masked_dqn\",\"step\":96,\"environment\":\"tactical-v1\",\"contract_version\":\"tactical-v1\",\"contract_hash\":\"def\",\"encoding_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}";
 
             var message = PolicyBridge.ParseReady(json);
 
@@ -16,6 +16,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(message.Seats, Has.Length.EqualTo(2));
             Assert.That(message.Seats[0].Seat, Is.Zero);
             Assert.That(message.Seats[0].Algorithm, Is.EqualTo("maskable_ppo"));
+            Assert.That(message.Seats[0].InferenceMode, Is.EqualTo("stochastic"));
             Assert.That(message.Seats[0].ContractVersion, Is.EqualTo("adaptive-v1"));
             Assert.That(message.Seats[0].Environment, Is.EqualTo("adaptive-v1"));
             Assert.That(message.Seats[0].EncodingHash, Is.EqualTo(new string('a', 64)));

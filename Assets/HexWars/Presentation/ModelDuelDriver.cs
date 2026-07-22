@@ -8,6 +8,7 @@ using HexWars.Engine.Rl;
 namespace HexWars.Presentation
 {
     public enum ModelControllerKind { Greedy, Random, FixedRun, LiveRun }
+    public enum ModelInferenceMode { Deterministic, Stochastic }
     public enum ModelDuelObserverSeat { Player1, Player2 }
 
     public static class ModelDuelObserver
@@ -21,6 +22,7 @@ namespace HexWars.Presentation
     {
         public ModelControllerKind Kind = ModelControllerKind.Greedy;
         public string Path = string.Empty;
+        public ModelInferenceMode InferenceMode = ModelInferenceMode.Deterministic;
 
         public string BuildSpec()
         {
@@ -29,10 +31,19 @@ namespace HexWars.Presentation
                 case ModelControllerKind.Random: return "random";
                 case ModelControllerKind.FixedRun: return "run:" + Path;
                 case ModelControllerKind.LiveRun:
-                    return JsonUtility.ToJson(new RunSpec { kind = "run", path = Path, mode = "live" });
+                    return JsonUtility.ToJson(new RunSpec
+                    {
+                        kind = "run",
+                        path = Path,
+                        mode = "live",
+                        inference_mode = InferenceValue(InferenceMode),
+                    });
                 default: return "greedy";
             }
         }
+
+        static string InferenceValue(ModelInferenceMode value) =>
+            value == ModelInferenceMode.Stochastic ? "stochastic" : "deterministic";
 
         public bool IsModel => Kind != ModelControllerKind.Greedy && Kind != ModelControllerKind.Random;
         public bool IsLive => Kind == ModelControllerKind.LiveRun;
@@ -43,7 +54,13 @@ namespace HexWars.Presentation
             return string.Empty;
         }
 
-        [Serializable] sealed class RunSpec { public string kind; public string path; public string mode; }
+        [Serializable] sealed class RunSpec
+        {
+            public string kind;
+            public string path;
+            public string mode;
+            public string inference_mode;
+        }
     }
 
     [Serializable]

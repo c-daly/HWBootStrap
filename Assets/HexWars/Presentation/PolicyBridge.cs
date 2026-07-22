@@ -13,6 +13,7 @@ namespace HexWars.Presentation
     {
         public int Seat { get; internal set; }
         public string Kind { get; internal set; }
+        public string InferenceMode { get; internal set; }
         public string Path { get; internal set; }
         public string Algorithm { get; internal set; }
         public long Step { get; internal set; }
@@ -210,6 +211,9 @@ namespace HexWars.Presentation
                 {
                     Seat = seat.seat,
                     Kind = seat.kind ?? string.Empty,
+                    InferenceMode = string.IsNullOrWhiteSpace(seat.inference_mode)
+                        ? "deterministic"
+                        : seat.inference_mode,
                     Path = seat.path ?? string.Empty,
                     Algorithm = seat.algorithm ?? string.Empty,
                     Step = seat.step,
@@ -333,6 +337,7 @@ namespace HexWars.Presentation
         {
             public int seat;
             public string kind;
+            public string inference_mode;
             public string path;
             public string algorithm;
             public long step = -1;

@@ -101,11 +101,7 @@ namespace HexWars.Presentation.EditorTools
             if (p1 == null) return;
             if (!TryResolveDuelEnvironment(learnerRun, opponentRun,
                     out MlEnvironmentContract environment)) return;
-            string learner = new ModelSeatConfiguration
-            {
-                Kind = ModelControllerKind.LiveRun,
-                Path = learnerRun,
-            }.BuildSpec();
+            string learner = BuildLiveTrainingSpec(learnerRun);
             LaunchDuel(pyDir, learner, p1, loop: true, environment: environment);
         }
 
@@ -115,14 +111,18 @@ namespace HexWars.Presentation.EditorTools
             if (string.IsNullOrWhiteSpace(runDirectory)) return;
             string pyDir = PyDir();
             if (!PyReady(pyDir)) return;
-            string learner = new ModelSeatConfiguration
-            {
-                Kind = ModelControllerKind.LiveRun,
-                Path = runDirectory,
-            }.BuildSpec();
+            string learner = BuildLiveTrainingSpec(runDirectory);
             if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true,
                 environment: EnvironmentFromRun(runDirectory));
         }
+
+        public static string BuildLiveTrainingSpec(string runDirectory) =>
+            new ModelSeatConfiguration
+            {
+                Kind = ModelControllerKind.LiveRun,
+                Path = runDirectory,
+                InferenceMode = ModelInferenceMode.Stochastic,
+            }.BuildSpec();
 
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
