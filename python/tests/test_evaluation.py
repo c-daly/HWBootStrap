@@ -290,6 +290,110 @@ def test_evaluation_workers_overlap_own_one_client_and_merge_in_schedule_order(
     assert all(client.closed for client in clients.values())
 
 
+class RendezvousDuelClient(FakeDuelClient):
+    def __init__(self, worker_index: int, rendezvous: threading.Barrier) -> None:
+        super().__init__(iter([0]), worker_index)
+        self._rendezvous = rendezvous
+        self.thread_ids: list[int] = []
+
+    def reset(self, *, seed: int, p0: str, p1: str) -> dict:
+        self.thread_ids.append(threading.get_ident())
+        self._rendezvous.wait(timeout=2)
+        return super().reset(seed=seed, p0=p0, p1=p1)
+
+    def step(self, action: int) -> dict:
+        self.thread_ids.append(threading.get_ident())
+        return super().step(action)
+
+    def close(self) -> None:
+        self.thread_ids.append(threading.get_ident())
+        super().close()
+
+
+def test_evaluation_serializes_shared_model_predictions_but_not_distinct_models(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    shared = _model_controller(tmp_path, contract, "shared", 64)
+    shared_clients: dict[int, RendezvousDuelClient] = {}
+    clients_lock = threading.Lock()
+    shared_client_rendezvous = threading.Barrier(2)
+    shared_predictions_started = 0
+    shared_model_active = False
+    shared_prediction_lock = threading.Lock()
+    second_shared_prediction_started = threading.Event()
+
+    def shared_client_factory(worker_index: int) -> RendezvousDuelClient:
+        client = RendezvousDuelClient(worker_index, shared_client_rendezvous)
+        with clients_lock:
+            shared_clients[worker_index] = client
+        return client
+
+    def shared_predict_action(_model, _algorithm, _observation, _mask) -> int:
+        nonlocal shared_predictions_started, shared_model_active
+        with shared_prediction_lock:
+            shared_predictions_started += 1
+            if shared_predictions_started == 2:
+                second_shared_prediction_started.set()
+            assert not shared_model_active, "shared model predictions overlapped"
+            shared_model_active = True
+        try:
+            second_shared_prediction_started.wait(timeout=1)
+        finally:
+            with shared_prediction_lock:
+                shared_model_active = False
+        return 1
+
+    evaluate_matchup(
+        shared,
+        shared,
+        games=2,
+        seed_start=26_000,
+        both_seats=False,
+        workers=2,
+        client_factory=shared_client_factory,
+        predict_action=shared_predict_action,
+    )
+
+    assert set(shared_clients) == {0, 1}
+    assert len({client.thread_ids[0] for client in shared_clients.values()}) == 2
+    assert all(client.closed for client in shared_clients.values())
+
+    candidate = _model_controller(tmp_path, contract, "candidate", 96)
+    opponent = _model_controller(tmp_path, contract, "opponent", 128)
+    distinct_clients: dict[int, RendezvousDuelClient] = {}
+    distinct_client_rendezvous = threading.Barrier(2)
+    distinct_models_started = threading.Barrier(2)
+
+    def distinct_client_factory(worker_index: int) -> RendezvousDuelClient:
+        client = RendezvousDuelClient(worker_index, distinct_client_rendezvous)
+        with clients_lock:
+            distinct_clients[worker_index] = client
+        return client
+
+    def distinct_predict_action(_model, _algorithm, observation, _mask) -> int:
+        if observation[1] == 0.0:
+            distinct_models_started.wait(timeout=1)
+        return 1
+
+    evaluate_matchup(
+        candidate,
+        opponent,
+        games=1,
+        seed_start=27_000,
+        both_seats=True,
+        workers=2,
+        client_factory=distinct_client_factory,
+        predict_action=distinct_predict_action,
+    )
+
+    assert set(distinct_clients) == {0, 1}
+    assert not distinct_models_started.broken
+    assert len({client.thread_ids[0] for client in distinct_clients.values()}) == 2
+    assert all(client.closed for client in distinct_clients.values())
+
+
 def test_evaluation_closes_all_clients_when_prediction_fails(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

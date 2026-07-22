@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from math import sqrt
 from statistics import NormalDist
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -178,6 +179,7 @@ def _play_game(
     seats: tuple[ResolvedController, ResolvedController],
     seed: int,
     predict_action: Callable[[Any, str, np.ndarray, np.ndarray], int],
+    prediction_locks: dict[int, Lock],
 ) -> int:
     state = client.reset(
         seed=seed,
@@ -197,9 +199,10 @@ def _play_game(
         observation = np.asarray(state.get("obs"), dtype=np.float32)
         mask = np.asarray(state.get("mask"), dtype=bool)
         validate_inference_input(controller, observation, mask)
-        action = int(
-            predict_action(controller.model, controller.algorithm, observation, mask)
-        )
+        with prediction_locks[id(controller.model)]:
+            action = int(
+                predict_action(controller.model, controller.algorithm, observation, mask)
+            )
         if action < 0 or action >= mask.size or not bool(mask[action]):
             raise RuntimeError("controller selected an action excluded by the action mask")
         state = client.step(action)
@@ -231,6 +234,11 @@ def evaluate_matchup(
         for seed in range(seed_start, seed_start + games)
         for candidate_seat in ((0, 1) if both_seats else (0,))
     ]
+    prediction_locks = {
+        id(controller.model): Lock()
+        for controller in (candidate, opponent)
+        if controller.model is not None
+    }
 
     def run_partition(
         worker_index: int,
@@ -247,7 +255,9 @@ def evaluate_matchup(
                     if candidate_seat == 0
                     else (opponent, candidate)
                 )
-                winner = _play_game(client, seats, seed, predict_action)
+                winner = _play_game(
+                    client, seats, seed, predict_action, prediction_locks
+                )
                 if winner == candidate_seat:
                     outcome = "win"
                 elif winner in {0, 1}:
