@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -106,6 +107,17 @@ def test_atomic_write_json_replaces_document_without_leaving_temp_file(tmp_path:
     assert list(tmp_path.glob("*.tmp")) == []
 
 
+def test_atomic_write_json_failure_preserves_document_and_removes_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    atomic_write_json(path, {"generation": 1})
+
+    with pytest.raises(TypeError):
+        atomic_write_json(path, {"not_json": {1, 2, 3}})
+
+    assert read_json(path) == {"generation": 1}
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 def test_update_state_preserves_config_and_contract(
     tmp_path: Path, config: RunConfig, contract: EnvironmentContract
 ) -> None:
@@ -160,6 +172,44 @@ def test_publish_checkpoint_validates_then_atomically_updates_latest(
     manifest = read_json(run / "run.json")
     assert manifest["latest_checkpoint"] == "checkpoints/step_000000100.zip"
     assert manifest["latest_checkpoint_step"] == 100
+
+
+def test_publish_checkpoint_stages_final_replace_inside_checkpoint_directory(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = create_run(tmp_path / "runs", config, contract)
+    pending = tmp_path / "external-volume" / "pending.zip"
+    pending.parent.mkdir()
+    pending.write_bytes(b"model")
+    real_replace = os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def require_same_directory(source: str | Path, destination: str | Path) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        assert source_path.parent == destination_path.parent
+        replacements.append((source_path, destination_path))
+        real_replace(source_path, destination_path)
+
+    monkeypatch.setattr("ml_lab.contracts.os.replace", require_same_directory)
+    published = publish_checkpoint(
+        source=pending,
+        run_dir=run,
+        step=200,
+        expected_contract=contract,
+        inspector=lambda _: {
+            "contract_hash": contract.contract_hash,
+            "observation_size": contract.observation_size,
+            "action_size": contract.action_size,
+        },
+    )
+
+    assert published.read_bytes() == b"model"
+    assert not pending.exists()
+    assert any(destination == published for _, destination in replacements)
 
 
 def test_publish_checkpoint_rejects_incompatible_model_without_mutating_run(

@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import os
 import re
+import shutil
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -169,7 +171,25 @@ def publish_checkpoint(
     destination = run_dir / "checkpoints" / f"step_{step:09d}.zip"
     if destination.exists():
         raise FileExistsError(destination)
-    os.replace(source, destination)
+
+    staged_path: Path | None = None
+    try:
+        with source.open("rb") as source_stream, tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+            delete=False,
+        ) as staged_stream:
+            staged_path = Path(staged_stream.name)
+            shutil.copyfileobj(source_stream, staged_stream)
+            staged_stream.flush()
+            os.fsync(staged_stream.fileno())
+        os.replace(staged_path, destination)
+        staged_path = None
+    finally:
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
 
     manifest_path = run_dir / "run.json"
     manifest = read_json(manifest_path)
@@ -177,4 +197,5 @@ def publish_checkpoint(
     manifest["latest_checkpoint_step"] = step
     manifest["updated_at"] = utc_now()
     atomic_write_json(manifest_path, manifest)
+    source.unlink()
     return destination

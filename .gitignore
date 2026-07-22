@@ -110,7 +110,7 @@ python/winenv/
 python/runs/
 python/wandb/
 python/events.out.tfevents.*
-python/**/*.replay
+/replays/*.replay
 
 # Vendor asset kits: local-only, never committed (1.2GB model kit; the game copies the few
 # files it uses into Assets/HexWars/Audio, which IS tracked). Unity crash-recovery snapshots too.
