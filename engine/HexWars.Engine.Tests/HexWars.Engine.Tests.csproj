@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HexWars.Engine\HexWars.Engine.csproj" />
+    <ProjectReference Include="..\HexWars.GymServer\HexWars.GymServer.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
