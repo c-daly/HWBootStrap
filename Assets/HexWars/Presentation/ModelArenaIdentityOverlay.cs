@@ -17,8 +17,8 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
-            EnsureStyles();
             if (!ShouldRender(_driver)) return;
+            EnsureStyles();
 
             float scale = Mathf.Max(1f, Screen.height / 1080f);
             var previousMatrix = GUI.matrix;

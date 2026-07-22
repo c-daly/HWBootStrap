@@ -29,6 +29,26 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void SeatsAfterReload_RetainsCurrentSeatsOnErrorAndAdvancesOnSuccess()
+        {
+            var current = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"seat_models\":[{\"seat\":0,\"step\":128}]}"
+            ).Seats;
+            var failed = PolicyBridge.ParseReload(
+                "{\"error\":\"reload failed\",\"seat_models\":[{\"seat\":0,\"step\":256}]}"
+            );
+
+            Assert.That(PolicyBridge.SeatsAfterReload(current, failed), Is.SameAs(current));
+
+            var succeeded = PolicyBridge.ParseReload(
+                "{\"reloaded\":[0],\"seat_models\":[{\"seat\":0,\"step\":256}]}"
+            );
+            var advanced = PolicyBridge.SeatsAfterReload(current, succeeded);
+            Assert.That(advanced, Is.SameAs(succeeded.Seats));
+            Assert.That(advanced[0].Step, Is.EqualTo(256));
+        }
+
+        [Test]
         public void ErrorMessage_PreservesServerErrorAndStderrTail()
         {
             var error = PolicyBridge.ParseAction("{\"error\":\"contract mismatch\"}");

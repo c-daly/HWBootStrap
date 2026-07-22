@@ -141,8 +141,14 @@ namespace HexWars.Presentation
             string response = _proc.StandardOutput.ReadLine();
             if (response == null) return new PolicyReloadResult { Error = WithStderr("policy server closed during reload") };
             var result = ParseReload(response);
-            if (string.IsNullOrWhiteSpace(result.Error) && ReadyInfo != null) ReadyInfo.Seats = result.Seats;
+            if (ReadyInfo != null) ReadyInfo.Seats = SeatsAfterReload(ReadyInfo.Seats, result);
             return result;
+        }
+
+        public static PolicySeatInfo[] SeatsAfterReload(PolicySeatInfo[] current, PolicyReloadResult result)
+        {
+            if (result == null || !string.IsNullOrWhiteSpace(result.Error)) return current;
+            return result.Seats ?? Array.Empty<PolicySeatInfo>();
         }
 
         public static PolicyReadyResult ParseReady(string json)
