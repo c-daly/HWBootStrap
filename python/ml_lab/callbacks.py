@@ -18,6 +18,10 @@ from .io import read_json
 from .tracking import SB3TrackingFacade, TrackerHub
 
 
+class TrainingStopRequested(RuntimeError):
+    """Internal control-flow signal raised only after a requested checkpoint is safe."""
+
+
 class TrainingLifecycle:
     """Testable callback core for progress, controls, and checkpoint publication."""
 
@@ -30,6 +34,8 @@ class TrainingLifecycle:
         *,
         checkpoint_interval: int,
         clock: Callable[[], float] = time.monotonic,
+        initial_step: int = 0,
+        episode_offset: int = 0,
     ) -> None:
         if checkpoint_interval <= 0:
             raise ValueError("checkpoint interval must be positive")
@@ -43,10 +49,15 @@ class TrainingLifecycle:
         manifest = read_json(self.run_dir / "run.json")
         latest = manifest.get("latest_checkpoint_step")
         base_step = latest if isinstance(latest, int) and not isinstance(latest, bool) else 0
+        base_step = max(base_step, initial_step)
         self._next_checkpoint = (base_step // checkpoint_interval + 1) * checkpoint_interval
+        self._pending_checkpoint_step: int | None = None
         self._last_progress_step: int | None = None
         self._last_metric_step = base_step
         self._last_metric_time = clock()
+        self._episode_offset = max(0, episode_offset)
+        self._episode_maxima: dict[int, int] = {}
+        self._episodes_total = self._episode_offset
         self.stop_requested = False
         self.stop_mode: str | None = None
 
@@ -57,6 +68,7 @@ class TrainingLifecycle:
             self.run_dir,
             "stopping" if self.stop_mode else "running",
             timesteps=step,
+            episodes=self._episodes_total,
             latest_message="rollout completed",
         )
         self._flush_logger(model)
@@ -68,7 +80,6 @@ class TrainingLifecycle:
         now = self._clock()
         elapsed = now - self._last_metric_time
         episode_buffer = list(getattr(model, "ep_info_buffer", ()))
-        per_worker: dict[int, int] = {}
         anonymous_episodes = 0
         for item in episode_buffer:
             if not isinstance(item, Mapping):
@@ -82,16 +93,25 @@ class TrainingLifecycle:
                 and not isinstance(episode_number, bool)
                 and episode_number > 0
             ):
-                per_worker[worker_id] = max(
-                    per_worker.get(worker_id, 0), episode_number
+                self._episode_maxima[worker_id] = max(
+                    self._episode_maxima.get(worker_id, 0), episode_number
                 )
             elif "r" in item:
                 anonymous_episodes += 1
-        buffered_episodes = sum(per_worker.values()) + anonymous_episodes
+        buffered_episodes = (
+            self._episode_offset
+            + sum(self._episode_maxima.values())
+            + anonymous_episodes
+        )
         reported_episodes = values.get(
             "time/episodes", getattr(model, "_episode_num", 0)
         )
-        episodes = max(int(reported_episodes or 0), buffered_episodes)
+        episodes = max(
+            self._episodes_total,
+            int(reported_episodes or 0),
+            buffered_episodes,
+        )
+        self._episodes_total = episodes
         mean_reward = values.get("rollout/ep_rew_mean")
         if mean_reward is None:
             rewards = [
@@ -142,13 +162,23 @@ class TrainingLifecycle:
                 latest_message="stop requested after next checkpoint",
             )
 
-        if step >= self._next_checkpoint:
-            self.publish_checkpoint(model, step)
-            self._next_checkpoint = (step // self.checkpoint_interval + 1) * self.checkpoint_interval
-            if self.stop_mode == "stop_after_checkpoint":
-                self.stop_requested = True
-                return False
+        if step >= self._next_checkpoint and self._pending_checkpoint_step is None:
+            self._pending_checkpoint_step = step
         return True
+
+    def on_rollout_start(self, model: Any) -> None:
+        """Publish a due checkpoint only after the previous rollout's policy update."""
+        if self._pending_checkpoint_step is None:
+            return
+        checkpoint_step = self._pending_checkpoint_step
+        self.publish_checkpoint(model, checkpoint_step)
+        self._pending_checkpoint_step = None
+        self._next_checkpoint = (
+            checkpoint_step // self.checkpoint_interval + 1
+        ) * self.checkpoint_interval
+        if self.stop_mode == "stop_after_checkpoint":
+            self.stop_requested = True
+            raise TrainingStopRequested("stop after checkpoint completed")
 
     def publish_checkpoint(self, model: Any, step: int | None = None) -> Path:
         checkpoint_step = int(model.num_timesteps if step is None else step)
@@ -182,6 +212,7 @@ class TrainingLifecycle:
             self.run_dir,
             "stopping" if self.stop_mode else "running",
             timesteps=checkpoint_step,
+            episodes=self._episodes_total,
             latest_message=f"published checkpoint at step {checkpoint_step}",
         )
         self._flush_logger(model)
@@ -210,6 +241,9 @@ class SB3RunCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         return self.lifecycle.on_step(self.model)
+
+    def _on_rollout_start(self) -> None:
+        self.lifecycle.on_rollout_start(self.model)
 
     def _on_rollout_end(self) -> None:
         self.lifecycle.on_rollout_end(self.model)

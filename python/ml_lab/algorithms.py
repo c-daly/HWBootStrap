@@ -242,6 +242,8 @@ def resolve_resume_checkpoint(
     source: Path,
     expected_algorithm: str,
     expected_contract: EnvironmentContract,
+    *,
+    allow_unsafe_legacy_resume: bool = False,
 ) -> Path:
     """Resolve a resume source and reject any authoritative metadata mismatch."""
     manifest_path, run_or_checkpoint = _manifest_for_resume(Path(source))
@@ -249,6 +251,11 @@ def resolve_resume_checkpoint(
         checkpoint = Path(run_or_checkpoint)
         if checkpoint.suffix.lower() != ".zip":
             raise ValueError("legacy resume source must be a .zip checkpoint")
+        if not allow_unsafe_legacy_resume:
+            raise ValueError(
+                "resume requires authoritative run metadata; use the explicit unsafe legacy "
+                "resume option only for trusted standalone checkpoints"
+            )
         return checkpoint.resolve()
 
     manifest = read_json(manifest_path)
@@ -287,6 +294,7 @@ def create_or_resume_model(
     device: str,
     checkpoint_interval: int,
     resume_source: Path | None,
+    allow_unsafe_legacy_resume: bool = False,
 ) -> tuple[Any, bool]:
     if resume_source is None:
         model = adapter.create(
@@ -298,8 +306,15 @@ def create_or_resume_model(
         )
         resumed = False
     else:
+        if adapter.name == "masked_dqn":
+            raise ValueError(
+                "masked_dqn resume is disabled until replay buffer sidecars are persisted"
+            )
         checkpoint = resolve_resume_checkpoint(
-            Path(resume_source), adapter.name, expected_contract
+            Path(resume_source),
+            adapter.name,
+            expected_contract,
+            allow_unsafe_legacy_resume=allow_unsafe_legacy_resume,
         )
         model = adapter.load(checkpoint, env=env, device=device)
         resumed = True

@@ -50,6 +50,7 @@ class SelfPlayEnv(gym.Env):
         self.learner = learner_seat
         self.opp_seat = 1 - learner_seat
         self._next_seed = base_seed
+        self._rng = random.Random(base_seed)
 
         sp = self._rpc({"cmd": "duel_spaces"})
         self.spaces_info = sp  # full handshake: shapes + env config (for params)
@@ -81,10 +82,10 @@ class SelfPlayEnv(gym.Env):
         present — it's decisive, so it punishes passivity and keeps self-play from collapsing to draws."""
         scripted = [o for o in self.opp_pool if self._is_scripted_opponent(o)]
         models = [o for o in self.opp_pool if not self._is_scripted_opponent(o)]
-        if scripted and (not models or random.random() < 0.5):
-            self.opp = random.choice(scripted)
+        if scripted and (not models or self._rng.random() < 0.5):
+            self.opp = self._rng.choice(scripted)
         else:
-            self.opp = random.choice(models)
+            self.opp = self._rng.choice(models)
 
     @staticmethod
     def _is_scripted_opponent(opponent):
@@ -124,6 +125,9 @@ class SelfPlayEnv(gym.Env):
         if seed is None:
             seed = self._next_seed
             self._next_seed += 1
+        if not hasattr(self, "_rng"):
+            self._rng = random.Random()
+        self._rng.seed(int(seed))
         self._reload_live_opponents()
         self._pick_opponent()
         msg = {"cmd": "duel_reset", "seed": int(seed), "learner": self.learner}

@@ -25,6 +25,27 @@ def _export_latest(run_dir: Path, output: str) -> Path:
     return destination
 
 
+def build_run_config(args: argparse.Namespace, run_path: Path) -> RunConfig:
+    """Translate legacy wrapper arguments while preserving its additional-step semantics."""
+    return RunConfig(
+        backend="sb3",
+        algorithm="maskable_ppo",
+        policy="HexCNN",
+        run_name=run_path.name,
+        seed=args.seed,
+        total_timesteps=args.timesteps,
+        checkpoint_interval=args.checkpoint_freq,
+        workers=1,
+        device="auto",
+        learner_seat=str(args.seat),
+        opponent=controller_config(args.opponent),
+        trackers=[{"kind": "local"}],
+        resume_source=args.resume,
+        timestep_mode="additional",
+        allow_unsafe_legacy_resume=bool(args.resume),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--opponent", choices=["greedy", "random"], default="greedy")
@@ -40,21 +61,12 @@ def main() -> None:
 
     print("DEPRECATED: use hexwars_ml.py train --algorithm maskable_ppo")
     run_path = Path(args.logdir or Path("runs") / args.out)
-    config = RunConfig(
-        backend="sb3",
-        algorithm="maskable_ppo",
-        policy="HexCNN",
-        run_name=run_path.name,
-        seed=args.seed,
-        total_timesteps=args.timesteps,
-        checkpoint_interval=args.checkpoint_freq,
-        workers=1,
-        device="auto",
-        learner_seat=str(args.seat),
-        opponent=controller_config(args.opponent),
-        trackers=[{"kind": "local"}],
-        resume_source=args.resume,
-    )
+    config = build_run_config(args, run_path)
+    if args.resume:
+        print(
+            "WARNING: legacy --resume explicitly permits standalone checkpoints without "
+            "authoritative run metadata"
+        )
     run_dir = run_training(
         config,
         runs_root=run_path.parent,

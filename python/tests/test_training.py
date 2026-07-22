@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import csv
+import multiprocessing as mp
+import os
 import threading
+import time
+from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +20,7 @@ from ml_lab.cli import main as cli_main
 from ml_lab.contracts import EnvironmentContract, RunConfig, create_run, request_stop
 import ml_lab.envs as env_module
 from ml_lab.envs import EpisodeMonitor, ScheduledEnvironment, WorkerSchedule, build_vector_env
-from ml_lab.io import read_json
+from ml_lab.io import atomic_write_json, read_json
 from ml_lab.tracking import TrackerHub
 from ml_lab.training import run_training
 
@@ -105,6 +110,73 @@ class FakeGymEnv(gym.Env):
         self.closed = True
 
 
+class SpawnCleanupProbeEnv(gym.Env):
+    """Pickle-safe spawned worker probe that records lifecycle events to disk."""
+
+    metadata = {"render_modes": []}
+
+    def __init__(self, marker_path: str, *, fail_step: bool = False) -> None:
+        self._marker_path = marker_path
+        self._fail_step = fail_step
+        self.observation_space = spaces.Box(0.0, 1.0, shape=(3,), dtype=np.float32)
+        self.action_space = spaces.Discrete(2)
+        self.contract = EnvironmentContract(
+            version="tactical-v1",
+            contract_hash="b" * 64,
+            observation_size=3,
+            action_size=2,
+            board={"width": 1, "height": 1},
+            roster=["1,2,3,4,5,6,7,8,9"],
+            reward={"terminal_win": 1.0},
+        )
+        self.spaces_info = {"worker_pid": os.getpid()}
+        self._record("opened")
+
+    def _record(self, event: str) -> None:
+        with Path(self._marker_path).open("a", encoding="utf-8") as stream:
+            stream.write(f"{event}:{os.getpid()}\n")
+
+    def reset(self, *, seed=None, options=None):
+        del seed, options
+        return np.zeros(3, dtype=np.float32), {}
+
+    def step(self, action):
+        del action
+        if self._fail_step:
+            raise RuntimeError("spawned step failed")
+        return np.zeros(3, dtype=np.float32), 0.0, False, False, {}
+
+    def action_masks(self) -> np.ndarray:
+        return np.ones(2, dtype=bool)
+
+    def close(self) -> None:
+        self._record("closed")
+
+
+def _spawn_cleanup_probe(marker_path: str, *, fail_step: bool = False) -> SpawnCleanupProbeEnv:
+    return SpawnCleanupProbeEnv(marker_path, fail_step=fail_step)
+
+
+def _spawn_construction_failure(marker_path: str) -> SpawnCleanupProbeEnv:
+    with Path(marker_path).open("a", encoding="utf-8") as stream:
+        stream.write(f"construction_failed:{os.getpid()}\n")
+    raise RuntimeError("spawned construction failed")
+
+
+def _wait_for_no_new_children(previous_pids: set[int], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        new_children = [
+            process
+            for process in mp.active_children()
+            if process.pid not in previous_pids and process.is_alive()
+        ]
+        if not new_children:
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_scheduled_environment_alternates_seat_and_uses_worker_seed_stream() -> None:
     created: list[FakeGymEnv] = []
 
@@ -181,6 +253,44 @@ def test_multiworker_vectorization_selects_spawned_subprocesses_without_parent_e
     assert parent_factory_calls == []
 
 
+def test_spawned_constructor_failure_closes_and_reaps_sibling_workers(tmp_path: Path) -> None:
+    marker = tmp_path / "spawn-construction.txt"
+    previous_pids = {process.pid for process in mp.active_children()}
+
+    with pytest.raises(EOFError):
+        env_module.MaskingSubprocVecEnv(
+            [
+                lambda: _spawn_cleanup_probe(str(marker)),
+                lambda: _spawn_construction_failure(str(marker)),
+            ],
+            start_method="spawn",
+        )
+
+    assert _wait_for_no_new_children(previous_pids)
+    events = marker.read_text(encoding="utf-8")
+    assert "opened:" in events
+    assert "construction_failed:" in events
+    assert "closed:" in events
+
+
+def test_spawned_runtime_failure_closes_worker_and_parent_reaps_it(tmp_path: Path) -> None:
+    marker = tmp_path / "spawn-runtime.txt"
+    vector = env_module.MaskingSubprocVecEnv(
+        [lambda: _spawn_cleanup_probe(str(marker), fail_step=True)],
+        start_method="spawn",
+    )
+    processes = list(vector.processes)
+    vector.reset()
+
+    with pytest.raises(EOFError):
+        vector.step(np.asarray([0]))
+
+    assert vector.closed is True
+    assert all(not process.is_alive() for process in processes)
+    assert "closed:" in marker.read_text(encoding="utf-8")
+    vector.close()
+
+
 def test_episode_monitor_emits_sb3_episode_info(tmp_path: Path) -> None:
     monitor_path = tmp_path / "monitor.csv"
     monitor_path.write_text(
@@ -208,7 +318,10 @@ class FakeCheckpointAdapter:
         self.inspected: list[Path] = []
 
     def save(self, model, path: Path) -> Path:
-        path.write_bytes(f"model-{model.num_timesteps}".encode())
+        generation = getattr(model, "update_generation", 0)
+        path.write_bytes(
+            f"model-{model.num_timesteps}-generation-{generation}".encode()
+        )
         return path
 
     def inspect(self, path: Path, expected_contract: EnvironmentContract):
@@ -318,7 +431,7 @@ def test_rollout_counts_completed_episodes_from_per_worker_buffer_maxima(
     assert float(row["mean_reward"]) == pytest.approx(2.0 / 3.0)
 
 
-def test_checkpoint_is_reload_validated_then_atomically_published(
+def test_periodic_checkpoint_waits_until_next_rollout_start_after_policy_update(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
     run_dir = create_run(tmp_path, config("checkpoint"), contract)
@@ -327,12 +440,20 @@ def test_checkpoint_is_reload_validated_then_atomically_published(
         run_dir, contract, adapter, TrackerHub(run_dir, []), checkpoint_interval=32
     )
 
-    assert lifecycle.on_step(fake_model(32)) is True
+    model = fake_model(32)
+    model.update_generation = 0
+
+    assert lifecycle.on_step(model) is True
+    assert read_json(run_dir / "run.json")["latest_checkpoint"] is None
+
+    lifecycle.on_rollout_end(model)
+    model.update_generation = 1
+    lifecycle.on_rollout_start(model)
 
     manifest = read_json(run_dir / "run.json")
     published = run_dir / manifest["latest_checkpoint"]
     assert published.name == "step_000000032.zip"
-    assert published.read_bytes() == b"model-32"
+    assert published.read_bytes() == b"model-32-generation-1"
     assert manifest["latest_checkpoint_step"] == 32
     assert len(adapter.inspected) == 1
     assert not list((run_dir / "checkpoints").glob(".pending*"))
@@ -340,7 +461,7 @@ def test_checkpoint_is_reload_validated_then_atomically_published(
         assert list(csv.DictReader(stream))[-1]["timesteps"] == "32"
 
 
-def test_stop_after_checkpoint_waits_for_publication(
+def test_stop_after_checkpoint_publishes_post_update_then_stops_cleanly(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
     run_dir = create_run(tmp_path, config("controlled"), contract)
@@ -353,12 +474,49 @@ def test_stop_after_checkpoint_waits_for_publication(
     )
     request_stop(run_dir, after_checkpoint=True)
 
-    assert lifecycle.on_step(fake_model(16)) is True
+    model = fake_model(16)
+    model.update_generation = 0
+    assert lifecycle.on_step(model) is True
     assert read_json(run_dir / "run.json")["state"] == "stopping"
-    assert lifecycle.on_step(fake_model(32)) is False
+    model.num_timesteps = 32
+    assert lifecycle.on_step(model) is True
+    assert read_json(run_dir / "run.json")["latest_checkpoint"] is None
+
+    model.update_generation = 1
+    with pytest.raises(RuntimeError, match="stop after checkpoint"):
+        lifecycle.on_rollout_start(model)
+
     manifest = read_json(run_dir / "run.json")
     assert manifest["latest_checkpoint_step"] == 32
+    checkpoint = run_dir / manifest["latest_checkpoint"]
+    assert checkpoint.read_bytes() == b"model-32-generation-1"
     assert lifecycle.stop_requested is True
+
+
+def test_resume_checkpoint_cadence_starts_from_loaded_model_timesteps(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, config("resume-cadence"), contract)
+    lifecycle = TrainingLifecycle(
+        run_dir,
+        contract,
+        FakeCheckpointAdapter(contract),
+        TrackerHub(run_dir, []),
+        checkpoint_interval=32,
+        initial_step=64,
+    )
+    model = fake_model(80)
+    model.update_generation = 1
+
+    assert lifecycle.on_step(model) is True
+    lifecycle.on_rollout_start(model)
+    assert read_json(run_dir / "run.json")["latest_checkpoint"] is None
+
+    model.num_timesteps = 96
+    lifecycle.on_step(model)
+    model.update_generation = 2
+    lifecycle.on_rollout_start(model)
+    assert read_json(run_dir / "run.json")["latest_checkpoint_step"] == 96
 
 
 def test_stop_now_does_not_publish_an_unrequested_checkpoint(
@@ -378,6 +536,69 @@ def test_stop_now_does_not_publish_an_unrequested_checkpoint(
     assert read_json(run_dir / "run.json")["latest_checkpoint"] is None
 
 
+def test_episode_count_never_decreases_when_bounded_buffer_drops_a_worker(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, config("bounded-episodes"), contract)
+    lifecycle = TrainingLifecycle(
+        run_dir,
+        contract,
+        FakeCheckpointAdapter(contract),
+        TrackerHub(run_dir, []),
+        checkpoint_interval=32,
+    )
+    model = SimpleNamespace(
+        num_timesteps=32,
+        logger=SimpleNamespace(name_to_value={}, output_formats=[]),
+        _episode_num=0,
+        ep_info_buffer=[
+            {"r": 1.0, "worker_id": 0, "episode_number": 100},
+            {"r": 1.0, "worker_id": 1, "episode_number": 50},
+        ],
+    )
+    lifecycle.on_rollout_end(model)
+
+    model.num_timesteps = 64
+    model.ep_info_buffer = [
+        {"r": 2.0, "worker_id": 0, "episode_number": 101}
+    ]
+    lifecycle.on_rollout_end(model)
+
+    with (run_dir / "progress.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [row["episodes"] for row in rows[-2:]] == ["150", "151"]
+
+
+def test_resumed_episode_numbers_add_to_source_run_offset(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, config("resumed-episodes"), contract)
+    lifecycle = TrainingLifecycle(
+        run_dir,
+        contract,
+        FakeCheckpointAdapter(contract),
+        TrackerHub(run_dir, []),
+        checkpoint_interval=32,
+        episode_offset=200,
+    )
+    model = SimpleNamespace(
+        num_timesteps=224,
+        logger=SimpleNamespace(name_to_value={}, output_formats=[]),
+        _episode_num=0,
+        ep_info_buffer=[
+            {"r": 1.0, "worker_id": 0, "episode_number": 1},
+            {"r": 1.0, "worker_id": 1, "episode_number": 1},
+        ],
+    )
+
+    lifecycle.on_rollout_end(model)
+
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["episodes"] == 202
+    with (run_dir / "progress.csv").open(newline="", encoding="utf-8") as stream:
+        assert list(csv.DictReader(stream))[-1]["episodes"] == "202"
+
+
 class FakeVectorEnv:
     def __init__(self, contract: EnvironmentContract) -> None:
         self.contract = contract
@@ -389,17 +610,38 @@ class FakeVectorEnv:
 
 
 class FakeTrainingModel:
-    def __init__(self, fail: bool = False) -> None:
-        self.num_timesteps = 0
+    def __init__(self, fail: bool = False, initial_step: int = 0) -> None:
+        self.num_timesteps = initial_step
         self.logger = SimpleNamespace(name_to_value={}, output_formats=[])
         self.fail = fail
         self.learn_calls: list[dict[str, object]] = []
+        self.configured_logger = None
+
+    def set_logger(self, logger) -> None:
+        self.configured_logger = logger
 
     def learn(self, **kwargs):
         self.learn_calls.append(kwargs)
         if self.fail:
             raise RuntimeError("training exploded")
         self.num_timesteps += int(kwargs["total_timesteps"])
+        return self
+
+
+class StopAfterFinalRolloutModel(FakeTrainingModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.update_generation = 0
+
+    def learn(self, **kwargs):
+        self.learn_calls.append(kwargs)
+        lifecycle = kwargs["callback"].lifecycle
+        lifecycle.on_rollout_start(self)
+        self.num_timesteps += int(kwargs["total_timesteps"])
+        request_stop(lifecycle.run_dir, after_checkpoint=True)
+        assert lifecycle.on_step(self) is True
+        lifecycle.on_rollout_end(self)
+        self.update_generation += 1
         return self
 
 
@@ -416,6 +658,24 @@ class FakeTrainingAdapter(FakeCheckpointAdapter):
 
     def validate_model(self, model, expected_contract: EnvironmentContract) -> None:
         assert expected_contract == self.contract
+
+
+def _resume_source(
+    tmp_path: Path, contract: EnvironmentContract, *, algorithm: str = "maskable_ppo"
+) -> Path:
+    source_config = replace(
+        config(f"source-{algorithm}"),
+        algorithm=algorithm,
+        policy="HexCNN" if algorithm == "maskable_ppo" else "MlpPolicy",
+    )
+    source_run = create_run(tmp_path, source_config, contract)
+    checkpoint = source_run / "checkpoints" / "step_000000064.zip"
+    checkpoint.write_bytes(b"model")
+    manifest = read_json(source_run / "run.json")
+    manifest["latest_checkpoint"] = "checkpoints/step_000000064.zip"
+    manifest["latest_checkpoint_step"] = 64
+    atomic_write_json(source_run / "run.json", manifest)
+    return source_run
 
 
 def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
@@ -458,6 +718,154 @@ def test_training_runner_marks_failure_and_closes_env(
     assert env.closed is True
 
 
+def test_absolute_resume_treats_timesteps_as_final_target(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    source = _resume_source(tmp_path, contract)
+    env = FakeVectorEnv(contract)
+    model = FakeTrainingModel(initial_step=64)
+    adapter = FakeTrainingAdapter(contract, model)
+    run_config = replace(
+        config("absolute-resume"),
+        resume_source=str(source),
+        total_timesteps=96,
+        timestep_mode="absolute",
+    )
+
+    run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=lambda _config, _run_dir: env,
+        algorithm_adapter=adapter,
+    )
+
+    assert model.learn_calls[0]["total_timesteps"] == 32
+    assert model.num_timesteps == 96
+
+
+def test_legacy_additional_resume_trains_requested_extra_steps(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    source = _resume_source(tmp_path, contract)
+    env = FakeVectorEnv(contract)
+    model = FakeTrainingModel(initial_step=64)
+    adapter = FakeTrainingAdapter(contract, model)
+    run_config = replace(
+        config("additional-resume"),
+        resume_source=str(source),
+        total_timesteps=32,
+        timestep_mode="additional",
+    )
+
+    run_dir = run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=lambda _config, _run_dir: env,
+        algorithm_adapter=adapter,
+    )
+
+    assert model.learn_calls[0]["total_timesteps"] == 32
+    assert model.num_timesteps == 96
+    assert read_json(run_dir / "run.json")["config"]["timestep_mode"] == "additional"
+
+
+def test_legacy_ppo_wrapper_persists_unsafe_additional_resume_mode() -> None:
+    import train_maskable_ppo
+
+    args = SimpleNamespace(
+        opponent="greedy",
+        seat=0,
+        seed=2,
+        timesteps=50,
+        checkpoint_freq=10,
+        resume="legacy.zip",
+    )
+
+    run_config = train_maskable_ppo.build_run_config(args, Path("runs/legacy"))
+
+    assert run_config.timestep_mode == "additional"
+    assert run_config.allow_unsafe_legacy_resume is True
+
+
+def test_training_wires_functional_tensorboard_writer_when_requested(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    env = FakeVectorEnv(contract)
+    model = FakeTrainingModel()
+    adapter = FakeTrainingAdapter(contract, model)
+    writer = SimpleNamespace(flush=lambda: None, close=lambda: None)
+    captured: dict[str, object] = {}
+
+    def tracker_factory(run_dir, specs, *, tensorboard_writer=None):
+        captured["writer"] = tensorboard_writer
+        return TrackerHub(run_dir, [], tensorboard_writer=tensorboard_writer)
+
+    run_training(
+        replace(config("tensorboard-run"), trackers=[{"kind": "tensorboard"}]),
+        runs_root=tmp_path,
+        environment_factory=lambda _config, _run_dir: env,
+        algorithm_adapter=adapter,
+        tracker_factory=tracker_factory,
+        summary_writer_factory=lambda _log_dir: writer,
+    )
+
+    assert captured["writer"] is writer
+
+
+def test_sb3_human_logger_appends_to_stdout_and_train_log(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    import ml_lab.training as training_module
+
+    run_dir = create_run(tmp_path, config("human-log"), contract)
+    stdout = StringIO()
+    logger = training_module.build_sb3_logger(run_dir, stdout=stdout)
+
+    logger.record("rollout/ep_rew_mean", 1.5)
+    logger.dump(step=32)
+    logger.close()
+
+    assert "ep_rew_mean" in stdout.getvalue()
+    assert "ep_rew_mean" in (run_dir / "train.log").read_text(encoding="utf-8")
+
+
+def test_multiworker_run_manifest_exposes_monitor_shards_as_authoritative(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, config("monitor-shards"), contract)
+
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["monitor_files"] == [
+        "monitor.worker_0.csv",
+        "monitor.worker_1.csv",
+    ]
+    with (run_dir / "monitor.csv").open(newline="", encoding="utf-8") as stream:
+        assert list(csv.reader(stream)) == [
+            ["episode_reward", "episode_length", "elapsed_seconds"]
+        ]
+
+
+def test_stop_after_checkpoint_on_final_rollout_publishes_update_and_marks_stopped(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    env = FakeVectorEnv(contract)
+    model = StopAfterFinalRolloutModel()
+    adapter = FakeTrainingAdapter(contract, model)
+
+    run_dir = run_training(
+        config("final-stop"),
+        runs_root=tmp_path,
+        environment_factory=lambda _config, _run_dir: env,
+        algorithm_adapter=adapter,
+    )
+
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["state"] == "stopped"
+    assert manifest["latest_checkpoint_step"] == 64
+    checkpoint = run_dir / manifest["latest_checkpoint"]
+    assert checkpoint.read_bytes() == b"model-64-generation-1"
+
+
 def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) -> None:
     received: list[tuple[RunConfig, Path, list[str]]] = []
 
@@ -497,3 +905,5 @@ def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) 
     assert run_config.opponent == {"kind": "scripted", "name": "greedy"}
     assert runs_root == tmp_path
     assert server_cmd == ["dotnet", "fake-server.dll"]
+    assert run_config.timestep_mode == "absolute"
+    assert run_config.allow_unsafe_legacy_resume is False

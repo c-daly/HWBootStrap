@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import selfplay_env as selfplay_module
 
 from ml_lab.controllers import (
     ControllerResolutionError,
@@ -340,3 +341,41 @@ def test_selfplay_rejects_raw_models_without_resolver_metadata(
 ) -> None:
     with pytest.raises(ControllerResolutionError, match="controller specification"):
         bind_opponents([loader(Path("unused.zip"), "maskable_ppo")], ControllerResolver(contract, model_loader=loader))
+
+
+def test_selfplay_pool_sampling_is_seeded_per_episode_not_global_random(
+    contract: EnvironmentContract, loader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolver = ControllerResolver(contract, model_loader=loader)
+    bindings = [resolver.bind("greedy"), resolver.bind("random")]
+    global_choices = iter([0, 1])
+    monkeypatch.setattr(
+        selfplay_module.random,
+        "choice",
+        lambda values: values[next(global_choices)],
+    )
+
+    def make_env() -> SelfPlayEnv:
+        env = object.__new__(SelfPlayEnv)
+        env.opp_pool = bindings
+        env.opp = bindings[0]
+        env.learner = 0
+        env.opp_seat = 1
+        env._next_seed = 0
+        env.obs_len = contract.observation_size
+        env.n_actions = contract.action_size
+        env._mask = None
+        env._rpc = lambda message: {
+            "terminated": True,
+            "truncated": False,
+            "obs": [0.0] * contract.observation_size,
+            "mask": [True] * contract.action_size,
+        }
+        return env
+
+    first = make_env()
+    second = make_env()
+    SelfPlayEnv.reset(first, seed=37)
+    SelfPlayEnv.reset(second, seed=37)
+
+    assert first.opp.resolved.server_controller == second.opp.resolved.server_controller

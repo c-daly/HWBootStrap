@@ -235,3 +235,73 @@ def test_resume_rejects_full_contract_mismatch_even_when_hash_matches(
 
     with pytest.raises(ContractMismatch, match="training contract"):
         resolve_resume_checkpoint(source_run, "maskable_ppo", contract)
+
+
+def test_unified_resume_rejects_raw_checkpoint_without_authoritative_metadata(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    checkpoint = tmp_path / "standalone.zip"
+    checkpoint.write_bytes(b"model")
+    adapter = FakeAdapter()
+
+    with pytest.raises(ValueError, match="authoritative run metadata"):
+        create_or_resume_model(
+            adapter,
+            env=object(),
+            expected_contract=contract,
+            spaces_info={},
+            seed=1,
+            device="cpu",
+            checkpoint_interval=32,
+            resume_source=checkpoint,
+        )
+
+
+def test_explicit_unsafe_legacy_resume_preserves_wrapper_compatibility(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    checkpoint = tmp_path / "standalone.zip"
+    checkpoint.write_bytes(b"model")
+    adapter = FakeAdapter()
+
+    model, resumed = create_or_resume_model(
+        adapter,
+        env=object(),
+        expected_contract=contract,
+        spaces_info={},
+        seed=1,
+        device="cpu",
+        checkpoint_interval=32,
+        resume_source=checkpoint,
+        allow_unsafe_legacy_resume=True,
+    )
+
+    assert model == "resumed-model"
+    assert resumed is True
+
+
+def test_masked_dqn_resume_is_rejected_until_replay_buffer_sidecars_exist(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    source_run = create_run(tmp_path, run_config("dqn-source", "masked_dqn"), contract)
+    checkpoint = source_run / "checkpoints" / "step_000000064.zip"
+    checkpoint.write_bytes(b"model")
+    manifest_path = source_run / "run.json"
+    manifest = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["latest_checkpoint"] = "checkpoints/step_000000064.zip"
+    manifest["latest_checkpoint_step"] = 64
+    manifest_path.write_text(__import__("json").dumps(manifest), encoding="utf-8")
+    adapter = FakeAdapter()
+    adapter.name = "masked_dqn"
+
+    with pytest.raises(ValueError, match="replay buffer"):
+        create_or_resume_model(
+            adapter,
+            env=object(),
+            expected_contract=contract,
+            spaces_info={},
+            seed=1,
+            device="cpu",
+            checkpoint_interval=32,
+            resume_source=source_run,
+        )

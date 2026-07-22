@@ -56,9 +56,13 @@ class RunConfig:
     opponent: Mapping[str, Any]
     trackers: list[Mapping[str, Any]]
     resume_source: str | None
+    timestep_mode: str = "absolute"
+    allow_unsafe_legacy_resume: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         validate_tracker_specs(self.trackers)
+        if self.timestep_mode not in {"absolute", "additional"}:
+            raise ValueError("timestep mode must be 'absolute' or 'additional'")
         return asdict(self)
 
 
@@ -121,6 +125,11 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     (run_dir / "replays").mkdir()
 
     created_at = utc_now()
+    monitor_files = (
+        ["monitor.csv"]
+        if config.workers == 1
+        else [f"monitor.worker_{index}.csv" for index in range(config.workers)]
+    )
     manifest = {
         "schema_version": RUN_SCHEMA_VERSION,
         "created_at": created_at,
@@ -131,6 +140,7 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
         "latest_message": None,
         "latest_checkpoint": None,
         "latest_checkpoint_step": None,
+        "monitor_files": monitor_files,
         "config": config_data,
         "contract": contract_data,
     }
@@ -140,6 +150,9 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     atomic_write_json(run_dir / "evaluation.json", {})
     _write_csv_header(run_dir / "progress.csv", PROGRESS_HEADER)
     _write_csv_header(run_dir / "monitor.csv", MONITOR_HEADER)
+    for monitor_file in monitor_files:
+        if monitor_file != "monitor.csv":
+            _write_csv_header(run_dir / monitor_file, MONITOR_HEADER)
     (run_dir / "train.log").touch(exist_ok=False)
     return run_dir
 

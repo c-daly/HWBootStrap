@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import multiprocessing as mp
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -12,6 +13,8 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env.base_vec_env import CloudpickleWrapper, VecEnv
+from stable_baselines3.common.vec_env.patch_gym import _patch_env
 
 from hexwars_gym import HexWarsEnv
 from selfplay_env import SelfPlayEnv
@@ -189,16 +192,192 @@ class MaskingSubprocVecEnv(SubprocVecEnv):
     """Spawned vector workers with the same direct mask and contract surface."""
 
     def __init__(self, env_fns, *, start_method: str = "spawn") -> None:
-        super().__init__(env_fns, start_method=start_method)
-        contracts = self.get_attr("contract")
-        if any(contract != contracts[0] for contract in contracts[1:]):
-            self.close()
-            raise ValueError("all vector workers must use the same environment contract")
-        self.contract = contracts[0]
-        self.spaces_info = dict(self.get_attr("spaces_info")[0])
+        self.waiting = False
+        self.closed = False
+        context = mp.get_context(start_method)
+        self.remotes, self.work_remotes = zip(
+            *[context.Pipe() for _ in range(len(env_fns))], strict=True
+        )
+        self.processes = []
+        try:
+            for work_remote, remote, env_fn in zip(
+                self.work_remotes, self.remotes, env_fns, strict=True
+            ):
+                process = context.Process(
+                    target=_exception_safe_worker,
+                    args=(work_remote, remote, CloudpickleWrapper(env_fn)),
+                    daemon=True,
+                )
+                process.start()
+                self.processes.append(process)
+                work_remote.close()
+
+            self.remotes[0].send(("get_spaces", None))
+            observation_space, action_space = self.remotes[0].recv()
+            VecEnv.__init__(self, len(env_fns), observation_space, action_space)
+
+            contracts = self.get_attr("contract")
+            if any(contract != contracts[0] for contract in contracts[1:]):
+                raise ValueError("all vector workers must use the same environment contract")
+            self.contract = contracts[0]
+            self.spaces_info = dict(self.get_attr("spaces_info")[0])
+        except BaseException:
+            self._shutdown_workers()
+            raise
+
+    def _pipe_guard(self, operation):
+        try:
+            return operation()
+        except (EOFError, BrokenPipeError, ConnectionError, OSError) as error:
+            self._shutdown_workers()
+            if isinstance(error, EOFError):
+                raise
+            raise EOFError("spawned worker connection closed") from error
+
+    def _shutdown_workers(self) -> None:
+        if self.closed:
+            return
+        remotes = tuple(getattr(self, "remotes", ()))
+        work_remotes = tuple(getattr(self, "work_remotes", ()))
+        processes = list(getattr(self, "processes", ()))
+        for process in processes:
+            process.join(timeout=0.05)
+        for remote, process in zip(remotes, processes):
+            if process.is_alive():
+                try:
+                    remote.send(("close", None))
+                except (EOFError, BrokenPipeError, ConnectionError, OSError):
+                    pass
+        for process in processes:
+            process.join(timeout=2.0)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join(timeout=2.0)
+        for remote in remotes:
+            try:
+                remote.close()
+            except OSError:
+                pass
+        for remote in work_remotes:
+            try:
+                remote.close()
+            except OSError:
+                pass
+        self.remotes = ()
+        self.work_remotes = ()
+        self.processes = []
+        self.waiting = False
+        self.closed = True
+
+    def step_async(self, actions: np.ndarray) -> None:
+        return self._pipe_guard(lambda: super(MaskingSubprocVecEnv, self).step_async(actions))
+
+    def step_wait(self):
+        return self._pipe_guard(lambda: super(MaskingSubprocVecEnv, self).step_wait())
+
+    def reset(self):
+        return self._pipe_guard(lambda: super(MaskingSubprocVecEnv, self).reset())
+
+    def get_images(self):
+        return self._pipe_guard(lambda: super(MaskingSubprocVecEnv, self).get_images())
+
+    def has_attr(self, attr_name: str) -> bool:
+        return self._pipe_guard(
+            lambda: super(MaskingSubprocVecEnv, self).has_attr(attr_name)
+        )
+
+    def get_attr(self, attr_name: str, indices=None) -> list[Any]:
+        return self._pipe_guard(
+            lambda: super(MaskingSubprocVecEnv, self).get_attr(attr_name, indices)
+        )
+
+    def set_attr(self, attr_name: str, value: Any, indices=None) -> None:
+        return self._pipe_guard(
+            lambda: super(MaskingSubprocVecEnv, self).set_attr(attr_name, value, indices)
+        )
+
+    def env_method(self, method_name: str, *method_args, indices=None, **method_kwargs):
+        return self._pipe_guard(
+            lambda: super(MaskingSubprocVecEnv, self).env_method(
+                method_name, *method_args, indices=indices, **method_kwargs
+            )
+        )
+
+    def env_is_wrapped(self, wrapper_class, indices=None) -> list[bool]:
+        return self._pipe_guard(
+            lambda: super(MaskingSubprocVecEnv, self).env_is_wrapped(
+                wrapper_class, indices
+            )
+        )
+
+    def close(self) -> None:
+        self._shutdown_workers()
 
     def action_masks(self) -> np.ndarray:
         return np.asarray(self.env_method("action_masks"), dtype=bool)
+
+
+def _exception_safe_worker(remote, parent_remote, env_fn_wrapper) -> None:
+    """Run SB3's protocol while guaranteeing child-owned environment cleanup."""
+    from stable_baselines3.common.env_util import is_wrapped
+
+    parent_remote.close()
+    env = None
+    try:
+        env = _patch_env(env_fn_wrapper.var())
+        reset_info: dict[str, Any] | None = {}
+        while True:
+            try:
+                cmd, data = remote.recv()
+                if cmd == "step":
+                    observation, reward, terminated, truncated, info = env.step(data)
+                    done = terminated or truncated
+                    info["TimeLimit.truncated"] = truncated and not terminated
+                    if done:
+                        info["terminal_observation"] = observation
+                        observation, reset_info = env.reset()
+                    remote.send((observation, reward, done, info, reset_info))
+                elif cmd == "reset":
+                    maybe_options = {"options": data[1]} if data[1] else {}
+                    observation, reset_info = env.reset(seed=data[0], **maybe_options)
+                    remote.send((observation, reset_info))
+                elif cmd == "render":
+                    remote.send(env.render())
+                elif cmd == "close":
+                    break
+                elif cmd == "get_spaces":
+                    remote.send((env.observation_space, env.action_space))
+                elif cmd == "env_method":
+                    method = env.get_wrapper_attr(data[0])
+                    remote.send(method(*data[1], **data[2]))
+                elif cmd == "get_attr":
+                    remote.send(env.get_wrapper_attr(data))
+                elif cmd == "has_attr":
+                    try:
+                        env.get_wrapper_attr(data)
+                        remote.send(True)
+                    except AttributeError:
+                        remote.send(False)
+                elif cmd == "set_attr":
+                    remote.send(setattr(env, data[0], data[1]))
+                elif cmd == "is_wrapped":
+                    remote.send(is_wrapped(env, data))
+                else:
+                    raise NotImplementedError(f"`{cmd}` is not implemented in the worker")
+            except (EOFError, KeyboardInterrupt):
+                break
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except BaseException:
+                pass
+        try:
+            remote.close()
+        except OSError:
+            pass
 
 
 def build_vector_env(
