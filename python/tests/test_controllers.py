@@ -166,7 +166,21 @@ def test_stochastic_run_inference_mode_survives_resolution_and_reload(
 
     assert binding.resolved.spec.inference_mode == "stochastic"
     assert binding.resolved.metadata()["inference_mode"] == "stochastic"
-    assert binding.reload() is False
+    second = run / "checkpoints" / "step_000000020.zip"
+    second.write_bytes(b"model")
+    atomic_write_json(
+        run / "run.json",
+        {
+            "schema_version": 1,
+            "config": {"algorithm": "maskable_ppo"},
+            "contract": contract.to_dict(),
+            "latest_checkpoint": "checkpoints/step_000000020.zip",
+            "latest_checkpoint_step": 20,
+        },
+    )
+
+    assert binding.reload() is True
+    assert binding.resolved.path == second
     assert binding.resolved.spec.inference_mode == "stochastic"
 
 
