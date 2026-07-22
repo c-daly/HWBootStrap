@@ -6,6 +6,12 @@ using System.Text;
 
 namespace HexWars.Engine.Rl
 {
+    public enum MlEnvironmentKind
+    {
+        Tactical,
+        Duel,
+    }
+
     /// <summary>
     /// The versioned meaning of the tactical observation, action and reward spaces. The JSON hashed here is
     /// deliberately assembled in a fixed order rather than reflected from configuration objects, so its SHA-256
@@ -21,6 +27,7 @@ namespace HexWars.Engine.Rl
             IReadOnlyDictionary<string, object> board,
             IReadOnlyList<string> roster,
             IReadOnlyDictionary<string, object> reward,
+            string environmentKind,
             string contractHash)
         {
             Version = CurrentVersion;
@@ -29,6 +36,7 @@ namespace HexWars.Engine.Rl
             Board = board;
             Roster = roster;
             Reward = reward;
+            EnvironmentKind = environmentKind;
             ContractHash = contractHash;
         }
 
@@ -39,26 +47,44 @@ namespace HexWars.Engine.Rl
         public IReadOnlyDictionary<string, object> Board { get; }
         public IReadOnlyList<string> Roster { get; }
         public IReadOnlyDictionary<string, object> Reward { get; }
+        public string EnvironmentKind { get; }
 
-        public static MlContract Create(EnvConfig config)
+        public static MlContract Create(EnvConfig config, MlEnvironmentKind environmentKind = MlEnvironmentKind.Tactical)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
 
             var layout = new TacticalLayout(config);
-            var board = BoardValues(config);
+            var kind = EnvironmentKindName(environmentKind);
+            var maxSteps = EffectiveMaxSteps(config, environmentKind);
+            var board = BoardValues(config, kind, maxSteps);
             var roster = RosterValues(config.Roster);
             var reward = RewardValues(config);
-            var canonical = CanonicalJson(config, layout, roster);
+            var canonical = CanonicalJson(config, layout, roster, kind, maxSteps);
             return new MlContract(
                 layout.ObservationLength,
                 layout.ActionCount,
                 board,
                 roster,
                 reward,
+                kind,
                 Sha256(canonical));
         }
 
-        private static IReadOnlyDictionary<string, object> BoardValues(EnvConfig config)
+        private static string EnvironmentKindName(MlEnvironmentKind kind) => kind switch
+        {
+            MlEnvironmentKind.Tactical => "tactical",
+            MlEnvironmentKind.Duel => "duel",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        private static int EffectiveMaxSteps(EnvConfig config, MlEnvironmentKind kind) => kind switch
+        {
+            MlEnvironmentKind.Tactical => config.MaxSteps,
+            MlEnvironmentKind.Duel => checked(config.MaxSteps * 2),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        private static IReadOnlyDictionary<string, object> BoardValues(EnvConfig config, string environmentKind, int maxSteps)
         {
             var b = config.BoardGen;
             var g = config.Game;
@@ -67,7 +93,7 @@ namespace HexWars.Engine.Rl
                 ["width"] = b.Width,
                 ["height"] = b.Height,
                 ["max_elevation"] = b.MaxElevation,
-                ["max_steps"] = config.MaxSteps,
+                ["max_steps"] = maxSteps,
                 ["zone_depth"] = b.ZoneDepth,
                 ["flat_chance"] = b.FlatChance,
                 ["plains_weight"] = b.PlainsWeight,
@@ -109,6 +135,7 @@ namespace HexWars.Engine.Rl
                 ["generators_enabled"] = g.GeneratorsEnabled,
                 ["point_decay"] = g.PointDecay,
                 ["fog_of_war"] = g.FogOfWar,
+                ["environment_kind"] = environmentKind,
             };
         }
 
@@ -140,7 +167,8 @@ namespace HexWars.Engine.Rl
                 ["terminal_loss"] = -1f,
             };
 
-        private static string CanonicalJson(EnvConfig config, TacticalLayout layout, IReadOnlyList<string> roster)
+        private static string CanonicalJson(EnvConfig config, TacticalLayout layout, IReadOnlyList<string> roster,
+            string environmentKind, int maxSteps)
         {
             var b = config.BoardGen;
             var g = config.Game;
@@ -162,6 +190,7 @@ namespace HexWars.Engine.Rl
                 .Append(",\"economy_win_threshold\":").Append(g.EconomyWinThreshold)
                 .Append(",\"flat_chance\":").AppendNumber(b.FlatChance)
                 .Append(",\"fog_of_war\":").AppendBool(g.FogOfWar)
+                .Append(",\"environment_kind\":").AppendJsonString(environmentKind)
                 .Append(",\"forest\":").AppendTerrain(g.Terrain(TerrainType.Forest))
                 .Append(",\"forest_weight\":").Append(b.ForestWeight)
                 .Append(",\"generator_cost\":").Append(g.GeneratorCost)
@@ -170,7 +199,7 @@ namespace HexWars.Engine.Rl
                 .Append(",\"generators_enabled\":").AppendBool(g.GeneratorsEnabled)
                 .Append(",\"height\":").Append(b.Height)
                 .Append(",\"max_elevation\":").Append(b.MaxElevation)
-                .Append(",\"max_steps\":").Append(config.MaxSteps)
+                .Append(",\"max_steps\":").Append(maxSteps)
                 .Append(",\"plains_weight\":").Append(b.PlainsWeight)
                 .Append(",\"plains\":").AppendTerrain(g.Terrain(TerrainType.Plains))
                 .Append(",\"point_decay\":").AppendNumber(g.PointDecay)
@@ -193,6 +222,7 @@ namespace HexWars.Engine.Rl
                 .Append(",\"win_conditions\":").Append((int)g.WinConditions)
                 .Append(",\"zone_depth\":").Append(b.ZoneDepth)
                 .Append("},\"contract_version\":").AppendJsonString(CurrentVersion)
+                .Append(",\"environment_kind\":").AppendJsonString(environmentKind)
                 .Append(",\"observation_size\":").Append(layout.ObservationLength)
                 .Append(",\"reward\":{")
                 .Append("\"closing_weight\":").AppendNumber(config.ClosingWeight)

@@ -48,5 +48,20 @@ namespace HexWars.Engine.Tests
             Assert.That(changedReward.ContractHash, Is.Not.EqualTo(baseline.ContractHash));
             Assert.That(changedHorizon.ContractHash, Is.Not.EqualTo(baseline.ContractHash));
         }
+
+        [Test]
+        public void Create_UsesDistinctContractsAndEffectiveHorizonsForTacticalAndDuelModes()
+        {
+            var config = new EnvConfig { MaxSteps = 123 };
+
+            var tactical = MlContract.Create(config, MlEnvironmentKind.Tactical);
+            var duel = MlContract.Create(config, MlEnvironmentKind.Duel);
+
+            Assert.That(tactical.EnvironmentKind, Is.EqualTo("tactical"));
+            Assert.That(duel.EnvironmentKind, Is.EqualTo("duel"));
+            Assert.That(tactical.Board["max_steps"], Is.EqualTo(123));
+            Assert.That(duel.Board["max_steps"], Is.EqualTo(246));
+            Assert.That(duel.ContractHash, Is.Not.EqualTo(tactical.ContractHash));
+        }
     }
 }
