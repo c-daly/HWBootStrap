@@ -89,18 +89,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "--device", Q(Device),
                 "--learner-seat", SeatValue(LearnerSeat),
             };
-            foreach (var tracker in Trackers ?? new List<MlTrackerConfig>())
+            var trackers = Trackers ?? new List<MlTrackerConfig>();
+            foreach (var tracker in trackers)
             {
                 if (tracker == null || string.IsNullOrWhiteSpace(tracker.Kind)) continue;
                 args.Add("--tracker");
                 args.Add(Q(tracker.ToCliValue()));
             }
-            AddOption(args, "--wandb-project", WandbProject);
-            AddOption(args, "--wandb-entity", WandbEntity);
-            AddOption(args, "--wandb-mode", WandbMode);
-            AddOption(args, "--wandb-group", WandbGroup);
-            foreach (var tag in WandbTags ?? new List<string>()) AddOption(args, "--wandb-tag", tag);
-            if (WandbUploadArtifacts) args.Add("--wandb-upload-artifacts");
+            bool hasWandb = trackers.Exists(tracker => tracker != null &&
+                string.Equals(tracker.Kind, "wandb", StringComparison.OrdinalIgnoreCase));
+            if (hasWandb)
+            {
+                AddOption(args, "--wandb-project", WandbProject);
+                AddOption(args, "--wandb-entity", WandbEntity);
+                AddOption(args, "--wandb-mode", WandbMode);
+                AddOption(args, "--wandb-group", WandbGroup);
+                foreach (var tag in WandbTags ?? new List<string>()) AddOption(args, "--wandb-tag", tag);
+                if (WandbUploadArtifacts) args.Add("--wandb-upload-artifacts");
+            }
             args.Add("--json");
             return string.Join(" ", args);
         }

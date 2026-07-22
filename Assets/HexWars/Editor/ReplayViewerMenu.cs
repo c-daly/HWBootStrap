@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
 using HexWars.Presentation;
+using HexWars.Presentation.EditorTools.MlLab;
 
 namespace HexWars.Presentation.EditorTools
 {
@@ -72,7 +73,9 @@ namespace HexWars.Presentation.EditorTools
             string pyDir = PyDir();
             if (!PyReady(pyDir)) return;
             string p0 = PickSpec("Seat 0 (Player 1) model — Cancel for greedy", pyDir);
+            if (p0 == null) return;
             string p1 = PickSpec("Seat 1 (Player 2) model — Cancel for greedy", pyDir);
+            if (p1 == null) return;
             LaunchDuel(pyDir, p0, p1, loop: false);
         }
 
@@ -89,8 +92,25 @@ namespace HexWars.Presentation.EditorTools
                 System.IO.Path.Combine(pyDir, "runs"), "");
             if (string.IsNullOrEmpty(dir)) return;
             string p1 = PickSpec("Opponent model — Cancel for greedy", pyDir);
-            LaunchDuel(pyDir, "ppo:" + dir, p1, loop: true);
+            if (p1 == null) return;
+            string learner = ResolveModelSpec(dir);
+            if (learner == null) return;
+            LaunchDuel(pyDir, learner, p1, loop: true);
         }
+
+        /// <summary>Open a live run from ML Lab, resolving its algorithm from run metadata.</summary>
+        public static void WatchLiveRun(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) return;
+            string pyDir = PyDir();
+            if (!PyReady(pyDir)) return;
+            string checkpoints = System.IO.Path.Combine(runDirectory, "checkpoints");
+            string learner = ResolveModelSpec(checkpoints);
+            if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true);
+        }
+
+        [System.Serializable] sealed class RunManifest { public RunConfig config; }
+        [System.Serializable] sealed class RunConfig { public string algorithm; }
 
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
@@ -135,8 +155,54 @@ namespace HexWars.Presentation.EditorTools
         {
             string path = EditorUtility.OpenFilePanel(title, pyDir, "zip");
             if (string.IsNullOrEmpty(path)) return "greedy";
-            string prefix = System.IO.Path.GetFileNameWithoutExtension(path).ToLowerInvariant().Contains("dqn") ? "dqn:" : "ppo:";
-            return prefix + path;
+            return ResolveModelSpec(path);
+        }
+
+        internal static string ResolveModelSpec(string modelPath)
+        {
+            string manifest = FindRunManifest(modelPath);
+            if (manifest == null)
+            {
+                UnityEngine.Debug.LogError(
+                    "HexWars: model is not backed by run metadata. Choose its algorithm explicitly in " +
+                    "the ML Lab Arena; filenames are never used to infer algorithms.");
+                return null;
+            }
+            string prefix;
+            try { prefix = AlgorithmPrefixFromManifest(System.IO.File.ReadAllText(manifest)); }
+            catch (System.Exception error)
+            {
+                UnityEngine.Debug.LogError("HexWars: could not read model run metadata: " + error.Message);
+                return null;
+            }
+            if (prefix == null)
+            {
+                UnityEngine.Debug.LogError("HexWars: model run metadata has no supported algorithm.");
+                return null;
+            }
+            return prefix + modelPath;
+        }
+
+        public static string AlgorithmPrefixFromManifest(string json)
+        {
+            var data = JsonUtility.FromJson<RunManifest>(json);
+            string algorithm = data?.config?.algorithm;
+            if (algorithm == "maskable_ppo") return "ppo:";
+            if (algorithm == "masked_dqn") return "dqn:";
+            return null;
+        }
+
+        static string FindRunManifest(string modelPath)
+        {
+            var directory = System.IO.Directory.Exists(modelPath)
+                ? new System.IO.DirectoryInfo(modelPath)
+                : System.IO.Directory.GetParent(modelPath);
+            for (int depth = 0; directory != null && depth < 2; depth++, directory = directory.Parent)
+            {
+                string manifest = System.IO.Path.Combine(directory.FullName, "run.json");
+                if (System.IO.File.Exists(manifest)) return manifest;
+            }
+            return null;
         }
     }
 }

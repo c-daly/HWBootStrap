@@ -64,7 +64,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             try
             {
                 var exited = sender as Process;
-                if (exited != null) code = exited.ExitCode;
+                if (exited != null)
+                {
+                    // Required after redirected async reads: this waits for final OutputDataReceived /
+                    // ErrorDataReceived callbacks before the owner observes ProcessExited.
+                    exited.WaitForExit();
+                    code = exited.ExitCode;
+                }
             }
             catch (InvalidOperationException) { }
             ProcessExited?.Invoke(code);

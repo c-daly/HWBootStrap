@@ -57,5 +57,14 @@ namespace HexWars.Presentation.Tests
             Assert.That(config.BuildResumeArguments(),
                 Does.StartWith("resume \"C:\\runs\\source run\" --run continued"));
         }
+
+        [Test]
+        public void BuildTrainArguments_DoesNotLeakDisabledWandbOptions()
+        {
+            var config = MlLabConfig.Default();
+            config.WandbProject = "remembered-project";
+
+            Assert.That(config.BuildTrainArguments(), Does.Not.Contain("--wandb-project"));
+        }
     }
 }
