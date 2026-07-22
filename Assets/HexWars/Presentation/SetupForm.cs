@@ -65,13 +65,14 @@ namespace HexWars.Presentation
         {
             if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {
-                var selected = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+                var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
+                var selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;
                 foreach (var binding in _bindings)
                 {
                     if (selected == binding.Field.gameObject)
                     {
                         binding.Restore();
-                        EventSystem.current.SetSelectedGameObject(null);
+                        eventSystem.SetSelectedGameObject(null);
                         return;
                     }
                 }

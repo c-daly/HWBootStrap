@@ -14,6 +14,7 @@ namespace HexWars.Presentation
     /// </summary>
     public static class UiKit
     {
+        static int _inputEscapeHandledFrame = -1;
         // ---- palette ----
         public static readonly Color Bg            = Hex("0A0E1C");
         public static readonly Color Surface       = Hex("161B2C");
@@ -294,45 +295,23 @@ namespace HexWars.Presentation
             return s.Substring(0, max - 1).TrimEnd() + "…";
         }
 
-#if UNITY_WEBGL && !UNITY_EDITOR
-        [System.Runtime.InteropServices.DllImport("__Internal")]
-        static extern string HexWarsPrompt(string message, string current);
-#endif
-        /// <summary>Tap-to-type int prompt: browser prompt() on WebGL (the only reliable mobile
-        /// keyboard), no-op in the editor (use the −/+ steppers there).</summary>
-        public static int PromptInt(string label, int current)
+        internal static bool InputOwnsFocus(InputField field)
         {
-#if UNITY_WEBGL && !UNITY_EDITOR
-            string s = HexWarsPrompt(label, current.ToString());
-            return int.TryParse(s, out var v) ? v : current;
-#else
-            return current;
-#endif
+            if (field == null) return false;
+            var eventSystem = EventSystem.current ?? UnityEngine.Object.FindAnyObjectByType<EventSystem>();
+            return eventSystem != null && eventSystem.currentSelectedGameObject == field.gameObject;
         }
 
-        /// <summary>Same for free text (join-by-code). Returns null when unavailable/cancelled.</summary>
-        public static string PromptText(string label, string current)
+        internal static void MarkInputEscapeHandled() => _inputEscapeHandledFrame = Time.frameCount;
+
+        internal static bool AnyInputOwnsFocus()
         {
-#if UNITY_WEBGL && !UNITY_EDITOR
-            return HexWarsPrompt(label, current);
-#else
-            return null;
-#endif
+            if (_inputEscapeHandledFrame == Time.frameCount) return true;
+            var eventSystem = EventSystem.current ?? UnityEngine.Object.FindAnyObjectByType<EventSystem>();
+            var selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;
+            return selected != null && selected.GetComponentInParent<InputField>() != null;
         }
 
-        /// <summary>Light input-style box showing an int; tap to type (WebGL), value clamped.</summary>
-        public static Text ValueBox(Transform parent, string label, float x, float y, float w, float h,
-                                    Func<int> get, Action<int> set, int min, int max)
-        {
-            var img = Panel(parent, "ValueBox", InputBg);
-            var go = img.gameObject;
-            var btn = go.AddComponent<Button>();
-            btn.targetGraphic = img;
-            SetRect(go.GetComponent<RectTransform>(), x, y, w, h);
-            var t = Label(go.transform, get().ToString(), 0f, 0f, w, h, SizeBody + 4, TextAnchor.MiddleCenter, InputText);
-            btn.onClick.AddListener(() => { set(Mathf.Clamp(PromptInt(label, get()), min, max)); t.text = get().ToString(); });
-            return t;
-        }
     }
 
     public sealed class InlineIntBinding

@@ -1,5 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 
 namespace HexWars.Presentation
 {
@@ -16,6 +18,9 @@ namespace HexWars.Presentation
 
         GameBootstrap _game;
         GameObject _canvasGo;
+        InputField _roomCodeField;
+        Text _roomCodeError;
+        string _committedRoomCode = "";
         float _overSince = -1f;
         bool _dead; // set the moment this screen closes/hides — Destroy is deferred to end-of-frame,
                     // and a dying component's Update must not fire the self-heal (it would StartDemo()
@@ -36,6 +41,22 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_dead || _game == null) return;
+
+            if (UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
+            {
+                if (Keyboard.current.escapeKey.wasPressedThisFrame)
+                {
+                    UiKit.MarkInputEscapeHandled();
+                    RestoreRoomCodeEdit();
+                    return;
+                }
+                if (Keyboard.current.enterKey.wasPressedThisFrame
+                    || Keyboard.current.numpadEnterKey.wasPressedThisFrame)
+                {
+                    OnJoinByCode();
+                    return;
+                }
+            }
 
             // a real match started — the title is done (sub-screens dismiss themselves the same way)
             if (_game.State != null && !_game.DemoMode) { Close(); return; }
@@ -97,7 +118,13 @@ namespace HexWars.Presentation
             UiKit.Button(col.transform, "Host Game", 0f, y, bw, bh, () =>
             { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Host); }, UiKit.ButtonStyle.Primary); y -= gap;
 
-            UiKit.Button(col.transform, "Join by Code", 0f, y, bw, bh, OnJoinByCode, UiKit.ButtonStyle.Primary); y -= gap;
+            _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 245f, bh,
+                                               "Room code");
+            _roomCodeField.gameObject.name = "Room code";
+            _roomCodeError = UiKit.Label(col.transform, "", -65f, y - 39f, 245f, 18f,
+                                         UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.Danger);
+            UiKit.Button(col.transform, "Join", 135f, y, 125f, bh, OnJoinByCode,
+                         UiKit.ButtonStyle.Primary); y -= gap;
 
             UiKit.Button(col.transform, "Play vs AI", 0f, y, bw, bh, () =>
             { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.VsAi); }, UiKit.ButtonStyle.Primary); y -= gap;
@@ -117,17 +144,39 @@ namespace HexWars.Presentation
 
         void OnJoinByCode()
         {
-            string code = UiKit.PromptText("Enter the room code (e.g. KQ7KP)", "");
-            if (code == null)
+            string code = NormalizeRoomCode(_roomCodeField != null ? _roomCodeField.text : "");
+            if (code.Length == 0)
             {
-                Toast.Show("Type-in needs the browser build — in the editor, use Browse Games.");
+                if (_roomCodeError != null) _roomCodeError.text = "Enter a room code";
                 return;
             }
-            code = code.Trim().ToUpperInvariant();
-            if (code.Length == 0) return; // cancelled
+            _committedRoomCode = code;
+            _roomCodeField?.SetTextWithoutNotify(code);
+            if (_roomCodeError != null) _roomCodeError.text = "";
             Hide();
             _game.StartNetGame(code, null);   // SEAT/START arrive via the normal net path;
                                               // a full/unknown room toasts via OnNetSeatFull
+        }
+
+        void RestoreRoomCodeEdit()
+        {
+            if (_roomCodeField == null) return;
+            _roomCodeField.SetTextWithoutNotify(_committedRoomCode);
+            if (_roomCodeError != null) _roomCodeError.text = "";
+            _roomCodeField.DeactivateInputField();
+            (EventSystem.current ?? FindAnyObjectByType<EventSystem>())?.SetSelectedGameObject(null);
+        }
+
+        internal static string NormalizeRoomCode(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "";
+            var result = new System.Text.StringBuilder(16);
+            foreach (char ch in raw.Trim().ToUpperInvariant())
+            {
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) result.Append(ch);
+                if (result.Length == 16) break;
+            }
+            return result.ToString();
         }
     }
 }

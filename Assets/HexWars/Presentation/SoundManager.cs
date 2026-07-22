@@ -104,7 +104,7 @@ namespace HexWars.Presentation
         {
             if (_src != null) return;
             var go = new GameObject("HexWarsSound");
-            Object.DontDestroyOnLoad(go);
+            if (Application.isPlaying) Object.DontDestroyOnLoad(go);
             _src = go.AddComponent<AudioSource>();
             _src.playOnAwake = false;
             _src.spatialBlend = 0f; // pin 2D: the imported WAV metas carry a legacy 3D flag

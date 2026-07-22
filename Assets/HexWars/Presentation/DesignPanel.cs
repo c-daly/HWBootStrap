@@ -1,5 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
 using HexWars.Engine;
 
 namespace HexWars.Presentation
@@ -20,7 +22,7 @@ namespace HexWars.Presentation
         readonly int[] _stats = new int[9];
         readonly Text[] _valueLabels = new Text[9];
         Text _summary;
-        Text _nameBox;
+        InputField _nameField;
         string _name = "";
         int _placeholderIdx;
         bool _lastTipsEnabled;
@@ -42,6 +44,24 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_game == null || _canvasGo == null) return;
+            var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
+            if (UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
+            {
+                if (Keyboard.current.escapeKey.wasPressedThisFrame)
+                {
+                    UiKit.MarkInputEscapeHandled();
+                    RestoreNameEdit();
+                    return;
+                }
+                if (Keyboard.current.enterKey.wasPressedThisFrame
+                    || Keyboard.current.numpadEnterKey.wasPressedThisFrame)
+                {
+                    CommitName();
+                    _nameField.DeactivateInputField();
+                    eventSystem?.SetSelectedGameObject(null);
+                    return;
+                }
+            }
             bool hidden = _game.DemoMode || _game.State == null;
             if (_canvasGo.activeSelf == hidden)
             {
@@ -113,9 +133,11 @@ namespace HexWars.Presentation
 
             float nameY = -(rowsTop + 9 * rowH + 6f);
             UiKit.Label(panel, "Name", -63f, nameY, 60f, rowH, 15, TextAnchor.MiddleLeft);
-            _nameBox = UiKit.Button(panel, PlaceholderText(), 23f, nameY, w - 110f, rowH, OnTapName,
-                                    UiKit.ButtonStyle.Secondary, 14).GetComponentInChildren<Text>();
-            ApplyNameDisplay(); // sets the grey placeholder color (UiKit.Button's own label defaults to white)
+            _nameField = UiKit.InputField(panel, _name, 46f, nameY, w - 150f, rowH, PlaceholderText());
+            _nameField.gameObject.name = "Unit name";
+            _nameField.textComponent.fontSize = 14;
+            _nameField.onEndEdit.AddListener(_ => CommitName());
+            ApplyNameDisplay();
 
             float sy = nameY - rowH - 6f;
             _summary = UiKit.Label(panel, "", 0f, sy, w - 24f, 24f, 15, TextAnchor.MiddleLeft);
@@ -157,16 +179,20 @@ namespace HexWars.Presentation
 
         string PlaceholderText() => NamePlaceholders[_placeholderIdx];
 
-        /// <summary>Browser-prompt text entry (the established mobile pattern, same as join-by-code).
-        /// Empty stays legal — CreateUnit/UnitTemplate.Sanitize defaults an empty name to the dominant
-        /// role at the engine boundary.</summary>
-        void OnTapName()
+        /// <summary>Commit the currently typed value through the same sanitizer used by the engine.</summary>
+        void CommitName()
         {
-            string typed = UiKit.PromptText("Name your unit", _name);
-            if (typed == null) return; // cancelled, or no browser prompt available (editor) — leave as-is
-            _name = typed.Trim();
-            if (_name.Length == 0) RotatePlaceholder();
+            _name = UnitTemplate.Sanitize(_nameField != null ? _nameField.text : _name);
+            if (_nameField != null) _nameField.SetTextWithoutNotify(_name);
             ApplyNameDisplay();
+        }
+
+        void RestoreNameEdit()
+        {
+            if (_nameField == null) return;
+            _nameField.SetTextWithoutNotify(_name);
+            _nameField.DeactivateInputField();
+            (EventSystem.current ?? FindAnyObjectByType<EventSystem>())?.SetSelectedGameObject(null);
         }
 
         /// <summary>Advances to the next example (Task 12's Tips-toggle rebuild also calls
@@ -179,8 +205,9 @@ namespace HexWars.Presentation
         /// current state (after typing, after Create, after a rebuild).</summary>
         void ApplyNameDisplay()
         {
-            if (_name.Length > 0) { _nameBox.text = UiKit.Ellipsize(_name, 16); _nameBox.color = UiKit.TextMain; }
-            else { _nameBox.text = PlaceholderText(); _nameBox.color = UiKit.TextFaint; } // grey, per spec
+            if (_nameField == null) return;
+            _nameField.SetTextWithoutNotify(_name);
+            if (_nameField.placeholder is Text placeholder) placeholder.text = PlaceholderText();
         }
 
         void RefreshSummary()
@@ -195,6 +222,7 @@ namespace HexWars.Presentation
         void OnCreate()
         {
             if (_game == null || _game.State == null) return;
+            CommitName();
             // Client-side sanitize before the command is even built — the engine still backstops this
             // (UnitTemplate.Sanitize runs again at the CreateUnit boundary), but doing it here too means
             // what's echoed back in APPLY / shown in the barracks matches what the player typed, instead
@@ -220,12 +248,12 @@ namespace HexWars.Presentation
         /// this client's own CreateUnit (final review N2 — the optimistic TryApply `true` was never a
         /// verdict, so online the box used to stay stale and the create was silent). The Design sound
         /// stays with the callers. Guard the label: the Tips-toggle rebuild in Update destroys and
-        /// recreates the canvas, so _nameBox can be a destroyed reference for a frame.</summary>
+        /// recreates the canvas, so _nameField can be a destroyed reference for a frame.</summary>
         public void ConfirmCreate()
         {
             _name = "";
             RotatePlaceholder(); // a fresh empty box next time shows a different example
-            if (_nameBox != null) ApplyNameDisplay();
+            if (_nameField != null) ApplyNameDisplay();
         }
     }
 }

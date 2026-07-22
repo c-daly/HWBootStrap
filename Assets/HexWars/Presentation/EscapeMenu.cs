@@ -27,7 +27,7 @@ namespace HexWars.Presentation
         void Update()
         {
             var kb = Keyboard.current;
-            if (kb != null && kb.escapeKey.wasPressedThisFrame) Toggle();
+            if (kb != null && kb.escapeKey.wasPressedThisFrame && !UiKit.AnyInputOwnsFocus()) Toggle();
         }
 
         public void Toggle()
