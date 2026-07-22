@@ -317,10 +317,11 @@ namespace HexWars.Engine.Rl
 
         private View MakeView(float reward)
         {
-            PlayerId seat = DeploymentComplete ? State.ActivePlayer : _deploymentSeat;
+            bool terminated = DeploymentComplete && State.IsGameOver;
+            PlayerId seat = terminated ? _learner
+                : DeploymentComplete ? State.ActivePlayer : _deploymentSeat;
             var decision = Decision(seat);
             var slots = Slots(seat);
-            bool terminated = DeploymentComplete && State.IsGameOver;
             bool truncated = !terminated && _steps >= checked(_cfg.MaxSteps * 2);
             int winner = terminated && State.Winner.HasValue ? (int)State.Winner.Value : -1;
             return new View(

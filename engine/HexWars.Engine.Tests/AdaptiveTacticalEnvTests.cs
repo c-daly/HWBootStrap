@@ -147,6 +147,32 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void LearnerSeatZero_TerminalEndTurnReturnsLearnerPerspective()
+        {
+            var config = AdaptiveEnvConfig.Default();
+            config.Game = GameConfig.Default(
+                biomesEnabled: false,
+                winConditions: WinBy.Economy,
+                economyWinThreshold: 0,
+                fogOfWar: true,
+                maxDesignPointCost: config.MaxDesignPointCost,
+                fixedTemplateCount: config.FixedTemplateCount,
+                templateSlotCount: config.Templates.Count);
+            var env = new AdaptiveTacticalEnv(
+                seed => new GreedyAgent(seed), seed => new CombinedArmsDeploymentPolicy(seed),
+                PlayerId.Player0, config);
+            env.Reset(22);
+            for (int template = 0; template < 6; template++) Place(env, template);
+            env.Step((int)AdaptiveCommandChoice.ConfirmDeployment);
+
+            StepResult terminal = env.Step((int)AdaptiveCommandChoice.EndTurn);
+
+            Assert.That(terminal.Terminated, Is.True);
+            Assert.That(terminal.Reward, Is.EqualTo(1f));
+            Assert.That(terminal.Observation.Length, Is.EqualTo(env.ObservationLength));
+        }
+
+        [Test]
         public void MaskedDeployment_IsDeterministicAndRevealsAtomically()
         {
             var a = NewEnv();
