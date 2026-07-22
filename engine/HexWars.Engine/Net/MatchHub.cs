@@ -51,11 +51,14 @@ namespace HexWars.Engine
 
         private sealed class Room
         {
-            public readonly GameState Start;       // the state at creation — paired with Log, replays exactly
+            public GameState? Start;       // assigned once both catalogs arrive; paired with Log, replays exactly
             public readonly List<Command> Log = new List<Command>(); // every Accepted command, in order
-            public readonly GameSession Session;
+            public GameSession? Session;
             public readonly List<string> Members = new List<string>(); // seated connections, broadcast targets
             public readonly Dictionary<string, string> ConnToToken = new Dictionary<string, string>();
+            public readonly Dictionary<string, PlayerId> TokenToSeat = new Dictionary<string, PlayerId>();
+            public readonly Dictionary<PlayerId, IReadOnlyList<UnitTemplate>> Catalogs =
+                new Dictionary<PlayerId, IReadOnlyList<UnitTemplate>>();
             public readonly GameSetup Setup;       // the host's picks — shown in the lobby browser
             public readonly bool IsPrivate;        // private rooms are joinable by code/link only
             public readonly long CreatedAtTicks;
@@ -63,18 +66,22 @@ namespace HexWars.Engine
                                                    // a started room that drops to one member must not re-list
             public long? EmptySinceTicks;          // set when a Started room's Members hits zero; null while
                                                    // occupied or un-started — the held-room expiry clock
-            public Room(GameState start, GameSetup setup, bool isPrivate, long nowTicks)
-            { Start = start; Session = new GameSession(start); Setup = setup; IsPrivate = isPrivate; CreatedAtTicks = nowTicks; }
+            public Room(GameSetup setup, bool isPrivate, long nowTicks)
+            { Setup = setup; IsPrivate = isPrivate; CreatedAtTicks = nowTicks; }
         }
 
-        private readonly Func<GameSetup, GameState> _newGame;
+        private readonly Func<GameSetup, IReadOnlyList<UnitTemplate>, IReadOnlyList<UnitTemplate>, GameState> _newGame;
         private readonly Func<long> _now;
         private readonly Dictionary<string, Room> _rooms = new Dictionary<string, Room>();
 
         /// <summary>The clock is injectable so lobby ages (and hold-window expiry) are exactly testable;
         /// production uses UTC.</summary>
-        public MatchHub(Func<GameSetup, GameState> newGame, Func<long>? utcNowTicks = null)
-        { _newGame = newGame; _now = utcNowTicks ?? (() => DateTime.UtcNow.Ticks); }
+        public MatchHub(Func<GameSetup, GameState> newGame, Func<long>? utcNowTicks = null,
+            Func<GameSetup, IReadOnlyList<UnitTemplate>, IReadOnlyList<UnitTemplate>, GameState>? newCatalogGame = null)
+        {
+            _newGame = newCatalogGame ?? ((setup, _, __) => newGame(setup));
+            _now = utcNowTicks ?? (() => DateTime.UtcNow.Ticks);
+        }
 
         /// <summary>Drop any held room whose hold window has elapsed. Cheap (a linear scan of rooms);
         /// called opportunistically at the top of every public method — there are no timers in this
@@ -114,11 +121,11 @@ namespace HexWars.Engine
                     outs.Add(new Outbound(connectionId, NetProtocol.SeatFull));
                     return outs;
                 }
-                room = new Room(_newGame(setup), setup.Sanitized(), isPrivate, _now());
+                room = new Room(setup.Sanitized(), isPrivate, _now());
                 _rooms[roomCode] = room;
             }
 
-            var seat = room.Session.Join(token);
+            var seat = Join(room, token);
             if (seat == null)
             {
                 outs.Add(new Outbound(connectionId, NetProtocol.SeatFull));
@@ -127,8 +134,7 @@ namespace HexWars.Engine
 
             room.ConnToToken[connectionId] = token;
             room.EmptySinceTicks = null; // any successful connect cancels a pending hold-expiry
-            bool added = false;
-            if (!room.Members.Contains(connectionId)) { room.Members.Add(connectionId); added = true; }
+            if (!room.Members.Contains(connectionId)) room.Members.Add(connectionId);
             outs.Add(new Outbound(connectionId, NetProtocol.Seat(seat.Value)));
 
             if (room.Started)
@@ -137,20 +143,20 @@ namespace HexWars.Engine
                 // every command accepted since, so the replay reconstructs the current state exactly
                 // (see class doc). Same resync-by-replay mechanism used for the initial deal below, now
                 // also serving a reconnect after a drop.
-                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start, room.Log));
+                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start!, room.Log));
                 outs.Add(new Outbound(connectionId, startMsg));
             }
-            else if (added && !room.Started && room.Session.SeatedCount == 2)
-            {
-                // Start when the second SEAT fills, not the second connection: seats are token-keyed,
-                // so one player's extra tabs are extra connections but the same single seat — counting
-                // Members here would fire a bogus START at a lone host with two tabs open (and Started,
-                // never cleared, would silently delist the room from the lobby forever).
-                room.Started = true;
-                string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start, room.Log)); // Log is empty here — identical to the old Session.State dump
-                foreach (var m in room.Members) outs.Add(new Outbound(m, startMsg));
-            }
             return outs;
+        }
+
+        private static PlayerId? Join(Room room, string token)
+        {
+            if (room.TokenToSeat.TryGetValue(token, out var existing)) return existing;
+            if (!room.TokenToSeat.ContainsValue(PlayerId.Player0))
+                return room.TokenToSeat[token] = PlayerId.Player0;
+            if (!room.TokenToSeat.ContainsValue(PlayerId.Player1))
+                return room.TokenToSeat[token] = PlayerId.Player1;
+            return null;
         }
 
         /// <summary>The lobby browser's view: public rooms with a waiting host and no game started,
@@ -164,7 +170,7 @@ namespace HexWars.Engine
                 var r = kv.Value;
                 // "A waiting host" is one claimed SEAT, not one connection — a host with two tabs open
                 // is still a lone waiting player and must stay browsable.
-                if (r.IsPrivate || r.Started || r.Session.SeatedCount != 1) continue;
+                if (r.IsPrivate || r.Started || r.TokenToSeat.Count != 1) continue;
                 int age = (int)((_now() - r.CreatedAtTicks) / TimeSpan.TicksPerSecond);
                 list.Add(new OpenGame(kv.Key, r.Setup, age));
             }
@@ -179,7 +185,40 @@ namespace HexWars.Engine
             if (!_rooms.TryGetValue(roomCode, out var room)) return outs;
 
             var msg = NetProtocol.Parse(raw);
-            if (msg.Type != "CMD") return outs; // v0: CMD is the only client→server message that does anything
+            if (msg.Type == "CATALOG")
+            {
+                if (!room.ConnToToken.TryGetValue(connectionId, out var catalogToken)
+                    || !room.TokenToSeat.TryGetValue(catalogToken, out var catalogSeat))
+                {
+                    outs.Add(new Outbound(connectionId, "REJECT NoSeat"));
+                    return outs;
+                }
+                if (room.Started)
+                {
+                    outs.Add(new Outbound(connectionId, "REJECT CatalogClosed"));
+                    return outs;
+                }
+
+                IReadOnlyList<UnitTemplate> catalog;
+                try { catalog = BarracksWire.Read(msg.Payload); }
+                catch (FormatException) { catalog = BarracksCatalog.DefaultTemplates; }
+                room.Catalogs[catalogSeat] = catalog;
+                TryStart(room, outs);
+                return outs;
+            }
+
+            if (msg.Type != "CMD") return outs;
+            if (!room.ConnToToken.TryGetValue(connectionId, out var commandToken)
+                || !room.TokenToSeat.ContainsKey(commandToken))
+            {
+                outs.Add(new Outbound(connectionId, "REJECT NoSeat"));
+                return outs;
+            }
+            if (!room.Started)
+            {
+                outs.Add(new Outbound(connectionId, "REJECT CatalogV1Required"));
+                return outs;
+            }
 
             if (!CommandWire.TryRead(msg.Payload, out var cmd) || cmd == null)
             {
@@ -187,8 +226,7 @@ namespace HexWars.Engine
                 return outs;
             }
 
-            string token = room.ConnToToken.TryGetValue(connectionId, out var t) ? t : connectionId;
-            var outcome = room.Session.Submit(token, cmd);
+            var outcome = room.Session!.Submit(commandToken, cmd);
             switch (outcome.Status)
             {
                 case SubmitStatus.Accepted:
@@ -204,6 +242,21 @@ namespace HexWars.Engine
                     break;
             }
             return outs;
+        }
+
+        private void TryStart(Room room, List<Outbound> outs)
+        {
+            if (room.Started || room.TokenToSeat.Count != 2
+                || !room.Catalogs.TryGetValue(PlayerId.Player0, out var p0Catalog)
+                || !room.Catalogs.TryGetValue(PlayerId.Player1, out var p1Catalog))
+                return;
+
+            room.Start = _newGame(room.Setup, p0Catalog, p1Catalog);
+            room.Session = new GameSession(room.Start, room.TokenToSeat);
+            room.Started = true;
+            string startMsg = NetProtocol.Start(ReplayFile.Write(room.Start, room.Log));
+            foreach (var member in room.Members)
+                outs.Add(new Outbound(member, startMsg));
         }
 
         /// <summary>Drop a connection. Its room's seat is NOT freed here — seats belong to tokens for the

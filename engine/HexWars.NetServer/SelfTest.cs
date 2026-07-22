@@ -28,12 +28,14 @@ namespace HexWars.NetServer
             {
                 using var a = await Connect();
                 string seatA = await Recv(a);               // SEAT 0 (room not full yet)
+                await Send(a, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
 
                 var lobby1 = Program.OpenGamesSnapshot();      // host waiting -> the room is browsable
                 bool lobbyListsWaitingRoom = lobby1.Count == 1 && lobby1[0].Code == "TEST";
 
                 using var b = await Connect();
                 string seatB = await Recv(b);               // SEAT 1
+                await Send(b, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 string startA = await Recv(a);              // START ... (dealt to both once full)
                 string startB = await Recv(b);
 
@@ -52,8 +54,10 @@ namespace HexWars.NetServer
                 // seats it back into P0 and re-deals START (the game must survive a background/refresh).
                 using var ra = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
                 string rSeatA = await Recv(ra);               // SEAT 0
+                await Send(ra, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 using var rb = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-b");
                 string rSeatB = await Recv(rb);                // SEAT 1
+                await Send(rb, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
                 string rStartA = await Recv(ra);
                 string rStartB = await Recv(rb);
 

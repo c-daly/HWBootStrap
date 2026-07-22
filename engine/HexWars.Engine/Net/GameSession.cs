@@ -53,6 +53,21 @@ namespace HexWars.Engine
 
         public GameSession(GameState start) { State = start; }
 
+        /// <summary>Create a started session from seats already assigned by MatchHub's waiting room.</summary>
+        public GameSession(GameState start, IReadOnlyDictionary<string, PlayerId> assignedSeats)
+        {
+            State = start;
+            foreach (var pair in assignedSeats)
+            {
+                if ((pair.Value != PlayerId.Player0 && pair.Value != PlayerId.Player1)
+                    || _seats.ContainsValue(pair.Value))
+                    throw new System.ArgumentException("assigned seats must contain distinct P0/P1 values", nameof(assignedSeats));
+                _seats.Add(pair.Key, pair.Value);
+            }
+            if (_seats.Count > 2)
+                throw new System.ArgumentException("a session has at most two seats", nameof(assignedSeats));
+        }
+
         /// <summary>How many of the two seats are currently claimed (0–2). Each entry in the seat map
         /// claims a distinct seat, so this is the number of distinct player identities in the match —
         /// NOT the number of live connections (one token can have several tabs open).</summary>

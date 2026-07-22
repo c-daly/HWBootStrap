@@ -17,7 +17,9 @@ namespace HexWars.NetServer
     public static class Program
     {
         static readonly ConcurrentDictionary<string, Conn> Conns = new();
-        static readonly MatchHub Hub = new(GameFactory.Build);
+        static readonly MatchHub Hub = new(
+            setup => GameFactory.Build(setup),
+            newCatalogGame: (setup, p0, p1) => GameFactory.Build(setup, p0, p1));
         static readonly object HubLock = new();
         const int MaxIncomingBytes = 64 * 1024;
 

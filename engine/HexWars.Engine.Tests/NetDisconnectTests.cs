@@ -54,6 +54,8 @@ namespace HexWars.Engine.Tests
             var hub = new MatchHub(_ => TwoUnitGame());
             hub.Connect("r", "a");
             hub.Connect("r", "b");
+            hub.Receive("r", "a", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
+            hub.Receive("r", "b", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
             hub.Disconnect("r", "a");
             hub.Disconnect("r", "b"); // room now empty, but it Started — held, not reset
             var d = hub.Connect("r", "d"); // a stranger's token, no time advance

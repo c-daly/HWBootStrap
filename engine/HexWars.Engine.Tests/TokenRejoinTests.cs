@@ -17,7 +17,31 @@ namespace HexWars.Engine.Tests
         private MatchHub NewHub()
         {
             _now = TimeSpan.FromHours(1).Ticks;
-            return new MatchHub(_ => TwoUnitGame(), () => _now);
+            return new MatchHub(_ => TwoUnitGame(), () => _now,
+                (_, p0, p1) => WithBarracks(TwoUnitGame(), p0, p1));
+        }
+
+        private static GameState WithBarracks(GameState state,
+            IReadOnlyList<UnitTemplate> p0Barracks, IReadOnlyList<UnitTemplate> p1Barracks)
+        {
+            var p0 = state.Player(PlayerId.Player0);
+            var p1 = state.Player(PlayerId.Player1);
+            return new GameState(state.Board, state.Config, new[]
+            {
+                new PlayerState(PlayerId.Player0, p0.Points, p0Barracks, p0.UnitsOnBoard, p0.Generators, p0.DestroyedValue),
+                new PlayerState(PlayerId.Player1, p1.Points, p1Barracks, p1.UnitsOnBoard, p1.Generators, p1.DestroyedValue),
+            }, state.ActivePlayer, state.Round, state.NextEntityId);
+        }
+
+        private static IReadOnlyList<Outbound> Catalog(MatchHub hub, string connection,
+            params UnitTemplate[] templates) =>
+            hub.Receive("R", connection, NetProtocol.Catalog(BarracksWire.Write(
+                templates.Length == 0 ? BarracksCatalog.DefaultTemplates : templates)));
+
+        private static void SubmitDefaultCatalogs(MatchHub hub, string a = "conn-a", string b = "conn-b")
+        {
+            Catalog(hub, a);
+            Catalog(hub, b);
         }
 
         private static GameState TwoUnitGame()
@@ -39,6 +63,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");   // P0
             hub.Connect("R", "conn-b", token: "tok-b");   // P1 -> room Started
+            SubmitDefaultCatalogs(hub);
 
             hub.Disconnect("R", "conn-a");                // a's socket dies (tab backgrounded)
             var back = hub.Connect("R", "conn-a-2", token: "tok-a"); // a reconnects on a NEW socket, SAME token
@@ -55,6 +80,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");
             hub.Connect("R", "conn-b", token: "tok-b");
+            SubmitDefaultCatalogs(hub);
             hub.Disconnect("R", "conn-a");                // a's socket drops, seat stays reserved to tok-a
 
             var stranger = hub.Connect("R", "conn-c", token: "tok-c");
@@ -67,6 +93,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");
             hub.Connect("R", "conn-b", token: "tok-b");
+            SubmitDefaultCatalogs(hub);
             hub.Disconnect("R", "conn-a");
             hub.Disconnect("R", "conn-b");                // room empty, started -> held, not removed
 
@@ -82,6 +109,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");
             hub.Connect("R", "conn-b", token: "tok-b");
+            SubmitDefaultCatalogs(hub);
             hub.Disconnect("R", "conn-a");
             hub.Disconnect("R", "conn-b");
 
@@ -118,10 +146,33 @@ namespace HexWars.Engine.Tests
                 "still a lone waiting host — the room stays browsable however many tabs the host has open");
 
             var joined = hub.Connect("R", "conn-b", token: "tok-b"); // a real opponent -> P1, NOW it starts
-            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a1" && o.Message.StartsWith("START ")));
-            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a2" && o.Message.StartsWith("START ")));
-            Assert.That(joined, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-b" && o.Message.StartsWith("START ")),
+            Assert.That(joined, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START ")),
+                "the opponent's seat still does not start until both catalogs arrive");
+            Catalog(hub, "conn-a2");
+            var started = Catalog(hub, "conn-b");
+            Assert.That(started, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a1" && o.Message.StartsWith("START ")));
+            Assert.That(started, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-a2" && o.Message.StartsWith("START ")));
+            Assert.That(started, Has.Some.Matches<Outbound>(o => o.ConnectionId == "conn-b" && o.Message.StartsWith("START ")),
                 "START is dealt to every live connection, duplicate tabs included");
+        }
+
+        [Test]
+        public void DuplicateTokenCatalogs_RemainOneSeat_AndCannotStartAgainstItself()
+        {
+            var hub = NewHub();
+            hub.Connect("R", "conn-a1", token: "tok-a");
+            hub.Connect("R", "conn-a2", token: "tok-a");
+
+            Catalog(hub, "conn-a1", new UnitTemplate("First", new UnitStats(2, 1, 0, 1, 0, 1, 0, 1, 0)));
+            var duplicate = Catalog(hub, "conn-a2", new UnitTemplate("Latest", new UnitStats(3, 1, 0, 1, 0, 1, 0, 1, 0)));
+
+            Assert.That(duplicate, Has.None.Matches<Outbound>(o => o.Message.StartsWith("START ")));
+            hub.Connect("R", "conn-b", token: "tok-b");
+            var started = Catalog(hub, "conn-b");
+            var start = ReplayFile.Read(started.First(o => o.Message.StartsWith("START ")).Message.Substring("START ".Length)).Start;
+            Assert.That(start.Player(PlayerId.Player0).Barracks.Select(x => x.Name), Is.EqualTo(new[] { "Latest" }));
+            Assert.That(start.Player(PlayerId.Player1).Barracks.Select(x => x.Name),
+                Is.EqualTo(BarracksCatalog.DefaultTemplates.Select(x => x.Name)));
         }
 
         [Test]
@@ -130,6 +181,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");
             hub.Connect("R", "conn-b", token: "tok-b");
+            SubmitDefaultCatalogs(hub);
             hub.Disconnect("R", "conn-a");
             hub.Disconnect("R", "conn-b");                // room empty, started -> held
 
@@ -149,6 +201,7 @@ namespace HexWars.Engine.Tests
             var hub = NewHub();
             hub.Connect("R", "conn-a", token: "tok-a");
             hub.Connect("R", "conn-b", token: "tok-b");
+            SubmitDefaultCatalogs(hub);
             hub.Disconnect("R", "conn-a");
             hub.Disconnect("R", "conn-b");                // held, empty, started
 
@@ -180,9 +233,11 @@ namespace HexWars.Engine.Tests
         [Test]
         public void Reconnect_ReDeal_ReconstructsDamageAndTurnTracking_Exactly()
         {
-            var hub = new MatchHub(_ => AdjacentUnitGame(), () => _now);
+            var hub = new MatchHub(_ => AdjacentUnitGame(), () => _now,
+                (_, p0, p1) => WithBarracks(AdjacentUnitGame(), p0, p1));
             hub.Connect("R", "conn-a", token: "tok-a");   // P0
             hub.Connect("R", "conn-b", token: "tok-b");   // P1 -> Started
+            SubmitDefaultCatalogs(hub);
 
             var move = new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 0));
             var attack = new AttackUnit(PlayerId.Player0, 1, 2);

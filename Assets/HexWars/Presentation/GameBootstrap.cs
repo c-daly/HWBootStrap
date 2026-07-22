@@ -493,6 +493,8 @@ namespace HexWars.Presentation
             EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()));
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             CheckFirstBounty(prev, cmd);
+            if ((cmd is CreateUnit || cmd is DeleteTemplate) && IsLocalCommand(cmd))
+                ReconcileOnlineSessionBarracks(cmd.Issuer);
             // The server confirmed THIS client's own CreateUnit (final review N2): the success cues
             // DesignPanel.OnCreate deliberately skips online (its optimistic TryApply `true` isn't a
             // verdict) fire here instead, on the real APPLY — the same sound + name-box clear the
@@ -531,6 +533,8 @@ namespace HexWars.Presentation
             "TemplateNotFound"      => "Pick a unit to deploy first.",
             "DuplicateTemplate"     => "That exact design is already in your barracks.",
             "BarracksFull"          => "Your barracks is full. Delete a design before adding another.",
+            "CatalogV1Required"     => "Waiting for both players' barracks. Refresh if this message persists.",
+            "CatalogClosed"         => "This match has already started with its saved barracks.",
             "GameAlreadyOver"       => "The game is over.",
             _                        => "That move isn't allowed right now.",
         };
@@ -543,6 +547,19 @@ namespace HexWars.Presentation
                 cache.Add(new UnitTemplate(UnitTemplate.Sanitize(created.Name), created.Stats));
             else if (cmd is DeleteTemplate deleted)
                 cache.RemoveAt(deleted.TemplateIndex);
+        }
+
+        /// <summary>After the server confirms this browser's own catalog mutation, replace the local
+        /// session cache from the authoritative post-APPLY barracks. Rebuilding from state avoids stale
+        /// optimistic delete indexes and never mistakes an opponent's APPLY for a local change.</summary>
+        void ReconcileOnlineSessionBarracks(PlayerId seat)
+        {
+            if (!Networked || !Seat.HasValue || Seat.Value != seat || State == null) return;
+            var cache = SessionBarracksCache.ForLocalPlayer((int)seat);
+            for (int i = cache.Snapshot().Count - 1; i >= 0; i--)
+                cache.RemoveAt(i);
+            foreach (var template in State.Player(seat).Barracks)
+                cache.Add(template);
         }
 
         PlayerState BuildPlayer(Board board, PlayerId id, int startingPoints,
