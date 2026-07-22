@@ -94,7 +94,7 @@ namespace HexWars.Presentation
             var prt = panelImg.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0f, 1f);
             prt.pivot = new Vector2(0f, 1f);
-            prt.sizeDelta = new Vector2(w, rowsTop + rowH * 10 + 86f); // 9 stat rows + the Name row
+            prt.sizeDelta = new Vector2(w, rowsTop + rowH * 10 + 104f); // 9 stat rows + the Name row
                                                                        // + summary/Create padding
             prt.anchoredPosition = new Vector2(8f, -top);
             var panel = panelImg.transform;
@@ -140,8 +140,8 @@ namespace HexWars.Presentation
             ApplyNameDisplay();
 
             float sy = nameY - rowH - 6f;
-            _summary = UiKit.Label(panel, "", 0f, sy, w - 24f, 24f, 15, TextAnchor.MiddleLeft);
-            UiKit.Button(panel, "Create (to Barracks)", 0f, sy - 30f, w - 24f, 30f, OnCreate, UiKit.ButtonStyle.Cta);
+            _summary = UiKit.Label(panel, "", 0f, sy, w - 24f, 42f, 15, TextAnchor.UpperLeft);
+            UiKit.Button(panel, "Create (to Barracks)", 0f, sy - 48f, w - 24f, 30f, OnCreate, UiKit.ButtonStyle.Cta);
         }
 
         /// <summary>Called by GameBootstrap's first-bounty Tips CTA ("Design your answer"). This panel
@@ -185,6 +185,7 @@ namespace HexWars.Presentation
             _name = UnitTemplate.Sanitize(_nameField != null ? _nameField.text : _name);
             if (_nameField != null) _nameField.SetTextWithoutNotify(_name);
             ApplyNameDisplay();
+            RefreshSummary();
         }
 
         void RestoreNameEdit()
@@ -212,8 +213,10 @@ namespace HexWars.Presentation
 
         void RefreshSummary()
         {
+            if (_summary == null) return;
             var s = ToStats();
-            _summary.text = $"Cost {s.PointCost}   Role: {Roles.Dominant(s)}";
+            string displayName = string.IsNullOrEmpty(_name) ? "Unnamed" : _name;
+            _summary.text = $"Name: {displayName}\nCost {s.PointCost}   Role: {Roles.Dominant(s)}";
         }
 
         UnitStats ToStats() =>
@@ -254,6 +257,7 @@ namespace HexWars.Presentation
             _name = "";
             RotatePlaceholder(); // a fresh empty box next time shows a different example
             if (_nameField != null) ApplyNameDisplay();
+            RefreshSummary();
         }
     }
 }

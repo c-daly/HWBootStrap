@@ -1,83 +1,74 @@
-"""Self-play training: train a learner against a frozen opponent policy, then (optionally) iterate —
-each round retrains against the previous round's winner.
+"""Deprecated compatibility wrapper for successive frozen-opponent training rounds."""
 
-    # one round: learn to beat a frozen ppo_a
-    python selfplay.py --opponent ppo:ppo_a.zip --out sp --timesteps 200000
-
-    # iterated self-play: r0 vs ppo_a, r1 vs r0, r2 vs r1 ...
-    python selfplay.py --opponent ppo:ppo_a.zip --out sp --rounds 3 --timesteps 200000
-
-Then duel the final policy against anything: python duel.py --p0 ppo:sp_r2.zip --p1 ppo:ppo_a.zip
-"""
 import argparse
 import os
+import shutil
+from pathlib import Path
 
-from sb3_contrib import MaskablePPO
-from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
-from sb3_contrib.common.wrappers import ActionMasker
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.logger import configure
-from stable_baselines3.common.callbacks import CheckpointCallback
+from ml_lab.cli import controller_config
+from ml_lab.contracts import RunConfig
+from ml_lab.io import read_json
+from ml_lab.training import run_training
 
-from selfplay_env import SelfPlayEnv
-from duel import load_controller
-from hex_cnn import cnn_policy_kwargs
-from experiment import write_params
 
 DEFAULT_DLL = "../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll"
 
 
-def mask_fn(env):
-    return env.unwrapped.action_masks()
+def _export_latest(run_dir: Path, output: str) -> Path:
+    source = run_dir / read_json(run_dir / "run.json")["latest_checkpoint"]
+    destination = Path(output)
+    if destination.suffix.lower() != ".zip":
+        destination = Path(f"{destination}.zip")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
-def load_opponent(spec):
-    _, model = load_controller(spec)  # "ppo:PATH" / "dqn:PATH" -> (.., model)
-    if model is None:
-        raise ValueError("opponent must be a trained model: ppo:PATH or dqn:PATH")
-    return model
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--opponent",
+        required=True,
+        help="opponent controller: greedy|random|ppo:PATH|dqn:PATH|run:PATH|JSON|@controller.json",
+    )
+    parser.add_argument("--out", default="sp")
+    parser.add_argument("--timesteps", type=int, default=200_000)
+    parser.add_argument("--rounds", type=int, default=1)
+    parser.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
 
-
-def train_round(opp_specs, out, timesteps, server, seed, logdir):
-    os.makedirs(logdir, exist_ok=True)
-    # a pool; one sampled per episode. "greedy"/"random" stay as strings (server-side); rest are models.
-    opponents = [s if s in ("greedy", "random") else load_opponent(s) for s in opp_specs]
-    base = SelfPlayEnv(["dotnet", server], opponents, learner_seat=0, base_seed=seed)
-    env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
-
-    write_params(logdir, base.spaces_info,
-                 dict(out=out, seed=seed, timesteps=timesteps, n_steps=512, policy="CNN", pool=list(opp_specs)))
-
-    ckpt = CheckpointCallback(save_freq=25_000, save_path=os.path.join(logdir, "checkpoints"), name_prefix=out)
-    model = MaskablePPO(MaskableActorCriticPolicy, env, n_steps=512, seed=seed, verbose=1,
-                        policy_kwargs=cnn_policy_kwargs(base.spaces_info))
-    model.set_logger(configure(logdir, ["stdout", "csv"]))
-    model.learn(total_timesteps=timesteps, callback=ckpt)
-    model.save(out)
-    env.close()
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--opponent", required=True, help="frozen opponent to start from: ppo:PATH or dqn:PATH")
-    ap.add_argument("--out", default="sp")
-    ap.add_argument("--timesteps", type=int, default=200_000)
-    ap.add_argument("--rounds", type=int, default=1, help="self-play rounds (each retrains vs the last winner)")
-    ap.add_argument("--server", default=os.environ.get("HEXWARS_SERVER", DEFAULT_DLL))
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
-
-    # greedy is anchored in the pool (decisive -> punishes passivity, stops the draw collapse); plus the
-    # base model and every past self, added each round. ~half of episodes face greedy.
-    pool = ["greedy", args.opponent]
-    final = None
-    for rnd in range(args.rounds):
-        out = f"{args.out}_r{rnd}"
-        print(f"=== self-play round {rnd}: train {out}.zip vs pool of {len(pool)} ({', '.join(pool)}) ===")
-        train_round(pool, out, args.timesteps, args.server, args.seed + rnd, os.path.join("runs", out))
-        final = out
-        pool = pool + [f"ppo:{out}.zip"]  # add this round's policy to the opponent pool
-    print(f"done -> {final}.zip  ({args.rounds} round(s))")
+    print("DEPRECATED: use hexwars_ml.py train with a fixed or live opponent")
+    pool: list[dict[str, object]] = [
+        controller_config("greedy"),
+        controller_config(args.opponent),
+    ]
+    final: Path | None = None
+    for round_index in range(args.rounds):
+        run_name = f"{args.out}_r{round_index}"
+        config = RunConfig(
+            backend="sb3",
+            algorithm="maskable_ppo",
+            policy="HexCNN",
+            run_name=run_name,
+            seed=args.seed + round_index,
+            total_timesteps=args.timesteps,
+            checkpoint_interval=25_000,
+            workers=1,
+            device="auto",
+            learner_seat="0",
+            opponent={"kind": "pool", "controllers": pool},
+            trackers=[{"kind": "local"}],
+            resume_source=None,
+        )
+        run_dir = run_training(
+            config,
+            runs_root=Path("runs"),
+            server_cmd=["dotnet", args.server],
+        )
+        final = _export_latest(run_dir, run_name)
+        pool = [*pool, {"kind": "run", "path": str(run_dir), "mode": "fixed"}]
+    print(f"done -> {final}  ({args.rounds} round(s))")
 
 
 if __name__ == "__main__":

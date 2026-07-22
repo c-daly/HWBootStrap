@@ -44,24 +44,34 @@ IAgent? MakeController(string? spec, int agentSeed)
 
 // Handshake: obs/action sizes + the spatial obs shape (so Python reshapes the board part to (C,H,W))
 // + the env config (recorded into each run's params for reproducibility).
-object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, EnvConfig c) => new
+object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, EnvConfig c, MlEnvironmentKind environmentKind)
 {
-    obs_len = obsLen,
-    n_actions = nActions,
-    channels,
-    board_h = boardH,
-    board_w = boardW,
-    globals = TacticalCoding.Globals,
-    roster = c.Roster.Count,
-    biomes = c.Game.BiomesEnabled,
-    round_cap = c.Game.RoundCap,
-    max_steps = c.MaxSteps,
-    shape_scale = c.ShapeScale,
-    step_penalty = c.StepPenalty,
-    closing_weight = c.ClosingWeight,
-    draw_credit_weight = c.DrawCreditWeight,
-    points_weight = c.PointsWeight,
-};
+    var contract = MlContract.Create(c, environmentKind);
+    return new
+    {
+        contract_version = contract.Version,
+        contract_hash = contract.ContractHash,
+        environment_kind = contract.EnvironmentKind,
+        obs_len = obsLen,
+        n_actions = nActions,
+        channels,
+        board_h = boardH,
+        board_w = boardW,
+        globals = TacticalCoding.Globals,
+        board = contract.Board,
+        roster = c.Roster.Count,
+        contract_roster = contract.Roster,
+        reward = contract.Reward,
+        biomes = c.Game.BiomesEnabled,
+        round_cap = c.Game.RoundCap,
+        max_steps = contract.Board["max_steps"],
+        shape_scale = c.ShapeScale,
+        step_penalty = c.StepPenalty,
+        closing_weight = c.ClosingWeight,
+        draw_credit_weight = c.DrawCreditWeight,
+        points_weight = c.PointsWeight,
+    };
+}
 
 string? line;
 while ((line = Console.ReadLine()) != null)
@@ -75,7 +85,7 @@ while ((line = Console.ReadLine()) != null)
     switch (cmd)
     {
         case "spaces":
-            Send(Spaces(env.ObservationLength, env.ActionCount, env.ObsChannels, env.BoardH, env.BoardW, env.Config));
+            Send(Spaces(env.ObservationLength, env.ActionCount, env.ObsChannels, env.BoardH, env.BoardW, env.Config, MlEnvironmentKind.Tactical));
             break;
 
         case "reset":
@@ -96,7 +106,7 @@ while ((line = Console.ReadLine()) != null)
 
         case "duel_spaces":
             duel ??= new DuelEnv();
-            Send(Spaces(duel.ObservationLength, duel.ActionCount, duel.ObsChannels, duel.BoardH, duel.BoardW, duel.Config));
+            Send(Spaces(duel.ObservationLength, duel.ActionCount, duel.ObsChannels, duel.BoardH, duel.BoardW, duel.Config, MlEnvironmentKind.Duel));
             break;
 
         case "duel_reset":
