@@ -87,10 +87,14 @@ def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> 
             raise ControllerResolutionError("scripted controller name must be 'greedy' or 'random'")
         return ControllerSpec(kind="scripted", name=name)
     if kind == "checkpoint":
+        mode = raw.get("mode", "fixed")
+        if mode not in {"fixed", "live"}:
+            raise ControllerResolutionError("checkpoint controller mode must be 'fixed' or 'live'")
         return ControllerSpec(
             kind="checkpoint",
             path=_path_field(raw),
             algorithm=_algorithm_field(raw),
+            mode=mode,
         )
     if kind == "run":
         mode = raw.get("mode", "fixed")
@@ -106,7 +110,14 @@ def _parse_string_spec(raw: str) -> Mapping[str, Any]:
         return {"kind": "scripted", "name": value}
     if value.startswith("ppo:") or value.startswith("dqn:"):
         alias, path = value.split(":", 1)
-        return {"kind": "checkpoint", "path": path, "algorithm": ALGORITHM_ALIASES[alias]}
+        # The old directory form was a live checkpoint source. Keep that behavior,
+        # but only refresh it when the caller explicitly invokes ControllerBinding.reload().
+        return {
+            "kind": "checkpoint",
+            "path": path,
+            "algorithm": ALGORITHM_ALIASES[alias],
+            "mode": "live" if Path(path).is_dir() else "fixed",
+        }
     if value.startswith("run:"):
         return {"kind": "run", "path": value[4:], "mode": "fixed"}
     if value.startswith("@"):
@@ -176,7 +187,11 @@ class ControllerResolver:
         if spec.kind == "run":
             return self._resolve_run(spec)
         if spec.path.is_dir() and (spec.path / "run.json").is_file():
-            return self._resolve_run(ControllerSpec(kind="run", path=spec.path, mode="fixed"), spec.algorithm)
+            return self._resolve_run(ControllerSpec(kind="run", path=spec.path, mode=spec.mode), spec.algorithm)
+        if spec.path.is_dir() and spec.path.name == "checkpoints" and (spec.path.parent / "run.json").is_file():
+            return self._resolve_run(
+                ControllerSpec(kind="run", path=spec.path.parent, mode=spec.mode), spec.algorithm
+            )
         return self._resolve_legacy_checkpoint(spec)
 
     def _resolve_run(self, spec: ControllerSpec, requested_algorithm: Algorithm | None = None) -> ResolvedController:
@@ -259,7 +274,9 @@ class ControllerBinding:
         self.resolved = resolver._resolve(spec)
 
     def reload(self) -> bool:
-        if self.spec.kind != "run" or self.spec.mode != "live":
+        if self.spec.mode != "live":
+            return False
+        if self.spec.kind == "checkpoint" and (self.spec.path is None or not self.spec.path.is_dir()):
             return False
         updated = self._resolver._resolve(self.spec)
         if _resolution_key(updated) == _resolution_key(self.resolved):

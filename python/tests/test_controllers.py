@@ -13,6 +13,7 @@ from ml_lab.controllers import (
 )
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.io import atomic_write_json
+from selfplay_env import SelfPlayEnv, bind_opponents
 
 
 @dataclass
@@ -215,3 +216,82 @@ def test_fixed_run_does_not_advance_when_reload_is_requested(
     )
 
     assert binding.reload() is False
+
+
+def test_legacy_checkpoint_directory_advances_only_after_explicit_reload(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    checkpoints = tmp_path / "legacy" / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    first = checkpoints / "first.zip"
+    first.write_bytes(b"first")
+    binding = ControllerResolver(contract, model_loader=loader).bind(f"ppo:{checkpoints}")
+    second = checkpoints / "second.zip"
+    second.write_bytes(b"second")
+    os.utime(first, (1, 1))
+    os.utime(second, (2, 2))
+
+    assert binding.resolved.path == first
+    assert binding.resolved.legacy is True
+    assert binding.reload() is True
+    assert binding.resolved.path == second
+
+
+def test_legacy_run_checkpoints_directory_uses_published_manifest_metadata(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+
+    binding = ControllerResolver(contract, model_loader=loader).bind(f"ppo:{run / 'checkpoints'}")
+
+    assert binding.resolved.path == run / "checkpoints" / "step_000000010.zip"
+    assert binding.resolved.step == 10
+    assert binding.resolved.contract == contract
+    assert binding.resolved.legacy is False
+
+
+def test_selfplay_reloads_live_bindings_at_reset_boundary(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    binding = ControllerResolver(contract, model_loader=loader).bind(
+        {"kind": "run", "path": str(run), "mode": "live"}
+    )
+    second = run / "checkpoints" / "step_000000020.zip"
+    second.write_bytes(b"model")
+    atomic_write_json(
+        run / "run.json",
+        {
+            "schema_version": 1,
+            "config": {"algorithm": "maskable_ppo"},
+            "contract": contract.to_dict(),
+            "latest_checkpoint": "checkpoints/step_000000020.zip",
+            "latest_checkpoint_step": 20,
+        },
+    )
+    env = object.__new__(SelfPlayEnv)
+    env.opp_pool = [binding]
+    env.opp = binding
+    env.learner = 0
+    env.opp_seat = 1
+    env._next_seed = 0
+    env.obs_len = contract.observation_size
+    env.n_actions = contract.action_size
+    env._mask = None
+    env._rpc = lambda message: {
+        "terminated": True,
+        "truncated": False,
+        "obs": [0.0] * contract.observation_size,
+        "mask": [True] * contract.action_size,
+    }
+
+    SelfPlayEnv.reset(env, seed=1)
+
+    assert binding.resolved.path == second
+
+
+def test_selfplay_rejects_raw_models_without_resolver_metadata(
+    contract: EnvironmentContract, loader
+) -> None:
+    with pytest.raises(ControllerResolutionError, match="controller specification"):
+        bind_opponents([loader(Path("unused.zip"), "maskable_ppo")], ControllerResolver(contract, model_loader=loader))

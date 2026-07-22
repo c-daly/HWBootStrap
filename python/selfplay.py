@@ -20,7 +20,6 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from selfplay_env import SelfPlayEnv
-from duel import load_controller
 from hex_cnn import cnn_policy_kwargs
 from experiment import write_params
 
@@ -31,18 +30,10 @@ def mask_fn(env):
     return env.unwrapped.action_masks()
 
 
-def load_opponent(spec):
-    _, model = load_controller(spec)  # "ppo:PATH" / "dqn:PATH" -> (.., model)
-    if model is None:
-        raise ValueError("opponent must be a trained model: ppo:PATH or dqn:PATH")
-    return model
-
-
 def train_round(opp_specs, out, timesteps, server, seed, logdir):
     os.makedirs(logdir, exist_ok=True)
-    # a pool; one sampled per episode. "greedy"/"random" stay as strings (server-side); rest are models.
-    opponents = [s if s in ("greedy", "random") else load_opponent(s) for s in opp_specs]
-    base = SelfPlayEnv(["dotnet", server], opponents, learner_seat=0, base_seed=seed)
+    # Keep controller specs intact: SelfPlayEnv owns their binding, compatibility checks, and reload policy.
+    base = SelfPlayEnv(["dotnet", server], opp_specs, learner_seat=0, base_seed=seed)
     env = ActionMasker(Monitor(base, filename=os.path.join(logdir, "monitor.csv")), mask_fn)
 
     write_params(logdir, base.spaces_info,
@@ -59,7 +50,11 @@ def train_round(opp_specs, out, timesteps, server, seed, logdir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--opponent", required=True, help="frozen opponent to start from: ppo:PATH or dqn:PATH")
+    ap.add_argument(
+        "--opponent",
+        required=True,
+        help="opponent controller: greedy|random|ppo:PATH|dqn:PATH|run:PATH|JSON|@controller.json",
+    )
     ap.add_argument("--out", default="sp")
     ap.add_argument("--timesteps", type=int, default=200_000)
     ap.add_argument("--rounds", type=int, default=1, help="self-play rounds (each retrains vs the last winner)")

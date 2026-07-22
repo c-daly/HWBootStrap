@@ -5,16 +5,17 @@ SHARED codec (HexWars.Engine.Rl.TacticalCoding, same C# the models trained again
 stdin, and this returns the model's action over stdout. So the model sees exactly what it saw at training
 time, and Unity stays in charge of the game.
 
-A seat spec is "ppo:PATH" or "dqn:PATH" where PATH is either a .zip OR a DIRECTORY — for a directory we
-load the NEWEST .zip in it, and a {"cmd":"reload"} re-scans (so the live-training viewer can pick up fresh
-checkpoints between games). Inference runs on CPU on purpose: it's one tiny forward pass per turn, faster
-than a GPU round-trip and it never contends with training for the GPU.
+A seat spec is a legacy "ppo:PATH"/"dqn:PATH" string, a JSON controller object, a run path, or
+"@controller.json". Explicit run specs are fixed unless their JSON mode is "live". Legacy directory
+inputs remain live sources, while legacy .zip paths remain fixed. No source changes until an explicit
+{"cmd":"reload"} re-resolves live seats. Inference runs on CPU on purpose: it's one tiny forward pass per
+turn, faster than a GPU round-trip and it never contends with training for the GPU.
 
 Protocol (one JSON object per line):
     spawn:  python policy_server.py --p0 ppo:runs/sp6_r1/checkpoints --p1 ppo:sp6base.zip
-    ready:  -> {"ready": true, "model_seats": [0,1]}
+    ready:  -> {"ready": true, "model_seats": [0,1], "seats": {"0": {...}}}
     in:     {"seat": 0, "obs": [...float...], "mask": [...bool...]}   -> {"action": 123}
-    in:     {"cmd": "reload"}   -> {"reloaded": [0]}   (seats whose newest checkpoint changed)
+    in:     {"cmd": "reload"}   -> {"reloaded": [0], "seats": {"0": {...}}}
     in:     {"cmd": "close"}    -> exits
 
 Greedy/Random seats are NOT served here — Unity drives those with its own C# agents.
