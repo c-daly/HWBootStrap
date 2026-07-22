@@ -36,6 +36,21 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Build_HandlesIncompleteResolvedRunMetadata()
+        {
+            var resolved = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"model_seats\":[0],\"seat_models\":[{\"seat\":0,\"kind\":\"run\",\"algorithm\":\"maskable_ppo\"}]}"
+            ).Seats[0];
+
+            var row = ModelArenaIdentity.Build(null, "greedy", resolved, null, 0, 0, 0, 0)[0];
+
+            Assert.That(row.Controller, Is.EqualTo("model"));
+            Assert.That(row.Checkpoint, Is.EqualTo(string.Empty));
+            Assert.That(row.Algorithm, Is.EqualTo("Maskable PPO"));
+            Assert.That(row.Step, Is.EqualTo(string.Empty));
+        }
+
+        [Test]
         public void MiddleTruncate_PreservesBothEnds()
         {
             Assert.That(ModelArenaIdentity.MiddleTruncate("abcdefghijklmnop", 11), Is.EqualTo("abcd…klmnop"));

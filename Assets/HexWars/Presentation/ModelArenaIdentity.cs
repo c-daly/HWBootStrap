@@ -35,7 +35,7 @@ namespace HexWars.Presentation
                 Player = seat == 0 ? "P1" : "P2",
                 Controller = scripted ? Capitalize(spec) : RunName(spec, resolved),
                 Algorithm = resolved == null ? string.Empty : FriendlyAlgorithm(resolved.Algorithm),
-                Checkpoint = resolved == null ? (scripted ? string.Empty : "loading checkpoint") : Path.GetFileName(resolved.Path),
+                Checkpoint = resolved == null ? (scripted ? string.Empty : "loading checkpoint") : Path.GetFileName(resolved.Path) ?? string.Empty,
                 Step = resolved == null || resolved.Step <= 0 ? string.Empty : $"step {resolved.Step:N0}",
                 Record = FormatRecord(wins, losses, draws),
                 IsActive = active,
@@ -65,7 +65,9 @@ namespace HexWars.Presentation
 
         static string RunName(string spec, PolicySeatInfo resolved)
         {
-            string path = resolved?.Kind == "run" ? Directory.GetParent(resolved.Path)?.Parent?.FullName : null;
+            string path = resolved?.Kind == "run" && !string.IsNullOrWhiteSpace(resolved.Path)
+                ? Directory.GetParent(resolved.Path)?.Parent?.FullName
+                : null;
             if (string.IsNullOrWhiteSpace(path))
             {
                 int colon = (spec ?? string.Empty).IndexOf(':');
