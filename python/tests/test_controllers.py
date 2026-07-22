@@ -237,6 +237,28 @@ def test_legacy_checkpoint_directory_advances_only_after_explicit_reload(
     assert binding.resolved.path == second
 
 
+def test_legacy_unversioned_run_directory_reloads_nested_checkpoints_only_explicitly(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = tmp_path / "old-run"
+    checkpoints = run / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    first = checkpoints / "first.zip"
+    first.write_bytes(b"first")
+    binding = ControllerResolver(contract, model_loader=loader).bind(f"dqn:{run}")
+    second = checkpoints / "second.zip"
+    second.write_bytes(b"second")
+    os.utime(first, (1, 1))
+    os.utime(second, (2, 2))
+
+    assert binding.resolved.path == first
+    assert binding.resolved.legacy is True
+    assert binding.resolved.promotable is False
+    assert binding.resolved.path == first
+    assert binding.reload() is True
+    assert binding.resolved.path == second
+
+
 def test_legacy_run_checkpoints_directory_uses_published_manifest_metadata(
     tmp_path: Path, contract: EnvironmentContract, loader
 ) -> None:

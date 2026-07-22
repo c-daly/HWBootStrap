@@ -298,6 +298,10 @@ def _latest_legacy_checkpoint(path: Path) -> Path:
         raise ControllerResolutionError(f"checkpoint path does not exist: {path}")
     candidates = list(path.glob("*.zip"))
     if not candidates:
+        # Pre-manifest training runs commonly kept checkpoints under this nested
+        # directory. The explicit legacy algorithm still governs loading.
+        candidates = list((path / "checkpoints").glob("*.zip"))
+    if not candidates:
         raise ControllerResolutionError(f"no .zip checkpoints found in {path}")
     return max(candidates, key=lambda candidate: candidate.stat().st_mtime_ns)
 
