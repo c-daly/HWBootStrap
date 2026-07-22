@@ -45,6 +45,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(args, Does.Contain("--tracker wandb"));
             Assert.That(args, Does.Contain("--tracker custom=my_tracker:record"));
             Assert.That(args, Does.Contain("--wandb-project \"hex wars\""));
+            Assert.That(args, Does.Contain("--no-console-output"));
         }
 
         [Test]
@@ -54,8 +55,10 @@ namespace HexWars.Presentation.Tests
             config.RunName = "continued";
             config.ResumeSource = @"C:\runs\source run";
 
-            Assert.That(config.BuildResumeArguments(),
-                Does.StartWith("resume \"C:\\runs\\source run\" --run continued"));
+            string args = config.BuildResumeArguments();
+
+            Assert.That(args, Does.StartWith("resume \"C:\\runs\\source run\" --run continued"));
+            Assert.That(args, Does.Contain("--no-console-output"));
         }
 
         [Test]

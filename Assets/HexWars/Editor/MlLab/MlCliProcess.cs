@@ -51,8 +51,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _process.ErrorDataReceived += OnError;
             _process.Exited += OnExited;
             if (!_process.Start()) throw new InvalidOperationException("Python process did not start.");
-            _process.BeginOutputReadLine();
-            _process.BeginErrorReadLine();
+            if (startInfo.RedirectStandardOutput) _process.BeginOutputReadLine();
+            if (startInfo.RedirectStandardError) _process.BeginErrorReadLine();
         }
 
         public void Kill() { if (IsRunning) _process.Kill(); }
@@ -128,7 +128,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 throw;
             }
             if (!string.IsNullOrWhiteSpace(activeRunDirectory))
-                MlRunAttachment.Remember(activeRunDirectory, _process.Id);
+                MlRunAttachment.Remember(activeRunDirectory);
             NotifyChanged();
         }
 
@@ -146,6 +146,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public static ProcessStartInfo BuildStartInfo(
             string pythonExe, string scriptPath, string commandArguments, string workingDirectory)
+            => BuildStartInfo(pythonExe, scriptPath, commandArguments, workingDirectory, true);
+
+        public static ProcessStartInfo BuildDetachedStartInfo(
+            string pythonExe, string scriptPath, string commandArguments, string workingDirectory)
+            => BuildStartInfo(pythonExe, scriptPath, commandArguments, workingDirectory, false);
+
+        static ProcessStartInfo BuildStartInfo(
+            string pythonExe, string scriptPath, string commandArguments, string workingDirectory,
+            bool redirectOutput)
         {
             return new ProcessStartInfo
             {
@@ -154,8 +163,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardOutput = redirectOutput,
+                RedirectStandardError = redirectOutput,
             };
         }
 

@@ -14,14 +14,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
     public sealed class MlLabWindowState
     {
         public MlLabUiPhase Phase { get; private set; } = MlLabUiPhase.Idle;
-        public int OwnedPid { get; private set; }
+        public bool LaunchedHere { get; private set; }
         public string Error { get; private set; } = string.Empty;
 
         public void BeginValidation() { Phase = MlLabUiPhase.Validating; Error = string.Empty; }
-        public void MarkLaunched(int pid) { OwnedPid = Math.Max(0, pid); Phase = MlLabUiPhase.Running; Error = string.Empty; }
+        public void MarkLaunched() { LaunchedHere = true; Phase = MlLabUiPhase.Running; Error = string.Empty; }
         public void BeginStopping() { Phase = MlLabUiPhase.Stopping; Error = string.Empty; }
         public void Fail(string error) { Phase = MlLabUiPhase.Failed; Error = error ?? "Unknown ML Lab error."; }
-        public void Reset() { Phase = MlLabUiPhase.Idle; OwnedPid = 0; Error = string.Empty; }
+        public void Reset() { Phase = MlLabUiPhase.Idle; LaunchedHere = false; Error = string.Empty; }
 
         public void Apply(MlRunState state, int pid)
         {
@@ -31,9 +31,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     Phase = MlLabUiPhase.Validating;
                     break;
                 case MlRunState.Running:
-                    Phase = OwnedPid > 0 && (pid == 0 || pid == OwnedPid)
-                        ? MlLabUiPhase.Running
-                        : MlLabUiPhase.ExternallyRunning;
+                    Phase = LaunchedHere ? MlLabUiPhase.Running : MlLabUiPhase.ExternallyRunning;
                     break;
                 case MlRunState.Stopping:
                     Phase = MlLabUiPhase.Stopping;
@@ -41,11 +39,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 case MlRunState.Stopped:
                 case MlRunState.Completed:
                     Phase = MlLabUiPhase.Completed;
-                    OwnedPid = 0;
+                    LaunchedHere = false;
                     break;
                 case MlRunState.Failed:
                     Phase = MlLabUiPhase.Failed;
-                    OwnedPid = 0;
+                    LaunchedHere = false;
                     break;
             }
         }
@@ -531,9 +529,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     " --server " + MlCliProcess.QuoteArgument(GymServer);
             try
             {
-                var info = MlCliProcess.BuildStartInfo(PythonExe, CliScript, args, PythonDir);
+                var info = MlCliProcess.BuildDetachedStartInfo(PythonExe, CliScript, args, PythonDir);
                 _training.Start(info, targetRun);
-                _state.MarkLaunched(_training.ProcessId);
+                _state.MarkLaunched();
                 _selectedRun = targetRun;
                 SessionState.SetString(SelectedRunKey, _selectedRun);
                 _watchWhenReady = watch;
@@ -623,7 +621,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return;
             }
             _state.Apply(status.State, status.Pid);
-            MlRunAttachment.Remember(_selectedRun, status.Pid);
+            MlRunAttachment.Remember(_selectedRun);
             ReadLatestMetric();
             if (_watchWhenReady && !_watchLaunched && !string.IsNullOrWhiteSpace(status.LatestCheckpoint))
             {
@@ -684,7 +682,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _lastMetricTime = string.Empty;
             _state.Reset();
             SessionState.SetString(SelectedRunKey, _selectedRun);
-            if (!string.IsNullOrWhiteSpace(_selectedRun)) MlRunAttachment.Remember(_selectedRun, 0);
+            if (!string.IsNullOrWhiteSpace(_selectedRun)) MlRunAttachment.Remember(_selectedRun);
             _nextPoll = 0;
         }
 
@@ -693,8 +691,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             try
             {
                 string path = Path.Combine(_selectedRun, "progress.csv");
-                if (!File.Exists(path)) return;
-                string line = File.ReadLines(path).LastOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                string line = MlSharedFileSnapshot.ReadLastNonEmptyLine(path);
                 if (string.IsNullOrWhiteSpace(line) || line.StartsWith("timestamp", StringComparison.Ordinal)) return;
                 string[] fields = line.Split(',');
                 if (fields.Length >= 5)
@@ -722,6 +719,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string[] CombinedLog()
         {
             var lines = new List<string>();
+            lines.AddRange(MlRunLog.ReadTail(_selectedRun, 500));
             if (_training != null) lines.AddRange(_training.Log.Lines);
             if (_command != null) lines.AddRange(_command.Log.Lines.Select(line => "[command] " + line));
             if (_statusQuery != null)

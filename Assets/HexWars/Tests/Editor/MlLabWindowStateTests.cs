@@ -13,9 +13,9 @@ namespace HexWars.Presentation.Tests
 
             state.BeginValidation();
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Validating));
-            state.MarkLaunched(42);
+            state.MarkLaunched();
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Running));
-            Assert.That(state.OwnedPid, Is.EqualTo(42));
+            Assert.That(state.LaunchedHere, Is.True);
 
             state.BeginStopping();
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Stopping));
@@ -30,7 +30,7 @@ namespace HexWars.Presentation.Tests
 
             state.Apply(MlRunState.Running, 99);
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.ExternallyRunning));
-            Assert.That(state.OwnedPid, Is.Zero);
+            Assert.That(state.LaunchedHere, Is.False);
 
             state.Apply(MlRunState.Completed, 0);
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Completed));
@@ -51,12 +51,12 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void OwnedProcessStatus_RemainsRunningRatherThanExternal()
+        public void LocallyLaunchedRun_RemainsRunningAcrossDifferentReportedPid()
         {
             var state = new MlLabWindowState();
-            state.MarkLaunched(42);
+            state.MarkLaunched();
 
-            state.Apply(MlRunState.Running, 42);
+            state.Apply(MlRunState.Running, 99);
 
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Running));
         }

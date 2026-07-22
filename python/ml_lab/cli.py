@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -51,6 +53,14 @@ def _add_json_argument(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_no_console_output_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--no-console-output",
+        action="store_true",
+        help="run without writing to stdout or stderr",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hexwars_ml.py")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -87,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--wandb-tag", action="append", default=[])
     train.add_argument("--wandb-upload-artifacts", action="store_true")
     _add_runtime_arguments(train)
+    _add_no_console_output_argument(train)
     _add_json_argument(train)
 
     resume = subcommands.add_parser(
@@ -96,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--run", required=True)
     resume.add_argument("--timesteps", required=True, type=int)
     _add_runtime_arguments(resume)
+    _add_no_console_output_argument(resume)
     _add_json_argument(resume)
 
     status = subcommands.add_parser("status", help="read durable local run status")
@@ -341,20 +353,30 @@ def _dispatch(
         )
     if args.command == "train":
         config = _training_config(args)
+        runner_options = {
+            "runs_root": Path(args.runs_root),
+            "server_cmd": ["dotnet", args.server],
+        }
+        if args.no_console_output:
+            runner_options["console_output"] = False
         return _run_result(
             runner(
                 config,
-                runs_root=Path(args.runs_root),
-                server_cmd=["dotnet", args.server],
+                **runner_options,
             )
         )
     if args.command == "resume":
         config = _resume_config(args)
+        runner_options = {
+            "runs_root": Path(args.runs_root),
+            "server_cmd": ["dotnet", args.server],
+        }
+        if args.no_console_output:
+            runner_options["console_output"] = False
         return _run_result(
             runner(
                 config,
-                runs_root=Path(args.runs_root),
-                server_cmd=["dotnet", args.server],
+                **runner_options,
             )
         )
     if args.command == "status":
@@ -409,27 +431,39 @@ def main(
     args = build_parser().parse_args(argv)
     output = stdout if stdout is not None else sys.stdout
     human_follow = args.command == "status" and args.follow and not args.json
-    try:
-        result = _dispatch(
-            args,
-            runner=runner,
-            sleeper=sleeper,
-            status_update=(
-                (lambda update: _emit_human(output, "status", update))
-                if human_follow
-                else None
-            ),
-        )
-    except Exception as error:
-        if args.json:
-            _emit_json(
-                output,
-                args.command,
-                {"error": type(error).__name__, "message": str(error)},
-                ok=False,
+    no_console_output = getattr(args, "no_console_output", False)
+    with ExitStack() as console_stack:
+        if no_console_output:
+            sink = console_stack.enter_context(
+                open(os.devnull, "w", encoding="utf-8")
             )
-            return 1
-        raise
+            console_stack.enter_context(redirect_stdout(sink))
+            console_stack.enter_context(redirect_stderr(sink))
+        try:
+            result = _dispatch(
+                args,
+                runner=runner,
+                sleeper=sleeper,
+                status_update=(
+                    (lambda update: _emit_human(output, "status", update))
+                    if human_follow
+                    else None
+                ),
+            )
+        except Exception as error:
+            if no_console_output:
+                return 1
+            if args.json:
+                _emit_json(
+                    output,
+                    args.command,
+                    {"error": type(error).__name__, "message": str(error)},
+                    ok=False,
+                )
+                return 1
+            raise
+    if no_console_output:
+        return 0
     if args.json:
         _emit_json(output, args.command, result)
     elif not human_follow:

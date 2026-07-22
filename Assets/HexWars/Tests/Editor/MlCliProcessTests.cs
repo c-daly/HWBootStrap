@@ -34,6 +34,21 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void BuildDetachedStartInfo_DoesNotCreateUnityOwnedOutputPipes()
+        {
+            var info = MlCliProcess.BuildDetachedStartInfo(
+                @"C:\Python Env\python.exe",
+                @"C:\Hex Wars\python\hexwars_ml.py",
+                "train --run detached --no-console-output",
+                @"C:\Hex Wars\python");
+
+            Assert.That(info.UseShellExecute, Is.False);
+            Assert.That(info.CreateNoWindow, Is.True);
+            Assert.That(info.RedirectStandardOutput, Is.False);
+            Assert.That(info.RedirectStandardError, Is.False);
+        }
+
+        [Test]
         public void StopCommands_TargetRunAndDifferentiateCheckpointFromImmediateStop()
         {
             Assert.That(MlCliProcess.BuildStopArguments(@"C:\runs\one", false),
@@ -87,6 +102,8 @@ namespace HexWars.Presentation.Tests
             owner.Start(new ProcessStartInfo("python.exe"), @"C:\runs\active");
             owner.Dispose();
 
+            Assert.That(MlRunAttachment.Restore().RunDirectory, Is.EqualTo(@"C:\runs\active"));
+
             var query = new FakeProcessAdapter();
             var reattached = new MlCliProcess(new FakeProcessFactory(query));
             MlRunStatus received = null;
@@ -107,7 +124,7 @@ namespace HexWars.Presentation.Tests
         public void ReloadQuery_PublishesFailedStatusEnvelope()
         {
             MlRunAttachment.Forget();
-            MlRunAttachment.Remember(@"C:\runs\missing", 0);
+            MlRunAttachment.Remember(@"C:\runs\missing");
             var query = new FakeProcessAdapter();
             var process = new MlCliProcess(new FakeProcessFactory(query));
             MlRunStatus received = null;

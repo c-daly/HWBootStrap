@@ -27,16 +27,19 @@ def _default_summary_writer(log_dir: Path) -> Any | None:
     return SummaryWriter(log_dir=str(log_dir))
 
 
-def build_sb3_logger(run_dir: Path, *, stdout: TextIO = sys.stdout) -> Any:
+def build_sb3_logger(run_dir: Path, *, stdout: TextIO | None = sys.stdout) -> Any:
     """Mirror SB3's human-readable output to the console and durable run log."""
     from stable_baselines3.common.logger import HumanOutputFormat, Logger
 
     log_stream = (Path(run_dir) / "train.log").open("a", encoding="utf-8")
     file_output = HumanOutputFormat(log_stream)
     file_output.own_file = True
+    output_formats = [file_output]
+    if stdout is not None:
+        output_formats.insert(0, HumanOutputFormat(stdout))
     return Logger(
         folder=str(run_dir),
-        output_formats=[HumanOutputFormat(stdout), file_output],
+        output_formats=output_formats,
     )
 
 
@@ -110,6 +113,7 @@ def run_training(
     algorithm_adapter: AlgorithmAdapter | None = None,
     tracker_factory: Callable[..., TrackerHub] = TrackerHub,
     summary_writer_factory: Callable[[Path], Any | None] = _default_summary_writer,
+    console_output: bool = True,
 ) -> Path:
     """Run one local experiment and leave its manifest in a terminal state."""
     adapter = algorithm_adapter or get_algorithm_adapter(config.algorithm)
@@ -171,7 +175,11 @@ def run_training(
             resume_source=resume_source,
             allow_unsafe_legacy_resume=config.allow_unsafe_legacy_resume,
         )
-        sb3_logger = build_sb3_logger(run_dir)
+        sb3_logger = (
+            build_sb3_logger(run_dir)
+            if console_output
+            else build_sb3_logger(run_dir, stdout=None)
+        )
         set_logger = getattr(model, "set_logger", None)
         if callable(set_logger):
             set_logger(sb3_logger)

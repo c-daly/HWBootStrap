@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -191,6 +192,84 @@ def test_train_json_reports_the_durable_completed_run(
     assert received[0].run_name == "json-train"
 
 
+def test_train_no_console_output_suppresses_envelope_and_requests_file_only_logging(
+    tmp_path: Path,
+) -> None:
+    received: list[bool] = []
+
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        console_output: bool,
+    ) -> Path:
+        del server_cmd
+        received.append(console_output)
+        return _complete_fake_run(runs_root, config)
+
+    stdout = StringIO()
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "detached-train",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--no-console-output",
+            "--json",
+        ],
+        stdout=stdout,
+        runner=runner,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == ""
+    assert received == [False]
+
+
+def test_train_no_console_output_sinks_incidental_runner_stream_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        console_output: bool,
+    ) -> Path:
+        del server_cmd, console_output
+        print("tracker wrote to stdout")
+        print("tracker wrote to stderr", file=sys.stderr)
+        return _complete_fake_run(runs_root, config)
+
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "detached-streams",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--no-console-output",
+            "--json",
+        ],
+        runner=runner,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets(
     tmp_path: Path,
 ) -> None:
@@ -302,6 +381,48 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
         total_timesteps=160,
         resume_source=str(source.resolve()),
     )
+
+
+def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_logging(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    source = create_run(tmp_path, _config("detached-source"), contract)
+    received: list[bool] = []
+
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        console_output: bool,
+    ) -> Path:
+        del server_cmd
+        received.append(console_output)
+        return _complete_fake_run(runs_root, config)
+
+    stdout = StringIO()
+    exit_code = cli_module.main(
+        [
+            "resume",
+            str(source),
+            "--run",
+            "detached-resume",
+            "--timesteps",
+            "160",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--no-console-output",
+            "--json",
+        ],
+        stdout=stdout,
+        runner=runner,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == ""
+    assert received == [False]
 
 
 def test_status_reads_local_truth_without_unity_or_remote_services(

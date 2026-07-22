@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 
@@ -126,30 +128,149 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const string PidKey = "HexWars.MlLab.ActivePid";
 
         public readonly string RunDirectory;
-        public readonly int Pid;
         public bool Exists => !string.IsNullOrWhiteSpace(RunDirectory);
 
-        MlRunAttachment(string runDirectory, int pid)
+        MlRunAttachment(string runDirectory)
         {
             RunDirectory = runDirectory ?? string.Empty;
-            Pid = pid;
         }
 
-        public static void Remember(string runDirectory, int pid)
+        public static void Remember(string runDirectory)
         {
             if (string.IsNullOrWhiteSpace(runDirectory)) throw new ArgumentException(
                 "Active run directory is required.", nameof(runDirectory));
             SessionState.SetString(RunKey, runDirectory);
-            SessionState.SetInt(PidKey, Math.Max(0, pid));
+            SessionState.EraseInt(PidKey);
         }
 
         public static MlRunAttachment Restore() => new MlRunAttachment(
-            SessionState.GetString(RunKey, string.Empty), SessionState.GetInt(PidKey, 0));
+            SessionState.GetString(RunKey, string.Empty));
 
         public static void Forget()
         {
             SessionState.EraseString(RunKey);
             SessionState.EraseInt(PidKey);
+        }
+    }
+
+    public static class MlRunLog
+    {
+        public static string[] ReadTail(string runDirectory, int maxLines)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory) || maxLines <= 0) return Array.Empty<string>();
+            return MlSharedFileSnapshot.ReadTail(Path.Combine(runDirectory, "train.log"), maxLines);
+        }
+    }
+
+    public static class MlSharedFileSnapshot
+    {
+        public const int TailReadLimitBytes = 256 * 1024;
+        public const int LastLineReadLimitBytes = 16 * 1024;
+
+        public static string[] ReadTail(string path, int maxLines) =>
+            ReadTail(path, maxLines, out _);
+
+        public static string[] ReadTail(string path, int maxLines, out int bytesRead)
+        {
+            bytesRead = 0;
+            if (string.IsNullOrWhiteSpace(path) || maxLines <= 0) return Array.Empty<string>();
+            try
+            {
+                SuffixSnapshot snapshot = ReadSuffix(path, TailReadLimitBytes);
+                bytesRead = snapshot.BytesRead;
+                string[] lines = SplitLines(snapshot, true);
+                int count = Math.Min(maxLines, lines.Length);
+                var tail = new string[count];
+                Array.Copy(lines, lines.Length - count, tail, 0, count);
+                return tail;
+            }
+            catch (IOException) { return Array.Empty<string>(); }
+            catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
+        }
+
+        public static string ReadLastNonEmptyLine(string path) =>
+            ReadLastNonEmptyLine(path, out _);
+
+        public static string ReadLastNonEmptyLine(string path, out int bytesRead)
+        {
+            bytesRead = 0;
+            if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+            try
+            {
+                SuffixSnapshot snapshot = ReadSuffix(path, LastLineReadLimitBytes);
+                bytesRead = snapshot.BytesRead;
+                string[] lines = SplitLines(snapshot, false);
+                for (int i = lines.Length - 1; i >= 0; i--)
+                    if (!string.IsNullOrWhiteSpace(lines[i])) return lines[i];
+                return string.Empty;
+            }
+            catch (IOException) { return string.Empty; }
+            catch (UnauthorizedAccessException) { return string.Empty; }
+        }
+
+        static SuffixSnapshot ReadSuffix(string path, int byteLimit)
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                       FileShare.ReadWrite | FileShare.Delete))
+            {
+                long length = stream.Length;
+                bool truncated = length > byteLimit;
+                long start = truncated ? length - byteLimit : 0;
+                stream.Seek(start, SeekOrigin.Begin);
+                int requested = (int)Math.Min(byteLimit, length - start);
+                var buffer = new byte[requested];
+                int bytesRead = 0;
+                while (bytesRead < requested)
+                {
+                    int count = stream.Read(buffer, bytesRead, requested - bytesRead);
+                    if (count == 0) break;
+                    bytesRead += count;
+                }
+
+                int textOffset = truncated && bytesRead > 0 ? 1 : 0;
+                bool startsAtLineBoundary = !truncated || (bytesRead > 0 && buffer[0] == (byte)'\n');
+                string text = Encoding.UTF8.GetString(buffer, textOffset, bytesRead - textOffset);
+                return new SuffixSnapshot(text, startsAtLineBoundary, bytesRead);
+            }
+        }
+
+        static string[] SplitLines(SuffixSnapshot snapshot, bool includePartialFinalLine)
+        {
+            string text = snapshot.Text;
+            if (!snapshot.StartsAtLineBoundary)
+            {
+                int firstNewline = text.IndexOf('\n');
+                if (firstNewline < 0) return Array.Empty<string>();
+                text = text.Substring(firstNewline + 1);
+            }
+            if (text.Length == 0) return Array.Empty<string>();
+
+            bool endsWithNewline = text[text.Length - 1] == '\n';
+            string[] raw = text.Split('\n');
+            int count = raw.Length;
+            if (endsWithNewline || !includePartialFinalLine) count--;
+            if (count <= 0) return Array.Empty<string>();
+
+            var lines = new string[count];
+            for (int i = 0; i < count; i++)
+                lines[i] = raw[i].EndsWith("\r", StringComparison.Ordinal)
+                    ? raw[i].Substring(0, raw[i].Length - 1)
+                    : raw[i];
+            return lines;
+        }
+
+        readonly struct SuffixSnapshot
+        {
+            public readonly string Text;
+            public readonly bool StartsAtLineBoundary;
+            public readonly int BytesRead;
+
+            public SuffixSnapshot(string text, bool startsAtLineBoundary, int bytesRead)
+            {
+                Text = text;
+                StartsAtLineBoundary = startsAtLineBoundary;
+                BytesRead = bytesRead;
+            }
         }
     }
 }

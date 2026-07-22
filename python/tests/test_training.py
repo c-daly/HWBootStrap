@@ -988,6 +988,21 @@ def test_sb3_human_logger_appends_to_stdout_and_train_log(
     assert "ep_rew_mean" in (run_dir / "train.log").read_text(encoding="utf-8")
 
 
+def test_sb3_file_only_logger_does_not_depend_on_console_output(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    import ml_lab.training as training_module
+
+    run_dir = create_run(tmp_path, config("file-only-log"), contract)
+    logger = training_module.build_sb3_logger(run_dir, stdout=None)
+
+    logger.record("rollout/ep_rew_mean", 2.5)
+    logger.dump(step=64)
+    logger.close()
+
+    assert "ep_rew_mean" in (run_dir / "train.log").read_text(encoding="utf-8")
+
+
 def test_multiworker_run_manifest_exposes_monitor_shards_as_authoritative(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

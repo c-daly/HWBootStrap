@@ -107,6 +107,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 foreach (var tag in WandbTags ?? new List<string>()) AddOption(args, "--wandb-tag", tag);
                 if (WandbUploadArtifacts) args.Add("--wandb-upload-artifacts");
             }
+            args.Add("--no-console-output");
             args.Add("--json");
             return string.Join(" ", args);
         }
@@ -116,7 +117,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             return string.Join(" ", new[]
             {
                 "resume", Q(ResumeSource), "--run", Q(RunName), "--timesteps",
-                TotalTimesteps.ToString(System.Globalization.CultureInfo.InvariantCulture), "--json"
+                TotalTimesteps.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--no-console-output", "--json"
             });
         }
 
