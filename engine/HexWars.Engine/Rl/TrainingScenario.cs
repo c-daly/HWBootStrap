@@ -138,7 +138,8 @@ namespace HexWars.Engine.Rl
             if (Board.Height <= 0) errors.Add("board height must be positive");
             if (Board.MaxElevation <= 0) errors.Add("board max elevation must be positive");
             if (Board.ZoneDepth <= 0) errors.Add("board zone depth must be positive");
-            if (Board.Width > 0 && Board.ZoneDepth >= Board.Width / 2)
+            if (Board.Width > 0 && Board.ZoneDepth > 0
+                && Board.ZoneDepth > Board.Width - Board.ZoneDepth)
                 errors.Add("deployment zones overlap");
             if (double.IsNaN(Board.FlatChance) || Board.FlatChance < 0 || Board.FlatChance > 1)
                 errors.Add("board flat chance must be within [0,1]");
@@ -179,9 +180,9 @@ namespace HexWars.Engine.Rl
             if (adaptive.StartingUnitCount > 24)
                 errors.Add("adaptive starting unit count must not exceed 24 controllable slots");
 
-            if (Board != null && Board.Width > 0 && Board.ZoneDepth > 0)
+            if (Board != null && Board.Height > 0 && Board.ZoneDepth > 0)
             {
-                long cellsPerSeat = (long)Board.Width * Board.ZoneDepth;
+                long cellsPerSeat = (long)Board.Height * Board.ZoneDepth;
                 if (cellsPerSeat < adaptive.StartingUnitCount)
                     errors.Add("adaptive deployment cells must cover the starting unit count");
             }

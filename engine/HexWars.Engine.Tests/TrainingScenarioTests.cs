@@ -100,7 +100,7 @@ namespace HexWars.Engine.Tests
 
         [TestCase(0, 9, 3, "width")]
         [TestCase(13, 0, 3, "height")]
-        [TestCase(6, 9, 3, "deployment zones overlap")]
+        [TestCase(7, 9, 4, "deployment zones overlap")]
         public void Scenario_RejectsImpossibleGeometry(int width, int height, int zoneDepth, string message)
         {
             var scenario = TrainingScenario.CreateStandard("tactical-v1");
@@ -109,6 +109,16 @@ namespace HexWars.Engine.Tests
             scenario.Board.ZoneDepth = zoneDepth;
 
             Assert.That(scenario.Validate(), Has.Some.Contains(message));
+        }
+
+        [Test]
+        public void Scenario_AcceptsOddWidthWithDisjointDeploymentZones()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 7;
+            scenario.Board.ZoneDepth = 3;
+
+            Assert.That(scenario.Validate(), Has.None.Contains("deployment zones overlap"));
         }
 
         [Test]
@@ -143,6 +153,17 @@ namespace HexWars.Engine.Tests
             scenario.Board.Width = 2;
             scenario.Board.Height = 2;
             scenario.Board.ZoneDepth = 1;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("deployment cells"));
+        }
+
+        [Test]
+        public void AdaptiveScenario_UsesHeightForDeploymentCellCapacity()
+        {
+            var scenario = TrainingScenario.CreateStandard("adaptive-v1");
+            scenario.Board.Width = 20;
+            scenario.Board.Height = 2;
+            scenario.Board.ZoneDepth = 2;
 
             Assert.That(scenario.Validate(), Has.Some.Contains("deployment cells"));
         }
