@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .io import atomic_write_json, read_json
+from .scenarios import ResolvedScenario
 
 
 RUN_SCHEMA_VERSION = 1
@@ -133,7 +134,14 @@ def _write_csv_header(path: Path, header: list[str]) -> None:
         csv.writer(stream).writerow(header)
 
 
-def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract) -> Path:
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
+    *,
+    opponent_snapshot: Mapping[str, Any],
+) -> Path:
     """Create a new experiment directory; existing runs are never overwritten."""
     validate_run_name(config.run_name)
     config_data = config.to_dict()
@@ -146,6 +154,7 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     run_dir.mkdir()
     (run_dir / "checkpoints").mkdir()
     (run_dir / "replays").mkdir()
+    scenario.write(run_dir / "scenario.json")
 
     created_at = utc_now()
     monitor_files = (
@@ -166,6 +175,12 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
         "monitor_files": monitor_files,
         "config": config_data,
         "contract": contract_data,
+        "scenario": {
+            "path": "scenario.json",
+            "template_id": scenario.template_id,
+            "schema_version": scenario.schema_version,
+        },
+        "opponent_snapshot": dict(opponent_snapshot),
     }
     atomic_write_json(run_dir / "run.json", manifest)
     atomic_write_json(run_dir / "params.json", {"config": config_data, "contract": contract_data})
@@ -192,7 +207,14 @@ def update_run_state(run_dir: Path, state: str, **fields: Any) -> dict[str, Any]
     """Update mutable status while preserving the run's config and contract."""
     if state not in RUN_STATES:
         raise ValueError(f"unknown run state: {state}")
-    forbidden = {"config", "contract", "schema_version", "created_at"}.intersection(fields)
+    forbidden = {
+        "config",
+        "contract",
+        "scenario",
+        "opponent_snapshot",
+        "schema_version",
+        "created_at",
+    }.intersection(fields)
     if forbidden:
         raise ValueError(f"immutable run fields cannot be updated: {', '.join(sorted(forbidden))}")
     manifest_path = Path(run_dir) / "run.json"

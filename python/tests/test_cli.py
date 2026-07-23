@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import ml_lab.cli as cli_module
-from ml_lab.contracts import EnvironmentContract, RunConfig, create_run
+from ml_lab.contracts import EnvironmentContract, RunConfig, create_run as create_durable_run
 from ml_lab.io import atomic_write_json, read_json
 from ml_lab.scenarios import ResolvedScenario
 
@@ -45,6 +45,30 @@ def _config(run_name: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+    )
+
+
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    template_id = (
+        "tactical-standard"
+        if config.environment == "tactical-v1"
+        else "adaptive-standard"
+    )
+    scenario = cli_module.resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id=template_id,
+    )
+    return create_durable_run(
+        runs_root,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
     )
 
 
@@ -96,6 +120,7 @@ def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> No
         replace(_config("adaptive-source"), environment="adaptive-v1"),
         adaptive_contract,
     )
+    (source / "scenario.json").unlink()
     received: list[RunConfig] = []
 
     def runner(config: RunConfig, *, scenario: ResolvedScenario, **_kwargs) -> Path:
@@ -551,7 +576,7 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
         server_cmd: list[str],
         scenario: ResolvedScenario,
     ) -> Path:
-        assert scenario.template_id == "legacy-default"
+        assert scenario.template_id == "tactical-standard"
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
         return _complete_fake_run(runs_root, config)
@@ -600,7 +625,7 @@ def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_log
         scenario: ResolvedScenario,
     ) -> Path:
         del server_cmd
-        assert scenario.template_id == "legacy-default"
+        assert scenario.template_id == "tactical-standard"
         received.append(console_output)
         return _complete_fake_run(runs_root, config)
 

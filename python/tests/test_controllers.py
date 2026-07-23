@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import selfplay_env as selfplay_module
+import ml_lab.controllers as controller_module
 
 from ml_lab.controllers import (
     ControllerResolutionError,
@@ -17,6 +18,7 @@ from ml_lab.controllers import (
     _validate_contract_compatibility,
     normalize_controller_spec,
     predict,
+    snapshot_opponents,
 )
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.io import atomic_write_json
@@ -122,6 +124,108 @@ def _write_run(
         },
     )
     return run
+
+
+def test_scripted_opponent_snapshot_retains_exact_name() -> None:
+    assert snapshot_opponents({"kind": "scripted", "name": "random"}) == {
+        "kind": "scripted",
+        "name": "random",
+    }
+
+
+def test_fixed_run_snapshot_retains_exact_checkpoint_identity(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    loader,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _write_run(tmp_path, contract)
+    monkeypatch.setattr(controller_module, "load_model", loader)
+
+    snapshot = snapshot_opponents(
+        {
+            "kind": "run",
+            "path": str(run),
+            "mode": "fixed",
+            "inference_mode": "stochastic",
+        }
+    )
+
+    assert snapshot == {
+        "kind": "snapshot",
+        "path": str((run / "checkpoints" / "step_000000010.zip").resolve()),
+        "source_run": str(run.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": 10,
+        "inference_mode": "stochastic",
+    }
+    (run / "checkpoints" / "step_000000020.zip").write_bytes(b"newer-model")
+    atomic_write_json(
+        run / "run.json",
+        {
+            "schema_version": 1,
+            "config": {"algorithm": "maskable_ppo"},
+            "contract": contract.to_dict(),
+            "latest_checkpoint": "checkpoints/step_000000020.zip",
+            "latest_checkpoint_step": 20,
+        },
+    )
+    resolved = ControllerResolver(contract, model_loader=loader).resolve(snapshot)
+    assert resolved.path == run / "checkpoints" / "step_000000010.zip"
+    assert resolved.contract == contract
+
+
+def test_live_run_snapshot_retains_run_path_and_live_mode(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    loader,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _write_run(tmp_path, contract)
+    monkeypatch.setattr(controller_module, "load_model", loader)
+
+    snapshot = snapshot_opponents(
+        {"kind": "run", "path": str(run), "mode": "live"}
+    )
+
+    assert snapshot == {
+        "kind": "run",
+        "path": str(run.resolve()),
+        "mode": "live",
+        "inference_mode": "deterministic",
+    }
+
+
+def test_pool_snapshot_preserves_every_entry_in_input_order(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    loader,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _write_run(tmp_path, contract)
+    monkeypatch.setattr(controller_module, "load_model", loader)
+
+    snapshot = snapshot_opponents(
+        {
+            "kind": "pool",
+            "controllers": [
+                {"kind": "scripted", "name": "random"},
+                {"kind": "run", "path": str(run), "mode": "fixed"},
+                {"kind": "scripted", "name": "greedy"},
+            ],
+        }
+    )
+
+    assert [entry["kind"] for entry in snapshot["controllers"]] == [
+        "scripted",
+        "snapshot",
+        "scripted",
+    ]
+    assert [entry.get("name") for entry in snapshot["controllers"]] == [
+        "random",
+        None,
+        "greedy",
+    ]
 
 
 @pytest.mark.parametrize("name", ["greedy", "random"])
@@ -615,10 +719,16 @@ def test_selfplay_constructor_failure_closes_and_reaps_server_process(
 
     monkeypatch.setattr(selfplay_module.subprocess, "Popen", capture_popen)
 
+    scenario_path = tmp_path / "run" / "scenario.json"
     with pytest.raises(KeyError) as constructor_error:
-        SelfPlayEnv([sys.executable, "-c", child_code], ["greedy"])
+        SelfPlayEnv(
+            [sys.executable, "-c", child_code],
+            ["greedy"],
+            scenario_path=scenario_path,
+        )
 
     process = children[0]
+    assert process.args[-2:] == ["--scenario-file", str(scenario_path)]
     child_pid = int(pid_path.read_text(encoding="utf-8"))
     try:
         assert marker_path.read_text(encoding="utf-8") == "closed"

@@ -205,6 +205,18 @@ def test_contract_exposes_environment_version_and_encoding_hash(tmp_path: Path) 
         env.close()
 
 
+def test_client_passes_explicit_scenario_file_to_server(tmp_path: Path) -> None:
+    scenario_path = tmp_path / "run" / "scenario.json"
+    env = HexWarsEnv(
+        _fake_server(tmp_path, _valid_spaces()),
+        scenario_path=scenario_path,
+    )
+    try:
+        assert env.proc.args[-2:] == ["--scenario-file", str(scenario_path)]
+    finally:
+        env.close()
+
+
 def test_adaptive_client_accepts_complete_contract_and_keeps_fixed_spaces(tmp_path: Path) -> None:
     spaces = _valid_adaptive_spaces()
     env = HexWarsEnv(_fake_server(tmp_path, spaces), environment="adaptive-v1")

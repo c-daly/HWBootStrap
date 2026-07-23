@@ -17,10 +17,17 @@ from gymnasium import spaces
 
 from ml_lab.callbacks import TrainingLifecycle
 from ml_lab.cli import main as cli_main
-from ml_lab.contracts import EnvironmentContract, RunConfig, create_run, request_stop
+from ml_lab.contracts import (
+    ContractMismatch,
+    EnvironmentContract,
+    RunConfig,
+    create_run as create_durable_run,
+    request_stop,
+)
 import ml_lab.envs as env_module
 from ml_lab.envs import EpisodeMonitor, ScheduledEnvironment, WorkerSchedule, build_vector_env
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.scenarios import ResolvedScenario, resolve_scenario
 from ml_lab.tracking import TrackerHub
 from ml_lab.training import run_training
 
@@ -60,6 +67,31 @@ def config(run_name: str = "training") -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+    )
+
+
+def scenario(environment: str = "tactical-v1") -> ResolvedScenario:
+    template_id = (
+        "tactical-standard" if environment == "tactical-v1" else "adaptive-standard"
+    )
+    return resolve_scenario(
+        environment=environment,
+        scenario_file=None,
+        template_id=template_id,
+    )
+
+
+def create_run(
+    runs_root: Path,
+    run_config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    return create_durable_run(
+        runs_root,
+        run_config,
+        contract,
+        scenario(run_config.environment),
+        opponent_snapshot=run_config.opponent,
     )
 
 
@@ -376,21 +408,73 @@ def test_tactical_episode_monitor_does_not_create_adaptive_sidecar(tmp_path: Pat
 def test_training_factory_forwards_environment_to_worker_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    captured: list[str] = []
+    captured: list[tuple[str, Path]] = []
 
-    def fake_client(server_cmd, *, opponent, seat, base_seed, environment):
+    def fake_client(
+        server_cmd,
+        *,
+        opponent,
+        seat,
+        base_seed,
+        environment,
+        scenario_path,
+    ):
         del server_cmd, opponent
-        captured.append(environment)
+        captured.append((environment, scenario_path))
         return FakeGymEnv(0, seat, base_seed)
 
     monkeypatch.setattr(env_module, "HexWarsEnv", fake_client)
     adaptive = replace(config("adaptive-worker"), workers=1, environment="adaptive-v1")
-    vector = env_module.TrainingEnvironmentFactory(["fake-server"])(adaptive, tmp_path)
+    scenario_path = tmp_path / "scenario.json"
+    vector = env_module.TrainingEnvironmentFactory(["fake-server"])(
+        adaptive,
+        tmp_path,
+        scenario_path,
+        {"kind": "scripted", "name": "greedy"},
+    )
     try:
-        assert captured == ["adaptive-v1"]
+        assert captured == [("adaptive-v1", scenario_path)]
         assert vector.action_masks().shape == (1, adaptive.workers + 1)
     finally:
         vector.close()
+
+
+def test_training_factory_probe_rejects_authoritative_scenario_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = scenario()
+    scenario_path = tmp_path / "scenario.json"
+    requested.write(scenario_path)
+    document = requested.document
+    spaces_info = {
+        "scenario_id": "wrong-id",
+        "scenario_schema_version": requested.schema_version,
+        "contract_version": requested.environment,
+        "board_w": document["board"]["width"],
+        "board_h": document["board"]["height"],
+        "round_cap": document["rules"]["round_cap"],
+        "biomes": document["rules"]["biomes_enabled"],
+        "board": {**document["board"], **document["rules"]},
+        "max_steps": document["episode"]["max_steps"],
+        "reward": dict(document["reward"]),
+    }
+
+    def fake_client(*_args, **_kwargs):
+        env = FakeGymEnv(0)
+        env.spaces_info = spaces_info
+        return env
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_client)
+
+    with pytest.raises(
+        ValueError,
+        match=r"scenario 'tactical-standard' field id requested 'tactical-standard'.*'wrong-id'",
+    ):
+        env_module.TrainingEnvironmentFactory(["fake-server"]).probe(
+            config("probe-mismatch"),
+            scenario_path,
+        )
 
 
 @pytest.mark.parametrize("worker_count,subprocess_workers", [(1, False), (2, True)])
@@ -798,6 +882,29 @@ class FakeVectorEnv:
         self.closed = True
 
 
+class StaticTrainingEnvironmentFactory:
+    def __init__(self, env: FakeVectorEnv) -> None:
+        self.env = env
+
+    def probe(
+        self,
+        run_config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, dict[str, object], dict[str, object]]:
+        del scenario_path
+        return self.env.contract, dict(self.env.spaces_info), dict(run_config.opponent)
+
+    def __call__(
+        self,
+        run_config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: dict[str, object],
+    ) -> FakeVectorEnv:
+        del run_config, run_dir, scenario_path, opponent_snapshot
+        return self.env
+
+
 class OrderedCloseVectorEnv(FakeVectorEnv):
     def __init__(self, contract: EnvironmentContract, order: list[str]) -> None:
         super().__init__(contract)
@@ -881,6 +988,97 @@ class FakeTrainingAdapter(FakeCheckpointAdapter):
         assert expected_contract == self.contract
 
 
+class CapturingTrainingEnvironmentFactory:
+    def __init__(
+        self,
+        contract: EnvironmentContract,
+        *,
+        worker_contract: EnvironmentContract | None = None,
+    ) -> None:
+        self.contract = contract
+        self.worker_contract = worker_contract or contract
+        self.probe_scenario_paths: list[Path] = []
+        self.worker_scenario_paths: list[Path] = []
+        self.worker_opponent_snapshots: list[dict[str, object]] = []
+        self.probed_opponent_snapshot = {"kind": "scripted", "name": "greedy"}
+        self.worker_env: FakeVectorEnv | None = None
+
+    def probe(
+        self,
+        run_config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, dict[str, object], dict[str, object]]:
+        del run_config
+        self.probe_scenario_paths.append(Path(scenario_path))
+        return (
+            self.contract,
+            {"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+            dict(self.probed_opponent_snapshot),
+        )
+
+    def __call__(
+        self,
+        run_config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: dict[str, object],
+    ) -> FakeVectorEnv:
+        del run_dir
+        self.worker_scenario_paths.extend([Path(scenario_path)] * run_config.workers)
+        self.worker_opponent_snapshots.extend(
+            [dict(opponent_snapshot) for _ in range(run_config.workers)]
+        )
+        self.worker_env = FakeVectorEnv(self.worker_contract)
+        return self.worker_env
+
+
+def test_every_real_worker_receives_run_local_scenario(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_config = config("scenario-workers")
+    factory = CapturingTrainingEnvironmentFactory(contract)
+
+    run_training(
+        run_config,
+        runs_root=tmp_path,
+        scenario=scenario(),
+        environment_factory=factory,
+        algorithm_adapter=FakeTrainingAdapter(contract, FakeTrainingModel()),
+    )
+
+    expected = tmp_path / run_config.run_name / "scenario.json"
+    assert factory.worker_scenario_paths == [expected] * run_config.workers
+    assert all(
+        value == factory.probed_opponent_snapshot
+        for value in factory.worker_opponent_snapshots
+    )
+    assert factory.probe_scenario_paths[0].parent.parent == tmp_path
+    assert not factory.probe_scenario_paths[0].exists()
+
+
+def test_training_rejects_probe_actual_contract_mismatch(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    changed = replace(contract, contract_hash="d" * 64)
+    run_config = config("contract-changed")
+    factory = CapturingTrainingEnvironmentFactory(contract, worker_contract=changed)
+
+    with pytest.raises(
+        ContractMismatch, match="worker contract changed after scenario snapshot"
+    ):
+        run_training(
+            run_config,
+            runs_root=tmp_path,
+            scenario=scenario(),
+            environment_factory=factory,
+            algorithm_adapter=FakeTrainingAdapter(contract, FakeTrainingModel()),
+        )
+
+    assert factory.worker_env is not None
+    assert factory.worker_env.closed is True
+    assert read_json(tmp_path / run_config.run_name / "run.json")["state"] == "failed"
+
+
 def _resume_source(
     tmp_path: Path, contract: EnvironmentContract, *, algorithm: str = "maskable_ppo"
 ) -> Path:
@@ -899,6 +1097,21 @@ def _resume_source(
     return source_run
 
 
+def test_legacy_resume_resolution_is_in_memory_and_visibly_labeled(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.cli import _source_scenario
+
+    source = tmp_path / "legacy-source"
+    source.mkdir()
+
+    resolved = _source_scenario(source, "tactical-v1")
+
+    assert resolved.template_id == "legacy-default"
+    assert resolved.name == "Standard"
+    assert not (source / "scenario.json").exists()
+
+
 def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -909,7 +1122,7 @@ def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     run_dir = run_training(
         config("complete"),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -931,7 +1144,7 @@ def test_training_runner_marks_failure_and_closes_env(
         run_training(
             config("failed"),
             runs_root=tmp_path,
-            environment_factory=lambda _config, _run_dir: env,
+            environment_factory=StaticTrainingEnvironmentFactory(env),
             algorithm_adapter=adapter,
         )
 
@@ -994,7 +1207,7 @@ def test_training_cleanup_closes_env_first_and_preserves_primary_error(
         run_training(
             run_config,
             runs_root=tmp_path,
-            environment_factory=lambda _config, _run_dir: env,
+            environment_factory=StaticTrainingEnvironmentFactory(env),
             algorithm_adapter=adapter,
             tracker_factory=lambda *_args, **_kwargs: CleanupTracker(),
             summary_writer_factory=lambda _log_dir: writer,
@@ -1020,15 +1233,18 @@ def test_absolute_resume_treats_timesteps_as_final_target(
         timestep_mode="absolute",
     )
 
-    run_training(
+    run_dir = run_training(
         run_config,
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
     assert model.learn_calls[0]["total_timesteps"] == 32
     assert model.num_timesteps == 96
+    assert (run_dir / "scenario.json").read_text(encoding="utf-8") == (
+        source / "scenario.json"
+    ).read_text(encoding="utf-8")
 
 
 def test_legacy_additional_resume_trains_requested_extra_steps(
@@ -1048,7 +1264,7 @@ def test_legacy_additional_resume_trains_requested_extra_steps(
     run_dir = run_training(
         run_config,
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -1075,7 +1291,7 @@ def test_resume_clears_loaded_episode_buffers_before_applying_source_offset(
             total_timesteps=96,
         ),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -1117,7 +1333,7 @@ def test_training_wires_functional_tensorboard_writer_when_requested(
     run_training(
         replace(config("tensorboard-run"), trackers=[{"kind": "tensorboard"}]),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
         tracker_factory=tracker_factory,
         summary_writer_factory=lambda _log_dir: writer,
@@ -1184,7 +1400,7 @@ def test_stop_after_checkpoint_on_final_rollout_publishes_update_and_marks_stopp
     run_dir = run_training(
         config("final-stop"),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -1196,10 +1412,16 @@ def test_stop_after_checkpoint_on_final_rollout_publishes_update_and_marks_stopp
 
 
 def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) -> None:
-    received: list[tuple[RunConfig, Path, list[str]]] = []
+    received: list[tuple[RunConfig, ResolvedScenario, Path, list[str]]] = []
 
-    def runner(run_config: RunConfig, *, runs_root: Path, server_cmd: list[str]):
-        received.append((run_config, runs_root, server_cmd))
+    def runner(
+        run_config: RunConfig,
+        *,
+        scenario: ResolvedScenario,
+        runs_root: Path,
+        server_cmd: list[str],
+    ):
+        received.append((run_config, scenario, runs_root, server_cmd))
         return runs_root / run_config.run_name
 
     exit_code = cli_main(
@@ -1228,8 +1450,9 @@ def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) 
     )
 
     assert exit_code == 0
-    run_config, runs_root, server_cmd = received[0]
+    run_config, resolved_scenario, runs_root, server_cmd = received[0]
     assert run_config.run_name == "cli-smoke"
+    assert resolved_scenario.template_id == "tactical-standard"
     assert run_config.learner_seat == "alternating"
     assert run_config.opponent == {"kind": "scripted", "name": "greedy"}
     assert runs_root == tmp_path

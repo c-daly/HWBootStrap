@@ -32,10 +32,12 @@ class ControllerResolutionError(ValueError):
 
 @dataclass(frozen=True)
 class ControllerSpec:
-    kind: Literal["scripted", "checkpoint", "run"]
+    kind: Literal["scripted", "checkpoint", "run", "snapshot"]
     name: str | None = None
     path: Path | None = None
+    source_run: Path | None = None
     algorithm: Algorithm | None = None
+    step: int | None = None
     mode: Literal["fixed", "live"] = "fixed"
     inference_mode: InferenceMode = "deterministic"
 
@@ -113,7 +115,24 @@ def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> 
             mode=mode,
             inference_mode=_inference_mode_field(raw),
         )
-    raise ControllerResolutionError("controller kind must be 'scripted', 'checkpoint', or 'run'")
+    if kind == "snapshot":
+        step = raw.get("step")
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ControllerResolutionError("snapshot controller step must be a non-negative integer")
+        source_run = raw.get("source_run")
+        if not isinstance(source_run, str) or not source_run.strip():
+            raise ControllerResolutionError("snapshot controller source_run must be a non-empty string")
+        return ControllerSpec(
+            kind="snapshot",
+            path=_path_field(raw),
+            source_run=Path(source_run),
+            algorithm=_algorithm_field(raw),
+            step=step,
+            inference_mode=_inference_mode_field(raw),
+        )
+    raise ControllerResolutionError(
+        "controller kind must be 'scripted', 'checkpoint', 'run', or 'snapshot'"
+    )
 
 
 def _parse_string_spec(raw: str) -> Mapping[str, Any]:
@@ -205,6 +224,8 @@ class ControllerResolver:
                 promotable=False,
             )
         assert spec.path is not None
+        if spec.kind == "snapshot":
+            return self._resolve_snapshot(spec)
         if spec.kind == "run":
             return self._resolve_run(spec)
         if spec.path.is_dir() and (spec.path / "run.json").is_file():
@@ -228,6 +249,60 @@ class ControllerResolver:
                 spec.algorithm,
             )
         return self._resolve_legacy_checkpoint(spec)
+
+    def _resolve_snapshot(self, spec: ControllerSpec) -> ResolvedController:
+        assert spec.path is not None
+        assert spec.source_run is not None
+        assert spec.algorithm is not None
+        assert spec.step is not None
+        source_run = spec.source_run.resolve()
+        manifest_path = source_run / "run.json"
+        if not manifest_path.is_file():
+            raise ControllerResolutionError(
+                f"snapshot controller requires source manifest {manifest_path}"
+            )
+        try:
+            manifest = read_json(manifest_path)
+        except (OSError, json.JSONDecodeError) as error:
+            raise ControllerResolutionError(
+                f"could not read snapshot source manifest {manifest_path}"
+            ) from error
+        if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
+            raise ControllerResolutionError("snapshot source manifest must have schema_version 1")
+        config = manifest.get("config")
+        if not isinstance(config, Mapping):
+            raise ControllerResolutionError("snapshot source manifest is missing config metadata")
+        recorded_algorithm = _algorithm_field({"algorithm": config.get("algorithm")})
+        if recorded_algorithm != spec.algorithm:
+            raise ControllerResolutionError(
+                "snapshot algorithm does not match the source run manifest"
+            )
+        checkpoint_path = spec.path.resolve()
+        checkpoints_dir = (source_run / "checkpoints").resolve()
+        if (
+            checkpoint_path.parent != checkpoints_dir
+            or checkpoint_path.suffix.lower() != ".zip"
+        ):
+            raise ControllerResolutionError(
+                "snapshot path must name a checkpoint inside the source run"
+            )
+        if checkpoint_path.name != f"step_{spec.step:09d}.zip":
+            raise ControllerResolutionError(
+                "snapshot step does not match the recorded checkpoint path"
+            )
+        if not checkpoint_path.is_file():
+            raise ControllerResolutionError(
+                f"snapshot checkpoint does not exist: {checkpoint_path}"
+            )
+        contract = _contract_from_manifest(manifest.get("contract"))
+        return self._load_model(
+            spec,
+            checkpoint_path,
+            spec.algorithm,
+            spec.step,
+            contract,
+            legacy=False,
+        )
 
     def _resolve_run(self, spec: ControllerSpec, requested_algorithm: Algorithm | None = None) -> ResolvedController:
         assert spec.path is not None
@@ -332,6 +407,67 @@ class ControllerBinding:
 
 def _resolution_key(resolved: ResolvedController) -> tuple[Any, ...]:
     return (resolved.path, resolved.algorithm, resolved.step, resolved.contract, resolved.legacy)
+
+
+def _resolved_source_run(resolved: ResolvedController) -> Path:
+    if resolved.path is None:
+        raise ControllerResolutionError("resolved model controller is missing a checkpoint path")
+    for candidate in resolved.path.parents:
+        if (candidate / "run.json").is_file():
+            return candidate.resolve()
+    raise ControllerResolutionError(
+        "resolved model checkpoint does not belong to a metadata-backed run"
+    )
+
+
+def _snapshot_controller(
+    raw: str | Mapping[str, Any] | ControllerSpec,
+) -> Mapping[str, Any]:
+    binding = ControllerResolver().bind(raw)
+    spec = binding.spec
+    resolved = binding.resolved
+    if spec.kind == "scripted":
+        return {"kind": "scripted", "name": spec.name}
+    source_run = _resolved_source_run(resolved)
+    if spec.mode == "live":
+        return {
+            "kind": "run",
+            "path": str(source_run),
+            "mode": "live",
+            "inference_mode": spec.inference_mode,
+        }
+    if (
+        resolved.path is None
+        or resolved.algorithm is None
+        or resolved.step is None
+        or resolved.contract is None
+    ):
+        raise ControllerResolutionError(
+            "fixed opponent snapshot requires checkpoint and contract metadata"
+        )
+    return {
+        "kind": "snapshot",
+        "path": str(resolved.path.resolve()),
+        "source_run": str(source_run),
+        "algorithm": resolved.algorithm,
+        "step": resolved.step,
+        "inference_mode": spec.inference_mode,
+    }
+
+
+def snapshot_opponents(opponent: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Freeze fixed opponents at exact checkpoints while preserving live bindings."""
+    if opponent.get("kind") == "pool":
+        controllers = opponent.get("controllers")
+        if not isinstance(controllers, list) or not controllers:
+            raise ControllerResolutionError(
+                "opponent pool requires at least one controller"
+            )
+        return {
+            "kind": "pool",
+            "controllers": [_snapshot_controller(entry) for entry in controllers],
+        }
+    return _snapshot_controller(opponent)
 
 
 def _latest_legacy_checkpoint(path: Path) -> Path:

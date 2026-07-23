@@ -20,7 +20,8 @@ from hexwars_gym import HexWarsEnv
 from selfplay_env import SelfPlayEnv
 
 from .contracts import ADAPTIVE_MONITOR_HEADER, EnvironmentContract, MONITOR_HEADER, RunConfig
-from .controllers import ControllerBinding, ControllerResolver
+from .controllers import ControllerBinding, ControllerResolver, snapshot_opponents
+from .scenarios import resolve_scenario, validate_handshake
 
 
 class WorkerSchedule:
@@ -491,21 +492,66 @@ class TrainingEnvironmentFactory:
     def __init__(self, server_cmd: list[str]) -> None:
         self.server_cmd = list(server_cmd)
 
+    def probe(
+        self,
+        config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, Mapping[str, Any], Mapping[str, Any]]:
+        scenario_path = Path(scenario_path)
+        scenario = resolve_scenario(
+            environment=config.environment,
+            scenario_file=scenario_path,
+            template_id=None,
+        )
+        opponent_snapshot = snapshot_opponents(config.opponent)
+        env = self._build_worker(
+            config,
+            scenario_path.parent,
+            0,
+            scenario_path,
+            opponent_snapshot,
+            monitor=False,
+        )
+        try:
+            spaces_info = dict(env.spaces_info)
+            validate_handshake(scenario, spaces_info)
+            return env.contract, spaces_info, opponent_snapshot
+        finally:
+            env.close()
+
     def __call__(
-        self, config: RunConfig, run_dir: Path
+        self,
+        config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: Mapping[str, Any],
     ) -> MaskingDummyVecEnv | MaskingSubprocVecEnv:
         return build_vector_env(
             config.workers,
-            lambda worker_index: self._build_worker(config, run_dir, worker_index),
+            lambda worker_index: self._build_worker(
+                config,
+                run_dir,
+                worker_index,
+                scenario_path,
+                opponent_snapshot,
+                monitor=True,
+            ),
             subprocess_workers=config.workers > 1,
         )
 
     def _build_worker(
-        self, config: RunConfig, run_dir: Path, worker_index: int
+        self,
+        config: RunConfig,
+        run_dir: Path,
+        worker_index: int,
+        scenario_path: Path,
+        opponent_snapshot: Mapping[str, Any],
+        *,
+        monitor: bool,
     ) -> gym.Env:
         resolver = ControllerResolver()
-        pool = _pool_specs(config.opponent)
-        raw_specs = pool if pool is not None else [config.opponent]
+        pool = _pool_specs(opponent_snapshot)
+        raw_specs = pool if pool is not None else [opponent_snapshot]
         bindings = [resolver.bind(spec) for spec in raw_specs]
         single_scripted = (
             len(bindings) == 1 and bindings[0].resolved.model is None and pool is None
@@ -519,6 +565,7 @@ class TrainingEnvironmentFactory:
                     seat=seat,
                     base_seed=seed,
                     environment=config.environment,
+                    scenario_path=scenario_path,
                 )
             return SelfPlayEnv(
                 self.server_cmd,
@@ -526,6 +573,7 @@ class TrainingEnvironmentFactory:
                 learner_seat=seat,
                 base_seed=seed,
                 environment=config.environment,
+                scenario_path=scenario_path,
             )
 
         scheduled = ScheduledEnvironment(
@@ -537,6 +585,8 @@ class TrainingEnvironmentFactory:
             ),
             build,
         )
+        if not monitor:
+            return scheduled
         monitor_name = "monitor.csv" if config.workers == 1 else f"monitor.worker_{worker_index}.csv"
         adaptive_name = (
             "adaptive_episodes.csv"

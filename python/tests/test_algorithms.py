@@ -11,7 +11,13 @@ from ml_lab.algorithms import (
     get_algorithm_adapter,
     resolve_resume_checkpoint,
 )
-from ml_lab.contracts import ContractMismatch, EnvironmentContract, RunConfig, create_run
+from ml_lab.contracts import (
+    ContractMismatch,
+    EnvironmentContract,
+    RunConfig,
+    create_run as create_durable_run,
+)
+from ml_lab.scenarios import resolve_scenario
 
 
 @pytest.fixture
@@ -43,6 +49,25 @@ def run_config(run_name: str, algorithm: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+    )
+
+
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    scenario = resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id="tactical-standard",
+    )
+    return create_durable_run(
+        runs_root,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
     )
 
 

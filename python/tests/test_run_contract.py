@@ -17,6 +17,7 @@ from ml_lab.contracts import (
     validate_run_name,
 )
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.scenarios import DEFAULT_TEMPLATE_LIBRARY, ResolvedScenario, resolve_scenario
 
 
 @pytest.fixture
@@ -52,6 +53,30 @@ def config() -> RunConfig:
     )
 
 
+@pytest.fixture
+def scenario() -> ResolvedScenario:
+    return resolve_scenario(
+        environment="tactical-v1",
+        scenario_file=None,
+        template_id="tactical-standard",
+    )
+
+
+def _create_test_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
+) -> Path:
+    return create_run(
+        runs_root,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
+    )
+
+
 @pytest.mark.parametrize(
     "name",
     ["", " has-space", "has space", "../escape", "a/b", "a\\b", ".hidden", "name!"],
@@ -62,9 +87,12 @@ def test_validate_run_name_rejects_unsafe_names(name: str) -> None:
 
 
 def test_create_run_writes_complete_manifest_and_tree(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    run = create_run(tmp_path, config, contract)
+    run = _create_test_run(tmp_path, config, contract, scenario)
 
     assert run == tmp_path / config.run_name
     manifest = read_json(run / "run.json")
@@ -91,12 +119,69 @@ def test_create_run_writes_complete_manifest_and_tree(
         assert next(csv.reader(stream)) == ["episode_reward", "episode_length", "elapsed_seconds"]
 
 
-def test_create_run_refuses_existing_directory(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+def test_create_run_snapshots_scenario_and_manifest_provenance(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    create_run(tmp_path, config, contract)
+    opponent_snapshot = {"kind": "scripted", "name": "greedy"}
+
+    run = create_run(
+        tmp_path,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=opponent_snapshot,
+    )
+
+    assert (run / "scenario.json").read_text(encoding="utf-8") == scenario.canonical_json + "\n"
+    manifest = read_json(run / "run.json")
+    assert manifest["scenario"] == {
+        "path": "scenario.json",
+        "template_id": scenario.template_id,
+        "schema_version": 1,
+    }
+    assert manifest["opponent_snapshot"] == opponent_snapshot
+    assert manifest["config"]["opponent"] == config.opponent
+
+
+def test_run_scenario_is_immutable_after_template_library_changes(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> None:
+    library = tmp_path / "training-game-templates.json"
+    library.write_text(DEFAULT_TEMPLATE_LIBRARY.read_text(encoding="utf-8"), encoding="utf-8")
+    resolved = resolve_scenario(
+        environment="tactical-v1",
+        scenario_file=None,
+        template_id="tactical-standard",
+        library_path=library,
+    )
+    run = create_run(
+        tmp_path / "runs",
+        config,
+        contract,
+        resolved,
+        opponent_snapshot=config.opponent,
+    )
+    snapshot = (run / "scenario.json").read_text(encoding="utf-8")
+
+    library.write_text('{"schema_version":1,"templates":[]}', encoding="utf-8")
+
+    assert (run / "scenario.json").read_text(encoding="utf-8") == snapshot
+
+
+def test_create_run_refuses_existing_directory(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
+) -> None:
+    _create_test_run(tmp_path, config, contract, scenario)
     with pytest.raises(FileExistsError):
-        create_run(tmp_path, config, contract)
+        _create_test_run(tmp_path, config, contract, scenario)
 
 
 @pytest.mark.parametrize(
@@ -112,6 +197,7 @@ def test_create_run_rejects_recursive_tracker_credentials_before_writing_files(
     tmp_path: Path,
     config: RunConfig,
     contract: EnvironmentContract,
+    scenario: ResolvedScenario,
     tracker: dict[str, object],
 ) -> None:
     unsafe = replace(config, trackers=[tracker])
@@ -119,7 +205,7 @@ def test_create_run_rejects_recursive_tracker_credentials_before_writing_files(
     with pytest.raises(
         ValueError, match="tracker configuration contains forbidden credential key"
     ) as error:
-        create_run(tmp_path, unsafe, contract)
+        _create_test_run(tmp_path, unsafe, contract, scenario)
 
     assert "do-not-leak-value" not in str(error.value)
     assert not (tmp_path / unsafe.run_name).exists()
@@ -146,9 +232,12 @@ def test_atomic_write_json_failure_preserves_document_and_removes_temp_file(tmp_
 
 
 def test_update_state_preserves_config_and_contract(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    run = create_run(tmp_path, config, contract)
+    run = _create_test_run(tmp_path, config, contract, scenario)
     original = read_json(run / "run.json")
 
     update_run_state(run, "running", pid=42, timesteps=128, latest_message="rollout complete")
@@ -156,6 +245,8 @@ def test_update_state_preserves_config_and_contract(
 
     assert updated["config"] == original["config"]
     assert updated["contract"] == original["contract"]
+    assert updated["scenario"] == original["scenario"]
+    assert updated["opponent_snapshot"] == original["opponent_snapshot"]
     assert updated["state"] == "running"
     assert updated["pid"] == 42
     assert updated["timesteps"] == 128
@@ -163,9 +254,12 @@ def test_update_state_preserves_config_and_contract(
 
 
 def test_control_requests_distinguish_graceful_and_immediate_stop(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    run = create_run(tmp_path, config, contract)
+    run = _create_test_run(tmp_path, config, contract, scenario)
 
     request_stop(run, after_checkpoint=True)
     assert read_json(run / "control.json")["request"] == "stop_after_checkpoint"
@@ -175,9 +269,12 @@ def test_control_requests_distinguish_graceful_and_immediate_stop(
 
 
 def test_publish_checkpoint_validates_then_atomically_updates_latest(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    run = create_run(tmp_path, config, contract)
+    run = _create_test_run(tmp_path, config, contract, scenario)
     pending = tmp_path / "pending.zip"
     pending.write_bytes(b"model")
 
@@ -208,9 +305,10 @@ def test_publish_checkpoint_stages_final_replace_inside_checkpoint_directory(
     tmp_path: Path,
     config: RunConfig,
     contract: EnvironmentContract,
+    scenario: ResolvedScenario,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = create_run(tmp_path / "runs", config, contract)
+    run = _create_test_run(tmp_path / "runs", config, contract, scenario)
     pending = tmp_path / "external-volume" / "pending.zip"
     pending.parent.mkdir()
     pending.write_bytes(b"model")
@@ -246,9 +344,12 @@ def test_publish_checkpoint_stages_final_replace_inside_checkpoint_directory(
 
 
 def test_publish_checkpoint_rejects_incompatible_model_without_mutating_run(
-    tmp_path: Path, config: RunConfig, contract: EnvironmentContract
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
 ) -> None:
-    run = create_run(tmp_path, config, contract)
+    run = _create_test_run(tmp_path, config, contract, scenario)
     pending = tmp_path / "pending.zip"
     pending.write_bytes(b"model")
     incompatible = replace(contract, encoding_hash="b" * 64)

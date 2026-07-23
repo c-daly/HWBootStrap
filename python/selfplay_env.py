@@ -9,6 +9,7 @@ import json
 import random
 import subprocess
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import gymnasium as gym
@@ -58,11 +59,15 @@ class SelfPlayEnv(gym.Env):
         learner_seat: int = 0,
         base_seed: int = 0,
         environment: str = "tactical-v1",
+        scenario_path: Path | None = None,
     ):
         super().__init__()
         if environment not in SUPPORTED_ENVIRONMENTS:
             raise ValueError(f"unsupported environment {environment!r}")
-        self.proc = subprocess.Popen(list(server_cmd) + ["--environment", environment],
+        cmd = list(server_cmd) + ["--environment", environment]
+        if scenario_path is not None:
+            cmd.extend(["--scenario-file", str(scenario_path)])
+        self.proc = subprocess.Popen(cmd,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      text=True, bufsize=1)
         try:

@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, List, Optional
 
 import gymnasium as gym
@@ -378,6 +379,7 @@ class HexWarsEnv(gym.Env):
         seat: int = 0,
         base_seed: int = 0,
         environment: str = "tactical-v1",
+        scenario_path: Path | None = None,
     ):
         super().__init__()
         if environment not in SUPPORTED_ENVIRONMENTS:
@@ -385,6 +387,8 @@ class HexWarsEnv(gym.Env):
         cmd = list(server_cmd) + [
             "--opponent", opponent, "--seat", str(seat), "--environment", environment,
         ]
+        if scenario_path is not None:
+            cmd.extend(["--scenario-file", str(scenario_path)])
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
         self._next_seed = base_seed
         try:

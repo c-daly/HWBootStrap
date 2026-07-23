@@ -5,8 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from ml_lab.contracts import EnvironmentContract, RunConfig, create_run
+from ml_lab.contracts import (
+    EnvironmentContract,
+    RunConfig,
+    create_run as create_durable_run,
+)
 from ml_lab.io import read_json
+from ml_lab.scenarios import resolve_scenario
 from ml_lab.tracking import SB3TrackingFacade, TrackerHub
 
 
@@ -37,7 +42,18 @@ def run_dir(tmp_path: Path) -> Path:
         roster=["scout"],
         reward={"win": 1.0},
     )
-    return create_run(tmp_path, config, contract)
+    scenario = resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id="tactical-standard",
+    )
+    return create_durable_run(
+        tmp_path,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
+    )
 
 
 def test_local_progress_csv_is_authoritative_even_without_tracker_specs(run_dir: Path) -> None:
