@@ -344,6 +344,107 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void GymServer_LoadsScenarioAndReportsResolvedContract()
+        {
+            string scenario = WriteScenario(environment: "adaptive-v1", width: 24, height: 16, maxSteps: 1800);
+            try
+            {
+                using var server = new ServerProcess(
+                    "--environment", "adaptive-v1", "--scenario-file", scenario);
+
+                using JsonDocument spaces = server.Exchange(new { cmd = "spaces" });
+
+                Assert.That(spaces.RootElement.GetProperty("scenario_id").GetString(), Is.EqualTo("test-large"));
+                Assert.That(spaces.RootElement.GetProperty("scenario_schema_version").GetInt32(), Is.EqualTo(1));
+                Assert.That(spaces.RootElement.GetProperty("board_w").GetInt32(), Is.EqualTo(24));
+                Assert.That(spaces.RootElement.GetProperty("board_h").GetInt32(), Is.EqualTo(16));
+                Assert.That(spaces.RootElement.GetProperty("max_steps").GetInt32(), Is.EqualTo(1800));
+
+                using JsonDocument duelSpaces = server.Exchange(new { cmd = "duel_spaces" });
+                Assert.That(duelSpaces.RootElement.GetProperty("scenario_id").GetString(), Is.EqualTo("test-large"));
+                Assert.That(duelSpaces.RootElement.GetProperty("board_w").GetInt32(), Is.EqualTo(24));
+                Assert.That(duelSpaces.RootElement.GetProperty("board_h").GetInt32(), Is.EqualTo(16));
+                Assert.That(duelSpaces.RootElement.GetProperty("max_steps").GetInt32(), Is.EqualTo(3600));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsMalformedScenarioBeforeCommandProcessing()
+        {
+            string scenario = WriteScenarioContent("{");
+            try
+            {
+                AssertScenarioStartupFails("invalid scenario JSON", "--environment", "adaptive-v1", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsUnsupportedScenarioSchemaBeforeCommandProcessing()
+        {
+            string scenario = WriteScenario(environment: "adaptive-v1", schemaVersion: 2);
+            try
+            {
+                AssertScenarioStartupFails("schema version must be 1", "--environment", "adaptive-v1", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsScenarioEnvironmentMismatchBeforeCommandProcessing()
+        {
+            string scenario = WriteScenario(environment: "adaptive-v1");
+            try
+            {
+                AssertScenarioStartupFails("scenario environment does not match --environment",
+                    "--environment", "tactical-v1", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsScenarioMissingEnvironmentRewardBeforeCommandProcessing()
+        {
+            string scenario = WriteScenario(environment: "adaptive-v1", includeReward: false);
+            try
+            {
+                AssertScenarioStartupFails("reward section is required", "--environment", "adaptive-v1", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsScenarioWithImpossibleDeploymentBeforeCommandProcessing()
+        {
+            string scenario = WriteScenario(environment: "adaptive-v1", width: 2, height: 2, zoneDepth: 1);
+            try
+            {
+                AssertScenarioStartupFails("adaptive deployment cells must cover the starting unit count",
+                    "--environment", "adaptive-v1", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
         public void GymServer_UnknownEnvironmentExitsTwoBeforeReadingInput()
         {
             string dll = ServerProcess.ServerDll;
@@ -385,6 +486,109 @@ namespace HexWars.Engine.Tests
             if (mask[(int)AdaptiveCommandChoice.ConfirmDeployment]) return (int)AdaptiveCommandChoice.ConfirmDeployment;
             if (mask[(int)AdaptiveCommandChoice.DeployStartingUnit]) return (int)AdaptiveCommandChoice.DeployStartingUnit;
             return Enumerable.Range(0, mask.Length).First(i => mask[i] && i != (int)AdaptiveCommandChoice.Cancel);
+        }
+
+        private static string WriteScenario(
+            string environment,
+            int schemaVersion = 1,
+            int width = 13,
+            int height = 9,
+            int zoneDepth = 3,
+            int maxSteps = 900,
+            bool includeReward = true)
+        {
+            var scenario = new Dictionary<string, object?>
+            {
+                ["schema_version"] = schemaVersion,
+                ["id"] = "test-large",
+                ["name"] = "Test Large",
+                ["environment"] = environment,
+                ["board"] = new
+                {
+                    width,
+                    height,
+                    max_elevation = 4,
+                    zone_depth = zoneDepth,
+                    flat_chance = 0.6,
+                    plains_weight = 70,
+                    forest_weight = 15,
+                    rough_weight = 10,
+                    water_weight = 5,
+                },
+                ["rules"] = new
+                {
+                    actions_per_turn = 0,
+                    round_cap = 100,
+                    starting_points = 12,
+                    fog_of_war = environment == "adaptive-v1",
+                    biomes_enabled = false,
+                    bounty_rate = 0.5,
+                    deploy_cost_multiplier = 1.0,
+                    generator_cost = 2,
+                    generator_output = 1,
+                    generator_health = 3,
+                },
+                ["episode"] = new { max_steps = maxSteps },
+            };
+
+            if (includeReward)
+            {
+                scenario["reward"] = environment == "adaptive-v1"
+                    ? new { intermediate_decision_penalty = 0.001f, deployment_completion_bonus = 0.0f }
+                    : new
+                    {
+                        shape_scale = 0.01f,
+                        step_penalty = 0.005f,
+                        closing_weight = 0.02f,
+                        draw_credit_weight = 0.25f,
+                        points_weight = 0.5f,
+                    };
+            }
+
+            if (environment == "adaptive-v1")
+            {
+                scenario["adaptive"] = new
+                {
+                    starting_unit_count = 6,
+                    starting_army_budget = 132,
+                    max_design_point_cost = 24,
+                };
+            }
+
+            return WriteScenarioContent(JsonSerializer.Serialize(scenario));
+        }
+
+        private static string WriteScenarioContent(string content)
+        {
+            string path = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "scenario-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(path, content);
+            return path;
+        }
+
+        private static void AssertScenarioStartupFails(string expectedError, params string[] args)
+        {
+            string arguments = $"\"{ServerProcess.ServerDll}\" " + string.Join(" ", args.Select(x => $"\"{x}\""));
+            using var process = Process.Start(new ProcessStartInfo("dotnet", arguments)
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            })!;
+
+            try
+            {
+                Assert.That(process.WaitForExit(5000), Is.True, "GymServer should reject the scenario before reading commands");
+                string error = process.StandardError.ReadToEnd();
+                Assert.That(process.ExitCode, Is.Not.EqualTo(0));
+                Assert.That(error, Does.Contain(expectedError));
+            }
+            finally
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
         }
 
         private sealed class RecordingDeploymentPolicy : IDeploymentPolicy

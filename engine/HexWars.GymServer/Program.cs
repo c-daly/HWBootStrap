@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
+using HexWars.GymServer;
 
 // Headless RL bridge: wraps a TacticalEnv and speaks one JSON object per line over stdin/stdout, so a
 // Python gymnasium.Env can drive it as a subprocess. Cross-platform (.NET 8) — built for WSL2/Linux.
@@ -16,11 +17,18 @@ using HexWars.Engine.Rl;
 string opponent = "greedy";
 int seat = 0;
 string environment = "tactical-v1";
+string? scenarioFile = null;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--opponent" && i + 1 < args.Length) opponent = args[++i];
     else if (args[i] == "--seat" && i + 1 < args.Length) seat = int.Parse(args[++i]);
     else if (args[i] == "--environment") environment = i + 1 < args.Length ? args[++i] : "";
+    else if (args[i] == "--scenario-file")
+    {
+        if (scenarioFile != null || i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            throw new InvalidDataException("--scenario-file requires exactly one path");
+        scenarioFile = args[++i];
+    }
 }
 if (environment != "tactical-v1" && environment != "adaptive-v1")
 {
@@ -29,16 +37,25 @@ if (environment != "tactical-v1" && environment != "adaptive-v1")
     return;
 }
 
+TrainingScenario scenario = scenarioFile == null
+    ? TrainingScenario.CreateStandard(environment)
+    : ScenarioJson.Load(scenarioFile);
+if (!string.Equals(scenario.Environment, environment, StringComparison.Ordinal))
+    throw new InvalidDataException("scenario environment does not match --environment");
+
+EnvConfig? tacticalConfig = environment == "tactical-v1" ? scenario.BuildTactical() : null;
+AdaptiveEnvConfig? adaptiveConfig = environment == "adaptive-v1" ? scenario.BuildAdaptive() : null;
+
 Func<int, IAgent> opponentFactory = opponent == "random"
     ? (s => new RandomAgent(s))
     : (s => new GreedyAgent(s));
 
 PlayerId learningSeat = seat == 1 ? PlayerId.Player1 : PlayerId.Player0;
-TacticalEnv? env = environment == "tactical-v1" ? new TacticalEnv(opponentFactory, learningSeat) : null;
+TacticalEnv? env = environment == "tactical-v1" ? new TacticalEnv(opponentFactory, learningSeat, tacticalConfig) : null;
 AdaptiveTacticalEnv? adaptiveEnv = environment == "adaptive-v1"
     ? new AdaptiveTacticalEnv(opponentFactory,
         opponent == "random" ? s => new RandomDeploymentPolicy(s) : s => new CombinedArmsDeploymentPolicy(s),
-        learningSeat)
+        learningSeat, adaptiveConfig)
     : null;
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
@@ -71,6 +88,8 @@ object Spaces(int obsLen, int nActions, int channels, int boardH, int boardW, En
     var contract = MlContract.Create(c, environmentKind);
     return new
     {
+        scenario_id = scenario.Id,
+        scenario_schema_version = scenario.SchemaVersion,
         contract_version = contract.Version,
         contract_hash = contract.ContractHash,
         encoding_hash = contract.EncodingHash,
@@ -100,6 +119,8 @@ object AdaptiveSpaces(AdaptiveLayout layout, AdaptiveEnvConfig config, MlContrac
 {
     return new
     {
+        scenario_id = scenario.Id,
+        scenario_schema_version = scenario.SchemaVersion,
         contract_version = contract.Version,
         contract_hash = contract.ContractHash,
         encoding_hash = contract.EncodingHash,
@@ -212,12 +233,12 @@ while ((line = Console.ReadLine()) != null)
         case "duel_spaces":
             if (environment == "tactical-v1")
             {
-                duel ??= new DuelEnv();
+                duel ??= new DuelEnv(tacticalConfig);
                 Send(Spaces(duel.ObservationLength, duel.ActionCount, duel.ObsChannels, duel.BoardH, duel.BoardW, duel.Config, MlEnvironmentKind.Duel));
             }
             else
             {
-                adaptiveDuel ??= new AdaptiveDuelEnv();
+                adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 Send(AdaptiveSpaces(adaptiveDuel.Layout, adaptiveDuel.Config, adaptiveDuel.Contract));
             }
             break;
@@ -230,14 +251,14 @@ while ((line = Console.ReadLine()) != null)
             int learner = root.TryGetProperty("learner", out var lr) ? lr.GetInt32() : 0; // reward perspective
             if (environment == "tactical-v1")
             {
-                duel ??= new DuelEnv();
+                duel ??= new DuelEnv(tacticalConfig);
                 var v = duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
                                    learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
                 Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
             }
             else
             {
-                adaptiveDuel ??= new AdaptiveDuelEnv();
+                adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 var v = adaptiveDuel.Reset(seed,
                     MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
                     MakeDeployment(p0, seed * 2 + 1), MakeDeployment(p1, seed * 2 + 2),
@@ -258,13 +279,13 @@ while ((line = Console.ReadLine()) != null)
             int action = root.GetProperty("action").GetInt32();
             if (environment == "tactical-v1")
             {
-                duel ??= new DuelEnv();
+                duel ??= new DuelEnv(tacticalConfig);
                 var v = duel.Step(action);
                 Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
             }
             else
             {
-                adaptiveDuel ??= new AdaptiveDuelEnv();
+                adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 var v = ContinueHeadlessReveal(adaptiveDuel.Step(action));
                 Send(new
                 {
