@@ -136,6 +136,7 @@ namespace HexWars.Presentation
             _nameField = UiKit.InputField(panel, _name, 46f, nameY, w - 150f, rowH, PlaceholderText());
             _nameField.gameObject.name = "Unit name";
             _nameField.textComponent.fontSize = 14;
+            _nameField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreNameEdit;
             _nameField.onEndEdit.AddListener(_ => CommitName());
             ApplyNameDisplay();
 

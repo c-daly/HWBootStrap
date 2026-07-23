@@ -18,6 +18,8 @@ namespace HexWars.Presentation.Tests
             if (_gameObject != null) UnityEngine.Object.DestroyImmediate(_gameObject);
             foreach (var canvas in UnityEngine.Object.FindObjectsByType<Canvas>(FindObjectsSortMode.None))
                 if (canvas != null) UnityEngine.Object.DestroyImmediate(canvas.gameObject);
+            foreach (var hub in UnityEngine.Object.FindObjectsByType<WebGlInputHub>(FindObjectsSortMode.None))
+                if (hub != null) UnityEngine.Object.DestroyImmediate(hub.gameObject);
             foreach (var eventSystem in UnityEngine.Object.FindObjectsByType<EventSystem>(FindObjectsSortMode.None))
                 if (eventSystem != null) UnityEngine.Object.DestroyImmediate(eventSystem.gameObject);
         }
@@ -45,6 +47,21 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void JoinByCode_SubmitEventUsesTheSameInlineValidation()
+        {
+            var title = BuildTitle();
+            var field = FindField(title, "Room code");
+            var error = FindPrivate<Text>(title, "_roomCodeError");
+
+            field.text = " --- ";
+            field.onSubmit.Invoke(field.text);
+
+            Assert.That(error.text, Is.Not.Empty,
+                "the native WebGL input bridge submits through InputField.onSubmit");
+            Assert.That(title.enabled, Is.True);
+        }
+
+        [Test]
         public void JoinByCode_EscapeRestoresLastCommittedText()
         {
             var title = BuildTitle();
@@ -54,6 +71,14 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(field.text, Is.Empty);
             Assert.That(CurrentEventSystem().currentSelectedGameObject, Is.Null);
+
+            field.text = "second-draft";
+            var bridge = field.GetComponent<WebGlInputBridge>();
+            bridge.OnSelect(null);
+            Invoke(bridge, "Receive", "cancel", field.text);
+
+            Assert.That(field.text, Is.Empty,
+                "native Escape must restore the screen's committed room code, not the draft at focus");
         }
 
         [Test]
@@ -75,6 +100,14 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(field.text, Is.EqualTo(expected));
             Assert.That(CurrentEventSystem().currentSelectedGameObject, Is.Null);
+
+            field.text = "another discarded edit";
+            var bridge = field.GetComponent<WebGlInputBridge>();
+            bridge.OnSelect(null);
+            Invoke(bridge, "Receive", "cancel", field.text);
+
+            Assert.That(field.text, Is.EqualTo(expected),
+                "native Escape must use the designer's committed-name restore behavior");
         }
 
         [Test]
@@ -176,8 +209,8 @@ namespace HexWars.Presentation.Tests
             return (T)found.Invoke(null, args);
         }
 
-        static void Invoke(object target, string method) =>
+        static void Invoke(object target, string method, params object[] args) =>
             target.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(target, null);
+                .Invoke(target, args);
     }
 }

@@ -251,6 +251,7 @@ namespace HexWars.Presentation
             field.placeholder = placeholderText;
             field.lineType = UnityEngine.UI.InputField.LineType.SingleLine;
             field.text = initial ?? string.Empty;
+            field.gameObject.AddComponent<WebGlInputBridge>().Bind(field);
             return field;
         }
 
@@ -336,6 +337,7 @@ namespace HexWars.Presentation
             _max = max;
             _blankMeansZero = blankMeansZero;
             _setter = setter ?? (_ => { });
+            Field.GetComponent<WebGlInputBridge>().CancelRequested += Restore;
             Field.onEndEdit.AddListener(_ =>
             {
                 if (_restoring) return;
