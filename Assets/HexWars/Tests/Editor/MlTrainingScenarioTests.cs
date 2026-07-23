@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using HexWars.Presentation;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
@@ -88,6 +89,86 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Library_RejectsMissingUnexpectedAndWrongTypedRootMembers()
+        {
+            AssertLibraryRejected(json => RemoveProperty(json, "schema_version"));
+            AssertLibraryRejected(json => InsertBeforeFinalBrace(
+                json, ",\n  \"unexpected\": true"));
+            AssertLibraryRejected(json => json.Replace(
+                "\"schema_version\": 1", "\"schema_version\": 1.0"));
+        }
+
+        [Test]
+        public void File_RejectsUnexpectedMembersAtEveryObjectLevel()
+        {
+            AssertScenarioRejected(_scenario, json =>
+                InsertBeforeFinalBrace(json, ",\n  \"unexpected\": true"));
+            foreach (string section in new[]
+                     {
+                         "board", "rules", "episode", "reward", "adaptive",
+                     })
+            {
+                AssertScenarioRejected(_scenario, json =>
+                    InsertFirstObjectMember(json, section, "\"unexpected\": true,"));
+            }
+        }
+
+        [Test]
+        public void File_RejectsMissingRulesFieldsThatJsonUtilityWouldDefault()
+        {
+            foreach (string field in new[]
+                     {
+                         "actions_per_turn", "round_cap", "starting_points",
+                         "fog_of_war", "biomes_enabled", "bounty_rate",
+                         "deploy_cost_multiplier", "generator_cost",
+                         "generator_output", "generator_health",
+                     })
+            {
+                AssertScenarioRejected(_scenario, json => RemoveProperty(json, field));
+            }
+        }
+
+        [Test]
+        public void File_RejectsMissingEnvironmentSpecificFields()
+        {
+            AssertScenarioRejected(_scenario, json =>
+                RemoveProperty(json, "deployment_completion_bonus"));
+            AssertScenarioRejected(_scenario, json =>
+                RemoveObjectProperty(json, "adaptive"));
+
+            var tactical = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath)
+                .Filter(MlEnvironmentContract.TacticalV1).First();
+            AssertScenarioRejected(tactical, json => RemoveProperty(json, "shape_scale"));
+        }
+
+        [Test]
+        public void File_RejectsIrrelevantEnvironmentSpecificSectionsAndRewardFields()
+        {
+            var tactical = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath)
+                .Filter(MlEnvironmentContract.TacticalV1).First();
+            AssertScenarioRejected(tactical, json => InsertBeforeFinalBrace(
+                json,
+                ",\n  \"adaptive\": {\"starting_unit_count\": 6," +
+                "\"starting_army_budget\": 132,\"max_design_point_cost\": 24}"));
+            AssertScenarioRejected(tactical, json =>
+                InsertFirstObjectMember(
+                    json, "reward", "\"intermediate_decision_penalty\": 0.001,"));
+            AssertScenarioRejected(_scenario, json =>
+                InsertFirstObjectMember(json, "reward", "\"shape_scale\": 0.01,"));
+        }
+
+        [Test]
+        public void File_RejectsJsonPrimitiveTypeMismatches()
+        {
+            AssertScenarioRejected(_scenario, json => json.Replace(
+                "\"fog_of_war\": true", "\"fog_of_war\": 1"));
+            AssertScenarioRejected(_scenario, json => json.Replace(
+                "\"actions_per_turn\": 0", "\"actions_per_turn\": false"));
+            AssertScenarioRejected(_scenario, json => json.Replace(
+                "\"width\": 13", "\"width\": 13.0"));
+        }
+
+        [Test]
         public void SessionWriter_RoundTripsResolvedScenario()
         {
             string path = MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, _scenario);
@@ -160,6 +241,59 @@ namespace HexWars.Presentation.Tests
             string path = Path.Combine(_scratch, "training-game-templates.json");
             File.WriteAllText(path, transform(File.ReadAllText(BuiltInLibraryPath)));
             return path;
+        }
+
+        void AssertLibraryRejected(Func<string, string> transform)
+        {
+            string path = CopyLibrary(transform);
+            Assert.Throws<InvalidDataException>(() => MlTrainingScenarioLibrary.Load(path));
+        }
+
+        void AssertScenarioRejected(
+            MlTrainingScenario scenario, Func<string, string> transform)
+        {
+            string validPath =
+                MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, scenario);
+            string valid = File.ReadAllText(validPath);
+            string changed = transform(valid);
+            Assert.That(changed, Is.Not.EqualTo(valid), "Test transform must change JSON.");
+            string candidate = Path.Combine(
+                _scratch, "scenario-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(candidate, changed);
+            Assert.Throws<InvalidDataException>(() => MlTrainingScenarioFile.Load(candidate));
+        }
+
+        static string InsertFirstObjectMember(
+            string json, string property, string member)
+        {
+            string marker = "\"" + property + "\": {";
+            return json.Replace(marker, marker + "\n    " + member);
+        }
+
+        static string InsertBeforeFinalBrace(string json, string fragment)
+        {
+            int index = json.LastIndexOf('}');
+            return index < 0 ? json : json.Insert(index, fragment);
+        }
+
+        static string RemoveObjectProperty(string json, string property) =>
+            new Regex(
+                ",?\\s*\"" + Regex.Escape(property) + "\"\\s*:\\s*\\{[^{}]*\\}",
+                RegexOptions.CultureInvariant).Replace(json, string.Empty, 1);
+
+        static string RemoveProperty(string json, string property)
+        {
+            const string value = "(?:true|false|null|\"(?:\\\\.|[^\"])*\"|" +
+                "-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)";
+            string escaped = Regex.Escape(property);
+            var followedByComma = new Regex(
+                "\\s*\"" + escaped + "\"\\s*:\\s*" + value + "\\s*,",
+                RegexOptions.CultureInvariant);
+            string changed = followedByComma.Replace(json, string.Empty, 1);
+            if (!string.Equals(changed, json, StringComparison.Ordinal)) return changed;
+            return new Regex(
+                ",\\s*\"" + escaped + "\"\\s*:\\s*" + value,
+                RegexOptions.CultureInvariant).Replace(json, string.Empty, 1);
         }
     }
 }

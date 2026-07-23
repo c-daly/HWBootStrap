@@ -210,8 +210,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
             MlTrainingScenarioLibraryWire wire;
             try
             {
+                string json = File.ReadAllText(path);
+                MlStrictScenarioJson.ValidateLibrary(json, path);
                 wire = JsonUtility.FromJson<MlTrainingScenarioLibraryWire>(
-                    File.ReadAllText(path));
+                    json);
             }
             catch (Exception error) when (
                 error is ArgumentException || error is IOException ||
@@ -288,6 +290,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             MlTrainingScenarioWire wire;
             try
             {
+                MlStrictScenarioJson.ValidateScenario(json, source);
                 wire = JsonUtility.FromJson<MlTrainingScenarioWire>(json);
             }
             catch (ArgumentException error)
@@ -386,6 +389,500 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (File.Exists(target)) File.Replace(temp, target, null);
             else File.Move(temp, target);
+        }
+    }
+
+    static class MlStrictScenarioJson
+    {
+        static readonly string[] LibraryKeys = { "schema_version", "templates" };
+        static readonly string[] ScenarioKeys =
+        {
+            "schema_version", "id", "name", "environment", "board", "rules",
+            "episode", "reward",
+        };
+        static readonly string[] AdaptiveScenarioKeys =
+            ScenarioKeys.Concat(new[] { "adaptive" }).ToArray();
+        static readonly string[] BoardKeys =
+        {
+            "width", "height", "max_elevation", "zone_depth", "flat_chance",
+            "plains_weight", "forest_weight", "rough_weight", "water_weight",
+        };
+        static readonly string[] RulesKeys =
+        {
+            "actions_per_turn", "round_cap", "starting_points", "fog_of_war",
+            "biomes_enabled", "bounty_rate", "deploy_cost_multiplier",
+            "generator_cost", "generator_output", "generator_health",
+        };
+        static readonly string[] EpisodeKeys = { "max_steps" };
+        static readonly string[] TacticalRewardKeys =
+        {
+            "shape_scale", "step_penalty", "closing_weight",
+            "draw_credit_weight", "points_weight",
+        };
+        static readonly string[] AdaptiveRewardKeys =
+        {
+            "intermediate_decision_penalty", "deployment_completion_bonus",
+        };
+        static readonly string[] AdaptiveKeys =
+        {
+            "starting_unit_count", "starting_army_budget", "max_design_point_cost",
+        };
+
+        public static void ValidateLibrary(string json, string source)
+        {
+            JsonNode root = Parse(json, source);
+            Dictionary<string, JsonNode> library = RequireObject(root, "library");
+            ExactKeys(library, LibraryKeys, "library");
+            RequireSchemaVersion(library["schema_version"], "library.schema_version");
+            List<JsonNode> templates = RequireArray(library["templates"], "library.templates");
+            for (int i = 0; i < templates.Count; i++)
+                ValidateScenarioNode(templates[i], "library.templates[" + i + "]");
+        }
+
+        public static void ValidateScenario(string json, string source)
+        {
+            ValidateScenarioNode(Parse(json, source), "scenario");
+        }
+
+        static void ValidateScenarioNode(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> scenario = RequireObject(node, path);
+            string environment = RequireString(
+                Required(scenario, "environment", path), path + ".environment");
+            if (string.IsNullOrWhiteSpace(environment))
+                Fail(path + ".environment must be a non-empty string");
+            bool adaptive = string.Equals(
+                environment, "adaptive-v1", StringComparison.Ordinal);
+            if (!adaptive && !string.Equals(
+                    environment, "tactical-v1", StringComparison.Ordinal))
+                Fail(path + ".environment must be tactical-v1 or adaptive-v1");
+
+            ExactKeys(
+                scenario, adaptive ? AdaptiveScenarioKeys : ScenarioKeys, path);
+            RequireSchemaVersion(scenario["schema_version"], path + ".schema_version");
+            RequireNonEmptyString(scenario["id"], path + ".id");
+            RequireNonEmptyString(scenario["name"], path + ".name");
+
+            ValidateBoard(scenario["board"], path + ".board");
+            ValidateRules(scenario["rules"], path + ".rules");
+            ValidateEpisode(scenario["episode"], path + ".episode");
+            ValidateReward(
+                scenario["reward"], path + ".reward",
+                adaptive ? AdaptiveRewardKeys : TacticalRewardKeys);
+            if (adaptive) ValidateAdaptive(scenario["adaptive"], path + ".adaptive");
+        }
+
+        static void ValidateBoard(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, BoardKeys, path);
+            foreach (string key in new[]
+                     {
+                         "width", "height", "max_elevation", "zone_depth",
+                         "plains_weight", "forest_weight", "rough_weight", "water_weight",
+                     })
+                RequireInteger(value[key], path + "." + key);
+            RequireNumber(value["flat_chance"], path + ".flat_chance");
+        }
+
+        static void ValidateRules(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, RulesKeys, path);
+            foreach (string key in new[]
+                     {
+                         "actions_per_turn", "round_cap", "starting_points",
+                         "generator_cost", "generator_output", "generator_health",
+                     })
+                RequireInteger(value[key], path + "." + key);
+            RequireBoolean(value["fog_of_war"], path + ".fog_of_war");
+            RequireBoolean(value["biomes_enabled"], path + ".biomes_enabled");
+            RequireNumber(value["bounty_rate"], path + ".bounty_rate");
+            RequireNumber(
+                value["deploy_cost_multiplier"], path + ".deploy_cost_multiplier");
+        }
+
+        static void ValidateEpisode(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, EpisodeKeys, path);
+            RequireInteger(value["max_steps"], path + ".max_steps");
+        }
+
+        static void ValidateReward(
+            JsonNode node, string path, IReadOnlyList<string> expectedKeys)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, expectedKeys, path);
+            foreach (string key in expectedKeys)
+                RequireNumber(value[key], path + "." + key);
+        }
+
+        static void ValidateAdaptive(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, AdaptiveKeys, path);
+            foreach (string key in AdaptiveKeys)
+                RequireInteger(value[key], path + "." + key);
+        }
+
+        static JsonNode Parse(string json, string source)
+        {
+            try
+            {
+                return new JsonParser(json).Parse();
+            }
+            catch (InvalidDataException error)
+            {
+                throw new InvalidDataException(source + ": " + error.Message, error);
+            }
+        }
+
+        static JsonNode Required(
+            Dictionary<string, JsonNode> value, string key, string path)
+        {
+            JsonNode node;
+            if (!value.TryGetValue(key, out node))
+                Fail("missing " + path + "." + key);
+            return node;
+        }
+
+        static Dictionary<string, JsonNode> RequireObject(JsonNode node, string path)
+        {
+            if (node == null || node.Kind != JsonKind.Object)
+                Fail(path + " must be an object");
+            return node.ObjectValue;
+        }
+
+        static List<JsonNode> RequireArray(JsonNode node, string path)
+        {
+            if (node == null || node.Kind != JsonKind.Array)
+                Fail(path + " must be an array");
+            return node.ArrayValue;
+        }
+
+        static string RequireString(JsonNode node, string path)
+        {
+            if (node == null || node.Kind != JsonKind.String)
+                Fail(path + " must be a string");
+            return node.StringValue;
+        }
+
+        static void RequireNonEmptyString(JsonNode node, string path)
+        {
+            if (string.IsNullOrWhiteSpace(RequireString(node, path)))
+                Fail(path + " must be a non-empty string");
+        }
+
+        static void RequireInteger(JsonNode node, string path)
+        {
+            if (node == null || node.Kind != JsonKind.Integer)
+                Fail(path + " must be an integer");
+        }
+
+        static void RequireNumber(JsonNode node, string path)
+        {
+            if (node == null ||
+                (node.Kind != JsonKind.Integer && node.Kind != JsonKind.Number))
+                Fail(path + " must be a number");
+        }
+
+        static void RequireBoolean(JsonNode node, string path)
+        {
+            if (node == null || node.Kind != JsonKind.Boolean)
+                Fail(path + " must be a boolean");
+        }
+
+        static void RequireSchemaVersion(JsonNode node, string path)
+        {
+            RequireInteger(node, path);
+            if (!string.Equals(node.NumberText, "1", StringComparison.Ordinal))
+                Fail(path + " must be 1");
+        }
+
+        static void ExactKeys(
+            Dictionary<string, JsonNode> value,
+            IReadOnlyList<string> expected,
+            string path)
+        {
+            var allowed = new HashSet<string>(expected, StringComparer.Ordinal);
+            string[] missing = expected.Where(key => !value.ContainsKey(key)).ToArray();
+            string[] extra = value.Keys.Where(key => !allowed.Contains(key))
+                .OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            var errors = new List<string>();
+            if (missing.Length > 0)
+                errors.Add("missing " + string.Join(
+                    ", ", missing.Select(key => path + "." + key)));
+            if (extra.Length > 0)
+                errors.Add("unexpected " + string.Join(
+                    ", ", extra.Select(key => path + "." + key)));
+            if (errors.Count > 0) Fail(string.Join("; ", errors));
+        }
+
+        static void Fail(string message)
+        {
+            throw new InvalidDataException(message);
+        }
+
+        enum JsonKind
+        {
+            Object,
+            Array,
+            String,
+            Integer,
+            Number,
+            Boolean,
+            Null,
+        }
+
+        sealed class JsonNode
+        {
+            public JsonKind Kind;
+            public Dictionary<string, JsonNode> ObjectValue;
+            public List<JsonNode> ArrayValue;
+            public string StringValue;
+            public string NumberText;
+        }
+
+        sealed class JsonParser
+        {
+            const int MaxDepth = 64;
+            readonly string _json;
+            int _index;
+
+            public JsonParser(string json)
+            {
+                _json = json ?? string.Empty;
+            }
+
+            public JsonNode Parse()
+            {
+                SkipWhitespace();
+                JsonNode value = ParseValue(0);
+                SkipWhitespace();
+                if (_index != _json.Length) Error("unexpected trailing JSON content");
+                return value;
+            }
+
+            JsonNode ParseValue(int depth)
+            {
+                if (depth > MaxDepth) Error("JSON nesting exceeds 64 levels");
+                if (_index >= _json.Length) Error("unexpected end of JSON");
+                char current = _json[_index];
+                if (current == '{') return ParseObject(depth + 1);
+                if (current == '[') return ParseArray(depth + 1);
+                if (current == '"')
+                    return new JsonNode
+                    {
+                        Kind = JsonKind.String,
+                        StringValue = ParseString(),
+                    };
+                if (current == 't')
+                {
+                    ReadLiteral("true");
+                    return new JsonNode { Kind = JsonKind.Boolean };
+                }
+                if (current == 'f')
+                {
+                    ReadLiteral("false");
+                    return new JsonNode { Kind = JsonKind.Boolean };
+                }
+                if (current == 'n')
+                {
+                    ReadLiteral("null");
+                    return new JsonNode { Kind = JsonKind.Null };
+                }
+                if (current == '-' || (current >= '0' && current <= '9'))
+                    return ParseNumber();
+                Error("unexpected character '" + current + "'");
+                return null;
+            }
+
+            JsonNode ParseObject(int depth)
+            {
+                Expect('{');
+                var fields = new Dictionary<string, JsonNode>(StringComparer.Ordinal);
+                SkipWhitespace();
+                if (TryRead('}'))
+                    return new JsonNode { Kind = JsonKind.Object, ObjectValue = fields };
+                while (true)
+                {
+                    SkipWhitespace();
+                    if (_index >= _json.Length || _json[_index] != '"')
+                        Error("object property name must be a string");
+                    string key = ParseString();
+                    SkipWhitespace();
+                    Expect(':');
+                    SkipWhitespace();
+                    fields[key] = ParseValue(depth);
+                    SkipWhitespace();
+                    if (TryRead('}')) break;
+                    Expect(',');
+                }
+                return new JsonNode { Kind = JsonKind.Object, ObjectValue = fields };
+            }
+
+            JsonNode ParseArray(int depth)
+            {
+                Expect('[');
+                var values = new List<JsonNode>();
+                SkipWhitespace();
+                if (TryRead(']'))
+                    return new JsonNode { Kind = JsonKind.Array, ArrayValue = values };
+                while (true)
+                {
+                    SkipWhitespace();
+                    values.Add(ParseValue(depth));
+                    SkipWhitespace();
+                    if (TryRead(']')) break;
+                    Expect(',');
+                }
+                return new JsonNode { Kind = JsonKind.Array, ArrayValue = values };
+            }
+
+            JsonNode ParseNumber()
+            {
+                int start = _index;
+                if (TryRead('-') && _index >= _json.Length)
+                    Error("incomplete JSON number");
+                if (TryRead('0'))
+                {
+                    if (_index < _json.Length &&
+                        _json[_index] >= '0' && _json[_index] <= '9')
+                        Error("JSON number cannot have a leading zero");
+                }
+                else
+                {
+                    ReadDigits(required: true);
+                }
+
+                bool fractional = false;
+                if (TryRead('.'))
+                {
+                    fractional = true;
+                    ReadDigits(required: true);
+                }
+                if (_index < _json.Length &&
+                    (_json[_index] == 'e' || _json[_index] == 'E'))
+                {
+                    fractional = true;
+                    _index++;
+                    if (_index < _json.Length &&
+                        (_json[_index] == '+' || _json[_index] == '-'))
+                        _index++;
+                    ReadDigits(required: true);
+                }
+                return new JsonNode
+                {
+                    Kind = fractional ? JsonKind.Number : JsonKind.Integer,
+                    NumberText = _json.Substring(start, _index - start),
+                };
+            }
+
+            string ParseString()
+            {
+                Expect('"');
+                var value = new System.Text.StringBuilder();
+                while (_index < _json.Length)
+                {
+                    char current = _json[_index++];
+                    if (current == '"') return value.ToString();
+                    if (current < 0x20) Error("unescaped control character in string");
+                    if (current != '\\')
+                    {
+                        value.Append(current);
+                        continue;
+                    }
+                    if (_index >= _json.Length) Error("incomplete string escape");
+                    char escaped = _json[_index++];
+                    switch (escaped)
+                    {
+                        case '"': value.Append('"'); break;
+                        case '\\': value.Append('\\'); break;
+                        case '/': value.Append('/'); break;
+                        case 'b': value.Append('\b'); break;
+                        case 'f': value.Append('\f'); break;
+                        case 'n': value.Append('\n'); break;
+                        case 'r': value.Append('\r'); break;
+                        case 't': value.Append('\t'); break;
+                        case 'u': value.Append(ParseUnicodeEscape()); break;
+                        default: Error("invalid string escape \\" + escaped); break;
+                    }
+                }
+                Error("unterminated string");
+                return null;
+            }
+
+            char ParseUnicodeEscape()
+            {
+                if (_index + 4 > _json.Length) Error("incomplete unicode escape");
+                int value = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    int digit = HexValue(_json[_index++]);
+                    if (digit < 0) Error("invalid unicode escape");
+                    value = value * 16 + digit;
+                }
+                return (char)value;
+            }
+
+            void ReadLiteral(string literal)
+            {
+                if (_index + literal.Length > _json.Length ||
+                    !string.Equals(
+                        _json.Substring(_index, literal.Length),
+                        literal, StringComparison.Ordinal))
+                    Error("invalid JSON literal");
+                _index += literal.Length;
+            }
+
+            void ReadDigits(bool required)
+            {
+                int start = _index;
+                while (_index < _json.Length &&
+                       _json[_index] >= '0' && _json[_index] <= '9')
+                    _index++;
+                if (required && start == _index) Error("JSON number requires a digit");
+            }
+
+            void SkipWhitespace()
+            {
+                while (_index < _json.Length)
+                {
+                    char current = _json[_index];
+                    if (current != ' ' && current != '\t' &&
+                        current != '\r' && current != '\n')
+                        break;
+                    _index++;
+                }
+            }
+
+            bool TryRead(char expected)
+            {
+                if (_index >= _json.Length || _json[_index] != expected) return false;
+                _index++;
+                return true;
+            }
+
+            void Expect(char expected)
+            {
+                if (!TryRead(expected))
+                    Error("expected '" + expected + "'");
+            }
+
+            void Error(string message)
+            {
+                throw new InvalidDataException(
+                    message + " at character " + _index);
+            }
+
+            static int HexValue(char value)
+            {
+                if (value >= '0' && value <= '9') return value - '0';
+                if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+                if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+                return -1;
+            }
         }
     }
 

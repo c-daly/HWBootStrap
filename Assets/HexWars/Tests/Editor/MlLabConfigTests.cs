@@ -114,6 +114,28 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void BuildTrainArguments_AlwaysQuotesTrailingBackslashScenarioPath()
+        {
+            var config = MlLabConfig.Default();
+
+            string args = config.BuildTrainArguments(@"C:\scenarios\");
+
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\scenarios\\\\\""));
+        }
+
+        [Test]
+        public void BuildTrainArguments_EscapesEmbeddedQuoteInScenarioPath()
+        {
+            var config = MlLabConfig.Default();
+
+            string args = config.BuildTrainArguments("C:\\scenarios\\a\"b.json");
+
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\scenarios\\a\\\"b.json\""));
+        }
+
+        [Test]
         public void BuildResumeArguments_UsesAuthoritativeSourceRun()
         {
             var config = MlLabConfig.Default();

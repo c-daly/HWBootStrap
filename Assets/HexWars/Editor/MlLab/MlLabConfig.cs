@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using HexWars.Presentation;
 using UnityEngine;
@@ -234,10 +235,27 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         static string QAlways(string value)
         {
-            string quoted = Q(value);
-            return quoted.StartsWith("\"", StringComparison.Ordinal)
-                ? quoted
-                : "\"" + quoted + "\"";
+            if (value == null) value = string.Empty;
+            var output = new StringBuilder(value.Length + 2).Append('"');
+            int slashes = 0;
+            foreach (char ch in value)
+            {
+                if (ch == '\\')
+                {
+                    slashes++;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    output.Append('\\', slashes * 2 + 1).Append('"');
+                    slashes = 0;
+                    continue;
+                }
+                output.Append('\\', slashes).Append(ch);
+                slashes = 0;
+            }
+            output.Append('\\', slashes * 2).Append('"');
+            return output.ToString();
         }
 
         static void AddOption(List<string> args, string name, string value)
