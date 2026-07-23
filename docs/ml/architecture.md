@@ -58,6 +58,16 @@ The snapshot is provenance, not a settings file. `run.json.scenario` records the
 
 Promotion consumes an exact checkpoint plus the unmodified manifest, scenario snapshot, evaluation, source commit, and human decision. A mutable template library entry, a Unity working copy, or a `latest` pointer is not sufficient provenance.
 
+## Faithful live viewing
+
+**Start & Watch** passes only the selected run directory to the viewer. A strict presentation plan reconstructs the rendered games from that run's immutable `run.json` and `scenario.json`: the recorded scenario, learner-seat schedule, opponent snapshot, and live learner controller. It does not reuse the ML Lab's current form values or silently replace missing metadata with Greedy.
+
+Presentation games reproduce the recorded scenario and controller schedules, but they are newly simulated Arena games. They are not recordings of hidden worker episodes and do not promise to use a worker's episode seed, action sequence, sampled pool choice, or stochastic policy draws. For `alternating`, the presentation schedule starts with the learner in P0 and swaps the learner and opponent after every displayed game. Opponent pools cycle deterministically for diagnosis; this is a faithful rendering schedule, not a claim about which opponent a particular training episode sampled.
+
+The observer follows the learner seat, so fog of war remains learner-relative after a swap. Controller identities, learner/opponent roles, checkpoint steps, and learner-centric W/L/D change at the same game boundary. If controller specs change, the old policy bridge is discarded and a new bridge is validated against the scenario-derived encoding before the next game begins. Complete live checkpoints may reload only at these boundaries; a failed reconstruction or restart stops the viewer instead of continuing with stale weights in the wrong seat.
+
+Seat counts in the Train status are a separate audit of actual headless episodes. The status command reads the `learner_seat` column from every monitor CSV listed in `run.json.monitor_files` and reports cumulative Seat 0/Seat 1 counts plus a readability or balance warning. These counts describe training; they do not identify the games shown by Start & Watch.
+
 ## Run directory
 
 By default a run named `example` is written to `python/runs/example/`:

@@ -123,7 +123,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("adaptive max design point cost must be positive");
         }
 
-        static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+        static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
     }
 
     public sealed class MlTrainingBoard
@@ -132,7 +132,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int Height { get; set; }
         public int MaxElevation { get; set; }
         public int ZoneDepth { get; set; }
-        public float FlatChance { get; set; }
+        public double FlatChance { get; set; }
         public int PlainsWeight { get; set; }
         public int ForestWeight { get; set; }
         public int RoughWeight { get; set; }
@@ -146,8 +146,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int StartingPoints { get; set; }
         public bool FogOfWar { get; set; }
         public bool BiomesEnabled { get; set; }
-        public float BountyRate { get; set; }
-        public float DeployCostMultiplier { get; set; }
+        public double BountyRate { get; set; }
+        public double DeployCostMultiplier { get; set; }
         public int GeneratorCost { get; set; }
         public int GeneratorOutput { get; set; }
         public int GeneratorHealth { get; set; }
@@ -995,7 +995,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int height;
         public int max_elevation;
         public int zone_depth;
-        public float flat_chance;
+        public double flat_chance;
         public int plains_weight;
         public int forest_weight;
         public int rough_weight;
@@ -1037,8 +1037,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int starting_points;
         public bool fog_of_war;
         public bool biomes_enabled;
-        public float bounty_rate;
-        public float deploy_cost_multiplier;
+        public double bounty_rate;
+        public double deploy_cost_multiplier;
         public int generator_cost;
         public int generator_output;
         public int generator_health;

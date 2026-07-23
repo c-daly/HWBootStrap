@@ -144,6 +144,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public void MarkLaunched() { LaunchedHere = true; Phase = MlLabUiPhase.Running; Error = string.Empty; }
         public void BeginStopping() { Phase = MlLabUiPhase.Stopping; Error = string.Empty; }
         public void Fail(string error) { Phase = MlLabUiPhase.Failed; Error = error ?? "Unknown ML Lab error."; }
+        public void ClearError() { Error = string.Empty; }
         public void Reset() { Phase = MlLabUiPhase.Idle; LaunchedHere = false; Error = string.Empty; }
 
         public void Apply(MlRunState state, int pid)
@@ -674,6 +675,78 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    [Serializable]
+    public sealed class MlStartAndWatchState
+    {
+        [SerializeField] string _lastAttemptedCheckpoint = string.Empty;
+        [SerializeField] bool _requested;
+        [SerializeField] bool _launchPending;
+        [SerializeField] bool _launched;
+        [SerializeField] bool _canRetry;
+        [SerializeField] string _presentationStatus = string.Empty;
+
+        public bool Requested => _requested;
+        public bool LaunchPending => _launchPending;
+        public bool Launched => _launched;
+        public bool CanRetry => _canRetry;
+        public string PresentationStatus => _presentationStatus;
+
+        public void Begin(bool requested)
+        {
+            _requested = requested;
+            _launchPending = false;
+            _launched = false;
+            _canRetry = false;
+            _presentationStatus = string.Empty;
+            _lastAttemptedCheckpoint = string.Empty;
+        }
+
+        public bool TryQueue(string latestCheckpoint)
+        {
+            if (!_requested || _launchPending || _launched ||
+                string.IsNullOrWhiteSpace(latestCheckpoint) ||
+                string.Equals(
+                    latestCheckpoint,
+                    _lastAttemptedCheckpoint,
+                    StringComparison.Ordinal))
+                return false;
+            _lastAttemptedCheckpoint = latestCheckpoint;
+            _launchPending = true;
+            return true;
+        }
+
+        public void Retry()
+        {
+            if (!_canRetry || _launchPending || _launched) return;
+            _canRetry = false;
+            _lastAttemptedCheckpoint = string.Empty;
+        }
+
+        public void Apply(
+            MlViewerLaunchResult result, MlLabWindowState uiState)
+        {
+            if (uiState == null)
+                throw new ArgumentNullException(nameof(uiState));
+            _launchPending = false;
+            if (!result.Success)
+            {
+                _launched = false;
+                _canRetry = true;
+                _presentationStatus = string.Empty;
+                uiState.Fail(result.Error);
+                return;
+            }
+
+            _launched = true;
+            _canRetry = false;
+            uiState.ClearError();
+            _presentationStatus =
+                $"Scenario {result.Scenario} · schedule {result.SeatSchedule} · " +
+                $"learner P{result.LearnerSeat + 1} " +
+                $"(seat {result.LearnerSeat}) · opponent {result.Opponent}";
+        }
+    }
+
     public sealed class MlLabWindow : EditorWindow
     {
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
@@ -705,8 +778,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         double _nextPoll;
         double _throughput;
         string _lastMetricTime = string.Empty;
-        bool _watchWhenReady;
-        bool _watchLaunched;
+        [SerializeField] MlStartAndWatchState _watch =
+            new MlStartAndWatchState();
         string _notice = string.Empty;
         string _arenaError = string.Empty;
         string _arenaNotice = string.Empty;
@@ -1210,7 +1283,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "Max elevation", scenario.Board.MaxElevation);
             scenario.Board.ZoneDepth = EditorGUILayout.IntField(
                 "Zone depth", scenario.Board.ZoneDepth);
-            scenario.Board.FlatChance = EditorGUILayout.FloatField(
+            scenario.Board.FlatChance = EditorGUILayout.DoubleField(
                 "Flat chance", scenario.Board.FlatChance);
             scenario.Board.PlainsWeight = EditorGUILayout.IntField(
                 "Plains weight", scenario.Board.PlainsWeight);
@@ -1234,9 +1307,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "Fog of war", scenario.Rules.FogOfWar);
             scenario.Rules.BiomesEnabled = EditorGUILayout.Toggle(
                 "Biomes enabled", scenario.Rules.BiomesEnabled);
-            scenario.Rules.BountyRate = EditorGUILayout.FloatField(
+            scenario.Rules.BountyRate = EditorGUILayout.DoubleField(
                 "Bounty rate", scenario.Rules.BountyRate);
-            scenario.Rules.DeployCostMultiplier = EditorGUILayout.FloatField(
+            scenario.Rules.DeployCostMultiplier = EditorGUILayout.DoubleField(
                 "Deploy cost multiplier", scenario.Rules.DeployCostMultiplier);
             scenario.Rules.GeneratorCost = EditorGUILayout.IntField(
                 "Generator cost", scenario.Rules.GeneratorCost);
@@ -1377,6 +1450,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (GUILayout.Button("Open run folder")) EditorUtility.RevealInFinder(_selectedRun);
             }
             EditorGUILayout.EndHorizontal();
+            if (_watch.CanRetry && GUILayout.Button("Retry viewer"))
+            {
+                _watch.Retry();
+                _state.ClearError();
+                if (_status != null && _status.Ok)
+                    _state.Apply(_status.State, _status.Pid);
+                _nextPoll = 0;
+                _notice =
+                    "Viewer retry requested; the selected run and checkpoint " +
+                    "will be validated again.";
+            }
             foreach (string error in formState.Errors)
                 EditorGUILayout.HelpBox(error, MessageType.Error);
             if (!string.IsNullOrWhiteSpace(_notice))
@@ -1417,6 +1501,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("Latest checkpoint", _status == null || string.IsNullOrWhiteSpace(_status.LatestCheckpoint)
                 ? "none"
                 : _status.LatestCheckpoint);
+            if (!string.IsNullOrWhiteSpace(_watch.PresentationStatus))
+                EditorGUILayout.LabelField(
+                    "Viewer presentation", _watch.PresentationStatus);
             string evaluation = !string.IsNullOrWhiteSpace(_selectedRun)
                 ? Path.Combine(_selectedRun, "evaluation.json")
                 : string.Empty;
@@ -1524,8 +1611,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _state.MarkLaunched();
                 _selectedRun = targetRun;
                 SessionState.SetString(SelectedRunKey, _selectedRun);
-                _watchWhenReady = watch;
-                _watchLaunched = false;
+                _watch.Begin(watch);
                 _nextPoll = 0;
                 RefreshKnownRuns();
                 _notice = watch
@@ -1614,10 +1700,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _state.Apply(status.State, status.Pid);
             MlRunAttachment.Remember(_selectedRun);
             ReadLatestMetric();
-            if (_watchWhenReady && !_watchLaunched && !string.IsNullOrWhiteSpace(status.LatestCheckpoint))
+            if (_watch.TryQueue(status.LatestCheckpoint))
             {
-                _watchLaunched = true;
-                EditorApplication.delayCall += () => ReplayViewerMenu.WatchLiveRun(_selectedRun);
+                string runDirectory = _selectedRun;
+                EditorApplication.delayCall += () =>
+                {
+                    MlViewerLaunchResult result =
+                        ReplayViewerMenu.WatchLiveRun(runDirectory);
+                    _watch.Apply(result, _state);
+                    if (result.Success)
+                        _notice =
+                            "Arena viewer launched. " +
+                            _watch.PresentationStatus;
+                    Repaint();
+                };
             }
             Repaint();
         }

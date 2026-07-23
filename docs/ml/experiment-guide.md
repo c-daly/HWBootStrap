@@ -129,7 +129,11 @@ Open **HexWars > ML Lab > Train** and enter the equivalent settings:
 - Learner seat: `alternating`; workers: the benchmarked count
 - Trackers: local plus TensorBoard (and W&B if desired)
 
-Choose **Doctor**, then **Start & Watch**. Training remains headless; Start & Watch separately opens rendered Arena games after a complete checkpoint exists. In the Arena, verify the learner run and exact checkpoint step shown for each seat. Checkpoints reload only between games. You may pause, change pacing, or stop watching without changing the trainer.
+Choose **Doctor**, then **Start & Watch**. Training remains headless; Start & Watch waits for a complete checkpoint and then builds a strict presentation plan from the selected run directory. The plan uses that run's immutable `scenario.json`, recorded learner-seat schedule, and recorded opponent snapshot. It does not use unsaved Train-tab values and does not fall back to Greedy if reconstruction fails.
+
+In the Arena, verify the scenario, current learner seat, opponent label, and exact checkpoint step. With `alternating`, the first displayed game places the learner in P0 and the next places it in P1; the observer and learner/opponent labels follow the swap. A configured opponent pool cycles deterministically between presentation games. Checkpoints reload, and changed controller seats restart their policy bridge, only between games. You may pause, change pacing, or stop watching without changing the trainer.
+
+These are newly simulated presentation games with the same scenario and controller schedules. They are not replays of hidden training episodes: their seed, actions, sampled pool member, and stochastic draws need not match any worker episode. Use the Train status's Seat 0/Seat 1 episode counts to audit the actual training schedule, and use the Arena to inspect representative behavior.
 
 ### 4. Monitor headless progress
 
@@ -174,7 +178,7 @@ In **ML Lab > Arena**, configure each seat independently. To diagnose this exper
 - Seat 0: **Live Run**, `python/runs/ppo_counter_run1`
 - Seat 1: **Fixed Run**, `python/runs/run1`
 
-Live Run resolves the newest complete checkpoint at each game boundary. Fixed Run resolves one exact checkpoint and stays frozen. Reverse the seat assignments for the reciprocal visual comparison. The panel shows the resolved algorithm, exact checkpoint path/step, and contract identity; it also shows current seat/seed and rolling W/L/D. Hidden training episodes are never revealed—the Arena is generating separate presentation matches.
+Live Run resolves the newest complete checkpoint at each game boundary. Fixed Run resolves one exact checkpoint and stays frozen. Reverse the seat assignments for the reciprocal visual comparison. The panel shows the resolved algorithm, exact checkpoint path/step, and contract identity; it also shows current seat/seed and rolling W/L/D. Manual Arena assignments are independent of a training schedule. By contrast, Start & Watch derives its scenario, learner seat, and opponent from the selected run. In both modes, the Arena generates separate presentation matches; it never reveals or replays hidden training episodes.
 
 For two concurrently training policies, choose **Live Run** for both seats. Each side may advance independently between games. This watches two arbitrary published model streams; it does not couple their optimizers or let either read half-written weights.
 

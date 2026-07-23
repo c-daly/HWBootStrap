@@ -30,6 +30,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public string RunDirectory { get; }
         public TrainingScenario Scenario { get; }
+        public string LearnerSeatSchedule => _learnerSeat;
 
         public static MlRunPresentationPlan Load(string runDirectory)
         {

@@ -1,8 +1,10 @@
 using System;
 using System.IO;
 using System.Linq;
+using HexWars.Presentation.EditorTools;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace HexWars.Presentation.Tests
 {
@@ -54,6 +56,111 @@ namespace HexWars.Presentation.Tests
             state.Reset();
             Assert.That(state.Phase, Is.EqualTo(MlLabUiPhase.Idle));
             Assert.That(state.Error, Is.Empty);
+        }
+
+        [Test]
+        public void StartAndWatch_WaitsForCheckpointAndQueuesOnlyOnce()
+        {
+            var watch = new MlStartAndWatchState();
+            watch.Begin(requested: true);
+
+            Assert.That(watch.TryQueue(string.Empty), Is.False);
+            Assert.That(watch.TryQueue("  "), Is.False);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True);
+            Assert.That(watch.TryQueue("checkpoints/step_200.zip"), Is.False,
+                "a second status poll must not schedule another viewer while launch is pending");
+            Assert.That(watch.LaunchPending, Is.True);
+            Assert.That(watch.Launched, Is.False);
+        }
+
+        [Test]
+        public void StartAndWatch_SuccessRecordsTheExactPresentationIdentity()
+        {
+            var watch = new MlStartAndWatchState();
+            var ui = new MlLabWindowState();
+            ui.MarkLaunched();
+            watch.Begin(requested: true);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True);
+
+            watch.Apply(
+                MlViewerLaunchResult.Succeeded(
+                    "adaptive-large-battle", learnerSeat: 0, opponent: "Random",
+                    seatSchedule: "alternating"),
+                ui);
+
+            Assert.That(watch.Launched, Is.True);
+            Assert.That(watch.LaunchPending, Is.False);
+            Assert.That(watch.PresentationStatus,
+                Does.Contain("adaptive-large-battle")
+                    .And.Contain("schedule alternating")
+                    .And.Contain("learner P1 (seat 0)")
+                    .And.Contain("Random"));
+            Assert.That(watch.TryQueue("checkpoints/step_200.zip"), Is.False);
+            Assert.That(ui.Phase, Is.EqualTo(MlLabUiPhase.Running));
+            Assert.That(ui.Error, Is.Empty);
+        }
+
+        [Test]
+        public void StartAndWatch_StrictPlanFailureIsInlineAndRemainsRetryable()
+        {
+            var watch = new MlStartAndWatchState();
+            var ui = new MlLabWindowState();
+            ui.MarkLaunched();
+            watch.Begin(requested: true);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True);
+
+            watch.Apply(
+                MlViewerLaunchResult.Failed(
+                    "run.json: scenario.path does not exist"),
+                ui);
+
+            Assert.That(watch.Launched, Is.False);
+            Assert.That(watch.LaunchPending, Is.False);
+            Assert.That(ui.Phase, Is.EqualTo(MlLabUiPhase.Failed));
+            Assert.That(ui.Error,
+                Is.EqualTo("run.json: scenario.path does not exist"));
+            Assert.That(watch.CanRetry, Is.True);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.False,
+                "a failed checkpoint must not auto-spam launch every status poll");
+            watch.Retry();
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True,
+                "Retry viewer must allow a repaired run to reuse the same checkpoint");
+            ui.Apply(MlRunState.Running, 99);
+
+            watch.Apply(
+                MlViewerLaunchResult.Succeeded(
+                    "adaptive-large-battle", learnerSeat: 1, opponent: "Random",
+                    seatSchedule: "alternating"),
+                ui);
+
+            Assert.That(watch.Launched, Is.True);
+            Assert.That(ui.Phase, Is.EqualTo(MlLabUiPhase.Running));
+            Assert.That(ui.Error, Is.Empty,
+                "a successful retry must remove the stale strict-plan error");
+        }
+
+        [Test]
+        public void StartAndWatch_PresentationStatusSurvivesDomainReloadSerialization()
+        {
+            var watch = new MlStartAndWatchState();
+            var ui = new MlLabWindowState();
+            watch.Begin(requested: true);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True);
+            watch.Apply(
+                MlViewerLaunchResult.Succeeded(
+                    "adaptive-standard", learnerSeat: 1, opponent: "Pool B",
+                    seatSchedule: "alternating"),
+                ui);
+
+            string json = JsonUtility.ToJson(watch);
+            var restored = JsonUtility.FromJson<MlStartAndWatchState>(json);
+
+            Assert.That(restored.Launched, Is.True);
+            Assert.That(restored.PresentationStatus,
+                Does.Contain("adaptive-standard")
+                    .And.Contain("schedule alternating")
+                    .And.Contain("learner P2 (seat 1)")
+                    .And.Contain("Pool B"));
         }
 
         [Test]

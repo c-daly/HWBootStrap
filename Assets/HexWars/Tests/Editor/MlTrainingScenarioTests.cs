@@ -261,6 +261,29 @@ namespace HexWars.Presentation.Tests
             Assert.That(preflight.LargeScenarioWarning, Is.False);
         }
 
+        [Test]
+        public void ScenarioConversion_PreservesEngineContractPrecision()
+        {
+            TrainingScenario expected = TrainingScenario.CreateStandard(
+                MlContract.AdaptiveVersion, "adaptive-standard");
+            TrainingScenario converted =
+                MlTrainingScenarioPreflight.ToEngine(_scenario);
+
+            Assert.That(
+                converted.Board.FlatChance,
+                Is.EqualTo(expected.Board.FlatChance));
+            Assert.That(
+                converted.Rules.BountyRate,
+                Is.EqualTo(expected.Rules.BountyRate));
+            Assert.That(
+                converted.Rules.DeployCostMultiplier,
+                Is.EqualTo(expected.Rules.DeployCostMultiplier));
+            Assert.That(
+                ModelDuelEnvironmentFactory.ContractIdentity(converted).EncodingHash,
+                Is.EqualTo(
+                    ModelDuelEnvironmentFactory.ContractIdentity(expected).EncodingHash));
+        }
+
         [TestCase(MlEnvironmentContract.TacticalV1, "tactical-large-battle")]
         [TestCase(MlEnvironmentContract.AdaptiveV1, "adaptive-large-battle")]
         public void PreflightDimensions_MatchAuthoritative24By16Presets(

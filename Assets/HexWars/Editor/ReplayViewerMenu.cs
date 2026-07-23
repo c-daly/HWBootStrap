@@ -10,6 +10,43 @@ using HexWars.Presentation.EditorTools.MlLab;
 
 namespace HexWars.Presentation.EditorTools
 {
+    public readonly struct MlViewerLaunchResult
+    {
+        MlViewerLaunchResult(
+            bool success, string error, string scenario,
+            string seatSchedule, int learnerSeat, string opponent)
+        {
+            Success = success;
+            Error = error ?? string.Empty;
+            Scenario = scenario ?? string.Empty;
+            SeatSchedule = seatSchedule ?? string.Empty;
+            LearnerSeat = learnerSeat;
+            Opponent = opponent ?? string.Empty;
+        }
+
+        public readonly bool Success;
+        public readonly string Error;
+        public readonly string Scenario;
+        public readonly string SeatSchedule;
+        public readonly int LearnerSeat;
+        public readonly string Opponent;
+
+        public static MlViewerLaunchResult Succeeded(
+            string scenario, int learnerSeat, string opponent,
+            string seatSchedule = "unknown") =>
+            new MlViewerLaunchResult(
+                true, string.Empty, scenario, seatSchedule,
+                learnerSeat, opponent);
+
+        public static MlViewerLaunchResult Failed(string error) =>
+            new MlViewerLaunchResult(
+                false,
+                string.IsNullOrWhiteSpace(error)
+                    ? "Start & Watch failed."
+                    : error,
+                string.Empty, string.Empty, -1, string.Empty);
+    }
+
     /// <summary>Editor entry point for the replay viewer: pick a recorded match file (written headless
     /// in WSL2 or by HexWars.Sim) and watch it play back, with speed + scrub controls.</summary>
     public static class ReplayViewerMenu
@@ -108,16 +145,23 @@ namespace HexWars.Presentation.EditorTools
         }
 
         /// <summary>Open a live run from ML Lab, resolving its algorithm from run metadata.</summary>
-        public static void WatchLiveRun(string runDirectory)
+        public static MlViewerLaunchResult WatchLiveRun(string runDirectory)
         {
             try
             {
                 MlRunPresentationPlan plan = MlRunPresentationPlan.Load(runDirectory);
+                MlPresentationGame firstGame = plan.PlanGame(0);
                 LaunchDuel(PyDir(), plan);
+                return MlViewerLaunchResult.Succeeded(
+                    firstGame.Scenario.Id,
+                    firstGame.LearnerSeat,
+                    firstGame.OpponentLabel,
+                    plan.LearnerSeatSchedule);
             }
             catch (Exception error)
             {
                 Debug.LogError("HexWars Start & Watch: " + error.Message);
+                return MlViewerLaunchResult.Failed(error.Message);
             }
         }
 
