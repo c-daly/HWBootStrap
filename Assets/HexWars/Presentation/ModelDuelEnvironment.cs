@@ -42,15 +42,32 @@ namespace HexWars.Presentation
     public static class ModelDuelEnvironmentFactory
     {
         public static IModelDuelEnvironment Create(MlEnvironmentContract environment) =>
-            environment == MlEnvironmentContract.AdaptiveV1
-                ? (IModelDuelEnvironment)new AdaptiveModelDuelEnvironment()
-                : new TacticalModelDuelEnvironment();
+            Create(TrainingScenario.CreateStandard(
+                MlEnvironmentContracts.CliValue(environment)));
+
+        public static IModelDuelEnvironment Create(TrainingScenario scenario)
+        {
+            if (scenario == null) throw new ArgumentNullException(nameof(scenario));
+            if (scenario.Environment == MlContract.AdaptiveVersion)
+                return new AdaptiveModelDuelEnvironment(scenario.BuildAdaptive());
+            if (scenario.Environment == MlContract.CurrentVersion)
+                return new TacticalModelDuelEnvironment(scenario.BuildTactical());
+            throw new ArgumentException(
+                "scenario environment must be tactical-v1 or adaptive-v1",
+                nameof(scenario));
+        }
 
         public static ModelDuelContractIdentity ContractIdentity(MlEnvironmentContract environment)
         {
-            var duel = Create(environment);
+            return ContractIdentity(TrainingScenario.CreateStandard(
+                MlEnvironmentContracts.CliValue(environment)));
+        }
+
+        public static ModelDuelContractIdentity ContractIdentity(TrainingScenario scenario)
+        {
+            var duel = Create(scenario);
             return new ModelDuelContractIdentity(
-                MlEnvironmentContracts.CliValue(environment),
+                scenario.Environment,
                 duel.Contract.Version,
                 duel.Contract.EncodingHash);
         }
@@ -124,9 +141,9 @@ namespace HexWars.Presentation
     {
         readonly DuelEnv _environment;
 
-        public TacticalModelDuelEnvironment()
+        public TacticalModelDuelEnvironment(EnvConfig config)
         {
-            var config = new EnvConfig();
+            if (config == null) throw new ArgumentNullException(nameof(config));
             _environment = new DuelEnv(config);
             Contract = MlContract.Create(config, MlEnvironmentKind.Duel);
         }
@@ -151,7 +168,13 @@ namespace HexWars.Presentation
 
     sealed class AdaptiveModelDuelEnvironment : IModelDuelEnvironment
     {
-        readonly AdaptiveDuelEnv _environment = new AdaptiveDuelEnv();
+        readonly AdaptiveDuelEnv _environment;
+
+        public AdaptiveModelDuelEnvironment(AdaptiveEnvConfig config)
+        {
+            _environment = new AdaptiveDuelEnv(
+                config ?? throw new ArgumentNullException(nameof(config)));
+        }
 
         public MlEnvironmentContract Environment => MlEnvironmentContract.AdaptiveV1;
         public MlContract Contract => _environment.Contract;

@@ -1,7 +1,11 @@
 using System;
+using System.IO;
 using HexWars.Engine;
+using HexWars.Engine.Rl;
 using HexWars.Presentation;
+using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace HexWars.Presentation.Tests
 {
@@ -204,6 +208,118 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void ScenarioFactory_UsesRecordedBoardAndEncoding()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 24;
+            scenario.Board.Height = 16;
+
+            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+
+            Assert.That(duel.Contract.Board["width"], Is.EqualTo(24));
+            Assert.That(duel.Contract.Board["height"], Is.EqualTo(16));
+            Assert.That(duel.Contract.EncodingHash,
+                Is.EqualTo(ModelDuelEnvironmentFactory.ContractIdentity(scenario).EncodingHash));
+        }
+
+        [Test]
+        public void ScenarioFactory_UsesAdaptiveBudgetAndEpisodeHorizon()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("adaptive-v1");
+            scenario.Adaptive.StartingArmyBudget = 176;
+            scenario.Episode.MaxSteps = 321;
+
+            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+
+            Assert.That(duel.Contract.Semantics["starting_army_budget"], Is.EqualTo(176));
+            Assert.That(duel.Contract.Board["max_steps"], Is.EqualTo(642),
+                "duel contracts use the recorded per-seat horizon for both seats");
+        }
+
+        [Test]
+        public void ScenarioFactory_RejectsInvalidScenario()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Episode.MaxSteps = 0;
+
+            Assert.That(() => ModelDuelEnvironmentFactory.Create(scenario),
+                Throws.ArgumentException.With.Message.Contains("max steps"));
+        }
+
+        [Test]
+        public void ManualArena_LoadsSelectedRunScenarioWithoutChangingSeatsOrObserver()
+        {
+            string scratch = NewScratchDirectory();
+            try
+            {
+                string scenarioRun = WriteScenarioRun(
+                    scratch, "scenario-source", MlEnvironmentContract.TacticalV1,
+                    scenario => scenario.Board.Width = 24);
+                var config = new ModelDuelConfiguration
+                {
+                    Environment = MlEnvironmentContract.TacticalV1,
+                    ScenarioRunPath = scenarioRun,
+                    P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.Random },
+                    P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy },
+                    Observer = ModelDuelObserverSeat.Player2,
+                };
+
+                MlArenaLaunchPlan plan = MlArenaLaunchPlan.Create(config);
+
+                Assert.That(plan.Scenario.Board.Width, Is.EqualTo(24));
+                Assert.That(plan.P0Spec, Is.EqualTo("random"));
+                Assert.That(plan.P1Spec, Is.EqualTo("greedy"));
+                Assert.That(plan.Observer, Is.EqualTo(ModelDuelObserverSeat.Player2));
+            }
+            finally
+            {
+                Directory.Delete(scratch, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ManualArena_RejectsBothModelSeatsAgainstSelectedScenarioEncoding()
+        {
+            string scratch = NewScratchDirectory();
+            try
+            {
+                string scenarioRun = WriteScenarioRun(
+                    scratch, "large-board", MlEnvironmentContract.TacticalV1,
+                    scenario =>
+                    {
+                        scenario.Board.Width = 24;
+                        scenario.Board.Height = 16;
+                    });
+                ModelDuelContractIdentity standard =
+                    ModelDuelEnvironmentFactory.ContractIdentity(MlEnvironmentContract.TacticalV1);
+                string p0 = WriteModelRun(scratch, "p0", standard);
+                string p1 = WriteModelRun(scratch, "p1", standard);
+                var config = new ModelDuelConfiguration
+                {
+                    Environment = MlEnvironmentContract.TacticalV1,
+                    ScenarioRunPath = scenarioRun,
+                    P0 = new ModelSeatConfiguration
+                        { Kind = ModelControllerKind.FixedRun, Path = p0 },
+                    P1 = new ModelSeatConfiguration
+                        { Kind = ModelControllerKind.LiveRun, Path = p1 },
+                };
+                string selectedHash = ModelDuelEnvironmentFactory.ContractIdentity(
+                    MlArenaLaunchPlan.LoadScenario(config)).EncodingHash;
+
+                InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+                    () => MlArenaLaunchPlan.Create(config));
+                Assert.That(error.Message, Does.Contain("Seat 0"));
+                Assert.That(error.Message, Does.Contain("Seat 1"));
+                Assert.That(error.Message, Does.Contain(standard.EncodingHash));
+                Assert.That(error.Message, Does.Contain(selectedHash));
+            }
+            finally
+            {
+                Directory.Delete(scratch, recursive: true);
+            }
+        }
+
+        [Test]
         public void AdaptiveAdapter_RequestsExternalActionsWithoutExposingStateBeforeReveal()
         {
             var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
@@ -265,6 +381,46 @@ namespace HexWars.Presentation.Tests
                 Calls++;
                 return new EndTurn(state.ActivePlayer);
             }
+        }
+
+        static string NewScratchDirectory()
+        {
+            string path = Path.Combine(
+                Path.GetTempPath(), "hexwars-arena-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        static string WriteScenarioRun(
+            string scratch,
+            string name,
+            MlEnvironmentContract environment,
+            Action<MlTrainingScenario> edit)
+        {
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            string library = Path.Combine(
+                projectRoot, "python", "config", "training-game-templates.json");
+            MlTrainingScenario scenario = MlTrainingScenarioLibrary.Load(library)
+                .Filter(environment)[0]
+                .Clone();
+            edit?.Invoke(scenario);
+            string generated = MlTrainingScenarioStore.WriteSessionScenario(scratch, scenario);
+            string run = Path.Combine(scratch, name);
+            Directory.CreateDirectory(run);
+            File.Copy(generated, Path.Combine(run, "scenario.json"));
+            return run;
+        }
+
+        static string WriteModelRun(
+            string scratch, string name, ModelDuelContractIdentity identity)
+        {
+            string run = Path.Combine(scratch, name);
+            Directory.CreateDirectory(run);
+            File.WriteAllText(Path.Combine(run, "run.json"),
+                "{\"contract\":{\"environment\":\"" + identity.Environment +
+                "\",\"version\":\"" + identity.Version +
+                "\",\"encoding_hash\":\"" + identity.EncodingHash + "\"}}");
+            return run;
         }
     }
 }

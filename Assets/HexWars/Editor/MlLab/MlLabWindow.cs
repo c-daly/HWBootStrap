@@ -12,6 +12,128 @@ namespace HexWars.Presentation.EditorTools.MlLab
 {
     public enum MlLabUiPhase { Idle, Validating, Running, Stopping, Completed, Failed, ExternallyRunning }
 
+    public sealed class MlArenaLaunchPlan
+    {
+        MlArenaLaunchPlan(
+            TrainingScenario scenario,
+            string p0Spec,
+            string p1Spec,
+            ModelDuelObserverSeat observer)
+        {
+            Scenario = scenario;
+            P0Spec = p0Spec;
+            P1Spec = p1Spec;
+            Observer = observer;
+        }
+
+        public TrainingScenario Scenario { get; }
+        public string P0Spec { get; }
+        public string P1Spec { get; }
+        public ModelDuelObserverSeat Observer { get; }
+
+        public static MlArenaLaunchPlan Create(ModelDuelConfiguration config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            TrainingScenario scenario = LoadScenario(config);
+            ModelDuelContractIdentity expected =
+                ModelDuelEnvironmentFactory.ContractIdentity(scenario);
+            var errors = new List<string>();
+            ValidateSeatContract(config.P0, "Seat 0", expected, errors);
+            ValidateSeatContract(config.P1, "Seat 1", expected, errors);
+            if (errors.Count > 0)
+                throw new InvalidOperationException(string.Join("\n", errors));
+            return new MlArenaLaunchPlan(
+                scenario,
+                config.P0.BuildSpec(),
+                config.P1.BuildSpec(),
+                config.Observer);
+        }
+
+        public static TrainingScenario LoadScenario(ModelDuelConfiguration config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            if (string.IsNullOrWhiteSpace(config.ScenarioRunPath))
+                return TrainingScenario.CreateStandard(
+                    MlEnvironmentContracts.CliValue(config.Environment));
+
+            string path = Path.Combine(config.ScenarioRunPath, "scenario.json");
+            try
+            {
+                MlTrainingScenario recorded = MlTrainingScenarioFile.Load(path);
+                TrainingScenario scenario =
+                    MlTrainingScenarioPreflight.ToEngine(recorded);
+                string selected = MlEnvironmentContracts.CliValue(config.Environment);
+                if (!string.Equals(scenario.Environment, selected, StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        "scenario environment " + scenario.Environment +
+                        " does not match selected environment " + selected + ".");
+                return scenario;
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is IOException ||
+                error is InvalidOperationException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    path + ": " + error.Message, error);
+            }
+        }
+
+        static void ValidateSeatContract(
+            ModelSeatConfiguration seat,
+            string label,
+            ModelDuelContractIdentity expected,
+            List<string> errors)
+        {
+            if (seat == null || !seat.IsModel ||
+                string.IsNullOrWhiteSpace(seat.Path))
+                return;
+            string manifestPath = Path.Combine(seat.Path, "run.json");
+            try
+            {
+                ArenaContractManifest manifest = JsonUtility.FromJson<ArenaContractManifest>(
+                    File.ReadAllText(manifestPath));
+                ArenaContract contract = manifest?.contract;
+                if (contract == null)
+                {
+                    errors.Add(label + " run metadata is missing contract identity: " +
+                        manifestPath);
+                    return;
+                }
+                if (!string.Equals(contract.environment, expected.Environment, StringComparison.Ordinal))
+                    errors.Add(label + " environment " + contract.environment +
+                        " does not match selected environment " + expected.Environment + ".");
+                if (!string.Equals(contract.version, expected.Version, StringComparison.Ordinal))
+                    errors.Add(label + " contract " + contract.version +
+                        " does not match selected environment " + expected.Version + ".");
+                if (!string.Equals(contract.encoding_hash, expected.EncodingHash, StringComparison.Ordinal))
+                    errors.Add(label + " encoding hash " + contract.encoding_hash +
+                        " does not match expected " + expected.EncodingHash + ".");
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is IOException ||
+                error is UnauthorizedAccessException)
+            {
+                errors.Add(label + " run metadata could not be read: " +
+                    manifestPath + ": " + error.Message);
+            }
+        }
+
+        [Serializable] sealed class ArenaContractManifest
+        {
+            public ArenaContract contract;
+        }
+
+        [Serializable] sealed class ArenaContract
+        {
+            public string environment;
+            public string version;
+            public string encoding_hash;
+        }
+    }
+
     public sealed class MlLabWindowState
     {
         public MlLabUiPhase Phase { get; private set; } = MlLabUiPhase.Idle;
@@ -706,6 +828,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "Environment", _arena.Environment);
             _arena.Observer = (ModelDuelObserverSeat)EditorGUILayout.EnumPopup(
                 "Observer", _arena.Observer);
+            EditorGUILayout.BeginHorizontal();
+            _arena.ScenarioRunPath = EditorGUILayout.TextField(
+                "Scenario run", _arena.ScenarioRunPath);
+            if (GUILayout.Button("Use selected run scenario", GUILayout.Width(174)))
+                _arena.ScenarioRunPath = _selectedRun;
+            EditorGUILayout.EndHorizontal();
             DrawEnvironmentSummary(MlEnvironmentSummary.ForSelection(_arena.Environment), "Arena preflight");
             DrawArenaSeat("Seat 0", _arena.P0);
             EditorGUILayout.Space(4);
@@ -784,9 +912,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ValidateSeatFiles(_arena.P1, "Seat 1", errors);
             if (!File.Exists(PythonExe)) errors.Add("Python environment not found: " + PythonExe);
             if (errors.Count > 0) { _arenaError = string.Join("\n", errors); return; }
+            MlArenaLaunchPlan plan;
+            try
+            {
+                plan = MlArenaLaunchPlan.Create(_arena);
+            }
+            catch (Exception error)
+            {
+                _arenaError = error.Message;
+                return;
+            }
             ReplayViewerMenu.LaunchDuel(
-                PythonDir, _arena.P0.BuildSpec(), _arena.P1.BuildSpec(), _arena.Loop,
-                _arena.Seed, _arena.SecondsPerAction, _arena.Environment, _arena.Observer);
+                PythonDir, plan.P0Spec, plan.P1Spec, _arena.Loop,
+                _arena.Seed, _arena.SecondsPerAction, _arena.Environment, plan.Observer,
+                plan.Scenario);
             _arenaNotice = "Arena launched. Resolved checkpoints appear here after the policy bridge is ready.";
         }
 

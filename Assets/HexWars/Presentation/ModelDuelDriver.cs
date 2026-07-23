@@ -69,6 +69,7 @@ namespace HexWars.Presentation
         public ModelSeatConfiguration P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.LiveRun };
         public ModelSeatConfiguration P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy };
         public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public string ScenarioRunPath = string.Empty;
         public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public int Seed;
         public float SecondsPerAction = 0.4f;
@@ -100,6 +101,7 @@ namespace HexWars.Presentation
         public string P1Spec = "greedy";
         public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
         public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
+        [NonSerialized] public TrainingScenario Scenario;
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop;
@@ -126,6 +128,7 @@ namespace HexWars.Presentation
 
         BoardRenderer _board;
         IModelDuelEnvironment _duel;
+        TrainingScenario _activeScenario;
         PolicyBridge _bridge;
         ModelDuelContractIdentity _contractIdentity;
         ModelDuelView _view;
@@ -142,7 +145,27 @@ namespace HexWars.Presentation
             _p1Model = IsModel(P1Spec);
             _p0Live = IsLiveRun(P0Spec);
             _p1Live = IsLiveRun(P1Spec);
-            _contractIdentity = ModelDuelEnvironmentFactory.ContractIdentity(Environment);
+            try
+            {
+                _activeScenario = Scenario ?? TrainingScenario.CreateStandard(
+                    MlEnvironmentContracts.CliValue(Environment));
+                if (!string.Equals(
+                    _activeScenario.Environment,
+                    MlEnvironmentContracts.CliValue(Environment),
+                    StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        "arena scenario environment " + _activeScenario.Environment +
+                        " does not match selected environment " +
+                        MlEnvironmentContracts.CliValue(Environment) + ".");
+                _contractIdentity =
+                    ModelDuelEnvironmentFactory.ContractIdentity(_activeScenario);
+            }
+            catch (Exception error)
+            {
+                Debug.LogError("ModelDuelDriver: invalid scenario. " + error.Message);
+                _done = true;
+                return;
+            }
             if (_p0Model || _p1Model)
             {
                 _bridge = new PolicyBridge();
@@ -175,7 +198,7 @@ namespace HexWars.Presentation
         {
             IAgent c0 = _p0Model ? null : Scripted(P0Spec, Seed * 2 + 1);
             IAgent c1 = _p1Model ? null : Scripted(P1Spec, Seed * 2 + 2);
-            _duel = ModelDuelEnvironmentFactory.Create(Environment);
+            _duel = ModelDuelEnvironmentFactory.Create(_activeScenario);
             _presentation = new ModelDuelPresentationState(Environment);
             _view = _duel.Reset(Seed, c0, c1);
             Present(previous: null);
