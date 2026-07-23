@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.RegularExpressions;
 using HexWars.Engine.Rl;
 using HexWars.Presentation;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace HexWars.Presentation.EditorTools.MlLab
@@ -81,6 +82,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (!File.Exists(manifestPath))
                     throw new InvalidDataException("run manifest does not exist");
                 string json = File.ReadAllText(manifestPath);
+                bool hasScenarioMetadata = ValidateRawManifest(json);
                 RunManifestDto manifest = JsonUtility.FromJson<RunManifestDto>(json);
                 if (manifest == null)
                     throw new InvalidDataException("run manifest must be a JSON object");
@@ -95,8 +97,6 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (manifest.opponent_snapshot == null)
                     throw new InvalidDataException("opponent_snapshot is required");
 
-                bool hasScenarioMetadata = Regex.IsMatch(
-                    json, "\"scenario\"\\s*:", RegexOptions.CultureInvariant);
                 TrainingScenario scenario = LoadScenario(
                     runPath, manifest, hasScenarioMetadata);
                 ContractDto learnerContract = manifest.contract;
@@ -141,6 +141,76 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     : ModelDuelObserverSeat.Player2,
                 opponent.Label,
                 Scenario);
+        }
+
+        static bool ValidateRawManifest(string json)
+        {
+            JObject root;
+            try
+            {
+                root = JToken.Parse(json) as JObject;
+            }
+            catch (JsonException error)
+            {
+                throw new InvalidDataException("run manifest contains invalid JSON", error);
+            }
+            if (root == null)
+                throw new InvalidDataException("run manifest must be a JSON object");
+
+            JProperty scenario = root.Property(
+                "scenario", StringComparison.Ordinal);
+            if (scenario != null && scenario.Value.Type != JTokenType.Object)
+                throw new InvalidDataException(
+                    "scenario must be a non-null JSON object");
+
+            JProperty opponent = root.Property(
+                "opponent_snapshot", StringComparison.Ordinal);
+            if (opponent != null)
+                ValidateRawOpponent(
+                    opponent.Value, "opponent_snapshot");
+            return scenario != null;
+        }
+
+        static void ValidateRawOpponent(JToken token, string metadataPath)
+        {
+            JObject opponent = token as JObject;
+            if (opponent == null)
+                throw new InvalidDataException(
+                    metadataPath + " must be a non-null JSON object");
+            string kind = opponent.Value<string>("kind");
+            if (kind == "snapshot")
+            {
+                JProperty step = opponent.Property(
+                    "step", StringComparison.Ordinal);
+                if (step == null || step.Value.Type != JTokenType.Integer)
+                    throw new InvalidDataException(
+                        metadataPath + ".step must be a non-negative integer");
+                try
+                {
+                    long value = step.Value.Value<long>();
+                    if (value < 0 || value > int.MaxValue)
+                        throw new InvalidDataException(
+                            metadataPath +
+                            ".step must be a non-negative 32-bit integer");
+                }
+                catch (OverflowException error)
+                {
+                    throw new InvalidDataException(
+                        metadataPath +
+                        ".step must be a non-negative 32-bit integer",
+                        error);
+                }
+                return;
+            }
+            if (kind != "pool") return;
+            JArray controllers = opponent["controllers"] as JArray;
+            if (controllers == null)
+                throw new InvalidDataException(
+                    metadataPath + ".controllers must be an array");
+            for (int index = 0; index < controllers.Count; index++)
+                ValidateRawOpponent(
+                    controllers[index],
+                    metadataPath + ".controllers[" + index + "]");
         }
 
         static TrainingScenario LoadScenario(

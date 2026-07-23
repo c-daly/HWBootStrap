@@ -91,6 +91,43 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void SnapshotWithoutStepFailsInsteadOfDefaultingToZero()
+        {
+            string source = WriteSourceRun("source-no-step", "maskable_ppo", 0);
+            string checkpoint = Path.Combine(
+                source, "checkpoints", "step_000000000.zip");
+            string opponent = "{\"kind\":\"snapshot\",\"path\":" + Json(checkpoint) +
+                ",\"source_run\":" + Json(source) +
+                ",\"algorithm\":\"maskable_ppo\"}";
+            string run = WriteRun("0", opponent);
+
+            Assert.That(
+                () => MlRunPresentationPlan.Load(run),
+                Throws.InvalidOperationException.With.Message.Contains(
+                    "opponent_snapshot.step"));
+        }
+
+        [TestCase("\"0\"")]
+        [TestCase("0.5")]
+        [TestCase("true")]
+        [TestCase("null")]
+        public void SnapshotStepMustBeAnInteger(string stepJson)
+        {
+            string source = WriteSourceRun("source-step-type", "maskable_ppo", 0);
+            string checkpoint = Path.Combine(
+                source, "checkpoints", "step_000000000.zip");
+            string opponent = "{\"kind\":\"snapshot\",\"path\":" + Json(checkpoint) +
+                ",\"source_run\":" + Json(source) +
+                ",\"algorithm\":\"maskable_ppo\",\"step\":" + stepJson + "}";
+            string run = WriteRun("0", opponent);
+
+            Assert.That(
+                () => MlRunPresentationPlan.Load(run),
+                Throws.InvalidOperationException.With.Message.Contains(
+                    "opponent_snapshot.step"));
+        }
+
+        [Test]
         public void LiveRunOpponent_RetainsLiveMode()
         {
             string source = WriteSourceRun("source-live", "maskable_ppo", 10);
@@ -205,6 +242,39 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void NestedScenarioKeyDoesNotTurnLegacyRunIntoModernRun()
+        {
+            string run = WriteRun(
+                "0", "{\"kind\":\"scripted\",\"name\":\"greedy\"}",
+                includeScenarioMetadata: false, writeScenario: false);
+            AppendTopLevelProperty(
+                run,
+                "\"metadata\":{\"scenario\":{\"path\":\"scenario.json\"}}");
+
+            MlPresentationGame game = MlRunPresentationPlan.Load(run).PlanGame(0);
+
+            Assert.That(game.Scenario.Id, Is.EqualTo("legacy-default"));
+        }
+
+        [TestCase("null")]
+        [TestCase("\"scenario.json\"")]
+        [TestCase("[]")]
+        [TestCase("{}")]
+        public void ModernScenarioMetadataMustBeANonNullValidObject(
+            string scenarioJson)
+        {
+            string run = WriteRun(
+                "0", "{\"kind\":\"scripted\",\"name\":\"greedy\"}",
+                includeScenarioMetadata: false, writeScenario: false);
+            AppendTopLevelProperty(run, "\"scenario\":" + scenarioJson);
+
+            Assert.That(
+                () => MlRunPresentationPlan.Load(run),
+                Throws.InvalidOperationException.With.Message.Contains(
+                    Path.Combine(run, "run.json")).And.Message.Contains("scenario"));
+        }
+
+        [Test]
         public void NegativeGameIndexIsRejected()
         {
             string run = WriteRun(
@@ -270,5 +340,13 @@ namespace HexWars.Presentation.Tests
 
         static string JsonFragment(string value) =>
             value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+        static void AppendTopLevelProperty(string run, string property)
+        {
+            string path = Path.Combine(run, "run.json");
+            string json = File.ReadAllText(path);
+            File.WriteAllText(
+                path, json.Substring(0, json.Length - 1) + "," + property + "}");
+        }
     }
 }
