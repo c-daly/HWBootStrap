@@ -59,7 +59,7 @@ namespace HexWars.Presentation
         {
             string controller = narrow ? StripZip(row.Controller) : row.Controller;
             string checkpoint = narrow ? StripZip(row.Checkpoint) : row.Checkpoint;
-            return string.Join(" · ", new[] { controller, row.Algorithm, checkpoint, row.Status }
+            return string.Join(" · ", new[] { row.Role, controller, row.Algorithm, checkpoint, row.Status }
                 .Where(value => !string.IsNullOrWhiteSpace(value)));
         }
 

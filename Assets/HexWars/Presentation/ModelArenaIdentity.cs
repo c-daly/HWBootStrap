@@ -6,6 +6,7 @@ namespace HexWars.Presentation
     public sealed class ModelArenaSeatIdentity
     {
         public string Player { get; internal set; }
+        public string Role { get; internal set; }
         public string Controller { get; internal set; }
         public string Algorithm { get; internal set; }
         public string Checkpoint { get; internal set; }
@@ -20,21 +21,34 @@ namespace HexWars.Presentation
         public static ModelArenaSeatIdentity[] Build(
             string p0Spec, string p1Spec, PolicySeatInfo p0, PolicySeatInfo p1,
             int currentSeat, int p0Wins, int p1Wins, int draws,
-            string p0Status = null, string p1Status = null) => new[]
+            string p0Status = null, string p1Status = null,
+            int learnerSeat = -1, int learnerWins = 0,
+            int learnerLosses = 0, int learnerDraws = 0) => new[]
         {
-            BuildSeat(0, p0Spec, p0, currentSeat == 0, p0Wins, p1Wins, draws, p0Status),
-            BuildSeat(1, p1Spec, p1, currentSeat == 1, p1Wins, p0Wins, draws, p1Status),
+            BuildSeat(
+                0, p0Spec, p0, currentSeat == 0,
+                learnerSeat < 0 ? p0Wins : learnerSeat == 0 ? learnerWins : learnerLosses,
+                learnerSeat < 0 ? p1Wins : learnerSeat == 0 ? learnerLosses : learnerWins,
+                learnerSeat < 0 ? draws : learnerDraws,
+                p0Status, Role(0, learnerSeat)),
+            BuildSeat(
+                1, p1Spec, p1, currentSeat == 1,
+                learnerSeat < 0 ? p1Wins : learnerSeat == 1 ? learnerWins : learnerLosses,
+                learnerSeat < 0 ? p0Wins : learnerSeat == 1 ? learnerLosses : learnerWins,
+                learnerSeat < 0 ? draws : learnerDraws,
+                p1Status, Role(1, learnerSeat)),
         };
 
         static ModelArenaSeatIdentity BuildSeat(
             int seat, string spec, PolicySeatInfo resolved, bool active,
-            int wins, int losses, int draws, string status)
+            int wins, int losses, int draws, string status, string role)
         {
             bool scripted = string.Equals(spec, "greedy", StringComparison.OrdinalIgnoreCase)
                            || string.Equals(spec, "random", StringComparison.OrdinalIgnoreCase);
             return new ModelArenaSeatIdentity
             {
                 Player = seat == 0 ? "P1" : "P2",
+                Role = role,
                 Controller = scripted ? Capitalize(spec) : RunName(spec, resolved),
                 Algorithm = resolved == null ? string.Empty : FriendlyAlgorithm(resolved.Algorithm),
                 Checkpoint = resolved == null ? (scripted ? string.Empty : "loading checkpoint") : SafePathLeaf(resolved.Path),
@@ -43,6 +57,12 @@ namespace HexWars.Presentation
                 Status = status ?? string.Empty,
                 IsActive = active,
             };
+        }
+
+        static string Role(int seat, int learnerSeat)
+        {
+            if (learnerSeat < 0) return string.Empty;
+            return seat == learnerSeat ? "Learner" : "Opponent";
         }
 
         public static string FormatRecord(int wins, int losses, int draws)

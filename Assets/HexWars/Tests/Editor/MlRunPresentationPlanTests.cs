@@ -33,9 +33,14 @@ namespace HexWars.Presentation.Tests
         }
 
         [TestCase("0", 0, 0)]
+        [TestCase("0", 1, 0)]
+        [TestCase("0", 2, 0)]
         [TestCase("1", 0, 1)]
+        [TestCase("1", 1, 1)]
+        [TestCase("1", 2, 1)]
         [TestCase("alternating", 0, 0)]
         [TestCase("alternating", 1, 1)]
+        [TestCase("alternating", 2, 0)]
         public void PlanGame_PlacesLearnerInRecordedSeat(
             string schedule, int game, int learnerSeat)
         {

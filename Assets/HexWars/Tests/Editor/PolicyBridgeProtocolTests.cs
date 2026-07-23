@@ -93,5 +93,27 @@ namespace HexWars.Presentation.Tests
             Assert.Throws<System.InvalidOperationException>(() => error.RequireAction("last stderr"),
                 "contract mismatch\nlast stderr");
         }
+
+        [Test]
+        public void AlternatingViewerNeverReconfiguresOrReloadsMidGame()
+        {
+            var config = new ModelDuelConfiguration
+            {
+                P0 = new ModelSeatConfiguration
+                    { Kind = ModelControllerKind.LiveRun, Path = "run-a" },
+                P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy },
+            };
+            var scenario = HexWars.Engine.Rl.TrainingScenario.CreateStandard("tactical-v1");
+            var previous = new MlPresentationGame(
+                "learner", "greedy", 0, ModelDuelObserverSeat.Player1,
+                "Greedy", scenario);
+            var next = new MlPresentationGame(
+                "greedy", "learner", 1, ModelDuelObserverSeat.Player2,
+                "Greedy", scenario);
+
+            Assert.That(config.ShouldReload(gameEnded: false), Is.False);
+            Assert.That(ModelDuelDriver.ShouldReconfigure(previous, next, gameEnded: false),
+                Is.False);
+        }
     }
 }

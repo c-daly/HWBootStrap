@@ -9,32 +9,6 @@ using UnityEngine;
 
 namespace HexWars.Presentation.EditorTools.MlLab
 {
-    public sealed class MlPresentationGame
-    {
-        internal MlPresentationGame(
-            string p0Spec,
-            string p1Spec,
-            int learnerSeat,
-            ModelDuelObserverSeat observer,
-            string opponentLabel,
-            TrainingScenario scenario)
-        {
-            P0Spec = p0Spec;
-            P1Spec = p1Spec;
-            LearnerSeat = learnerSeat;
-            Observer = observer;
-            OpponentLabel = opponentLabel;
-            Scenario = scenario;
-        }
-
-        public string P0Spec { get; }
-        public string P1Spec { get; }
-        public int LearnerSeat { get; }
-        public ModelDuelObserverSeat Observer { get; }
-        public string OpponentLabel { get; }
-        public TrainingScenario Scenario { get; }
-    }
-
     public sealed class MlRunPresentationPlan
     {
         readonly string _learnerSpec;
@@ -141,6 +115,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     : ModelDuelObserverSeat.Player2,
                 opponent.Label,
                 Scenario);
+        }
+
+        public MlPresentationSchedule BuildRuntimeSchedule()
+        {
+            var games = new MlPresentationGame[_opponents.Count * 2];
+            for (int index = 0; index < games.Length; index++)
+                games[index] = PlanGame(index);
+            return new MlPresentationSchedule { Games = games };
         }
 
         static bool ValidateRawManifest(string json)

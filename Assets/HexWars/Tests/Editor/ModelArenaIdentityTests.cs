@@ -197,6 +197,36 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Build_PresentationRolesProjectLearnerCentricRecordsOntoCurrentSeats()
+        {
+            var rows = ModelArenaIdentity.Build(
+                "greedy", "run:C:/runs/learner",
+                null, null, currentSeat: 1,
+                p0Wins: 4, p1Wins: 3, draws: 2,
+                learnerSeat: 1, learnerWins: 5, learnerLosses: 2,
+                learnerDraws: 1);
+
+            Assert.That(rows[0].Role, Is.EqualTo("Opponent"));
+            Assert.That(rows[0].Record, Is.EqualTo("2-5-1 (25%)"));
+            Assert.That(rows[1].Role, Is.EqualTo("Learner"));
+            Assert.That(rows[1].Record, Is.EqualTo("5-2-1 (62.5%)"));
+            Assert.That(ModelArenaIdentityOverlay.RowText(rows[1], 72),
+                Does.StartWith("▶ P2").And.Contain("Learner").And.Contain("learner"));
+        }
+
+        [Test]
+        public void Build_ManualArenaLeavesRolesBlankAndKeepsSeatRecords()
+        {
+            var rows = ModelArenaIdentity.Build(
+                "greedy", "random", null, null, 0, 3, 1, 1);
+
+            Assert.That(rows[0].Role, Is.Empty);
+            Assert.That(rows[0].Record, Is.EqualTo("3-1-1 (60%)"));
+            Assert.That(rows[1].Role, Is.Empty);
+            Assert.That(rows[1].Record, Is.EqualTo("1-3-1 (20%)"));
+        }
+
+        [Test]
         public void Build_HandlesIncompleteResolvedRunMetadata()
         {
             var resolved = PolicyBridge.ParseReady(

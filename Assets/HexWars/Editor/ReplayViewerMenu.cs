@@ -144,7 +144,8 @@ namespace HexWars.Presentation.EditorTools
             string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f,
             MlEnvironmentContract environment = MlEnvironmentContract.TacticalV1,
             ModelDuelObserverSeat observer = ModelDuelObserverSeat.Player1,
-            TrainingScenario scenario = null)
+            TrainingScenario scenario = null,
+            MlPresentationSchedule presentationPlan = null)
         {
             string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
             string server = System.IO.Path.Combine(pyDir, "policy_server.py");
@@ -166,6 +167,7 @@ namespace HexWars.Presentation.EditorTools
             d.Environment = environment;
             d.Observer = observer;
             d.Scenario = scenario;
+            d.PresentationPlan = presentationPlan;
             d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 
@@ -194,7 +196,8 @@ namespace HexWars.Presentation.EditorTools
                 loop: true,
                 environment: environment,
                 observer: game.Observer,
-                scenario: game.Scenario);
+                scenario: game.Scenario,
+                presentationPlan: plan.BuildRuntimeSchedule());
         }
 
         static string PickRunSpec(string title, string pyDir, ModelControllerKind kind,

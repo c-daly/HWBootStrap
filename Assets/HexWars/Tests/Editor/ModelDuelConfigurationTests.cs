@@ -71,6 +71,69 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void PresentationSchedule_CyclesGamesAndSurvivesUnitySerialization()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 24;
+            var schedule = new MlPresentationSchedule
+            {
+                Games = new[]
+                {
+                    new MlPresentationGame(
+                        "learner", "random", 0, ModelDuelObserverSeat.Player1,
+                        "Random", scenario),
+                    new MlPresentationGame(
+                        "greedy", "learner", 1, ModelDuelObserverSeat.Player2,
+                        "Greedy", scenario),
+                },
+            };
+            var originalObject = new GameObject("original-driver");
+            var restoredObject = new GameObject("restored-driver");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.PresentationPlan = schedule;
+
+                string json = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(json, restored);
+
+                Assert.That(restored.NextPresentationGame(0).LearnerSeat, Is.Zero);
+                Assert.That(restored.NextPresentationGame(1).LearnerSeat, Is.EqualTo(1));
+                Assert.That(restored.NextPresentationGame(2).LearnerSeat, Is.Zero);
+                Assert.That(restored.NextPresentationGame(1).OpponentLabel, Is.EqualTo("Greedy"));
+                Assert.That(restored.NextPresentationGame(1).Observer,
+                    Is.EqualTo(ModelDuelObserverSeat.Player2));
+                Assert.That(restored.NextPresentationGame(1).Scenario.Board.Width,
+                    Is.EqualTo(24));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [Test]
+        public void ShouldReconfigure_OnlyChangesControllersAtACompletedGameBoundary()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+            var game0 = new MlPresentationGame(
+                "learner", "greedy", 0, ModelDuelObserverSeat.Player1,
+                "Greedy", scenario);
+            var game1 = new MlPresentationGame(
+                "greedy", "learner", 1, ModelDuelObserverSeat.Player2,
+                "Greedy", scenario);
+
+            Assert.That(ModelDuelDriver.ShouldReconfigure(game0, game1, gameEnded: false),
+                Is.False);
+            Assert.That(ModelDuelDriver.ShouldReconfigure(game0, game1, gameEnded: true),
+                Is.True);
+            Assert.That(ModelDuelDriver.ShouldReconfigure(game0, game0, gameEnded: true),
+                Is.False);
+        }
+
+        [Test]
         public void ControllerChoices_ExcludeManifestlessCheckpointPaths()
         {
             Assert.That(Enum.GetNames(typeof(ModelControllerKind)), Does.Not.Contain("FixedCheckpoint"));
