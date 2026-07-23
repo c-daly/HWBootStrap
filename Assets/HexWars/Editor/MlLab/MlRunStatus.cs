@@ -22,16 +22,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public string LatestEvaluation { get; private set; }
         public double Throughput { get; private set; }
         public bool TrackerDegraded { get; private set; }
+        public string LearnerSeat { get; private set; }
         public int Seat0Episodes { get; private set; }
         public int Seat1Episodes { get; private set; }
         public bool SeatAuditReadable { get; private set; }
         public bool SeatAuditBalanced { get; private set; }
         public string SeatAuditWarning { get; private set; }
-        public bool SeatAuditShowsWarning => IsTerminal(State) &&
+        public bool SeatAuditBalanceApplicable => string.Equals(
+            LearnerSeat, "alternating", StringComparison.OrdinalIgnoreCase);
+        public bool SeatAuditShowsWarning => SeatAuditBalanceApplicable && IsTerminal(State) &&
             SeatAuditReadable && !SeatAuditBalanced &&
             !string.IsNullOrWhiteSpace(SeatAuditWarning);
         public bool SeatAuditShowsInfo => !SeatAuditShowsWarning &&
-            (!SeatAuditReadable || (!IsTerminal(State) && !SeatAuditBalanced));
+            (!SeatAuditReadable || (SeatAuditBalanceApplicable &&
+             !IsTerminal(State) && !SeatAuditBalanced));
         public string Error { get; private set; }
 
         public static MlRunStatus Parse(string json)
@@ -56,6 +60,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 LatestEvaluation = run.latest_evaluation ?? string.Empty,
                 Throughput = run.throughput,
                 TrackerDegraded = run.tracker_degraded || HasTrackerFailure(run.tracker_status),
+                LearnerSeat = config.learner_seat ?? string.Empty,
                 Seat0Episodes = seatAudit.seat_0_episodes,
                 Seat1Episodes = seatAudit.seat_1_episodes,
                 SeatAuditReadable = seatAudit.readable,
@@ -103,7 +108,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public SeatAudit seat_audit;
             public string message;
         }
-        [Serializable] sealed class Config { public string run_name; public long total_timesteps; }
+        [Serializable] sealed class Config
+        {
+            public string run_name;
+            public long total_timesteps;
+            public string learner_seat;
+        }
         [Serializable] sealed class SeatAudit
         {
             public int seat_0_episodes;
