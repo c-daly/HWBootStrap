@@ -122,6 +122,16 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Scenario_AcceptsEvenWidthFullyPartitionedDeploymentZones()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 6;
+            scenario.Board.ZoneDepth = 3;
+
+            Assert.That(scenario.Validate(), Has.None.Contains("deployment zones overlap"));
+        }
+
+        [Test]
         public void Scenario_ReportsEachInvalidScalarField()
         {
             var scenario = TrainingScenario.CreateStandard("tactical-v1");
