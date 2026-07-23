@@ -349,3 +349,44 @@ def test_validate_handshake_checks_authoritative_scenario_values() -> None:
         ValueError, match=r"adaptive-standard.*board\.width.*13.*24"
     ):
         validate_handshake(scenario, spaces)
+
+
+def test_validate_handshake_accepts_float32_equivalent_reward_values(
+    tmp_path: Path,
+) -> None:
+    document = scenario_document("tactical-v1")
+    document["reward"].update(
+        {
+            "shape_scale": 0.009999999776482582,
+            "step_penalty": 0.004999999888241291,
+            "closing_weight": 0.019999999552965165,
+        }
+    )
+    scenario = resolve_scenario(
+        environment="tactical-v1",
+        scenario_file=write_scenario(tmp_path, document=document),
+        template_id=None,
+    )
+    spaces = {
+        "scenario_id": "tactical-test",
+        "scenario_schema_version": 1,
+        "contract_version": "tactical-v1",
+        "board_w": 13,
+        "board_h": 9,
+        "round_cap": 100,
+        "max_steps": 600,
+        "biomes": False,
+        "board": {
+            **dict(scenario.document["board"]),
+            **dict(scenario.document["rules"]),
+            "actions_per_turn": -1,
+        },
+        "reward": {
+            **dict(scenario.document["reward"]),
+            "shape_scale": 0.01,
+            "step_penalty": 0.005,
+            "closing_weight": 0.02,
+        },
+    }
+
+    validate_handshake(scenario, spaces)

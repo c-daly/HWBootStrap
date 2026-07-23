@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -357,6 +358,20 @@ def _space_value(spaces_info: Mapping[str, Any], path: tuple[str, ...]) -> Any:
     return value
 
 
+def _float32_equivalent(left: Any, right: Any) -> bool:
+    if (
+        isinstance(left, bool)
+        or isinstance(right, bool)
+        or not isinstance(left, (int, float))
+        or not isinstance(right, (int, float))
+    ):
+        return False
+    try:
+        return struct.pack("!f", float(left)) == struct.pack("!f", float(right))
+    except (OverflowError, struct.error, TypeError, ValueError):
+        return False
+
+
 def validate_handshake(
     scenario: ResolvedScenario, spaces_info: Mapping[str, Any]
 ) -> None:
@@ -390,7 +405,10 @@ def validate_handshake(
 
     for field_path, requested, handshake_path in comparisons:
         authoritative = _space_value(spaces_info, handshake_path)
-        if authoritative != requested:
+        matches = authoritative == requested
+        if not matches and field_path.startswith("reward."):
+            matches = _float32_equivalent(authoritative, requested)
+        if not matches:
             raise ValueError(
                 f"scenario {scenario.template_id!r} field {field_path} requested "
                 f"{requested!r} but GymServer reported {authoritative!r}"
