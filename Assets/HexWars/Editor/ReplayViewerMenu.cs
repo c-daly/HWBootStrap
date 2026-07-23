@@ -1,3 +1,4 @@
+using System;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -108,12 +109,15 @@ namespace HexWars.Presentation.EditorTools
         /// <summary>Open a live run from ML Lab, resolving its algorithm from run metadata.</summary>
         public static void WatchLiveRun(string runDirectory)
         {
-            if (string.IsNullOrWhiteSpace(runDirectory)) return;
-            string pyDir = PyDir();
-            if (!PyReady(pyDir)) return;
-            string learner = BuildLiveTrainingSpec(runDirectory);
-            if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true,
-                environment: EnvironmentFromRun(runDirectory));
+            try
+            {
+                MlRunPresentationPlan plan = MlRunPresentationPlan.Load(runDirectory);
+                LaunchDuel(PyDir(), plan);
+            }
+            catch (Exception error)
+            {
+                Debug.LogError("HexWars Start & Watch: " + error.Message);
+            }
         }
 
         public static string BuildLiveTrainingSpec(string runDirectory) =>
@@ -167,6 +171,26 @@ namespace HexWars.Presentation.EditorTools
             es.AddComponent<InputSystemUIInputModule>();
 
             EditorApplication.EnterPlaymode();
+        }
+
+        public static void LaunchDuel(string pyDir, MlRunPresentationPlan plan)
+        {
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (!PyReady(pyDir))
+                throw new InvalidOperationException(
+                    "Windows venv Python is unavailable for Start & Watch.");
+            MlPresentationGame game = plan.PlanGame(0);
+            MlEnvironmentContract environment =
+                game.Scenario.Environment == "adaptive-v1"
+                    ? MlEnvironmentContract.AdaptiveV1
+                    : MlEnvironmentContract.TacticalV1;
+            LaunchDuel(
+                pyDir,
+                game.P0Spec,
+                game.P1Spec,
+                loop: true,
+                environment: environment,
+                observer: game.Observer);
         }
 
         static string PickRunSpec(string title, string pyDir, ModelControllerKind kind,

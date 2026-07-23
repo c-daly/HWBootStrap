@@ -69,6 +69,8 @@ namespace HexWars.Presentation.Tests
         public void ControllerChoices_ExcludeManifestlessCheckpointPaths()
         {
             Assert.That(Enum.GetNames(typeof(ModelControllerKind)), Does.Not.Contain("FixedCheckpoint"));
+            Assert.That(Enum.GetNames(typeof(ModelControllerKind)), Does.Not.Contain("Snapshot"),
+                "metadata-backed snapshots are internal viewer specs, not player choices");
         }
 
         [Test]

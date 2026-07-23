@@ -122,11 +122,16 @@ def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> 
         source_run = raw.get("source_run")
         if not isinstance(source_run, str) or not source_run.strip():
             raise ControllerResolutionError("snapshot controller source_run must be a non-empty string")
+        algorithm = raw.get("algorithm")
+        if algorithm not in ALGORITHM_ALIASES.values():
+            raise ControllerResolutionError(
+                "snapshot controller algorithm must be 'maskable_ppo' or 'masked_dqn'"
+            )
         return ControllerSpec(
             kind="snapshot",
             path=_path_field(raw),
             source_run=Path(source_run),
-            algorithm=_algorithm_field(raw),
+            algorithm=algorithm,
             step=step,
             inference_mode=_inference_mode_field(raw),
         )

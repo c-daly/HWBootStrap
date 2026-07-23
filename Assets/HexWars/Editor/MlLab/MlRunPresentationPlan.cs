@@ -1,0 +1,551 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.RegularExpressions;
+using HexWars.Engine.Rl;
+using HexWars.Presentation;
+using UnityEngine;
+
+namespace HexWars.Presentation.EditorTools.MlLab
+{
+    public sealed class MlPresentationGame
+    {
+        internal MlPresentationGame(
+            string p0Spec,
+            string p1Spec,
+            int learnerSeat,
+            ModelDuelObserverSeat observer,
+            string opponentLabel,
+            TrainingScenario scenario)
+        {
+            P0Spec = p0Spec;
+            P1Spec = p1Spec;
+            LearnerSeat = learnerSeat;
+            Observer = observer;
+            OpponentLabel = opponentLabel;
+            Scenario = scenario;
+        }
+
+        public string P0Spec { get; }
+        public string P1Spec { get; }
+        public int LearnerSeat { get; }
+        public ModelDuelObserverSeat Observer { get; }
+        public string OpponentLabel { get; }
+        public TrainingScenario Scenario { get; }
+    }
+
+    public sealed class MlRunPresentationPlan
+    {
+        readonly string _learnerSpec;
+        readonly string _learnerSeat;
+        readonly IReadOnlyList<OpponentPlan> _opponents;
+
+        MlRunPresentationPlan(
+            string runDirectory,
+            string learnerSeat,
+            IReadOnlyList<OpponentPlan> opponents,
+            TrainingScenario scenario)
+        {
+            RunDirectory = runDirectory;
+            _learnerSpec = ReplayViewerMenu.BuildLiveTrainingSpec(runDirectory);
+            _learnerSeat = learnerSeat;
+            _opponents = opponents;
+            Scenario = scenario;
+        }
+
+        public string RunDirectory { get; }
+        public TrainingScenario Scenario { get; }
+
+        public static MlRunPresentationPlan Load(string runDirectory)
+        {
+            string runPath;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(runDirectory))
+                    throw new InvalidDataException("run directory is required");
+                runPath = Path.GetFullPath(runDirectory);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is NotSupportedException ||
+                error is PathTooLongException ||
+                error is InvalidDataException)
+            {
+                throw new InvalidOperationException(
+                    (runDirectory ?? "<null>") + ": " + error.Message, error);
+            }
+
+            string manifestPath = Path.Combine(runPath, "run.json");
+            try
+            {
+                if (!File.Exists(manifestPath))
+                    throw new InvalidDataException("run manifest does not exist");
+                string json = File.ReadAllText(manifestPath);
+                RunManifestDto manifest = JsonUtility.FromJson<RunManifestDto>(json);
+                if (manifest == null)
+                    throw new InvalidDataException("run manifest must be a JSON object");
+                if (manifest.schema_version != 1)
+                    throw new InvalidDataException("schema_version must be 1");
+                string learnerSeat = manifest.config?.learner_seat;
+                if (learnerSeat != "0" &&
+                    learnerSeat != "1" &&
+                    learnerSeat != "alternating")
+                    throw new InvalidDataException(
+                        "config.learner_seat must be '0', '1', or 'alternating'");
+                if (manifest.opponent_snapshot == null)
+                    throw new InvalidDataException("opponent_snapshot is required");
+
+                bool hasScenarioMetadata = Regex.IsMatch(
+                    json, "\"scenario\"\\s*:", RegexOptions.CultureInvariant);
+                TrainingScenario scenario = LoadScenario(
+                    runPath, manifest, hasScenarioMetadata);
+                ContractDto learnerContract = manifest.contract;
+                IReadOnlyList<OpponentPlan> opponents = ResolveOpponents(
+                    manifest.opponent_snapshot, learnerContract, "opponent_snapshot");
+                return new MlRunPresentationPlan(
+                    runPath, learnerSeat, opponents, scenario);
+            }
+            catch (InvalidOperationException error)
+            {
+                throw new InvalidOperationException(
+                    manifestPath + ": " + error.Message, error);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    manifestPath + ": " + error.Message, error);
+            }
+        }
+
+        public MlPresentationGame PlanGame(int gameIndex)
+        {
+            if (gameIndex < 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(gameIndex), gameIndex, "game index must be non-negative");
+            int learnerSeat = _learnerSeat == "1"
+                ? 1
+                : _learnerSeat == "alternating"
+                    ? gameIndex % 2
+                    : 0;
+            OpponentPlan opponent = _opponents[gameIndex % _opponents.Count];
+            return new MlPresentationGame(
+                learnerSeat == 0 ? _learnerSpec : opponent.Spec,
+                learnerSeat == 0 ? opponent.Spec : _learnerSpec,
+                learnerSeat,
+                learnerSeat == 0
+                    ? ModelDuelObserverSeat.Player1
+                    : ModelDuelObserverSeat.Player2,
+                opponent.Label,
+                Scenario);
+        }
+
+        static TrainingScenario LoadScenario(
+            string runDirectory,
+            RunManifestDto manifest,
+            bool hasScenarioMetadata)
+        {
+            if (!hasScenarioMetadata)
+            {
+                string environment = manifest.config?.environment;
+                if (string.IsNullOrWhiteSpace(environment))
+                    environment = manifest.contract?.version;
+                try
+                {
+                    return TrainingScenario.CreateStandard(
+                        environment, "legacy-default");
+                }
+                catch (Exception error)
+                {
+                    throw new InvalidOperationException(
+                        "legacy scenario environment is invalid: " + error.Message,
+                        error);
+                }
+            }
+
+            ScenarioDto recorded = manifest.scenario;
+            if (recorded.schema_version != 1)
+                throw new InvalidOperationException(
+                    "scenario.schema_version must be 1");
+            if (string.IsNullOrWhiteSpace(recorded.path))
+                throw new InvalidOperationException(
+                    "scenario.path must be a non-empty string");
+            string scenarioPath = ResolveContainedPath(
+                runDirectory, recorded.path, "scenario.path");
+            try
+            {
+                MlTrainingScenario scenario = MlTrainingScenarioFile.Load(scenarioPath);
+                if (!string.IsNullOrWhiteSpace(recorded.template_id) &&
+                    !string.Equals(
+                        scenario.Id, recorded.template_id, StringComparison.Ordinal))
+                    throw new InvalidDataException(
+                        "scenario id does not match run metadata");
+                string expectedEnvironment = manifest.contract?.version;
+                if (!string.IsNullOrWhiteSpace(expectedEnvironment) &&
+                    !string.Equals(
+                        MlEnvironmentContracts.CliValue(scenario.Environment),
+                        expectedEnvironment,
+                        StringComparison.Ordinal))
+                    throw new InvalidDataException(
+                        "scenario environment does not match run contract");
+                return MlTrainingScenarioPreflight.ToEngine(scenario);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    scenarioPath + ": " + error.Message, error);
+            }
+        }
+
+        static IReadOnlyList<OpponentPlan> ResolveOpponents(
+            OpponentDto opponent,
+            ContractDto learnerContract,
+            string metadataPath)
+        {
+            if (opponent.kind == "pool")
+            {
+                if (opponent.controllers == null || opponent.controllers.Length == 0)
+                    throw new InvalidOperationException(
+                        metadataPath + ".controllers must contain at least one opponent");
+                var plans = new List<OpponentPlan>(opponent.controllers.Length);
+                for (int index = 0; index < opponent.controllers.Length; index++)
+                {
+                    OpponentEntryDto item = opponent.controllers[index];
+                    if (item == null)
+                        throw new InvalidOperationException(
+                            metadataPath + ".controllers[" + index + "] is required");
+                    plans.Add(ResolveOpponent(
+                        item, learnerContract,
+                        metadataPath + ".controllers[" + index + "]"));
+                }
+                return plans;
+            }
+            return new[]
+            {
+                ResolveOpponent(
+                    OpponentEntryDto.From(opponent),
+                    learnerContract,
+                    metadataPath)
+            };
+        }
+
+        static OpponentPlan ResolveOpponent(
+            OpponentEntryDto opponent,
+            ContractDto learnerContract,
+            string metadataPath)
+        {
+            if (opponent.kind == "scripted")
+            {
+                if (opponent.name != "greedy" && opponent.name != "random")
+                    throw new InvalidOperationException(
+                        metadataPath +
+                        ".name must be 'greedy' or 'random' for a scripted opponent");
+                return new OpponentPlan(
+                    opponent.name,
+                    opponent.name == "greedy" ? "Greedy" : "Random");
+            }
+            if (opponent.kind == "snapshot")
+                return ResolveSnapshot(opponent, learnerContract, metadataPath);
+            if (opponent.kind == "run")
+                return ResolveLiveRun(opponent, learnerContract, metadataPath);
+            throw new InvalidOperationException(
+                metadataPath + ".kind '" + (opponent.kind ?? "<missing>") +
+                "' is not a supported opponent");
+        }
+
+        static OpponentPlan ResolveSnapshot(
+            OpponentEntryDto opponent,
+            ContractDto learnerContract,
+            string metadataPath)
+        {
+            if (string.IsNullOrWhiteSpace(opponent.path))
+                throw new InvalidOperationException(metadataPath + ".path is required");
+            if (string.IsNullOrWhiteSpace(opponent.source_run))
+                throw new InvalidOperationException(
+                    metadataPath + ".source_run is required");
+            if (opponent.algorithm != "maskable_ppo" &&
+                opponent.algorithm != "masked_dqn")
+                throw new InvalidOperationException(
+                    metadataPath + ".algorithm is invalid");
+            if (opponent.step < 0)
+                throw new InvalidOperationException(
+                    metadataPath + ".step must be non-negative");
+
+            string sourceRun = Path.GetFullPath(opponent.source_run);
+            string checkpoint = Path.GetFullPath(opponent.path);
+            string checkpointsDirectory = Path.GetFullPath(
+                Path.Combine(sourceRun, "checkpoints"));
+            if (!string.Equals(
+                    Path.GetDirectoryName(checkpoint),
+                    checkpointsDirectory,
+                    PathComparison) ||
+                !string.Equals(
+                    Path.GetFileName(checkpoint),
+                    "step_" + opponent.step.ToString("D9") + ".zip",
+                    StringComparison.OrdinalIgnoreCase) ||
+                !File.Exists(checkpoint))
+                throw new InvalidOperationException(
+                    metadataPath +
+                    ".path must name its recorded checkpoint inside source_run");
+
+            SourceManifestDto source = LoadSourceManifest(
+                sourceRun, learnerContract, metadataPath);
+            if (!string.Equals(
+                    source.config?.algorithm,
+                    opponent.algorithm,
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    metadataPath +
+                    ".algorithm does not match source_run/run.json");
+
+            string inferenceMode = ValidateInferenceMode(
+                opponent.inference_mode, metadataPath);
+            string spec = JsonUtility.ToJson(new SnapshotSpecDto
+            {
+                kind = "snapshot",
+                path = checkpoint,
+                source_run = sourceRun,
+                algorithm = opponent.algorithm,
+                step = opponent.step,
+                inference_mode = inferenceMode,
+            });
+            return new OpponentPlan(
+                spec,
+                Path.GetFileName(sourceRun) + " · step " + opponent.step);
+        }
+
+        static OpponentPlan ResolveLiveRun(
+            OpponentEntryDto opponent,
+            ContractDto learnerContract,
+            string metadataPath)
+        {
+            if (opponent.mode != "live")
+                throw new InvalidOperationException(
+                    metadataPath + ".mode must be 'live'");
+            if (string.IsNullOrWhiteSpace(opponent.path))
+                throw new InvalidOperationException(metadataPath + ".path is required");
+            string sourceRun = Path.GetFullPath(opponent.path);
+            LoadSourceManifest(sourceRun, learnerContract, metadataPath);
+            string inferenceMode = ValidateInferenceMode(
+                opponent.inference_mode, metadataPath);
+            string spec = JsonUtility.ToJson(new RunSpecDto
+            {
+                kind = "run",
+                path = sourceRun,
+                mode = "live",
+                inference_mode = inferenceMode,
+            });
+            return new OpponentPlan(
+                spec, Path.GetFileName(sourceRun) + " · live");
+        }
+
+        static SourceManifestDto LoadSourceManifest(
+            string sourceRun,
+            ContractDto learnerContract,
+            string metadataPath)
+        {
+            string manifestPath = Path.Combine(sourceRun, "run.json");
+            try
+            {
+                SourceManifestDto source = JsonUtility.FromJson<SourceManifestDto>(
+                    File.ReadAllText(manifestPath));
+                if (source == null || source.schema_version != 1)
+                    throw new InvalidDataException(
+                        "source run schema_version must be 1");
+                if (source.config == null ||
+                    string.IsNullOrWhiteSpace(source.config.algorithm))
+                    throw new InvalidDataException(
+                        "source run config.algorithm is required");
+                ValidateContractCompatibility(
+                    learnerContract, source.contract, metadataPath);
+                return source;
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    manifestPath + ": " + error.Message, error);
+            }
+        }
+
+        static void ValidateContractCompatibility(
+            ContractDto learner,
+            ContractDto opponent,
+            string metadataPath)
+        {
+            if (learner == null ||
+                string.IsNullOrWhiteSpace(learner.version) ||
+                string.IsNullOrWhiteSpace(learner.encoding_hash))
+                throw new InvalidOperationException(
+                    metadataPath + ": learner run contract metadata is incomplete");
+            if (opponent == null ||
+                string.IsNullOrWhiteSpace(opponent.version) ||
+                string.IsNullOrWhiteSpace(opponent.encoding_hash))
+                throw new InvalidOperationException(
+                    metadataPath + ": opponent source run contract metadata is incomplete");
+            if (!string.Equals(
+                    learner.version, opponent.version, StringComparison.Ordinal) ||
+                !string.Equals(
+                    learner.encoding_hash,
+                    opponent.encoding_hash,
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    metadataPath +
+                    ": opponent source run contract is incompatible with the learner run");
+        }
+
+        static string ValidateInferenceMode(string value, string metadataPath)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "deterministic";
+            if (value == "deterministic" || value == "stochastic") return value;
+            throw new InvalidOperationException(
+                metadataPath +
+                ".inference_mode must be 'deterministic' or 'stochastic'");
+        }
+
+        static string ResolveContainedPath(
+            string root, string recordedPath, string metadataPath)
+        {
+            if (Path.IsPathRooted(recordedPath))
+                throw new InvalidOperationException(
+                    metadataPath + " must be relative to the run directory");
+            string fullRoot = Path.GetFullPath(root).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullPath = Path.GetFullPath(Path.Combine(fullRoot, recordedPath));
+            if (!fullPath.StartsWith(
+                    fullRoot + Path.DirectorySeparatorChar,
+                    PathComparison))
+                throw new InvalidOperationException(
+                    metadataPath + " escapes the run directory");
+            return fullPath;
+        }
+
+        static StringComparison PathComparison =>
+            Environment.OSVersion.Platform == PlatformID.Win32NT
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
+        sealed class OpponentPlan
+        {
+            public OpponentPlan(string spec, string label)
+            {
+                Spec = spec;
+                Label = label;
+            }
+
+            public string Spec { get; }
+            public string Label { get; }
+        }
+
+        [Serializable]
+        sealed class RunManifestDto
+        {
+            public int schema_version;
+            public ConfigDto config;
+            public ContractDto contract;
+            public ScenarioDto scenario;
+            public OpponentDto opponent_snapshot;
+        }
+
+        [Serializable]
+        sealed class SourceManifestDto
+        {
+            public int schema_version;
+            public ConfigDto config;
+            public ContractDto contract;
+        }
+
+        [Serializable]
+        sealed class ConfigDto
+        {
+            public string algorithm;
+            public string environment;
+            public string learner_seat;
+        }
+
+        [Serializable]
+        sealed class ContractDto
+        {
+            public string version;
+            public string encoding_hash;
+        }
+
+        [Serializable]
+        sealed class ScenarioDto
+        {
+            public string path;
+            public string template_id;
+            public int schema_version;
+        }
+
+        [Serializable]
+        sealed class OpponentDto
+        {
+            public string kind;
+            public string name;
+            public string path;
+            public string source_run;
+            public string algorithm;
+            public int step;
+            public string mode;
+            public string inference_mode;
+            public OpponentEntryDto[] controllers;
+        }
+
+        [Serializable]
+        sealed class OpponentEntryDto
+        {
+            public string kind;
+            public string name;
+            public string path;
+            public string source_run;
+            public string algorithm;
+            public int step;
+            public string mode;
+            public string inference_mode;
+
+            public static OpponentEntryDto From(OpponentDto value) =>
+                new OpponentEntryDto
+                {
+                    kind = value.kind,
+                    name = value.name,
+                    path = value.path,
+                    source_run = value.source_run,
+                    algorithm = value.algorithm,
+                    step = value.step,
+                    mode = value.mode,
+                    inference_mode = value.inference_mode,
+                };
+        }
+
+        [Serializable]
+        sealed class SnapshotSpecDto
+        {
+            public string kind;
+            public string path;
+            public string source_run;
+            public string algorithm;
+            public int step;
+            public string inference_mode;
+        }
+
+        [Serializable]
+        sealed class RunSpecDto
+        {
+            public string kind;
+            public string path;
+            public string mode;
+            public string inference_mode;
+        }
+    }
+}

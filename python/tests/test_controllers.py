@@ -175,6 +175,110 @@ def test_fixed_run_snapshot_retains_exact_checkpoint_identity(
     assert resolved.contract == contract
 
 
+def test_snapshot_controller_loads_contract_from_its_recorded_source_run(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    checkpoint = run / "checkpoints" / "step_000000010.zip"
+
+    resolved = ControllerResolver(model_loader=loader).resolve(
+        {
+            "kind": "snapshot",
+            "path": str(checkpoint),
+            "source_run": str(run),
+            "algorithm": "maskable_ppo",
+            "step": 10,
+        }
+    )
+
+    assert resolved.path == checkpoint
+    assert resolved.contract == contract
+    assert resolved.algorithm == "maskable_ppo"
+    assert resolved.step == 10
+
+
+@pytest.mark.parametrize("location", ["standalone", "escaped", "nested"])
+def test_snapshot_controller_rejects_checkpoint_outside_recorded_checkpoint_directory(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    loader,
+    location: str,
+) -> None:
+    run = _write_run(tmp_path, contract)
+    if location == "standalone":
+        checkpoint = tmp_path / "step_000000010.zip"
+    elif location == "escaped":
+        checkpoint = run / "checkpoints" / ".." / "step_000000010.zip"
+    else:
+        checkpoint = run / "checkpoints" / "nested" / "step_000000010.zip"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"model")
+
+    with pytest.raises(ControllerResolutionError, match="inside the source run"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {
+                "kind": "snapshot",
+                "path": str(checkpoint),
+                "source_run": str(run),
+                "algorithm": "maskable_ppo",
+                "step": 10,
+            }
+        )
+
+
+def test_snapshot_controller_rejects_algorithm_not_recorded_by_source_run(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+
+    with pytest.raises(ControllerResolutionError, match="algorithm"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {
+                "kind": "snapshot",
+                "path": str(run / "checkpoints" / "step_000000010.zip"),
+                "source_run": str(run),
+                "algorithm": "masked_dqn",
+                "step": 10,
+            }
+        )
+
+
+def test_snapshot_controller_requires_canonical_recorded_algorithm(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+
+    with pytest.raises(
+        ControllerResolutionError, match="snapshot controller algorithm"
+    ):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {
+                "kind": "snapshot",
+                "path": str(run / "checkpoints" / "step_000000010.zip"),
+                "source_run": str(run),
+                "algorithm": "ppo",
+                "step": 10,
+            }
+        )
+
+
+def test_snapshot_controller_rejects_step_not_recorded_by_checkpoint_name(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+
+    with pytest.raises(ControllerResolutionError, match="step"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {
+                "kind": "snapshot",
+                "path": str(run / "checkpoints" / "step_000000010.zip"),
+                "source_run": str(run),
+                "algorithm": "maskable_ppo",
+                "step": 11,
+            }
+        )
+
+
 def test_live_run_snapshot_retains_run_path_and_live_mode(
     tmp_path: Path,
     contract: EnvironmentContract,
