@@ -6,6 +6,7 @@ namespace HexWars.Engine.Rl
 {
     /// <summary>Serializable schema-v1 training scenario. JSON parsing stays outside the engine so
     /// Unity and headless callers construct the exact same environment configuration here.</summary>
+    [Serializable]
     public sealed class TrainingScenario
     {
         public int SchemaVersion = 1;
@@ -265,6 +266,7 @@ namespace HexWars.Engine.Rl
         }
     }
 
+    [Serializable]
     public sealed class TrainingBoardConfig
     {
         public int Width = 13;
@@ -278,6 +280,7 @@ namespace HexWars.Engine.Rl
         public int WaterWeight = 5;
     }
 
+    [Serializable]
     public sealed class TrainingRuleConfig
     {
         public int ActionsPerTurn;
@@ -292,11 +295,13 @@ namespace HexWars.Engine.Rl
         public int GeneratorHealth = 3;
     }
 
+    [Serializable]
     public sealed class TrainingEpisodeConfig
     {
         public int MaxSteps = 600;
     }
 
+    [Serializable]
     public sealed class TacticalRewardConfig
     {
         public float ShapeScale = 0.01f;
@@ -306,12 +311,14 @@ namespace HexWars.Engine.Rl
         public float PointsWeight = 0.5f;
     }
 
+    [Serializable]
     public sealed class AdaptiveRewardConfig
     {
         public float IntermediateDecisionPenalty = 0.001f;
         public float DeploymentCompletionBonus;
     }
 
+    [Serializable]
     public sealed class TrainingAdaptiveConfig
     {
         public int StartingUnitCount = 6;

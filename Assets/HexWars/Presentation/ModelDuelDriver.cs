@@ -101,7 +101,7 @@ namespace HexWars.Presentation
         public string P1Spec = "greedy";
         public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
         public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
-        [NonSerialized] public TrainingScenario Scenario;
+        public TrainingScenario Scenario;
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop;
@@ -147,16 +147,7 @@ namespace HexWars.Presentation
             _p1Live = IsLiveRun(P1Spec);
             try
             {
-                _activeScenario = Scenario ?? TrainingScenario.CreateStandard(
-                    MlEnvironmentContracts.CliValue(Environment));
-                if (!string.Equals(
-                    _activeScenario.Environment,
-                    MlEnvironmentContracts.CliValue(Environment),
-                    StringComparison.Ordinal))
-                    throw new InvalidOperationException(
-                        "arena scenario environment " + _activeScenario.Environment +
-                        " does not match selected environment " +
-                        MlEnvironmentContracts.CliValue(Environment) + ".");
+                _activeScenario = ResolveScenario();
                 _contractIdentity =
                     ModelDuelEnvironmentFactory.ContractIdentity(_activeScenario);
             }
@@ -192,6 +183,38 @@ namespace HexWars.Presentation
             if (input != null) input.ReadOnly = true;
             Debug.Log($"ModelDuelDriver: P0={P0Spec} vs P1={P1Spec}, loop={Loop}");
             BeginGame();
+        }
+
+        public TrainingScenario ResolveScenario()
+        {
+            TrainingScenario scenario = Scenario ??
+                TrainingScenario.CreateStandard(
+                    MlEnvironmentContracts.CliValue(Environment));
+            if (!string.Equals(
+                scenario.Environment,
+                MlEnvironmentContracts.CliValue(Environment),
+                StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "arena scenario environment " + scenario.Environment +
+                    " does not match selected environment " +
+                    MlEnvironmentContracts.CliValue(Environment) + ".");
+            // Unity's by-value serializer materializes absent nested reference fields.
+            // Restore the schema-v1 environment invariant before validating the reload.
+            if (scenario.Environment == MlContract.CurrentVersion)
+            {
+                scenario.AdaptiveReward = null;
+                scenario.Adaptive = null;
+            }
+            else if (scenario.Environment == MlContract.AdaptiveVersion)
+            {
+                scenario.TacticalReward = null;
+            }
+            IReadOnlyList<string> errors = scenario.Validate();
+            if (errors.Count > 0)
+                throw new InvalidOperationException(
+                    "arena scenario is invalid after serialization: " +
+                    string.Join("; ", errors));
+            return scenario;
         }
 
         void BeginGame()

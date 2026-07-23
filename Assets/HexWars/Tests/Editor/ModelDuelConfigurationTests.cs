@@ -5,6 +5,7 @@ using HexWars.Engine.Rl;
 using HexWars.Presentation;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 
 namespace HexWars.Presentation.Tests
@@ -244,6 +245,40 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(() => ModelDuelEnvironmentFactory.Create(scenario),
                 Throws.ArgumentException.With.Message.Contains("max steps"));
+        }
+
+        [Test]
+        public void DriverScenario_SurvivesUnitySerializationAndPreservesEncoding()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 24;
+            scenario.Board.Height = 16;
+            string expectedEncoding =
+                ModelDuelEnvironmentFactory.ContractIdentity(scenario).EncodingHash;
+            var originalObject = new GameObject("original-driver");
+            var restoredObject = new GameObject("restored-driver");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.Environment = MlEnvironmentContract.TacticalV1;
+                original.Scenario = scenario;
+
+                string serializedComponent = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(serializedComponent, restored);
+                TrainingScenario roundTripped = restored.ResolveScenario();
+
+                Assert.That(roundTripped.Board.Width, Is.EqualTo(24));
+                Assert.That(roundTripped.Board.Height, Is.EqualTo(16));
+                Assert.That(
+                    ModelDuelEnvironmentFactory.ContractIdentity(roundTripped).EncodingHash,
+                    Is.EqualTo(expectedEncoding));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
         }
 
         [Test]
