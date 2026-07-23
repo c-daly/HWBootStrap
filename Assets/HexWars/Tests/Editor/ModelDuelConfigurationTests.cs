@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using HexWars.Presentation;
@@ -7,6 +8,7 @@ using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace HexWars.Presentation.Tests
 {
@@ -131,6 +133,57 @@ namespace HexWars.Presentation.Tests
                 Is.True);
             Assert.That(ModelDuelDriver.ShouldReconfigure(game0, game0, gameEnded: true),
                 Is.False);
+        }
+
+        [Test]
+        public void ApplyPresentationGame_DerivesObserverFromLearnerSeat()
+        {
+            var go = new GameObject("driver");
+            try
+            {
+                var driver = go.AddComponent<ModelDuelDriver>();
+                var game = new MlPresentationGame(
+                    "greedy", "random", learnerSeat: 1,
+                    observer: ModelDuelObserverSeat.Player1,
+                    opponentLabel: "Greedy",
+                    scenario: TrainingScenario.CreateStandard("tactical-v1"));
+
+                InvokePrivate(driver, "ApplyPresentationGame", game);
+
+                Assert.That(driver.Observer, Is.EqualTo(ModelDuelObserverSeat.Player2));
+                Assert.That(driver.ObserverPlayer, Is.EqualTo(PlayerId.Player1));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
+        public void EmptyPresentationScheduleAtBoundaryFailsClosedAndClearsStarting()
+        {
+            var go = new GameObject("driver");
+            try
+            {
+                var driver = go.AddComponent<ModelDuelDriver>();
+                driver.P0Spec = "run:C:/runs/learner";
+                driver.PresentationPlan = new MlPresentationSchedule();
+                SetPrivate(driver, "_p0Model", true);
+
+                LogAssert.Expect(
+                    LogType.Error,
+                    "ModelDuelDriver: game-boundary restart failed. " +
+                    "presentation schedule must contain at least one game");
+                InvokePrivate(driver, "AdvanceAtGameBoundary");
+
+                Assert.That(driver.IsDone, Is.True);
+                Assert.That(driver.IsStarting, Is.False);
+                Assert.That(driver.P0ArenaStatus, Is.EqualTo("restart failed"));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
         }
 
         [Test]
@@ -479,6 +532,22 @@ namespace HexWars.Presentation.Tests
                 Calls++;
                 return new EndTurn(state.ActivePlayer);
             }
+        }
+
+        static void InvokePrivate(object target, string method, params object[] arguments)
+        {
+            MethodInfo info = target.GetType().GetMethod(
+                method, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(info, Is.Not.Null, method);
+            info.Invoke(target, arguments);
+        }
+
+        static void SetPrivate(object target, string field, object value)
+        {
+            FieldInfo info = target.GetType().GetField(
+                field, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(info, Is.Not.Null, field);
+            info.SetValue(target, value);
         }
 
         static string NewScratchDirectory()

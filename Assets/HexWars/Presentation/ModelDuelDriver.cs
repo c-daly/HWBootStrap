@@ -176,7 +176,8 @@ namespace HexWars.Presentation
         public ModelArenaSeatIdentity[] IdentitySnapshot() => ModelArenaIdentity.Build(
             P0Spec, P1Spec, P0Resolved, P1Resolved, CurrentSeat,
             P0Wins, P1Wins, Draws, P0ArenaStatus, P1ArenaStatus,
-            CurrentLearnerSeat, LearnerWins, LearnerLosses, LearnerDraws);
+            CurrentLearnerSeat, LearnerWins, LearnerLosses, LearnerDraws,
+            _activePresentationGame?.OpponentLabel);
 
         public MlPresentationGame NextPresentationGame(int gamesPlayed) =>
             PresentationPlan?.NextPresentationGame(gamesPlayed);
@@ -377,9 +378,9 @@ namespace HexWars.Presentation
             if (IsStarting || _done) return;
             IsStarting = true;
             _duel = null;
-            MlPresentationGame next = NextPresentationGame(GamesPlayed);
             try
             {
+                MlPresentationGame next = NextPresentationGame(GamesPlayed);
                 if (ShouldReconfigure(_activePresentationGame, next, gameEnded: true))
                 {
                     _bridge?.Dispose();
@@ -497,7 +498,9 @@ namespace HexWars.Presentation
                     "presentation game scenario is required");
             P0Spec = game.P0Spec;
             P1Spec = game.P1Spec;
-            Observer = game.Observer;
+            Observer = game.LearnerSeat == 0
+                ? ModelDuelObserverSeat.Player1
+                : ModelDuelObserverSeat.Player2;
             Scenario = game.Scenario;
             Environment = game.Scenario.Environment == MlContract.AdaptiveVersion
                 ? MlEnvironmentContract.AdaptiveV1

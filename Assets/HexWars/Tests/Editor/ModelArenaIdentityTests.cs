@@ -215,6 +215,24 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Build_PresentationOpponentUsesRecordedPoolLabelWithoutRelabelingLearner()
+        {
+            var rows = ModelArenaIdentity.Build(
+                "run:C:/runs/learner", "ppo:C:/models/pool-b.zip",
+                null, null, currentSeat: 0,
+                p0Wins: 0, p1Wins: 0, draws: 0,
+                learnerSeat: 0, learnerWins: 0, learnerLosses: 0,
+                learnerDraws: 0, opponentLabel: "pool-b · step 20");
+
+            Assert.That(rows[0].Role, Is.EqualTo("Learner"));
+            Assert.That(rows[0].Controller, Is.EqualTo("learner"));
+            Assert.That(rows[1].Role, Is.EqualTo("Opponent"));
+            Assert.That(rows[1].Controller, Is.EqualTo("pool-b · step 20"));
+            Assert.That(ModelArenaIdentityOverlay.RowText(rows[1], 72),
+                Does.Contain("Opponent").And.Contain("pool-b · step 20"));
+        }
+
+        [Test]
         public void Build_ManualArenaLeavesRolesBlankAndKeepsSeatRecords()
         {
             var rows = ModelArenaIdentity.Build(
