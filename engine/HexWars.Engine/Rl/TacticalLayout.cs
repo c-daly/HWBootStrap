@@ -67,14 +67,34 @@ namespace HexWars.Engine.Rl
             {
                 cellCount = checked(
                     cfg.BoardGen.Width * cfg.BoardGen.Height);
+            }
+            catch (OverflowException)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(cfg),
+                    "tactical cell count exceeds Int32 capacity");
+            }
+
+            try
+            {
                 _ = CheckedActionCount(cfg.Roster.Count, cellCount);
+            }
+            catch (OverflowException)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(cfg),
+                    "tactical action size exceeds Int32 capacity");
+            }
+
+            try
+            {
                 _ = CheckedObservationLength(cfg.Roster.Count, cellCount);
             }
             catch (OverflowException)
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(cfg),
-                    "tactical cell count, action size, or observation size exceeds Int32 capacity");
+                    "tactical observation size exceeds Int32 capacity");
             }
 
             if (cellCount > MaxSafeCellCount)

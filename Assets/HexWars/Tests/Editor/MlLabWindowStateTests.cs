@@ -280,6 +280,32 @@ namespace HexWars.Presentation.Tests
             Assert.That(state.Errors, Is.Empty);
         }
 
+        [Test]
+        public void LiveBlankCustomTracker_DisablesLaunchWithoutMutatingConfig()
+        {
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            var config = MlLabConfig.Default();
+            MlTrackerSelectionSnapshot trackers =
+                MlTrackerSelectionSnapshot.Capture(
+                    useTensorBoard: true,
+                    useWandb: false,
+                    useCustomTracker: true,
+                    customTrackerAdapter: " ");
+
+            MlTrainingLaunchFormState state =
+                MlTrainingLaunchFormState.Evaluate(
+                    config, session, resume: false, trackers);
+
+            Assert.That(state.CanLaunch, Is.False);
+            Assert.That(
+                state.Errors,
+                Has.Some.Contains(
+                    "Custom tracker requires a module:function adapter."));
+            Assert.That(config.Trackers, Has.Count.EqualTo(1));
+            Assert.That(config.Trackers.Single().Kind, Is.EqualTo("local"));
+        }
+
         [TestCase("tactical-v1", MlEnvironmentContract.TacticalV1)]
         [TestCase("adaptive-v1", MlEnvironmentContract.AdaptiveV1)]
         public void ArenaEnvironment_IsResolvedFromRunMetadata(string contract, MlEnvironmentContract expected)

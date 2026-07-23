@@ -98,7 +98,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public static MlLabConfig Default() => new MlLabConfig();
 
-        public IReadOnlyList<string> Validate()
+        public IReadOnlyList<string> Validate() => Validate(Trackers);
+
+        public IReadOnlyList<string> Validate(
+            IReadOnlyList<MlTrackerConfig> trackers)
         {
             var errors = new List<string>();
             if (string.IsNullOrWhiteSpace(RunName) || !SafeRunName.IsMatch(RunName))
@@ -112,7 +115,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("Opponent path is required for a model or live run.");
             if (!string.IsNullOrEmpty(ResumeSource) && string.IsNullOrWhiteSpace(ResumeSource))
                 errors.Add("Resume source cannot be blank.");
-            foreach (var tracker in Trackers ?? new List<MlTrackerConfig>())
+            foreach (var tracker in
+                     trackers ?? Array.Empty<MlTrackerConfig>())
                 if (tracker != null && string.Equals(tracker.Kind, "custom", StringComparison.OrdinalIgnoreCase) &&
                     string.IsNullOrWhiteSpace(tracker.Settings))
                     errors.Add("Custom tracker requires a module:function adapter.");

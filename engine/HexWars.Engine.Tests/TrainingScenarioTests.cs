@@ -271,5 +271,62 @@ namespace HexWars.Engine.Tests
 
             Assert.That(error!.Message, Does.Contain("cell count"));
         }
+
+        [Test]
+        public void TacticalContract_RejectsCellCountArithmeticOverflow()
+        {
+            var config = new EnvConfig
+            {
+                BoardGen = new BoardGenConfig(
+                    width: int.MaxValue, height: 2),
+                Roster = Array.Empty<UnitStats>(),
+            };
+
+            var error = Assert.Throws<ArgumentOutOfRangeException>(
+                () => MlContract.Create(config));
+
+            Assert.That(
+                error!.Message,
+                Does.StartWith(
+                    "tactical cell count exceeds Int32 capacity"));
+        }
+
+        [Test]
+        public void TacticalContract_RejectsActionSizeArithmeticOverflow()
+        {
+            var config = new EnvConfig
+            {
+                BoardGen = new BoardGenConfig(
+                    width: 65_536, height: 1),
+                Roster = new UnitStats[10_923],
+            };
+
+            var error = Assert.Throws<ArgumentOutOfRangeException>(
+                () => MlContract.Create(config));
+
+            Assert.That(
+                error!.Message,
+                Does.StartWith(
+                    "tactical action size exceeds Int32 capacity"));
+        }
+
+        [Test]
+        public void TacticalContract_RejectsObservationSizeArithmeticOverflow()
+        {
+            var config = new EnvConfig
+            {
+                BoardGen = new BoardGenConfig(
+                    width: int.MaxValue, height: 1),
+                Roster = Array.Empty<UnitStats>(),
+            };
+
+            var error = Assert.Throws<ArgumentOutOfRangeException>(
+                () => MlContract.Create(config));
+
+            Assert.That(
+                error!.Message,
+                Does.StartWith(
+                    "tactical observation size exceeds Int32 capacity"));
+        }
     }
 }

@@ -442,6 +442,54 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    public sealed class MlTrackerSelectionSnapshot
+    {
+        readonly bool _useTensorBoard;
+        readonly bool _useWandb;
+        readonly bool _useCustomTracker;
+        readonly string _customTrackerAdapter;
+
+        MlTrackerSelectionSnapshot(
+            bool useTensorBoard,
+            bool useWandb,
+            bool useCustomTracker,
+            string customTrackerAdapter)
+        {
+            _useTensorBoard = useTensorBoard;
+            _useWandb = useWandb;
+            _useCustomTracker = useCustomTracker;
+            _customTrackerAdapter = customTrackerAdapter ?? string.Empty;
+        }
+
+        public static MlTrackerSelectionSnapshot Capture(
+            bool useTensorBoard,
+            bool useWandb,
+            bool useCustomTracker,
+            string customTrackerAdapter) =>
+            new MlTrackerSelectionSnapshot(
+                useTensorBoard,
+                useWandb,
+                useCustomTracker,
+                customTrackerAdapter);
+
+        public List<MlTrackerConfig> CreateTrackers()
+        {
+            var trackers = new List<MlTrackerConfig>
+            {
+                new MlTrackerConfig("local"),
+            };
+            if (_useTensorBoard)
+                trackers.Add(new MlTrackerConfig("tensorboard"));
+            if (_useWandb)
+                trackers.Add(new MlTrackerConfig("wandb"));
+            if (_useCustomTracker)
+                trackers.Add(
+                    new MlTrackerConfig(
+                        "custom", _customTrackerAdapter));
+            return trackers;
+        }
+    }
+
     public sealed class MlTrainingLaunchFormState
     {
         MlTrainingLaunchFormState(IReadOnlyList<string> errors)
@@ -455,10 +503,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public static MlTrainingLaunchFormState Evaluate(
             MlLabConfig config,
             MlTrainingScenarioSession scenarioSession,
-            bool resume)
+            bool resume,
+            MlTrackerSelectionSnapshot trackerSelection = null)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
-            var errors = new List<string>(config.Validate());
+            IReadOnlyList<MlTrackerConfig> trackers =
+                trackerSelection == null
+                    ? config.Trackers
+                    : trackerSelection.CreateTrackers();
+            var errors = new List<string>(config.Validate(trackers));
             if (resume)
             {
                 if (string.IsNullOrWhiteSpace(config.ResumeSource))
@@ -1158,9 +1211,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void DrawControls()
         {
+            MlTrackerSelectionSnapshot trackerSelection =
+                CaptureTrackerSelection();
             MlTrainingLaunchFormState formState =
                 MlTrainingLaunchFormState.Evaluate(
-                    _config, _scenarioSession, _resume);
+                    _config,
+                    _scenarioSession,
+                    _resume,
+                    trackerSelection);
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Controls", EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
@@ -1261,10 +1319,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             _notice = string.Empty;
             _state.BeginValidation();
-            SyncTrackers();
+            MlTrackerSelectionSnapshot trackerSelection =
+                CaptureTrackerSelection();
             var errors = new List<string>(
                 MlTrainingLaunchFormState.Evaluate(
-                    _config, _scenarioSession, _resume).Errors);
+                    _config,
+                    _scenarioSession,
+                    _resume,
+                    trackerSelection).Errors);
             if (!_resume && _scenarioSession?.WorkingCopy != null)
                 _config.Environment =
                     _scenarioSession.WorkingCopy.Environment;
@@ -1278,6 +1340,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _state.Fail(string.Join("\n", errors));
                 return;
             }
+            SyncTrackers(trackerSelection);
 
             string args;
             try
@@ -1327,7 +1390,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _state.Fail("Python ML environment or hexwars_ml.py is missing.");
                 return;
             }
-            SyncTrackers();
+            SyncTrackers(CaptureTrackerSelection());
             string args = _config.BuildDoctorArguments(RunsRoot, GymServer);
             RunCommand(args, "Environment doctor started.", CommandKind.Doctor);
         }
@@ -1354,12 +1417,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             catch (Exception error) { _state.Fail(error.Message); }
         }
 
-        void SyncTrackers()
+        MlTrackerSelectionSnapshot CaptureTrackerSelection() =>
+            MlTrackerSelectionSnapshot.Capture(
+                _useTensorBoard,
+                _useWandb,
+                _useCustomTracker,
+                _customTrackerAdapter);
+
+        void SyncTrackers(
+            MlTrackerSelectionSnapshot trackerSelection)
         {
-            _config.Trackers = new List<MlTrackerConfig> { new MlTrackerConfig("local") };
-            if (_useTensorBoard) _config.Trackers.Add(new MlTrackerConfig("tensorboard"));
-            if (_useWandb) _config.Trackers.Add(new MlTrackerConfig("wandb"));
-            if (_useCustomTracker) _config.Trackers.Add(new MlTrackerConfig("custom", _customTrackerAdapter));
+            _config.Trackers = trackerSelection.CreateTrackers();
         }
 
         void Tick()
