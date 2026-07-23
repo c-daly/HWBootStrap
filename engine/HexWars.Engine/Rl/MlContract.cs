@@ -74,6 +74,7 @@ namespace HexWars.Engine.Rl
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
 
+            TacticalLayout.ValidateDimensions(config);
             var layout = new TacticalLayout(config);
             var kind = EnvironmentKindName(environmentKind);
             var maxSteps = EffectiveMaxSteps(config, environmentKind);

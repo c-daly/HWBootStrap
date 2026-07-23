@@ -442,6 +442,63 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    public sealed class MlTrainingLaunchFormState
+    {
+        MlTrainingLaunchFormState(IReadOnlyList<string> errors)
+        {
+            Errors = errors;
+        }
+
+        public IReadOnlyList<string> Errors { get; }
+        public bool CanLaunch => Errors.Count == 0;
+
+        public static MlTrainingLaunchFormState Evaluate(
+            MlLabConfig config,
+            MlTrainingScenarioSession scenarioSession,
+            bool resume)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            var errors = new List<string>(config.Validate());
+            if (resume)
+            {
+                if (string.IsNullOrWhiteSpace(config.ResumeSource))
+                    errors.Add("A source run is required to resume.");
+                return new MlTrainingLaunchFormState(errors);
+            }
+
+            if (scenarioSession == null)
+            {
+                errors.Add("Training scenario session is unavailable.");
+            }
+            else if (!string.IsNullOrWhiteSpace(
+                         scenarioSession.LibraryError))
+            {
+                errors.Add(scenarioSession.LibraryError);
+            }
+            else if (scenarioSession.WorkingCopy == null)
+            {
+                errors.Add("Training scenario is unavailable.");
+            }
+            else
+            {
+                errors.AddRange(
+                    scenarioSession.WorkingCopy.Validate());
+                try
+                {
+                    MlTrainingScenarioPreflight.Create(
+                        scenarioSession.WorkingCopy);
+                }
+                catch (Exception error)
+                {
+                    errors.Add(
+                        "Training scenario preflight failed: " +
+                        error.Message);
+                }
+            }
+            return new MlTrainingLaunchFormState(errors);
+        }
+    }
+
     public sealed class MlLabWindow : EditorWindow
     {
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
@@ -1101,13 +1158,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void DrawControls()
         {
+            MlTrainingLaunchFormState formState =
+                MlTrainingLaunchFormState.Evaluate(
+                    _config, _scenarioSession, _resume);
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Controls", EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Doctor")) RunDoctor();
-            using (new EditorGUI.DisabledScope(
-                       !_resume &&
-                       (_scenarioSession == null || !_scenarioSession.CanLaunch)))
+            using (new EditorGUI.DisabledScope(!formState.CanLaunch))
             {
                 if (GUILayout.Button(_resume ? "Resume" : "Start"))
                     StartTraining(false);
@@ -1122,6 +1180,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (GUILayout.Button("Open run folder")) EditorUtility.RevealInFinder(_selectedRun);
             }
             EditorGUILayout.EndHorizontal();
+            foreach (string error in formState.Errors)
+                EditorGUILayout.HelpBox(error, MessageType.Error);
             if (!string.IsNullOrWhiteSpace(_notice))
                 EditorGUILayout.HelpBox(_notice, MessageType.Info);
             if (!string.IsNullOrWhiteSpace(_state.Error))
@@ -1202,37 +1262,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _notice = string.Empty;
             _state.BeginValidation();
             SyncTrackers();
-            var errors = new List<string>(_config.Validate());
-            if (!_resume)
-            {
-                if (_scenarioSession == null)
-                    errors.Add("Training scenario session is unavailable.");
-                else if (!string.IsNullOrWhiteSpace(_scenarioSession.LibraryError))
-                    errors.Add(_scenarioSession.LibraryError);
-                else if (_scenarioSession.WorkingCopy == null)
-                    errors.Add("Training scenario is unavailable.");
-                else
-                {
-                    errors.AddRange(_scenarioSession.WorkingCopy.Validate());
-                    _config.Environment =
-                        _scenarioSession.WorkingCopy.Environment;
-                    try
-                    {
-                        MlTrainingScenarioPreflight.Create(
-                            _scenarioSession.WorkingCopy);
-                    }
-                    catch (Exception error)
-                    {
-                        errors.Add(
-                            "Training scenario preflight failed: " +
-                            error.Message);
-                    }
-                }
-            }
+            var errors = new List<string>(
+                MlTrainingLaunchFormState.Evaluate(
+                    _config, _scenarioSession, _resume).Errors);
+            if (!_resume && _scenarioSession?.WorkingCopy != null)
+                _config.Environment =
+                    _scenarioSession.WorkingCopy.Environment;
             if (!File.Exists(PythonExe)) errors.Add("Python environment was not found: " + PythonExe);
             if (!File.Exists(CliScript)) errors.Add("ML CLI was not found: " + CliScript);
             if (!File.Exists(GymServer)) errors.Add("Release GymServer was not found: " + GymServer);
-            if (_resume && string.IsNullOrWhiteSpace(_config.ResumeSource)) errors.Add("A source run is required to resume.");
             string targetRun = Path.Combine(RunsRoot, _config.RunName ?? string.Empty);
             if (Directory.Exists(targetRun)) errors.Add("Run already exists; choose a new run name. Existing runs are never overwritten.");
             if (errors.Count > 0)

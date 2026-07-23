@@ -257,5 +257,19 @@ namespace HexWars.Engine.Tests
             Assert.That(b.ObservationSize, Is.Not.EqualTo(a.ObservationSize));
             Assert.That(b.ActionSize, Is.Not.EqualTo(a.ActionSize));
         }
+
+        [Test]
+        public void TacticalContract_RejectsUnsafeCellCountBeforeLayoutAllocation()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v1");
+            scenario.Board.Width = 257;
+            scenario.Board.Height = 256;
+
+            Assert.That(scenario.Validate(), Is.Empty);
+            var error = Assert.Throws<ArgumentOutOfRangeException>(
+                () => MlContract.Create(scenario.BuildTactical()));
+
+            Assert.That(error!.Message, Does.Contain("cell count"));
+        }
     }
 }

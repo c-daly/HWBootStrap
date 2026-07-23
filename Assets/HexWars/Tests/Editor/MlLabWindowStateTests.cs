@@ -227,6 +227,59 @@ namespace HexWars.Presentation.Tests
             Assert.That(session.CanLaunch, Is.False);
         }
 
+        [Test]
+        public void AuthoritativeTacticalContractFailure_DisablesLaunch()
+        {
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            session.WorkingCopy.Board.Width = 257;
+            session.WorkingCopy.Board.Height = 256;
+
+            Assert.That(session.WorkingCopy.Validate(), Is.Empty);
+            Assert.That(session.CanLaunch, Is.False);
+        }
+
+        [Test]
+        public void InvalidMlForm_DisablesLaunchWithInlineErrors()
+        {
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            var config = MlLabConfig.Default();
+            config.RunName = "bad name";
+            config.TotalTimesteps = 0;
+            config.CheckpointInterval = 0;
+            config.Workers = 0;
+            config.Device = " ";
+            config.OpponentKind = MlOpponentKind.FixedRun;
+            config.OpponentPath = string.Empty;
+
+            MlTrainingLaunchFormState state =
+                MlTrainingLaunchFormState.Evaluate(
+                    config, session, resume: false);
+
+            Assert.That(state.CanLaunch, Is.False);
+            Assert.That(state.Errors, Has.Some.Contains("Run name"));
+            Assert.That(state.Errors, Has.Some.Contains("Timesteps"));
+            Assert.That(state.Errors, Has.Some.Contains("Checkpoint interval"));
+            Assert.That(state.Errors, Has.Some.Contains("Workers"));
+            Assert.That(state.Errors, Has.Some.Contains("Device"));
+            Assert.That(state.Errors, Has.Some.Contains("Opponent path"));
+        }
+
+        [Test]
+        public void ValidMlForm_IsLaunchableWithoutDependencyChecks()
+        {
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+
+            MlTrainingLaunchFormState state =
+                MlTrainingLaunchFormState.Evaluate(
+                    MlLabConfig.Default(), session, resume: false);
+
+            Assert.That(state.CanLaunch, Is.True);
+            Assert.That(state.Errors, Is.Empty);
+        }
+
         [TestCase("tactical-v1", MlEnvironmentContract.TacticalV1)]
         [TestCase("adaptive-v1", MlEnvironmentContract.AdaptiveV1)]
         public void ArenaEnvironment_IsResolvedFromRunMetadata(string contract, MlEnvironmentContract expected)

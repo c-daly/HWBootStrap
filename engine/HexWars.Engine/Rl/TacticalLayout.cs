@@ -11,6 +11,8 @@ namespace HexWars.Engine.Rl
     /// </summary>
     public sealed class TacticalLayout
     {
+        internal const int MaxSafeCellCount = 65_536;
+
         public readonly List<HexCoord> Cells = new List<HexCoord>();
         public readonly Dictionary<HexCoord, int> CellIndex = new Dictionary<HexCoord, int>();
         public readonly int CellCount;
@@ -21,6 +23,8 @@ namespace HexWars.Engine.Rl
 
         public TacticalLayout(EnvConfig cfg)
         {
+            if (cfg == null) throw new ArgumentNullException(nameof(cfg));
+            CellCount = ValidateDimensions(cfg);
             BoardGen = cfg.BoardGen;
             Game = cfg.Game;
             RosterStats = cfg.Roster;
@@ -34,16 +38,61 @@ namespace HexWars.Engine.Rl
                     CellIndex[c] = Cells.Count;
                     Cells.Add(c);
                 }
-            CellCount = Cells.Count;
         }
 
-        public int ActionCount => 1 + 3 * Roster * CellCount; // EndTurn + (move | attack | deploy) × slot/template × cell
+        public int ActionCount => CheckedActionCount(Roster, CellCount); // EndTurn + (move | attack | deploy) × slot/template × cell
 
         // Spatial obs shape: (Channels, BoardH, BoardW) board planes (cells row-major) + Globals scalars.
         public int BoardH => BoardGen.Height;
         public int BoardW => BoardGen.Width;
         public int ObsChannels => TacticalCoding.Channels(Roster);
-        public int ObservationLength => ObsChannels * CellCount + TacticalCoding.Globals;
+        public int ObservationLength =>
+            CheckedObservationLength(Roster, CellCount);
+
+        internal static int ValidateDimensions(EnvConfig cfg)
+        {
+            if (cfg == null) throw new ArgumentNullException(nameof(cfg));
+            if (cfg.BoardGen == null)
+                throw new ArgumentException(
+                    "tactical board configuration is required", nameof(cfg));
+            if (cfg.Roster == null)
+                throw new ArgumentException(
+                    "tactical roster is required", nameof(cfg));
+            if (cfg.BoardGen.Width <= 0 || cfg.BoardGen.Height <= 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(cfg), "tactical board dimensions must be positive");
+
+            int cellCount;
+            try
+            {
+                cellCount = checked(
+                    cfg.BoardGen.Width * cfg.BoardGen.Height);
+                _ = CheckedActionCount(cfg.Roster.Count, cellCount);
+                _ = CheckedObservationLength(cfg.Roster.Count, cellCount);
+            }
+            catch (OverflowException)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(cfg),
+                    "tactical cell count, action size, or observation size exceeds Int32 capacity");
+            }
+
+            if (cellCount > MaxSafeCellCount)
+                throw new ArgumentOutOfRangeException(
+                    nameof(cfg),
+                    "tactical cell count " + cellCount +
+                    " exceeds the memory-safe limit of " + MaxSafeCellCount);
+            return cellCount;
+        }
+
+        private static int CheckedActionCount(int roster, int cellCount) =>
+            checked(1 + 3 * roster * cellCount);
+
+        private static int CheckedObservationLength(
+            int roster, int cellCount) =>
+            checked(
+                TacticalCoding.Channels(roster) * cellCount +
+                TacticalCoding.Globals);
 
         /// <summary>Builds the start state (rosters placed in deployment zones) and each seat's stable
         /// slot→unitId map for the action codec.</summary>
