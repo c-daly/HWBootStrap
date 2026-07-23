@@ -94,6 +94,26 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void BuildTrainArguments_UsesResolvedScenarioFile()
+        {
+            var config = MlLabConfig.Default();
+
+            string args = config.BuildTrainArguments(
+                @"C:\project\Library\HexWars\MLLab\scenario.json");
+
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\project\\Library\\HexWars\\MLLab\\scenario.json\""));
+        }
+
+        [Test]
+        public void BuildTrainArguments_RejectsMissingResolvedScenarioPath()
+        {
+            var config = MlLabConfig.Default();
+
+            Assert.Throws<ArgumentException>(() => config.BuildTrainArguments(" "));
+        }
+
+        [Test]
         public void BuildResumeArguments_UsesAuthoritativeSourceRun()
         {
             var config = MlLabConfig.Default();

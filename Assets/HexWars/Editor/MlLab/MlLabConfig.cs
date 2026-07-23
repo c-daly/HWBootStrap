@@ -120,6 +120,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public string BuildTrainArguments()
         {
+            return BuildTrainArgumentsCore(null);
+        }
+
+        public string BuildTrainArguments(string scenarioPath)
+        {
+            if (string.IsNullOrWhiteSpace(scenarioPath))
+                throw new ArgumentException(
+                    "Resolved scenario path is required.", nameof(scenarioPath));
+            return BuildTrainArgumentsCore(scenarioPath);
+        }
+
+        string BuildTrainArgumentsCore(string scenarioPath)
+        {
             var args = new List<string>
             {
                 "train",
@@ -134,6 +147,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "--device", Q(Device),
                 "--learner-seat", SeatValue(LearnerSeat),
             };
+            if (!string.IsNullOrWhiteSpace(scenarioPath))
+            {
+                args.Add("--scenario-file");
+                args.Add(QAlways(scenarioPath));
+            }
             var trackers = Trackers ?? new List<MlTrackerConfig>();
             foreach (var tracker in trackers)
             {
@@ -213,6 +231,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
 
         static string Q(string value) => MlCliProcess.QuoteArgument(value ?? string.Empty);
+
+        static string QAlways(string value)
+        {
+            string quoted = Q(value);
+            return quoted.StartsWith("\"", StringComparison.Ordinal)
+                ? quoted
+                : "\"" + quoted + "\"";
+        }
 
         static void AddOption(List<string> args, string name, string value)
         {
