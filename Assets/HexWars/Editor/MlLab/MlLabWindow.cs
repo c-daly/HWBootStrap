@@ -1257,6 +1257,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("Progress", _status == null
                 ? "-"
                 : string.Format(CultureInfo.InvariantCulture, "{0:N0} / {1:N0}", _status.Step, _status.TargetStep));
+            EditorGUILayout.LabelField("Learner episodes (Seat 0 / Seat 1)", _status == null
+                ? "-"
+                : string.Format(CultureInfo.InvariantCulture, "{0:N0} / {1:N0}",
+                    _status.Seat0Episodes, _status.Seat1Episodes));
+            if (_status != null && _status.SeatAuditShowsWarning)
+                EditorGUILayout.HelpBox(_status.SeatAuditWarning, MessageType.Warning);
+            else if (_status != null && _status.SeatAuditShowsInfo)
+                EditorGUILayout.HelpBox(
+                    !_status.SeatAuditReadable
+                        ? (string.IsNullOrWhiteSpace(_status.SeatAuditWarning)
+                            ? "Learner seat audit is not readable yet."
+                            : _status.SeatAuditWarning)
+                        : "Learner seat balance is still in progress; counts can differ while workers finish episodes.",
+                    MessageType.Info);
             EditorGUILayout.LabelField("Elapsed", RunElapsed());
             EditorGUILayout.LabelField("Throughput", _throughput > 0
                 ? _throughput.ToString("N1", CultureInfo.InvariantCulture) + " steps/s"

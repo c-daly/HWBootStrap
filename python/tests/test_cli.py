@@ -672,6 +672,119 @@ def test_status_reads_local_truth_without_unity_or_remote_services(
     assert result["run"]["timesteps"] == 48
 
 
+def test_run_result_aggregates_learner_seats_from_manifest_monitor_shards(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(
+        tmp_path, replace(_config("seat-audit"), workers=2), contract
+    )
+    manifest = read_json(run_dir / "run.json")
+    first, second = [run_dir / relative for relative in manifest["monitor_files"]]
+    first.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,0,1.0,10,0.1\n"
+        "0,1,19,1,-1.0,11,0.2\n"
+        "0,2,21,0,1.0,12,0.3\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "1,0,18,1,1.0,9,0.1\n"
+        "1,1,20,0,-1.0,8,0.2\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit == {
+        "seat_0_episodes": 3,
+        "seat_1_episodes": 2,
+        "readable": True,
+        "balanced": True,
+        "warning": "",
+    }
+
+
+def test_run_result_reports_path_for_malformed_monitor_seat(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, _config("malformed-seat-audit"), contract)
+    manifest = read_json(run_dir / "run.json")
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,sideways,1.0,10,0.1\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["readable"] is False
+    assert str(monitor_path) in audit["warning"]
+    assert "learner_seat" in audit["warning"]
+
+
+def test_run_result_reports_path_for_monitor_missing_learner_seat_header(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, _config("missing-header-audit"), contract)
+    manifest = read_json(run_dir / "run.json")
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_reward\n0,1.0\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["readable"] is False
+    assert str(monitor_path) in audit["warning"]
+    assert "learner_seat" in audit["warning"]
+    assert "header" in audit["warning"].lower()
+
+
+@pytest.mark.parametrize(
+    ("state", "learner_seat", "expect_warning"),
+    [
+        ("running", "alternating", False),
+        ("completed", "alternating", True),
+        ("completed", "0", False),
+    ],
+)
+def test_run_result_only_warns_for_terminal_alternating_imbalance(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    state: str,
+    learner_seat: str,
+    expect_warning: bool,
+) -> None:
+    run_dir = create_run(
+        tmp_path,
+        replace(_config("seat-warning"), learner_seat=learner_seat),
+        contract,
+    )
+    manifest = read_json(run_dir / "run.json")
+    manifest["state"] = state
+    atomic_write_json(run_dir / "run.json", manifest)
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,0,1.0,10,0.1\n"
+        "0,1,18,0,1.0,10,0.2\n"
+        "0,2,19,0,1.0,10,0.3\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["balanced"] is False
+    assert bool(audit["warning"]) is expect_warning
+
+
 def test_status_follow_waits_for_terminal_local_state_without_streaming_json(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

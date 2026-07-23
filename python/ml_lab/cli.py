@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -316,12 +317,89 @@ def _resume_config(args: argparse.Namespace) -> RunConfig:
     )
 
 
+def read_seat_audit(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate learner-seat episode counts from the manifest's monitor shards."""
+    run_dir = Path(run_dir).resolve()
+    unreadable = {
+        "seat_0_episodes": 0,
+        "seat_1_episodes": 0,
+        "readable": False,
+        "balanced": False,
+        "warning": "",
+    }
+    monitor_files = manifest.get("monitor_files")
+    if (
+        not isinstance(monitor_files, list)
+        or not monitor_files
+        or any(not isinstance(relative, str) or not relative for relative in monitor_files)
+    ):
+        unreadable["warning"] = (
+            f"{run_dir / 'run.json'}: monitor_files must be a non-empty list of paths"
+        )
+        return unreadable
+
+    seat_counts = {0: 0, 1: 0}
+    for relative in monitor_files:
+        monitor_path = run_dir / relative
+        try:
+            with monitor_path.open(newline="", encoding="utf-8") as stream:
+                reader = csv.DictReader(stream, strict=True)
+                if reader.fieldnames is None or "learner_seat" not in reader.fieldnames:
+                    unreadable["warning"] = (
+                        f"{monitor_path}: missing learner_seat header"
+                    )
+                    return unreadable
+                for line_number, row in enumerate(reader, start=2):
+                    raw_seat = row.get("learner_seat")
+                    if raw_seat not in {"0", "1"}:
+                        unreadable["warning"] = (
+                            f"{monitor_path}:{line_number}: invalid learner_seat "
+                            f"{raw_seat!r}"
+                        )
+                        return unreadable
+                    seat_counts[int(raw_seat)] += 1
+        except (OSError, UnicodeError, csv.Error) as error:
+            unreadable["warning"] = f"{monitor_path}: {error}"
+            return unreadable
+
+    config = manifest.get("config")
+    if not isinstance(config, dict):
+        config = {}
+    try:
+        tolerance = max(1, int(config.get("workers", 1)))
+    except (TypeError, ValueError) as error:
+        unreadable["warning"] = f"{run_dir / 'run.json'}: invalid config.workers: {error}"
+        return unreadable
+    balanced = abs(seat_counts[0] - seat_counts[1]) <= tolerance
+    warning = ""
+    if (
+        config.get("learner_seat") == "alternating"
+        and manifest.get("state") in TERMINAL_STATES
+        and not balanced
+    ):
+        warning = (
+            "Learner seat audit is materially imbalanced: "
+            f"Seat 0 has {seat_counts[0]} episodes and "
+            f"Seat 1 has {seat_counts[1]} episodes "
+            f"(worker tolerance {tolerance})."
+        )
+    return {
+        "seat_0_episodes": seat_counts[0],
+        "seat_1_episodes": seat_counts[1],
+        "readable": True,
+        "balanced": balanced,
+        "warning": warning,
+    }
+
+
 def _run_result(run_dir: Path, *, require_manifest: bool = False) -> dict[str, Any]:
     run_dir = Path(run_dir).resolve()
     manifest_path = run_dir / "run.json"
     result: dict[str, Any] = {"run_dir": str(run_dir)}
     if manifest_path.is_file():
-        result["run"] = read_json(manifest_path)
+        manifest = read_json(manifest_path)
+        result["run"] = manifest
+        result["seat_audit"] = read_seat_audit(run_dir, manifest)
     elif require_manifest:
         raise FileNotFoundError(manifest_path)
     return result

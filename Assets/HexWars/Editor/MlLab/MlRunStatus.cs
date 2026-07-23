@@ -22,6 +22,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public string LatestEvaluation { get; private set; }
         public double Throughput { get; private set; }
         public bool TrackerDegraded { get; private set; }
+        public int Seat0Episodes { get; private set; }
+        public int Seat1Episodes { get; private set; }
+        public bool SeatAuditReadable { get; private set; }
+        public bool SeatAuditBalanced { get; private set; }
+        public string SeatAuditWarning { get; private set; }
+        public bool SeatAuditShowsWarning => IsTerminal(State) &&
+            SeatAuditReadable && !SeatAuditBalanced &&
+            !string.IsNullOrWhiteSpace(SeatAuditWarning);
+        public bool SeatAuditShowsInfo => !SeatAuditShowsWarning &&
+            (!SeatAuditReadable || (!IsTerminal(State) && !SeatAuditBalanced));
         public string Error { get; private set; }
 
         public static MlRunStatus Parse(string json)
@@ -32,6 +42,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             var result = envelope.result ?? new Result();
             var run = result.run ?? envelope.run ?? new Run();
             var config = run.config ?? new Config();
+            var seatAudit = result.seat_audit ?? new SeatAudit();
             return new MlRunStatus
             {
                 Ok = envelope.ok,
@@ -45,6 +56,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 LatestEvaluation = run.latest_evaluation ?? string.Empty,
                 Throughput = run.throughput,
                 TrackerDegraded = run.tracker_degraded || HasTrackerFailure(run.tracker_status),
+                Seat0Episodes = seatAudit.seat_0_episodes,
+                Seat1Episodes = seatAudit.seat_1_episodes,
+                SeatAuditReadable = seatAudit.readable,
+                SeatAuditBalanced = seatAudit.balanced,
+                SeatAuditWarning = seatAudit.warning ?? string.Empty,
                 Error = result.message ?? string.Empty,
             };
         }
@@ -65,6 +81,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         static string First(string first, string second) => !string.IsNullOrEmpty(first) ? first : second ?? string.Empty;
 
+        static bool IsTerminal(MlRunState state) =>
+            state == MlRunState.Stopped ||
+            state == MlRunState.Completed ||
+            state == MlRunState.Failed;
+
         static bool HasTrackerFailure(Tracker[] trackers)
         {
             if (trackers == null) return false;
@@ -75,8 +96,22 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
 
         [Serializable] sealed class Envelope { public bool ok; public Result result; public Run run; }
-        [Serializable] sealed class Result { public string run_dir; public Run run; public string message; }
+        [Serializable] sealed class Result
+        {
+            public string run_dir;
+            public Run run;
+            public SeatAudit seat_audit;
+            public string message;
+        }
         [Serializable] sealed class Config { public string run_name; public long total_timesteps; }
+        [Serializable] sealed class SeatAudit
+        {
+            public int seat_0_episodes;
+            public int seat_1_episodes;
+            public bool readable;
+            public bool balanced;
+            public string warning;
+        }
         [Serializable] sealed class Tracker { public bool ok = true; public string status; }
         [Serializable] sealed class Run
         {
