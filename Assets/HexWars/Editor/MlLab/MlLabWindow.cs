@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using HexWars.Engine.Rl;
 using UnityEditor;
 using UnityEngine;
 
@@ -81,6 +82,366 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [Serializable] sealed class DoctorCheck { public string name; public bool ok; public bool required; public string detail; }
     }
 
+    public sealed class MlTrainingScenarioSession
+    {
+        MlTrainingScenarioLibrary _library;
+        readonly string _libraryPath;
+
+        MlTrainingScenarioSession(string libraryPath, Exception error)
+        {
+            _libraryPath = libraryPath;
+            LibraryException = error;
+            LibraryError = libraryPath + ": " + error.Message;
+        }
+
+        public MlTrainingScenarioSession(MlTrainingScenarioLibrary library)
+            : this(library, string.Empty)
+        {
+        }
+
+        MlTrainingScenarioSession(MlTrainingScenarioLibrary library, string libraryPath)
+        {
+            _library = library ?? throw new ArgumentNullException(nameof(library));
+            _libraryPath = libraryPath ?? string.Empty;
+            SelectEnvironment(MlEnvironmentContract.TacticalV1);
+        }
+
+        public MlEnvironmentContract Environment { get; private set; }
+        public string SelectedTemplateId { get; private set; } = string.Empty;
+        public MlTrainingScenario WorkingCopy { get; private set; }
+        public string SaveName { get; private set; } = string.Empty;
+        public string SaveId { get; private set; } = string.Empty;
+        public bool OverwriteArmed { get; private set; }
+        public Exception LibraryException { get; }
+        public string LibraryError { get; } = string.Empty;
+        public bool CanLaunch
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(LibraryError) ||
+                    WorkingCopy == null ||
+                    WorkingCopy.Validate().Count > 0)
+                    return false;
+                try
+                {
+                    MlTrainingScenarioPreflight.Create(WorkingCopy);
+                    return true;
+                }
+                catch (Exception)
+                {
+                    return false;
+                }
+            }
+        }
+        public IReadOnlyList<MlTrainingScenario> AvailableTemplates =>
+            _library?.Filter(Environment) ?? Array.Empty<MlTrainingScenario>();
+
+        public static MlTrainingScenarioSession Load(string libraryPath)
+        {
+            try
+            {
+                return new MlTrainingScenarioSession(
+                    MlTrainingScenarioLibrary.Load(libraryPath), libraryPath);
+            }
+            catch (Exception error)
+            {
+                return new MlTrainingScenarioSession(libraryPath, error);
+            }
+        }
+
+        public void SelectEnvironment(MlEnvironmentContract environment)
+        {
+            EnsureLibrary();
+            Environment = environment;
+            IReadOnlyList<MlTrainingScenario> available = _library.Filter(environment);
+            if (available.Count == 0)
+                throw new InvalidDataException(
+                    "No templates are available for " +
+                    MlEnvironmentContracts.CliValue(environment) + ".");
+            string standardId = environment == MlEnvironmentContract.AdaptiveV1
+                ? "adaptive-standard"
+                : "tactical-standard";
+            MlTrainingScenario selected =
+                available.FirstOrDefault(item => item.Id == standardId) ?? available[0];
+            Select(selected);
+        }
+
+        public void SelectTemplate(string id)
+        {
+            EnsureLibrary();
+            MlTrainingScenario selected = _library.Filter(Environment).FirstOrDefault(
+                item => string.Equals(item.Id, id, StringComparison.Ordinal));
+            if (selected == null)
+                throw new ArgumentException(
+                    "Template '" + id + "' is not available for " +
+                    MlEnvironmentContracts.CliValue(Environment) + ".", nameof(id));
+            Select(selected);
+        }
+
+        public void Reload()
+        {
+            EnsureLibrary();
+            SelectTemplate(SelectedTemplateId);
+        }
+
+        public void ReloadTemplates()
+        {
+            if (string.IsNullOrWhiteSpace(_libraryPath))
+                throw new InvalidOperationException(
+                    "This session does not have a template-library path.");
+            _library = MlTrainingScenarioLibrary.Load(_libraryPath);
+            string selectedId = SelectedTemplateId;
+            MlTrainingScenario selected = _library.Filter(Environment).FirstOrDefault(
+                item => string.Equals(item.Id, selectedId, StringComparison.Ordinal));
+            if (selected == null)
+            {
+                SelectEnvironment(Environment);
+                return;
+            }
+            Select(selected);
+        }
+
+        public void SetSaveIdentity(string name, string id)
+        {
+            SaveName = name ?? string.Empty;
+            SaveId = id ?? string.Empty;
+            OverwriteArmed = false;
+        }
+
+        public bool SaveAsTemplate()
+        {
+            EnsureWritableLibrary();
+            MlTrainingScenario candidate = SaveCandidate();
+            bool collision = _library.Templates.Any(
+                item => string.Equals(item.Id, candidate.Id, StringComparison.Ordinal));
+            if (collision)
+            {
+                OverwriteArmed = true;
+                return false;
+            }
+            MlTrainingScenarioStore.SaveAsTemplate(
+                _libraryPath, candidate, overwrite: false);
+            CompleteSave(candidate.Id);
+            return true;
+        }
+
+        public bool ConfirmOverwrite()
+        {
+            EnsureWritableLibrary();
+            if (!OverwriteArmed) return false;
+            MlTrainingScenario candidate = SaveCandidate();
+            MlTrainingScenarioStore.SaveAsTemplate(
+                _libraryPath, candidate, overwrite: true);
+            CompleteSave(candidate.Id);
+            return true;
+        }
+
+        void CompleteSave(string id)
+        {
+            _library = MlTrainingScenarioLibrary.Load(_libraryPath);
+            Environment = WorkingCopy.Environment;
+            SelectTemplate(id);
+            OverwriteArmed = false;
+        }
+
+        MlTrainingScenario SaveCandidate()
+        {
+            if (string.IsNullOrWhiteSpace(SaveName))
+                throw new InvalidDataException("Template name is required.");
+            if (string.IsNullOrWhiteSpace(SaveId))
+                throw new InvalidDataException("Template ID is required.");
+            string prefix = Environment == MlEnvironmentContract.AdaptiveV1
+                ? "adaptive-"
+                : "tactical-";
+            if (!SaveId.StartsWith(prefix, StringComparison.Ordinal))
+                throw new InvalidDataException(
+                    "Template ID must start with '" + prefix + "'.");
+            MlTrainingScenario candidate = WorkingCopy.Clone();
+            candidate.Name = SaveName.Trim();
+            candidate.Id = SaveId.Trim();
+            return candidate;
+        }
+
+        void Select(MlTrainingScenario selected)
+        {
+            SelectedTemplateId = selected.Id;
+            WorkingCopy = selected.Clone();
+            SaveName = selected.Name;
+            SaveId = selected.Id;
+            OverwriteArmed = false;
+        }
+
+        void EnsureLibrary()
+        {
+            if (_library == null)
+                throw new InvalidOperationException(LibraryError);
+        }
+
+        void EnsureWritableLibrary()
+        {
+            EnsureLibrary();
+            if (string.IsNullOrWhiteSpace(_libraryPath))
+                throw new InvalidOperationException(
+                    "This session does not have a template-library path.");
+        }
+    }
+
+    public sealed class MlTrainingScenarioPreflight
+    {
+        MlTrainingScenarioPreflight(
+            MlTrainingScenario scenario, int observationSize, int actionSize)
+        {
+            TemplateId = scenario.Id;
+            TemplateName = scenario.Name;
+            Environment = scenario.Environment;
+            BoardWidth = scenario.Board.Width;
+            BoardHeight = scenario.Board.Height;
+            ZoneDepth = scenario.Board.ZoneDepth;
+            ActionsPerTurn = scenario.Rules.ActionsPerTurn;
+            RoundCap = scenario.Rules.RoundCap;
+            MaxSteps = scenario.Episode.MaxSteps;
+            FogOfWar = scenario.Rules.FogOfWar;
+            ObservationSize = observationSize;
+            ActionSize = actionSize;
+            LargeScenarioWarning =
+                (long)scenario.Board.Width * scenario.Board.Height > 13L * 9L;
+        }
+
+        public string TemplateId { get; }
+        public string TemplateName { get; }
+        public MlEnvironmentContract Environment { get; }
+        public int BoardWidth { get; }
+        public int BoardHeight { get; }
+        public int ZoneDepth { get; }
+        public int ActionsPerTurn { get; }
+        public int RoundCap { get; }
+        public int MaxSteps { get; }
+        public bool FogOfWar { get; }
+        public int ObservationSize { get; }
+        public int ActionSize { get; }
+        public bool LargeScenarioWarning { get; }
+        public string DisplayText => Describe("not selected", "not selected");
+
+        public static MlTrainingScenarioPreflight Create(
+            MlTrainingScenario scenario)
+        {
+            if (scenario == null) throw new ArgumentNullException(nameof(scenario));
+            TrainingScenario engineScenario = ToEngine(scenario);
+            MlContract contract = scenario.Environment == MlEnvironmentContract.AdaptiveV1
+                ? MlContract.CreateAdaptive(engineScenario.BuildAdaptive())
+                : MlContract.Create(engineScenario.BuildTactical());
+            return new MlTrainingScenarioPreflight(
+                scenario, contract.ObservationSize, contract.ActionSize);
+        }
+
+        public static MlTrainingScenarioPreflight LoadSourceRun(
+            string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory))
+                throw new ArgumentException(
+                    "Source run is required.", nameof(runDirectory));
+            string path = Path.Combine(runDirectory, "scenario.json");
+            return Create(MlTrainingScenarioFile.Load(path));
+        }
+
+        public string Describe(string opponent, string learnerSeats)
+        {
+            string actions = ActionsPerTurn == 0
+                ? "Whole team"
+                : ActionsPerTurn.ToString(CultureInfo.InvariantCulture);
+            return TemplateName + " \u00b7 " +
+                   MlEnvironmentContracts.CliValue(Environment) + "\n" +
+                   "Board " + BoardWidth + "\u00d7" + BoardHeight +
+                   " \u00b7 zone depth " + ZoneDepth +
+                   " \u00b7 actions/turn " + actions + "\n" +
+                   "Round cap " + RoundCap +
+                   " \u00b7 max steps " + MaxSteps +
+                   " \u00b7 fog " + (FogOfWar ? "on" : "off") +
+                   " \u00b7 opponent " + opponent +
+                   " \u00b7 learner seats " + learnerSeats + "\n" +
+                   "Observation " + ObservationSize +
+                   " \u00b7 actions " + ActionSize;
+        }
+
+        public static TrainingScenario ToEngine(MlTrainingScenario scenario)
+        {
+            if (scenario == null) throw new ArgumentNullException(nameof(scenario));
+            var converted = new TrainingScenario
+            {
+                SchemaVersion = scenario.SchemaVersion,
+                Id = scenario.Id,
+                Name = scenario.Name,
+                Environment = MlEnvironmentContracts.CliValue(scenario.Environment),
+                Board = scenario.Board == null
+                    ? null
+                    : new TrainingBoardConfig
+                    {
+                        Width = scenario.Board.Width,
+                        Height = scenario.Board.Height,
+                        MaxElevation = scenario.Board.MaxElevation,
+                        ZoneDepth = scenario.Board.ZoneDepth,
+                        FlatChance = scenario.Board.FlatChance,
+                        PlainsWeight = scenario.Board.PlainsWeight,
+                        ForestWeight = scenario.Board.ForestWeight,
+                        RoughWeight = scenario.Board.RoughWeight,
+                        WaterWeight = scenario.Board.WaterWeight,
+                    },
+                Rules = scenario.Rules == null
+                    ? null
+                    : new TrainingRuleConfig
+                    {
+                        ActionsPerTurn = scenario.Rules.ActionsPerTurn,
+                        RoundCap = scenario.Rules.RoundCap,
+                        StartingPoints = scenario.Rules.StartingPoints,
+                        FogOfWar = scenario.Rules.FogOfWar,
+                        BiomesEnabled = scenario.Rules.BiomesEnabled,
+                        BountyRate = scenario.Rules.BountyRate,
+                        DeployCostMultiplier = scenario.Rules.DeployCostMultiplier,
+                        GeneratorCost = scenario.Rules.GeneratorCost,
+                        GeneratorOutput = scenario.Rules.GeneratorOutput,
+                        GeneratorHealth = scenario.Rules.GeneratorHealth,
+                    },
+                Episode = scenario.Episode == null
+                    ? null
+                    : new TrainingEpisodeConfig
+                    {
+                        MaxSteps = scenario.Episode.MaxSteps,
+                    },
+                TacticalReward = scenario.TacticalReward == null
+                    ? null
+                    : new TacticalRewardConfig
+                    {
+                        ShapeScale = scenario.TacticalReward.ShapeScale,
+                        StepPenalty = scenario.TacticalReward.StepPenalty,
+                        ClosingWeight = scenario.TacticalReward.ClosingWeight,
+                        DrawCreditWeight = scenario.TacticalReward.DrawCreditWeight,
+                        PointsWeight = scenario.TacticalReward.PointsWeight,
+                    },
+                AdaptiveReward = scenario.AdaptiveReward == null
+                    ? null
+                    : new AdaptiveRewardConfig
+                    {
+                        IntermediateDecisionPenalty =
+                            scenario.AdaptiveReward.IntermediateDecisionPenalty,
+                        DeploymentCompletionBonus =
+                            scenario.AdaptiveReward.DeploymentCompletionBonus,
+                    },
+                Adaptive = scenario.Adaptive == null
+                    ? null
+                    : new TrainingAdaptiveConfig
+                    {
+                        StartingUnitCount = scenario.Adaptive.StartingUnitCount,
+                        StartingArmyBudget = scenario.Adaptive.StartingArmyBudget,
+                        MaxDesignPointCost = scenario.Adaptive.MaxDesignPointCost,
+                    },
+            };
+            IReadOnlyList<string> errors = converted.Validate();
+            if (errors.Count > 0)
+                throw new InvalidDataException(string.Join("; ", errors));
+            return converted;
+        }
+    }
+
     public sealed class MlLabWindow : EditorWindow
     {
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
@@ -93,10 +454,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [SerializeField] bool _useCustomTracker;
         [SerializeField] string _customTrackerAdapter = string.Empty;
         [SerializeField] bool _showAdvanced;
+        [SerializeField] bool _showGameSettings;
         [SerializeField] int _tab;
         [SerializeField] ModelDuelConfiguration _arena = new ModelDuelConfiguration();
 
         MlLabWindowState _state = new MlLabWindowState();
+        MlTrainingScenarioSession _scenarioSession;
         MlCliProcess _training;
         MlCliProcess _statusQuery;
         MlCliProcess _command;
@@ -124,6 +487,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string PythonExe => MlLabPaths.ResolvePythonExecutable(ProjectRoot);
         string CliScript => Path.Combine(PythonDir, "hexwars_ml.py");
         string RunsRoot => Path.Combine(PythonDir, "runs");
+        string TemplateLibraryPath =>
+            Path.Combine(ProjectRoot, "python", "config", "training-game-templates.json");
+        string SessionScenarioPath =>
+            Path.Combine(ProjectRoot, "Library", "HexWars", "MLLab", "scenario.json");
         string GymServer => Path.Combine(ProjectRoot, "engine", "HexWars.GymServer", "bin", "Release", "net8.0", "HexWars.GymServer.dll");
 
         [MenuItem("HexWars/ML Lab", priority = 20)]
@@ -137,6 +504,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         void OnEnable()
         {
             _state = new MlLabWindowState();
+            LoadScenarioLibrary();
             CreateProcessOwners();
             _selectedRun = SessionState.GetString(SelectedRunKey, string.Empty);
             var attached = MlRunAttachment.Restore();
@@ -389,15 +757,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _config.ResumeSource = EditorGUILayout.TextField("Source run", _config.ResumeSource);
                 if (GUILayout.Button("Use selected", GUILayout.Width(92))) _config.ResumeSource = _selectedRun;
                 EditorGUILayout.EndHorizontal();
+                DrawSourceRunScenarioPreflight();
+            }
+            else
+            {
+                DrawScenarioEditor();
             }
             _config.RunName = EditorGUILayout.TextField("New run name", _config.RunName);
-            using (new EditorGUI.DisabledScope(_resume))
-                _config.Environment = (MlEnvironmentContract)EditorGUILayout.EnumPopup(
-                    "Environment", _config.Environment);
-            MlEnvironmentSummary trainingSummary = _resume
-                ? LoadRunEnvironmentSummary(_config.ResumeSource)
-                : MlEnvironmentSummary.ForSelection(_config.Environment);
-            DrawEnvironmentSummary(trainingSummary, _resume ? "Source run contract" : "Training preflight");
             _config.Algorithm = (MlAlgorithm)EditorGUILayout.EnumPopup("SB3 algorithm", _config.Algorithm);
             _config.TotalTimesteps = EditorGUILayout.LongField("Target timesteps", _config.TotalTimesteps);
             _config.Seed = EditorGUILayout.IntField("Seed", _config.Seed);
@@ -441,14 +807,312 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.EndVertical();
         }
 
+        void LoadScenarioLibrary()
+        {
+            _scenarioSession = MlTrainingScenarioSession.Load(TemplateLibraryPath);
+            if (_scenarioSession.CanLaunch)
+            {
+                _scenarioSession.SelectEnvironment(_config.Environment);
+                _config.Environment = _scenarioSession.Environment;
+            }
+        }
+
+        void DrawScenarioEditor()
+        {
+            if (_scenarioSession == null) LoadScenarioLibrary();
+            if (!string.IsNullOrWhiteSpace(_scenarioSession.LibraryError))
+            {
+                EditorGUILayout.HelpBox(
+                    _scenarioSession.LibraryError, MessageType.Error);
+                return;
+            }
+
+            MlEnvironmentContract environment =
+                (MlEnvironmentContract)EditorGUILayout.EnumPopup(
+                    "Environment", _scenarioSession.Environment);
+            if (environment != _scenarioSession.Environment)
+            {
+                try
+                {
+                    _scenarioSession.SelectEnvironment(environment);
+                    _config.Environment = environment;
+                }
+                catch (Exception error)
+                {
+                    _state.Fail(error.Message);
+                }
+            }
+
+            IReadOnlyList<MlTrainingScenario> templates =
+                _scenarioSession.AvailableTemplates;
+            string[] labels = templates.Select(
+                item => item.Name + " (" + item.Id + ")").ToArray();
+            int selectedIndex = Math.Max(
+                0, Array.FindIndex(
+                    templates.ToArray(),
+                    item => item.Id == _scenarioSession.SelectedTemplateId));
+            int chosenIndex = EditorGUILayout.Popup(
+                "Template", selectedIndex, labels);
+            if (chosenIndex != selectedIndex &&
+                chosenIndex >= 0 && chosenIndex < templates.Count)
+            {
+                _scenarioSession.SelectTemplate(templates[chosenIndex].Id);
+            }
+
+            _showGameSettings = EditorGUILayout.Foldout(
+                _showGameSettings, "Advanced game settings");
+            if (_showGameSettings) DrawScenarioFields(_scenarioSession.WorkingCopy);
+
+            string saveName = EditorGUILayout.TextField(
+                "Template name", _scenarioSession.SaveName);
+            string saveId = EditorGUILayout.TextField(
+                "Template ID", _scenarioSession.SaveId);
+            if (!string.Equals(saveName, _scenarioSession.SaveName, StringComparison.Ordinal) ||
+                !string.Equals(saveId, _scenarioSession.SaveId, StringComparison.Ordinal))
+            {
+                _scenarioSession.SetSaveIdentity(saveName, saveId);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Save as template"))
+            {
+                try
+                {
+                    bool saved = _scenarioSession.SaveAsTemplate();
+                    _notice = saved
+                        ? "Template saved to " + TemplateLibraryPath
+                        : "Template ID already exists. Confirm overwrite inline.";
+                }
+                catch (Exception error)
+                {
+                    _state.Fail(
+                        TemplateLibraryPath + ": " + error.Message);
+                }
+            }
+            if (GUILayout.Button("Reload templates"))
+            {
+                try
+                {
+                    _scenarioSession.ReloadTemplates();
+                    _notice = "Templates reloaded from " + TemplateLibraryPath;
+                }
+                catch (Exception error)
+                {
+                    LoadScenarioLibrary();
+                    _state.Fail(
+                        TemplateLibraryPath + ": " + error.Message);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            if (_scenarioSession.OverwriteArmed &&
+                GUILayout.Button("Confirm overwrite"))
+            {
+                try
+                {
+                    _scenarioSession.ConfirmOverwrite();
+                    _notice = "Template overwritten in " + TemplateLibraryPath;
+                }
+                catch (Exception error)
+                {
+                    _state.Fail(
+                        TemplateLibraryPath + ": " + error.Message);
+                }
+            }
+
+            IReadOnlyList<string> errors =
+                _scenarioSession.WorkingCopy.Validate();
+            foreach (string error in errors)
+                EditorGUILayout.HelpBox(error, MessageType.Error);
+            if (errors.Count == 0)
+            {
+                try
+                {
+                    MlTrainingScenarioPreflight preflight =
+                        MlTrainingScenarioPreflight.Create(
+                            _scenarioSession.WorkingCopy);
+                    EditorGUILayout.LabelField(
+                        "Training preflight", EditorStyles.boldLabel);
+                    EditorGUILayout.HelpBox(
+                        preflight.Describe(
+                            OpponentLabel(_config.OpponentKind),
+                            LearnerSeatLabel(_config.LearnerSeat)),
+                        MessageType.None);
+                    if (preflight.LargeScenarioWarning)
+                        EditorGUILayout.HelpBox(
+                            "Warning: large scenario may reduce headless throughput",
+                            MessageType.Warning);
+                }
+                catch (Exception error)
+                {
+                    EditorGUILayout.HelpBox(error.Message, MessageType.Error);
+                }
+            }
+        }
+
+        static void DrawScenarioFields(MlTrainingScenario scenario)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Board", EditorStyles.boldLabel);
+            scenario.Board.Width = EditorGUILayout.IntField(
+                "Width", scenario.Board.Width);
+            scenario.Board.Height = EditorGUILayout.IntField(
+                "Height", scenario.Board.Height);
+            scenario.Board.MaxElevation = EditorGUILayout.IntField(
+                "Max elevation", scenario.Board.MaxElevation);
+            scenario.Board.ZoneDepth = EditorGUILayout.IntField(
+                "Zone depth", scenario.Board.ZoneDepth);
+            scenario.Board.FlatChance = EditorGUILayout.FloatField(
+                "Flat chance", scenario.Board.FlatChance);
+            scenario.Board.PlainsWeight = EditorGUILayout.IntField(
+                "Plains weight", scenario.Board.PlainsWeight);
+            scenario.Board.ForestWeight = EditorGUILayout.IntField(
+                "Forest weight", scenario.Board.ForestWeight);
+            scenario.Board.RoughWeight = EditorGUILayout.IntField(
+                "Rough weight", scenario.Board.RoughWeight);
+            scenario.Board.WaterWeight = EditorGUILayout.IntField(
+                "Water weight", scenario.Board.WaterWeight);
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Match rules", EditorStyles.boldLabel);
+            scenario.Rules.ActionsPerTurn = EditorGUILayout.IntField(
+                "Actions per turn", scenario.Rules.ActionsPerTurn);
+            scenario.Rules.RoundCap = EditorGUILayout.IntField(
+                "Round cap", scenario.Rules.RoundCap);
+            scenario.Rules.StartingPoints = EditorGUILayout.IntField(
+                "Starting points", scenario.Rules.StartingPoints);
+            scenario.Rules.FogOfWar = EditorGUILayout.Toggle(
+                "Fog of war", scenario.Rules.FogOfWar);
+            scenario.Rules.BiomesEnabled = EditorGUILayout.Toggle(
+                "Biomes enabled", scenario.Rules.BiomesEnabled);
+            scenario.Rules.BountyRate = EditorGUILayout.FloatField(
+                "Bounty rate", scenario.Rules.BountyRate);
+            scenario.Rules.DeployCostMultiplier = EditorGUILayout.FloatField(
+                "Deploy cost multiplier", scenario.Rules.DeployCostMultiplier);
+            scenario.Rules.GeneratorCost = EditorGUILayout.IntField(
+                "Generator cost", scenario.Rules.GeneratorCost);
+            scenario.Rules.GeneratorOutput = EditorGUILayout.IntField(
+                "Generator output", scenario.Rules.GeneratorOutput);
+            scenario.Rules.GeneratorHealth = EditorGUILayout.IntField(
+                "Generator health", scenario.Rules.GeneratorHealth);
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Episode", EditorStyles.boldLabel);
+            scenario.Episode.MaxSteps = EditorGUILayout.IntField(
+                "Max steps", scenario.Episode.MaxSteps);
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField(
+                scenario.Environment == MlEnvironmentContract.AdaptiveV1
+                    ? "Adaptive reward"
+                    : "Tactical reward",
+                EditorStyles.boldLabel);
+            if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
+            {
+                scenario.AdaptiveReward.IntermediateDecisionPenalty =
+                    EditorGUILayout.FloatField(
+                        "Intermediate decision penalty",
+                        scenario.AdaptiveReward.IntermediateDecisionPenalty);
+                scenario.AdaptiveReward.DeploymentCompletionBonus =
+                    EditorGUILayout.FloatField(
+                        "Deployment completion bonus",
+                        scenario.AdaptiveReward.DeploymentCompletionBonus);
+            }
+            else
+            {
+                scenario.TacticalReward.ShapeScale = EditorGUILayout.FloatField(
+                    "Shape scale", scenario.TacticalReward.ShapeScale);
+                scenario.TacticalReward.StepPenalty = EditorGUILayout.FloatField(
+                    "Step penalty", scenario.TacticalReward.StepPenalty);
+                scenario.TacticalReward.ClosingWeight = EditorGUILayout.FloatField(
+                    "Closing weight", scenario.TacticalReward.ClosingWeight);
+                scenario.TacticalReward.DrawCreditWeight = EditorGUILayout.FloatField(
+                    "Draw credit weight", scenario.TacticalReward.DrawCreditWeight);
+                scenario.TacticalReward.PointsWeight = EditorGUILayout.FloatField(
+                    "Points weight", scenario.TacticalReward.PointsWeight);
+            }
+            EditorGUILayout.EndVertical();
+
+            if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
+            {
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField(
+                    "Adaptive deployment", EditorStyles.boldLabel);
+                scenario.Adaptive.StartingUnitCount = EditorGUILayout.IntField(
+                    "Starting unit count", scenario.Adaptive.StartingUnitCount);
+                scenario.Adaptive.StartingArmyBudget = EditorGUILayout.IntField(
+                    "Starting army budget", scenario.Adaptive.StartingArmyBudget);
+                scenario.Adaptive.MaxDesignPointCost = EditorGUILayout.IntField(
+                    "Max design point cost", scenario.Adaptive.MaxDesignPointCost);
+                EditorGUILayout.EndVertical();
+            }
+        }
+
+        void DrawSourceRunScenarioPreflight()
+        {
+            EditorGUILayout.LabelField(
+                "Source run scenario", EditorStyles.boldLabel);
+            try
+            {
+                MlTrainingScenarioPreflight preflight =
+                    MlTrainingScenarioPreflight.LoadSourceRun(
+                        _config.ResumeSource);
+                EditorGUILayout.HelpBox(
+                    preflight.Describe(
+                        "source run", "source run"),
+                    MessageType.None);
+                if (preflight.LargeScenarioWarning)
+                    EditorGUILayout.HelpBox(
+                        "Warning: large scenario may reduce headless throughput",
+                        MessageType.Warning);
+            }
+            catch (Exception error)
+            {
+                string path = string.IsNullOrWhiteSpace(_config.ResumeSource)
+                    ? "Source run scenario path unavailable"
+                    : Path.Combine(_config.ResumeSource, "scenario.json");
+                EditorGUILayout.HelpBox(
+                    path + ": " + error.Message, MessageType.Warning);
+            }
+        }
+
+        static string OpponentLabel(MlOpponentKind opponent)
+        {
+            switch (opponent)
+            {
+                case MlOpponentKind.Random: return "Random";
+                case MlOpponentKind.FixedRun: return "Fixed run";
+                case MlOpponentKind.LiveRun: return "Live run";
+                default: return "Greedy";
+            }
+        }
+
+        static string LearnerSeatLabel(MlLearnerSeat learnerSeat)
+        {
+            switch (learnerSeat)
+            {
+                case MlLearnerSeat.Seat0: return "Seat 0";
+                case MlLearnerSeat.Seat1: return "Seat 1";
+                default: return "Alternating";
+            }
+        }
+
         void DrawControls()
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Controls", EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Doctor")) RunDoctor();
-            if (GUILayout.Button(_resume ? "Resume" : "Start")) StartTraining(false);
-            if (GUILayout.Button("Start & Watch")) StartTraining(true);
+            using (new EditorGUI.DisabledScope(
+                       !_resume &&
+                       (_scenarioSession == null || !_scenarioSession.CanLaunch)))
+            {
+                if (GUILayout.Button(_resume ? "Resume" : "Start"))
+                    StartTraining(false);
+                if (GUILayout.Button("Start & Watch")) StartTraining(true);
+            }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.BeginHorizontal();
             using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_selectedRun)))
@@ -539,6 +1203,32 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _state.BeginValidation();
             SyncTrackers();
             var errors = new List<string>(_config.Validate());
+            if (!_resume)
+            {
+                if (_scenarioSession == null)
+                    errors.Add("Training scenario session is unavailable.");
+                else if (!string.IsNullOrWhiteSpace(_scenarioSession.LibraryError))
+                    errors.Add(_scenarioSession.LibraryError);
+                else if (_scenarioSession.WorkingCopy == null)
+                    errors.Add("Training scenario is unavailable.");
+                else
+                {
+                    errors.AddRange(_scenarioSession.WorkingCopy.Validate());
+                    _config.Environment =
+                        _scenarioSession.WorkingCopy.Environment;
+                    try
+                    {
+                        MlTrainingScenarioPreflight.Create(
+                            _scenarioSession.WorkingCopy);
+                    }
+                    catch (Exception error)
+                    {
+                        errors.Add(
+                            "Training scenario preflight failed: " +
+                            error.Message);
+                    }
+                }
+            }
             if (!File.Exists(PythonExe)) errors.Add("Python environment was not found: " + PythonExe);
             if (!File.Exists(CliScript)) errors.Add("ML CLI was not found: " + CliScript);
             if (!File.Exists(GymServer)) errors.Add("Release GymServer was not found: " + GymServer);
@@ -551,7 +1241,26 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return;
             }
 
-            string args = _resume ? _config.BuildResumeArguments() : _config.BuildTrainArguments();
+            string args;
+            try
+            {
+                if (_resume)
+                {
+                    args = _config.BuildResumeArguments();
+                }
+                else
+                {
+                    string scenarioPath =
+                        MlTrainingScenarioStore.WriteSessionScenario(
+                            ProjectRoot, _scenarioSession.WorkingCopy);
+                    args = _config.BuildTrainArguments(scenarioPath);
+                }
+            }
+            catch (Exception error)
+            {
+                _state.Fail(SessionScenarioPath + ": " + error.Message);
+                return;
+            }
             args += " --runs-root " + MlCliProcess.QuoteArgument(RunsRoot) +
                     " --server " + MlCliProcess.QuoteArgument(GymServer);
             try

@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using HexWars.Engine.Rl;
 using HexWars.Presentation;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
@@ -234,6 +235,70 @@ namespace HexWars.Presentation.Tests
                 .Single(item => item.Id == _scenario.Id);
             Assert.That(saved.Name, Is.EqualTo("Changed"));
             Assert.That(File.Exists(libraryPath + ".tmp"), Is.False);
+        }
+
+        [TestCase(MlEnvironmentContract.TacticalV1, "tactical-standard")]
+        [TestCase(MlEnvironmentContract.AdaptiveV1, "adaptive-standard")]
+        public void PreflightDimensions_MatchAuthoritativeEngineDefaults(
+            MlEnvironmentContract environment, string templateId)
+        {
+            var scenario = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath)
+                .Filter(environment).Single(item => item.Id == templateId);
+
+            MlTrainingScenarioPreflight preflight =
+                MlTrainingScenarioPreflight.Create(scenario);
+            TrainingScenario engineScenario = MlTrainingScenarioPreflight.ToEngine(scenario);
+            MlContract contract = environment == MlEnvironmentContract.AdaptiveV1
+                ? MlContract.CreateAdaptive(engineScenario.BuildAdaptive())
+                : MlContract.Create(engineScenario.BuildTactical());
+
+            Assert.That(preflight.ObservationSize, Is.EqualTo(contract.ObservationSize));
+            Assert.That(preflight.ActionSize, Is.EqualTo(contract.ActionSize));
+            Assert.That(preflight.DisplayText, Does.Contain(
+                "Observation " + contract.ObservationSize));
+            Assert.That(preflight.DisplayText, Does.Contain(
+                "actions " + contract.ActionSize));
+            Assert.That(preflight.LargeScenarioWarning, Is.False);
+        }
+
+        [TestCase(MlEnvironmentContract.TacticalV1, "tactical-large-battle")]
+        [TestCase(MlEnvironmentContract.AdaptiveV1, "adaptive-large-battle")]
+        public void PreflightDimensions_MatchAuthoritative24By16Presets(
+            MlEnvironmentContract environment, string templateId)
+        {
+            var scenario = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath)
+                .Filter(environment).Single(item => item.Id == templateId);
+
+            MlTrainingScenarioPreflight preflight =
+                MlTrainingScenarioPreflight.Create(scenario);
+            TrainingScenario engineScenario = MlTrainingScenarioPreflight.ToEngine(scenario);
+            MlContract contract = environment == MlEnvironmentContract.AdaptiveV1
+                ? MlContract.CreateAdaptive(engineScenario.BuildAdaptive())
+                : MlContract.Create(engineScenario.BuildTactical());
+
+            Assert.That(scenario.Board.Width, Is.EqualTo(24));
+            Assert.That(scenario.Board.Height, Is.EqualTo(16));
+            Assert.That(preflight.ObservationSize, Is.EqualTo(contract.ObservationSize));
+            Assert.That(preflight.ActionSize, Is.EqualTo(contract.ActionSize));
+            Assert.That(preflight.LargeScenarioWarning, Is.True);
+        }
+
+        [Test]
+        public void SourceRunPreflight_LoadsTheResolvedRunScenario()
+        {
+            string run = Path.Combine(_scratch, "source-run");
+            Directory.CreateDirectory(run);
+            string scenarioPath = Path.Combine(run, "scenario.json");
+            File.Copy(
+                MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, _scenario),
+                scenarioPath);
+
+            MlTrainingScenarioPreflight preflight =
+                MlTrainingScenarioPreflight.LoadSourceRun(run);
+
+            Assert.That(preflight.TemplateId, Is.EqualTo("adaptive-standard"));
+            Assert.That(preflight.DisplayText, Does.Contain("adaptive-v1"));
+            Assert.That(preflight.DisplayText, Does.Contain("Board 13\u00d79"));
         }
 
         string CopyLibrary(Func<string, string> transform)
