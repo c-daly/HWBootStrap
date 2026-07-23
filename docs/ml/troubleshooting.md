@@ -36,6 +36,27 @@ If using `--server`, pass the exact built `.dll`. The default is `engine/HexWars
 
 The tool deliberately never overwrites a run. Pick a new valid name or pass `--runs-root` to a writable experiment directory. A valid name starts with a letter/number, is at most 64 characters, and uses only letters, numbers, `.`, `_`, and `-`.
 
+### Template or scenario validation fails
+
+`--template` and `--scenario-file` are mutually exclusive. A template ID must exist in `python/config/training-game-templates.json`, and the selected document's `environment` must match `--environment`. A scenario file is one complete schema-v1 scenario object, not the entire library wrapper. Validation is strict: missing keys, extra keys, non-finite numbers, overlapping deployment zones, an impossible adaptive starting budget, or a non-positive `episode.max_steps` all stop launch.
+
+Start from a known-good entry in the library, copy it to a new experiment file, and change only the hypothesis fields. For an adaptive budget/horizon experiment those are normally `adaptive.starting_army_budget` and `episode.max_steps`. Give the copy a distinct `id` and `name`, then validate it with a unique 1,000-timestep, one-worker smoke run before allocating the full budget.
+
+### GymServer reports different scenario values
+
+Python compares the requested scenario with the authoritative GymServer handshake before creating the durable run, including the scenario identity/schema, board, rules, horizon, rewards, adaptive settings, and resulting contract dimensions. A mismatch usually means the selected server binary is stale or `--server` points to a different build. Rebuild Release, confirm the repository/server path, and rerun the smoke; do not weaken validation.
+
+```powershell
+dotnet build .\engine\HexWars.GymServer\HexWars.GymServer.csproj -c Release
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train --run scenario-smoke-new-name --environment adaptive-v1 --scenario-file .\experiments\counter-artillery.json --algorithm maskable_ppo --opponent random --timesteps 1000 --checkpoint-every 500 --workers 1 --learner-seat alternating --tracker local
+```
+
+### A completed run has the wrong budget or horizon
+
+Do not edit `python/runs/RUN/scenario.json` or redirect `run.json.scenario.path`. The snapshot is immutable provenance, and every worker was launched against it. Preserve the bad smoke as evidence long enough to record the finding, fix the source experiment file or template, and launch a new run name. Before promotion, verify that `run.json.scenario.path` is `scenario.json`, its template ID/schema version match that file, and the recorded observation/action dimensions match the handshake for the snapshot.
+
+In Unity, reopen **HexWars > ML Lab > Train**, choose the environment/template, expand **Advanced game settings**, correct **Starting army budget** or **Max steps**, give the revision a new name/ID, and choose **Save as template**. Read **Training preflight**, run **Doctor**, and choose **Start & Watch** with a new smoke name. The Arena view is a separate checkpoint consumer; it cannot repair or redefine the training run.
+
 ## Training and status
 
 ### Status does not advance

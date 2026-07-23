@@ -71,6 +71,46 @@ Run names are 1–64 characters, start with a letter or number, and contain only
 
 Controller specifications accepted by evaluation and model tooling are `greedy`, `random`, and `run:PATH`. Standalone checkpoints and legacy `ppo:PATH` / `dqn:PATH` sources are rejected because they lack authoritative contract metadata.
 
+## Training game templates and custom scenarios
+
+Choose a checked-in template with `--template`, or pass a complete schema-v1 experiment file with `--scenario-file`; the two options are mutually exclusive. The selected scenario's `environment` must match `--environment`. If neither option is supplied, training selects that environment's `tactical-standard` or `adaptive-standard` template.
+
+For a reviewed library template, run:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run adaptive_large_seed31 `
+  --environment adaptive-v1 `
+  --template adaptive-large-battle `
+  --algorithm maskable_ppo `
+  --opponent greedy `
+  --learner-seat alternating `
+  --workers 4 `
+  --timesteps 300000
+```
+
+For a one-off experiment file, run:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run custom_scenario_seed32 `
+  --environment adaptive-v1 `
+  --scenario-file .\experiments\counter-artillery.json `
+  --algorithm maskable_ppo `
+  --opponent random `
+  --learner-seat 1 `
+  --workers 2 `
+  --timesteps 100000
+```
+
+An intern should copy one complete entry from [`python/config/training-game-templates.json`](config/training-game-templates.json) into a standalone JSON object such as `experiments/counter-artillery.json`, give it a distinct `id` and `name`, and change only the intended fields. For an adaptive experiment, `adaptive.starting_army_budget` controls the private deployment budget and `episode.max_steps` is the training horizon. Keep the copied `environment` aligned with the CLI selection and retain every schema-v1 field; strict validation rejects missing or extra keys.
+
+Before a full budget, use a new run name and `--timesteps 1000 --checkpoint-every 500 --workers 1 --tracker local`. After it completes, inspect both `python/runs/RUN/run.json` and `python/runs/RUN/scenario.json`: `run.json.scenario.path` must be `scenario.json`, the manifest's template ID/schema version must match the snapshot, and the contract observation/action dimensions must be the dimensions reported by the GymServer handshake for that snapshot.
+
+`scenario.json` is immutable experiment provenance. Python writes its canonical snapshot before workers start and passes that run-local file to every worker. Do not edit it to tune or repair a run, and do not edit `run.json` to point elsewhere. Change the source experiment file or library entry, then launch a new smoke/full run under a new name. Promote only the exact reviewed checkpoint together with its unmodified `run.json`, `scenario.json`, evaluation, source commit, and approval.
+
+The Unity equivalent is **HexWars > ML Lab > Train**: select **Environment** and **Template**, expand **Advanced game settings**, change the starting army budget and max steps if the hypothesis requires them, enter a new template name/ID, and choose **Save as template**. Set the run, algorithm, opponent, learner seat, workers, timesteps, and checkpoint interval; review **Training preflight**, choose **Doctor**, then **Start & Watch**. Unity writes the edited working copy to a session scenario file and launches the same CLI with `--scenario-file`. Use **Open run folder** to inspect the immutable snapshot, and use the Arena only after a complete checkpoint exists. Watching is a separate rendered match and does not display or pace the learner's headless episodes.
+
 Every current run manifest records `environment`, `version`, and a lowercase SHA-256 `encoding_hash`. Inference and resume require all three values to match the selected engine environment exactly; observation/action geometry is checked as a separate guard. `contract_hash` remains the full run-contract identity and can legitimately differ between training and duel horizons, while `encoding_hash` covers only the semantics that determine what observations and actions mean. Manifests created before `encoding_hash` was introduced are intentionally rejected rather than guessed compatible. The Unity arena passes its engine-derived expected identity to `policy_server.py`, and a rejected live reload leaves the previously validated model active.
 
 Runs created by `hexwars_ml.py` use absolute timestep targets. A manifest created by a legacy compatibility trainer can declare `config.timestep_mode: "additional"`; the resume command preserves that declaration, so inspect it before resuming an old run.

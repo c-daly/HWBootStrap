@@ -20,8 +20,8 @@ The main responsibilities are:
 | Component | Responsibility |
 | --- | --- |
 | `HexWars.GymServer` | Deterministic tactical environment, observations, legal-action masks, rewards, and game transitions |
-| `python/ml_lab` | Run lifecycle, controller resolution, SB3 adapters, vector workers, tracking, checkpoints, evaluation, and CLI |
-| Unity **ML Lab / Train** | Configure and launch a run, validate, monitor, stop/resume, reconnect, and open its folder |
+| `python/ml_lab` | Strict template/scenario resolution, run lifecycle, controller resolution, SB3 adapters, vector workers, tracking, checkpoints, evaluation, and CLI |
+| Unity **ML Lab / Train** | Select or edit a game template, preflight it with the engine contract, launch the same scenario-file CLI path, monitor, stop/resume, reconnect, and open its folder |
 | `policy_server.py` + `PolicyBridge` | Load resolved checkpoints and answer inference requests for rendered games |
 | Unity **ML Lab / Arena** | Play any two Greedy, Random, fixed-checkpoint, fixed-run, or live-run controllers |
 
@@ -48,6 +48,16 @@ The semantic hash matters because two tensors can have the same length while the
 
 The current contract is a tactical training scenario, not the entire configurable game. Success here does not prove that a model understands arbitrary map sizes, custom units, economy, setup placement, or every turn rule.
 
+## Scenario resolution and provenance
+
+`python/config/training-game-templates.json` is the checked-in schema-v1 library shared by the CLI and Unity. A new run resolves exactly one input: `--template ID`, `--scenario-file PATH`, or the selected environment's standard template when both are omitted. Template and scenario-file selection are mutually exclusive, and the resolved document's `environment` must equal the CLI environment.
+
+Resolution is deliberately two-stage. Python canonicalizes and strictly validates the document, materializes a temporary copy for a GymServer probe, and compares the authoritative handshake field by field with the requested board, rules, episode horizon, rewards, and adaptive settings. Only after that succeeds does it create the run and atomically write the canonical document to `RUN/scenario.json`. Every real worker receives that run-local path. Training rejects a worker whose resulting contract differs from the probe contract.
+
+The snapshot is provenance, not a settings file. `run.json.scenario` records the relative path `scenario.json`, template ID, and schema version; `run.json.contract` records the handshake-derived observation and action dimensions and semantic identities. The snapshot explains the exact game that produced the experience even if the library entry later changes. Nothing should mutate or redirect it after run creation. To change starting budget, horizon, board, rules, or rewards, edit a source experiment file or a library working copy and create a differently named run.
+
+Promotion consumes an exact checkpoint plus the unmodified manifest, scenario snapshot, evaluation, source commit, and human decision. A mutable template library entry, a Unity working copy, or a `latest` pointer is not sufficient provenance.
+
 ## Run directory
 
 By default a run named `example` is written to `python/runs/example/`:
@@ -56,6 +66,7 @@ By default a run named `example` is written to `python/runs/example/`:
 example/
 ├── run.json                 authoritative intent, state, PID, step, contract, latest checkpoint
 ├── params.json              immutable resolved configuration and contract
+├── scenario.json            immutable canonical game/scenario snapshot
 ├── control.json             stop request mailbox
 ├── progress.csv             normalized training metrics
 ├── monitor.csv              episode reward/length (plus worker-specific monitor files)

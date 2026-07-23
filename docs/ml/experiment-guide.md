@@ -16,6 +16,47 @@ This guide is written for an intern who can use a terminal and the Unity Editor 
 
 A useful name includes the algorithm, opponent or hypothesis, and seed, for example `ppo_counter_run1_s1701`. Never reuse a run name: the tool refuses to overwrite an existing directory. Keep experiment and held-out seeds disjoint; the default evaluation range begins at `1000000`.
 
+## Choose and freeze the training game
+
+For a full run based on a checked-in library entry, use the exact template ID:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run adaptive_large_seed31 `
+  --environment adaptive-v1 `
+  --template adaptive-large-battle `
+  --algorithm maskable_ppo `
+  --opponent greedy `
+  --learner-seat alternating `
+  --workers 4 `
+  --timesteps 300000
+```
+
+For a one-off game configuration, use a standalone scenario document:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run custom_scenario_seed32 `
+  --environment adaptive-v1 `
+  --scenario-file .\experiments\counter-artillery.json `
+  --algorithm maskable_ppo `
+  --opponent random `
+  --learner-seat 1 `
+  --workers 2 `
+  --timesteps 100000
+```
+
+Use this intern workflow:
+
+1. Open `python/config/training-game-templates.json`, copy one complete object from its `templates` array, and save that object alone as `experiments/counter-artillery.json`. Do not wrap it in another `templates` array.
+2. Change its `id` and `name`, retaining `schema_version: 1` and the selected environment. Change the hypothesis variables—for example `adaptive.starting_army_budget` and the horizon at `episode.max_steps`—while preserving all required fields. The adaptive budget must still fund `starting_unit_count` copies of the cheapest unit.
+3. Validate with a cheap real run: use a unique smoke name, the same `--environment` and `--scenario-file`, and `--timesteps 1000 --checkpoint-every 500 --workers 1 --tracker local`. A smoke is for launch, checkpoint, and contract validation, not policy-quality evidence.
+4. Inspect `python/runs/SMOKE/run.json` and `python/runs/SMOKE/scenario.json`. Confirm `run.json.state` is `completed`, `run.json.scenario.path` is `scenario.json`, its template ID/schema version match the snapshot, checkpoints were published, and the manifest contract's observation/action sizes match the GymServer handshake validated for that snapshot.
+5. In **HexWars > ML Lab > Train**, select the same environment/template. Expand **Advanced game settings** to review or edit **Starting army budget** and **Max steps**, assign a new template name and ID, and **Save as template** if this configuration belongs in the shared library. Set the smoke run fields, read **Training preflight**, choose **Doctor**, and then **Start & Watch**. Use **Open run folder** for the snapshot. The Arena watches separate games from complete checkpoints; it does not render training episodes.
+6. Record the smoke result, review the diff and hypothesis with the experiment owner, then start the full-budget command under a new run name. Promote only reviewed, pinned checkpoint artifacts with their unmodified manifest and scenario snapshot.
+
+`scenario.json` is immutable provenance, not a convenient settings file. Never modify it after launch, copy a different document over it, or redirect the manifest. If a smoke reveals a bad budget or horizon, fix the source experiment file or template and create a new run. A later edit to the library cannot change what an existing run means because each run retains its canonical snapshot.
+
 ## Local headless benchmark record
 
 The following Task 11 verification was recorded on 2026-07-22 on the Windows development host reported by `benchmark` as 16 logical CPUs. Each command used 20 games and held the seed range and engine build constant:
