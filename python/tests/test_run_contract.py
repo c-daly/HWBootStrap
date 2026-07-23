@@ -146,6 +146,29 @@ def test_create_run_snapshots_scenario_and_manifest_provenance(
     assert manifest["config"]["opponent"] == config.opponent
 
 
+def test_create_run_rejects_scenario_environment_mismatch_before_writing(
+    tmp_path: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> None:
+    adaptive_scenario = resolve_scenario(
+        environment="adaptive-v1",
+        scenario_file=None,
+        template_id="adaptive-standard",
+    )
+
+    with pytest.raises(ContractMismatch, match="scenario environment"):
+        create_run(
+            tmp_path,
+            config,
+            contract,
+            adaptive_scenario,
+            opponent_snapshot=config.opponent,
+        )
+
+    assert not (tmp_path / config.run_name).exists()
+
+
 def test_run_scenario_is_immutable_after_template_library_changes(
     tmp_path: Path,
     config: RunConfig,

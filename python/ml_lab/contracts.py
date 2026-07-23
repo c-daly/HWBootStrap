@@ -147,6 +147,8 @@ def create_run(
     config_data = config.to_dict()
     if config.environment != contract.environment:
         raise ContractMismatch("run environment does not match the environment contract")
+    if scenario.environment != config.environment:
+        raise ContractMismatch("scenario environment does not match the run configuration")
     contract_data = contract.to_dict()
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
