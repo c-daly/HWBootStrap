@@ -372,6 +372,41 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        [TestCase(0)]
+        [TestCase(1)]
+        [TestCase(2)]
+        [TestCase(3)]
+        [TestCase(4)]
+        [TestCase(5)]
+        public void GymServer_AcceptsEveryCheckedInTrainingTemplate(int templateIndex)
+        {
+            string libraryPath = Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "..", "python", "config",
+                "training-game-templates.json"));
+            using JsonDocument library = JsonDocument.Parse(File.ReadAllText(libraryPath));
+            JsonElement template = library.RootElement.GetProperty("templates")[templateIndex];
+            string environment = template.GetProperty("environment").GetString()!;
+            string scenario = WriteScenarioContent(template.GetRawText());
+            try
+            {
+                using var server = new ServerProcess(
+                    "--environment", environment, "--scenario-file", scenario);
+                using JsonDocument spaces = server.Exchange(new { cmd = "spaces" });
+
+                Assert.That(
+                    spaces.RootElement.GetProperty("scenario_id").GetString(),
+                    Is.EqualTo(template.GetProperty("id").GetString()));
+                Assert.That(
+                    spaces.RootElement.GetProperty("scenario_schema_version").GetInt32(),
+                    Is.EqualTo(1));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
         [Test]
         public void GymServer_RejectsMalformedScenarioBeforeCommandProcessing()
         {

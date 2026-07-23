@@ -13,6 +13,7 @@ import pytest
 import ml_lab.cli as cli_module
 from ml_lab.contracts import EnvironmentContract, RunConfig, create_run
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.scenarios import ResolvedScenario
 
 
 @pytest.fixture
@@ -50,8 +51,9 @@ def _config(run_name: str) -> RunConfig:
 def test_cli_records_explicit_adaptive_environment(tmp_path: Path) -> None:
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, **_kwargs) -> Path:
+    def runner(config: RunConfig, *, scenario: ResolvedScenario, **_kwargs) -> Path:
         received.append(config)
+        assert scenario.template_id == "adaptive-standard"
         return _complete_fake_run(tmp_path, config)
 
     assert cli_module.main([
@@ -96,8 +98,9 @@ def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> No
     )
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, **_kwargs) -> Path:
+    def runner(config: RunConfig, *, scenario: ResolvedScenario, **_kwargs) -> Path:
         received.append(config)
+        assert scenario.template_id == "legacy-default"
         return _complete_fake_run(tmp_path, config)
 
     assert cli_module.main([
@@ -106,6 +109,72 @@ def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> No
     ], runner=runner, stdout=StringIO()) == 0
 
     assert received[0].environment == "adaptive-v1"
+
+
+def test_train_cli_rejects_template_and_file_together() -> None:
+    with pytest.raises(SystemExit):
+        cli_module.build_parser().parse_args([
+            "train", "--run", "x", "--template", "tactical-standard",
+            "--scenario-file", "custom.json",
+        ])
+
+
+def test_train_cli_passes_selected_template_to_runner(tmp_path: Path) -> None:
+    received: list[ResolvedScenario] = []
+
+    def runner(
+        config: RunConfig, *, scenario: ResolvedScenario, **_kwargs
+    ) -> Path:
+        received.append(scenario)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "large", "--environment", "tactical-v1",
+        "--template", "tactical-large-battle", "--runs-root", str(tmp_path),
+        "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].template_id == "tactical-large-battle"
+
+
+def test_train_resume_uses_source_scenario_instead_of_new_selection(
+    tmp_path: Path,
+) -> None:
+    source = create_run(
+        tmp_path,
+        _config("scenario-source"),
+        EnvironmentContract(
+            version="tactical-v1",
+            contract_hash="c" * 64,
+            encoding_hash="d" * 64,
+            observation_size=12,
+            action_size=7,
+            board={"width": 2, "height": 2},
+            roster=["scout"],
+            reward={"terminal_win": 1.0},
+        ),
+    )
+    source_scenario = cli_module.resolve_scenario(
+        environment="tactical-v1",
+        scenario_file=None,
+        template_id="tactical-long-battle",
+    )
+    source_scenario.write(source / "scenario.json")
+    received: list[ResolvedScenario] = []
+
+    def runner(
+        config: RunConfig, *, scenario: ResolvedScenario, **_kwargs
+    ) -> Path:
+        received.append(scenario)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "scenario-resumed", "--resume", str(source),
+        "--template", "tactical-large-battle", "--runs-root", str(tmp_path),
+        "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].template_id == "tactical-long-battle"
 
 
 def _complete_fake_run(runs_root: Path, config: RunConfig) -> Path:
@@ -273,9 +342,16 @@ def test_train_json_reports_the_durable_completed_run(
 ) -> None:
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
+        assert scenario.template_id == "tactical-standard"
         return _complete_fake_run(runs_root, config)
 
     exit_code, payload = _invoke_json(
@@ -313,8 +389,9 @@ def test_train_no_console_output_suppresses_envelope_and_requests_file_only_logg
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
-        del server_cmd
+        del server_cmd, scenario
         received.append(console_output)
         return _complete_fake_run(runs_root, config)
 
@@ -351,8 +428,9 @@ def test_train_no_console_output_sinks_incidental_runner_stream_writes(
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
-        del server_cmd, console_output
+        del server_cmd, console_output, scenario
         print("tracker wrote to stdout")
         print("tracker wrote to stderr", file=sys.stderr)
         return _complete_fake_run(runs_root, config)
@@ -385,7 +463,14 @@ def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets
 ) -> None:
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del scenario
         received.append(config)
         return _complete_fake_run(runs_root, config)
 
@@ -459,7 +544,14 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
     atomic_write_json(source / "run.json", source_manifest)
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        assert scenario.template_id == "legacy-default"
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
         return _complete_fake_run(runs_root, config)
@@ -505,8 +597,10 @@ def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_log
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
         del server_cmd
+        assert scenario.template_id == "legacy-default"
         received.append(console_output)
         return _complete_fake_run(runs_root, config)
 

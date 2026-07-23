@@ -18,6 +18,11 @@ from .controllers import ControllerResolver, ControllerSpec, normalize_controlle
 from .doctor import doctor_environment
 from .evaluation import DEFAULT_HELD_OUT_SEED, evaluate_controllers, publish_candidate
 from .io import read_json
+from .scenarios import (
+    ResolvedScenario,
+    legacy_default_scenario,
+    resolve_scenario,
+)
 from .training import run_training
 
 
@@ -93,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
     )
     train.add_argument("--resume")
+    scenario = train.add_mutually_exclusive_group()
+    scenario.add_argument("--scenario-file", type=Path)
+    scenario.add_argument("--template")
     train.add_argument(
         "--tracker",
         action="append",
@@ -251,6 +259,46 @@ def _source_run_dir(source: Path) -> Path:
     raise ValueError("resume source must belong to a metadata-backed run")
 
 
+def _source_environment(source_run: Path) -> str:
+    manifest = read_json(Path(source_run) / "run.json")
+    raw_config = manifest.get("config")
+    if not isinstance(raw_config, dict):
+        raise ValueError("resume source run is missing configuration metadata")
+    environment = raw_config.get("environment")
+    if environment not in {"tactical-v1", "adaptive-v1"}:
+        raise ValueError("resume source run is missing valid environment metadata")
+    return environment
+
+
+def _source_scenario(source_run: Path, environment: str) -> ResolvedScenario:
+    scenario_path = Path(source_run) / "scenario.json"
+    if scenario_path.is_file():
+        return resolve_scenario(
+            environment=environment,
+            scenario_file=scenario_path,
+            template_id=None,
+        )
+    return legacy_default_scenario(environment)
+
+
+def _training_scenario(args: argparse.Namespace) -> ResolvedScenario:
+    if args.resume:
+        source_run = _source_run_dir(Path(args.resume))
+        environment = _source_environment(source_run)
+        return _source_scenario(source_run, environment)
+    environment = args.environment or "tactical-v1"
+    return resolve_scenario(
+        environment=environment,
+        scenario_file=args.scenario_file,
+        template_id=args.template,
+    )
+
+
+def _resume_scenario(args: argparse.Namespace) -> ResolvedScenario:
+    source_run = _source_run_dir(args.source)
+    return _source_scenario(source_run, _source_environment(source_run))
+
+
 def _resume_config(args: argparse.Namespace) -> RunConfig:
     source_run = _source_run_dir(args.source)
     source = read_json(source_run / "run.json")
@@ -379,6 +427,7 @@ def _dispatch(
             trackers=args.tracker,
         )
     if args.command == "train":
+        scenario = _training_scenario(args)
         config = _training_config(args)
         runner_options = {
             "runs_root": Path(args.runs_root),
@@ -389,10 +438,12 @@ def _dispatch(
         return _run_result(
             runner(
                 config,
+                scenario=scenario,
                 **runner_options,
             )
         )
     if args.command == "resume":
+        scenario = _resume_scenario(args)
         config = _resume_config(args)
         runner_options = {
             "runs_root": Path(args.runs_root),
@@ -403,6 +454,7 @@ def _dispatch(
         return _run_result(
             runner(
                 config,
+                scenario=scenario,
                 **runner_options,
             )
         )
