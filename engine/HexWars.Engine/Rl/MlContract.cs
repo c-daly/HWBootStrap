@@ -449,6 +449,10 @@ namespace HexWars.Engine.Rl
             return AppendCanonicalValue(new StringBuilder(), document).ToString();
         }
 
+        // Encoding identity is deliberately narrower than the full run contract: inference may transfer
+        // across environment role, episode horizon, and reward shaping, but not across board, rules, or
+        // adaptive architecture changes. Keep this exclusion list intentionally small until fine-tuning
+        // compatibility has an explicit contract of its own.
         private static object NormalizeEncodingValue(object value)
         {
             if (value is IReadOnlyDictionary<string, object> dictionary)
