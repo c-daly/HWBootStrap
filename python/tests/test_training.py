@@ -99,8 +99,18 @@ def test_worker_seed_streams_are_deterministic_and_disjoint() -> None:
     worker0 = WorkerSchedule(base_seed=17, worker_index=0, worker_count=2)
     worker1 = WorkerSchedule(base_seed=17, worker_index=1, worker_count=2)
 
-    assert [worker0.next_episode(), worker0.next_episode()] == [(17, 0), (19, 1)]
-    assert [worker1.next_episode(), worker1.next_episode()] == [(18, 1), (20, 0)]
+    assignments0 = [worker0.next_episode(), worker0.next_episode()]
+    assignments1 = [worker1.next_episode(), worker1.next_episode()]
+
+    assert type(assignments0[0]).__name__ == "EpisodeAssignment"
+    assert [
+        (item.worker_id, item.episode_index, item.seed, item.learner_seat)
+        for item in assignments0
+    ] == [(0, 0, 17, 0), (0, 1, 19, 1)]
+    assert [
+        (item.worker_id, item.episode_index, item.seed, item.learner_seat)
+        for item in assignments1
+    ] == [(1, 0, 18, 1), (1, 1, 20, 0)]
 
 
 def test_fixed_learner_seat_is_available_for_diagnosis() -> None:
@@ -108,7 +118,24 @@ def test_fixed_learner_seat_is_available_for_diagnosis() -> None:
         base_seed=5, worker_index=0, worker_count=1, learner_seat="1"
     )
 
-    assert [schedule.next_episode(), schedule.next_episode()] == [(5, 1), (6, 1)]
+    assert [schedule.next_episode().learner_seat for _ in range(2)] == [1, 1]
+
+
+def test_four_workers_alternate_evenly_and_fixed_seats_never_change() -> None:
+    alternating = [
+        WorkerSchedule(base_seed=17, worker_index=worker_id, worker_count=4)
+        for worker_id in range(4)
+    ]
+
+    for worker_id, schedule in enumerate(alternating):
+        assignments = [schedule.next_episode() for _ in range(5)]
+        assert [assignment.worker_id for assignment in assignments] == [worker_id] * 5
+        seats = [assignment.learner_seat for assignment in assignments]
+        assert seats == [worker_id % 2, (worker_id + 1) % 2, worker_id % 2, (worker_id + 1) % 2, worker_id % 2]
+        assert abs(seats.count(0) - seats.count(1)) <= 1
+
+    fixed = WorkerSchedule(base_seed=17, worker_index=3, worker_count=4, learner_seat="1")
+    assert [fixed.next_episode().learner_seat for _ in range(5)] == [1, 1, 1, 1, 1]
 
 
 class FakeGymEnv(gym.Env):
@@ -148,6 +175,10 @@ class FakeGymEnv(gym.Env):
 
     def close(self):
         self.closed = True
+
+
+def build_one_step_env(seat: int, seed: int) -> FakeGymEnv:
+    return FakeGymEnv(0, seat, seed)
 
 
 class SpawnCleanupProbeEnv(gym.Env):
@@ -248,6 +279,12 @@ def test_scheduled_environment_alternates_seat_and_uses_worker_seed_stream() -> 
     assert created[0].reset_seeds == [23]
     assert created[0].closed is True
     assert created[1].reset_seeds == [24]
+    assert (
+        env.current_assignment.worker_id,
+        env.current_assignment.episode_index,
+        env.current_assignment.seed,
+        env.current_assignment.learner_seat,
+    ) == (0, 1, 24, 1)
 
 
 def test_vector_workers_expose_direct_action_masks_and_own_distinct_environments() -> None:
@@ -343,21 +380,41 @@ def test_spawned_runtime_failure_closes_worker_and_parent_reaps_it(tmp_path: Pat
     vector.close()
 
 
-def test_episode_monitor_emits_sb3_episode_info(tmp_path: Path) -> None:
-    monitor_path = tmp_path / "monitor.csv"
-    monitor_path.write_text(
-        "episode_reward,episode_length,elapsed_seconds\n", encoding="utf-8"
+def test_monitor_records_assignment_for_each_completed_episode(tmp_path: Path) -> None:
+    schedule = WorkerSchedule(base_seed=17, worker_index=1, worker_count=2)
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(schedule, build_one_step_env),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
     )
-    monitored = EpisodeMonitor(FakeGymEnv(0), monitor_path, threading.Lock(), worker_id=3)
 
-    monitored.reset(seed=7)
+    monitored.reset()
     _, _, terminated, _, info = monitored.step(0)
-
     assert terminated is True
-    assert info["episode"]["r"] == 0.0
-    assert info["episode"]["l"] == 1
-    assert info["episode"]["worker_id"] == 3
-    assert info["episode"]["episode_number"] == 1
+    assert info["episode"] == {
+        "r": 0.0,
+        "l": 1,
+        "t": info["episode"]["t"],
+        "worker_id": 1,
+        "episode_number": 1,
+        "episode_index": 0,
+        "episode_seed": 18,
+        "learner_seat": 1,
+    }
+
+    monitored.reset()
+    monitored.step(0)
+
+    rows = list(csv.DictReader(monitor_path.open(newline="", encoding="utf-8")))
+    assert [
+        (row["worker_id"], row["episode_index"], row["episode_seed"], row["learner_seat"])
+        for row in rows
+    ] == [
+        ("1", "0", "18", "1"),
+        ("1", "1", "20", "0"),
+    ]
 
 
 class AdaptiveEpisodeEnv(FakeGymEnv):
@@ -1386,7 +1443,15 @@ def test_multiworker_run_manifest_exposes_monitor_shards_as_authoritative(
     ]
     with (run_dir / "monitor.csv").open(newline="", encoding="utf-8") as stream:
         assert list(csv.reader(stream)) == [
-            ["episode_reward", "episode_length", "elapsed_seconds"]
+            [
+                "worker_id",
+                "episode_index",
+                "episode_seed",
+                "learner_seat",
+                "episode_reward",
+                "episode_length",
+                "elapsed_seconds",
+            ]
         ]
 
 

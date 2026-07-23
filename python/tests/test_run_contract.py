@@ -116,7 +116,15 @@ def test_create_run_writes_complete_manifest_and_tree(
             "steps_per_second",
         ]
     with (run / "monitor.csv").open(newline="", encoding="utf-8") as stream:
-        assert next(csv.reader(stream)) == ["episode_reward", "episode_length", "elapsed_seconds"]
+        assert next(csv.reader(stream)) == [
+            "worker_id",
+            "episode_index",
+            "episode_seed",
+            "learner_seat",
+            "episode_reward",
+            "episode_length",
+            "elapsed_seconds",
+        ]
 
 
 def test_create_run_snapshots_scenario_and_manifest_provenance(

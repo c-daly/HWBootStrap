@@ -20,7 +20,15 @@ RUN_SCHEMA_VERSION = 1
 RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_STATES = {"created", "running", "stopping", "stopped", "completed", "failed"}
 PROGRESS_HEADER = ["timestamp", "timesteps", "episodes", "mean_reward", "steps_per_second"]
-MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
+MONITOR_HEADER = [
+    "worker_id",
+    "episode_index",
+    "episode_seed",
+    "learner_seat",
+    "episode_reward",
+    "episode_length",
+    "elapsed_seconds",
+]
 ADAPTIVE_MONITOR_HEADER = [
     "episode",
     "design_count",

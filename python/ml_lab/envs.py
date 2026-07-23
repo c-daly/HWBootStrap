@@ -7,6 +7,7 @@ import multiprocessing as mp
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,16 @@ from selfplay_env import SelfPlayEnv
 from .contracts import ADAPTIVE_MONITOR_HEADER, EnvironmentContract, MONITOR_HEADER, RunConfig
 from .controllers import ControllerBinding, ControllerResolver, snapshot_opponents
 from .scenarios import resolve_scenario, validate_handshake
+
+
+@dataclass(frozen=True)
+class EpisodeAssignment:
+    """The deterministic identity and learner seat of one worker episode."""
+
+    worker_id: int
+    episode_index: int
+    seed: int
+    learner_seat: int
 
 
 class WorkerSchedule:
@@ -45,7 +56,7 @@ class WorkerSchedule:
         self.learner_seat = learner_seat
         self.episode_index = 0
 
-    def next_episode(self) -> tuple[int, int]:
+    def next_episode(self) -> EpisodeAssignment:
         episode = self.episode_index
         self.episode_index += 1
         seed = self.base_seed + self.worker_index + episode * self.worker_count
@@ -53,7 +64,12 @@ class WorkerSchedule:
             seat = (self.worker_index + episode) % 2
         else:
             seat = int(self.learner_seat)
-        return seed, seat
+        return EpisodeAssignment(
+            worker_id=self.worker_index,
+            episode_index=episode,
+            seed=seed,
+            learner_seat=seat,
+        )
 
 
 class ScheduledEnvironment(gym.Env):
@@ -70,9 +86,9 @@ class ScheduledEnvironment(gym.Env):
         self._schedule = schedule
         self._builder = builder
         self._pending = schedule.next_episode()
-        seed, seat = self._pending
-        self._env = builder(seat, seed)
-        self._seat = seat
+        self.current_assignment = self._pending
+        self._env = builder(self._pending.learner_seat, self._pending.seed)
+        self._seat = self._pending.learner_seat
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
         self.contract = _environment_contract(self._env)
@@ -98,9 +114,9 @@ class ScheduledEnvironment(gym.Env):
         else:
             assignment = self._pending
             self._pending = None
-        episode_seed, seat = assignment
-        self._ensure_seat(seat, episode_seed)
-        return self._env.reset(seed=episode_seed, options=options)
+        self._ensure_seat(assignment.learner_seat, assignment.seed)
+        self.current_assignment = assignment
+        return self._env.reset(seed=assignment.seed, options=options)
 
     def step(self, action):
         return self._env.step(action)
@@ -139,12 +155,16 @@ class EpisodeMonitor(gym.Wrapper):
         self._reward = 0.0
         self._length = 0
         self._diagnostics: dict[str, Any] = {}
+        self._assignment: EpisodeAssignment | None = None
 
     def reset(self, **kwargs):
         self._reward = 0.0
         self._length = 0
         self._diagnostics = {}
-        return self.env.reset(**kwargs)
+        observation, info = self.env.reset(**kwargs)
+        assignment = getattr(self.env, "current_assignment", None)
+        self._assignment = assignment if isinstance(assignment, EpisodeAssignment) else None
+        return observation, info
 
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
@@ -160,13 +180,23 @@ class EpisodeMonitor(gym.Wrapper):
             if self.contract.version == "adaptive-v1":
                 self._append_adaptive_episode()
             info = dict(info)
-            info["episode"] = {
+            episode_info = {
                 "r": self._reward,
                 "l": self._length,
                 "t": elapsed,
                 "worker_id": self._worker_id,
                 "episode_number": self._episode_number,
             }
+            if self._assignment is not None:
+                episode_info.update(
+                    {
+                        "worker_id": self._assignment.worker_id,
+                        "episode_index": self._assignment.episode_index,
+                        "episode_seed": self._assignment.seed,
+                        "learner_seat": self._assignment.learner_seat,
+                    }
+                )
+            info["episode"] = episode_info
         return observation, reward, terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
@@ -182,7 +212,18 @@ class EpisodeMonitor(gym.Wrapper):
                 except FileExistsError:
                     pass
             with self._path.open("a", newline="", encoding="utf-8") as stream:
-                csv.writer(stream).writerow([self._reward, self._length, elapsed])
+                assignment = self._assignment
+                csv.writer(stream).writerow(
+                    [
+                        assignment.worker_id if assignment is not None else self._worker_id,
+                        assignment.episode_index if assignment is not None else self._episode_number - 1,
+                        assignment.seed if assignment is not None else "",
+                        assignment.learner_seat if assignment is not None else "",
+                        self._reward,
+                        self._length,
+                        elapsed,
+                    ]
+                )
 
     def _append_adaptive_episode(self) -> None:
         path = self._adaptive_path
