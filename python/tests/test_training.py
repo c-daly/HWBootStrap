@@ -417,6 +417,64 @@ def test_monitor_records_assignment_for_each_completed_episode(tmp_path: Path) -
     ]
 
 
+def test_monitor_migrates_legacy_rows_before_appending_assignment_data(tmp_path: Path) -> None:
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    monitor_path.write_text(
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "1.5,7,0.25\n"
+        "-2.0,3,0.75\n",
+        encoding="utf-8",
+    )
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(
+            WorkerSchedule(base_seed=17, worker_index=1, worker_count=2), build_one_step_env
+        ),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
+    )
+
+    monitored.reset()
+    monitored.step(0)
+
+    with monitor_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.reader(stream))
+    assert rows == [
+        [
+            "worker_id",
+            "episode_index",
+            "episode_seed",
+            "learner_seat",
+            "episode_reward",
+            "episode_length",
+            "elapsed_seconds",
+        ],
+        ["", "", "", "", "1.5", "7", "0.25"],
+        ["", "", "", "", "-2.0", "3", "0.75"],
+        ["1", "0", "18", "1", "0.0", "1", rows[3][6]],
+    ]
+
+
+def test_monitor_rejects_unknown_existing_header_without_appending(tmp_path: Path) -> None:
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    original = "unexpected,columns\nold,data\n"
+    monitor_path.write_text(original, encoding="utf-8")
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(
+            WorkerSchedule(base_seed=17, worker_index=1, worker_count=2), build_one_step_env
+        ),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
+    )
+
+    monitored.reset()
+    with pytest.raises(ValueError, match="unexpected monitor CSV header"):
+        monitored.step(0)
+
+    assert monitor_path.read_text(encoding="utf-8") == original
+
+
 class AdaptiveEpisodeEnv(FakeGymEnv):
     def __init__(self) -> None:
         super().__init__(0)

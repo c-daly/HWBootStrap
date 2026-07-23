@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import multiprocessing as mp
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import gymnasium as gym
@@ -23,6 +25,9 @@ from selfplay_env import SelfPlayEnv
 from .contracts import ADAPTIVE_MONITOR_HEADER, EnvironmentContract, MONITOR_HEADER, RunConfig
 from .controllers import ControllerBinding, ControllerResolver, snapshot_opponents
 from .scenarios import resolve_scenario, validate_handshake
+
+
+LEGACY_MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
 
 
 @dataclass(frozen=True)
@@ -204,13 +209,7 @@ class EpisodeMonitor(gym.Wrapper):
 
     def _append_episode(self, elapsed: float) -> None:
         with self._lock:
-            if not self._path.exists():
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    with self._path.open("x", newline="", encoding="utf-8") as stream:
-                        csv.writer(stream).writerow(MONITOR_HEADER)
-                except FileExistsError:
-                    pass
+            self._prepare_monitor_file()
             with self._path.open("a", newline="", encoding="utf-8") as stream:
                 assignment = self._assignment
                 csv.writer(stream).writerow(
@@ -224,6 +223,55 @@ class EpisodeMonitor(gym.Wrapper):
                         elapsed,
                     ]
                 )
+
+    def _prepare_monitor_file(self) -> None:
+        if not self._path.exists():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self._path.open("x", newline="", encoding="utf-8") as stream:
+                    csv.writer(stream).writerow(MONITOR_HEADER)
+                return
+            except FileExistsError:
+                pass
+
+        with self._path.open(newline="", encoding="utf-8") as stream:
+            rows = csv.reader(stream)
+            try:
+                header = next(rows)
+            except StopIteration as error:
+                raise ValueError(f"unexpected monitor CSV header in {self._path}: file is empty") from error
+            if header == MONITOR_HEADER:
+                return
+            if header != LEGACY_MONITOR_HEADER:
+                raise ValueError(f"unexpected monitor CSV header in {self._path}: {header!r}")
+            legacy_rows = list(rows)
+
+        if any(len(row) != len(LEGACY_MONITOR_HEADER) for row in legacy_rows):
+            raise ValueError(f"unexpected monitor CSV row shape in {self._path}")
+
+        staged_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                newline="",
+                encoding="utf-8",
+                prefix=f".{self._path.name}.",
+                suffix=".tmp",
+                dir=self._path.parent,
+                delete=False,
+            ) as stream:
+                staged_path = Path(stream.name)
+                writer = csv.writer(stream)
+                writer.writerow(MONITOR_HEADER)
+                for row in legacy_rows:
+                    writer.writerow(["", "", "", "", *row])
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(staged_path, self._path)
+            staged_path = None
+        finally:
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
 
     def _append_adaptive_episode(self) -> None:
         path = self._adaptive_path
