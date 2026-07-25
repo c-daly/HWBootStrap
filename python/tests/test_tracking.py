@@ -31,6 +31,7 @@ def run_dir(tmp_path: Path) -> Path:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[],
         resume_source=None,
+        environment="tactical-v1",
     )
     contract = EnvironmentContract(
         version="tactical-v1",

@@ -74,7 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subcommands.add_parser("doctor", help="check headless ML dependencies")
     doctor.add_argument("--tracker", action="append", default=[])
     doctor.add_argument(
-        "--environment", choices=["tactical-v1", "adaptive-v1"], default="tactical-v1"
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
     )
     _add_runtime_arguments(doctor)
     _add_json_argument(doctor)
@@ -83,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--run", required=True)
     train.add_argument(
         "--environment",
-        choices=["tactical-v1", "adaptive-v1"],
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
         default=None,
     )
     train.add_argument(
@@ -173,7 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--seed-start", type=int, default=DEFAULT_HELD_OUT_SEED)
     benchmark.add_argument("--workers", type=int, default=1)
     benchmark.add_argument(
-        "--environment", choices=["tactical-v1", "adaptive-v1"], default="tactical-v1"
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
     )
     benchmark.add_argument("--server", default=str(DEFAULT_SERVER))
     _add_json_argument(benchmark)
@@ -221,14 +225,14 @@ def _tracker_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _training_config(args: argparse.Namespace) -> RunConfig:
     policy = "HexCNN" if args.algorithm == "maskable_ppo" else "MlpPolicy"
-    environment = args.environment or "tactical-v1"
+    environment = args.environment or "tactical-v2"
     if args.resume:
         source_manifest = read_json(_source_run_dir(Path(args.resume)) / "run.json")
         source_config = source_manifest.get("config")
         if not isinstance(source_config, dict):
             raise ValueError("resume source run is missing configuration metadata")
         source_environment = source_config.get("environment")
-        if source_environment not in {"tactical-v1", "adaptive-v1"}:
+        if source_environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
             raise ValueError("resume source run is missing valid environment metadata")
         if args.environment is not None and args.environment != source_environment:
             raise ValueError("resume environment does not match the source run")
@@ -266,7 +270,7 @@ def _source_environment(source_run: Path) -> str:
     if not isinstance(raw_config, dict):
         raise ValueError("resume source run is missing configuration metadata")
     environment = raw_config.get("environment")
-    if environment not in {"tactical-v1", "adaptive-v1"}:
+    if environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
         raise ValueError("resume source run is missing valid environment metadata")
     return environment
 
@@ -287,7 +291,7 @@ def _training_scenario(args: argparse.Namespace) -> ResolvedScenario:
         source_run = _source_run_dir(Path(args.resume))
         environment = _source_environment(source_run)
         return _source_scenario(source_run, environment)
-    environment = args.environment or "tactical-v1"
+    environment = args.environment or "tactical-v2"
     return resolve_scenario(
         environment=environment,
         scenario_file=args.scenario_file,
@@ -306,7 +310,7 @@ def _resume_config(args: argparse.Namespace) -> RunConfig:
     raw_config = source.get("config")
     if not isinstance(raw_config, dict):
         raise ValueError("resume source run is missing configuration metadata")
-    if raw_config.get("environment") not in {"tactical-v1", "adaptive-v1"}:
+    if raw_config.get("environment") not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
         raise ValueError("resume source run is missing valid environment metadata")
     config = RunConfig(**raw_config)
     return replace(

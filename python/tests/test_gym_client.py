@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from hexwars_gym import HexWarsEnv
+from hexwars_gym.env import parse_contract
 
 
 def _fake_server(
@@ -86,6 +87,82 @@ def _valid_spaces() -> dict:
             "draw_credit_weight": 0.25, "points_weight": 0.5,
             "terminal_win": 1.0, "terminal_loss": -1.0,
         },
+    }
+
+
+def tactical_v2_templates(count: int) -> list[dict]:
+    stats = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    return [
+        {"id": f"template-{index}", "name": f"Template {index}", "stats": list(stats), "cost": sum(stats)}
+        for index in range(count)
+    ]
+
+
+def tactical_v2_spaces(
+    *,
+    template_count: int = 5,
+    unit_count: int = 3,
+    width: int = 13,
+    height: int = 9,
+    environment_kind: str = "tactical",
+) -> dict:
+    cells = width * height
+    templates = tactical_v2_templates(template_count)
+    action_regions = {
+        "move": {"offset": 1, "count": unit_count * cells},
+        "attack": {"offset": 1 + unit_count * cells, "count": unit_count * cells},
+        "deploy": {"offset": 1 + 2 * unit_count * cells, "count": template_count * cells},
+    }
+    action_size = 1 + (2 * unit_count + template_count) * cells
+    observation_channels = (
+        [f"friendly_role_hp_{index}" for index in range(template_count)]
+        + [f"visible_enemy_role_hp_{index}" for index in range(template_count)]
+        + ["elevation"]
+    )
+    observation_size = len(observation_channels) * cells + 5
+    board = _board()
+    board.update(width=width, height=height, environment_kind=environment_kind)
+    roster = [
+        f"{template['id']}:{template['name']}:{','.join(map(str, template['stats']))}"
+        for template in templates
+    ]
+    semantics = {
+        "contract_version": "tactical-v2",
+        "environment_kind": environment_kind,
+        "starting_unit_count": unit_count,
+        "max_controllable_units": unit_count,
+        "placement_policy": "symmetric-random-v1",
+        "templates": templates,
+        "action_regions": action_regions,
+        "observation_channels": observation_channels,
+        "action_size": action_size,
+        "observation_size": observation_size,
+        "board": board,
+    }
+    return {
+        "scenario_id": "tactical-v2-test",
+        "scenario_schema_version": 1,
+        "contract_version": "tactical-v2",
+        "contract_hash": "a" * 64,
+        "encoding_hash": "b" * 64,
+        "environment_kind": environment_kind,
+        "obs_len": observation_size,
+        "n_actions": action_size,
+        "channels": len(observation_channels),
+        "globals": 5,
+        "board_h": height,
+        "board_w": width,
+        "board": board,
+        "roster": template_count,
+        "contract_roster": roster,
+        "reward": {
+            "shape_scale": 0.01, "step_penalty": 0.005, "closing_weight": 0.02,
+            "draw_credit_weight": 0.25, "points_weight": 0.5,
+            "terminal_win": 1.0, "terminal_loss": -1.0,
+        },
+        "tactical_v2": semantics,
+        "action_regions": action_regions,
+        "observation_channels": observation_channels,
     }
 
 
@@ -328,9 +405,52 @@ def test_contract_rejects_observation_geometry_inconsistent_with_spaces(tmp_path
 
 def test_contract_rejects_unknown_version(tmp_path: Path) -> None:
     spaces = _valid_spaces()
-    spaces["contract_version"] = "tactical-v2"
+    spaces["contract_version"] = "tactical-v3"
     with pytest.raises(ValueError, match="contract_version"):
         HexWarsEnv(_fake_server(tmp_path, spaces))
+
+
+def test_parse_tactical_v2_contract_uses_slots_and_templates() -> None:
+    spaces = tactical_v2_spaces(template_count=5, unit_count=7, width=13, height=9)
+    contract = parse_contract(spaces, environment="tactical-v2")
+
+    cells = 13 * 9
+    assert contract.action_size == 1 + (2 * 7 + 5) * cells
+    assert contract.observation_size == (2 * 5 + 1) * cells + 5
+    assert contract.semantics["starting_unit_count"] == 7
+
+
+def test_tactical_v2_client_accepts_complete_contract_and_sends_environment_flag(
+    tmp_path: Path,
+) -> None:
+    spaces = tactical_v2_spaces(template_count=5, unit_count=3, width=13, height=9)
+    env = HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
+    try:
+        assert env.contract.version == "tactical-v2"
+        assert env.action_space.n == spaces["n_actions"]
+        assert env.contract.semantics["starting_unit_count"] == 3
+        assert env.proc.args[-2:] == ["--environment", "tactical-v2"]
+    finally:
+        env.close()
+
+
+def test_tactical_v2_client_rejects_duel_handshake_and_closes_server_process(
+    tmp_path: Path,
+) -> None:
+    spaces = tactical_v2_spaces(environment_kind="duel")
+    close_marker = tmp_path / "tactical-v2-duel-server-closed.txt"
+
+    with pytest.raises(ValueError, match="environment_kind"):
+        HexWarsEnv(_fake_server(tmp_path, spaces, close_marker), environment="tactical-v2")
+
+    assert close_marker.read_text(encoding="utf-8") == "closed"
+
+
+def test_tactical_v2_client_rejects_roster_mismatched_with_templates(tmp_path: Path) -> None:
+    spaces = tactical_v2_spaces()
+    spaces["contract_roster"][0] = "mismatched-entry"
+    with pytest.raises(ValueError, match="contract_roster"):
+        HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
 
 
 def test_contract_rejects_incomplete_reward(tmp_path: Path) -> None:

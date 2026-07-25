@@ -36,7 +36,9 @@ class BenchmarkClient:
         )
         try:
             spaces = self._rpc({"cmd": "spaces"})
-            kind = "tactical" if environment == "tactical-v1" else "adaptive_tactical"
+            kind = (
+                "tactical" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_tactical"
+            )
             self.contract = parse_contract(spaces, environment=environment, required_kind=kind)
         except BaseException:
             self.close()

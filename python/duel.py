@@ -57,7 +57,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default=str(PROJECT_ROOT / "replays" / "duel.replay"))
     parser.add_argument(
-        "--environment", choices=["tactical-v1", "adaptive-v1"], default="tactical-v1"
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
     )
     args = parser.parse_args()
 
@@ -73,7 +75,9 @@ def main() -> None:
         contract = parse_contract(
             spaces,
             environment=args.environment,
-            required_kind="duel" if args.environment == "tactical-v1" else "adaptive_duel",
+            required_kind=(
+                "duel" if args.environment in {"tactical-v1", "tactical-v2"} else "adaptive_duel"
+            ),
         )
         resolver = ControllerResolver(contract)
         bindings = {0: resolver.bind(args.p0), 1: resolver.bind(args.p1)}

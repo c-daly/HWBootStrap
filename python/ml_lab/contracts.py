@@ -85,14 +85,14 @@ class RunConfig:
     resume_source: str | None
     timestep_mode: str = "absolute"
     allow_unsafe_legacy_resume: bool = False
-    environment: str = "tactical-v1"
+    environment: str = "tactical-v2"
 
     def to_dict(self) -> dict[str, Any]:
         validate_tracker_specs(self.trackers)
         if self.timestep_mode not in {"absolute", "additional"}:
             raise ValueError("timestep mode must be 'absolute' or 'additional'")
-        if self.environment not in {"tactical-v1", "adaptive-v1"}:
-            raise ValueError("environment must be 'tactical-v1' or 'adaptive-v1'")
+        if self.environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+            raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
         return asdict(self)
 
 

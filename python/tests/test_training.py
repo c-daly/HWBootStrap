@@ -67,6 +67,7 @@ def config(run_name: str = "training") -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
     )
 
 
@@ -1575,7 +1576,7 @@ def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) 
     assert exit_code == 0
     run_config, resolved_scenario, runs_root, server_cmd = received[0]
     assert run_config.run_name == "cli-smoke"
-    assert resolved_scenario.template_id == "tactical-standard"
+    assert resolved_scenario.template_id == "tactical-v2-standard"
     assert run_config.learner_seat == "alternating"
     assert run_config.opponent == {"kind": "scripted", "name": "greedy"}
     assert runs_root == tmp_path

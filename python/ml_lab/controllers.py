@@ -23,7 +23,7 @@ Algorithm = Literal["maskable_ppo", "masked_dqn"]
 InferenceMode = Literal["deterministic", "stochastic"]
 SCRIPTED_NAMES = frozenset({"greedy", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
-SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "adaptive-v1"})
+SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
 
 
 class ControllerResolutionError(ValueError):

@@ -543,6 +543,66 @@ def test_evaluation_atomically_replaces_evaluation_json(
     assert not list(output.parent.glob(".evaluation.json.*.tmp"))
 
 
+class _FakeDuelProcess:
+    """A stand-in for subprocess.Popen that answers one queued handshake line."""
+
+    def __init__(self, response_line: str) -> None:
+        self._response_line = response_line
+        self.stdin = SimpleNamespace(
+            write=lambda _payload: None, flush=lambda: None, close=lambda: None,
+        )
+        self.stdout = SimpleNamespace(readline=lambda: self._response_line)
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_duel_client_sends_tactical_v2_and_requires_duel_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_module
+    import ml_lab.evaluation as evaluation_module
+
+    launched: list[list[str]] = []
+    captured: dict[str, str] = {}
+
+    def fake_popen(command, **_kwargs):
+        launched.append(list(command))
+        return _FakeDuelProcess(json_module.dumps({"cmd": "duel_spaces"}) + "\n")
+
+    def fake_parse_contract(_spaces, *, environment, required_kind):
+        captured["environment"] = environment
+        captured["required_kind"] = required_kind
+        raise RuntimeError("stop after handshake capture")
+
+    monkeypatch.setattr(evaluation_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(evaluation_module, "parse_contract", fake_parse_contract)
+
+    with pytest.raises(RuntimeError, match="stop after handshake capture"):
+        evaluation_module.DuelClient(["dotnet", "server.dll"], environment="tactical-v2")
+
+    assert launched == [["dotnet", "server.dll", "--environment", "tactical-v2"]]
+    assert captured == {"environment": "tactical-v2", "required_kind": "duel"}
+
+
+def test_duel_client_rejects_unknown_environment_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_module
+    import ml_lab.evaluation as evaluation_module
+
+    def fake_popen(_command, **_kwargs):
+        return _FakeDuelProcess(json_module.dumps({"cmd": "duel_spaces"}) + "\n")
+
+    monkeypatch.setattr(evaluation_module.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(ValueError, match="unsupported environment"):
+        evaluation_module.DuelClient(["dotnet", "server.dll"], environment="tactical-v3")
+
+
 class FakeBenchmarkClient:
     def __init__(self, worker_index: int) -> None:
         self.worker_index = worker_index

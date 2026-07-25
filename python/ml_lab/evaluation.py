@@ -93,7 +93,9 @@ class DuelClient:
         )
         try:
             spaces = self._rpc({"cmd": "duel_spaces"})
-            required_kind = "duel" if environment == "tactical-v1" else "adaptive_duel"
+            required_kind = (
+                "duel" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_duel"
+            )
             self.contract = parse_contract(
                 spaces, environment=environment, required_kind=required_kind
             )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -466,6 +467,60 @@ def test_controller_rejects_wrong_environment_for_adaptive_runtime(
         _validate_contract_compatibility(contract, adaptive)
 
 
+def test_controller_rejects_tactical_v1_model_for_tactical_v2_runtime(
+    contract: EnvironmentContract,
+) -> None:
+    """Adding tactical-v2 support must not make tactical-v1 checkpoints cross-compatible:
+    different contract version and encoding hash, so compatibility stays exact."""
+    tactical_v2 = dataclass_replace(
+        contract,
+        version="tactical-v2",
+        contract_hash="d" * 64,
+        encoding_hash="c" * 64,
+    )
+    with pytest.raises(ControllerResolutionError, match="environment"):
+        _validate_contract_compatibility(contract, tactical_v2)
+
+
+def test_resolves_tactical_v2_run_manifest_checkpoint_and_contract(
+    tmp_path: Path, loader
+) -> None:
+    tactical_v2 = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="e" * 64,
+        encoding_hash="f" * 64,
+        observation_size=12,
+        action_size=7,
+        board={"width": 2, "height": 2},
+        roster=["brute-85597320:Brute:7,2,2,3,2,1,1,2,1"],
+        reward={"terminal_win": 1.0},
+    )
+    run = _write_run(tmp_path, tactical_v2)
+
+    resolved = ControllerResolver(tactical_v2, model_loader=loader).resolve(
+        {"kind": "run", "path": str(run), "mode": "fixed"}
+    )
+
+    assert resolved.contract == tactical_v2
+    assert resolved.metadata()["contract_version"] == "tactical-v2"
+    assert resolved.metadata()["environment"] == "tactical-v2"
+
+
+def test_contract_from_manifest_rejects_unknown_encoding_version(
+    tmp_path: Path, contract: EnvironmentContract, loader
+) -> None:
+    run = _write_run(tmp_path, contract)
+    manifest = __import__("json").loads((run / "run.json").read_text(encoding="utf-8"))
+    manifest["contract"]["version"] = "tactical-v3"
+    manifest["contract"]["environment"] = "tactical-v3"
+    atomic_write_json(run / "run.json", manifest)
+
+    with pytest.raises(ControllerResolutionError, match="unsupported"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {"kind": "run", "path": str(run), "mode": "fixed"}
+        )
+
+
 def test_controller_accepts_adaptive_tactical_run_for_duel_with_shared_encoding_hash(
     contract: EnvironmentContract,
 ) -> None:
@@ -798,6 +853,70 @@ def test_selfplay_pool_sampling_is_seeded_per_episode_not_global_random(
     SelfPlayEnv.reset(second, seed=37)
 
     assert first.opp.resolved.server_controller == second.opp.resolved.server_controller
+
+
+def test_selfplay_accepts_tactical_v2_and_sends_environment_flag(tmp_path: Path) -> None:
+    from .test_gym_client import tactical_v2_spaces
+
+    spaces = tactical_v2_spaces(environment_kind="duel")
+    server = tmp_path / "fake_duel_server.py"
+    spaces_path = tmp_path / "spaces.json"
+    spaces_path.write_text(json.dumps(spaces), encoding="utf-8")
+    server.write_text(
+        """import json
+import sys
+
+response = json.load(open(sys.argv[1], encoding="utf-8"))
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["cmd"] == "duel_spaces":
+        print(json.dumps(response), flush=True)
+    elif request["cmd"] == "close":
+        break
+""",
+        encoding="utf-8",
+    )
+
+    env = SelfPlayEnv(
+        [sys.executable, str(server), str(spaces_path)],
+        ["greedy"],
+        environment="tactical-v2",
+    )
+    try:
+        assert env.contract.version == "tactical-v2"
+        assert env.proc.args[-2:] == ["--environment", "tactical-v2"]
+    finally:
+        env.close()
+
+
+def test_selfplay_rejects_tactical_kind_handshake_for_tactical_v2_duel(tmp_path: Path) -> None:
+    from .test_gym_client import tactical_v2_spaces
+
+    spaces = tactical_v2_spaces(environment_kind="tactical")
+    server = tmp_path / "fake_wrong_kind_server.py"
+    spaces_path = tmp_path / "spaces.json"
+    spaces_path.write_text(json.dumps(spaces), encoding="utf-8")
+    server.write_text(
+        """import json
+import sys
+
+response = json.load(open(sys.argv[1], encoding="utf-8"))
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["cmd"] == "duel_spaces":
+        print(json.dumps(response), flush=True)
+    elif request["cmd"] == "close":
+        break
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="environment_kind"):
+        SelfPlayEnv(
+            [sys.executable, str(server), str(spaces_path)],
+            ["greedy"],
+            environment="tactical-v2",
+        )
 
 
 def test_selfplay_constructor_failure_closes_and_reaps_server_process(

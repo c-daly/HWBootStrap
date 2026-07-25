@@ -49,6 +49,7 @@ def run_config(run_name: str, algorithm: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from ml_lab.scenarios import (
     load_template_library,
     resolve_scenario,
     validate_handshake,
+    validate_scenario_document,
 )
 
 
@@ -67,10 +69,67 @@ def scenario_document(environment: str = "adaptive-v1") -> dict:
     return document
 
 
-def write_scenario(
-    tmp_path: Path, *, environment: str = "adaptive-v1", document: dict | None = None
-) -> Path:
-    path = tmp_path / "scenario.json"
+TACTICAL_V2_TEMPLATES = [
+    {
+        "id": "brute-85597320",
+        "name": "Brute",
+        "stats": {
+            "health": 7, "damage": 2, "defense": 2, "movement": 3, "vertical_movement": 2,
+            "range": 1, "range_arc": 1, "vision": 2, "vision_arc": 1,
+        },
+    },
+    {
+        "id": "striker-0d7b6999",
+        "name": "Striker",
+        "stats": {
+            "health": 2, "damage": 6, "defense": 0, "movement": 3, "vertical_movement": 2,
+            "range": 2, "range_arc": 1, "vision": 3, "vision_arc": 1,
+        },
+    },
+    {
+        "id": "sniper-d065c02a",
+        "name": "Sniper",
+        "stats": {
+            "health": 2, "damage": 2, "defense": 0, "movement": 2, "vertical_movement": 2,
+            "range": 6, "range_arc": 1, "vision": 4, "vision_arc": 1,
+        },
+    },
+    {
+        "id": "artillery-27c01722",
+        "name": "Artillery",
+        "stats": {
+            "health": 3, "damage": 6, "defense": 0, "movement": 0, "vertical_movement": 0,
+            "range": 5, "range_arc": 2, "vision": 2, "vision_arc": 1,
+        },
+    },
+    {
+        "id": "scout-d3503dfa",
+        "name": "Scout",
+        "stats": {
+            "health": 2, "damage": 0, "defense": 0, "movement": 4, "vertical_movement": 3,
+            "range": 0, "range_arc": 0, "vision": 7, "vision_arc": 2,
+        },
+    },
+]
+
+
+def tactical_v2_document(*, starting_units: int = 3) -> dict:
+    document = scenario_document("tactical-v1")
+    document["id"] = "tactical-v2-test"
+    document["environment"] = "tactical-v2"
+    document["tactical_v2"] = {
+        "starting_unit_count": starting_units,
+        "max_controllable_units": starting_units,
+        "placement_policy": "symmetric-random-v1",
+        "templates": copy.deepcopy(TACTICAL_V2_TEMPLATES),
+    }
+    return document
+
+
+def write_scenario(document: dict | None = None, *, environment: str = "adaptive-v1") -> Path:
+    """Write a scenario to its own throwaway directory (no pytest tmp_path needed)."""
+    directory = Path(tempfile.mkdtemp(prefix="hexwars-scenario-"))
+    path = directory / "scenario.json"
     path.write_text(
         json.dumps(document or scenario_document(environment), indent=2),
         encoding="utf-8",
@@ -101,6 +160,9 @@ def test_builtin_library_has_three_templates_per_environment() -> None:
         "tactical-standard",
         "tactical-long-battle",
         "tactical-large-battle",
+        "tactical-v2-standard",
+        "tactical-v2-long-battle",
+        "tactical-v2-large-battle",
         "adaptive-standard",
         "adaptive-long-battle",
         "adaptive-large-battle",
@@ -126,16 +188,34 @@ def test_builtin_library_presets_have_exact_horizons_and_geometry() -> None:
         ("tactical-standard", 13, 9, 3, 100, 600),
         ("tactical-long-battle", 13, 9, 3, 200, 1200),
         ("tactical-large-battle", 24, 16, 4, 150, 1200),
+        ("tactical-v2-standard", 13, 9, 3, 100, 600),
+        ("tactical-v2-long-battle", 13, 9, 3, 200, 1200),
+        ("tactical-v2-large-battle", 24, 16, 4, 150, 1200),
         ("adaptive-standard", 13, 9, 3, 100, 900),
         ("adaptive-long-battle", 13, 9, 3, 200, 1800),
         ("adaptive-large-battle", 24, 16, 4, 150, 1800),
     ]
 
 
-def test_explicit_scenario_is_canonical_and_environment_checked(
-    tmp_path: Path,
-) -> None:
-    path = write_scenario(tmp_path, environment="adaptive-v1")
+def test_builtin_tactical_v2_presets_share_the_canonical_five_template_catalog() -> None:
+    templates = {
+        item.template_id: item.document
+        for item in load_template_library(DEFAULT_TEMPLATE_LIBRARY)
+    }
+    for template_id in (
+        "tactical-v2-standard", "tactical-v2-long-battle", "tactical-v2-large-battle",
+    ):
+        tactical_v2 = templates[template_id]["tactical_v2"]
+        assert tactical_v2["starting_unit_count"] == 3
+        assert tactical_v2["max_controllable_units"] == 3
+        assert tactical_v2["placement_policy"] == "symmetric-random-v1"
+        assert [item["name"] for item in tactical_v2["templates"]] == [
+            "Brute", "Striker", "Sniper", "Artillery", "Scout",
+        ]
+
+
+def test_explicit_scenario_is_canonical_and_environment_checked() -> None:
+    path = write_scenario(environment="adaptive-v1")
     first = resolve_scenario(
         environment="adaptive-v1", scenario_file=path, template_id=None
     )
@@ -159,7 +239,7 @@ def test_resolved_document_is_deeply_immutable_and_write_is_canonical(
     tmp_path: Path,
 ) -> None:
     source = scenario_document()
-    path = write_scenario(tmp_path, document=source)
+    path = write_scenario(document=source)
     scenario = resolve_scenario(
         environment="adaptive-v1", scenario_file=path, template_id=None
     )
@@ -212,15 +292,13 @@ def test_default_and_named_template_resolution_are_environment_scoped() -> None:
         "adaptive.starting_unit_count",
     ],
 )
-def test_boolean_is_not_accepted_as_an_integer(
-    tmp_path: Path, path: str
-) -> None:
+def test_boolean_is_not_accepted_as_an_integer(path: str) -> None:
     document = scenario_document()
     set_path(document, path, True)
     with pytest.raises(ValueError, match=path):
         resolve_scenario(
             environment="adaptive-v1",
-            scenario_file=write_scenario(tmp_path, document=document),
+            scenario_file=write_scenario(document=document),
             template_id=None,
         )
 
@@ -251,26 +329,24 @@ def test_non_finite_numbers_are_rejected(
 
 
 @pytest.mark.parametrize("section", ["board", "rules", "episode", "reward"])
-def test_missing_required_sections_are_rejected(
-    tmp_path: Path, section: str
-) -> None:
+def test_missing_required_sections_are_rejected(section: str) -> None:
     document = scenario_document()
     document.pop(section)
     with pytest.raises(ValueError, match=section):
         resolve_scenario(
             environment="adaptive-v1",
-            scenario_file=write_scenario(tmp_path, document=document),
+            scenario_file=write_scenario(document=document),
             template_id=None,
         )
 
 
-def test_wrong_environment_reward_kind_is_rejected(tmp_path: Path) -> None:
+def test_wrong_environment_reward_kind_is_rejected() -> None:
     document = scenario_document()
     document["reward"] = scenario_document("tactical-v1")["reward"]
     with pytest.raises(ValueError, match="reward"):
         resolve_scenario(
             environment="adaptive-v1",
-            scenario_file=write_scenario(tmp_path, document=document),
+            scenario_file=write_scenario(document=document),
             template_id=None,
         )
 
@@ -285,14 +361,14 @@ def test_wrong_environment_reward_kind_is_rejected(tmp_path: Path) -> None:
     ],
 )
 def test_invalid_adaptive_values_are_rejected(
-    tmp_path: Path, path: str, value: int, expected: str
+    path: str, value: int, expected: str
 ) -> None:
     document = scenario_document()
     set_path(document, path, value)
     with pytest.raises(ValueError, match=expected):
         resolve_scenario(
             environment="adaptive-v1",
-            scenario_file=write_scenario(tmp_path, document=document),
+            scenario_file=write_scenario(document=document),
             template_id=None,
         )
 
@@ -351,9 +427,7 @@ def test_validate_handshake_checks_authoritative_scenario_values() -> None:
         validate_handshake(scenario, spaces)
 
 
-def test_validate_handshake_accepts_float32_equivalent_reward_values(
-    tmp_path: Path,
-) -> None:
+def test_validate_handshake_accepts_float32_equivalent_reward_values() -> None:
     document = scenario_document("tactical-v1")
     document["reward"].update(
         {
@@ -364,7 +438,7 @@ def test_validate_handshake_accepts_float32_equivalent_reward_values(
     )
     scenario = resolve_scenario(
         environment="tactical-v1",
-        scenario_file=write_scenario(tmp_path, document=document),
+        scenario_file=write_scenario(document=document),
         template_id=None,
     )
     spaces = {
@@ -390,3 +464,88 @@ def test_validate_handshake_accepts_float32_equivalent_reward_values(
     }
 
     validate_handshake(scenario, spaces)
+
+
+def test_tactical_v2_scenario_preserves_roster_and_count():
+    scenario = resolve_scenario(
+        environment="tactical-v2",
+        scenario_file=write_scenario(tactical_v2_document(starting_units=7)),
+        template_id=None,
+    )
+
+    assert scenario.document["tactical_v2"]["starting_unit_count"] == 7
+    assert [item["name"] for item in scenario.document["tactical_v2"]["templates"]][:2] == [
+        "Brute", "Striker"
+    ]
+
+
+@pytest.mark.parametrize("count", [0, 13])
+def test_tactical_v2_rejects_invalid_starting_count(count):
+    document = tactical_v2_document(starting_units=count)
+    with pytest.raises(ValueError, match="between 1 and 12"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_default_template_selection_does_not_collide_with_tactical_v1() -> None:
+    default = resolve_scenario(
+        environment="tactical-v2", scenario_file=None, template_id=None
+    )
+    assert default.template_id == "tactical-v2-standard"
+    assert default.environment == "tactical-v2"
+
+
+def test_tactical_v2_rejects_mismatched_controllable_units() -> None:
+    document = tactical_v2_document(starting_units=3)
+    document["tactical_v2"]["max_controllable_units"] = 4
+    with pytest.raises(ValueError, match="max_controllable_units"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_rejects_non_canonical_placement_policy() -> None:
+    document = tactical_v2_document()
+    document["tactical_v2"]["placement_policy"] = "random"
+    with pytest.raises(ValueError, match="placement_policy"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_rejects_duplicate_template_ids() -> None:
+    document = tactical_v2_document()
+    document["tactical_v2"]["templates"][1] = copy.deepcopy(
+        document["tactical_v2"]["templates"][0]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_rejects_extra_and_missing_fields() -> None:
+    extra_section_field = tactical_v2_document()
+    extra_section_field["tactical_v2"]["extra_field"] = 1
+    with pytest.raises(ValueError, match="tactical_v2"):
+        validate_scenario_document(extra_section_field)
+
+    missing_stat = tactical_v2_document()
+    del missing_stat["tactical_v2"]["templates"][0]["stats"]["range_arc"]
+    with pytest.raises(ValueError, match="range_arc"):
+        validate_scenario_document(missing_stat)
+
+    missing_section = tactical_v2_document()
+    del missing_section["tactical_v2"]
+    with pytest.raises(ValueError, match="tactical_v2"):
+        validate_scenario_document(missing_section)
+
+
+def test_tactical_v2_rejects_deployment_zone_too_small_for_starting_units() -> None:
+    document = tactical_v2_document(starting_units=12)
+    document["board"]["height"] = 4
+    document["board"]["zone_depth"] = 1
+    with pytest.raises(ValueError, match="deployment cells"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_library_template_ids_match_their_environment_prefix(
+    tmp_path: Path,
+) -> None:
+    template = tactical_v2_document()
+    template["id"] = "adaptive-wrong"
+    with pytest.raises(ValueError, match="environment"):
+        load_template_library(write_library(tmp_path, [template]))

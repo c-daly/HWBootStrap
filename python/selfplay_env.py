@@ -80,7 +80,9 @@ class SelfPlayEnv(gym.Env):
             self.spaces_info = sp  # full handshake: shapes + env config (for params)
             self.n_actions = int(sp["n_actions"])
             self.obs_len = int(sp["obs_len"])
-            expected_kind = "duel" if environment == "tactical-v1" else "adaptive_duel"
+            expected_kind = (
+                "duel" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_duel"
+            )
             self.contract = parse_contract(
                 sp, environment=environment, required_kind=expected_kind
             )

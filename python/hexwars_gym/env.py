@@ -14,7 +14,11 @@ from ml_lab.contracts import EnvironmentContract
 from ml_lab.protocol import validate_json_object, validate_step_payload, validate_view_payload
 
 
-SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "adaptive-v1"})
+SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
+_TACTICAL_V2_STAT_KEYS = (
+    "health", "damage", "defense", "movement", "vertical_movement",
+    "range", "range_arc", "vision", "vision_arc",
+)
 _ADAPTIVE_PHASES = (
     "deployment_root", "deployment_template", "deployment_cell", "deployment_placed_unit",
     "deployment_move_cell", "gameplay_root", "gameplay_unit", "gameplay_unit_command",
@@ -99,7 +103,7 @@ def parse_contract(
     environment_kind = spaces_info["environment_kind"]
     allowed_kinds = (
         {"tactical", "duel"}
-        if version == "tactical-v1"
+        if version in {"tactical-v1", "tactical-v2"}
         else {"adaptive_tactical", "adaptive_duel"}
     )
     if environment_kind not in allowed_kinds:
@@ -116,11 +120,12 @@ def parse_contract(
     reward = _mapping(spaces_info["reward"], "reward")
 
     _validate_board(board, environment_kind)
-    if version == "tactical-v1":
+    if version in {"tactical-v1", "tactical-v2"}:
         _validate_reward(reward)
-        _validate_roster(roster)
     else:
         _validate_adaptive_reward(reward)
+    if version == "tactical-v1":
+        _validate_roster(roster)
     if roster_count != len(roster):
         raise ValueError("GymServer contract roster count does not match contract_roster")
 
@@ -138,6 +143,17 @@ def parse_contract(
             raise ValueError("GymServer contract obs_len does not match board geometry")
         if action_size != 1 + 3 * len(roster) * board_width * board_height:
             raise ValueError("GymServer contract n_actions does not match board geometry")
+    elif version == "tactical-v2":
+        semantics = _validate_tactical_v2(
+            spaces_info,
+            board=board,
+            roster=roster,
+            observation_size=observation_size,
+            action_size=action_size,
+            channels=channels,
+            globals_count=globals_count,
+            environment_kind=environment_kind,
+        )
     else:
         semantics = _validate_adaptive_v1(
             spaces_info,
@@ -217,6 +233,113 @@ def _validate_roster(roster: Any) -> None:
             raise ValueError("GymServer contract contract_roster entries must contain nine integer stats")
         if any(not re.fullmatch(r"-?\d+", stat) for stat in entry.split(",")):
             raise ValueError("GymServer contract contract_roster entries must contain nine integer stats")
+
+
+def _validate_tactical_v2(
+    spaces_info: Mapping[str, Any],
+    *,
+    board: Mapping[str, Any],
+    roster: Any,
+    observation_size: int,
+    action_size: int,
+    channels: int,
+    globals_count: int,
+    environment_kind: str,
+) -> Mapping[str, Any]:
+    if environment_kind not in {"tactical", "duel"}:
+        raise ValueError("GymServer contract environment_kind is invalid for tactical-v2")
+    semantics = _mapping(spaces_info.get("tactical_v2"), "tactical_v2")
+    if semantics.get("contract_version") != "tactical-v2":
+        raise ValueError("GymServer contract tactical_v2.contract_version must be 'tactical-v2'")
+    if semantics.get("environment_kind") != environment_kind:
+        raise ValueError("GymServer contract tactical_v2.environment_kind does not match environment_kind")
+
+    starting_units = _positive_int(
+        semantics.get("starting_unit_count"), "tactical_v2.starting_unit_count"
+    )
+    if not 1 <= starting_units <= 12:
+        raise ValueError("GymServer contract tactical_v2.starting_unit_count must be between 1 and 12")
+    max_controllable = _positive_int(
+        semantics.get("max_controllable_units"), "tactical_v2.max_controllable_units"
+    )
+    if max_controllable != starting_units:
+        raise ValueError(
+            "GymServer contract tactical_v2.max_controllable_units must equal starting_unit_count"
+        )
+    if semantics.get("placement_policy") != "symmetric-random-v1":
+        raise ValueError("GymServer contract tactical_v2.placement_policy is not canonical")
+
+    templates = semantics.get("templates")
+    if not isinstance(templates, list) or not templates:
+        raise ValueError("GymServer contract tactical_v2.templates must be a non-empty list")
+    expected_roster: list[str] = []
+    seen_ids: set[str] = set()
+    for index, raw_template in enumerate(templates):
+        template = _mapping(raw_template, f"tactical_v2.templates[{index}]")
+        template_id = template.get("id")
+        if not isinstance(template_id, str) or not template_id:
+            raise ValueError(f"GymServer contract tactical_v2.templates[{index}].id must be a non-empty string")
+        if template_id in seen_ids:
+            raise ValueError(f"GymServer contract tactical_v2.templates[{index}].id is duplicated")
+        seen_ids.add(template_id)
+        name = template.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"GymServer contract tactical_v2.templates[{index}].name must be a non-empty string")
+        stats = template.get("stats")
+        if (
+            not isinstance(stats, list)
+            or len(stats) != len(_TACTICAL_V2_STAT_KEYS)
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in stats)
+        ):
+            raise ValueError(
+                f"GymServer contract tactical_v2.templates[{index}].stats must contain "
+                f"{len(_TACTICAL_V2_STAT_KEYS)} integers"
+            )
+        _integer(template.get("cost"), f"tactical_v2.templates[{index}].cost")
+        expected_roster.append(f"{template_id}:{name}:{','.join(str(value) for value in stats)}")
+    if list(roster) != expected_roster:
+        raise ValueError("GymServer contract contract_roster does not match tactical_v2 templates")
+
+    template_count = len(templates)
+    cell_count = _positive_int(board["width"], "board.width") * _positive_int(board["height"], "board.height")
+
+    regions = _mapping(semantics.get("action_regions"), "tactical_v2.action_regions")
+    if set(regions) != {"move", "attack", "deploy"}:
+        raise ValueError("GymServer contract tactical_v2.action_regions must contain move, attack, and deploy")
+    expected_regions = (
+        ("move", 1, starting_units * cell_count),
+        ("attack", 1 + starting_units * cell_count, starting_units * cell_count),
+        ("deploy", 1 + 2 * starting_units * cell_count, template_count * cell_count),
+    )
+    for name, expected_offset, expected_count in expected_regions:
+        region = _mapping(regions[name], f"tactical_v2.action_regions.{name}")
+        if region.get("offset") != expected_offset or region.get("count") != expected_count:
+            raise ValueError(f"GymServer contract tactical_v2.action_regions.{name} is invalid")
+    if spaces_info.get("action_regions") != regions:
+        raise ValueError("GymServer contract action_regions does not match tactical_v2.action_regions")
+    expected_action_size = 1 + (2 * starting_units + template_count) * cell_count
+    if action_size != expected_action_size:
+        raise ValueError("GymServer contract n_actions does not match tactical-v2 geometry")
+
+    expected_channels = [f"friendly_role_hp_{index}" for index in range(template_count)]
+    expected_channels += [f"visible_enemy_role_hp_{index}" for index in range(template_count)]
+    expected_channels.append("elevation")
+    observation_channels = semantics.get("observation_channels")
+    if observation_channels != expected_channels or spaces_info.get("observation_channels") != expected_channels:
+        raise ValueError("GymServer contract tactical_v2 observation_channels are incomplete")
+    if channels != len(expected_channels):
+        raise ValueError("GymServer contract tactical_v2 observation geometry is invalid")
+    if globals_count != 5:
+        raise ValueError("GymServer contract tactical_v2 globals must be 5")
+    expected_observation_size = channels * cell_count + globals_count
+    if observation_size != expected_observation_size:
+        raise ValueError("GymServer contract tactical_v2 obs_len does not match board geometry")
+
+    if semantics.get("action_size") != action_size or semantics.get("observation_size") != observation_size:
+        raise ValueError("GymServer contract tactical_v2 semantics geometry does not match n_actions/obs_len")
+    if semantics.get("board") != board:
+        raise ValueError("GymServer contract tactical_v2.board does not match board")
+    return semantics
 
 
 def _adaptive_channels() -> list[str]:
@@ -393,7 +516,9 @@ class HexWarsEnv(gym.Env):
         self._next_seed = base_seed
         try:
             self.spaces_info = self._rpc({"cmd": "spaces"})
-            expected_kind = "tactical" if environment == "tactical-v1" else "adaptive_tactical"
+            expected_kind = (
+                "tactical" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_tactical"
+            )
             self.contract = parse_contract(
                 self.spaces_info, environment=environment, required_kind=expected_kind
             )

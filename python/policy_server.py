@@ -48,9 +48,9 @@ class PolicyExpectation:
     encoding_hash: str
 
     def __post_init__(self):
-        if self.environment not in {"tactical-v1", "adaptive-v1"}:
+        if self.environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
             raise ValueError(f"unsupported expected environment {self.environment!r}")
-        if self.version not in {"tactical-v1", "adaptive-v1"}:
+        if self.version not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
             raise ValueError(f"unsupported expected contract version {self.version!r}")
         if self.environment != self.version:
             raise ValueError("expected environment must match expected contract version")

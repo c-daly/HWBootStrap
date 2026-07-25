@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TEMPLATE_LIBRARY = (
     PROJECT_ROOT / "python" / "config" / "training-game-templates.json"
 )
-SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "adaptive-v1"})
+SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
 _LIBRARY_KEYS = frozenset({"schema_version", "templates"})
 _COMMON_SCENARIO_KEYS = frozenset(
     {"schema_version", "id", "name", "environment", "board", "rules", "episode", "reward"}
@@ -66,6 +66,23 @@ _ADAPTIVE_KEYS = frozenset(
     {"starting_unit_count", "starting_army_budget", "max_design_point_cost"}
 )
 _CHEAPEST_ADAPTIVE_TEMPLATE_COST = 20
+_TACTICAL_V2_KEYS = frozenset(
+    {"starting_unit_count", "max_controllable_units", "placement_policy", "templates"}
+)
+_TACTICAL_V2_TEMPLATE_KEYS = frozenset({"id", "name", "stats"})
+_TACTICAL_V2_STAT_KEYS = frozenset(
+    {
+        "health",
+        "damage",
+        "defense",
+        "movement",
+        "vertical_movement",
+        "range",
+        "range_arc",
+        "vision",
+        "vision_arc",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -142,11 +159,14 @@ def _positive(value: int, path: str) -> None:
         raise ValueError(f"{path} must be positive")
 
 
-def _validate_document(raw: Any) -> Mapping[str, Any]:
+def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
     document = _mapping(raw, "scenario")
     environment = _text(document.get("environment"), "environment")
     expected_keys = _COMMON_SCENARIO_KEYS | (
-        frozenset({"adaptive"}) if environment == "adaptive-v1" else frozenset()
+        frozenset({"adaptive"})
+        if environment == "adaptive-v1"
+        else frozenset({"tactical_v2"}) if environment == "tactical-v2"
+        else frozenset()
     )
     _exact_keys(document, expected_keys, "scenario")
 
@@ -156,7 +176,7 @@ def _validate_document(raw: Any) -> Mapping[str, Any]:
     _text(document["id"], "id")
     _text(document["name"], "name")
     if environment not in SUPPORTED_ENVIRONMENTS:
-        raise ValueError("environment must be tactical-v1 or adaptive-v1")
+        raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
 
     board = _mapping(document["board"], "board")
     _exact_keys(board, _BOARD_KEYS, "board")
@@ -209,12 +229,62 @@ def _validate_document(raw: Any) -> Mapping[str, Any]:
     reward = _mapping(document["reward"], "reward")
     reward_keys = (
         _TACTICAL_REWARD_KEYS
-        if environment == "tactical-v1"
+        if environment in {"tactical-v1", "tactical-v2"}
         else _ADAPTIVE_REWARD_KEYS
     )
     _exact_keys(reward, reward_keys, "reward")
     for key in reward_keys:
         _number(reward[key], f"reward.{key}")
+
+    if environment == "tactical-v2":
+        tactical_v2 = _mapping(document["tactical_v2"], "tactical_v2")
+        _exact_keys(tactical_v2, _TACTICAL_V2_KEYS, "tactical_v2")
+        starting_units = _integer(
+            tactical_v2["starting_unit_count"], "tactical_v2.starting_unit_count"
+        )
+        if not 1 <= starting_units <= 12:
+            raise ValueError(
+                "tactical_v2.starting_unit_count must be between 1 and 12"
+            )
+        max_controllable = _integer(
+            tactical_v2["max_controllable_units"], "tactical_v2.max_controllable_units"
+        )
+        if max_controllable != starting_units:
+            raise ValueError(
+                "tactical_v2.max_controllable_units must equal starting_unit_count"
+            )
+        placement_policy = _text(
+            tactical_v2["placement_policy"], "tactical_v2.placement_policy"
+        )
+        if placement_policy != "symmetric-random-v1":
+            raise ValueError(
+                "tactical_v2.placement_policy must be 'symmetric-random-v1'"
+            )
+
+        raw_templates = tactical_v2["templates"]
+        if not isinstance(raw_templates, list) or not raw_templates:
+            raise ValueError("tactical_v2.templates must be a non-empty array")
+        seen_template_ids: set[str] = set()
+        for index, raw_template in enumerate(raw_templates):
+            path = f"tactical_v2.templates[{index}]"
+            template = _mapping(raw_template, path)
+            _exact_keys(template, _TACTICAL_V2_TEMPLATE_KEYS, path)
+            template_id = _text(template["id"], f"{path}.id")
+            if template_id in seen_template_ids:
+                raise ValueError(f"duplicate tactical_v2 template id {template_id!r}")
+            seen_template_ids.add(template_id)
+            _text(template["name"], f"{path}.name")
+            stats = _mapping(template["stats"], f"{path}.stats")
+            _exact_keys(stats, _TACTICAL_V2_STAT_KEYS, f"{path}.stats")
+            for key in _TACTICAL_V2_STAT_KEYS:
+                value = _integer(stats[key], f"{path}.stats.{key}")
+                if value < 0:
+                    raise ValueError(f"{path}.stats.{key} must be non-negative")
+
+        if height * zone_depth < starting_units:
+            raise ValueError(
+                "tactical-v2 deployment cells must cover starting_unit_count"
+            )
 
     if environment == "adaptive-v1":
         adaptive = _mapping(document["adaptive"], "adaptive")
@@ -254,7 +324,7 @@ def _freeze(value: Any) -> Any:
 
 
 def _resolve_document(raw: Any) -> ResolvedScenario:
-    validated = _validate_document(raw)
+    validated = validate_scenario_document(raw)
     owned = copy.deepcopy(dict(validated))
     canonical_json = json.dumps(
         owned,
@@ -307,13 +377,16 @@ def resolve_scenario(
     library_path: Path = DEFAULT_TEMPLATE_LIBRARY,
 ) -> ResolvedScenario:
     if environment not in SUPPORTED_ENVIRONMENTS:
-        raise ValueError("environment must be tactical-v1 or adaptive-v1")
+        raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
     if scenario_file is not None and template_id is not None:
         raise ValueError("scenario_file and template_id are mutually exclusive")
     if scenario_file is not None:
         scenario = _resolve_document(_read_document(scenario_file))
     else:
-        selected_id = template_id or f"{environment.split('-', 1)[0]}-standard"
+        # tactical-v1/adaptive-v1 default ids drop the "-v1" suffix ("tactical-standard",
+        # "adaptive-standard"); tactical-v2 keeps its full version tag ("tactical-v2-standard")
+        # so its ids never collide with tactical-v1's.
+        selected_id = template_id or f"{environment.removesuffix('-v1')}-standard"
         templates = load_template_library(library_path)
         scenario = next(
             (item for item in templates if item.template_id == selected_id),
@@ -402,6 +475,14 @@ def validate_handshake(
     if scenario.environment == "adaptive-v1":
         for key, requested in document["adaptive"].items():
             comparisons.append((f"adaptive.{key}", requested, ("adaptive", key)))
+    elif scenario.environment == "tactical-v2":
+        # Templates are echoed back in a different (flat, cost-annotated) shape than the
+        # scenario document's authored form, so only the scalar roster knobs are compared
+        # here; template-catalog fidelity is cross-checked against contract_roster instead.
+        for key in ("starting_unit_count", "max_controllable_units", "placement_policy"):
+            comparisons.append(
+                (f"tactical_v2.{key}", document["tactical_v2"][key], ("tactical_v2", key))
+            )
 
     for field_path, requested, handshake_path in comparisons:
         authoritative = _space_value(spaces_info, handshake_path)

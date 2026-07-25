@@ -45,6 +45,7 @@ def _config(run_name: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
     )
 
 
@@ -376,7 +377,7 @@ def test_train_json_reports_the_durable_completed_run(
     ) -> Path:
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
-        assert scenario.template_id == "tactical-standard"
+        assert scenario.template_id == "tactical-v2-standard"
         return _complete_fake_run(runs_root, config)
 
     exit_code, payload = _invoke_json(
