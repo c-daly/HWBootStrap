@@ -131,19 +131,55 @@ namespace HexWars.Engine.Tests
         [Test]
         public void Decode_DeployActionAddressesTemplateIndexAndCell()
         {
-            // DeployUnit is never affordable at a fresh reset (players start at 0 points), so it never
-            // appears in the Mask/Decode round-trip test above — cover its offset math directly instead.
+            // DeployUnit is never affordable at a fresh reset (players start at 0 points) and, by
+            // design, MaxControllableUnits == StartingUnitCount means the starting roster already
+            // fills every registry slot — so it never appears in the Mask/Decode round-trip test
+            // above. Cover its offset math directly instead, against a registry with a free slot
+            // (DecodeDeploy never consults `state`, only registry capacity, so an otherwise-empty
+            // registry of matching capacity is a faithful probe of the offset math alone).
             TacticalV2Config config = TacticalV2Config.Default();
             var layout = new TacticalV2Layout(config);
             TacticalV2Start start = layout.NewGame(7);
+            var registryWithFreeSlot = new TacticalV2UnitRegistry(layout.UnitSlotCount);
 
             int templateIndex = 2;
             int cellIndex = 5;
             int action = layout.DeployOffset + templateIndex * layout.CellCount + cellIndex;
 
-            Command decoded = TacticalV2Coding.Decode(action, start.State, PlayerId.Player0, layout, start.Slots0);
+            Command decoded =
+                TacticalV2Coding.Decode(action, start.State, PlayerId.Player0, layout, registryWithFreeSlot);
 
             Assert.That(decoded, Is.EqualTo(new DeployUnit(PlayerId.Player0, templateIndex, layout.Cells[cellIndex])));
+        }
+
+        // ---- Capacity gate: deploy region must be masked/decoded out when the registry is full ----
+
+        [Test]
+        public void Mask_HidesDeployRegionWhenRegistryHasNoFreeSlot()
+        {
+            // The fixture's two registry slots already hold a living unit each (capacity == 2,
+            // both seeded by Initialize). Give the player plenty of points so a deploy would
+            // otherwise be affordable and placeable in the deployment zone's remaining empty
+            // cells, then prove the mask still refuses every deploy index.
+            TacticalV2CodingFixture fixture = TacticalV2CodingFixture.WithEqualStatTemplates(points: 1000);
+
+            bool[] mask = TacticalV2Coding.Mask(fixture.Game, PlayerId.Player0, fixture.Layout, fixture.Slots0);
+
+            for (int action = fixture.Layout.DeployOffset; action < fixture.Layout.ActionCount; action++)
+                Assert.That(mask[action], Is.False,
+                    $"deploy action {action} should be illegal once every registry slot holds a living unit");
+        }
+
+        [Test]
+        public void Decode_DeployActionFallsBackToEndTurnWhenRegistryHasNoFreeSlot()
+        {
+            TacticalV2CodingFixture fixture = TacticalV2CodingFixture.WithEqualStatTemplates(points: 1000);
+            int action = fixture.Layout.DeployOffset; // templateIndex 0, cell 0 — structurally valid deploy address
+
+            Command decoded =
+                TacticalV2Coding.Decode(action, fixture.Game, PlayerId.Player0, fixture.Layout, fixture.Slots0);
+
+            Assert.That(decoded, Is.EqualTo(new EndTurn(PlayerId.Player0)));
         }
 
         [Test]
@@ -264,7 +300,7 @@ namespace HexWars.Engine.Tests
                 _cellByTemplateIndex = cellByTemplateIndex;
             }
 
-            public static TacticalV2CodingFixture WithEqualStatTemplates()
+            public static TacticalV2CodingFixture WithEqualStatTemplates(int points = 0)
             {
                 var sharedStats = new UnitStats(5, 3, 2, 3, 2, 1, 1, 2, 1);
                 var templates = new[]
@@ -290,7 +326,7 @@ namespace HexWars.Engine.Tests
                     board.TileAt(cellForTemplate0).Elevation, templates[0].Template.Name);
                 var unit1 = new Unit(2, PlayerId.Player0, templates[1].Template.Stats, cellForTemplate1,
                     board.TileAt(cellForTemplate1).Elevation, templates[1].Template.Name);
-                var p0 = new PlayerState(PlayerId.Player0, 0, barracks, new[] { unit0, unit1 }, null);
+                var p0 = new PlayerState(PlayerId.Player0, points, barracks, new[] { unit0, unit1 }, null);
                 var p1 = new PlayerState(PlayerId.Player1, 0, barracks, Array.Empty<Unit>(), null);
                 var state = new GameState(board, config.Game, new PlayerState[] { p0, p1 }, PlayerId.Player0, 1, 3);
 

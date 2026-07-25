@@ -107,6 +107,14 @@ namespace HexWars.Engine.Rl
                 int index = Encode(command, state, own, layout);
                 if (index >= 0 && index < mask.Length) mask[index] = true;
             }
+
+            // The engine itself has no live-unit cap — only points and board legality gate a
+            // DeployUnit — so LegalMoves can hand back deploys the registry has no slot left to
+            // track. Gate the whole deploy region on registry capacity here, or RegisterDeployment
+            // throws once the command is applied.
+            if (!own.HasFreeSlot)
+                for (int i = layout.DeployOffset; i < layout.ActionCount; i++) mask[i] = false;
+
             return mask;
         }
 
@@ -126,7 +134,7 @@ namespace HexWars.Engine.Rl
             else if (action < layout.DeployOffset)
                 decoded = DecodeUnitCell(action - layout.AttackOffset, n, layout, own, state, seat, isAttack: true);
             else if (action < layout.ActionCount)
-                decoded = DecodeDeploy(action - layout.DeployOffset, n, layout, seat);
+                decoded = DecodeDeploy(action - layout.DeployOffset, n, layout, seat, own);
             else
                 decoded = null;
 
@@ -150,9 +158,14 @@ namespace HexWars.Engine.Rl
             return targetId < 0 ? null : new AttackUnit(seat, unitId, targetId);
         }
 
-        private static Command? DecodeDeploy(int offset, int n, TacticalV2Layout layout, PlayerId seat)
+        private static Command? DecodeDeploy(int offset, int n, TacticalV2Layout layout, PlayerId seat,
+            TacticalV2UnitRegistry own)
         {
             if (n <= 0) return null;
+            // Same registry-capacity gate as Mask: a deploy address can be structurally valid (in-range
+            // template + cell) yet have nowhere to land once every slot holds a living unit, so decoding
+            // it must degrade to EndTurn rather than let RegisterDeployment throw downstream.
+            if (!own.HasFreeSlot) return null;
             int templateIndex = offset / n, cell = offset % n;
             if (templateIndex < 0 || templateIndex >= layout.TemplateCount || cell < 0 || cell >= n) return null;
             return new DeployUnit(seat, templateIndex, layout.Cells[cell]);

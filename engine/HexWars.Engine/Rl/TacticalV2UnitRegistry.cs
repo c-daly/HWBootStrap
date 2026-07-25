@@ -26,6 +26,10 @@ namespace HexWars.Engine.Rl
 
         public int Capacity => _unitIds.Length;
 
+        /// <summary>True while at least one slot has no living unit tracked in it — i.e. a deploy can
+        /// still claim a slot via <see cref="RegisterDeployment"/> without throwing.</summary>
+        public bool HasFreeSlot => Array.IndexOf(_unitIds, -1) >= 0;
+
         public int UnitIdAt(int slot) => slot >= 0 && slot < Capacity ? _unitIds[slot] : -1;
         public int TemplateIndexAt(int slot) => slot >= 0 && slot < Capacity ? _templateIndices[slot] : -1;
         public int SlotOf(int unitId) => Array.IndexOf(_unitIds, unitId);
