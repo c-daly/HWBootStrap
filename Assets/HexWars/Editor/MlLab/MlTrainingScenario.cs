@@ -19,6 +19,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public MlTacticalReward TacticalReward { get; set; }
         public MlAdaptiveReward AdaptiveReward { get; set; }
         public MlTrainingAdaptive Adaptive { get; set; }
+        public MlTrainingTacticalV2 TacticalV2 { get; set; }
 
         public IReadOnlyList<string> Validate()
         {
@@ -53,9 +54,21 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     errors.Add("tactical reward section is not valid for adaptive-v1");
                 ValidateAdaptive(errors);
             }
+            else if (Environment == MlEnvironmentContract.TacticalV2)
+            {
+                if (TacticalReward == null)
+                    errors.Add("tactical-v2 requires a tactical reward section");
+                else if (!TacticalReward.IsFinite())
+                    errors.Add("tactical reward values must be finite");
+                if (AdaptiveReward != null)
+                    errors.Add("adaptive reward section is not valid for tactical-v2");
+                if (Adaptive != null)
+                    errors.Add("adaptive section is not valid for tactical-v2");
+                ValidateTacticalV2(errors);
+            }
             else
             {
-                errors.Add("environment must be tactical-v1 or adaptive-v1");
+                errors.Add("environment must be tactical-v1, tactical-v2, or adaptive-v1");
             }
 
             return errors;
@@ -121,6 +134,50 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("adaptive starting army budget is insufficient for the starting unit count");
             if (Adaptive.MaxDesignPointCost <= 0)
                 errors.Add("adaptive max design point cost must be positive");
+        }
+
+        void ValidateTacticalV2(List<string> errors)
+        {
+            if (TacticalV2 == null)
+            {
+                errors.Add("tactical-v2 requires a tactical-v2 section");
+                return;
+            }
+
+            if (TacticalV2.StartingUnitCount < 1 || TacticalV2.StartingUnitCount > 12)
+                errors.Add("tactical-v2 starting unit count must be between 1 and 12");
+            if (TacticalV2.MaxControllableUnits != TacticalV2.StartingUnitCount)
+                errors.Add("tactical-v2 max controllable units must equal starting unit count");
+            if (TacticalV2.PlacementPolicy != "symmetric-random-v1")
+                errors.Add("tactical-v2 placement policy must be 'symmetric-random-v1'");
+
+            if (TacticalV2.Templates == null || TacticalV2.Templates.Count == 0)
+            {
+                errors.Add("tactical-v2 template catalog must not be empty");
+            }
+            else
+            {
+                var seenIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (MlTrainingUnitTemplate template in TacticalV2.Templates)
+                {
+                    if (string.IsNullOrEmpty(template.Id))
+                        errors.Add("tactical-v2 template ids must not be empty");
+                    else if (!seenIds.Add(template.Id))
+                        errors.Add("duplicate tactical-v2 template id '" + template.Id + "'");
+
+                    MlTrainingUnitStats stats = template.Stats;
+                    if (stats == null ||
+                        stats.Health < 0 || stats.Damage < 0 || stats.Defense < 0 ||
+                        stats.Movement < 0 || stats.VerticalMovement < 0 ||
+                        stats.Range < 0 || stats.RangeArc < 0 ||
+                        stats.Vision < 0 || stats.VisionArc < 0)
+                        errors.Add("tactical-v2 template '" + template.Id + "' has an invalid stat");
+                }
+            }
+
+            if (Board != null && Board.Height > 0 && Board.ZoneDepth > 0 &&
+                (long)Board.Height * Board.ZoneDepth < TacticalV2.StartingUnitCount)
+                errors.Add("tactical-v2 deployment cells must cover the starting unit count");
         }
 
         static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
@@ -194,6 +251,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int StartingUnitCount { get; set; }
         public int StartingArmyBudget { get; set; }
         public int MaxDesignPointCost { get; set; }
+    }
+
+    public sealed class MlTrainingTacticalV2
+    {
+        public int StartingUnitCount { get; set; }
+        public int MaxControllableUnits { get; set; }
+        public string PlacementPolicy { get; set; }
+        public List<MlTrainingUnitTemplate> Templates { get; set; }
+    }
+
+    public sealed class MlTrainingUnitTemplate
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public MlTrainingUnitStats Stats { get; set; }
+    }
+
+    public sealed class MlTrainingUnitStats
+    {
+        public int Health { get; set; }
+        public int Damage { get; set; }
+        public int Defense { get; set; }
+        public int Movement { get; set; }
+        public int VerticalMovement { get; set; }
+        public int Range { get; set; }
+        public int RangeArc { get; set; }
+        public int Vision { get; set; }
+        public int VisionArc { get; set; }
     }
 
     public sealed class MlTrainingScenarioLibrary
@@ -325,9 +410,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         internal static string Serialize(MlTrainingScenario scenario)
         {
             ThrowIfInvalid(scenario);
-            return scenario.Environment == MlEnvironmentContract.AdaptiveV1
-                ? JsonUtility.ToJson(MlAdaptiveScenarioWire.FromScenario(scenario), true)
-                : JsonUtility.ToJson(MlTacticalScenarioWire.FromScenario(scenario), true);
+            if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
+                return JsonUtility.ToJson(MlAdaptiveScenarioWire.FromScenario(scenario), true);
+            if (scenario.Environment == MlEnvironmentContract.TacticalV2)
+                return JsonUtility.ToJson(MlTacticalV2ScenarioWire.FromScenario(scenario), true);
+            return JsonUtility.ToJson(MlTacticalScenarioWire.FromScenario(scenario), true);
         }
 
         internal static void ThrowIfInvalid(MlTrainingScenario scenario)
@@ -402,6 +489,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         };
         static readonly string[] AdaptiveScenarioKeys =
             ScenarioKeys.Concat(new[] { "adaptive" }).ToArray();
+        static readonly string[] TacticalV2ScenarioKeys =
+            ScenarioKeys.Concat(new[] { "tactical_v2" }).ToArray();
         static readonly string[] BoardKeys =
         {
             "width", "height", "max_elevation", "zone_depth", "flat_chance",
@@ -426,6 +515,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
         static readonly string[] AdaptiveKeys =
         {
             "starting_unit_count", "starting_army_budget", "max_design_point_cost",
+        };
+        static readonly string[] TacticalV2Keys =
+        {
+            "starting_unit_count", "max_controllable_units", "placement_policy", "templates",
+        };
+        static readonly string[] UnitTemplateKeys = { "id", "name", "stats" };
+        static readonly string[] UnitStatsKeys =
+        {
+            "health", "damage", "defense", "movement", "vertical_movement",
+            "range", "range_arc", "vision", "vision_arc",
         };
 
         public static void ValidateLibrary(string json, string source)
@@ -453,12 +552,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 Fail(path + ".environment must be a non-empty string");
             bool adaptive = string.Equals(
                 environment, "adaptive-v1", StringComparison.Ordinal);
-            if (!adaptive && !string.Equals(
+            bool tacticalV2 = string.Equals(
+                environment, "tactical-v2", StringComparison.Ordinal);
+            if (!adaptive && !tacticalV2 && !string.Equals(
                     environment, "tactical-v1", StringComparison.Ordinal))
-                Fail(path + ".environment must be tactical-v1 or adaptive-v1");
+                Fail(path + ".environment must be tactical-v1, tactical-v2, or adaptive-v1");
 
-            ExactKeys(
-                scenario, adaptive ? AdaptiveScenarioKeys : ScenarioKeys, path);
+            string[] keys = adaptive ? AdaptiveScenarioKeys
+                : tacticalV2 ? TacticalV2ScenarioKeys
+                : ScenarioKeys;
+            ExactKeys(scenario, keys, path);
             RequireSchemaVersion(scenario["schema_version"], path + ".schema_version");
             RequireNonEmptyString(scenario["id"], path + ".id");
             RequireNonEmptyString(scenario["name"], path + ".name");
@@ -470,6 +573,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 scenario["reward"], path + ".reward",
                 adaptive ? AdaptiveRewardKeys : TacticalRewardKeys);
             if (adaptive) ValidateAdaptive(scenario["adaptive"], path + ".adaptive");
+            if (tacticalV2) ValidateTacticalV2(scenario["tactical_v2"], path + ".tactical_v2");
         }
 
         static void ValidateBoard(JsonNode node, string path)
@@ -523,6 +627,35 @@ namespace HexWars.Presentation.EditorTools.MlLab
             Dictionary<string, JsonNode> value = RequireObject(node, path);
             ExactKeys(value, AdaptiveKeys, path);
             foreach (string key in AdaptiveKeys)
+                RequireInteger(value[key], path + "." + key);
+        }
+
+        static void ValidateTacticalV2(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, TacticalV2Keys, path);
+            RequireInteger(value["starting_unit_count"], path + ".starting_unit_count");
+            RequireInteger(value["max_controllable_units"], path + ".max_controllable_units");
+            RequireNonEmptyString(value["placement_policy"], path + ".placement_policy");
+            List<JsonNode> templates = RequireArray(value["templates"], path + ".templates");
+            for (int i = 0; i < templates.Count; i++)
+                ValidateUnitTemplate(templates[i], path + ".templates[" + i + "]");
+        }
+
+        static void ValidateUnitTemplate(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, UnitTemplateKeys, path);
+            RequireNonEmptyString(value["id"], path + ".id");
+            RequireNonEmptyString(value["name"], path + ".name");
+            ValidateUnitStats(value["stats"], path + ".stats");
+        }
+
+        static void ValidateUnitStats(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, UnitStatsKeys, path);
+            foreach (string key in UnitStatsKeys)
                 RequireInteger(value[key], path + "." + key);
         }
 
@@ -905,17 +1038,30 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public MlTrainingEpisodeWire episode;
         public MlTrainingRewardWire reward;
         public MlTrainingAdaptiveWire adaptive;
+        public MlTrainingTacticalV2Wire tactical_v2;
 
         public static MlTrainingScenario ToScenario(MlTrainingScenarioWire wire)
         {
             bool adaptiveEnvironment;
+            bool tacticalV2Environment;
             if (string.Equals(wire.environment, "adaptive-v1", StringComparison.Ordinal))
+            {
                 adaptiveEnvironment = true;
+                tacticalV2Environment = false;
+            }
             else if (string.Equals(wire.environment, "tactical-v1", StringComparison.Ordinal))
+            {
                 adaptiveEnvironment = false;
+                tacticalV2Environment = false;
+            }
+            else if (string.Equals(wire.environment, "tactical-v2", StringComparison.Ordinal))
+            {
+                adaptiveEnvironment = false;
+                tacticalV2Environment = true;
+            }
             else
                 throw new ArgumentException(
-                    "environment must be tactical-v1 or adaptive-v1");
+                    "environment must be tactical-v1, tactical-v2, or adaptive-v1");
             return new MlTrainingScenario
             {
                 SchemaVersion = wire.schema_version,
@@ -923,13 +1069,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 Name = wire.name ?? string.Empty,
                 Environment = adaptiveEnvironment
                     ? MlEnvironmentContract.AdaptiveV1
-                    : MlEnvironmentContract.TacticalV1,
+                    : tacticalV2Environment
+                        ? MlEnvironmentContract.TacticalV2
+                        : MlEnvironmentContract.TacticalV1,
                 Board = wire.board?.ToModel(),
                 Rules = wire.rules?.ToModel(),
                 Episode = wire.episode?.ToModel(),
                 TacticalReward = adaptiveEnvironment ? null : wire.reward?.ToTactical(),
                 AdaptiveReward = adaptiveEnvironment ? wire.reward?.ToAdaptive() : null,
                 Adaptive = adaptiveEnvironment ? wire.adaptive?.ToModel() : null,
+                TacticalV2 = tacticalV2Environment ? wire.tactical_v2?.ToModel() : null,
             };
         }
     }
@@ -985,6 +1134,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 episode = MlTrainingEpisodeWire.FromModel(scenario.Episode),
                 reward = MlAdaptiveRewardWire.FromModel(scenario.AdaptiveReward),
                 adaptive = MlTrainingAdaptiveWire.FromModel(scenario.Adaptive),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTacticalV2ScenarioWire
+    {
+        public int schema_version;
+        public string id;
+        public string name;
+        public string environment;
+        public MlTrainingBoardWire board;
+        public MlTrainingRulesWire rules;
+        public MlTrainingEpisodeWire episode;
+        public MlTacticalRewardWire reward;
+        public MlTrainingTacticalV2Wire tactical_v2;
+
+        public static MlTacticalV2ScenarioWire FromScenario(MlTrainingScenario scenario) =>
+            new MlTacticalV2ScenarioWire
+            {
+                schema_version = scenario.SchemaVersion,
+                id = scenario.Id,
+                name = scenario.Name,
+                environment = "tactical-v2",
+                board = MlTrainingBoardWire.FromModel(scenario.Board),
+                rules = MlTrainingRulesWire.FromModel(scenario.Rules),
+                episode = MlTrainingEpisodeWire.FromModel(scenario.Episode),
+                reward = MlTacticalRewardWire.FromModel(scenario.TacticalReward),
+                tactical_v2 = MlTrainingTacticalV2Wire.FromModel(scenario.TacticalV2),
             };
     }
 
@@ -1165,6 +1342,98 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 starting_unit_count = model.StartingUnitCount,
                 starting_army_budget = model.StartingArmyBudget,
                 max_design_point_cost = model.MaxDesignPointCost,
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV2Wire
+    {
+        public int starting_unit_count;
+        public int max_controllable_units;
+        public string placement_policy;
+        public MlTrainingUnitTemplateWire[] templates;
+
+        public MlTrainingTacticalV2 ToModel() => new MlTrainingTacticalV2
+        {
+            StartingUnitCount = starting_unit_count,
+            MaxControllableUnits = max_controllable_units,
+            PlacementPolicy = placement_policy,
+            Templates = (templates ?? Array.Empty<MlTrainingUnitTemplateWire>())
+                .Select(item => item.ToModel()).ToList(),
+        };
+
+        public static MlTrainingTacticalV2Wire FromModel(MlTrainingTacticalV2 model) =>
+            new MlTrainingTacticalV2Wire
+            {
+                starting_unit_count = model.StartingUnitCount,
+                max_controllable_units = model.MaxControllableUnits,
+                placement_policy = model.PlacementPolicy,
+                templates = (model.Templates ?? new List<MlTrainingUnitTemplate>())
+                    .Select(MlTrainingUnitTemplateWire.FromModel).ToArray(),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingUnitTemplateWire
+    {
+        public string id;
+        public string name;
+        public MlTrainingUnitStatsWire stats;
+
+        public MlTrainingUnitTemplate ToModel() => new MlTrainingUnitTemplate
+        {
+            Id = id,
+            Name = name,
+            Stats = stats?.ToModel(),
+        };
+
+        public static MlTrainingUnitTemplateWire FromModel(MlTrainingUnitTemplate model) =>
+            new MlTrainingUnitTemplateWire
+            {
+                id = model.Id,
+                name = model.Name,
+                stats = MlTrainingUnitStatsWire.FromModel(model.Stats),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingUnitStatsWire
+    {
+        public int health;
+        public int damage;
+        public int defense;
+        public int movement;
+        public int vertical_movement;
+        public int range;
+        public int range_arc;
+        public int vision;
+        public int vision_arc;
+
+        public MlTrainingUnitStats ToModel() => new MlTrainingUnitStats
+        {
+            Health = health,
+            Damage = damage,
+            Defense = defense,
+            Movement = movement,
+            VerticalMovement = vertical_movement,
+            Range = range,
+            RangeArc = range_arc,
+            Vision = vision,
+            VisionArc = vision_arc,
+        };
+
+        public static MlTrainingUnitStatsWire FromModel(MlTrainingUnitStats model) =>
+            new MlTrainingUnitStatsWire
+            {
+                health = model.Health,
+                damage = model.Damage,
+                defense = model.Defense,
+                movement = model.Movement,
+                vertical_movement = model.VerticalMovement,
+                range = model.Range,
+                range_arc = model.RangeArc,
+                vision = model.Vision,
+                vision_arc = model.VisionArc,
             };
     }
 }

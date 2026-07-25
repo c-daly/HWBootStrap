@@ -5,12 +5,20 @@ namespace HexWars.Presentation
     {
         TacticalV1,
         AdaptiveV1,
+        TacticalV2,
     }
 
     public static class MlEnvironmentContracts
     {
-        public static string CliValue(MlEnvironmentContract environment) =>
-            environment == MlEnvironmentContract.AdaptiveV1 ? "adaptive-v1" : "tactical-v1";
+        public static string CliValue(MlEnvironmentContract environment)
+        {
+            switch (environment)
+            {
+                case MlEnvironmentContract.AdaptiveV1: return "adaptive-v1";
+                case MlEnvironmentContract.TacticalV2: return "tactical-v2";
+                default: return "tactical-v1";
+            }
+        }
 
         public static string ContractVersion(MlEnvironmentContract environment) => CliValue(environment);
     }

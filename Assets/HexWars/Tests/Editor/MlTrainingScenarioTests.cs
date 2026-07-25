@@ -307,6 +307,23 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void TacticalV2Scenario_RoundTripsTemplateIdentityAndCount()
+        {
+            MlTrainingScenario scenario = Load("tactical-v2-standard");
+            scenario.TacticalV2.StartingUnitCount = 7;
+            scenario.TacticalV2.MaxControllableUnits = 7;
+            scenario.TacticalV2.Templates =
+                MlTacticalRosterSource.Snapshot(0).ToList();
+
+            string path = MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, scenario);
+            MlTrainingScenario restored = MlTrainingScenarioFile.Load(path);
+
+            Assert.That(restored.TacticalV2.StartingUnitCount, Is.EqualTo(7));
+            Assert.That(restored.TacticalV2.Templates.Select(item => item.Id),
+                Is.EqualTo(scenario.TacticalV2.Templates.Select(item => item.Id)));
+        }
+
+        [Test]
         public void SourceRunPreflight_LoadsTheResolvedRunScenario()
         {
             string run = Path.Combine(_scratch, "source-run");
@@ -330,6 +347,10 @@ namespace HexWars.Presentation.Tests
             File.WriteAllText(path, transform(File.ReadAllText(BuiltInLibraryPath)));
             return path;
         }
+
+        MlTrainingScenario Load(string templateId) =>
+            MlTrainingScenarioLibrary.Load(BuiltInLibraryPath)
+                .Templates.First(item => item.Id == templateId);
 
         void AssertLibraryRejected(Func<string, string> transform)
         {
