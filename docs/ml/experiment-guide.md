@@ -57,6 +57,16 @@ Use this intern workflow:
 
 `scenario.json` is immutable provenance, not a convenient settings file. Never modify it after launch, copy a different document over it, or redirect the manifest. If a smoke reveals a bad budget or horizon, fix the source experiment file or template and create a new run. A later edit to the library cannot change what an existing run means because each run retains its canonical snapshot.
 
+### Choosing a tactical-v2 roster
+
+An unqualified `--environment` on `train` resolves to `tactical-v2`; it is the default for a new tactical experiment. `tactical-v1` is a frozen legacy contract kept for its own checkpoints only — never mix tactical-v1 and tactical-v2 artifacts. `doctor` and `benchmark` deliberately default to `--environment tactical-v1` instead, since they diagnose an environment rather than launch a run; pass `--environment tactical-v2` explicitly when you want to check the new contract.
+
+tactical-v2 has no design/budget economy — its roster *is* the hypothesis surface. In **HexWars > ML Lab > Train**, select the tactical-v2 environment to reveal the **Tactical setup** box: pick **Roster source** (local player 1 or 2), press **Refresh saved roster** to snapshot that seat's five canonical defaults plus its saved custom designs into the working scenario, and set **Starting unit count** with the 1–12 slider (`max_controllable_units` tracks it automatically). To test a hypothesis about a specific unit design, design and save it as a barracks template for the chosen local player first, then refresh the roster so it is included.
+
+Whatever roster/count is current when you choose **Start & Watch** (or a CLI `train` with a hand-authored `--scenario-file`) is snapshotted into that run's `scenario.json` and never re-read afterward: a resume, or the Arena/Start & Watch presentation, always reads the run's own snapshot, not a live saved-roster cache. Each episode then samples `starting_unit_count` templates **with replacement** from that frozen roster, seeded from the episode seed — both seats draw the identical, symmetric starting army for a given seed, and a small roster will legitimately repeat a template within one army. After a smoke run, confirm a custom template actually reached play by sampling a handful of seeds (via a short GymServer reset script, or by inspecting `scenario.json`'s template list directly) rather than assuming the ML Lab snapshot step worked.
+
+Because roster identity (each template's id, name, and stats) and count are baked into `encoding_hash`, changing either is a semantic contract change, not a cosmetic one: a checkpoint trained on one roster cannot resume or duel against a differently rostered run, even at the same starting-unit count. Give a roster or count change a new run name rather than editing an in-progress or completed one.
+
 ## Local headless benchmark record
 
 The following Task 11 verification was recorded on 2026-07-22 on the Windows development host reported by `benchmark` as 16 logical CPUs. Each command used 20 games and held the seed range and engine build constant:

@@ -100,6 +100,10 @@ Do not bypass the error. Inspect both the model and current server:
 
 `doctor` and `inspect-model` report separate environment/model identities; they do not perform an all-fields comparison. Resume requires an exact source/current training contract. Arena and evaluation accept a supported encoding version with matching observation/action geometry and intentionally permit different reward/horizon hashes between training and duel environments. A hash difference therefore requires interpretation: expected reward/horizon differences may be viewable, while changed channel/action meaning needs a reviewed compatibility/migration path. Official promotion must apply stricter semantic evidence than the developer viewer.
 
+### A tactical-v2 encoding hash changed unexpectedly
+
+tactical-v2's roster is part of its contract, not a cosmetic setting: each template's `id`, `name`, and full stat block, plus `starting_unit_count`, are hashed into `encoding_hash`. A resume rejection or Arena "encoding hash ... does not match expected ..." error after a roster edit is expected, not a bug — it means the two runs sampled from different rosters or counts. Compare the two runs' `scenario.json` `tactical_v2.templates` and `tactical_v2.starting_unit_count` directly; do not compare only `run.json.contract`. If the roster was supposed to be identical, check whether **Refresh saved roster** was pressed after a barracks design changed, or whether a hand-authored `--scenario-file` was edited between runs — either explains a silent roster drift. There is no compatibility shim for this: retrain or duel with a run that shares the exact roster and count, or accept that the checkpoints belong to different experiments.
+
 ### Old `game_prototype` model will not load
 
 A standalone legacy zip may omit algorithm and contract metadata. Try an explicit trusted `ppo:PATH` or `dqn:PATH` inspection only for diagnosis. Do not rename a file to imply an algorithm, edit another run's manifest, or resume/promote an unversioned model. If the old environment semantics are still needed, reproduce them in an isolated compatibility branch and generate authoritative evaluation evidence.

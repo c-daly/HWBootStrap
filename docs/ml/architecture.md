@@ -58,6 +58,14 @@ The snapshot is provenance, not a settings file. `run.json.scenario` records the
 
 Promotion consumes an exact checkpoint plus the unmodified manifest, scenario snapshot, evaluation, source commit, and human decision. A mutable template library entry, a Unity working copy, or a `latest` pointer is not sufficient provenance.
 
+### Tactical-v2 roster identity
+
+`tactical-v2` is the default environment `train` resolves to when `--environment` is omitted; `tactical-v1` is a frozen legacy contract, checkpoint-compatible only with other tactical-v1 artifacts. `doctor` and `benchmark` deliberately keep `--environment tactical-v1` as their own default — they check an environment, they do not launch a run, so an unqualified diagnostic invocation must not silently start checking a different contract than before.
+
+A tactical-v2 scenario's `tactical_v2` section replaces adaptive-v1's design/budget economy with an explicit roster: a `templates` catalog (stable `id`, `name`, nine-field stat block per entry), `starting_unit_count` (1–12), a `max_controllable_units` that must equal it, and `placement_policy` (`symmetric-random-v1`). `HexWars > ML Lab > Train` exposes the roster source and count as a **Tactical setup** box: a **Roster source** popup selects local player 1 or 2, **Refresh saved roster** rebuilds the working scenario's template list from that seat's five canonical barracks defaults plus its saved custom designs (deduplicated against the defaults), and a slider sets **Starting unit count** (1–12). Like every other scenario field, the roster is frozen into `scenario.json` at launch; a resume or Arena/Start & Watch reload reads that run's snapshot, never Unity's live saved-roster cache.
+
+Each episode samples `starting_unit_count` templates with replacement from the roster, seeded by the episode seed, so a given seed produces an identical, symmetric starting army for both seats. A roster's templates and count feed directly into the canonical JSON that `EncodingHash` is computed over (each template contributes its `id:name:stats` triple), so changing either — even a single template's stats, or just the count — is a semantic contract change: it produces a new `encoding_hash`, and a checkpoint trained on one roster is not resume- or Arena-compatible with a differently rostered run.
+
 ## Faithful live viewing
 
 **Start & Watch** passes only the selected run directory to the viewer. A strict presentation plan reconstructs the rendered games from that run's immutable `run.json` and `scenario.json`: the recorded scenario, learner-seat schedule, opponent snapshot, and live learner controller. It does not reuse the ML Lab's current form values or silently replace missing metadata with Greedy.
