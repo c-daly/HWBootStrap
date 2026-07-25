@@ -30,7 +30,7 @@ for (int i = 0; i < args.Length; i++)
         scenarioFile = args[++i];
     }
 }
-if (environment != "tactical-v1" && environment != "adaptive-v1")
+if (environment != "tactical-v1" && environment != "adaptive-v1" && environment != "tactical-v2")
 {
     Console.Error.WriteLine($"unsupported environment '{environment}'");
     Environment.ExitCode = 2;
@@ -45,6 +45,7 @@ if (!string.Equals(scenario.Environment, environment, StringComparison.Ordinal))
 
 EnvConfig? tacticalConfig = environment == "tactical-v1" ? scenario.BuildTactical() : null;
 AdaptiveEnvConfig? adaptiveConfig = environment == "adaptive-v1" ? scenario.BuildAdaptive() : null;
+TacticalV2Config? tacticalV2Config = environment == "tactical-v2" ? scenario.BuildTacticalV2() : null;
 
 Func<int, IAgent> opponentFactory = opponent == "random"
     ? (s => new RandomAgent(s))
@@ -57,8 +58,12 @@ AdaptiveTacticalEnv? adaptiveEnv = environment == "adaptive-v1"
         opponent == "random" ? s => new RandomDeploymentPolicy(s) : s => new CombinedArmsDeploymentPolicy(s),
         learningSeat, adaptiveConfig)
     : null;
+TacticalV2Env? tacticalV2Env = environment == "tactical-v2"
+    ? new TacticalV2Env(opponentFactory, learningSeat, tacticalV2Config!)
+    : null;
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
+TacticalV2DuelEnv? tacticalV2Duel = null;
 var output = Console.Out;
 
 void Send(object payload)
@@ -145,6 +150,39 @@ object AdaptiveSpaces(AdaptiveLayout layout, AdaptiveEnvConfig config, MlContrac
     };
 }
 
+// Handshake for tactical-v2: the generic contract fields (mirroring Spaces/AdaptiveSpaces) plus the
+// full v2 semantics document (catalog, slot/template split, action regions, observation channels) so
+// Python never has to hardcode a tactical-v2 offset that could drift from the C# layout.
+object TacticalV2Spaces(TacticalV2Layout layout, TacticalV2Config config, MlEnvironmentKind environmentKind)
+{
+    var contract = MlContract.CreateTacticalV2(config, environmentKind);
+    return new
+    {
+        scenario_id = scenario.Id,
+        scenario_schema_version = scenario.SchemaVersion,
+        contract_version = contract.Version,
+        contract_hash = contract.ContractHash,
+        encoding_hash = contract.EncodingHash,
+        environment_kind = contract.EnvironmentKind,
+        obs_len = layout.ObservationLength,
+        n_actions = layout.ActionCount,
+        channels = layout.ObservationChannels,
+        board_h = layout.BoardGen.Height,
+        board_w = layout.BoardGen.Width,
+        globals = layout.ObservationGlobals,
+        board = contract.Board,
+        roster = config.Templates.Count,
+        contract_roster = contract.Roster,
+        reward = contract.Reward,
+        biomes = config.Game.BiomesEnabled,
+        round_cap = config.Game.RoundCap,
+        max_steps = contract.Board["max_steps"],
+        tactical_v2 = contract.Semantics,
+        action_regions = contract.Semantics["action_regions"],
+        observation_channels = contract.Semantics["observation_channels"],
+    };
+}
+
 object Diagnostics(AdaptiveDiagnostics value) => new
 {
     design_count = value.DesignCount,
@@ -179,8 +217,10 @@ while ((line = Console.ReadLine()) != null)
         case "spaces":
             if (env != null)
                 Send(Spaces(env.ObservationLength, env.ActionCount, env.ObsChannels, env.BoardH, env.BoardW, env.Config, MlEnvironmentKind.Tactical));
+            else if (adaptiveEnv != null)
+                Send(AdaptiveSpaces(adaptiveEnv.Layout, adaptiveEnv.Config, adaptiveEnv.Contract));
             else
-                Send(AdaptiveSpaces(adaptiveEnv!.Layout, adaptiveEnv.Config, adaptiveEnv.Contract));
+                Send(TacticalV2Spaces(tacticalV2Env!.Layout, tacticalV2Env.Config, MlEnvironmentKind.Tactical));
             break;
 
         case "reset":
@@ -191,9 +231,9 @@ while ((line = Console.ReadLine()) != null)
                 var obs = env.Reset(seed);
                 Send(new { obs, mask = env.LegalActionMask() });
             }
-            else
+            else if (adaptiveEnv != null)
             {
-                var obs = adaptiveEnv!.Reset(seed);
+                var obs = adaptiveEnv.Reset(seed);
                 Send(new
                 {
                     obs,
@@ -201,6 +241,11 @@ while ((line = Console.ReadLine()) != null)
                     deployment_complete = adaptiveEnv.DeploymentComplete,
                     diagnostics = Diagnostics(adaptiveEnv.Diagnostics),
                 });
+            }
+            else
+            {
+                var obs = tacticalV2Env!.Reset(seed);
+                Send(new { obs, mask = tacticalV2Env.LegalActionMask() });
             }
             break;
         }
@@ -213,9 +258,9 @@ while ((line = Console.ReadLine()) != null)
                 var r = env.Step(action);
                 Send(new { obs = r.Observation, reward = r.Reward, terminated = r.Terminated, truncated = r.Truncated, mask = r.ActionMask });
             }
-            else
+            else if (adaptiveEnv != null)
             {
-                var r = adaptiveEnv!.Step(action);
+                var r = adaptiveEnv.Step(action);
                 Send(new
                 {
                     obs = r.Observation,
@@ -227,6 +272,11 @@ while ((line = Console.ReadLine()) != null)
                     diagnostics = Diagnostics(adaptiveEnv.Diagnostics),
                 });
             }
+            else
+            {
+                var r = tacticalV2Env!.Step(action);
+                Send(new { obs = r.Observation, reward = r.Reward, terminated = r.Terminated, truncated = r.Truncated, mask = r.ActionMask });
+            }
             break;
         }
 
@@ -236,10 +286,15 @@ while ((line = Console.ReadLine()) != null)
                 duel ??= new DuelEnv(tacticalConfig);
                 Send(Spaces(duel.ObservationLength, duel.ActionCount, duel.ObsChannels, duel.BoardH, duel.BoardW, duel.Config, MlEnvironmentKind.Duel));
             }
-            else
+            else if (environment == "adaptive-v1")
             {
                 adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 Send(AdaptiveSpaces(adaptiveDuel.Layout, adaptiveDuel.Config, adaptiveDuel.Contract));
+            }
+            else
+            {
+                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!);
+                Send(TacticalV2Spaces(tacticalV2Duel.Layout, tacticalV2Duel.Config, MlEnvironmentKind.Duel));
             }
             break;
 
@@ -256,7 +311,7 @@ while ((line = Console.ReadLine()) != null)
                                    learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
                 Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
             }
-            else
+            else if (environment == "adaptive-v1")
             {
                 adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 var v = adaptiveDuel.Reset(seed,
@@ -271,6 +326,13 @@ while ((line = Console.ReadLine()) != null)
                     deployment_complete = v.DeploymentComplete, diagnostics = Diagnostics(v.Diagnostics),
                 });
             }
+            else
+            {
+                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!);
+                var v = tacticalV2Duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
+                                   learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
+                Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
+            }
             break;
         }
 
@@ -283,7 +345,7 @@ while ((line = Console.ReadLine()) != null)
                 var v = duel.Step(action);
                 Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
             }
-            else
+            else if (environment == "adaptive-v1")
             {
                 adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 var v = ContinueHeadlessReveal(adaptiveDuel.Step(action));
@@ -293,6 +355,12 @@ while ((line = Console.ReadLine()) != null)
                     winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated,
                     deployment_complete = v.DeploymentComplete, diagnostics = Diagnostics(v.Diagnostics),
                 });
+            }
+            else
+            {
+                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!);
+                var v = tacticalV2Duel.Step(action);
+                Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
             }
             break;
         }
@@ -305,6 +373,13 @@ while ((line = Console.ReadLine()) != null)
                 var dir = Path.GetDirectoryName(Path.GetFullPath(path));
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllText(path, adaptiveDuel.ToReplay());
+                Send(new { saved = path });
+            }
+            else if (environment == "tactical-v2" && tacticalV2Duel != null)
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, tacticalV2Duel.ToReplay());
                 Send(new { saved = path });
             }
             else if (duel != null)

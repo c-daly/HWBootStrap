@@ -497,6 +497,207 @@ namespace HexWars.Engine.Tests
             Assert.That(process.StandardError.ReadToEnd(), Does.Contain("unsupported environment 'future-v9'"));
         }
 
+        [TestCase(1)]
+        [TestCase(12)]
+        public void TacticalV2GymServer_SpacesResetStepAndDuelRoundTripForEveryCount(int unitCount)
+        {
+            string scenarioPath = WriteTacticalV2Scenario(unitCount);
+            try
+            {
+                using var server = new ServerProcess("--environment", "tactical-v2", "--scenario-file", scenarioPath);
+
+                using JsonDocument spaces = server.Exchange(new { cmd = "spaces" });
+                Assert.That(spaces.RootElement.GetProperty("contract_version").GetString(), Is.EqualTo("tactical-v2"));
+                Assert.That(spaces.RootElement.GetProperty("environment_kind").GetString(), Is.EqualTo("tactical"));
+                Assert.That(
+                    spaces.RootElement.GetProperty("tactical_v2").GetProperty("starting_unit_count").GetInt32(),
+                    Is.EqualTo(unitCount));
+                Assert.That(
+                    spaces.RootElement.GetProperty("tactical_v2").GetProperty("max_controllable_units").GetInt32(),
+                    Is.EqualTo(unitCount));
+                Assert.That(spaces.RootElement.TryGetProperty("action_regions", out _), Is.True);
+                Assert.That(spaces.RootElement.TryGetProperty("observation_channels", out _), Is.True);
+                string encodingHash = spaces.RootElement.GetProperty("encoding_hash").GetString()!;
+                Assert.That(encodingHash, Does.Match("^[0-9a-f]{64}$"));
+                int obsLen = spaces.RootElement.GetProperty("obs_len").GetInt32();
+                int nActions = spaces.RootElement.GetProperty("n_actions").GetInt32();
+
+                using JsonDocument reset = server.Exchange(new { cmd = "reset", seed = 123 });
+                Assert.That(reset.RootElement.GetProperty("obs").GetArrayLength(), Is.EqualTo(obsLen));
+                bool[] mask = reset.RootElement.GetProperty("mask").EnumerateArray().Select(x => x.GetBoolean()).ToArray();
+                Assert.That(mask.Length, Is.EqualTo(nActions));
+                int action = Enumerable.Range(0, mask.Length).First(i => mask[i]);
+
+                using JsonDocument step = server.Exchange(new { cmd = "step", action });
+                Assert.That(step.RootElement.GetProperty("obs").GetArrayLength(), Is.EqualTo(obsLen));
+                Assert.That(step.RootElement.GetProperty("mask").GetArrayLength(), Is.EqualTo(nActions));
+                Assert.That(step.RootElement.TryGetProperty("terminated", out _), Is.True);
+                Assert.That(step.RootElement.TryGetProperty("truncated", out _), Is.True);
+
+                using JsonDocument duelSpaces = server.Exchange(new { cmd = "duel_spaces" });
+                Assert.That(duelSpaces.RootElement.GetProperty("environment_kind").GetString(), Is.EqualTo("duel"));
+                Assert.That(duelSpaces.RootElement.GetProperty("encoding_hash").GetString(), Is.EqualTo(encodingHash));
+                Assert.That(duelSpaces.RootElement.GetProperty("contract_hash").GetString(),
+                    Is.Not.EqualTo(spaces.RootElement.GetProperty("contract_hash").GetString()));
+
+                using JsonDocument duelReset = server.Exchange(new { cmd = "duel_reset", seed = 5 });
+                bool[] duelMask = duelReset.RootElement.GetProperty("mask").EnumerateArray()
+                    .Select(x => x.GetBoolean()).ToArray();
+                int duelAction = Enumerable.Range(0, duelMask.Length).First(i => duelMask[i]);
+                using JsonDocument duelStep = server.Exchange(new { cmd = "duel_step", action = duelAction });
+                Assert.That(duelStep.RootElement.TryGetProperty("seat", out _), Is.True);
+                Assert.That(duelStep.RootElement.TryGetProperty("winner", out _), Is.True);
+
+                string replayPath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                    "tactical-v2-" + Guid.NewGuid().ToString("N") + ".replay");
+                try
+                {
+                    using JsonDocument saved = server.Exchange(new { cmd = "duel_save", path = replayPath });
+                    Assert.That(saved.RootElement.GetProperty("saved").GetString(), Is.EqualTo(replayPath));
+                    ReplayData replay = ReplayFile.Read(File.ReadAllText(replayPath));
+                    Assert.That(replay.Commands, Is.Not.Empty);
+                }
+                finally
+                {
+                    if (File.Exists(replayPath)) File.Delete(replayPath);
+                }
+            }
+            finally
+            {
+                File.Delete(scenarioPath);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsTacticalV2ScenarioWithMismatchedCounts()
+        {
+            string scenario = WriteTacticalV2Scenario(startingUnitCount: 4, maxControllableUnits: 6);
+            try
+            {
+                AssertScenarioStartupFails("tactical-v2 max controllable units must equal starting unit count",
+                    "--environment", "tactical-v2", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsTacticalV2ScenarioMissingSection()
+        {
+            string scenario = WriteTacticalV2Scenario(1, includeTacticalV2: false);
+            try
+            {
+                AssertScenarioStartupFails("tactical_v2 section", "--environment", "tactical-v2", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_RejectsTacticalV2ScenarioWithUnknownField()
+        {
+            string scenario = WriteTacticalV2Scenario(1, includeUnknownField: true);
+            try
+            {
+                AssertScenarioStartupFails("invalid scenario JSON", "--environment", "tactical-v2", "--scenario-file", scenario);
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        private static string WriteTacticalV2Scenario(
+            int startingUnitCount,
+            int? maxControllableUnits = null,
+            bool includeTacticalV2 = true,
+            bool includeUnknownField = false,
+            int width = 24,
+            int height = 16,
+            int zoneDepth = 4)
+        {
+            var scenario = new Dictionary<string, object?>
+            {
+                ["schema_version"] = 1,
+                ["id"] = "test-tactical-v2",
+                ["name"] = "Test Tactical V2",
+                ["environment"] = "tactical-v2",
+                ["board"] = new
+                {
+                    width,
+                    height,
+                    max_elevation = 4,
+                    zone_depth = zoneDepth,
+                    flat_chance = 0.6,
+                    plains_weight = 70,
+                    forest_weight = 15,
+                    rough_weight = 10,
+                    water_weight = 5,
+                },
+                ["rules"] = new
+                {
+                    actions_per_turn = 0,
+                    round_cap = 100,
+                    starting_points = 12,
+                    fog_of_war = false,
+                    biomes_enabled = false,
+                    bounty_rate = 0.5,
+                    deploy_cost_multiplier = 1.0,
+                    generator_cost = 2,
+                    generator_output = 1,
+                    generator_health = 3,
+                },
+                ["episode"] = new { max_steps = 600 },
+                ["reward"] = new
+                {
+                    shape_scale = 0.01f,
+                    step_penalty = 0.005f,
+                    closing_weight = 0.02f,
+                    draw_credit_weight = 0.25f,
+                    points_weight = 0.5f,
+                },
+            };
+
+            if (includeTacticalV2)
+            {
+                var tacticalV2 = new Dictionary<string, object?>
+                {
+                    ["starting_unit_count"] = startingUnitCount,
+                    ["max_controllable_units"] = maxControllableUnits ?? startingUnitCount,
+                    ["placement_policy"] = "symmetric-random-v1",
+                    ["templates"] = new object[]
+                    {
+                        new
+                        {
+                            id = "brute", name = "Brute",
+                            stats = new
+                            {
+                                health = 7, damage = 2, defense = 2, movement = 3, vertical_movement = 2,
+                                range = 1, range_arc = 1, vision = 2, vision_arc = 1,
+                            },
+                        },
+                        new
+                        {
+                            id = "scout", name = "Scout",
+                            stats = new
+                            {
+                                health = 2, damage = 2, defense = 0, movement = 4, vertical_movement = 3,
+                                range = 1, range_arc = 0, vision = 5, vision_arc = 2,
+                            },
+                        },
+                    },
+                };
+                if (includeUnknownField) tacticalV2["bogus_field"] = true;
+                scenario["tactical_v2"] = tacticalV2;
+            }
+
+            return WriteScenarioContent(JsonSerializer.Serialize(scenario));
+        }
+
         private static AdaptiveDuelEnv.View DeployExternalSeat(
             AdaptiveDuelEnv env, AdaptiveDuelEnv.View view, bool useCustomTemplate)
         {

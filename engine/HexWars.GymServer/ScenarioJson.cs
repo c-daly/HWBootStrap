@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using HexWars.Engine.Rl;
@@ -103,6 +104,7 @@ namespace HexWars.GymServer
                     Require(reward.PointsWeight, "reward.points_weight", errors);
                 }
                 RequireAbsent(wire.Adaptive, "adaptive section is not valid for tactical-v1", errors);
+                RequireAbsent(wire.TacticalV2, "tactical-v2 section is not valid for tactical-v1", errors);
             }
             else if (wire.Environment == MlContract.AdaptiveVersion)
             {
@@ -120,7 +122,58 @@ namespace HexWars.GymServer
                     Require(wire.Adaptive.StartingArmyBudget, "adaptive.starting_army_budget", errors);
                     Require(wire.Adaptive.MaxDesignPointCost, "adaptive.max_design_point_cost", errors);
                 }
+                RequireAbsent(wire.TacticalV2, "tactical-v2 section is not valid for adaptive-v1", errors);
             }
+            else if (wire.Environment == MlContract.TacticalV2Version)
+            {
+                TacticalRewardWire? reward = DeserializeReward<TacticalRewardWire>(wire.Reward, errors);
+                if (reward != null)
+                {
+                    Require(reward.ShapeScale, "reward.shape_scale", errors);
+                    Require(reward.StepPenalty, "reward.step_penalty", errors);
+                    Require(reward.ClosingWeight, "reward.closing_weight", errors);
+                    Require(reward.DrawCreditWeight, "reward.draw_credit_weight", errors);
+                    Require(reward.PointsWeight, "reward.points_weight", errors);
+                }
+                RequireAbsent(wire.Adaptive, "adaptive section is not valid for tactical-v2", errors);
+
+                Require(wire.TacticalV2, "tactical_v2 section", errors);
+                if (wire.TacticalV2 != null)
+                {
+                    Require(wire.TacticalV2.StartingUnitCount, "tactical_v2.starting_unit_count", errors);
+                    Require(wire.TacticalV2.MaxControllableUnits, "tactical_v2.max_controllable_units", errors);
+                    RequireText(wire.TacticalV2.PlacementPolicy, "tactical_v2.placement_policy", errors);
+
+                    if (wire.TacticalV2.Templates == null || wire.TacticalV2.Templates.Count == 0)
+                    {
+                        errors.Add("tactical_v2.templates is required");
+                    }
+                    else
+                    {
+                        for (int i = 0; i < wire.TacticalV2.Templates.Count; i++)
+                            ValidateTacticalV2TemplateWire(wire.TacticalV2.Templates[i], $"tactical_v2.templates[{i}]", errors);
+                    }
+                }
+            }
+        }
+
+        private static void ValidateTacticalV2TemplateWire(
+            TacticalV2TemplateWire template, string prefix, List<string> errors)
+        {
+            RequireText(template.Id, prefix + ".id", errors);
+            RequireText(template.Name, prefix + ".name", errors);
+            Require(template.Stats, prefix + ".stats", errors);
+            if (template.Stats == null) return;
+
+            Require(template.Stats.Health, prefix + ".stats.health", errors);
+            Require(template.Stats.Damage, prefix + ".stats.damage", errors);
+            Require(template.Stats.Defense, prefix + ".stats.defense", errors);
+            Require(template.Stats.Movement, prefix + ".stats.movement", errors);
+            Require(template.Stats.VerticalMovement, prefix + ".stats.vertical_movement", errors);
+            Require(template.Stats.Range, prefix + ".stats.range", errors);
+            Require(template.Stats.RangeArc, prefix + ".stats.range_arc", errors);
+            Require(template.Stats.Vision, prefix + ".stats.vision", errors);
+            Require(template.Stats.VisionArc, prefix + ".stats.vision_arc", errors);
         }
 
         private static T? DeserializeReward<T>(JsonElement? reward, List<string> errors) where T : class
@@ -200,9 +253,44 @@ namespace HexWars.GymServer
                     MaxDesignPointCost = wire.Adaptive.MaxDesignPointCost!.Value,
                 };
             }
+            else if (wire.Environment == MlContract.TacticalV2Version)
+            {
+                TacticalRewardWire reward = wire.Reward!.Value.Deserialize<TacticalRewardWire>(Options)!;
+                scenario.TacticalReward = new TacticalRewardConfig
+                {
+                    ShapeScale = reward.ShapeScale!.Value,
+                    StepPenalty = reward.StepPenalty!.Value,
+                    ClosingWeight = reward.ClosingWeight!.Value,
+                    DrawCreditWeight = reward.DrawCreditWeight!.Value,
+                    PointsWeight = reward.PointsWeight!.Value,
+                };
+                scenario.TacticalV2 = new TrainingTacticalV2Config
+                {
+                    StartingUnitCount = wire.TacticalV2!.StartingUnitCount!.Value,
+                    MaxControllableUnits = wire.TacticalV2.MaxControllableUnits!.Value,
+                    PlacementPolicy = wire.TacticalV2.PlacementPolicy!,
+                    Templates = wire.TacticalV2.Templates!.Select(MapTacticalV2Template).ToList(),
+                };
+            }
 
             return scenario;
         }
+
+        private static TrainingUnitTemplateConfig MapTacticalV2Template(TacticalV2TemplateWire template) =>
+            new TrainingUnitTemplateConfig
+            {
+                Id = template.Id!,
+                Name = template.Name!,
+                Health = template.Stats!.Health!.Value,
+                Damage = template.Stats.Damage!.Value,
+                Defense = template.Stats.Defense!.Value,
+                Movement = template.Stats.Movement!.Value,
+                VerticalMovement = template.Stats.VerticalMovement!.Value,
+                Range = template.Stats.Range!.Value,
+                RangeArc = template.Stats.RangeArc!.Value,
+                Vision = template.Stats.Vision!.Value,
+                VisionArc = template.Stats.VisionArc!.Value,
+            };
 
         private static void Require(object? value, string field, List<string> errors)
         {
@@ -230,6 +318,7 @@ namespace HexWars.GymServer
             [JsonPropertyName("episode")] public EpisodeWire? Episode { get; set; }
             [JsonPropertyName("reward")] public JsonElement? Reward { get; set; }
             [JsonPropertyName("adaptive")] public AdaptiveWire? Adaptive { get; set; }
+            [JsonPropertyName("tactical_v2")] public TacticalV2Wire? TacticalV2 { get; set; }
         }
 
         private sealed class BoardWire
@@ -284,6 +373,34 @@ namespace HexWars.GymServer
             [JsonPropertyName("starting_unit_count")] public int? StartingUnitCount { get; set; }
             [JsonPropertyName("starting_army_budget")] public int? StartingArmyBudget { get; set; }
             [JsonPropertyName("max_design_point_cost")] public int? MaxDesignPointCost { get; set; }
+        }
+
+        private sealed class TacticalV2Wire
+        {
+            [JsonPropertyName("starting_unit_count")] public int? StartingUnitCount { get; set; }
+            [JsonPropertyName("max_controllable_units")] public int? MaxControllableUnits { get; set; }
+            [JsonPropertyName("placement_policy")] public string? PlacementPolicy { get; set; }
+            [JsonPropertyName("templates")] public List<TacticalV2TemplateWire>? Templates { get; set; }
+        }
+
+        private sealed class TacticalV2TemplateWire
+        {
+            [JsonPropertyName("id")] public string? Id { get; set; }
+            [JsonPropertyName("name")] public string? Name { get; set; }
+            [JsonPropertyName("stats")] public TacticalV2StatsWire? Stats { get; set; }
+        }
+
+        private sealed class TacticalV2StatsWire
+        {
+            [JsonPropertyName("health")] public int? Health { get; set; }
+            [JsonPropertyName("damage")] public int? Damage { get; set; }
+            [JsonPropertyName("defense")] public int? Defense { get; set; }
+            [JsonPropertyName("movement")] public int? Movement { get; set; }
+            [JsonPropertyName("vertical_movement")] public int? VerticalMovement { get; set; }
+            [JsonPropertyName("range")] public int? Range { get; set; }
+            [JsonPropertyName("range_arc")] public int? RangeArc { get; set; }
+            [JsonPropertyName("vision")] public int? Vision { get; set; }
+            [JsonPropertyName("vision_arc")] public int? VisionArc { get; set; }
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using NUnit.Framework;
@@ -328,5 +329,136 @@ namespace HexWars.Engine.Tests
                 Does.StartWith(
                     "tactical observation size exceeds Int32 capacity"));
         }
+
+        [Test]
+        public void TacticalV2Scenario_BuildsSavedCatalogAndCount()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = 6;
+            scenario.TacticalV2.MaxControllableUnits = 6;
+            scenario.TacticalV2.Templates.Add(CustomTemplate("custom-alpha", "Alpha"));
+
+            TacticalV2Config config = scenario.BuildTacticalV2();
+
+            Assert.That(config.StartingUnitCount, Is.EqualTo(6));
+            Assert.That(config.Templates.Select(item => item.Id), Does.Contain("custom-alpha"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_DefaultMatchesEngineDefaultCatalogIdentity()
+        {
+            TacticalV2Config fromScenario = TrainingScenario.CreateStandard("tactical-v2").BuildTacticalV2();
+            TacticalV2Config engineDefault = TacticalV2Config.Default();
+
+            MlContract fromScenarioContract = MlContract.CreateTacticalV2(fromScenario);
+            MlContract engineDefaultContract = MlContract.CreateTacticalV2(engineDefault);
+
+            Assert.That(fromScenarioContract.ContractHash, Is.EqualTo(engineDefaultContract.ContractHash));
+            Assert.That(fromScenarioContract.EncodingHash, Is.EqualTo(engineDefaultContract.EncodingHash));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsMismatchedCountAndCap()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = 4;
+            scenario.TacticalV2.MaxControllableUnits = 6;
+
+            Assert.That(scenario.Validate(),
+                Has.Some.Contains("max controllable units must equal starting unit count"));
+        }
+
+        [TestCase(0)]
+        [TestCase(13)]
+        public void TacticalV2Scenario_RejectsStartingCountsOutsideRegularGameLimit(int count)
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = count;
+            scenario.TacticalV2.MaxControllableUnits = count;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("starting unit count must be between 1 and 12"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsDuplicateTemplateIds()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            string existingId = scenario.TacticalV2.Templates[0].Id;
+            scenario.TacticalV2.Templates.Add(CustomTemplate(existingId, "Duplicate"));
+
+            Assert.That(scenario.Validate(), Has.Some.Contains($"duplicate tactical-v2 template id '{existingId}'"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsInvalidStats()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.Templates[0].Health = -1;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("invalid stat"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsUnrecognizedPlacementPolicy()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.PlacementPolicy = "corner-stack-v1";
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("placement policy"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsInsufficientDeploymentCells()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.Board.Width = 2;
+            scenario.Board.Height = 2;
+            scenario.Board.ZoneDepth = 1;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("deployment cells"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsEnvironmentSectionMismatch()
+        {
+            var tacticalV2 = TrainingScenario.CreateStandard("tactical-v2");
+            tacticalV2.Adaptive = new TrainingAdaptiveConfig();
+            var tactical = TrainingScenario.CreateStandard("tactical-v1");
+            tactical.TacticalV2 = new TrainingTacticalV2Config();
+            var adaptive = TrainingScenario.CreateStandard("adaptive-v1");
+            adaptive.TacticalV2 = new TrainingTacticalV2Config();
+
+            Assert.That(tacticalV2.Validate(), Has.Some.Contains("adaptive section"));
+            Assert.That(tactical.Validate(), Has.Some.Contains("tactical-v2 section"));
+            Assert.That(adaptive.Validate(), Has.Some.Contains("tactical-v2 section"));
+        }
+
+        [Test]
+        public void TacticalV2Builder_ThrowsAllValidationErrors()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = 0;
+            scenario.TacticalV2.MaxControllableUnits = 0;
+            scenario.Rules.RoundCap = 0;
+
+            var error = Assert.Throws<ArgumentException>(() => scenario.BuildTacticalV2());
+
+            Assert.That(error!.Message, Does.Contain("starting unit count").And.Contain("round cap"));
+        }
+
+        private static TrainingUnitTemplateConfig CustomTemplate(string id, string name) => new TrainingUnitTemplateConfig
+        {
+            Id = id,
+            Name = name,
+            Health = 4,
+            Damage = 2,
+            Defense = 1,
+            Movement = 3,
+            VerticalMovement = 2,
+            Range = 1,
+            RangeArc = 1,
+            Vision = 2,
+            VisionArc = 1,
+        };
     }
 }

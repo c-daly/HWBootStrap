@@ -26,6 +26,7 @@ namespace HexWars.Engine.Rl
     {
         public const string CurrentVersion = "tactical-v1";
         public const string AdaptiveVersion = "adaptive-v1";
+        public const string TacticalV2Version = "tactical-v2";
 
         private static readonly IReadOnlyList<string> AdaptivePhases = Array.AsReadOnly(new[]
         {
@@ -148,6 +149,157 @@ namespace HexWars.Engine.Rl
                 Sha256(canonical),
                 Sha256(CanonicalEncodingJson(AdaptiveVersion, observationSize,
                     actionSize, board, roster, semantics)));
+        }
+
+        /// <summary>Tactical-v2 contract identity: a stable-id template catalog plus the unit-slot
+        /// architecture (starting count, controllable-unit cap, placement policy, move/attack/deploy
+        /// action regions, ordered observation channels) — everything a trained policy's observation
+        /// and action spaces depend on. Mirrors <see cref="Create"/>'s tactical/duel kind split and
+        /// <see cref="CreateAdaptive"/>'s semantics-driven canonical JSON, but keeps its own dedicated
+        /// canonical-JSON builder (<see cref="CanonicalTacticalV2Json"/>) rather than sharing one, so a
+        /// change here can never perturb tactical-v1 or adaptive-v1 hashes.</summary>
+        public static MlContract CreateTacticalV2(
+            TacticalV2Config config,
+            MlEnvironmentKind environmentKind = MlEnvironmentKind.Tactical)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            var layout = new TacticalV2Layout(config);
+            string kind = EnvironmentKindName(environmentKind);
+            int maxSteps = TacticalV2EffectiveMaxSteps(config, environmentKind);
+            var board = BoardValues(new EnvConfig { BoardGen = config.BoardGen, Game = config.Game }, kind, maxSteps);
+            var actionRegions = TacticalV2ActionRegions(layout);
+            var observationChannels = TacticalV2ObservationChannels(layout);
+            var templates = TacticalV2Templates(layout.Templates);
+            var roster = TacticalV2RosterValues(layout.Templates);
+            var reward = TacticalV2RewardValues(config);
+            var semantics = TacticalV2Semantics(
+                config, board, actionRegions, observationChannels, templates,
+                layout.ActionCount, layout.ObservationLength, kind);
+            var canonical = CanonicalTacticalV2Json(semantics, roster, reward, kind, layout.ActionCount, layout.ObservationLength);
+
+            return new MlContract(
+                TacticalV2Version,
+                layout.ObservationLength,
+                layout.ActionCount,
+                board,
+                roster,
+                reward,
+                semantics,
+                kind,
+                Sha256(canonical),
+                Sha256(CanonicalEncodingJson(TacticalV2Version, layout.ObservationLength,
+                    layout.ActionCount, board, roster, semantics)));
+        }
+
+        private static int TacticalV2EffectiveMaxSteps(TacticalV2Config config, MlEnvironmentKind kind) => kind switch
+        {
+            MlEnvironmentKind.Tactical => config.MaxSteps,
+            MlEnvironmentKind.Duel => checked(config.MaxSteps * 2),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        private static IReadOnlyDictionary<string, object> TacticalV2ActionRegions(TacticalV2Layout layout) =>
+            ReadOnlyMap(new Dictionary<string, object>
+            {
+                ["move"] = Region(layout.MoveOffset, layout.UnitSlotCount * layout.CellCount),
+                ["attack"] = Region(layout.AttackOffset, layout.UnitSlotCount * layout.CellCount),
+                ["deploy"] = Region(layout.DeployOffset, layout.TemplateCount * layout.CellCount),
+            });
+
+        // Plane order matches TacticalV2Coding.Observe exactly: friendly-by-template, then
+        // enemy-by-template, then a single shared elevation plane.
+        private static IReadOnlyList<string> TacticalV2ObservationChannels(TacticalV2Layout layout)
+        {
+            var channels = new List<string>(layout.ObservationChannels);
+            for (int i = 0; i < layout.TemplateCount; i++) channels.Add($"friendly_role_hp_{i}");
+            for (int i = 0; i < layout.TemplateCount; i++) channels.Add($"visible_enemy_role_hp_{i}");
+            channels.Add("elevation");
+            return Array.AsReadOnly(channels.ToArray());
+        }
+
+        private static object[] TacticalV2Templates(IReadOnlyList<TacticalV2Template> templates)
+        {
+            var result = new object[templates.Count];
+            for (int i = 0; i < templates.Count; i++)
+            {
+                TacticalV2Template item = templates[i];
+                result[i] = ReadOnlyMap(new Dictionary<string, object>
+                {
+                    ["id"] = item.Id,
+                    ["name"] = item.Template.Name,
+                    ["stats"] = Array.AsReadOnly(StatValues(item.Template.Stats)),
+                    ["cost"] = item.Template.Stats.PointCost,
+                });
+            }
+            return result;
+        }
+
+        private static IReadOnlyList<string> TacticalV2RosterValues(IReadOnlyList<TacticalV2Template> templates)
+        {
+            var values = new string[templates.Count];
+            for (int i = 0; i < templates.Count; i++)
+                values[i] = templates[i].Id + ":" + templates[i].Template.Name + ":" + RosterEntry(templates[i].Template.Stats);
+            return Array.AsReadOnly(values);
+        }
+
+        private static IReadOnlyDictionary<string, object> TacticalV2RewardValues(TacticalV2Config config) =>
+            ReadOnlyMap(new Dictionary<string, object>
+            {
+                ["shape_scale"] = config.ShapeScale,
+                ["step_penalty"] = config.StepPenalty,
+                ["closing_weight"] = config.ClosingWeight,
+                ["draw_credit_weight"] = config.DrawCreditWeight,
+                ["points_weight"] = config.PointsWeight,
+                ["terminal_win"] = 1f,
+                ["terminal_loss"] = -1f,
+            });
+
+        private static IReadOnlyDictionary<string, object> TacticalV2Semantics(
+            TacticalV2Config config,
+            IReadOnlyDictionary<string, object> board,
+            IReadOnlyDictionary<string, object> actionRegions,
+            IReadOnlyList<string> observationChannels,
+            object[] templates,
+            int actionSize,
+            int observationSize,
+            string environmentKind) =>
+            ReadOnlyMap(new Dictionary<string, object>
+            {
+                ["contract_version"] = TacticalV2Version,
+                ["environment_kind"] = environmentKind,
+                ["starting_unit_count"] = config.StartingUnitCount,
+                ["max_controllable_units"] = config.MaxControllableUnits,
+                ["placement_policy"] = config.PlacementPolicy,
+                ["templates"] = Array.AsReadOnly(templates),
+                ["action_regions"] = actionRegions,
+                ["observation_channels"] = observationChannels,
+                ["action_size"] = actionSize,
+                ["observation_size"] = observationSize,
+                ["board"] = board,
+            });
+
+        // Tactical-v2 keeps its own canonical-JSON builder (rather than sharing CanonicalAdaptiveJson)
+        // so a change to one contract version's document shape can never perturb another's hash.
+        private static string CanonicalTacticalV2Json(
+            IReadOnlyDictionary<string, object> semantics,
+            IReadOnlyList<string> roster,
+            IReadOnlyDictionary<string, object> reward,
+            string environmentKind,
+            int actionSize,
+            int observationSize)
+        {
+            var document = ReadOnlyMap(new Dictionary<string, object>
+            {
+                ["action_size"] = actionSize,
+                ["contract_version"] = TacticalV2Version,
+                ["environment_kind"] = environmentKind,
+                ["observation_size"] = observationSize,
+                ["reward"] = reward,
+                ["roster"] = roster,
+                ["semantics"] = semantics,
+            });
+            return AppendCanonicalValue(new StringBuilder(), document).ToString();
         }
 
         private static string AdaptiveEnvironmentKindName(MlEnvironmentKind kind) => kind switch

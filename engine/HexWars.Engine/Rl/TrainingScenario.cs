@@ -19,10 +19,12 @@ namespace HexWars.Engine.Rl
         public TacticalRewardConfig TacticalReward = null!;
         public AdaptiveRewardConfig AdaptiveReward = null!;
         public TrainingAdaptiveConfig Adaptive = null!;
+        public TrainingTacticalV2Config TacticalV2 = null!;
 
         public static TrainingScenario CreateStandard(string environment, string id = "legacy-default")
         {
-            if (environment != MlContract.CurrentVersion && environment != MlContract.AdaptiveVersion)
+            if (environment != MlContract.CurrentVersion && environment != MlContract.AdaptiveVersion
+                && environment != MlContract.TacticalV2Version)
                 throw new ArgumentException($"unsupported environment '{environment}'", nameof(environment));
 
             var scenario = new TrainingScenario
@@ -37,15 +39,56 @@ namespace HexWars.Engine.Rl
                 scenario.Rules.FogOfWar = false;
                 scenario.TacticalReward = new TacticalRewardConfig();
             }
-            else
+            else if (environment == MlContract.AdaptiveVersion)
             {
                 scenario.Episode.MaxSteps = 900;
                 scenario.Rules.FogOfWar = true;
                 scenario.AdaptiveReward = new AdaptiveRewardConfig();
                 scenario.Adaptive = new TrainingAdaptiveConfig();
             }
+            else
+            {
+                scenario.Episode.MaxSteps = 600;
+                scenario.Rules.FogOfWar = false;
+                scenario.TacticalReward = new TacticalRewardConfig();
+                scenario.TacticalV2 = new TrainingTacticalV2Config
+                {
+                    StartingUnitCount = 3,
+                    MaxControllableUnits = 3,
+                    PlacementPolicy = "symmetric-random-v1",
+                    Templates = DefaultTacticalV2Templates(),
+                };
+            }
 
             return scenario;
+        }
+
+        /// <summary>The five canonical barracks templates, carried over verbatim (same stable ids,
+        /// names, and stats) from <see cref="TacticalV2Config.Default"/> — so the standard scenario and
+        /// the engine's own default always build byte-identical <see cref="TacticalV2Config"/> contract
+        /// identities.</summary>
+        private static List<TrainingUnitTemplateConfig> DefaultTacticalV2Templates()
+        {
+            var result = new List<TrainingUnitTemplateConfig>();
+            foreach (TacticalV2Template template in TacticalV2Config.Default().Templates)
+            {
+                UnitStats stats = template.Template.Stats;
+                result.Add(new TrainingUnitTemplateConfig
+                {
+                    Id = template.Id,
+                    Name = template.Template.Name,
+                    Health = stats.Health,
+                    Damage = stats.Damage,
+                    Defense = stats.Defense,
+                    Movement = stats.Movement,
+                    VerticalMovement = stats.VerticalMovement,
+                    Range = stats.Range,
+                    RangeArc = stats.RangeArc,
+                    Vision = stats.Vision,
+                    VisionArc = stats.VisionArc,
+                });
+            }
+            return result;
         }
 
         public IReadOnlyList<string> Validate()
@@ -54,7 +97,9 @@ namespace HexWars.Engine.Rl
             if (SchemaVersion != 1) errors.Add("schema version must be 1");
             bool tactical = Environment == MlContract.CurrentVersion;
             bool adaptive = Environment == MlContract.AdaptiveVersion;
-            if (!tactical && !adaptive) errors.Add("environment must be tactical-v1 or adaptive-v1");
+            bool tacticalV2 = Environment == MlContract.TacticalV2Version;
+            if (!tactical && !adaptive && !tacticalV2)
+                errors.Add("environment must be tactical-v1, adaptive-v1, or tactical-v2");
 
             ValidateBoard(errors);
             ValidateRules(errors);
@@ -65,6 +110,7 @@ namespace HexWars.Engine.Rl
                 if (TacticalReward == null) errors.Add("tactical-v1 requires a tactical reward section");
                 if (AdaptiveReward != null) errors.Add("adaptive reward section is not valid for tactical-v1");
                 if (Adaptive != null) errors.Add("adaptive section is not valid for tactical-v1");
+                if (TacticalV2 != null) errors.Add("tactical-v2 section is not valid for tactical-v1");
             }
             else if (adaptive)
             {
@@ -72,6 +118,15 @@ namespace HexWars.Engine.Rl
                 if (AdaptiveReward == null) errors.Add("adaptive-v1 requires an adaptive reward section");
                 if (Adaptive == null) errors.Add("adaptive-v1 requires an adaptive section");
                 if (Adaptive != null) ValidateAdaptive(errors, Adaptive);
+                if (TacticalV2 != null) errors.Add("tactical-v2 section is not valid for adaptive-v1");
+            }
+            else if (tacticalV2)
+            {
+                if (TacticalReward == null) errors.Add("tactical-v2 requires a tactical reward section");
+                if (AdaptiveReward != null) errors.Add("adaptive reward section is not valid for tactical-v2");
+                if (Adaptive != null) errors.Add("adaptive section is not valid for tactical-v2");
+                if (TacticalV2 == null) errors.Add("tactical-v2 requires a tactical-v2 section");
+                if (TacticalV2 != null) ValidateTacticalV2(errors, TacticalV2);
             }
 
             return errors;
@@ -124,6 +179,46 @@ namespace HexWars.Engine.Rl
                 MaxSteps = Episode.MaxSteps,
                 IntermediateDecisionPenalty = reward.IntermediateDecisionPenalty,
                 DeploymentCompletionBonus = reward.DeploymentCompletionBonus,
+            };
+        }
+
+        /// <summary>Maps the DTO into a <see cref="TacticalV2Config"/> without reading Unity state —
+        /// same boundary as <see cref="BuildTactical"/>/<see cref="BuildAdaptive"/>. Template ids are
+        /// carried over verbatim from the DTO (never re-derived), so a caller-assigned id such as a
+        /// saved custom design's id round-trips exactly.</summary>
+        public TacticalV2Config BuildTacticalV2()
+        {
+            ThrowIfInvalid();
+            if (Environment != MlContract.TacticalV2Version)
+                throw new ArgumentException("scenario environment must be tactical-v2", nameof(Environment));
+
+            TacticalRewardConfig reward = TacticalReward!;
+            TrainingTacticalV2Config tacticalV2 = TacticalV2!;
+            var templates = new List<TacticalV2Template>(tacticalV2.Templates.Count);
+            foreach (TrainingUnitTemplateConfig item in tacticalV2.Templates)
+            {
+                var stats = new UnitStats(
+                    item.Health, item.Damage, item.Defense,
+                    item.Movement, item.VerticalMovement,
+                    item.Range, item.RangeArc,
+                    item.Vision, item.VisionArc);
+                templates.Add(new TacticalV2Template(item.Id, new UnitTemplate(UnitTemplate.Sanitize(item.Name), stats)));
+            }
+
+            return new TacticalV2Config
+            {
+                BoardGen = BuildBoardGen(),
+                Game = BuildGameConfig(),
+                Templates = templates.AsReadOnly(),
+                StartingUnitCount = tacticalV2.StartingUnitCount,
+                MaxControllableUnits = tacticalV2.MaxControllableUnits,
+                MaxSteps = Episode.MaxSteps,
+                ShapeScale = reward.ShapeScale,
+                StepPenalty = reward.StepPenalty,
+                ClosingWeight = reward.ClosingWeight,
+                DrawCreditWeight = reward.DrawCreditWeight,
+                PointsWeight = reward.PointsWeight,
+                PlacementPolicy = tacticalV2.PlacementPolicy,
             };
         }
 
@@ -194,6 +289,51 @@ namespace HexWars.Engine.Rl
                 errors.Add("adaptive starting army budget is insufficient for the starting unit count");
             if (adaptive.MaxDesignPointCost <= 0)
                 errors.Add("adaptive max design point cost must be positive");
+        }
+
+        /// <summary>Mirrors <see cref="TacticalV2Config.Validate"/>'s own invariants (count range,
+        /// starting-count/controllable-unit-cap lockstep, placement policy, non-empty and duplicate-free
+        /// catalog) at the DTO layer, plus a deployment-cell capacity check like
+        /// <see cref="ValidateAdaptive"/>'s — so a scenario can never reach <see cref="TacticalV2Layout"/>
+        /// with a controllable-unit cap the board or the starting roster can't honor (the crash surface
+        /// is <see cref="TacticalV2UnitRegistry"/>, which throws rather than silently truncating).</summary>
+        private void ValidateTacticalV2(List<string> errors, TrainingTacticalV2Config tacticalV2)
+        {
+            if (tacticalV2.StartingUnitCount < 1 || tacticalV2.StartingUnitCount > 12)
+                errors.Add("tactical-v2 starting unit count must be between 1 and 12");
+            if (tacticalV2.MaxControllableUnits != tacticalV2.StartingUnitCount)
+                errors.Add("tactical-v2 max controllable units must equal starting unit count");
+            if (tacticalV2.PlacementPolicy != "symmetric-random-v1")
+                errors.Add("tactical-v2 placement policy must be 'symmetric-random-v1'");
+
+            if (tacticalV2.Templates == null || tacticalV2.Templates.Count == 0)
+            {
+                errors.Add("tactical-v2 template catalog must not be empty");
+            }
+            else
+            {
+                var seenIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (TrainingUnitTemplateConfig template in tacticalV2.Templates)
+                {
+                    if (string.IsNullOrEmpty(template.Id))
+                        errors.Add("tactical-v2 template ids must not be empty");
+                    else if (!seenIds.Add(template.Id))
+                        errors.Add($"duplicate tactical-v2 template id '{template.Id}'");
+
+                    if (template.Health < 0 || template.Damage < 0 || template.Defense < 0
+                        || template.Movement < 0 || template.VerticalMovement < 0
+                        || template.Range < 0 || template.RangeArc < 0
+                        || template.Vision < 0 || template.VisionArc < 0)
+                        errors.Add($"tactical-v2 template '{template.Id}' has an invalid stat");
+                }
+            }
+
+            if (Board != null && Board.Height > 0 && Board.ZoneDepth > 0)
+            {
+                long cellsPerSeat = (long)Board.Height * Board.ZoneDepth;
+                if (cellsPerSeat < tacticalV2.StartingUnitCount)
+                    errors.Add("tactical-v2 deployment cells must cover the starting unit count");
+            }
         }
 
         private void ThrowIfInvalid()
@@ -324,5 +464,30 @@ namespace HexWars.Engine.Rl
         public int StartingUnitCount = 6;
         public int StartingArmyBudget = 132;
         public int MaxDesignPointCost = 24;
+    }
+
+    [Serializable]
+    public sealed class TrainingTacticalV2Config
+    {
+        public int StartingUnitCount = 3;
+        public int MaxControllableUnits = 3;
+        public string PlacementPolicy = "symmetric-random-v1";
+        public List<TrainingUnitTemplateConfig> Templates = new List<TrainingUnitTemplateConfig>();
+    }
+
+    [Serializable]
+    public sealed class TrainingUnitTemplateConfig
+    {
+        public string Id = string.Empty;
+        public string Name = string.Empty;
+        public int Health;
+        public int Damage;
+        public int Defense;
+        public int Movement;
+        public int VerticalMovement;
+        public int Range;
+        public int RangeArc;
+        public int Vision;
+        public int VisionArc;
     }
 }
