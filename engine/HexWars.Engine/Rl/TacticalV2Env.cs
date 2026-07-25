@@ -93,6 +93,17 @@ namespace HexWars.Engine.Rl
         /// with <see cref="State"/> regardless of who acted.</summary>
         private bool TryApply(Command cmd)
         {
+            // A scripted opponent decides from raw engine legality (board cells and points), never the
+            // RL registry's synthetic per-seat capacity, so it can propose a DeployUnit with nowhere to
+            // land once every registry slot already holds a living unit. Reject it exactly like any
+            // other illegal move — before touching state — rather than letting RegisterDeployment throw.
+            if (cmd is DeployUnit pendingDeploy)
+            {
+                TacticalV2UnitRegistry pendingRegistry =
+                    pendingDeploy.Issuer == PlayerId.Player0 ? _slots0 : _slots1;
+                if (!pendingRegistry.HasFreeSlot) return false;
+            }
+
             GameState before = _state;
             var r = GameEngine.Apply(_state, cmd);
             if (!r.Success) return false;

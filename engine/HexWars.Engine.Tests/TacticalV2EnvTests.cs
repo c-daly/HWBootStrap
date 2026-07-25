@@ -22,6 +22,31 @@ namespace HexWars.Engine.Tests
                 Is.EqualTo(Signature(first.State, PlayerId.Player1)));
         }
 
+        /// <summary>Regression: a scripted opponent (Greedy) decides purely from raw engine legality —
+        /// board cells and points, never the RL registry's synthetic per-seat capacity — so nothing
+        /// stops it from proposing a DeployUnit once every registry slot already holds a living unit.
+        /// Before the fix, TryApply forwarded that command straight to
+        /// <see cref="TacticalV2UnitRegistry.RegisterDeployment"/>, which throws when the registry is
+        /// full, crashing the whole GymServer process mid-training. A full episode against Greedy, for
+        /// every starting seed in this range, must never throw — an over-capacity deploy attempt has to
+        /// be treated the same as any other illegal move (silently rejected, turn continues/unsticks).</summary>
+        [Test]
+        public void LongGameAgainstGreedyOpponent_NeverOverflowsRegistryCapacity()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+
+            for (int seed = 0; seed < 40; seed++)
+            {
+                var env = new TacticalV2Env(s => new GreedyAgent(s), PlayerId.Player0, config);
+                env.Reset(seed);
+                for (int step = 0; step < config.MaxSteps; step++)
+                {
+                    StepResult result = env.Step(0); // learner always ends its own turn immediately
+                    if (result.Terminated || result.Truncated) break;
+                }
+            }
+        }
+
         [Test]
         public void DeployAfterDeath_ReusesReleasedSlotWithChosenTemplateIdentity()
         {
