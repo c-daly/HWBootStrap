@@ -114,7 +114,7 @@ namespace HexWars.Presentation
     {
         public ModelSeatConfiguration P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.LiveRun };
         public ModelSeatConfiguration P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy };
-        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV2;
         public string ScenarioRunPath = string.Empty;
         public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public int Seed;
@@ -166,6 +166,7 @@ namespace HexWars.Presentation
         public int LearnerDraws { get; private set; }
         public PlayerId ObserverPlayer => ModelDuelObserver.Resolve(Observer);
         public bool ShouldShowArenaOverlays => Environment == MlEnvironmentContract.TacticalV1
+            || Environment == MlEnvironmentContract.TacticalV2
             || (_duel != null && _view.DeploymentComplete);
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
@@ -248,10 +249,17 @@ namespace HexWars.Presentation
             {
                 scenario.AdaptiveReward = null;
                 scenario.Adaptive = null;
+                scenario.TacticalV2 = null;
             }
             else if (scenario.Environment == MlContract.AdaptiveVersion)
             {
                 scenario.TacticalReward = null;
+                scenario.TacticalV2 = null;
+            }
+            else if (scenario.Environment == MlContract.TacticalV2Version)
+            {
+                scenario.AdaptiveReward = null;
+                scenario.Adaptive = null;
             }
             IReadOnlyList<string> errors = scenario.Validate();
             if (errors.Count > 0)
@@ -504,7 +512,9 @@ namespace HexWars.Presentation
             Scenario = game.Scenario;
             Environment = game.Scenario.Environment == MlContract.AdaptiveVersion
                 ? MlEnvironmentContract.AdaptiveV1
-                : MlEnvironmentContract.TacticalV1;
+                : game.Scenario.Environment == MlContract.TacticalV2Version
+                    ? MlEnvironmentContract.TacticalV2
+                    : MlEnvironmentContract.TacticalV1;
         }
 
         void RefreshControllerFlags()

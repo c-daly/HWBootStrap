@@ -172,12 +172,21 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Defaults_SelectTacticalV1AndEmitItExplicitly()
+        public void Defaults_SelectTacticalV2AndEmitItExplicitly()
         {
             var config = MlLabConfig.Default();
 
-            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV1));
-            Assert.That(config.BuildTrainArguments(), Does.Contain("--environment tactical-v1"));
+            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.That(config.BuildTrainArguments(), Does.Contain("--environment tactical-v2"));
+        }
+
+        [Test]
+        public void NewConfig_DefaultsToTacticalV2()
+        {
+            Assert.That(new MlLabConfig().Environment,
+                Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.That(MlEnvironmentContracts.CliValue(MlEnvironmentContract.TacticalV2),
+                Is.EqualTo("tactical-v2"));
         }
 
         [Test]
@@ -197,6 +206,7 @@ namespace HexWars.Presentation.Tests
 
         [TestCase(MlEnvironmentContract.TacticalV1, "tactical-v1")]
         [TestCase(MlEnvironmentContract.AdaptiveV1, "adaptive-v1")]
+        [TestCase(MlEnvironmentContract.TacticalV2, "tactical-v2")]
         public void BuildDoctorArguments_EmitsSelectedEnvironment(
             MlEnvironmentContract environment, string cliValue)
         {

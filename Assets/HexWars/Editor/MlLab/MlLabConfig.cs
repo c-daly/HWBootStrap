@@ -77,7 +77,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", RegexOptions.CultureInvariant);
 
         public string RunName = "run1";
-        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV2;
         public MlAlgorithm Algorithm = MlAlgorithm.MaskablePpo;
         public long TotalTimesteps = 300000;
         public int Seed = 1;
@@ -307,6 +307,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (environment == MlEnvironmentContract.TacticalV1)
                 return new MlEnvironmentSummary { ContractVersion = "tactical-v1" };
+            if (environment == MlEnvironmentContract.TacticalV2)
+                return new MlEnvironmentSummary { ContractVersion = "tactical-v2" };
             return new MlEnvironmentSummary
             {
                 ContractVersion = "adaptive-v1",

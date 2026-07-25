@@ -52,8 +52,10 @@ namespace HexWars.Presentation
                 return new AdaptiveModelDuelEnvironment(scenario.BuildAdaptive());
             if (scenario.Environment == MlContract.CurrentVersion)
                 return new TacticalModelDuelEnvironment(scenario.BuildTactical());
+            if (scenario.Environment == MlContract.TacticalV2Version)
+                return new TacticalV2ModelDuelEnvironment(scenario.BuildTacticalV2());
             throw new ArgumentException(
-                "scenario environment must be tactical-v1 or adaptive-v1",
+                "scenario environment must be tactical-v1, tactical-v2, or adaptive-v1",
                 nameof(scenario));
         }
 
@@ -86,7 +88,9 @@ namespace HexWars.Presentation
         }
 
         public bool ShouldRender(bool deploymentComplete) =>
-            _environment == MlEnvironmentContract.TacticalV1 || deploymentComplete;
+            _environment == MlEnvironmentContract.TacticalV1 ||
+            _environment == MlEnvironmentContract.TacticalV2 ||
+            deploymentComplete;
 
         public ModelDuelRenderDirective Next(bool deploymentComplete)
         {
@@ -163,6 +167,40 @@ namespace HexWars.Presentation
 
         static ModelDuelView Convert(DuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, view.Seat, view.Winner,
+            view.Terminated, view.Truncated, deploymentComplete: true);
+    }
+
+    /// <summary>Arena adapter for tactical-v2, backed by <see cref="TacticalV2DuelEnv"/>. Tactical-v2 has
+    /// no hidden deployment phase (rosters are snapshotted and placement is automatic/symmetric), so —
+    /// like <see cref="TacticalModelDuelEnvironment"/> — it is immediately renderable from the first
+    /// reset and never requires an external continuation.</summary>
+    sealed class TacticalV2ModelDuelEnvironment : IModelDuelEnvironment
+    {
+        readonly TacticalV2DuelEnv _environment;
+
+        public TacticalV2ModelDuelEnvironment(TacticalV2Config config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            _environment = new TacticalV2DuelEnv(config);
+            Contract = MlContract.CreateTacticalV2(config, MlEnvironmentKind.Duel);
+        }
+
+        public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV2;
+        public MlContract Contract { get; }
+        public GameState CurrentState => _environment.State;
+        public bool RequiresContinuation => false;
+
+        public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1) =>
+            Convert(_environment.Reset(seed, controller0, controller1, PlayerId.Player0));
+
+        public ModelDuelView Step(int action) => Convert(_environment.Step(action));
+
+        public ModelDuelView Continue() => throw new InvalidOperationException(
+            "the tactical-v2 environment has no pending continuation");
+
+        static ModelDuelView Convert(TacticalV2DuelEnv.View view) => new ModelDuelView(
+            view.Observation, view.ActionMask, (int)view.Seat,
+            view.Winner.HasValue ? (int)view.Winner.Value : -1,
             view.Terminated, view.Truncated, deploymentComplete: true);
     }
 

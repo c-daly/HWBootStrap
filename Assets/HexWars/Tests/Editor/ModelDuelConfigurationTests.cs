@@ -160,6 +160,29 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void ApplyPresentationGame_MapsTacticalV2ScenarioEnvironment()
+        {
+            var go = new GameObject("driver-tactical-v2");
+            try
+            {
+                var driver = go.AddComponent<ModelDuelDriver>();
+                var game = new MlPresentationGame(
+                    "greedy", "random", learnerSeat: 0,
+                    observer: ModelDuelObserverSeat.Player1,
+                    opponentLabel: "Greedy",
+                    scenario: TrainingScenario.CreateStandard("tactical-v2"));
+
+                InvokePrivate(driver, "ApplyPresentationGame", game);
+
+                Assert.That(driver.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
         public void EmptyPresentationScheduleAtBoundaryFailsClosedAndClearsStarting()
         {
             var go = new GameObject("driver");
@@ -208,11 +231,11 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Defaults_SelectTacticalEnvironment()
+        public void Defaults_SelectTacticalV2Environment()
         {
             var config = new ModelDuelConfiguration();
 
-            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV1));
+            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
             Assert.That(config.Observer, Is.EqualTo(ModelDuelObserverSeat.Player1));
             Assert.That(ModelDuelObserver.Resolve(config.Observer), Is.EqualTo(PlayerId.Player0));
         }
@@ -296,12 +319,28 @@ namespace HexWars.Presentation.Tests
         public void PresentationState_RendersTacticalThroughoutAndAdaptiveOnlyAfterReveal()
         {
             var tactical = new ModelDuelPresentationState(MlEnvironmentContract.TacticalV1);
+            var tacticalV2 = new ModelDuelPresentationState(MlEnvironmentContract.TacticalV2);
             var adaptive = new ModelDuelPresentationState(MlEnvironmentContract.AdaptiveV1);
 
             Assert.That(tactical.ShouldRender(deploymentComplete: false), Is.True);
             Assert.That(tactical.ShouldRender(deploymentComplete: true), Is.True);
+            Assert.That(tacticalV2.ShouldRender(deploymentComplete: false), Is.True,
+                "tactical-v2 has no hidden deployment phase and must render immediately, like tactical-v1");
+            Assert.That(tacticalV2.ShouldRender(deploymentComplete: true), Is.True);
             Assert.That(adaptive.ShouldRender(deploymentComplete: false), Is.False);
             Assert.That(adaptive.ShouldRender(deploymentComplete: true), Is.True);
+        }
+
+        [Test]
+        public void Factory_CreatesTacticalV2DuelWithMatchingIdentity()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+
+            Assert.That(duel.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.That(duel.Contract.Version, Is.EqualTo("tactical-v2"));
+            Assert.That(ModelDuelEnvironmentFactory.ContractIdentity(scenario).EncodingHash,
+                Is.EqualTo(duel.Contract.EncodingHash));
         }
 
         [Test]
@@ -386,6 +425,39 @@ namespace HexWars.Presentation.Tests
 
                 Assert.That(roundTripped.Board.Width, Is.EqualTo(24));
                 Assert.That(roundTripped.Board.Height, Is.EqualTo(16));
+                Assert.That(
+                    ModelDuelEnvironmentFactory.ContractIdentity(roundTripped).EncodingHash,
+                    Is.EqualTo(expectedEncoding));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [Test]
+        public void DriverScenario_TacticalV2SurvivesUnitySerializationAndPreservesEncoding()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = 5;
+            scenario.TacticalV2.MaxControllableUnits = 5;
+            string expectedEncoding =
+                ModelDuelEnvironmentFactory.ContractIdentity(scenario).EncodingHash;
+            var originalObject = new GameObject("original-driver-v2");
+            var restoredObject = new GameObject("restored-driver-v2");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.Environment = MlEnvironmentContract.TacticalV2;
+                original.Scenario = scenario;
+
+                string serializedComponent = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(serializedComponent, restored);
+                TrainingScenario roundTripped = restored.ResolveScenario();
+
+                Assert.That(roundTripped.TacticalV2.StartingUnitCount, Is.EqualTo(5));
                 Assert.That(
                     ModelDuelEnvironmentFactory.ContractIdentity(roundTripped).EncodingHash,
                     Is.EqualTo(expectedEncoding));

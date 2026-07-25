@@ -226,7 +226,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             _library = library ?? throw new ArgumentNullException(nameof(library));
             _libraryPath = libraryPath ?? string.Empty;
-            SelectEnvironment(MlEnvironmentContract.TacticalV1);
+            SelectEnvironment(MlEnvironmentContract.TacticalV2);
         }
 
         public MlEnvironmentContract Environment { get; private set; }
@@ -283,7 +283,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     MlEnvironmentContracts.CliValue(environment) + ".");
             string standardId = environment == MlEnvironmentContract.AdaptiveV1
                 ? "adaptive-standard"
-                : "tactical-standard";
+                : environment == MlEnvironmentContract.TacticalV2
+                    ? "tactical-v2-standard"
+                    : "tactical-standard";
             MlTrainingScenario selected =
                 available.FirstOrDefault(item => item.Id == standardId) ?? available[0];
             Select(selected);
@@ -305,6 +307,28 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             EnsureLibrary();
             SelectTemplate(SelectedTemplateId);
+        }
+
+        /// <summary>Refreshes the working copy's tactical-v2 template catalog from
+        /// <see cref="MlTacticalRosterSource"/>'s current snapshot for <paramref name="localPlayer"/>
+        /// (canonical defaults plus that seat's saved custom designs), while preserving the working
+        /// copy's own <see cref="MlTrainingTacticalV2.StartingUnitCount"/> — the working scenario, not
+        /// live session/cache state, is what drives preflight and launch.</summary>
+        public void RefreshTacticalRoster(int localPlayer)
+        {
+            if (WorkingCopy == null)
+                throw new InvalidOperationException(
+                    "No working training scenario is selected.");
+            if (WorkingCopy.Environment != MlEnvironmentContract.TacticalV2 ||
+                WorkingCopy.TacticalV2 == null)
+                throw new InvalidOperationException(
+                    "Roster refresh is only available for tactical-v2 scenarios.");
+
+            int preservedStartingUnitCount = WorkingCopy.TacticalV2.StartingUnitCount;
+            WorkingCopy.TacticalV2.Templates =
+                MlTacticalRosterSource.Snapshot(localPlayer).ToList();
+            WorkingCopy.TacticalV2.StartingUnitCount = preservedStartingUnitCount;
+            WorkingCopy.TacticalV2.MaxControllableUnits = preservedStartingUnitCount;
         }
 
         public void ReloadTemplates()
@@ -428,6 +452,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ActionSize = actionSize;
             LargeScenarioWarning =
                 (long)scenario.Board.Width * scenario.Board.Height > 13L * 9L;
+            if (scenario.Environment == MlEnvironmentContract.TacticalV2 &&
+                scenario.TacticalV2 != null)
+            {
+                TacticalV2StartingUnitCount = scenario.TacticalV2.StartingUnitCount;
+                TacticalV2ControllableSlots = scenario.TacticalV2.MaxControllableUnits;
+                TacticalV2TemplateCount = scenario.TacticalV2.Templates?.Count ?? 0;
+            }
         }
 
         public string TemplateId { get; }
@@ -443,6 +474,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int ObservationSize { get; }
         public int ActionSize { get; }
         public bool LargeScenarioWarning { get; }
+        public int TacticalV2StartingUnitCount { get; }
+        public int TacticalV2ControllableSlots { get; }
+        public int TacticalV2TemplateCount { get; }
         public string DisplayText => Describe("not selected", "not selected");
 
         public static MlTrainingScenarioPreflight Create(
@@ -452,7 +486,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             TrainingScenario engineScenario = ToEngine(scenario);
             MlContract contract = scenario.Environment == MlEnvironmentContract.AdaptiveV1
                 ? MlContract.CreateAdaptive(engineScenario.BuildAdaptive())
-                : MlContract.Create(engineScenario.BuildTactical());
+                : scenario.Environment == MlEnvironmentContract.TacticalV2
+                    ? MlContract.CreateTacticalV2(engineScenario.BuildTacticalV2())
+                    : MlContract.Create(engineScenario.BuildTactical());
             return new MlTrainingScenarioPreflight(
                 scenario, contract.ObservationSize, contract.ActionSize);
         }
@@ -472,7 +508,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             string actions = ActionsPerTurn == 0
                 ? "Whole team"
                 : ActionsPerTurn.ToString(CultureInfo.InvariantCulture);
-            return TemplateName + " \u00b7 " +
+            string text = TemplateName + " \u00b7 " +
                    MlEnvironmentContracts.CliValue(Environment) + "\n" +
                    "Board " + BoardWidth + "\u00d7" + BoardHeight +
                    " \u00b7 zone depth " + ZoneDepth +
@@ -484,6 +520,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
                    " \u00b7 learner seats " + learnerSeats + "\n" +
                    "Observation " + ObservationSize +
                    " \u00b7 actions " + ActionSize;
+            if (Environment == MlEnvironmentContract.TacticalV2)
+                text += "\n" +
+                    "Starting units " + TacticalV2StartingUnitCount +
+                    " \u00b7 controllable slots " + TacticalV2ControllableSlots +
+                    " \u00b7 templates " + TacticalV2TemplateCount + "\n" +
+                    "Roster source snapshotted \u00b7 automatic symmetric placement";
+            return text;
         }
 
         public static TrainingScenario ToEngine(MlTrainingScenario scenario)
@@ -556,6 +599,31 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         StartingUnitCount = scenario.Adaptive.StartingUnitCount,
                         StartingArmyBudget = scenario.Adaptive.StartingArmyBudget,
                         MaxDesignPointCost = scenario.Adaptive.MaxDesignPointCost,
+                    },
+                TacticalV2 = scenario.TacticalV2 == null
+                    ? null
+                    : new TrainingTacticalV2Config
+                    {
+                        StartingUnitCount = scenario.TacticalV2.StartingUnitCount,
+                        MaxControllableUnits = scenario.TacticalV2.MaxControllableUnits,
+                        PlacementPolicy = scenario.TacticalV2.PlacementPolicy,
+                        Templates = (scenario.TacticalV2.Templates ??
+                                new List<MlTrainingUnitTemplate>())
+                            .Select(item => new TrainingUnitTemplateConfig
+                            {
+                                Id = item.Id,
+                                Name = item.Name,
+                                Health = item.Stats.Health,
+                                Damage = item.Stats.Damage,
+                                Defense = item.Stats.Defense,
+                                Movement = item.Stats.Movement,
+                                VerticalMovement = item.Stats.VerticalMovement,
+                                Range = item.Stats.Range,
+                                RangeArc = item.Stats.RangeArc,
+                                Vision = item.Stats.Vision,
+                                VisionArc = item.Stats.VisionArc,
+                            })
+                            .ToList(),
                     },
             };
             IReadOnlyList<string> errors = converted.Validate();
@@ -761,6 +829,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [SerializeField] bool _showAdvanced;
         [SerializeField] bool _showGameSettings;
         [SerializeField] int _tab;
+        [SerializeField] int _tacticalRosterPlayer;
         [SerializeField] ModelDuelConfiguration _arena = new ModelDuelConfiguration();
 
         MlLabWindowState _state = new MlLabWindowState();
@@ -1271,7 +1340,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
         }
 
-        static void DrawScenarioFields(MlTrainingScenario scenario)
+        void DrawScenarioFields(MlTrainingScenario scenario)
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Board", EditorStyles.boldLabel);
@@ -1357,7 +1426,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             EditorGUILayout.EndVertical();
 
-            if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
+            // Exhaustive over the three environments: tactical-v2 gets the configurable roster/count
+            // box, tactical-v1 a read-only legacy notice, adaptive-v1 keeps its existing deployment
+            // fields. Never fall through an unhandled environment to the tactical-v1 case.
+            if (scenario.Environment == MlEnvironmentContract.TacticalV2)
+            {
+                DrawTacticalV2Setup(scenario);
+            }
+            else if (scenario.Environment == MlEnvironmentContract.TacticalV1)
+            {
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField("Tactical setup", EditorStyles.boldLabel);
+                EditorGUILayout.HelpBox(
+                    "tactical-v1 uses a fixed legacy roster; starting unit count and roster " +
+                    "source are not configurable.",
+                    MessageType.None);
+                EditorGUILayout.EndVertical();
+            }
+            else if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
             {
                 EditorGUILayout.BeginVertical(EditorStyles.helpBox);
                 EditorGUILayout.LabelField(
@@ -1370,6 +1456,44 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     "Max design point cost", scenario.Adaptive.MaxDesignPointCost);
                 EditorGUILayout.EndVertical();
             }
+        }
+
+        static readonly string[] TacticalRosterPlayerLabels = { "Local player 1", "Local player 2" };
+
+        void DrawTacticalV2Setup(MlTrainingScenario scenario)
+        {
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField("Tactical setup", EditorStyles.boldLabel);
+            _tacticalRosterPlayer = EditorGUILayout.Popup(
+                "Roster source", _tacticalRosterPlayer, TacticalRosterPlayerLabels);
+            int startingUnitCount = EditorGUILayout.IntSlider(
+                "Starting unit count", scenario.TacticalV2.StartingUnitCount, 1, 12);
+            scenario.TacticalV2.StartingUnitCount = startingUnitCount;
+            scenario.TacticalV2.MaxControllableUnits = startingUnitCount;
+            List<MlTrainingUnitTemplate> templates =
+                scenario.TacticalV2.Templates ?? new List<MlTrainingUnitTemplate>();
+            EditorGUILayout.LabelField(
+                "Available templates",
+                templates.Count.ToString(CultureInfo.InvariantCulture));
+            EditorGUILayout.LabelField(
+                templates.Count == 0
+                    ? "No templates available."
+                    : string.Join(", ", templates.Select(item => item.Name)),
+                EditorStyles.wordWrappedLabel);
+            if (GUILayout.Button("Refresh saved roster"))
+            {
+                try
+                {
+                    _scenarioSession.RefreshTacticalRoster(_tacticalRosterPlayer);
+                    _notice = "Roster refreshed from local player " +
+                        (_tacticalRosterPlayer + 1) + "'s saved templates.";
+                }
+                catch (Exception error)
+                {
+                    _state.Fail(error.Message);
+                }
+            }
+            EditorGUILayout.EndVertical();
         }
 
         void DrawSourceRunScenarioPreflight()

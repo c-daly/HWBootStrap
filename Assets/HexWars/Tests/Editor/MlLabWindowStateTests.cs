@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using HexWars.Engine;
 using HexWars.Presentation.EditorTools;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
@@ -208,6 +209,23 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void TacticalV2RosterRefresh_UsesSelectedPlayerAndPreservesCount()
+        {
+            SessionBarracksCache.ResetForTests();
+            SessionBarracksCache.ForLocalPlayer(1).Add(Custom("Player Two Custom"));
+            MlTrainingScenarioSession session =
+                MlTrainingScenarioSession.Load(BuiltInLibraryPath);
+            session.SelectEnvironment(MlEnvironmentContract.TacticalV2);
+            session.WorkingCopy.TacticalV2.StartingUnitCount = 8;
+
+            session.RefreshTacticalRoster(1);
+
+            Assert.That(session.WorkingCopy.TacticalV2.StartingUnitCount, Is.EqualTo(8));
+            Assert.That(session.WorkingCopy.TacticalV2.Templates.Select(item => item.Name),
+                Does.Contain("Player Two Custom"));
+        }
+
+        [Test]
         public void EditIsSessionOnlyUntilSaveAndReloadDiscardsIt()
         {
             var session = new MlTrainingScenarioSession(
@@ -225,6 +243,7 @@ namespace HexWars.Presentation.Tests
         {
             var session = new MlTrainingScenarioSession(
                 MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            session.SelectEnvironment(MlEnvironmentContract.TacticalV1);
 
             Assert.That(
                 session.AvailableTemplates.Select(item => item.Id),
@@ -339,6 +358,7 @@ namespace HexWars.Presentation.Tests
         {
             var session = new MlTrainingScenarioSession(
                 MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            session.SelectEnvironment(MlEnvironmentContract.TacticalV1);
             session.WorkingCopy.Board.Width = 257;
             session.WorkingCopy.Board.Height = 256;
 
@@ -431,5 +451,11 @@ namespace HexWars.Presentation.Tests
             File.Copy(BuiltInLibraryPath, path);
             return path;
         }
+
+        static UnitTemplate Custom(string name) =>
+            new UnitTemplate(name, new UnitStats(4, 3, 1, 3, 2, 2, 1, 4, 1));
+
+        [TearDown]
+        public void TearDown() => SessionBarracksCache.ResetForTests();
     }
 }
