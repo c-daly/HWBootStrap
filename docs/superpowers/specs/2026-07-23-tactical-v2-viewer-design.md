@@ -194,15 +194,23 @@ Portrait and landscape layouts retain their existing truncation behavior.
 
 ## Fog-of-War Indicator
 
-The viewer adds **Fog overlay: Off / P1 / P2**.
+> **Amended 2026-07-25:** the originally drafted Off/P1/P2 selector did not match the
+> approved intent. The approved behavior is a marking that follows the **current
+> (acting) player** automatically; the observer always sees everything.
 
-- **Off** is the default omniscient presentation.
-- **P1** shades cells outside P1's current visibility.
-- **P2** shades cells outside P2's current visibility.
+When the game's fog of war is enabled, the viewer shades a map marking over every cell
+outside the **acting player's** current visibility. The marking follows the turn order
+automatically — it always shows the perspective of the player whose presented
+transition is acting, in every mode (live training, model-vs-model, scripted).
 
-The viewer remains omniscient in all three modes. Units hidden from the selected model remain present but receive a clear dimmed or marked treatment, so the operator can distinguish “spectator can see this” from “selected model can see this.”
+The viewer remains omniscient at all times. Units inside marked cells remain present
+but receive a clear dimmed or marked treatment, so the operator can distinguish
+“spectator can see this” from “the acting model can see this.”
 
-The overlay is computed from `PresentedState` using the engine's authoritative visibility rules. It advances with the animation queue. It never changes observations, masks, policy inputs, or simulation state. When fog of war is disabled, the selector reports that all cells are visible.
+A single toggle hides or shows the marking. The overlay is computed from
+`PresentedState` using the engine's authoritative visibility rules. It advances with
+the animation queue. It never changes observations, masks, policy inputs, or
+simulation state. When fog of war is disabled, no marking is drawn.
 
 ## Validation and Failure Behavior
 

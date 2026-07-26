@@ -1,5 +1,6 @@
 using System.Linq;
 using UnityEngine;
+using HexWars.Engine;
 
 namespace HexWars.Presentation
 {
@@ -13,6 +14,7 @@ namespace HexWars.Presentation
         ModelDuelDriver _driver;
         GUIStyle _p1Style;
         GUIStyle _p2Style;
+        GUIStyle _toggleStyle;
 
         void Awake() => _driver = GetComponent<ModelDuelDriver>();
 
@@ -33,8 +35,31 @@ namespace HexWars.Presentation
                 {
                     DrawRow(rows[index], RowRect(index, logicalWidth, narrow), narrow);
                 }
+                DrawFogMarkingToggle(rows.Length, logicalWidth, narrow);
             }
             finally { GUI.matrix = previousMatrix; }
+        }
+
+        /// <summary>Spec §"Fog-of-War Indicator": the single on/off toggle for the acting-player fog
+        /// marking, drawn only while the presented scenario actually trains with fog of war — otherwise
+        /// there is nothing for it to hide (spec: "When fog of war is disabled, no marking is drawn").
+        /// Placed directly under the identity rows, same corner and row rhythm as
+        /// <see cref="RowRect"/>.</summary>
+        void DrawFogMarkingToggle(int rowCount, float logicalWidth, bool narrow)
+        {
+            GameState presented = _driver.PresentedState;
+            if (presented == null || !presented.Config.FogOfWar) return;
+
+            float height = narrow ? PortraitRowHeight : LandscapeRowHeight;
+            var rect = new Rect(Padding, Padding + rowCount * (height + Padding), 240f, 26f);
+
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.72f);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previousColor;
+
+            bool show = GUI.Toggle(rect, _driver.ShowFogMarking, " Fog marking (acting player)", _toggleStyle);
+            if (show != _driver.ShowFogMarking) _driver.SetShowFogMarking(show);
         }
 
         public static bool ShouldRender(ModelDuelDriver driver) => driver != null
@@ -92,6 +117,9 @@ namespace HexWars.Presentation
             _p1Style.normal.textColor = new Color(0.44f, 0.69f, 1f);
             _p2Style = new GUIStyle(_p1Style);
             _p2Style.normal.textColor = new Color(1f, 0.48f, 0.42f);
+            _toggleStyle = new GUIStyle(GUI.skin.toggle) { fontSize = 14, alignment = TextAnchor.MiddleLeft };
+            _toggleStyle.normal.textColor = Color.white;
+            _toggleStyle.onNormal.textColor = Color.white;
         }
 
         void DrawRow(ModelArenaSeatIdentity row, Rect rect, bool narrow)

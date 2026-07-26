@@ -146,9 +146,18 @@ namespace HexWars.Presentation
         public string P0Spec = "greedy";
         public string P1Spec = "greedy";
         public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
-        public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public TrainingScenario Scenario;
+        /// <summary>Spec §"Fog-of-War Indicator" (amended 2026-07-25): the single on/off toggle for the
+        /// acting-player fog marking. Default on — the marking is the point of watching a fog run.</summary>
+        public bool ShowFogMarking = true;
         public MlPresentationSchedule PresentationPlan;
+        // Removed dead ModelDuelDriver.Observer/ObserverPlayer (Task C review carry): omniscient
+        // presentation always passes viewer: null (RenderEntities/InitializeBoard), so the field had no
+        // remaining reader besides one test. ModelDuelObserverSeat/ModelDuelObserver.Resolve, and the
+        // ModelDuelConfiguration/MlPresentationGame/MlArenaLaunchPlan.Observer that still feed the
+        // ML Lab Arena tab's "Observer" field, are untouched — they remain load-bearing recorded
+        // metadata (e.g. MlRunPresentationPlan derives it from the recorded learner seat) independent of
+        // this driver's now-removed consumption of it.
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop;
@@ -173,7 +182,16 @@ namespace HexWars.Presentation
         public int LearnerWins { get; private set; }
         public int LearnerLosses { get; private set; }
         public int LearnerDraws { get; private set; }
-        public PlayerId ObserverPlayer => ModelDuelObserver.Resolve(Observer);
+        /// <summary>Every board cell outside the acting player's (<see cref="PresentedState"/>'s
+        /// <see cref="GameState.ActivePlayer"/>) current visibility — spec §"Fog-of-War Indicator"
+        /// (amended 2026-07-25). Empty while <see cref="ShowFogMarking"/> is off, before the first
+        /// render, or when the scenario's fog of war is disabled. A live derived read of
+        /// <see cref="PresentedState"/> (never cached), so it is always already correct for whatever the
+        /// board currently shows — <see cref="RefreshFogMarking"/> exists only to push it into the
+        /// renderer at the two points <see cref="PresentedState"/> actually advances.</summary>
+        public IReadOnlyCollection<HexCoord> MarkedFogCells => ShowFogMarking
+            ? FogMarkingOverlay.MarkedCells(_presentedState)
+            : Array.Empty<HexCoord>();
         public bool ShouldShowArenaOverlays => Environment == MlEnvironmentContract.TacticalV1
             || Environment == MlEnvironmentContract.TacticalV2
             || (_duel != null && _view.DeploymentComplete);
@@ -404,7 +422,14 @@ namespace HexWars.Presentation
                     InitializeBoard(anchor);
                 }
                 foreach (DuelTransition transition in transitions)
+                {
                     _presenter.Enqueue(transition.Previous, transition.Command, transition.Resulting, isLocal: false);
+                    // A render fault routes synchronously back into MarkPresentationError (RenderFault ->
+                    // OnPresenterRenderFault) before Enqueue returns, setting _done. Keep draining anyway
+                    // and every remaining transition would fault too — multi-fault log spam plus
+                    // presentation continuing past a run the driver already declared dead.
+                    if (_done) break;
+                }
             }
             catch (Exception error)
             {
@@ -430,6 +455,7 @@ namespace HexWars.Presentation
             EventConsole.Clear();
             EventConsole.Report(anchor, null, null);
             _presentedState = anchor;
+            RefreshFogMarking();
             FindAnyObjectByType<CameraRig>()?.Frame();
         }
 
@@ -440,6 +466,25 @@ namespace HexWars.Presentation
         {
             _presentedState = next;
             EventConsole.Report(next, CombatLog.Diff(prev, next, null), null);
+            RefreshFogMarking();
+        }
+
+        /// <summary>Pushes <see cref="MarkedFogCells"/> into the board's rendering — the acting player
+        /// can change with a presented turn transition, so this must run every time
+        /// <see cref="PresentedState"/> actually advances (<see cref="InitializeBoard"/> and
+        /// <see cref="OnItemCommitted"/>), never sooner.</summary>
+        void RefreshFogMarking()
+        {
+            if (_board != null) _board.UpdateFogMarking(MarkedFogCells);
+        }
+
+        /// <summary>UI entry point for the single fog-marking toggle (spec §"Fog-of-War Indicator") — also
+        /// pushes the change to the board immediately, so hiding/showing the marking doesn't wait for the
+        /// next presented transition.</summary>
+        public void SetShowFogMarking(bool show)
+        {
+            ShowFogMarking = show;
+            RefreshFogMarking();
         }
 
         void MarkPresentationError(string message, Exception error = null)
@@ -582,9 +627,6 @@ namespace HexWars.Presentation
                     "presentation game scenario is required");
             P0Spec = game.P0Spec;
             P1Spec = game.P1Spec;
-            Observer = game.LearnerSeat == 0
-                ? ModelDuelObserverSeat.Player1
-                : ModelDuelObserverSeat.Player2;
             Scenario = game.Scenario;
             Environment = game.Scenario.Environment == MlContract.AdaptiveVersion
                 ? MlEnvironmentContract.AdaptiveV1

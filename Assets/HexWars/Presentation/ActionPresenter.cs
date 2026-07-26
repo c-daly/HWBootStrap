@@ -137,6 +137,9 @@ namespace HexWars.Presentation
                     // everything still queued rather than risk compounding the failure by animating
                     // more items on top of it. Both _playing=false AND an emptied queue are required:
                     // IsBusy is `_playing || _queue.Count > 0`.
+                    // A fault mid-PlayAttack can leave a live projectile in flight — destroy it here too,
+                    // same as FastForward/ResetQueue, so a faulted attack doesn't strand one.
+                    if (_projectile != null) { Destroy(_projectile); _projectile = null; }
                     _current = null;
                     _queue.Clear();
                     _playing = false;

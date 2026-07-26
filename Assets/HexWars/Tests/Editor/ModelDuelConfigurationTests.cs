@@ -139,22 +139,31 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void ApplyPresentationGame_DerivesObserverFromLearnerSeat()
+        public void ApplyPresentationGame_AppliesSeatSpecsAndScenario()
         {
+            // Was ApplyPresentationGame_DerivesObserverFromLearnerSeat: ModelDuelDriver.Observer/
+            // ObserverPlayer are retired (Task C review carry — dead surface, superseded by
+            // omniscience: presentation always renders with viewer: null, so nothing read them besides
+            // this assertion). MlPresentationGame still carries an Observer value (recorded metadata
+            // MlRunPresentationPlan derives from the learner seat; see MlRunPresentationPlanTests), so
+            // its constructor still takes one, but ApplyPresentationGame no longer copies it anywhere.
             var go = new GameObject("driver");
             try
             {
                 var driver = go.AddComponent<ModelDuelDriver>();
+                var scenario = TrainingScenario.CreateStandard("tactical-v1");
                 var game = new MlPresentationGame(
                     "greedy", "random", learnerSeat: 1,
                     observer: ModelDuelObserverSeat.Player1,
                     opponentLabel: "Greedy",
-                    scenario: TrainingScenario.CreateStandard("tactical-v1"));
+                    scenario: scenario);
 
                 InvokePrivate(driver, "ApplyPresentationGame", game);
 
-                Assert.That(driver.Observer, Is.EqualTo(ModelDuelObserverSeat.Player2));
-                Assert.That(driver.ObserverPlayer, Is.EqualTo(PlayerId.Player1));
+                Assert.That(driver.P0Spec, Is.EqualTo("greedy"));
+                Assert.That(driver.P1Spec, Is.EqualTo("random"));
+                Assert.That(driver.Scenario, Is.SameAs(scenario));
+                Assert.That(driver.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV1));
             }
             finally
             {
@@ -1029,6 +1038,212 @@ namespace HexWars.Presentation.Tests
                 Assert.That(caughtUp[1].Points, Is.EqualTo(40));
             }
             finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        // ---- Viewer C: acting-player fog marking (amended design) ----
+
+        static readonly UnitStats OneVisionUnit = new UnitStats(
+            health: 1, damage: 0, defense: 0,
+            movement: 0, verticalMovement: 0,
+            range: 0, rangeArc: 0,
+            vision: 1, visionArc: 0);
+
+        static Board FogLineBoard() => new Board(new[]
+        {
+            new Tile(new HexCoord(0, 0), 0, TerrainType.Plains),
+            new Tile(new HexCoord(1, 0), 0, TerrainType.Plains),
+            new Tile(new HexCoord(2, 0), 0, TerrainType.Plains),
+            new Tile(new HexCoord(3, 0), 0, TerrainType.Plains),
+            new Tile(new HexCoord(4, 0), 0, TerrainType.Plains),
+        });
+
+        /// <summary>A 5-wide line board with one P0 unit (vision 1) at q=0 and one P1 unit (vision 1) at
+        /// q=4, fog of war on. Distance((0,0),(q,0)) collapses to |q| on this line, so each army's own
+        /// visible set is deliberately small and lopsided: {q0,q1} for P0, {q3,q4} for P1 — easy to
+        /// state the expected marked (complement) set by hand and guaranteed to differ between the two
+        /// acting players.</summary>
+        static GameState FogLineState(Board board, PlayerId activePlayer)
+        {
+            var p0Unit = new Unit(1, PlayerId.Player0, OneVisionUnit, new HexCoord(0, 0), 0);
+            var p1Unit = new Unit(2, PlayerId.Player1, OneVisionUnit, new HexCoord(4, 0), 0);
+            var players = new[]
+            {
+                new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { p0Unit }),
+                new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { p1Unit }),
+            };
+            return new GameState(
+                board, GameConfig.Default(fogOfWar: true), players, activePlayer, round: 1, nextEntityId: 3);
+        }
+
+        [Test]
+        public void Driver_MarkedFogCells_MatchesEngineVisibilityForTheActingPlayerOfPresentedState()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.Rules.FogOfWar = true;
+            var go = new GameObject("driver-fog-marking", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                driver.P0Spec = "greedy";
+                driver.P1Spec = "random";
+                driver.Environment = MlEnvironmentContract.TacticalV2;
+                driver.Scenario = scenario;
+                driver.Seed = 9;
+                InvokePrivate(driver, "RefreshControllerFlags");
+                SetPrivate(driver, "_activeScenario", driver.ResolveScenario());
+                InvokePrivate(driver, "BeginGame");
+
+                var presenter = go.GetComponent<ActionPresenter>();
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                GameState presented = driver.PresentedState;
+                Assert.That(presented.Config.FogOfWar, Is.True,
+                    "the scenario under test must actually train with fog of war on");
+
+                var expected = new HashSet<HexCoord>();
+                foreach (Tile tile in presented.Board.Tiles)
+                    if (!TargetingService.IsVisibleToArmy(presented, presented.ActivePlayer, tile.Coord, tile.Elevation))
+                        expected.Add(tile.Coord);
+
+                Assert.That(new HashSet<HexCoord>(driver.MarkedFogCells), Is.EquivalentTo(expected),
+                    "the driver's marked-cell set must equal the complement of the engine's own " +
+                    "IsVisibleToArmy rule for whichever player is acting in PresentedState");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void Driver_MarkedFogCells_RecomputesForTheNewActingPlayerAfterAPresentedEndTurn()
+        {
+            var go = new GameObject("driver-fog-queue", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                var presenter = go.GetComponent<ActionPresenter>();
+
+                Board board = FogLineBoard();
+                GameState anchor = FogLineState(board, PlayerId.Player0);
+                GameState afterEndTurn = FogLineState(board, PlayerId.Player1);
+
+                InvokePrivate(driver, "InitializeBoard", anchor);
+                Assert.That(new HashSet<HexCoord>(driver.MarkedFogCells), Is.EquivalentTo(new[]
+                {
+                    new HexCoord(2, 0), new HexCoord(3, 0), new HexCoord(4, 0),
+                }), "must mark the complement of P0's own army vision while P0 is the acting player");
+
+                presenter.Enqueue(anchor, new EndTurn(PlayerId.Player0), afterEndTurn, isLocal: false);
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                Assert.That(driver.PresentedState, Is.SameAs(afterEndTurn));
+                Assert.That(new HashSet<HexCoord>(driver.MarkedFogCells), Is.EquivalentTo(new[]
+                {
+                    new HexCoord(0, 0), new HexCoord(1, 0), new HexCoord(2, 0),
+                }), "the presented EndTurn must flip the acting player, and the marking must follow it " +
+                    "automatically to P1's own army vision the moment PresentedState advances — spec: " +
+                    "no fixed P1/P2 selector, only the current acting player");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void Driver_MarkedFogCells_ToggleOff_ReturnsEmpty()
+        {
+            var go = new GameObject("driver-fog-toggle", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = go.GetComponent<ModelDuelDriver>();
+                SetPrivate(driver, "_presentedState", FogLineState(FogLineBoard(), PlayerId.Player0));
+
+                Assert.That(driver.MarkedFogCells, Is.Not.Empty,
+                    "sanity: the toggle-on baseline must actually have something to hide");
+
+                driver.ShowFogMarking = false;
+
+                Assert.That(driver.MarkedFogCells, Is.Empty,
+                    "spec: \"A single toggle hides or shows the marking\"");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void Driver_MarkedFogCells_FogOffConfig_ReturnsEmptyRegardlessOfToggle()
+        {
+            var go = new GameObject("driver-fog-config-off", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = go.GetComponent<ModelDuelDriver>();
+                var board = new Board(new[] { new Tile(new HexCoord(0, 0), 0, TerrainType.Plains) });
+                var state = new GameState(board, GameConfig.Default(fogOfWar: false),
+                    new[] { new PlayerState(PlayerId.Player0, 0), new PlayerState(PlayerId.Player1, 0) },
+                    PlayerId.Player0, round: 1, nextEntityId: 1);
+                SetPrivate(driver, "_presentedState", state);
+                driver.ShowFogMarking = true;
+
+                Assert.That(driver.MarkedFogCells, Is.Empty,
+                    "spec: \"When fog of war is disabled, no marking is drawn\" — the toggle does not " +
+                    "override this");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void HandlePresentation_MultipleQueuedTransitionsFaultOnlyOnceNotOncePerRemainingTransition()
+        {
+            var go = new GameObject("driver-multi-fault", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                var presenter = go.GetComponent<ActionPresenter>();
+                // Same deterministic render-phase fault trick as the single-fault tests above: with
+                // ActionPresenter._board null, any non-local queued item throws synchronously inside
+                // Enqueue, before Enqueue returns.
+                SetPrivate(presenter, "_board", null);
+
+                GameState state0 = MinimalClaimableState(out HexCoord cellA);
+                GameState state1 = MinimalClaimableState(out HexCoord cellB);
+                GameState state2 = MinimalClaimableState(out _);
+                var transitions = new[]
+                {
+                    new DuelTransition(state0, new CaptureHex(PlayerId.Player0, cellA), state1),
+                    new DuelTransition(state1, new CaptureHex(PlayerId.Player0, cellB), state2),
+                };
+                SetPrivate(driver, "_duel", new MultiFaultModelDuelEnvironment(transitions));
+                SetPrivate(driver, "_presentation", new ModelDuelPresentationState(MlEnvironmentContract.TacticalV1));
+                SetPrivate(driver, "_view", default(ModelDuelView));
+
+                // Exactly ONE fault pair expected (Task C carry-in #1): HandlePresentation's drain loop
+                // must stop (`if (_done) break;`) the instant the first transition's Enqueue faults
+                // synchronously, instead of also enqueueing — and re-faulting on — every remaining
+                // transition already drained in this same batch. Without the fix this would be two of
+                // each, and LogAssert fails the test on any unexpected log message.
+                LogAssert.Expect(LogType.Exception, new Regex(".*"));
+                LogAssert.Expect(LogType.Error, new Regex(@"^ModelDuelDriver: render error: .*"));
+
+                InvokePrivate(driver, "HandlePresentation");
+
+                Assert.That(driver.IsDone, Is.True);
+                Assert.That(driver.P0ArenaStatus, Does.Contain("render error"));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        sealed class MultiFaultModelDuelEnvironment : IModelDuelEnvironment
+        {
+            readonly IReadOnlyList<DuelTransition> _transitions;
+            public MultiFaultModelDuelEnvironment(IReadOnlyList<DuelTransition> transitions) =>
+                _transitions = transitions;
+
+            public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV1;
+            public MlContract Contract => null;
+            public GameState CurrentState => _transitions[0].Previous;
+            public bool RequiresContinuation => false;
+            public bool CaptureTransitions { get; set; }
+
+            public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1) => default;
+            public ModelDuelView Step(int action) => default;
+            public ModelDuelView Continue() => default;
+
+            public IReadOnlyList<DuelTransition> DrainTransitions() => _transitions;
         }
 
         static GameState MinimalClaimableState(out HexCoord cell)

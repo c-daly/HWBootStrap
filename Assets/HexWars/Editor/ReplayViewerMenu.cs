@@ -209,7 +209,10 @@ namespace HexWars.Presentation.EditorTools
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
             d.Environment = environment;
-            d.Observer = observer;
+            // `observer` is still accepted (and threaded through by MlLab's Arena tab / MlArenaLaunchPlan)
+            // as recorded config metadata, but ModelDuelDriver no longer has an Observer field to receive
+            // it: presentation is always omniscient (RenderEntities/InitializeBoard pass viewer: null),
+            // so a driver-side "observer seat" has no remaining reader (Task C review carry).
             d.Scenario = scenario;
             d.PresentationPlan = presentationPlan;
             d.SecondsPerAction = secondsPerAction;

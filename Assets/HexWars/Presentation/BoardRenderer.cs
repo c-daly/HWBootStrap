@@ -22,6 +22,7 @@ namespace HexWars.Presentation
         public bool Outlines = true;                     // black cel-style edges (off = realistic metal)
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1, _p0Dim, _p1Dim;
+        Material _fogMarkCell, _p0Fog, _p1Fog;
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
         readonly Dictionary<(TerrainType, PlayerId), Material> _controlMats = new Dictionary<(TerrainType, PlayerId), Material>();
         static Texture2D _matcap;
@@ -98,6 +99,32 @@ namespace HexWars.Presentation
                 fillT.GetComponent<MeshRenderer>().sharedMaterial =
                     owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);
             }
+        }
+
+        /// <summary>Spec §"Fog-of-War Indicator" (amended 2026-07-25): shade every cell in
+        /// <paramref name="markedCells"/> — everything outside the acting player's current visibility —
+        /// with a translucent overlay sitting above each column's tile fill, and dim the units standing
+        /// in those cells. Deliberately a SEPARATE overlay object per column rather than another swap of
+        /// the "Fill" renderer's material: <see cref="UpdateControlTint"/> already owns that swap
+        /// (terrain material vs. owner-tinted material) and layering a second, independent concern onto
+        /// the same renderer would make the two features fight over one material slot. An empty/null
+        /// <paramref name="markedCells"/> hides every marking (fog off in config, or the viewer's toggle
+        /// off) — the units underneath are untouched either way; they were never hidden, only (un)dimmed.</summary>
+        public void UpdateFogMarking(IReadOnlyCollection<HexCoord> markedCells)
+        {
+            var cols = transform.Find("Columns");
+            if (cols == null) return;
+            HashSet<HexCoord> marked = markedCells == null || markedCells.Count == 0
+                ? null
+                : (markedCells as HashSet<HexCoord> ?? new HashSet<HexCoord>(markedCells));
+            foreach (Transform col in cols)
+            {
+                var tv = col.GetComponent<TileView>();
+                var mark = col.Find("FogMark");
+                if (tv == null || mark == null) continue;
+                mark.gameObject.SetActive(marked != null && marked.Contains(tv.Coord));
+            }
+            GetComponent<TokenStore>()?.ApplyFogDimming(marked);
         }
 
         Material UnlitColor(Color c)
@@ -180,6 +207,18 @@ namespace HexWars.Presentation
             fill.AddComponent<MeshFilter>().sharedMesh = HexMesh.Prism(R, htot);
             fill.AddComponent<MeshRenderer>().sharedMaterial = MaterialFor(tile.Terrain);
 
+            // fog-marking overlay: a thin translucent cap just above the fill top, independent of the
+            // Fill renderer's own material (see UpdateFogMarking) — starts hidden; UpdateFogMarking
+            // turns it on per cell.
+            var mark = new GameObject("FogMark");
+            mark.transform.SetParent(col.transform, false);
+            mark.transform.localPosition = new Vector3(0f, htot + 0.01f, 0f);
+            mark.AddComponent<MeshFilter>().sharedMesh = HexMesh.Prism(R * 0.995f, 0.02f);
+            var markRenderer = mark.AddComponent<MeshRenderer>();
+            markRenderer.sharedMaterial = FogMarkCellMaterial();
+            markRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            mark.SetActive(false);
+
             if (!Outlines) return;
 
             for (int i = 0; i <= levels; i++)
@@ -235,6 +274,43 @@ namespace HexWars.Presentation
         internal Material IconMatFor(UnitRole role) => IconMaterial(role);
         internal Material BlackMat => _black;
         internal Material UnlitColorMat(Color c) => UnlitColor(c);
+
+        /// <summary>Translucent dark cap shared by every "FogMark" cell overlay (spec §"Fog-of-War
+        /// Indicator"). Same alpha-blend recipe as <see cref="IconMaterial"/>'s fallback path — proven
+        /// WebGL-safe transparent unlit — just without a texture, so it reads as a flat shade.</summary>
+        Material FogMarkCellMaterial()
+        {
+            if (_fogMarkCell != null) return _fogMarkCell;
+            _fogMarkCell = TransparentUnlit(new Color(0.02f, 0.02f, 0.04f, 0.6f));
+            return _fogMarkCell;
+        }
+
+        /// <summary>Translucent per-owner cap for a unit token standing in a marked cell — visually
+        /// distinct from <see cref="UnitMat"/>'s spent/inactive dim (a different material swapped onto
+        /// the disc itself) so an operator never confuses "not this player's turn" with "the acting
+        /// model can't see this."</summary>
+        internal Material FogUnitMat(PlayerId owner)
+        {
+            if (owner == PlayerId.Player0) return _p0Fog ?? (_p0Fog = TransparentUnlit(new Color(0.05f, 0.09f, 0.14f, 0.72f)));
+            return _p1Fog ?? (_p1Fog = TransparentUnlit(new Color(0.14f, 0.06f, 0.06f, 0.72f)));
+        }
+
+        Material TransparentUnlit(Color c)
+        {
+            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            if (unlit == null) unlit = Shader.Find("Unlit/Color");
+            var m = new Material(unlit);
+            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
+            m.color = c;
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
+            m.SetFloat("_Surface", 1f);
+            m.SetFloat("_SrcBlend", (float)BlendMode.SrcAlpha);
+            m.SetFloat("_DstBlend", (float)BlendMode.OneMinusSrcAlpha);
+            m.SetFloat("_ZWrite", 0f);
+            m.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+            m.renderQueue = (int)RenderQueue.Transparent;
+            return m;
+        }
 
         internal void EnsureMaterials()
         {

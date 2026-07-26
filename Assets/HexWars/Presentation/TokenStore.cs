@@ -103,6 +103,27 @@ namespace HexWars.Presentation
             Prune(_generators, liveGens);
         }
 
+        /// <summary>Toggle each live unit token's "FogDim" overlay on/off: on when the token's current
+        /// cell is in <paramref name="markedCells"/>, off otherwise. Called by
+        /// <see cref="BoardRenderer.UpdateFogMarking"/>; never removes or hides the token itself — the
+        /// viewer stays omniscient (spec §"Fog-of-War Indicator"), only the treatment changes.</summary>
+        public void ApplyFogDimming(IReadOnlyCollection<HexCoord> markedCells)
+        {
+            bool any = markedCells != null && markedCells.Count > 0;
+            HashSet<HexCoord> cells = any
+                ? (markedCells as HashSet<HexCoord> ?? new HashSet<HexCoord>(markedCells))
+                : null;
+            foreach (var kv in _units)
+            {
+                var token = kv.Value;
+                if (token == null) continue;
+                var view = token.GetComponent<UnitView>();
+                bool dim = any && view != null && cells.Contains(view.Unit.Cell);
+                var overlay = token.transform.Find("FogDim");
+                if (overlay != null) overlay.gameObject.SetActive(dim);
+            }
+        }
+
         static void Prune(Dictionary<int, GameObject> map, HashSet<int> live)
         {
             List<int> dead = null;
@@ -153,6 +174,22 @@ namespace HexWars.Presentation
             var mr = icon.GetComponent<MeshRenderer>();
             mr.sharedMaterial = _board.IconMatFor(Roles.Dominant(unit.Stats));
             mr.shadowCastingMode = ShadowCastingMode.Off;
+
+            // fog-marking dim overlay (spec §"Fog-of-War Indicator"): a translucent per-owner cap,
+            // hidden by default; BoardRenderer.UpdateFogMarking -> ApplyFogDimming turns it on for units
+            // standing in a marked cell. Separate object from "Disc" so the existing spent/inactive dim
+            // (RefreshToken's own material swap on Disc) is never touched by this — the two dims must
+            // stay visually distinguishable (spec: "spectator can see this" vs. "the acting model can").
+            var fogDim = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            fogDim.name = "FogDim";
+            DestroyImmediate(fogDim.GetComponent<Collider>());
+            fogDim.transform.SetParent(token.transform, false);
+            fogDim.transform.localPosition = new Vector3(0f, 0.19f, 0f);
+            fogDim.transform.localScale = new Vector3(radius * 1.03f, 0.17f, radius * 1.03f);
+            var fogRenderer = fogDim.GetComponent<MeshRenderer>();
+            fogRenderer.sharedMaterial = _board.FogUnitMat(unit.Owner); // fixed for the unit's lifetime: owner never changes
+            fogRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            fogDim.SetActive(false);
 
             var bar = new GameObject("HpBar");
             bar.transform.SetParent(token.transform, false);
