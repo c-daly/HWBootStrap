@@ -544,21 +544,25 @@ def test_run_local_scenario_with_old_small_max_steps_still_resolves_with_a_warni
     assert any("insufficient to reach the round cap" in str(w.message) for w in recwarn.list)
 
 
-def test_new_run_with_insufficient_max_steps_is_a_hard_error_when_enforced() -> None:
-    """The hard-error form: a new-run creation path (e.g. the CLI's `train` command, not `resume`)
-    opts into enforce_round_cap_minimum so an undersized max_steps is refused up front, naming the
-    round cap and the required minimum, instead of silently faking a draw during training."""
+def test_new_run_with_insufficient_max_steps_is_auto_raised_when_enforced() -> None:
+    """The repair form: a new-run creation path (e.g. the CLI's `train` command, not `resume`)
+    opts into enforce_round_cap_minimum, and an undersized max_steps — typically a stale
+    session-authored value — is auto-raised to the round-cap minimum instead of blocking the
+    launch. A launch must never fail over a value the resolver itself knows how to correct;
+    the whole knob is scheduled for deletion (game length is denominated in rounds)."""
     document = tactical_v2_document(starting_units=12)
     document["episode"]["max_steps"] = 600
     path = write_scenario(document=document)
 
-    with pytest.raises(ValueError, match=r"round cap \(100\).*minimum required is 2600"):
-        resolve_scenario(
-            environment="tactical-v2",
-            scenario_file=path,
-            template_id=None,
-            enforce_round_cap_minimum=True,
-        )
+    scenario = resolve_scenario(
+        environment="tactical-v2",
+        scenario_file=path,
+        template_id=None,
+        enforce_round_cap_minimum=True,
+    )
+
+    assert scenario.document["episode"]["max_steps"] == 2600
+    assert scenario.warnings == ()
 
 
 def test_new_run_with_sufficient_max_steps_is_not_rejected_when_enforced() -> None:

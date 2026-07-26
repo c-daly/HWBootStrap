@@ -463,7 +463,19 @@ def resolve_scenario(
             f"selected environment {environment!r}"
         )
     if enforce_round_cap_minimum and scenario.warnings:
-        raise ValueError("; ".join(scenario.warnings))
+        # Temporary shim until the tactical-v2 step budget is removed outright: a stale
+        # session-authored max_steps must never block a launch. Auto-raise it to the
+        # round-cap minimum (re-resolving through the one canonical path so the frozen
+        # document, canonical JSON, and warnings stay consistent), then fail only on
+        # warnings that cannot be repaired here.
+        minimum = tactical_v2_round_cap_minimum(scenario.document)
+        current = scenario.document.get("episode", {}).get("max_steps")
+        if minimum is not None and isinstance(current, int) and current < minimum:
+            patched = json.loads(scenario.canonical_json)
+            patched["episode"]["max_steps"] = minimum
+            scenario = _resolve_document(patched)
+        if scenario.warnings:
+            raise ValueError("; ".join(scenario.warnings))
     return scenario
 
 
