@@ -103,24 +103,25 @@ namespace HexWars.Presentation
             Prune(_generators, liveGens);
         }
 
-        /// <summary>Toggle each live unit token's "FogDim" overlay on/off: on when the token's current
-        /// cell is in <paramref name="markedCells"/>, off otherwise. Called by
-        /// <see cref="BoardRenderer.UpdateFogMarking"/>; never removes or hides the token itself — the
-        /// viewer stays omniscient (spec §"Fog-of-War Indicator"), only the treatment changes.</summary>
-        public void ApplyFogDimming(IReadOnlyCollection<HexCoord> markedCells)
+        /// <summary>Toggle each live unit token's "FogDim" overlay on/off: on when the token's unit id is
+        /// in <paramref name="unitIdsToDim"/>, off otherwise. Called by
+        /// <see cref="BoardRenderer.UpdateFogMarking"/>, which computes that id set via
+        /// <see cref="FogMarkingOverlay.UnitIdsToDim"/> — the single source of truth for "which unit
+        /// sits inside a marked cell" (this method no longer re-derives the decision from
+        /// <c>UnitView.Unit.Cell</c> itself). Never removes or hides the token itself — the viewer stays
+        /// omniscient (spec §"Fog-of-War Indicator"), only the treatment changes.</summary>
+        public void ApplyFogDimming(IReadOnlyCollection<int> unitIdsToDim)
         {
-            bool any = markedCells != null && markedCells.Count > 0;
-            HashSet<HexCoord> cells = any
-                ? (markedCells as HashSet<HexCoord> ?? new HashSet<HexCoord>(markedCells))
+            bool any = unitIdsToDim != null && unitIdsToDim.Count > 0;
+            HashSet<int> ids = any
+                ? (unitIdsToDim as HashSet<int> ?? new HashSet<int>(unitIdsToDim))
                 : null;
             foreach (var kv in _units)
             {
                 var token = kv.Value;
                 if (token == null) continue;
-                var view = token.GetComponent<UnitView>();
-                bool dim = any && view != null && cells.Contains(view.Unit.Cell);
                 var overlay = token.transform.Find("FogDim");
-                if (overlay != null) overlay.gameObject.SetActive(dim);
+                if (overlay != null) overlay.gameObject.SetActive(any && ids.Contains(kv.Key));
             }
         }
 

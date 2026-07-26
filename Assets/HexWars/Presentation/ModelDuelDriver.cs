@@ -40,6 +40,7 @@ namespace HexWars.Presentation
         public string P0Spec;
         public string P1Spec;
         public int LearnerSeat;
+        // No runtime reader (see ModelDuelDriver.Seed's comment); recorded/serialized metadata only.
         public ModelDuelObserverSeat Observer;
         public string OpponentLabel;
         public TrainingScenario Scenario;
@@ -116,6 +117,9 @@ namespace HexWars.Presentation
         public ModelSeatConfiguration P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy };
         public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV2;
         public string ScenarioRunPath = string.Empty;
+        // No longer editable via the Arena tab UI (its Observer dropdown was removed — review-fix
+        // pass); retained for this class's EditorWindow-serialized-state round-trip and existing
+        // ModelDuelConfigurationTests coverage.
         public ModelDuelObserverSeat Observer = ModelDuelObserverSeat.Player1;
         public int Seed;
         public float SecondsPerAction = 0.4f;
@@ -154,10 +158,13 @@ namespace HexWars.Presentation
         // Removed dead ModelDuelDriver.Observer/ObserverPlayer (Task C review carry): omniscient
         // presentation always passes viewer: null (RenderEntities/InitializeBoard), so the field had no
         // remaining reader besides one test. ModelDuelObserverSeat/ModelDuelObserver.Resolve, and the
-        // ModelDuelConfiguration/MlPresentationGame/MlArenaLaunchPlan.Observer that still feed the
-        // ML Lab Arena tab's "Observer" field, are untouched — they remain load-bearing recorded
-        // metadata (e.g. MlRunPresentationPlan derives it from the recorded learner seat) independent of
-        // this driver's now-removed consumption of it.
+        // ModelDuelConfiguration/MlPresentationGame/MlArenaLaunchPlan.Observer, are untouched even
+        // though the ML Lab Arena tab's "Observer" dropdown that used to feed them is now ALSO gone
+        // (review-fix pass) — ReplayViewerMenu.LaunchDuel dropped its own now-parameterless `observer`
+        // argument to match. These three Observer members remain purely recorded/serialized metadata
+        // (e.g. MlRunPresentationPlan still derives MlPresentationGame.Observer from the recorded
+        // learner seat) with no runtime reader left anywhere in the presentation pipeline — kept alive
+        // only by existing test coverage (ModelDuelConfigurationTests, MlRunPresentationPlanTests).
         public int Seed;
         public float SecondsPerAction = 0.4f;
         public bool Loop;
@@ -475,7 +482,7 @@ namespace HexWars.Presentation
         /// <see cref="OnItemCommitted"/>), never sooner.</summary>
         void RefreshFogMarking()
         {
-            if (_board != null) _board.UpdateFogMarking(MarkedFogCells);
+            if (_board != null) _board.UpdateFogMarking(_presentedState, MarkedFogCells);
         }
 
         /// <summary>UI entry point for the single fog-marking toggle (spec §"Fog-of-War Indicator") — also

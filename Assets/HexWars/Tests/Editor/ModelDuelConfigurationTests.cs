@@ -1135,12 +1135,80 @@ namespace HexWars.Presentation.Tests
                 FastForwardIgnoringEditModeDestroyWarnings(presenter);
 
                 Assert.That(driver.PresentedState, Is.SameAs(afterEndTurn));
-                Assert.That(new HashSet<HexCoord>(driver.MarkedFogCells), Is.EquivalentTo(new[]
+                var expectedMarked = new HashSet<HexCoord>(new[]
                 {
                     new HexCoord(0, 0), new HexCoord(1, 0), new HexCoord(2, 0),
-                }), "the presented EndTurn must flip the acting player, and the marking must follow it " +
+                });
+                Assert.That(new HashSet<HexCoord>(driver.MarkedFogCells), Is.EquivalentTo(expectedMarked),
+                    "the presented EndTurn must flip the acting player, and the marking must follow it " +
                     "automatically to P1's own army vision the moment PresentedState advances — spec: " +
                     "no fixed P1/P2 selector, only the current acting player");
+
+                // Assert the RENDER path too, not just the pure MarkedFogCells computation: the presented
+                // EndTurn drove RefreshFogMarking -> BoardRenderer.UpdateFogMarking for real, so the actual
+                // GameObject hierarchy (column FogMark overlays, per-token FogDim overlays) must already
+                // reflect the new acting player, not just the driver's derived property.
+                var columns = go.GetComponent<BoardRenderer>().transform.Find("Columns");
+                Assert.That(columns, Is.Not.Null);
+                int columnCount = 0;
+                foreach (Transform col in columns)
+                {
+                    columnCount++;
+                    var tv = col.GetComponent<TileView>();
+                    var mark = col.Find("FogMark");
+                    Assert.That(mark, Is.Not.Null, "every column must carry a FogMark overlay child");
+                    Assert.That(mark.gameObject.activeSelf, Is.EqualTo(expectedMarked.Contains(tv.Coord)),
+                        $"FogMark active state for {tv.Coord} must match the marked-cell set after the " +
+                        "presented end turn");
+                }
+                Assert.That(columnCount, Is.EqualTo(5), "sanity: the 5-wide fog line board must be fully rendered");
+
+                var tokens = go.GetComponent<TokenStore>();
+                GameObject p0Token = tokens.UnitToken(1); // P0's unit at (0,0) — inside the marked cells
+                GameObject p1Token = tokens.UnitToken(2); // P1's unit at (4,0) — outside the marked cells
+                Assert.That(p0Token, Is.Not.Null);
+                Assert.That(p1Token, Is.Not.Null);
+                Assert.That(p0Token.transform.Find("FogDim").gameObject.activeSelf, Is.True,
+                    "P0's unit sits in a cell the now-acting P1 cannot see — its FogDim overlay must be on");
+                Assert.That(p1Token.transform.Find("FogDim").gameObject.activeSelf, Is.False,
+                    "P1's unit sits in P1's own visible cells — its FogDim overlay must stay off");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void SetShowFogMarking_PushesTheChangeToTheAlreadyRenderedBoardImmediately()
+        {
+            var go = new GameObject("driver-fog-set-toggle", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                Board board = FogLineBoard();
+                GameState anchor = FogLineState(board, PlayerId.Player0);
+
+                InvokePrivate(driver, "InitializeBoard", anchor);
+
+                var columns = go.GetComponent<BoardRenderer>().transform.Find("Columns");
+                Transform markFor4 = null;
+                foreach (Transform col in columns)
+                    if (col.GetComponent<TileView>().Coord.Equals(new HexCoord(4, 0)))
+                        markFor4 = col.Find("FogMark");
+                Assert.That(markFor4, Is.Not.Null);
+                Assert.That(markFor4.gameObject.activeSelf, Is.True,
+                    "sanity: with the default ShowFogMarking=true, (4,0) is outside P0's own vision and " +
+                    "must already be marked after InitializeBoard's own RefreshFogMarking");
+
+                driver.SetShowFogMarking(false);
+
+                Assert.That(driver.MarkedFogCells, Is.Empty, "the ShowFogMarking flag itself must flip off");
+                Assert.That(markFor4.gameObject.activeSelf, Is.False,
+                    "SetShowFogMarking(false) must call RefreshFogMarking and push the change into the " +
+                    "already-rendered board immediately — not wait for the next presented transition");
+
+                driver.SetShowFogMarking(true);
+
+                Assert.That(markFor4.gameObject.activeSelf, Is.True,
+                    "SetShowFogMarking(true) must re-light the already-rendered marking immediately too");
             }
             finally { UnityEngine.Object.DestroyImmediate(go); }
         }

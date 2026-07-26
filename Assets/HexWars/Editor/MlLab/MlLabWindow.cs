@@ -29,6 +29,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public TrainingScenario Scenario { get; }
         public string P0Spec { get; }
         public string P1Spec { get; }
+        // LaunchArena() no longer reads this (the Arena tab's Observer dropdown is gone); kept only
+        // because ManualArena_LoadsSelectedRunScenarioWithoutChangingSeatsOrObserver still asserts it.
         public ModelDuelObserverSeat Observer { get; }
 
         public static MlArenaLaunchPlan Create(ModelDuelConfiguration config)
@@ -968,8 +970,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 EditorStyles.wordWrappedMiniLabel);
             _arena.Environment = (MlEnvironmentContract)EditorGUILayout.EnumPopup(
                 "Environment", _arena.Environment);
-            _arena.Observer = (ModelDuelObserverSeat)EditorGUILayout.EnumPopup(
-                "Observer", _arena.Observer);
+            // No "Observer" control here anymore (review-fix pass): presentation is always omniscient
+            // (BoardRenderer.RenderEntities/InitializeBoard pass viewer: null), so an observer seat had
+            // no effect on what the Arena tab actually showed — see ModelDuelConfiguration.Observer.
             EditorGUILayout.BeginHorizontal();
             _arena.ScenarioRunPath = EditorGUILayout.TextField(
                 "Scenario run", _arena.ScenarioRunPath);
@@ -1066,7 +1069,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             ReplayViewerMenu.LaunchDuel(
                 PythonDir, plan.P0Spec, plan.P1Spec, _arena.Loop,
-                _arena.Seed, _arena.SecondsPerAction, _arena.Environment, plan.Observer,
+                _arena.Seed, _arena.SecondsPerAction, _arena.Environment,
                 plan.Scenario);
             _arenaNotice = "Arena launched. Resolved checkpoints appear here after the policy bridge is ready.";
         }

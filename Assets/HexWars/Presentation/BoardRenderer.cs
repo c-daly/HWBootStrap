@@ -109,8 +109,12 @@ namespace HexWars.Presentation
         /// (terrain material vs. owner-tinted material) and layering a second, independent concern onto
         /// the same renderer would make the two features fight over one material slot. An empty/null
         /// <paramref name="markedCells"/> hides every marking (fog off in config, or the viewer's toggle
-        /// off) — the units underneath are untouched either way; they were never hidden, only (un)dimmed.</summary>
-        public void UpdateFogMarking(IReadOnlyCollection<HexCoord> markedCells)
+        /// off) — the units underneath are untouched either way; they were never hidden, only (un)dimmed.
+        /// <paramref name="state"/> is the same <see cref="GameState"/> <paramref name="markedCells"/> was
+        /// computed from — passed through to <see cref="FogMarkingOverlay.UnitIdsToDim"/> so which units
+        /// get the dim treatment is decided by that one tested, pure function rather than re-derived
+        /// here or in <see cref="TokenStore.ApplyFogDimming"/>.</summary>
+        public void UpdateFogMarking(GameState state, IReadOnlyCollection<HexCoord> markedCells)
         {
             var cols = transform.Find("Columns");
             if (cols == null) return;
@@ -124,7 +128,7 @@ namespace HexWars.Presentation
                 if (tv == null || mark == null) continue;
                 mark.gameObject.SetActive(marked != null && marked.Contains(tv.Coord));
             }
-            GetComponent<TokenStore>()?.ApplyFogDimming(marked);
+            GetComponent<TokenStore>()?.ApplyFogDimming(FogMarkingOverlay.UnitIdsToDim(state, markedCells));
         }
 
         Material UnlitColor(Color c)

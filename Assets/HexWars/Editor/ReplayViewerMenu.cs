@@ -187,7 +187,6 @@ namespace HexWars.Presentation.EditorTools
         public static void LaunchDuel(
             string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f,
             MlEnvironmentContract environment = MlEnvironmentContract.TacticalV1,
-            ModelDuelObserverSeat observer = ModelDuelObserverSeat.Player1,
             TrainingScenario scenario = null,
             MlPresentationSchedule presentationPlan = null)
         {
@@ -209,10 +208,6 @@ namespace HexWars.Presentation.EditorTools
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
             d.Environment = environment;
-            // `observer` is still accepted (and threaded through by MlLab's Arena tab / MlArenaLaunchPlan)
-            // as recorded config metadata, but ModelDuelDriver no longer has an Observer field to receive
-            // it: presentation is always omniscient (RenderEntities/InitializeBoard pass viewer: null),
-            // so a driver-side "observer seat" has no remaining reader (Task C review carry).
             d.Scenario = scenario;
             d.PresentationPlan = presentationPlan;
             d.SecondsPerAction = secondsPerAction;
@@ -242,7 +237,6 @@ namespace HexWars.Presentation.EditorTools
                 game.P1Spec,
                 loop: true,
                 environment: environment,
-                observer: game.Observer,
                 scenario: game.Scenario,
                 presentationPlan: plan.BuildRuntimeSchedule());
         }
