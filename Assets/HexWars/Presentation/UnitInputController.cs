@@ -71,7 +71,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            var pointer = Pointer.current; // mouse OR touch — one path for desktop and mobile
+            var pointer = DeviceInput.Allowed ? Pointer.current : null; // mouse OR touch — one path for desktop and mobile
             var cam = Camera.main;
             if (pointer == null || cam == null) return;
 

@@ -106,7 +106,7 @@ namespace HexWars.Presentation
             }
 
             // touch: one-finger drag pans, two-finger pinch zooms
-            var ts = Touchscreen.current;
+            var ts = DeviceInput.Allowed ? Touchscreen.current : null;
             if (ts != null)
             {
                 var touches = ts.touches;

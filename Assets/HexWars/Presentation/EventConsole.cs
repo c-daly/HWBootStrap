@@ -89,7 +89,11 @@ namespace HexWars.Presentation
             if (Screen.width < Screen.height) return;
 
             var e = Event.current;
-            if (e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.BackQuote) { _collapsed = !_collapsed; e.Use(); }
+            if (DeviceInput.Allowed && e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.BackQuote)
+            {
+                _collapsed = !_collapsed;
+                e.Use();
+            }
 
             EnsureStyles();
 

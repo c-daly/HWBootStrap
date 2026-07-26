@@ -131,7 +131,7 @@ namespace HexWars.Presentation
             void Update()
             {
                 if (_card == null || Time.frameCount <= _armedFrame) return;
-                var pointer = Pointer.current;
+                var pointer = DeviceInput.Allowed ? Pointer.current : null;
                 if (pointer == null || !pointer.press.wasPressedThisFrame) return;
                 Vector2 pos = pointer.position.ReadValue();
                 if (!RectTransformUtility.RectangleContainsScreenPoint(_card, pos, null))

@@ -47,7 +47,7 @@ namespace HexWars.Presentation
         void Update()
         {
             if (ReadOnly || _deployIndex < 0 || _game == null) return; // spectating: no human deploys
-            var pointer = Pointer.current; // mouse or touch
+            var pointer = DeviceInput.Allowed ? Pointer.current : null; // mouse or touch
             var cam = Camera.main;
             if (pointer == null || cam == null || !pointer.press.wasReleasedThisFrame || IsOverUi()) return;
 
