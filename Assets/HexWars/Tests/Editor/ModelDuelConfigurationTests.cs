@@ -1068,6 +1068,35 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void MarkTrainerLivenessStatus_OnlyAppliesToLiveSeatsAndClearsWhenHealthy()
+        {
+            // D2 ("Lab stops lying about trainers"): MlLabWindow feeds trainer-liveness text into the
+            // Arena identity rows via this method, following the exact MarkLiveReloadStatus idiom --
+            // only live seats are touched, and re-calling with an empty string clears it back out once
+            // the trainer looks healthy again.
+            var go = new GameObject("driver-trainer-liveness");
+            try
+            {
+                var driver = go.AddComponent<ModelDuelDriver>();
+                SetPrivate(driver, "_p0Live", true);
+                SetPrivate(driver, "_p1Live", false);
+
+                driver.MarkTrainerLivenessStatus("trainer stalled — no progress for 12 min");
+
+                Assert.That(driver.P0ArenaStatus, Is.EqualTo("trainer stalled — no progress for 12 min"));
+                Assert.That(driver.P1ArenaStatus, Is.Not.EqualTo("trainer stalled — no progress for 12 min"));
+
+                driver.MarkTrainerLivenessStatus(string.Empty);
+
+                Assert.That(driver.P0ArenaStatus, Is.Empty);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        [Test]
         public void IdentitySnapshot_PointsFollowPresentedStateNotTheLiveSimulation()
         {
             var go = new GameObject("driver-points-lag", typeof(BoardRenderer), typeof(ModelDuelDriver));

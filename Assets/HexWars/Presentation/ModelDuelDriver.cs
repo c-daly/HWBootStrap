@@ -509,6 +509,19 @@ namespace HexWars.Presentation
             if (_p1Live) P1ArenaStatus = status;
         }
 
+        /// <summary>Called by MlLabWindow (D2, "Lab stops lying about trainers") each repaint while its
+        /// Arena tab is spectating a live run: an honest, non-interrupting status line for a live seat
+        /// whose backing trainer process has exited or stalled, exactly like <see
+        /// cref="MarkLiveReloadStatus"/> already does for weight-reload failures -- never pauses or
+        /// resets playback, and clears back to empty once the trainer looks healthy again. A no-op for
+        /// a seat that isn't a live run (fixed run / greedy / random controllers never reload weights,
+        /// so trainer liveness is not their concern).</summary>
+        public void MarkTrainerLivenessStatus(string status)
+        {
+            if (_p0Live) P0ArenaStatus = status ?? string.Empty;
+            if (_p1Live) P1ArenaStatus = status ?? string.Empty;
+        }
+
         async void AdvanceAtGameBoundary()
         {
             if (IsStarting || _done) return;

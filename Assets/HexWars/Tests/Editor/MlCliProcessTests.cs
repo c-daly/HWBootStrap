@@ -103,6 +103,8 @@ namespace HexWars.Presentation.Tests
             owner.Dispose();
 
             Assert.That(MlRunAttachment.Restore().RunDirectory, Is.EqualTo(@"C:\runs\active"));
+            Assert.That(MlRunAttachment.Restore().Pid, Is.EqualTo(42),
+                "Start must persist the launched process' own pid (D1: reattach after a reload)");
 
             var query = new FakeProcessAdapter();
             var reattached = new MlCliProcess(new FakeProcessFactory(query));
@@ -137,6 +139,50 @@ namespace HexWars.Presentation.Tests
             Assert.That(received.Ok, Is.False);
             Assert.That(received.Error, Is.EqualTo("run missing"));
             process.Dispose();
+            MlRunAttachment.Forget();
+        }
+
+        [Test]
+        public void RememberProcess_PersistsPidAlongsideRunDirectory()
+        {
+            MlRunAttachment.Forget();
+
+            MlRunAttachment.RememberProcess(@"C:\runs\active", 4242);
+
+            MlRunAttachment restored = MlRunAttachment.Restore();
+            Assert.That(restored.RunDirectory, Is.EqualTo(@"C:\runs\active"));
+            Assert.That(restored.Pid, Is.EqualTo(4242));
+            Assert.That(restored.HasPid, Is.True);
+            MlRunAttachment.Forget();
+        }
+
+        [Test]
+        public void Remember_SwitchingRunDirectoryClearsAnyPreviouslyRecordedPid()
+        {
+            MlRunAttachment.Forget();
+            MlRunAttachment.RememberProcess(@"C:\runs\active", 4242);
+
+            MlRunAttachment.Remember(@"C:\runs\different");
+
+            MlRunAttachment restored = MlRunAttachment.Restore();
+            Assert.That(restored.RunDirectory, Is.EqualTo(@"C:\runs\different"));
+            Assert.That(restored.HasPid, Is.False,
+                "a pid recorded for a different run must not survive selecting a different run");
+            MlRunAttachment.Forget();
+        }
+
+        [Test]
+        public void Remember_SameRunDirectoryPreservesThePersistedPid()
+        {
+            MlRunAttachment.Forget();
+            MlRunAttachment.RememberProcess(@"C:\runs\active", 4242);
+
+            // Mirrors the once-a-second status poll and manual re-selection, both of which
+            // re-remember the same run directory without ever knowing its launch-time pid.
+            MlRunAttachment.Remember(@"C:\runs\active");
+
+            Assert.That(MlRunAttachment.Restore().Pid, Is.EqualTo(4242),
+                "re-remembering the same run must not clobber the launch-time pid");
             MlRunAttachment.Forget();
         }
 

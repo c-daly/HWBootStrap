@@ -1241,6 +1241,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             driver.SecondsPerAction = Mathf.Max(0.01f, _arena.SecondsPerAction);
             driver.Loop = _arena.Loop;
+            UpdateArenaTrainerLivenessStatus(driver);
             EditorGUILayout.LabelField("State", driver.IsDone ? "stopped" : driver.IsStarting ? "loading models" : driver.Paused ? "paused" : "playing");
             EditorGUILayout.LabelField("Environment", MlEnvironmentContracts.CliValue(driver.Environment));
             EditorGUILayout.LabelField("Seed", driver.Seed.ToString());
@@ -1250,6 +1251,36 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("Seat 1 loaded", FormatResolved(driver.P1Resolved), EditorStyles.wordWrappedLabel);
             EditorGUILayout.EndVertical();
             Repaint();
+        }
+
+        // D2 ("Lab stops lying about trainers"): while the Arena is spectating a live run, feed the
+        // same process+file trainer-liveness truth the Train tab's status line uses into the Arena
+        // identity rows (ModelDuelDriver.MarkTrainerLivenessStatus -> IdentitySnapshot -> the on-screen
+        // overlay) -- an honest "trainer exited"/"trainer stalled" line beside a live seat, without
+        // pausing or resetting playback. A no-op when neither seat is configured as a live run.
+        void UpdateArenaTrainerLivenessStatus(ModelDuelDriver driver)
+        {
+            string liveRunDirectory =
+                _arena.P0.Kind == ModelControllerKind.LiveRun ? _arena.P0.Path :
+                _arena.P1.Kind == ModelControllerKind.LiveRun ? _arena.P1.Path :
+                string.Empty;
+            if (string.IsNullOrWhiteSpace(liveRunDirectory)) return;
+            ComputeTrainerLiveness(liveRunDirectory, out bool confirmedExited, out double minutesSinceProgress);
+            (long step, long targetStep) = ReadRunProgress(liveRunDirectory);
+            driver.MarkTrainerLivenessStatus(
+                MlTrainerStatusFormatter.Describe(confirmedExited, minutesSinceProgress, step, targetStep));
+        }
+
+        static (long Step, long TargetStep) ReadRunProgress(string runDirectory)
+        {
+            try
+            {
+                string manifestPath = Path.Combine(runDirectory, "run.json");
+                if (!File.Exists(manifestPath)) return (0, 0);
+                var manifest = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifestPath));
+                return (manifest?.latest_checkpoint_step ?? 0, manifest?.config?.total_timesteps ?? 0);
+            }
+            catch (Exception) { return (0, 0); }
         }
 
         static string FormatResolved(PolicySeatInfo info) => info == null
@@ -1263,7 +1294,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public string latest_checkpoint;
             public long latest_checkpoint_step;
         }
-        [Serializable] sealed class ArenaRunConfig { public string algorithm; }
+        [Serializable] sealed class ArenaRunConfig { public string algorithm; public long total_timesteps; }
 
         void DrawRunPicker()
         {
@@ -1784,7 +1815,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("Latest evaluation", File.Exists(evaluation) ? evaluation : "none");
             EditorGUILayout.LabelField("Trackers", _status != null && _status.TrackerDegraded ? "degraded (see run.json/log)" : "healthy or local-only");
             if (!string.IsNullOrWhiteSpace(_selectedRun))
+            {
+                // D2 ("Lab stops lying about trainers"): an honest status line, derived from process
+                // liveness + progress.csv staleness -- never a modal, never interrupts anything, just
+                // surfaced text so a dead or hung trainer isn't only discoverable via TensorBoard.
+                ComputeTrainerLiveness(_selectedRun, out bool confirmedExited, out double minutesSinceProgress);
+                string trainerStatus = MlTrainerStatusFormatter.Describe(
+                    confirmedExited, minutesSinceProgress, _status?.Step ?? 0, _status?.TargetStep ?? 0);
+                if (!string.IsNullOrWhiteSpace(trainerStatus))
+                    EditorGUILayout.HelpBox(trainerStatus, MessageType.Warning);
                 DrawEnvironmentSummary(LoadRunEnvironmentSummary(_selectedRun), "Run contract");
+            }
             if (!string.IsNullOrWhiteSpace(_lastMetricTime))
                 EditorGUILayout.LabelField("Last metric", _lastMetricTime);
             EditorGUILayout.EndVertical();
@@ -1994,7 +2035,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             string runDirectory = _pendingWatchRunDirectory;
             bool matchesSelection = string.Equals(runDirectory, _selectedRun, StringComparison.Ordinal);
             bool checkpointReady = RunHasValidatedCheckpoint(runDirectory);
-            bool trainingAlive = _state.Phase != MlLabUiPhase.Completed && _state.Phase != MlLabUiPhase.Failed;
+            bool trainingAlive = MlTrainerLivenessPolicy.IsAlive(
+                ComputeTrainerLiveness(runDirectory, out _, out _));
             bool ceilingPassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
 
             switch (MlWatchStartPolicy.Decide(matchesSelection, checkpointReady, trainingAlive, ceilingPassed))
@@ -2047,6 +2089,48 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return File.Exists(Path.Combine(runDirectory, manifest.latest_checkpoint));
             }
             catch (Exception) { return false; }
+        }
+
+        // Ground truth for D1 ("Lab stops lying about trainers"): whether the trainer tracked for
+        // runDirectory is actually still alive, independent of _state.Phase (see
+        // MlTrainerLivenessPolicy's class comment for why that ephemeral phase is not trustworthy on
+        // its own). Reattaches via the PID persisted at launch time (MlRunAttachment.RememberProcess),
+        // guarded against PID reuse by an existence+name check, and falls back to progress.csv mtime
+        // freshness whenever no valid process handle is available.
+        MlTrainerLivenessState ComputeTrainerLiveness(
+            string runDirectory, out bool confirmedExited, out double minutesSinceProgress)
+        {
+            MlRunAttachment attachment = MlRunAttachment.Restore();
+            bool hasPersistedPid = attachment.HasPid && !string.IsNullOrEmpty(runDirectory) &&
+                string.Equals(attachment.RunDirectory, runDirectory, StringComparison.Ordinal);
+            bool processExists = false;
+            bool processIdentityMatches = false;
+            if (hasPersistedPid &&
+                MlTrainerProcessLookup.TryGetRunningProcessName(attachment.Pid, out string processName))
+            {
+                processExists = true;
+                processIdentityMatches = MlTrainerProcessLookup.MatchesExpectedExecutable(processName, PythonExe);
+            }
+            minutesSinceProgress = MinutesSinceProgressUpdate(runDirectory);
+            bool progressFresh = MlTrainerProgressFreshness.IsFresh(minutesSinceProgress);
+            confirmedExited = hasPersistedPid && !(processExists && processIdentityMatches);
+            return MlTrainerLivenessPolicy.Decide(
+                hasPersistedPid, processExists, processIdentityMatches, progressFresh);
+        }
+
+        // No progress.csv yet is not evidence of a stall (training may not have written its first
+        // metrics row); treated as fresh so a brand-new run is never mistaken for stalled.
+        static double MinutesSinceProgressUpdate(string runDirectory)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(runDirectory)) return 0.0;
+                string path = Path.Combine(runDirectory, "progress.csv");
+                if (!File.Exists(path)) return 0.0;
+                return (DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalMinutes;
+            }
+            catch (IOException) { return 0.0; }
+            catch (UnauthorizedAccessException) { return 0.0; }
         }
 
         void OnTrainingExited(int exitCode)

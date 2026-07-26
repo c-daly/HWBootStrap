@@ -173,23 +173,52 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const string PidKey = "HexWars.MlLab.ActivePid";
 
         public readonly string RunDirectory;
+        public readonly int Pid;
         public bool Exists => !string.IsNullOrWhiteSpace(RunDirectory);
+        // True only when Pid was actually recorded by RememberProcess for this run directory --
+        // Remember(runDirectory) alone (the once-a-second status poll, manual run selection) never
+        // sets it, so re-selecting or re-polling a run never fabricates a pid for a process the Lab
+        // did not itself launch.
+        public bool HasPid => Pid > 0;
 
-        MlRunAttachment(string runDirectory)
+        MlRunAttachment(string runDirectory, int pid)
         {
             RunDirectory = runDirectory ?? string.Empty;
+            Pid = pid;
         }
 
+        /// <summary>Remembers which run directory is the Lab's active attachment without touching any
+        /// persisted PID. Switching to a different run directory clears any previously-recorded PID,
+        /// since that PID belonged to the run being left, not the one now selected; re-remembering the
+        /// same run directory (as the once-a-second status poll does) leaves a launch-time PID alone.</summary>
         public static void Remember(string runDirectory)
         {
             if (string.IsNullOrWhiteSpace(runDirectory)) throw new ArgumentException(
                 "Active run directory is required.", nameof(runDirectory));
+            string current = SessionState.GetString(RunKey, string.Empty);
+            if (!string.Equals(current, runDirectory, StringComparison.Ordinal))
+                SessionState.EraseInt(PidKey);
             SessionState.SetString(RunKey, runDirectory);
-            SessionState.EraseInt(PidKey);
+        }
+
+        /// <summary>Records the trainer's own PID alongside its run directory at the moment
+        /// <see cref="MlCliProcess.Start"/> launches it -- the fact D1 ("Lab stops lying about
+        /// trainers") needs that <see cref="Remember"/> never had a source for. Persisted via
+        /// SessionState (survives domain reloads, same mechanism MlLabWindow already uses for its
+        /// pending-watch state), so <c>MlLabWindow</c> can reattach to it after a reload without ever
+        /// having redirected the detached process' own stdio.</summary>
+        public static void RememberProcess(string runDirectory, int pid)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) throw new ArgumentException(
+                "Active run directory is required.", nameof(runDirectory));
+            SessionState.SetString(RunKey, runDirectory);
+            if (pid > 0) SessionState.SetInt(PidKey, pid);
+            else SessionState.EraseInt(PidKey);
         }
 
         public static MlRunAttachment Restore() => new MlRunAttachment(
-            SessionState.GetString(RunKey, string.Empty));
+            SessionState.GetString(RunKey, string.Empty),
+            SessionState.GetInt(PidKey, 0));
 
         public static void Forget()
         {
