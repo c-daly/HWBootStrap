@@ -57,5 +57,36 @@ namespace HexWars.Engine.Tests
             }
             Assert.That(view.Terminated || view.Truncated, Is.True);
         }
+
+        /// <summary>Capture smoke test (see TacticalV2DuelEnvTests for the thorough coverage): the
+        /// drained transitions — from both the external Step path and the internal auto-play loop — are
+        /// exactly the accepted commands in order, matching the replay log, and chain by reference.</summary>
+        [Test]
+        public void DrainTransitions_MatchesReplayLog_WithExternalAndInternalSeats()
+        {
+            var env = new DuelEnv();
+            var rng = new Random(31);
+
+            var view = env.Reset(31, null, new GreedyAgent(6)); // seat0 external, seat1 internal
+            int steps = 0;
+            while (!view.Terminated && !view.Truncated && steps < 4000)
+            {
+                view = env.Step(PickLegal(view.ActionMask, rng));
+                steps++;
+            }
+            Assert.That(view.Terminated || view.Truncated, Is.True);
+
+            var transitions = env.DrainTransitions();
+            Assert.That(transitions, Is.Not.Empty);
+            var data = ReplayFile.Read(env.ToReplay());
+            Assert.That(transitions.Count, Is.EqualTo(data.Commands.Count));
+            for (int i = 0; i < transitions.Count; i++)
+                Assert.That(transitions[i].Command, Is.EqualTo(data.Commands[i]));
+            for (int i = 0; i < transitions.Count - 1; i++)
+                Assert.That(transitions[i].Resulting, Is.SameAs(transitions[i + 1].Previous));
+            Assert.That(transitions[transitions.Count - 1].Resulting, Is.SameAs(env.State));
+
+            Assert.That(env.DrainTransitions(), Is.Empty, "drain must empty the queue");
+        }
     }
 }

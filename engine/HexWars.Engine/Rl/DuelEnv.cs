@@ -16,6 +16,7 @@ namespace HexWars.Engine.Rl
         private readonly EnvConfig _cfg;
         private readonly TacticalLayout _layout;
         private readonly List<Command> _log = new List<Command>();
+        private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
 
         private GameState _start = null!;
         private GameState _state = null!;
@@ -57,6 +58,7 @@ namespace HexWars.Engine.Rl
             _learner = learnerSeat;
             _steps = 0;
             _log.Clear();
+            _transitions.Clear();
             AdvancePastInternal();
             _prevAdv = Advantage();
             _armyValue = RewardShaping.PositionValue(_state, _learner, _cfg.PointsWeight);
@@ -76,10 +78,12 @@ namespace HexWars.Engine.Rl
                 // active-piece closing, credited only when the LEARNER moves one of its own units
                 var mv = seat == _learner ? cmd as MoveUnit : null;
                 int gapBefore = mv != null ? RewardShaping.GapOfUnit(_state, mv.UnitId, _learner, Foe) : -1;
+                GameState before = _state;
                 var r = GameEngine.Apply(_state, cmd);
                 if (r.Success)
                 {
                     _state = r.NewState; _log.Add(cmd);
+                    _transitions.Add(new DuelTransition(before, cmd, _state));
                     if (mv != null && gapBefore >= 0)
                     {
                         int gapAfter = RewardShaping.GapOfUnit(_state, mv.UnitId, _learner, Foe);
@@ -95,6 +99,16 @@ namespace HexWars.Engine.Rl
         /// <summary>The recorded duel as a portable replay (start + commands), for Unity playback.</summary>
         public string ToReplay() => ReplayFile.Write(_start, _log);
 
+        /// <summary>Every accepted-command transition since the last drain (or Reset), in order, then
+        /// clears the queue. See <see cref="DuelTransition"/>: covers both the external step path and
+        /// the internal scripted-controller loop (including its unstick EndTurn fallback).</summary>
+        public IReadOnlyList<DuelTransition> DrainTransitions()
+        {
+            var drained = new List<DuelTransition>(_transitions);
+            _transitions.Clear();
+            return drained;
+        }
+
         private IAgent? Controller(PlayerId seat) => seat == PlayerId.Player0 ? _ctrl0 : _ctrl1;
 
         private void AdvancePastInternal()
@@ -104,10 +118,22 @@ namespace HexWars.Engine.Rl
             {
                 var seat = _state.ActivePlayer;
                 var cmd = Controller(seat)!.Decide(_state);
+                GameState before = _state;
                 var r = GameEngine.Apply(_state, cmd);
-                if (r.Success) { _state = r.NewState; _log.Add(cmd); continue; }
-                var end = GameEngine.Apply(_state, new EndTurn(seat));
-                if (end.Success) { _state = end.NewState; _log.Add(new EndTurn(seat)); } else break;
+                if (r.Success)
+                {
+                    _state = r.NewState; _log.Add(cmd);
+                    _transitions.Add(new DuelTransition(before, cmd, _state));
+                    continue;
+                }
+                var endCmd = new EndTurn(seat);
+                var end = GameEngine.Apply(_state, endCmd);
+                if (end.Success)
+                {
+                    _state = end.NewState; _log.Add(endCmd);
+                    _transitions.Add(new DuelTransition(before, endCmd, _state));
+                }
+                else break;
             }
         }
 

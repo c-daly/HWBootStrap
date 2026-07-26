@@ -18,6 +18,7 @@ namespace HexWars.Engine.Rl
         private readonly TacticalV2Config _cfg;
         private readonly TacticalV2Layout _layout;
         private readonly List<Command> _log = new List<Command>();
+        private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
 
         private GameState _start = null!;
         private GameState _state = null!;
@@ -56,6 +57,7 @@ namespace HexWars.Engine.Rl
             _learner = learnerSeat;
             _steps = 0;
             _log.Clear();
+            _transitions.Clear();
             AdvancePastInternal();
             _prevAdv = Advantage();
             _armyValue = RewardShaping.PositionValue(_state, _learner, _cfg.PointsWeight);
@@ -87,6 +89,17 @@ namespace HexWars.Engine.Rl
         /// <summary>The recorded duel as a portable replay (start + commands), for Unity playback.</summary>
         public string ToReplay() => ReplayFile.Write(_start, _log);
 
+        /// <summary>Every accepted-command transition since the last drain (or Reset), in order, then
+        /// clears the queue. See <see cref="DuelTransition"/>: covers the external step path, internal
+        /// scripted controllers, and the unstick EndTurn fallback alike — anywhere <see cref="TryApply"/>
+        /// accepted a command.</summary>
+        public IReadOnlyList<DuelTransition> DrainTransitions()
+        {
+            var drained = new List<DuelTransition>(_transitions);
+            _transitions.Clear();
+            return drained;
+        }
+
         private IAgent? Controller(PlayerId seat) => seat == PlayerId.Player0 ? _ctrl0 : _ctrl1;
 
         private TacticalV2UnitRegistry Registry(PlayerId seat) => seat == PlayerId.Player0 ? _slots0 : _slots1;
@@ -112,6 +125,7 @@ namespace HexWars.Engine.Rl
 
             _state = r.NewState;
             _log.Add(cmd);
+            _transitions.Add(new DuelTransition(before, cmd, _state));
             _slots0.ReleaseDead(_state, PlayerId.Player0);
             _slots1.ReleaseDead(_state, PlayerId.Player1);
             if (cmd is DeployUnit deploy)

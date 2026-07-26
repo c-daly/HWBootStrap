@@ -48,6 +48,33 @@ namespace HexWars.Engine.Tests
                 Is.EqualTo(env.State.Player(PlayerId.Player0).Barracks[6].Stats));
         }
 
+        /// <summary>Capture smoke test (see TacticalV2DuelEnvTests for the thorough coverage): a fully
+        /// scripted deployment + gameplay episode drains transitions that are exactly the accepted
+        /// commands in order, matching the replay log, and chain by reference.</summary>
+        [Test]
+        public void DrainTransitions_MatchesReplayLog_ForFullyScriptedGame()
+        {
+            var env = new AdaptiveDuelEnv();
+            var view = env.Reset(71, new GreedyAgent(1), new GreedyAgent(2),
+                new CombinedArmsDeploymentPolicy(1), new CombinedArmsDeploymentPolicy(2));
+
+            if (env.AwaitingPostRevealAdvance) view = env.ContinueAfterReveal();
+
+            Assert.That(env.DeploymentComplete, Is.True);
+
+            var transitions = env.DrainTransitions();
+            Assert.That(transitions, Is.Not.Empty);
+            var data = ReplayFile.Read(env.ToReplay());
+            Assert.That(transitions.Count, Is.EqualTo(data.Commands.Count));
+            for (int i = 0; i < transitions.Count; i++)
+                Assert.That(transitions[i].Command, Is.EqualTo(data.Commands[i]));
+            for (int i = 0; i < transitions.Count - 1; i++)
+                Assert.That(transitions[i].Resulting, Is.SameAs(transitions[i + 1].Previous));
+            Assert.That(transitions[transitions.Count - 1].Resulting, Is.SameAs(env.State));
+
+            Assert.That(env.DrainTransitions(), Is.Empty, "drain must empty the queue");
+        }
+
         [Test]
         public void ScriptedAndExternalSeats_UseOnePrivateDeploymentCallAndExposeOnlyExternalSeat()
         {

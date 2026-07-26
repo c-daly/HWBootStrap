@@ -31,6 +31,7 @@ namespace HexWars.Engine.Rl
         private readonly AdaptiveLayout _layout;
         private readonly MlContract _contract;
         private readonly List<Command> _log = new List<Command>();
+        private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
         private readonly HashSet<int> _customTemplatesDeployed = new HashSet<int>();
 
         private AdaptiveDeployment _setup = null!;
@@ -100,6 +101,7 @@ namespace HexWars.Engine.Rl
             _awaitingPostRevealAdvance = false;
             _customTemplatesDeployed.Clear();
             _log.Clear();
+            _transitions.Clear();
 
             ApplyScriptedDeployment(PlayerId.Player0, deployment0);
             ApplyScriptedDeployment(PlayerId.Player1, deployment1);
@@ -154,7 +156,8 @@ namespace HexWars.Engine.Rl
 
             if (transition.Command != null)
             {
-                var result = GameEngine.Apply(State, transition.Command);
+                GameState before = State;
+                var result = GameEngine.Apply(before, transition.Command);
                 if (!result.Success)
                 {
                     _invalidSequences++;
@@ -164,6 +167,7 @@ namespace HexWars.Engine.Rl
 
                 _state = result.NewState;
                 _log.Add(transition.Command);
+                _transitions.Add(new DuelTransition(before, transition.Command, _state));
                 RecordSuccessfulCommand(transition.Command);
                 SyncSlots();
                 AdvancePastInternal();
@@ -177,6 +181,18 @@ namespace HexWars.Engine.Rl
         {
             if (_start == null) throw new InvalidOperationException("deployment is not complete");
             return ReplayFile.Write(_start, _log);
+        }
+
+        /// <summary>Every accepted-command transition since the last drain (or Reset), in order, then
+        /// clears the queue. See <see cref="DuelTransition"/>: covers the external gameplay step path
+        /// and the internal scripted-controller loop (including its unstick EndTurn fallback). Hidden
+        /// pregame deployment placements are not commands applied via <see cref="GameEngine.Apply"/> and
+        /// never produce a transition — the atomic reveal itself is the first observable gameplay state.</summary>
+        public IReadOnlyList<DuelTransition> DrainTransitions()
+        {
+            var drained = new List<DuelTransition>(_transitions);
+            _transitions.Clear();
+            return drained;
         }
 
         private void ApplyScriptedDeployment(PlayerId seat, IDeploymentPolicy? policy)
@@ -287,11 +303,13 @@ namespace HexWars.Engine.Rl
             {
                 PlayerId seat = _state.ActivePlayer;
                 Command command = Controller(seat)!.Decide(_state);
+                GameState before = _state;
                 var result = GameEngine.Apply(_state, command);
                 if (result.Success)
                 {
                     _state = result.NewState;
                     _log.Add(command);
+                    _transitions.Add(new DuelTransition(before, command, _state));
                     RecordSuccessfulCommand(command);
                     SyncSlots();
                     continue;
@@ -299,10 +317,12 @@ namespace HexWars.Engine.Rl
 
                 _invalidSequences++;
                 Decision(seat).Clear(AdaptivePhase.GameplayRoot);
-                var end = GameEngine.Apply(_state, new EndTurn(seat));
+                var endCmd = new EndTurn(seat);
+                var end = GameEngine.Apply(_state, endCmd);
                 if (!end.Success) break;
                 _state = end.NewState;
-                _log.Add(new EndTurn(seat));
+                _log.Add(endCmd);
+                _transitions.Add(new DuelTransition(before, endCmd, _state));
                 SyncSlots();
             }
         }
