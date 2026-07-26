@@ -46,6 +46,41 @@ namespace HexWars.Engine.Tests
                 Has.Some.Contains("starting unit count must be between 1 and 12"));
         }
 
+        [TestCase(1, 100, 404)]
+        [TestCase(3, 100, 808)]
+        [TestCase(12, 100, 2626)]
+        [TestCase(3, 200, 1608)]
+        [TestCase(3, 150, 1208)]
+        public void DefaultMaxSteps_DerivesFromRoundCapAndStartingUnitCount(
+            int startingUnitCount, int roundCap, int expected)
+        {
+            // 100-round-rule: MaxSteps counts RL actions (move/attack/deploy/end-turn), never rounds. Each
+            // round both seats can spend up to (startingUnitCount + 1) actions apiece (one per unit slot
+            // plus an end-turn) — so reaching roundCap needs roundCap * 2 * (startingUnitCount + 1) actions,
+            // plus one extra round's headroom so the RL step budget never pre-empts the engine's own
+            // round-cap backstop.
+            Assert.That(TacticalV2Config.DefaultMaxSteps(startingUnitCount, roundCap), Is.EqualTo(expected));
+        }
+
+        [TestCase(1, 100, 400)]
+        [TestCase(3, 100, 800)]
+        [TestCase(12, 100, 2600)]
+        public void MinimumMaxSteps_IsExactlyRoundCapActionsWithNoHeadroom(
+            int startingUnitCount, int roundCap, int expected)
+        {
+            Assert.That(TacticalV2Config.MinimumMaxSteps(startingUnitCount, roundCap), Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void Default_DerivesMaxStepsFromRoundCapNotAMagicConstant()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+
+            Assert.That(config.MaxSteps,
+                Is.EqualTo(TacticalV2Config.DefaultMaxSteps(config.StartingUnitCount, GameConfig.DefaultRoundCap)));
+            Assert.That(config.Game.RoundCap, Is.EqualTo(GameConfig.DefaultRoundCap));
+        }
+
         [Test]
         public void TemplateIds_PinsTheCanonicalBruteIdCheckedIntoTrainingTemplates()
         {

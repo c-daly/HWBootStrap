@@ -47,6 +47,32 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        /// <summary>100-round-rule correctness check: when the ENGINE ends the game at its own round cap
+        /// (<see cref="WinCheck.IsTerminal"/>'s unconditional round-cap clause), the env must surface a
+        /// terminal (not truncated) result independent of MaxSteps — even a MaxSteps so huge it could
+        /// never fire. Guards against the RL step budget racing the engine's own backstop and reporting a
+        /// truncated draw for what was actually a real, in-game round-cap ending.</summary>
+        [Test]
+        public void RoundCapReachedByEngine_IsReportedAsTerminatedNeverTruncated_EvenWithHugeMaxSteps()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = new GameConfig(new Dictionary<TerrainType, TerrainDef>(), biomesEnabled: false, roundCap: 2);
+            config.MaxSteps = 1_000_000; // deliberately absurd: proves truncation cannot be what ends this
+
+            var env = new TacticalV2Env(seed => new AlwaysEndTurnAgent(), PlayerId.Player0, config);
+            env.Reset(0);
+
+            StepResult result = env.Step(0); // learner ends its own turn; opponent ends turn -> round cap hit
+
+            Assert.That(result.Terminated, Is.True);
+            Assert.That(result.Truncated, Is.False);
+        }
+
+        private sealed class AlwaysEndTurnAgent : IAgent
+        {
+            public Command Decide(GameState state) => new EndTurn(state.ActivePlayer);
+        }
+
         [Test]
         public void DeployAfterDeath_ReusesReleasedSlotWithChosenTemplateIdentity()
         {

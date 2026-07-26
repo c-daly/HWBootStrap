@@ -33,6 +33,13 @@ namespace HexWars.Engine
         /// <summary>Round at which the stalemate backstop ends the game by total value.</summary>
         public int RoundCap { get; }
 
+        /// <summary>The engine's own backstop round cap — games are meant to end by annihilation, so
+        /// this exists only to give them room, never as a target step count for any RL layer above it.
+        /// Callers that need to derive an RL episode step budget from "how many rounds can this game
+        /// possibly run" (see <see cref="Rl.TacticalV2Config"/>) must read this constant rather than
+        /// hardcoding 100 a second time.</summary>
+        public const int DefaultRoundCap = 100;
+
         /// <summary>Points to add a unit design to the barracks (default 0 = free; configurable).</summary>
         public int DesignFee { get; }
 
@@ -115,7 +122,7 @@ namespace HexWars.Engine
             int damageFloor = 0,
             int dmgHighGroundBonus = 1,
             int rangeHighGroundBonus = 1,
-            int roundCap = 100, // backstop only — games are meant to end by annihilation, so give them room
+            int roundCap = DefaultRoundCap, // backstop only — games are meant to end by annihilation, so give them room
             int designFee = 0,
             double deployCostMultiplier = 1.0,
             ITurnPolicy? turnPolicy = null,

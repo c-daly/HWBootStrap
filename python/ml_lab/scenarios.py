@@ -6,7 +6,8 @@ import copy
 import json
 import math
 import struct
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -93,6 +94,10 @@ class ResolvedScenario:
     environment: str
     document: Mapping[str, Any]
     canonical_json: str
+    # Non-fatal advisories (see tactical_v2_round_cap_warning) that don't invalidate the scenario —
+    # contrast a Validate-style hard error. Empty for every environment except tactical-v2, and empty
+    # there too once episode.max_steps covers the configured round cap.
+    warnings: tuple[str, ...] = field(default_factory=tuple)
 
     def write(self, path: Path) -> None:
         atomic_write_text(path, self.canonical_json + "\n")
@@ -315,6 +320,44 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
     return document
 
 
+def tactical_v2_round_cap_minimum(document: Mapping[str, Any]) -> int | None:
+    """The fewest ``episode.max_steps`` that lets ``document``'s tactical-v2 army play out every
+    round up to its configured round cap, or ``None`` for a non-tactical-v2 document.
+
+    Mirrors the engine's ``TacticalV2Config.MinimumMaxSteps`` (see
+    ``engine/HexWars.Engine/Rl/TacticalV2Config.cs``): MaxSteps counts RL actions (each
+    move/attack/deploy/end-turn call is one), and both seats together can spend up to
+    ``2 * (starting_unit_count + 1)`` actions per round (one action per starting-unit slot plus an
+    end-turn, per seat). Reaching ``round_cap`` rounds therefore needs
+    ``round_cap * 2 * (starting_unit_count + 1)`` actions at minimum. Below this, the RL step budget
+    truncates the episode before the engine's own round-cap backstop ever fires, faking a draw.
+    """
+    if document.get("environment") != "tactical-v2":
+        return None
+    starting_units = document["tactical_v2"]["starting_unit_count"]
+    round_cap = document["rules"]["round_cap"]
+    actions_per_round = 2 * (starting_units + 1)
+    return actions_per_round * round_cap
+
+
+def tactical_v2_round_cap_warning(document: Mapping[str, Any]) -> str | None:
+    """A human-readable warning if ``document``'s tactical-v2 ``episode.max_steps`` is too small to
+    reach its own configured round cap, else ``None`` (including for non-tactical-v2 documents).
+    Never raises — see ``resolve_scenario``'s ``enforce_round_cap_minimum`` for the hard-error form.
+    """
+    minimum = tactical_v2_round_cap_minimum(document)
+    if minimum is None:
+        return None
+    max_steps = document["episode"]["max_steps"]
+    if max_steps >= minimum:
+        return None
+    return (
+        f"tactical-v2 episode.max_steps ({max_steps}) is insufficient to reach the round cap "
+        f"({document['rules']['round_cap']}) for {document['tactical_v2']['starting_unit_count']} "
+        f"starting units; minimum required is {minimum}"
+    )
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, dict):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
@@ -332,6 +375,15 @@ def _resolve_document(raw: Any) -> ResolvedScenario:
         separators=(",", ":"),
         allow_nan=False,
     )
+    scenario_warnings: tuple[str, ...] = ()
+    round_cap_warning = tactical_v2_round_cap_warning(owned)
+    if round_cap_warning is not None:
+        # Warn, don't break: an old scenario.json written before this check existed (including an
+        # already-checkpointed, multi-million-step training run) must keep loading for resume/Arena.
+        # A hard rejection belongs only at new-run creation time — see resolve_scenario's
+        # enforce_round_cap_minimum.
+        warnings.warn(round_cap_warning, stacklevel=3)
+        scenario_warnings = (round_cap_warning,)
     return ResolvedScenario(
         schema_version=owned["schema_version"],
         template_id=owned["id"],
@@ -339,6 +391,7 @@ def _resolve_document(raw: Any) -> ResolvedScenario:
         environment=owned["environment"],
         document=_freeze(owned),
         canonical_json=canonical_json,
+        warnings=scenario_warnings,
     )
 
 
@@ -375,7 +428,17 @@ def resolve_scenario(
     scenario_file: Path | None,
     template_id: str | None,
     library_path: Path = DEFAULT_TEMPLATE_LIBRARY,
+    enforce_round_cap_minimum: bool = False,
 ) -> ResolvedScenario:
+    """Resolve a scenario document (explicit file or a named/default library template).
+
+    ``enforce_round_cap_minimum`` escalates a tactical-v2 round-cap shortfall (see
+    ``tactical_v2_round_cap_warning``) from a warning into a hard ``ValueError``. Defaults to
+    ``False`` so every existing caller — including resuming a run from its frozen scenario.json —
+    keeps loading unchanged; callers creating a brand-new run should opt in so an undersized
+    max_steps is caught before training starts rather than silently faking a draw thousands of
+    steps into an already-truncated episode.
+    """
     if environment not in SUPPORTED_ENVIRONMENTS:
         raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
     if scenario_file is not None and template_id is not None:
@@ -399,6 +462,8 @@ def resolve_scenario(
             f"scenario environment {scenario.environment!r} does not match "
             f"selected environment {environment!r}"
         )
+    if enforce_round_cap_minimum and scenario.warnings:
+        raise ValueError("; ".join(scenario.warnings))
     return scenario
 
 

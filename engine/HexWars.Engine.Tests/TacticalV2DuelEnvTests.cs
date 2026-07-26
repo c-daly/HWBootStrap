@@ -29,6 +29,31 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        /// <summary>100-round-rule correctness check (duel side): when the ENGINE ends the game at its own
+        /// round cap, the duel view must report a terminal (not truncated) result independent of MaxSteps
+        /// — even a MaxSteps so huge it could never fire. See the matching
+        /// <see cref="TacticalV2EnvTests.RoundCapReachedByEngine_IsReportedAsTerminatedNeverTruncated_EvenWithHugeMaxSteps"/>.</summary>
+        [Test]
+        public void RoundCapReachedByEngine_IsReportedAsTerminatedNeverTruncated_EvenWithHugeMaxSteps()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = new GameConfig(new Dictionary<TerrainType, TerrainDef>(), biomesEnabled: false, roundCap: 2);
+            config.MaxSteps = 1_000_000; // deliberately absurd: proves truncation cannot be what ends this
+
+            var env = new TacticalV2DuelEnv(config);
+            env.Reset(0, controller0: null, controller1: new AlwaysEndTurnAgent(), learnerSeat: PlayerId.Player0);
+
+            TacticalV2DuelEnv.View view = env.Step(0); // learner ends its own turn; internal seat ends -> round cap hit
+
+            Assert.That(view.Terminated, Is.True);
+            Assert.That(view.Truncated, Is.False);
+        }
+
+        private sealed class AlwaysEndTurnAgent : IAgent
+        {
+            public Command Decide(GameState state) => new EndTurn(state.ActivePlayer);
+        }
+
         private static int PickLegal(bool[] mask, Random rng)
         {
             var legal = new List<int>();

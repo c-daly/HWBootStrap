@@ -48,7 +48,6 @@ namespace HexWars.Engine.Rl
             }
             else
             {
-                scenario.Episode.MaxSteps = 600;
                 scenario.Rules.FogOfWar = false;
                 scenario.TacticalReward = new TacticalRewardConfig();
                 scenario.TacticalV2 = new TrainingTacticalV2Config
@@ -58,6 +57,10 @@ namespace HexWars.Engine.Rl
                     PlacementPolicy = "symmetric-random-v1",
                     Templates = DefaultTacticalV2Templates(),
                 };
+                // Derived, not a magic constant: the RL step budget must never pre-empt the engine's own
+                // round-cap backstop (see GameConfig.DefaultRoundCap / TacticalV2Config.DefaultMaxSteps).
+                scenario.Episode.MaxSteps = TacticalV2Config.DefaultMaxSteps(
+                    scenario.TacticalV2.StartingUnitCount, scenario.Rules.RoundCap);
             }
 
             return scenario;
@@ -130,6 +133,31 @@ namespace HexWars.Engine.Rl
             }
 
             return errors;
+        }
+
+        /// <summary>Non-fatal advisories that never invalidate the scenario (contrast <see cref="Validate"/>,
+        /// whose errors are hard rejections). Today this covers exactly one case: a tactical-v2
+        /// <see cref="TrainingEpisodeConfig.MaxSteps"/> too small for the configured army to ever reach the
+        /// engine's own round cap (<see cref="TrainingRuleConfig.RoundCap"/>), so the RL step budget would
+        /// truncate the episode first and report a draw the game itself never reached. This is surfaced as
+        /// a warning — not an error — so scenario.json files written before this check existed (including
+        /// long-running, already-checkpointed training runs) keep loading for resume/Arena unchanged; a
+        /// hard rejection belongs only at new-run creation time, one layer up.</summary>
+        public IReadOnlyList<string> Warnings()
+        {
+            var warnings = new List<string>();
+            if (Environment == MlContract.TacticalV2Version && Rules != null && Episode != null && TacticalV2 != null)
+            {
+                int minimum = TacticalV2Config.MinimumMaxSteps(TacticalV2.StartingUnitCount, Rules.RoundCap);
+                if (Episode.MaxSteps < minimum)
+                {
+                    warnings.Add(
+                        $"tactical-v2 episode.max_steps ({Episode.MaxSteps}) is insufficient to reach the " +
+                        $"round cap ({Rules.RoundCap}) for {TacticalV2.StartingUnitCount} starting units; " +
+                        $"minimum required is {minimum}");
+                }
+            }
+            return warnings;
         }
 
         public EnvConfig BuildTactical()
@@ -424,7 +452,7 @@ namespace HexWars.Engine.Rl
     public sealed class TrainingRuleConfig
     {
         public int ActionsPerTurn;
-        public int RoundCap = 100;
+        public int RoundCap = GameConfig.DefaultRoundCap;
         public int StartingPoints = 12;
         public bool FogOfWar;
         public bool BiomesEnabled;

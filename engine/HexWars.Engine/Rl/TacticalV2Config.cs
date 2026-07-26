@@ -96,7 +96,7 @@ namespace HexWars.Engine.Rl
                 .ToArray()),
             StartingUnitCount = 3,
             MaxControllableUnits = 3,
-            MaxSteps = 600,
+            MaxSteps = DefaultMaxSteps(3, GameConfig.DefaultRoundCap),
             ShapeScale = 0.01f,
             StepPenalty = 0.005f,
             ClosingWeight = 0.02f,
@@ -104,6 +104,27 @@ namespace HexWars.Engine.Rl
             PointsWeight = 0.5f,
             PlacementPolicy = "symmetric-random-v1",
         };
+
+        /// <summary>RL actions (each move/attack/deploy/end-turn call counts as one) both seats together
+        /// can spend in a single round: one action per starting-unit slot plus an end-turn, per seat.
+        /// This is the "~26 actions/round" a 12-unit tactical-v2 army spends, matching the 600-step
+        /// tactical-v2 default that was tuned for the old 3-unit army and silently truncated (faking a
+        /// draw) long before annihilation or the engine's own round cap for larger armies.</summary>
+        public static int ActionsPerRound(int startingUnitCount) => 2 * (startingUnitCount + 1);
+
+        /// <summary>The fewest RL-action MaxSteps that lets a <paramref name="startingUnitCount"/>-unit
+        /// tactical-v2 army play out every round up to <paramref name="roundCap"/> before the RL step
+        /// budget can truncate the episode first. Below this, the RL layer pre-empts the engine's own
+        /// backstop and reports a truncated (not terminal) draw the game itself never reached.</summary>
+        public static int MinimumMaxSteps(int startingUnitCount, int roundCap) =>
+            ActionsPerRound(startingUnitCount) * roundCap;
+
+        /// <summary>The recommended MaxSteps default for a new tactical-v2 scenario: the bare minimum
+        /// needed to reach <paramref name="roundCap"/> (see <see cref="MinimumMaxSteps"/>), plus one
+        /// extra round's worth of actions as headroom so the engine's own terminal check — not the RL
+        /// step budget — always decides how the game ends.</summary>
+        public static int DefaultMaxSteps(int startingUnitCount, int roundCap) =>
+            MinimumMaxSteps(startingUnitCount, roundCap) + ActionsPerRound(startingUnitCount);
 
         public IReadOnlyList<string> Validate()
         {

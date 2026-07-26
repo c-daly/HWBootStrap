@@ -331,6 +331,46 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV2Scenario_DefaultMaxStepsIsDerivedFromRoundCapAndStartingUnitCount()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+
+            Assert.That(scenario.Episode.MaxSteps, Is.EqualTo(
+                TacticalV2Config.DefaultMaxSteps(scenario.TacticalV2.StartingUnitCount, scenario.Rules.RoundCap)));
+            Assert.That(scenario.Rules.RoundCap, Is.EqualTo(GameConfig.DefaultRoundCap));
+        }
+
+        [Test]
+        public void Warnings_IsEmptyForTacticalV1AndAdaptive()
+        {
+            Assert.That(TrainingScenario.CreateStandard("tactical-v1").Warnings(), Is.Empty);
+            Assert.That(TrainingScenario.CreateStandard("adaptive-v1").Warnings(), Is.Empty);
+        }
+
+        [Test]
+        public void TacticalV2Scenario_WarnsButDoesNotFailValidationWhenMaxStepsCannotReachRoundCap()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.StartingUnitCount = 12;
+            scenario.TacticalV2.MaxControllableUnits = 12;
+            scenario.Episode.MaxSteps = 600; // the old, pre-fix magic constant — too small for 12 units
+
+            Assert.That(scenario.Validate(), Is.Empty,
+                "an old-style scenario.json with an undersized max_steps must still validate " +
+                "(warning-only) so existing runs keep loading for resume/Arena");
+            Assert.That(scenario.Warnings(), Has.Some.Contains("insufficient to reach the round cap"));
+            Assert.DoesNotThrow(() => scenario.BuildTacticalV2());
+        }
+
+        [Test]
+        public void TacticalV2Scenario_DoesNotWarnWhenMaxStepsIsSufficient()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+
+            Assert.That(scenario.Warnings(), Is.Empty);
+        }
+
+        [Test]
         public void TacticalV2Scenario_BuildsSavedCatalogAndCount()
         {
             TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");

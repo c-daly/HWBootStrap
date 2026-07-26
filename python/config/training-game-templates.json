@@ -147,7 +147,7 @@
         "generator_health": 3
       },
       "episode": {
-        "max_steps": 600
+        "max_steps": 808
       },
       "reward": {
         "shape_scale": 0.01,
@@ -268,7 +268,7 @@
         "generator_health": 3
       },
       "episode": {
-        "max_steps": 1200
+        "max_steps": 1608
       },
       "reward": {
         "shape_scale": 0.01,
@@ -389,7 +389,7 @@
         "generator_health": 3
       },
       "episode": {
-        "max_steps": 1200
+        "max_steps": 1208
       },
       "reward": {
         "shape_scale": 0.01,

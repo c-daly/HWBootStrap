@@ -12,6 +12,8 @@ from ml_lab.scenarios import (
     DEFAULT_TEMPLATE_LIBRARY,
     load_template_library,
     resolve_scenario,
+    tactical_v2_round_cap_minimum,
+    tactical_v2_round_cap_warning,
     validate_handshake,
     validate_scenario_document,
 )
@@ -123,6 +125,9 @@ def tactical_v2_document(*, starting_units: int = 3) -> dict:
         "placement_policy": "symmetric-random-v1",
         "templates": copy.deepcopy(TACTICAL_V2_TEMPLATES),
     }
+    # Big enough to reach round_cap for any starting_units this helper is called with, so tests that
+    # aren't specifically exercising the round-cap warning don't spuriously trigger one.
+    document["episode"]["max_steps"] = tactical_v2_round_cap_minimum(document)
     return document
 
 
@@ -188,9 +193,12 @@ def test_builtin_library_presets_have_exact_horizons_and_geometry() -> None:
         ("tactical-standard", 13, 9, 3, 100, 600),
         ("tactical-long-battle", 13, 9, 3, 200, 1200),
         ("tactical-large-battle", 24, 16, 4, 150, 1200),
-        ("tactical-v2-standard", 13, 9, 3, 100, 600),
-        ("tactical-v2-long-battle", 13, 9, 3, 200, 1200),
-        ("tactical-v2-large-battle", 24, 16, 4, 150, 1200),
+        # tactical-v2's max_steps is derived (100-round-rule): round_cap * 2 * (starting_unit_count +
+        # 1) + one extra round's headroom. All three presets have starting_unit_count == 3, so
+        # actions_per_round == 8: 100 -> 808, 200 -> 1608, 150 -> 1208.
+        ("tactical-v2-standard", 13, 9, 3, 100, 808),
+        ("tactical-v2-long-battle", 13, 9, 3, 200, 1608),
+        ("tactical-v2-large-battle", 24, 16, 4, 150, 1208),
         ("adaptive-standard", 13, 9, 3, 100, 900),
         ("adaptive-long-battle", 13, 9, 3, 200, 1800),
         ("adaptive-large-battle", 24, 16, 4, 150, 1800),
@@ -484,6 +492,88 @@ def test_tactical_v2_rejects_invalid_starting_count(count):
     document = tactical_v2_document(starting_units=count)
     with pytest.raises(ValueError, match="between 1 and 12"):
         validate_scenario_document(document)
+
+
+@pytest.mark.parametrize(
+    ("starting_units", "round_cap", "expected_minimum"),
+    [(1, 100, 400), (3, 100, 800), (12, 100, 2600), (3, 200, 1600), (3, 150, 1200)],
+)
+def test_tactical_v2_round_cap_minimum_matches_engine_derivation(
+    starting_units: int, round_cap: int, expected_minimum: int
+) -> None:
+    document = tactical_v2_document(starting_units=starting_units)
+    document["rules"]["round_cap"] = round_cap
+    assert tactical_v2_round_cap_minimum(document) == expected_minimum
+
+
+def test_tactical_v2_round_cap_minimum_is_none_for_non_tactical_v2() -> None:
+    assert tactical_v2_round_cap_minimum(scenario_document("tactical-v1")) is None
+    assert tactical_v2_round_cap_minimum(scenario_document("adaptive-v1")) is None
+
+
+def test_tactical_v2_round_cap_warning_fires_only_when_max_steps_is_undersized() -> None:
+    document = tactical_v2_document(starting_units=12)
+    document["episode"]["max_steps"] = 600  # the old, pre-fix default: too small for 12 units
+
+    warning = tactical_v2_round_cap_warning(document)
+
+    assert warning is not None
+    assert "600" in warning
+    assert "100" in warning  # round cap
+    assert "2600" in warning  # required minimum
+
+    document["episode"]["max_steps"] = 2600
+    assert tactical_v2_round_cap_warning(document) is None
+
+
+def test_run_local_scenario_with_old_small_max_steps_still_resolves_with_a_warning(
+    recwarn: pytest.WarningsChecker,
+) -> None:
+    """An existing run's frozen scenario.json (e.g. a checkpointed multi-million-step training run)
+    predating this check must keep loading for resume/Arena — the shortfall is surfaced as a warning,
+    never a hard rejection, unless the caller opts into enforce_round_cap_minimum (new-run creation)."""
+    document = tactical_v2_document(starting_units=12)
+    document["episode"]["max_steps"] = 600
+    path = write_scenario(document=document)
+
+    scenario = resolve_scenario(environment="tactical-v2", scenario_file=path, template_id=None)
+
+    assert scenario.document["episode"]["max_steps"] == 600
+    assert scenario.warnings
+    assert "insufficient to reach the round cap" in scenario.warnings[0]
+    assert any("insufficient to reach the round cap" in str(w.message) for w in recwarn.list)
+
+
+def test_new_run_with_insufficient_max_steps_is_a_hard_error_when_enforced() -> None:
+    """The hard-error form: a new-run creation path (e.g. the CLI's `train` command, not `resume`)
+    opts into enforce_round_cap_minimum so an undersized max_steps is refused up front, naming the
+    round cap and the required minimum, instead of silently faking a draw during training."""
+    document = tactical_v2_document(starting_units=12)
+    document["episode"]["max_steps"] = 600
+    path = write_scenario(document=document)
+
+    with pytest.raises(ValueError, match=r"round cap \(100\).*minimum required is 2600"):
+        resolve_scenario(
+            environment="tactical-v2",
+            scenario_file=path,
+            template_id=None,
+            enforce_round_cap_minimum=True,
+        )
+
+
+def test_new_run_with_sufficient_max_steps_is_not_rejected_when_enforced() -> None:
+    document = tactical_v2_document(starting_units=12)
+    document["episode"]["max_steps"] = 2600
+    path = write_scenario(document=document)
+
+    scenario = resolve_scenario(
+        environment="tactical-v2",
+        scenario_file=path,
+        template_id=None,
+        enforce_round_cap_minimum=True,
+    )
+
+    assert scenario.warnings == ()
 
 
 def test_tactical_v2_default_template_selection_does_not_collide_with_tactical_v1() -> None:
