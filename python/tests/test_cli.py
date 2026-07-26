@@ -205,7 +205,7 @@ def test_train_resume_uses_source_scenario_instead_of_new_selection(
 
 def _complete_fake_run(runs_root: Path, config: RunConfig) -> Path:
     run_dir = runs_root / config.run_name
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
         run_dir / "run.json",
         {
@@ -482,6 +482,86 @@ def test_train_no_console_output_sinks_incidental_runner_stream_writes(
     assert exit_code == 0
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_train_clean_run_creates_empty_stderr_log_file(tmp_path: Path) -> None:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del server_cmd, scenario
+        return _complete_fake_run(runs_root, config)
+
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "clean-stderr-log",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--json",
+        ],
+        runner=runner,
+        stdout=StringIO(),
+    )
+
+    assert exit_code == 0
+    log_path = tmp_path / "clean-stderr-log" / "train-err.log"
+    assert log_path.is_file()
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_train_child_exception_traceback_lands_in_stderr_log(tmp_path: Path) -> None:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del server_cmd, scenario
+        # Simulate a trainer that gets partway through startup before crashing.
+        run_dir = runs_root / config.run_name
+        (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        raise RuntimeError("simulated trainer crash after startup")
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "crash-stderr-log",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--json",
+        ],
+        runner=runner,
+        stdout=output,
+    )
+
+    assert exit_code == 1
+    log_path = tmp_path / "crash-stderr-log" / "train-err.log"
+    assert log_path.is_file()
+    contents = log_path.read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in contents
+    assert "RuntimeError" in contents
+    assert "simulated trainer crash after startup" in contents
+
+    # The --json stdout error protocol must stay untouched by the new stderr capture.
+    payload = json.loads(output.getvalue())
+    assert payload["ok"] is False
+    assert payload["result"]["error"] == "RuntimeError"
 
 
 def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets(

@@ -161,7 +161,12 @@ def create_run(
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
     run_dir = runs_root / config.run_name
-    run_dir.mkdir()
+    # The CLI may have already created an empty run directory (e.g. to host a
+    # stderr capture file opened before this manifest exists). A run is only
+    # "existing" once it has a manifest, so that is the overwrite guard.
+    if (run_dir / "run.json").exists():
+        raise FileExistsError(run_dir / "run.json")
+    run_dir.mkdir(exist_ok=True)
     (run_dir / "checkpoints").mkdir()
     (run_dir / "replays").mkdir()
     scenario.write(run_dir / "scenario.json")

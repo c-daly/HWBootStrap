@@ -8,10 +8,11 @@ import json
 import os
 import sys
 import time
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import traceback
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterator, TextIO
 
 from .benchmark import benchmark_gymserver
 from .contracts import RunConfig, request_stop
@@ -583,6 +584,49 @@ def _dispatch(
     raise AssertionError(f"unhandled command {args.command!r}")
 
 
+def _training_run_dir(args: argparse.Namespace) -> Path:
+    return Path(args.runs_root) / args.run
+
+
+@contextmanager
+def _capture_stderr_to_file(path: Path) -> Iterator[TextIO]:
+    """Duplicate the process's stderr onto ``path`` for the lifetime of the context.
+
+    Trainers launched detached by the Unity ML Lab have their console discarded, so an
+    uncaught traceback, a CUDA/native fault, or worker/SB3 noise written to stderr was
+    previously unrecoverable. The file is opened line-buffered and created unconditionally
+    (it may legitimately stay empty on a clean run). Both ``sys.stderr`` and the raw OS
+    file descriptor are redirected so writes land in the file whether they come from
+    Python, a native extension, or a child process inheriting this process's stderr handle.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(path, "w", buffering=1, encoding="utf-8", errors="replace")
+    original_stderr = sys.stderr
+    target_fd: int | None = None
+    saved_fd: int | None = None
+    try:
+        target_fd = original_stderr.fileno()
+    except (OSError, ValueError, AttributeError):
+        target_fd = None
+    if target_fd is not None:
+        try:
+            saved_fd = os.dup(target_fd)
+            os.dup2(log_file.fileno(), target_fd)
+        except OSError:
+            saved_fd = None
+    sys.stderr = log_file
+    try:
+        yield log_file
+    finally:
+        sys.stderr = original_stderr
+        if target_fd is not None and saved_fd is not None:
+            try:
+                os.dup2(saved_fd, target_fd)
+            finally:
+                os.close(saved_fd)
+        log_file.close()
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -595,6 +639,11 @@ def main(
     human_follow = args.command == "status" and args.follow and not args.json
     no_console_output = getattr(args, "no_console_output", False)
     with ExitStack() as console_stack:
+        stderr_log: TextIO | None = None
+        if args.command in {"train", "resume"}:
+            stderr_log = console_stack.enter_context(
+                _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
+            )
         if no_console_output:
             sink = console_stack.enter_context(
                 open(os.devnull, "w", encoding="utf-8")
@@ -613,6 +662,9 @@ def main(
                 ),
             )
         except Exception as error:
+            if stderr_log is not None:
+                traceback.print_exc(file=stderr_log)
+                stderr_log.flush()
             if no_console_output:
                 return 1
             if args.json:

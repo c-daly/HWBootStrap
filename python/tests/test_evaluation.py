@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 
 from ml_lab.contracts import EnvironmentContract
-from ml_lab.controllers import ControllerSpec, ResolvedController
-from ml_lab.io import read_json
+from ml_lab.controllers import ControllerResolver, ControllerSpec, ResolvedController
+from ml_lab.io import atomic_write_json, read_json
 
 
 @pytest.fixture
@@ -134,6 +134,46 @@ def test_controller_identity_preserves_scripted_name_and_checkpoint_metadata(
     assert identity["algorithm"] == "maskable_ppo"
     assert identity["step"] == 64
     assert identity["contract_hash"] == contract.contract_hash
+
+
+def test_evaluation_controller_resolution_loads_checkpoints_on_cpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    """evaluate_controllers resolves both seats through ControllerResolver, which must
+    always load checkpoints on CPU: mirrors policy_server's documented rule that
+    inference runs on CPU so it never competes with training for the GPU."""
+    calls: list[dict] = []
+
+    class _FakeMaskablePPO:
+        @classmethod
+        def load(cls, path, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                observation_space=SimpleNamespace(shape=(contract.observation_size,)),
+                action_space=SimpleNamespace(n=contract.action_size),
+            )
+
+    monkeypatch.setattr("sb3_contrib.MaskablePPO", _FakeMaskablePPO)
+
+    run = tmp_path / "eval-run"
+    (run / "checkpoints").mkdir(parents=True)
+    checkpoint = run / "checkpoints" / "step_000000064.zip"
+    checkpoint.write_bytes(b"model")
+    atomic_write_json(
+        run / "run.json",
+        {
+            "schema_version": 1,
+            "config": {"algorithm": "maskable_ppo"},
+            "contract": contract.to_dict(),
+            "latest_checkpoint": "checkpoints/step_000000064.zip",
+            "latest_checkpoint_step": 64,
+        },
+    )
+
+    resolved = ControllerResolver().resolve(f"run:{run}")
+
+    assert resolved.model is not None
+    assert calls == [{"device": "cpu"}]
 
 
 def test_evaluation_uses_held_out_seeds_reciprocal_seats_masks_and_identity(

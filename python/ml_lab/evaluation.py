@@ -429,6 +429,9 @@ def evaluate_controllers(
     output_path: Path | None = None,
 ) -> dict[str, Any]:
     """Resolve any two supported controller specs and evaluate them headlessly."""
+    # ControllerResolver's default model_loader (ml_lab.controllers.load_model) always
+    # loads checkpoints with device="cpu", mirroring policy_server's documented rule:
+    # inference must never compete with training for the GPU.
     resolver = ControllerResolver()
     candidate = resolver.resolve(p0)
     opponent = resolver.resolve(p1)

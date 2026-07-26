@@ -128,6 +128,48 @@ def _write_run(
     return run
 
 
+def test_load_model_forces_cpu_device_for_maskable_ppo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mirrors policy_server's documented rule: inference always runs on CPU so
+    checkpoint-time evaluation never competes with training for the GPU."""
+    calls: list[dict] = []
+
+    class _FakeMaskablePPO:
+        @classmethod
+        def load(cls, path, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(path=path)
+
+    monkeypatch.setattr("sb3_contrib.MaskablePPO", _FakeMaskablePPO)
+    checkpoint = tmp_path / "model.zip"
+    checkpoint.write_bytes(b"model")
+
+    controller_module.load_model(checkpoint, "maskable_ppo")
+
+    assert calls == [{"device": "cpu"}]
+
+
+def test_load_model_forces_cpu_device_for_masked_dqn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict] = []
+
+    class _FakeDQN:
+        @classmethod
+        def load(cls, path, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(path=path)
+
+    monkeypatch.setattr("stable_baselines3.DQN", _FakeDQN)
+    checkpoint = tmp_path / "model.zip"
+    checkpoint.write_bytes(b"model")
+
+    controller_module.load_model(checkpoint, "masked_dqn")
+
+    assert calls == [{"device": "cpu"}]
+
+
 def test_scripted_opponent_snapshot_retains_exact_name() -> None:
     assert snapshot_opponents({"kind": "scripted", "name": "random"}) == {
         "kind": "scripted",
