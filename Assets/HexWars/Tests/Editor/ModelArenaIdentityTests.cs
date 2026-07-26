@@ -292,5 +292,51 @@ namespace HexWars.Presentation.Tests
             Assert.That(ModelArenaIdentityOverlay.MetricsText(unscored), Does.Contain("0 pts"),
                 "points must display continuously, including zero, per spec \"Player Point Totals\"");
         }
+
+        // ---- Comfort controls (Sound / Fullscreen) row layout ----
+
+        [Test]
+        public void ComfortControlsRowIndex_ClaimsTheRowAfterFogWhenShown()
+        {
+            Assert.That(ModelArenaIdentityOverlay.ComfortControlsRowIndex(2, fogRowShown: false), Is.EqualTo(2));
+            Assert.That(ModelArenaIdentityOverlay.ComfortControlsRowIndex(2, fogRowShown: true), Is.EqualTo(3));
+        }
+
+        [Test]
+        public void ComfortControlsRowRect_StacksBelowIdentityRowsAndClaimsAnExtraRowWhenFogShown()
+        {
+            Rect withoutFog = ModelArenaIdentityOverlay.ComfortControlsRowRect(2, fogRowShown: false, 1280f, false);
+            Rect withFog = ModelArenaIdentityOverlay.ComfortControlsRowRect(2, fogRowShown: true, 1280f, false);
+
+            Assert.That(withFog.y, Is.GreaterThan(withoutFog.y),
+                "when the fog toggle claims a row, comfort controls must stack one row further down");
+            Assert.That(withoutFog.x, Is.EqualTo(withFog.x), "both share the same left corner as the identity rows");
+        }
+
+        [Test]
+        public void SoundAndFullscreenToggleRects_SitSideBySideWithoutOverlappingOrOverflowingTheRow()
+        {
+            Rect row = ModelArenaIdentityOverlay.ComfortControlsRowRect(2, fogRowShown: true, 1280f, false);
+            Rect sound = ModelArenaIdentityOverlay.SoundToggleRect(row);
+            Rect fullscreen = ModelArenaIdentityOverlay.FullscreenToggleRect(row);
+
+            Assert.That(sound.x, Is.EqualTo(row.x));
+            Assert.That(sound.xMax, Is.LessThanOrEqualTo(fullscreen.x), "Sound must sit fully left of Fullscreen");
+            Assert.That(fullscreen.xMax, Is.LessThanOrEqualTo(row.xMax), "Fullscreen must not overflow the row");
+            Assert.That(sound.y, Is.EqualTo(row.y));
+            Assert.That(fullscreen.y, Is.EqualTo(row.y));
+            Assert.That(sound.height, Is.EqualTo(row.height));
+            Assert.That(fullscreen.height, Is.EqualTo(row.height));
+        }
+
+        [Test]
+        public void ComfortControlsRowRect_NarrowUsesPortraitRowHeightForSpacing()
+        {
+            Rect landscape = ModelArenaIdentityOverlay.ComfortControlsRowRect(1, fogRowShown: false, 1280f, false);
+            Rect portrait = ModelArenaIdentityOverlay.ComfortControlsRowRect(1, fogRowShown: false, 390f, true);
+
+            Assert.That(portrait.y, Is.GreaterThan(landscape.y),
+                "portrait rows are taller, so the same row index sits further down the screen");
+        }
     }
 }

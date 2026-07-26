@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Reflection;
 using UnityEngine;
 using HexWars.Engine;
 
@@ -35,7 +36,8 @@ namespace HexWars.Presentation
                 {
                     DrawRow(rows[index], RowRect(index, logicalWidth, narrow), narrow);
                 }
-                DrawFogMarkingToggle(rows.Length, logicalWidth, narrow);
+                bool fogRowShown = DrawFogMarkingToggle(rows.Length, logicalWidth, narrow);
+                DrawComfortControls(rows.Length, fogRowShown, logicalWidth, narrow);
             }
             finally { GUI.matrix = previousMatrix; }
         }
@@ -45,10 +47,12 @@ namespace HexWars.Presentation
         /// there is nothing for it to hide (spec: "When fog of war is disabled, no marking is drawn").
         /// Placed directly under the identity rows, same corner and row rhythm as
         /// <see cref="RowRect"/>.</summary>
-        void DrawFogMarkingToggle(int rowCount, float logicalWidth, bool narrow)
+        /// <returns>Whether the row was actually drawn — callers stacking further control rows beneath
+        /// it (<see cref="DrawComfortControls"/>) need to know whether to claim its row slot.</returns>
+        bool DrawFogMarkingToggle(int rowCount, float logicalWidth, bool narrow)
         {
             GameState presented = _driver.PresentedState;
-            if (presented == null || !presented.Config.FogOfWar) return;
+            if (presented == null || !presented.Config.FogOfWar) return false;
 
             float height = narrow ? PortraitRowHeight : LandscapeRowHeight;
             var rect = new Rect(Padding, Padding + rowCount * (height + Padding), 240f, 26f);
@@ -60,7 +64,65 @@ namespace HexWars.Presentation
 
             bool show = GUI.Toggle(rect, _driver.ShowFogMarking, " Fog marking (acting player)", _toggleStyle);
             if (show != _driver.ShowFogMarking) _driver.SetShowFogMarking(show);
+            return true;
         }
+
+        /// <summary>Spec: viewer comfort controls — Sound (bound to the persisted
+        /// <see cref="SoundSettings.MuteAll"/>) and, in the editor, Fullscreen (maximizes/restores the
+        /// Game view). Drawn as one row directly beneath the fog-marking toggle when it is shown, or in
+        /// its row slot when it is not — same corner and row rhythm as <see cref="RowRect"/>.</summary>
+        void DrawComfortControls(int rowCount, bool fogRowShown, float logicalWidth, bool narrow)
+        {
+            Rect row = ComfortControlsRowRect(rowCount, fogRowShown, logicalWidth, narrow);
+            DrawSoundToggle(SoundToggleRect(row));
+#if UNITY_EDITOR
+            DrawFullscreenToggle(FullscreenToggleRect(row));
+#endif
+        }
+
+        void DrawSoundToggle(Rect rect)
+        {
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.72f);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previousColor;
+
+            bool soundOn = GUI.Toggle(rect, !SoundSettings.MuteAll, " Sound", _toggleStyle);
+            bool wantMute = !soundOn;
+            if (wantMute != SoundSettings.MuteAll) SoundSettings.MuteAll = wantMute;
+        }
+
+#if UNITY_EDITOR
+        void DrawFullscreenToggle(Rect rect)
+        {
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.72f);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previousColor;
+
+            bool maximized = GameViewFullscreen.IsMaximized();
+            bool want = GUI.Toggle(rect, maximized, " Fullscreen", _toggleStyle);
+            if (want != maximized) GameViewFullscreen.SetMaximized(want);
+        }
+#endif
+
+        /// <summary>Row slot for the comfort-controls row: right after the identity rows, plus one more
+        /// row if the fog-marking toggle claimed a slot above it.</summary>
+        public static int ComfortControlsRowIndex(int rowCount, bool fogRowShown) =>
+            rowCount + (fogRowShown ? 1 : 0);
+
+        public static Rect ComfortControlsRowRect(int rowCount, bool fogRowShown, float logicalWidth, bool narrow)
+        {
+            float height = narrow ? PortraitRowHeight : LandscapeRowHeight;
+            int index = ComfortControlsRowIndex(rowCount, fogRowShown);
+            return new Rect(Padding, Padding + index * (height + Padding), 240f, 26f);
+        }
+
+        public static Rect SoundToggleRect(Rect comfortRowRect) =>
+            new Rect(comfortRowRect.x, comfortRowRect.y, 112f, comfortRowRect.height);
+
+        public static Rect FullscreenToggleRect(Rect comfortRowRect) =>
+            new Rect(comfortRowRect.x + 120f, comfortRowRect.y, 120f, comfortRowRect.height);
 
         public static bool ShouldRender(ModelDuelDriver driver) => driver != null
             && driver.isActiveAndEnabled && driver.ShouldShowArenaOverlays;
@@ -155,4 +217,44 @@ namespace HexWars.Presentation
             GUI.Label(new Rect(metricsX, rect.y, metricsWidth, rect.height), metrics, style);
         }
     }
+
+#if UNITY_EDITOR
+    /// <summary>Reads/writes the in-editor "maximize on play" equivalent for the Game view — the closest
+    /// runtime analog to OS fullscreen, since a standalone build has no Game view to maximize. Reflection
+    /// is required because <c>UnityEditor.GameView</c> is internal; this Presentation asmdef is a normal
+    /// runtime assembly (see <see cref="HexWars.Presentation.SpectatorDriver"/> for the same
+    /// <c>#if UNITY_EDITOR</c> + <c>UnityEditor.*</c> pattern already in use here), so it compiles only
+    /// into editor builds and is never linked into a player.</summary>
+    static class GameViewFullscreen
+    {
+        static System.Type _gameViewType;
+        static PropertyInfo _maximizedProperty;
+        static bool _resolveFailed;
+
+        static bool TryResolve(out UnityEditor.EditorWindow window, out PropertyInfo maximizedProperty)
+        {
+            window = null;
+            maximizedProperty = null;
+            if (_resolveFailed) return false;
+            if (_gameViewType == null)
+                _gameViewType = typeof(UnityEditor.EditorWindow).Assembly.GetType("UnityEditor.GameView");
+            if (_gameViewType == null) { _resolveFailed = true; return false; }
+            if (_maximizedProperty == null)
+                _maximizedProperty = _gameViewType.GetProperty("maximized", BindingFlags.Public | BindingFlags.Instance);
+            if (_maximizedProperty == null) { _resolveFailed = true; return false; }
+
+            window = UnityEditor.EditorWindow.GetWindow(_gameViewType);
+            maximizedProperty = _maximizedProperty;
+            return window != null;
+        }
+
+        public static bool IsMaximized() =>
+            TryResolve(out var window, out var property) && (bool)property.GetValue(window);
+
+        public static void SetMaximized(bool maximized)
+        {
+            if (TryResolve(out var window, out var property)) property.SetValue(window, maximized);
+        }
+    }
+#endif
 }

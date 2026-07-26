@@ -20,6 +20,7 @@ namespace HexWars.Presentation
     {
         UnitTooltip _tooltip;
         GameBootstrap _game;
+        ModelDuelDriver _duelDriver;
         BarracksPanel _barracks;
         BoardRenderer _board;
         MovementHighlightController _movementHighlights;
@@ -45,6 +46,7 @@ namespace HexWars.Presentation
         void Awake()
         {
             _tooltip = GetComponent<UnitTooltip>();
+            _duelDriver = GetComponent<ModelDuelDriver>(); // arena: sits on the same GameObject, no _game
             BuildMarker();
         }
 
@@ -86,14 +88,22 @@ namespace HexWars.Presentation
             bool isTouch = pointer is Touchscreen;
             if (!isTouch) UpdateDesktopMovementPreview(hoveredTile);
 
+            GameState inspectionState = ResolveInspectionState(
+                _game != null ? _game.State : null,
+                _duelDriver != null ? _duelDriver.PresentedState : null);
+
             var previewRoute = PreviewRoute();
             if (hoveredUnit != null)
             {
                 var hoveredRoute = hoveredUnit.Unit.Id == _selectedId ? previewRoute : null;
-                _tooltip.Show(hoveredUnit.Unit, mp, _game.State, hoveredRoute);
+                if (inspectionState != null) _tooltip.Show(hoveredUnit.Unit, mp, inspectionState, hoveredRoute);
+                else _tooltip.Hide();
             }
             else if (_selected != null)
-                _tooltip.Show(_selected.Unit, mp, _game.State, previewRoute);
+            {
+                if (inspectionState != null) _tooltip.Show(_selected.Unit, mp, inspectionState, previewRoute);
+                else _tooltip.Hide();
+            }
             else _tooltip.Hide();
 
             // act on a TAP (press + release without dragging) so a drag is free to pan the camera
@@ -180,6 +190,15 @@ namespace HexWars.Presentation
             NotifyIfWaiting(unit, tile);
             Select(unit);
         }
+
+        /// <summary>Which <see cref="GameState"/> hover/inspection reads against: the live simulation
+        /// state when a <see cref="GameBootstrap"/> is present (the normal desktop/mobile game), falling
+        /// back to the arena's <see cref="ModelDuelDriver.PresentedState"/> (what is actually on screen,
+        /// never the sim running ahead of presentation) when there is no <c>_game</c> — the arena
+        /// GameObject never carries one. Null when neither source has a state yet (pre-initialize);
+        /// callers hide the tooltip and do nothing in that case rather than showing a stateless one.</summary>
+        public static GameState ResolveInspectionState(GameState gameState, GameState presentedState) =>
+            gameState ?? presentedState;
 
         static bool HasActed(System.Collections.Generic.IReadOnlyCollection<int> ids, int id)
         {
