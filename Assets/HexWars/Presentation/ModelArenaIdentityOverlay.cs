@@ -227,10 +227,21 @@ namespace HexWars.Presentation
     /// <c>#if UNITY_EDITOR</c> + <c>UnityEditor.*</c> pattern already in use here), so it compiles only
     /// into editor builds and is never linked into a player. Every reflection call is wrapped in
     /// try/catch — an unresolvable type/property is the expected "old Editor version" case already
-    /// latched via <see cref="Unavailable"/>, but <see cref="UnityEditor.EditorWindow.GetWindow"/> and
-    /// the property get/set can themselves throw (e.g. no Game view exists yet, as in
-    /// <c>-batchmode</c>), and an uncaught throw here becomes a per-OnGUI-event exception. On any
-    /// failure the toggle just latches unavailable and silently disappears rather than throwing.</summary>
+    /// latched via <see cref="Unavailable"/>, but the property get/set can themselves throw (e.g. no
+    /// Game view exists yet, as in <c>-batchmode</c>), and an uncaught throw here becomes a
+    /// per-OnGUI-event exception. On any failure the toggle just latches unavailable and silently
+    /// disappears rather than throwing.
+    ///
+    /// INVARIANT: nothing in this class may ever call <c>UnityEditor.EditorWindow.GetWindow</c> or
+    /// <c>EditorWindow.Focus()</c>. <c>GetWindow</c> both creates a Game view if none exists AND
+    /// focuses/activates it; an earlier version of <see cref="TryResolve"/> used it, and because
+    /// <see cref="IsMaximized"/> is polled from every <c>OnGUI</c> event this toggle draws — i.e.
+    /// continuously while the arena overlay is on screen — that re-activated the Unity Editor window
+    /// every single frame, stealing OS foreground from whatever application the user was actually
+    /// using for as long as the overlay stayed visible. Window lookups here use
+    /// <see cref="Resources.FindObjectsOfTypeAll"/> instead, which finds an existing Game view
+    /// without creating or focusing one; when no Game view exists the toggle just reports "not
+    /// maximized" / no-ops rather than conjuring a focus-stealing window into existence.</summary>
     public static class GameViewFullscreen
     {
         static System.Type _gameViewType;
@@ -269,9 +280,17 @@ namespace HexWars.Presentation
                     _maximizedProperty = _gameViewType.GetProperty("maximized", BindingFlags.Public | BindingFlags.Instance);
                 if (_maximizedProperty == null) { _resolveFailed = true; return false; }
 
-                window = UnityEditor.EditorWindow.GetWindow(_gameViewType);
+                // Never UnityEditor.EditorWindow.GetWindow here (see the class doc's INVARIANT): it
+                // both creates a Game view when none exists and focuses/activates it, which is exactly
+                // the per-OnGUI focus-stealing bug this guard exists to prevent. FindObjectsOfTypeAll
+                // finds an existing instance, if any, without creating or focusing anything.
+                UnityEngine.Object[] existing = Resources.FindObjectsOfTypeAll(_gameViewType);
+                if (existing == null || existing.Length == 0)
+                    return false; // No Game view open yet — transient, so this must NOT latch _resolveFailed.
+                window = existing[0] as UnityEditor.EditorWindow;
+                if (window == null) return false;
                 maximizedProperty = _maximizedProperty;
-                return window != null;
+                return true;
             }
             catch (Exception)
             {

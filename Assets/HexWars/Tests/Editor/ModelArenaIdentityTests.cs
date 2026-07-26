@@ -403,5 +403,32 @@ namespace HexWars.Presentation.Tests
                 GameViewFullscreen.ResetCacheForTests();
             }
         }
+
+        // Locks the no-create/no-focus semantics behind the fix for the per-frame OS-foreground-theft
+        // bug: TryResolve must never call EditorWindow.GetWindow (which creates AND focuses a Game
+        // view), so under a batch-mode test run — where no Game view instance exists — resolution
+        // must fail closed (IsMaximized false) without latching Unavailable, since a missing window
+        // instance is transient (a Game view can still open later) unlike an unresolvable type/property.
+        [Test]
+        public void GameViewFullscreen_RealTypeButNoGameViewInstance_ReturnsFalseWithoutLatching()
+        {
+            GameViewFullscreen.ResetCacheForTests();
+            try
+            {
+                Assert.That(GameViewFullscreen.IsMaximized(), Is.False,
+                    "no Game view instance exists under batch-mode test execution, and resolution " +
+                    "must never create one via GetWindow");
+                Assert.That(GameViewFullscreen.Unavailable, Is.False,
+                    "a missing window instance is transient (unlike an unresolvable type) and must " +
+                    "not latch Unavailable");
+                Assert.DoesNotThrow(() => GameViewFullscreen.SetMaximized(true),
+                    "SetMaximized must no-op rather than throw when there is no window to set");
+                Assert.That(GameViewFullscreen.Unavailable, Is.False);
+            }
+            finally
+            {
+                GameViewFullscreen.ResetCacheForTests();
+            }
+        }
     }
 }

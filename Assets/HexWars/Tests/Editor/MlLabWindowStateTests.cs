@@ -141,48 +141,80 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void WatchStartPolicy_ManifestMissingBeforeDeadline_WaitsAndRetries()
+        public void WatchStartPolicy_CheckpointNotReadyBeforeCeiling_WaitsAndRetriesWhileTrainingAlive()
         {
             Assert.That(
                 MlWatchStartPolicy.Decide(
                     pendingRunDirectoryMatchesSelection: true,
-                    manifestExists: false,
-                    retryDeadlinePassed: false),
+                    checkpointReady: false,
+                    trainingAlive: true,
+                    ceilingDeadlinePassed: false),
                 Is.EqualTo(MlWatchStartDecision.WaitAndRetry));
         }
 
         [Test]
-        public void WatchStartPolicy_ManifestAppears_WatchesExactlyOnce()
+        public void WatchStartPolicy_CheckpointReady_WatchesExactlyOnce()
         {
             Assert.That(
                 MlWatchStartPolicy.Decide(
                     pendingRunDirectoryMatchesSelection: true,
-                    manifestExists: true,
-                    retryDeadlinePassed: false),
+                    checkpointReady: true,
+                    trainingAlive: true,
+                    ceilingDeadlinePassed: false),
                 Is.EqualTo(MlWatchStartDecision.Watch));
         }
 
         [Test]
-        public void WatchStartPolicy_ManifestAppearsRightAtDeadline_StillWatchesInsteadOfGivingUp()
+        public void WatchStartPolicy_CheckpointReadyRightAtCeiling_StillWatchesInsteadOfGivingUp()
         {
-            // The manifest landing is what matters; a deadline check that only just tripped must not
-            // pre-empt a manifest that is already there.
+            // The checkpoint landing is what matters; a ceiling check that only just tripped must not
+            // pre-empt a checkpoint that is already validated and ready.
             Assert.That(
                 MlWatchStartPolicy.Decide(
                     pendingRunDirectoryMatchesSelection: true,
-                    manifestExists: true,
-                    retryDeadlinePassed: true),
+                    checkpointReady: true,
+                    trainingAlive: true,
+                    ceilingDeadlinePassed: true),
                 Is.EqualTo(MlWatchStartDecision.Watch));
         }
 
         [Test]
-        public void WatchStartPolicy_DeadlinePassesWithoutManifest_GivesUpWithNoInfiniteSpin()
+        public void WatchStartPolicy_CheckpointReadyEvenAfterTrainingEnded_StillWatches()
+        {
+            // Training can legitimately finish in the same tick its final checkpoint becomes
+            // validated; the checkpoint being ready must win over "training is no longer alive".
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    checkpointReady: true,
+                    trainingAlive: false,
+                    ceilingDeadlinePassed: false),
+                Is.EqualTo(MlWatchStartDecision.Watch));
+        }
+
+        [Test]
+        public void WatchStartPolicy_CeilingPassesWithoutCheckpoint_GivesUpWithNoInfiniteSpin()
         {
             Assert.That(
                 MlWatchStartPolicy.Decide(
                     pendingRunDirectoryMatchesSelection: true,
-                    manifestExists: false,
-                    retryDeadlinePassed: true),
+                    checkpointReady: false,
+                    trainingAlive: true,
+                    ceilingDeadlinePassed: true),
+                Is.EqualTo(MlWatchStartDecision.GiveUp));
+        }
+
+        [Test]
+        public void WatchStartPolicy_TrainingDeadBeforeCheckpointReady_GivesUpWithoutWaitingForCeiling()
+        {
+            // Training already stopped/completed/failed without ever publishing a validated
+            // checkpoint; there is nothing left to wait for, so this must not spin until the ceiling.
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    checkpointReady: false,
+                    trainingAlive: false,
+                    ceilingDeadlinePassed: false),
                 Is.EqualTo(MlWatchStartDecision.GiveUp));
         }
 
@@ -190,13 +222,14 @@ namespace HexWars.Presentation.Tests
         public void WatchStartPolicy_RunDirectoryChangedMidRetry_DropsTheStaleRetry()
         {
             // A second run started (or the selection changed) while the first was still waiting for
-            // its manifest; the stale retry must never launch a viewer for the old run directory, even
-            // if that old run's manifest shows up or its own deadline has passed.
+            // its checkpoint; the stale retry must never launch a viewer for the old run directory,
+            // even if that old run's checkpoint becomes ready or its own ceiling has passed.
             Assert.That(
                 MlWatchStartPolicy.Decide(
                     pendingRunDirectoryMatchesSelection: false,
-                    manifestExists: true,
-                    retryDeadlinePassed: true),
+                    checkpointReady: true,
+                    trainingAlive: true,
+                    ceilingDeadlinePassed: true),
                 Is.EqualTo(MlWatchStartDecision.Stale));
         }
 

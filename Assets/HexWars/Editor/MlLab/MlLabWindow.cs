@@ -746,24 +746,36 @@ namespace HexWars.Presentation.EditorTools.MlLab
     }
 
     /// <summary>Outcome of <see cref="MlWatchStartPolicy.Decide"/>: whether the Start & Watch
-    /// auto-trigger should launch the viewer now, wait and poll again, give up after the retry
-    /// deadline, or silently drop a retry whose target run directory is no longer the current
-    /// selection.</summary>
+    /// auto-trigger should launch the viewer now, wait and poll again, give up because training ended
+    /// (or the safety-net ceiling passed) before a checkpoint became ready, or silently drop a retry
+    /// whose target run directory is no longer the current selection.</summary>
     public enum MlWatchStartDecision { WaitAndRetry, Watch, GiveUp, Stale }
 
-    /// <summary>Pure decision for the Start & Watch auto-trigger. The Python trainer's first status
-    /// message can arrive a few seconds before run.json is written, so <see
-    /// cref="ReplayViewerMenu.WatchLiveRun"/> (which requires the manifest to exist) cannot be called
-    /// from the very first status poll. This bounds a retry instead of failing outright or spinning
-    /// forever.</summary>
+    /// <summary>Pure decision for the Start & Watch auto-trigger. run.json is written (with
+    /// <c>latest_checkpoint: null</c>) well before the Python trainer publishes its first checkpoint,
+    /// so gating on manifest existence alone let <see cref="ReplayViewerMenu.WatchLiveRun"/> launch
+    /// against a run that had no checkpoint yet — the policy server then fails closed with "run
+    /// manifest is missing latest_checkpoint metadata" (see <c>controllers.py</c>'s
+    /// <c>_resolve_run</c>, which requires that exact field). <see cref="Decide"/> instead gates on
+    /// <paramref name="checkpointReady"/> the caller has already validated the same way (manifest
+    /// exists, <c>latest_checkpoint</c> is a non-blank string naming a checkpoint file that actually
+    /// exists). While not ready, this waits and retries for as long as training is still alive
+    /// (<paramref name="trainingAlive"/>) rather than failing on a fixed short timeout, since a slow
+    /// first checkpoint (long checkpoint interval, slow device) is not an error; a <paramref
+    /// name="ceilingDeadlinePassed"/> ceiling remains only as a safety net against a genuinely stuck
+    /// wait.</summary>
     public static class MlWatchStartPolicy
     {
         public static MlWatchStartDecision Decide(
-            bool pendingRunDirectoryMatchesSelection, bool manifestExists, bool retryDeadlinePassed)
+            bool pendingRunDirectoryMatchesSelection,
+            bool checkpointReady,
+            bool trainingAlive,
+            bool ceilingDeadlinePassed)
         {
             if (!pendingRunDirectoryMatchesSelection) return MlWatchStartDecision.Stale;
-            if (manifestExists) return MlWatchStartDecision.Watch;
-            return retryDeadlinePassed ? MlWatchStartDecision.GiveUp : MlWatchStartDecision.WaitAndRetry;
+            if (checkpointReady) return MlWatchStartDecision.Watch;
+            if (!trainingAlive) return MlWatchStartDecision.GiveUp;
+            return ceilingDeadlinePassed ? MlWatchStartDecision.GiveUp : MlWatchStartDecision.WaitAndRetry;
         }
     }
 
@@ -883,9 +895,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const string PendingWatchRunDirectoryKey = "HexWars.MlLab.PendingWatchRunDirectory";
         const string PendingWatchDeadlineKey = "HexWars.MlLab.PendingWatchDeadline";
         const double PollIntervalSeconds = 1.0;
-        // The Python trainer's first status response can arrive a few seconds before it finishes
-        // writing run.json; bound the Start & Watch retry instead of failing on that first poll.
-        const double WatchManifestRetryTimeoutSeconds = 30.0;
+        // Start & Watch retries until a validated checkpoint appears (see MlWatchStartPolicy) for as
+        // long as training is still alive; this ceiling is only a safety net against a genuinely
+        // stuck wait (e.g. training hung without ever transitioning to a terminal state), not the
+        // normal way out — a slow first checkpoint is not itself an error.
+        const double WatchCeilingTimeoutSeconds = 600.0;
 
         [SerializeField] MlLabConfig _config = new MlLabConfig();
         [SerializeField] bool _resume;
@@ -1964,24 +1978,26 @@ namespace HexWars.Presentation.EditorTools.MlLab
             {
                 _pendingWatchRunDirectory = _selectedRun;
                 _watchRetryDeadline =
-                    EditorApplication.timeSinceStartup + WatchManifestRetryTimeoutSeconds;
+                    EditorApplication.timeSinceStartup + WatchCeilingTimeoutSeconds;
                 AttemptWatch();
             }
             Repaint();
         }
 
-        // Retries the Start & Watch launch until run.json exists, the retry deadline passes, or the
-        // pending run directory is superseded by a different selection. See MlWatchStartPolicy for the
-        // pure decision; this method is just the editor-main-thread plumbing around it.
+        // Retries the Start & Watch launch until a validated checkpoint is ready, training is no
+        // longer alive, the safety-net ceiling passes, or the pending run directory is superseded by a
+        // different selection. See MlWatchStartPolicy for the pure decision; this method is just the
+        // editor-main-thread plumbing (file reads, live training/UI state) around it.
         void AttemptWatch()
         {
             if (this == null || string.IsNullOrEmpty(_pendingWatchRunDirectory)) return;
             string runDirectory = _pendingWatchRunDirectory;
             bool matchesSelection = string.Equals(runDirectory, _selectedRun, StringComparison.Ordinal);
-            bool manifestExists = File.Exists(Path.Combine(runDirectory, "run.json"));
-            bool deadlinePassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
+            bool checkpointReady = RunHasValidatedCheckpoint(runDirectory);
+            bool trainingAlive = _state.Phase != MlLabUiPhase.Completed && _state.Phase != MlLabUiPhase.Failed;
+            bool ceilingPassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
 
-            switch (MlWatchStartPolicy.Decide(matchesSelection, manifestExists, deadlinePassed))
+            switch (MlWatchStartPolicy.Decide(matchesSelection, checkpointReady, trainingAlive, ceilingPassed))
             {
                 case MlWatchStartDecision.Stale:
                     _pendingWatchRunDirectory = string.Empty;
@@ -2003,14 +2019,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 case MlWatchStartDecision.GiveUp:
                     _pendingWatchRunDirectory = string.Empty;
                     _watch.Apply(
-                        MlViewerLaunchResult.Failed(
-                            "Start & Watch gave up: run.json did not appear within " +
-                            WatchManifestRetryTimeoutSeconds.ToString("0", CultureInfo.InvariantCulture) +
-                            "s of the first status."),
+                        MlViewerLaunchResult.Failed(trainingAlive
+                            ? "Start & Watch gave up: no validated checkpoint appeared within " +
+                              (WatchCeilingTimeoutSeconds / 60.0).ToString("0", CultureInfo.InvariantCulture) +
+                              " minute(s) of the first status."
+                            : "Start & Watch gave up: training ended before a validated checkpoint appeared."),
                         _state);
                     Repaint();
                     break;
             }
+        }
+
+        // Mirrors python/ml_lab/controllers.py's ControllerResolver._resolve_run check (the exact
+        // check that raises "run manifest is missing latest_checkpoint metadata"): the manifest must
+        // exist and its latest_checkpoint must be a non-blank string naming a checkpoint file that
+        // actually exists in the run directory. Checking this here — not just run.json's existence —
+        // is what closes the race that let Start & Watch launch a viewer before the policy server had
+        // anything loadable to serve.
+        static bool RunHasValidatedCheckpoint(string runDirectory)
+        {
+            string manifestPath = Path.Combine(runDirectory, "run.json");
+            if (!File.Exists(manifestPath)) return false;
+            try
+            {
+                var manifest = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifestPath));
+                if (manifest == null || string.IsNullOrWhiteSpace(manifest.latest_checkpoint)) return false;
+                return File.Exists(Path.Combine(runDirectory, manifest.latest_checkpoint));
+            }
+            catch (Exception) { return false; }
         }
 
         void OnTrainingExited(int exitCode)
