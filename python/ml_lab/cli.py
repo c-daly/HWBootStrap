@@ -297,6 +297,7 @@ def _training_scenario(args: argparse.Namespace) -> ResolvedScenario:
         environment=environment,
         scenario_file=args.scenario_file,
         template_id=args.template,
+        enforce_round_cap_minimum=True,
     )
 
 
