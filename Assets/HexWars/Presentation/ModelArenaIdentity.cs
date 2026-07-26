@@ -14,6 +14,9 @@ namespace HexWars.Presentation
         public string Record { get; internal set; }
         public string Status { get; internal set; }
         public bool IsActive { get; internal set; }
+        /// <summary>The player's point total from the viewer's <c>PresentedState</c> — never the live
+        /// simulation state, which may already be ahead of what is on screen.</summary>
+        public int Points { get; internal set; }
     }
 
     public static class ModelArenaIdentity
@@ -24,7 +27,8 @@ namespace HexWars.Presentation
             string p0Status = null, string p1Status = null,
             int learnerSeat = -1, int learnerWins = 0,
             int learnerLosses = 0, int learnerDraws = 0,
-            string opponentLabel = null) => new[]
+            string opponentLabel = null,
+            int p0Points = 0, int p1Points = 0) => new[]
         {
             BuildSeat(
                 0, p0Spec, p0, currentSeat == 0,
@@ -32,20 +36,20 @@ namespace HexWars.Presentation
                 learnerSeat < 0 ? p1Wins : learnerSeat == 0 ? learnerLosses : learnerWins,
                 learnerSeat < 0 ? draws : learnerDraws,
                 p0Status, Role(0, learnerSeat),
-                learnerSeat >= 0 && learnerSeat != 0 ? opponentLabel : null),
+                learnerSeat >= 0 && learnerSeat != 0 ? opponentLabel : null, p0Points),
             BuildSeat(
                 1, p1Spec, p1, currentSeat == 1,
                 learnerSeat < 0 ? p1Wins : learnerSeat == 1 ? learnerWins : learnerLosses,
                 learnerSeat < 0 ? p0Wins : learnerSeat == 1 ? learnerLosses : learnerWins,
                 learnerSeat < 0 ? draws : learnerDraws,
                 p1Status, Role(1, learnerSeat),
-                learnerSeat >= 0 && learnerSeat != 1 ? opponentLabel : null),
+                learnerSeat >= 0 && learnerSeat != 1 ? opponentLabel : null, p1Points),
         };
 
         static ModelArenaSeatIdentity BuildSeat(
             int seat, string spec, PolicySeatInfo resolved, bool active,
             int wins, int losses, int draws, string status, string role,
-            string controllerLabel)
+            string controllerLabel, int points)
         {
             bool scripted = string.Equals(spec, "greedy", StringComparison.OrdinalIgnoreCase)
                            || string.Equals(spec, "random", StringComparison.OrdinalIgnoreCase);
@@ -62,6 +66,7 @@ namespace HexWars.Presentation
                 Record = FormatRecord(wins, losses, draws),
                 Status = status ?? string.Empty,
                 IsActive = active,
+                Points = points,
             };
         }
 

@@ -34,9 +34,19 @@ namespace HexWars.Presentation
         MlContract Contract { get; }
         GameState CurrentState { get; }
         bool RequiresContinuation { get; }
+
+        /// <summary>Opt-in (default false): when true, every accepted command captures a
+        /// <see cref="DuelTransition"/> the viewer can drain and play back. The Unity arena driver
+        /// turns this on for every duel it presents; headless training never touches it.</summary>
+        bool CaptureTransitions { get; set; }
+
         ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1);
         ModelDuelView Step(int action);
         ModelDuelView Continue();
+
+        /// <summary>Every accepted-command transition since the last drain (or Reset), in order, then
+        /// clears the queue. See <see cref="DuelTransition"/>.</summary>
+        IReadOnlyList<DuelTransition> DrainTransitions();
     }
 
     public static class ModelDuelEnvironmentFactory
@@ -157,6 +167,12 @@ namespace HexWars.Presentation
         public GameState CurrentState => _environment.State;
         public bool RequiresContinuation => false;
 
+        public bool CaptureTransitions
+        {
+            get => _environment.CaptureTransitions;
+            set => _environment.CaptureTransitions = value;
+        }
+
         public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1) =>
             Convert(_environment.Reset(seed, controller0, controller1, PlayerId.Player0));
 
@@ -164,6 +180,8 @@ namespace HexWars.Presentation
 
         public ModelDuelView Continue() => throw new InvalidOperationException(
             "the tactical environment has no pending continuation");
+
+        public IReadOnlyList<DuelTransition> DrainTransitions() => _environment.DrainTransitions();
 
         static ModelDuelView Convert(DuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, view.Seat, view.Winner,
@@ -190,6 +208,12 @@ namespace HexWars.Presentation
         public GameState CurrentState => _environment.State;
         public bool RequiresContinuation => false;
 
+        public bool CaptureTransitions
+        {
+            get => _environment.CaptureTransitions;
+            set => _environment.CaptureTransitions = value;
+        }
+
         public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1) =>
             Convert(_environment.Reset(seed, controller0, controller1, PlayerId.Player0));
 
@@ -197,6 +221,8 @@ namespace HexWars.Presentation
 
         public ModelDuelView Continue() => throw new InvalidOperationException(
             "the tactical-v2 environment has no pending continuation");
+
+        public IReadOnlyList<DuelTransition> DrainTransitions() => _environment.DrainTransitions();
 
         static ModelDuelView Convert(TacticalV2DuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, (int)view.Seat,
@@ -219,6 +245,12 @@ namespace HexWars.Presentation
         public GameState CurrentState => _environment.DeploymentComplete ? _environment.State : null;
         public bool RequiresContinuation => _environment.AwaitingPostRevealAdvance;
 
+        public bool CaptureTransitions
+        {
+            get => _environment.CaptureTransitions;
+            set => _environment.CaptureTransitions = value;
+        }
+
         public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1)
         {
             IDeploymentPolicy deployment0 = controller0 == null
@@ -232,6 +264,8 @@ namespace HexWars.Presentation
         public ModelDuelView Step(int action) => Convert(_environment.Step(action));
 
         public ModelDuelView Continue() => Convert(_environment.ContinueAfterReveal());
+
+        public IReadOnlyList<DuelTransition> DrainTransitions() => _environment.DrainTransitions();
 
         static ModelDuelView Convert(AdaptiveDuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, view.Seat, view.Winner,

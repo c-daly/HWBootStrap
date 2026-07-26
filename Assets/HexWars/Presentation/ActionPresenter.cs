@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -32,8 +33,19 @@ namespace HexWars.Presentation
 
         public bool IsBusy => _playing || _queue.Count > 0;
 
+        /// <summary>Fires once per queued item, right after its visuals finish and <see cref="Commit"/>
+        /// has landed the token store on `next` — never before, never for a still-mid-flight item. A
+        /// presentation-only consumer without its own polling loop (the ML arena viewer's lagging
+        /// `PresentedState`) uses this to advance in lockstep with what is actually on screen, instead
+        /// of the moment engine truth committed.</summary>
+        public event Action<GameState, Command, GameState> ItemCommitted;
+
         void Awake()
         {
+            // Absent on the ML arena's GameObject (there is no interactive GameBootstrap there), which
+            // is deliberate: every fog-viewer lookup below then falls back to null (omniscient) — the
+            // arena viewer is always a full spectator, per its design, never fog-limited like a seated
+            // player.
             _game = GetComponent<GameBootstrap>();
             _board = GetComponent<BoardRenderer>();
         }
@@ -117,7 +129,7 @@ namespace HexWars.Presentation
                 }
             }
 
-            var viewer = _game.FogViewerFor(item.Next);
+            var viewer = _game?.FogViewerFor(item.Next);
             switch (item.Cmd)
             {
                 case MoveUnit mv: yield return PlayMove(item, mv, viewer); break;
@@ -317,7 +329,7 @@ namespace HexWars.Presentation
         /// must not move the camera either (fog discipline: zero time, zero sound, zero camera motion).</summary>
         Vector3? ActionSite(Item item)
         {
-            var viewer = _game.FogViewerFor(item.Next);
+            var viewer = _game?.FogViewerFor(item.Next);
             switch (item.Cmd)
             {
                 case MoveUnit mv:
@@ -423,7 +435,7 @@ namespace HexWars.Presentation
 
         void Commit(Item item, bool skipCombatFx = false)
         {
-            Tokens().Sync(item.Next, _game.FogViewerFor(item.Next));
+            Tokens().Sync(item.Next, _game?.FogViewerFor(item.Next));
             _board.UpdateControlTint(item.Next);
             if (!skipCombatFx && !(item.Cmd is MoveUnit))
                 CombatFx.Report(item.Prev, item.Next, _board, item.Cmd); // popups (attack timing refined in Task 4)
@@ -431,6 +443,7 @@ namespace HexWars.Presentation
                 SoundManager.Play(SoundKind.EndTurn); // paced turns auto-pass without an EndTurn command
             if (LiveUnits(item.Next) < LiveUnits(item.Prev)) { SoundManager.Play(SoundKind.Death); Rig()?.Shake(); }
             if (item.Next.IsGameOver && !item.Prev.IsGameOver) SoundManager.Play(SoundKind.Win);
+            ItemCommitted?.Invoke(item.Prev, item.Cmd, item.Next);
         }
 
         internal static Unit? FindUnit(GameState s, PlayerId owner, int id)

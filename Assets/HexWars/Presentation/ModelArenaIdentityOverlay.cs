@@ -68,7 +68,11 @@ namespace HexWars.Presentation
                 ? value.Substring(0, value.Length - 4) : value ?? string.Empty;
 
         public static string MetricsText(ModelArenaSeatIdentity row) => string.Join(" · ",
-            new[] { row.Step, row.Record }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            new[] { row.Step, row.Record, PointsText(row) }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        /// <summary>Always non-blank (0 included): the identity row displays points continuously, per
+        /// spec §"Player Point Totals", not only once a player has scored.</summary>
+        static string PointsText(ModelArenaSeatIdentity row) => $"{row.Points} pts";
 
         public static string[] PortraitLines(ModelArenaSeatIdentity row, int characterBudget) => new[]
         {

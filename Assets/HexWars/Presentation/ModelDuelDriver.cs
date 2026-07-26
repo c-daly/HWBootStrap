@@ -157,6 +157,15 @@ namespace HexWars.Presentation
         public bool Paused { get; private set; }
         public bool IsDone => _done;
         public int CurrentSeat => _duel == null ? -1 : _view.Seat;
+        /// <summary>Whose turn the identity rows' "▶" indicator marks: derived from
+        /// <see cref="PresentedState"/> (what is actually on screen), never from the live simulation
+        /// seat, which can already be several commands ahead while presentation catches up.</summary>
+        public int PresentedActiveSeat => _presentedState == null ? -1 : (int)_presentedState.ActivePlayer;
+        /// <summary>The last game state whose transition has fully finished presenting — board tokens,
+        /// point totals, the active-player indicator, and console text all read from here, never from a
+        /// simulation state that may already be ahead. Null before the first render (or, for adaptive,
+        /// before the atomic reveal).</summary>
+        public GameState PresentedState => _presentedState;
         public int GamesPlayed { get; private set; }
         public int P0Wins { get; private set; }
         public int P1Wins { get; private set; }
@@ -175,10 +184,13 @@ namespace HexWars.Presentation
         public int CurrentLearnerSeat => _activePresentationGame?.LearnerSeat ?? -1;
 
         public ModelArenaSeatIdentity[] IdentitySnapshot() => ModelArenaIdentity.Build(
-            P0Spec, P1Spec, P0Resolved, P1Resolved, CurrentSeat,
+            P0Spec, P1Spec, P0Resolved, P1Resolved, PresentedActiveSeat,
             P0Wins, P1Wins, Draws, P0ArenaStatus, P1ArenaStatus,
             CurrentLearnerSeat, LearnerWins, LearnerLosses, LearnerDraws,
-            _activePresentationGame?.OpponentLabel);
+            _activePresentationGame?.OpponentLabel,
+            PresentedPoints(PlayerId.Player0), PresentedPoints(PlayerId.Player1));
+
+        int PresentedPoints(PlayerId player) => _presentedState?.Player(player).Points ?? 0;
 
         public MlPresentationGame NextPresentationGame(int gamesPlayed) =>
             PresentationPlan?.NextPresentationGame(gamesPlayed);
@@ -192,21 +204,29 @@ namespace HexWars.Presentation
              !string.Equals(previous.P1Spec, next.P1Spec, StringComparison.Ordinal));
 
         BoardRenderer _board;
+        ActionPresenter _presenter;
         IModelDuelEnvironment _duel;
         TrainingScenario _activeScenario;
         PolicyBridge _bridge;
         ModelDuelContractIdentity _contractIdentity;
         ModelDuelView _view;
         ModelDuelPresentationState _presentation;
+        GameState _presentedState;
         bool _p0Model, _p1Model, _p0Live, _p1Live, _done, _ended;
         float _timer, _restTimer;
         CancellationTokenSource _startupCancellation;
         MlPresentationGame _activePresentationGame;
         public bool IsStarting { get; private set; }
 
-        async void Start()
+        void Awake()
         {
             _board = GetComponent<BoardRenderer>();
+            _presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
+            _presenter.ItemCommitted += OnItemCommitted;
+        }
+
+        async void Start()
+        {
             try
             {
                 _activePresentationGame = NextPresentationGame(0);
@@ -274,20 +294,26 @@ namespace HexWars.Presentation
             IAgent c0 = _p0Model ? null : Scripted(P0Spec, Seed * 2 + 1);
             IAgent c1 = _p1Model ? null : Scripted(P1Spec, Seed * 2 + 2);
             _duel = ModelDuelEnvironmentFactory.Create(_activeScenario);
+            _duel.CaptureTransitions = true;
             _presentation = new ModelDuelPresentationState(Environment);
+            _presentedState = null;
+            _presenter.ResetQueue();
             _view = _duel.Reset(Seed, c0, c1);
-            Present(previous: null);
+            HandlePresentation();
             _timer = 0;
         }
 
         void Update()
         {
             if (_done || Paused || _duel == null) return;
+            // Pacing gate: never request the next policy/step action while the last batch of
+            // transitions is still queued or mid-animation — spec §"Viewer Playback". This governs the
+            // Unity viewing duel only; headless training never touches this driver.
+            if (_presenter.IsBusy) { _timer = 0f; return; }
             if (_duel.RequiresContinuation)
             {
-                var previous = _duel.CurrentState;
                 _view = _duel.Continue();
-                Present(previous);
+                HandlePresentation();
                 return;
             }
             if (_view.Terminated || _view.Truncated)
@@ -314,9 +340,8 @@ namespace HexWars.Presentation
             try
             {
                 int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
-                var prev = _duel.CurrentState;
                 _view = _duel.Step(action);
-                Present(prev);
+                HandlePresentation();
             }
             catch (Exception error)
             {
@@ -354,25 +379,63 @@ namespace HexWars.Presentation
             return false;
         }
 
-        void Present(GameState previous)
+        /// <summary>Drains every transition the engine accepted since the last drain and hands them to
+        /// the shared gameplay animation pipeline (<see cref="ActionPresenter"/>) — omnisciently
+        /// (<c>viewer: null</c>): the arena is a full spectator, never fog-limited like a seated player,
+        /// even when the underlying scenario trains with fog of war on. Adaptive-v1 stays pre-empted
+        /// (<see cref="ModelDuelRenderDirective.Suppress"/>) until its atomic reveal; the engine never
+        /// produces pregame-deployment transitions, so nothing is lost by not draining while suppressed.
+        /// A transition that cannot be queued or rendered stops the run with an explicit status — spec
+        /// §"Validation and Failure Behavior" — rather than skipping it and continuing with stale
+        /// visuals.</summary>
+        void HandlePresentation()
         {
             ModelDuelRenderDirective directive = _presentation.Next(_view.DeploymentComplete);
             if (directive == ModelDuelRenderDirective.Suppress) return;
-            GameState current = _duel.CurrentState;
-            if (current == null) throw new InvalidOperationException(
-                "arena presentation became visible before the environment exposed a revealed state");
-            PlayerId viewer = ObserverPlayer;
-            if (directive == ModelDuelRenderDirective.Initialize)
+            try
             {
-                _board.Render(current.Board);
-                _board.RenderEntities(current, viewer);
-                EventConsole.Clear();
-                EventConsole.Report(current, null, viewer);
-                FindAnyObjectByType<CameraRig>()?.Frame();
-                return;
+                IReadOnlyList<DuelTransition> transitions = _duel.DrainTransitions();
+                if (directive == ModelDuelRenderDirective.Initialize)
+                {
+                    GameState anchor = transitions.Count > 0 ? transitions[0].Previous : _duel.CurrentState;
+                    if (anchor == null) throw new InvalidOperationException(
+                        "arena presentation became visible before the environment exposed a revealed state");
+                    InitializeBoard(anchor);
+                }
+                foreach (DuelTransition transition in transitions)
+                    _presenter.Enqueue(transition.Previous, transition.Command, transition.Resulting, isLocal: false);
             }
-            _board.RenderEntities(current, viewer);
-            EventConsole.Report(current, CombatLog.Diff(previous, current, viewer), viewer);
+            catch (Exception error)
+            {
+                MarkPresentationError("presentation error: " + error.Message);
+            }
+        }
+
+        void InitializeBoard(GameState anchor)
+        {
+            _board.Render(anchor.Board);
+            _board.RenderEntities(anchor, viewer: null);
+            EventConsole.Clear();
+            EventConsole.Report(anchor, null, null);
+            _presentedState = anchor;
+            FindAnyObjectByType<CameraRig>()?.Frame();
+        }
+
+        /// <summary>Advances the lagging <see cref="PresentedState"/> exactly when <see cref="ActionPresenter"/>
+        /// finishes presenting each queued transition — never sooner. Console text reads from the same
+        /// transition (omnisciently), so narration always matches what just finished on screen.</summary>
+        void OnItemCommitted(GameState prev, Command cmd, GameState next)
+        {
+            _presentedState = next;
+            EventConsole.Report(next, CombatLog.Diff(prev, next, null), null);
+        }
+
+        void MarkPresentationError(string message)
+        {
+            P0ArenaStatus = message;
+            P1ArenaStatus = message;
+            Debug.LogError("ModelDuelDriver: " + message);
+            _done = true;
         }
 
         void MarkLiveReloadStatus(string status)
@@ -541,7 +604,11 @@ namespace HexWars.Presentation
             _bridge?.Dispose();
             _bridge = null;
         }
-        void OnDestroy() => StopDuel();
+        void OnDestroy()
+        {
+            if (_presenter != null) _presenter.ItemCommitted -= OnItemCommitted;
+            StopDuel();
+        }
 
         public static bool IsModel(string spec) => !string.IsNullOrWhiteSpace(spec) && spec != "greedy" && spec != "random";
         public static bool IsLiveRun(string spec)

@@ -264,5 +264,33 @@ namespace HexWars.Presentation.Tests
         {
             Assert.That(ModelArenaIdentity.MiddleTruncate("abcdefghijklmnop", 11), Is.EqualTo("abcd…klmnop"));
         }
+
+        [Test]
+        public void Build_IncludesPointsInIdentityRowsAndDefaultsToZero()
+        {
+            var withoutPoints = ModelArenaIdentity.Build("greedy", "random", null, null, 0, 0, 0, 0);
+
+            Assert.That(withoutPoints[0].Points, Is.EqualTo(0));
+            Assert.That(withoutPoints[1].Points, Is.EqualTo(0));
+
+            var withPoints = ModelArenaIdentity.Build(
+                "greedy", "random", null, null, 0, 0, 0, 0,
+                p0Points: 12, p1Points: 7);
+
+            Assert.That(withPoints[0].Points, Is.EqualTo(12));
+            Assert.That(withPoints[1].Points, Is.EqualTo(7));
+        }
+
+        [Test]
+        public void Overlay_MetricsText_IncludesPointsContinuously()
+        {
+            var scored = ModelArenaIdentity.Build(
+                "greedy", "random", null, null, 0, 0, 0, 0, p0Points: 5)[0];
+            var unscored = ModelArenaIdentity.Build("greedy", "random", null, null, 0, 0, 0, 0)[0];
+
+            Assert.That(ModelArenaIdentityOverlay.MetricsText(scored), Does.Contain("5 pts"));
+            Assert.That(ModelArenaIdentityOverlay.MetricsText(unscored), Does.Contain("0 pts"),
+                "points must display continuously, including zero, per spec \"Player Point Totals\"");
+        }
     }
 }

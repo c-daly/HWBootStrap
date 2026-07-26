@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -630,6 +632,64 @@ namespace HexWars.Presentation.Tests
             Assert.That(environment.RequiresContinuation, Is.False);
         }
 
+        [Test]
+        public void TacticalAdapter_CaptureTransitionsDefaultsToFalseAndDrainsScriptedCommandsWhenEnabled()
+        {
+            var first = new CountingEndTurnAgent();
+            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.TacticalV1);
+            Assert.That(environment.CaptureTransitions, Is.False,
+                "opt-in capture defaults to false: headless training must never pay to retain states");
+
+            environment.Reset(seed: 45, controller0: first, controller1: null);
+            Assert.That(environment.DrainTransitions(), Is.Empty,
+                "capture is still off: the scripted EndTurn above must not have been retained");
+
+            environment.CaptureTransitions = true;
+            environment.Reset(seed: 45, controller0: first, controller1: null);
+
+            IReadOnlyList<DuelTransition> transitions = environment.DrainTransitions();
+            Assert.That(transitions, Has.Count.EqualTo(1));
+            Assert.That(transitions[0].Command, Is.InstanceOf<EndTurn>());
+            Assert.That(environment.DrainTransitions(), Is.Empty, "draining clears the queue");
+        }
+
+        [Test]
+        public void TacticalV2Adapter_DrainsScriptedTransitionsInOrderWhenCaptureIsEnabled()
+        {
+            var first = new CountingEndTurnAgent();
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            var environment = ModelDuelEnvironmentFactory.Create(scenario);
+            environment.CaptureTransitions = true;
+
+            environment.Reset(seed: 46, controller0: first, controller1: null);
+
+            IReadOnlyList<DuelTransition> transitions = environment.DrainTransitions();
+            Assert.That(transitions, Is.Not.Empty);
+            for (int i = 1; i < transitions.Count; i++)
+                Assert.That(transitions[i].Previous, Is.SameAs(transitions[i - 1].Resulting),
+                    "consecutive transitions must chain by reference");
+        }
+
+        [Test]
+        public void AdaptiveAdapter_TransitionsStayEmptyPreRevealThenCapturePostRevealScriptedPlay()
+        {
+            var first = new CountingEndTurnAgent();
+            var second = new CountingEndTurnAgent();
+            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
+            environment.CaptureTransitions = true;
+
+            ModelDuelView reveal = environment.Reset(seed: 47, controller0: first, controller1: second);
+
+            Assert.That(reveal.DeploymentComplete, Is.True);
+            Assert.That(environment.DrainTransitions(), Is.Empty,
+                "hidden pregame deployment placements never produce a transition");
+
+            environment.Continue();
+
+            Assert.That(environment.DrainTransitions(), Is.Not.Empty,
+                "post-reveal scripted play must be captured once continuation resumes");
+        }
+
         sealed class CountingEndTurnAgent : IAgent
         {
             public int Calls { get; private set; }
@@ -695,6 +755,241 @@ namespace HexWars.Presentation.Tests
                 "\",\"version\":\"" + identity.Version +
                 "\",\"encoding_hash\":\"" + identity.EncodingHash + "\"}}");
             return run;
+        }
+
+        // ---- Viewer B: omniscient, paced, transition-driven playback ----
+
+        [Test]
+        public void ScriptedDuel_PresentsEveryAcceptedCommandInOrderAndAdvancesPresentedStatePerTransition()
+        {
+            var go = new GameObject("driver-order", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = StartScriptedDriver(go, MlEnvironmentContract.TacticalV2, "greedy", "random", seed: 5);
+                var presenter = go.GetComponent<ActionPresenter>();
+                var committed = new List<(GameState prev, Command cmd, GameState next)>();
+                presenter.ItemCommitted += (prev, cmd, next) => committed.Add((prev, cmd, next));
+
+                GameState anchor = driver.PresentedState;
+                Assert.That(anchor, Is.Not.Null);
+                Assert.That(presenter.IsBusy, Is.True,
+                    "a full scripted-vs-scripted game resolves inside Reset and must already be queued " +
+                    "for presentation");
+
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                Assert.That(committed, Is.Not.Empty);
+                Assert.That(committed[0].prev, Is.SameAs(anchor),
+                    "the first presented transition must start from the episode's presented anchor");
+                for (int i = 1; i < committed.Count; i++)
+                    Assert.That(committed[i].prev, Is.SameAs(committed[i - 1].next),
+                        "presented transitions must play in the exact order the engine accepted them");
+                Assert.That(driver.PresentedState, Is.SameAs(committed[committed.Count - 1].next),
+                    "PresentedState must land on the Resulting state of the last fully-presented transition");
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void ScriptedDuel_AttackTransitionsReachTheAnimationQueue()
+        {
+            bool foundAttack = false;
+            for (int seed = 0; seed < 20 && !foundAttack; seed++)
+            {
+                var go = new GameObject("driver-attack-" + seed, typeof(BoardRenderer), typeof(ModelDuelDriver));
+                try
+                {
+                    var driver = StartScriptedDriver(go, MlEnvironmentContract.TacticalV2, "greedy", "greedy", seed);
+                    var presenter = go.GetComponent<ActionPresenter>();
+                    var committedCommands = new List<Command>();
+                    presenter.ItemCommitted += (prev, cmd, next) => committedCommands.Add(cmd);
+
+                    FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                    foundAttack = committedCommands.Any(cmd => cmd is AttackUnit);
+                }
+                finally { UnityEngine.Object.DestroyImmediate(go); }
+            }
+
+            Assert.That(foundAttack, Is.True,
+                "expected at least one of the first 20 greedy-vs-greedy seeds to produce an attack " +
+                "transition that reaches the animation queue");
+        }
+
+        [Test]
+        public void Update_GatesTheNextAdvanceUntilPresentationCatchesUp()
+        {
+            var go = new GameObject("driver-pacing", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                driver.P0Spec = "greedy";
+                driver.P1Spec = "random";
+                driver.Environment = MlEnvironmentContract.AdaptiveV1;
+                driver.Loop = false;
+                InvokePrivate(driver, "RefreshControllerFlags");
+                SetPrivate(driver, "_activeScenario", driver.ResolveScenario());
+                InvokePrivate(driver, "BeginGame");
+
+                var duel = (IModelDuelEnvironment)GetPrivate(driver, "_duel");
+                Assert.That(duel.RequiresContinuation, Is.True,
+                    "the scripted first mover must await the atomic reveal before continuing");
+                Assert.That(driver.PresentedState, Is.Not.Null,
+                    "the reveal itself must already be presented before any post-reveal play");
+
+                var presenter = go.GetComponent<ActionPresenter>();
+                Assert.That(presenter.IsBusy, Is.False,
+                    "nothing plays before the reveal: hidden deployment never produces a transition");
+
+                InvokePrivate(driver, "Update"); // presenter idle -> allowed past the reveal
+                Assert.That(duel.RequiresContinuation, Is.False);
+                Assert.That(presenter.IsBusy, Is.True,
+                    "post-reveal scripted play must have queued transitions for the viewer");
+
+                int gamesBefore = driver.GamesPlayed;
+                InvokePrivate(driver, "Update"); // presenter still busy -> must not progress further
+                Assert.That(driver.GamesPlayed, Is.EqualTo(gamesBefore),
+                    "Update must not advance game-boundary logic while presentation is still queued");
+
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+                InvokePrivate(driver, "Update"); // presenter idle again -> game-boundary logic may proceed
+                Assert.That(driver.GamesPlayed, Is.EqualTo(gamesBefore + 1));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void FogOfWarScenario_RendersBothArmiesOmniscientlyRegardlessOfVisibility()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.Rules.FogOfWar = true;
+            var go = new GameObject("driver-fog", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                driver.P0Spec = "greedy";
+                driver.P1Spec = "random";
+                driver.Environment = MlEnvironmentContract.TacticalV2;
+                driver.Scenario = scenario;
+                driver.Seed = 9;
+                InvokePrivate(driver, "RefreshControllerFlags");
+                SetPrivate(driver, "_activeScenario", driver.ResolveScenario());
+                InvokePrivate(driver, "BeginGame");
+
+                var presenter = go.GetComponent<ActionPresenter>();
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                GameState presented = driver.PresentedState;
+                Assert.That(presented.Config.FogOfWar, Is.True,
+                    "the scenario under test must actually train with fog of war on");
+                var tokens = go.GetComponent<TokenStore>();
+                Assert.That(tokens, Is.Not.Null);
+
+                int checkedUnits = 0;
+                foreach (PlayerState player in presented.Players)
+                    foreach (Unit unit in player.UnitsOnBoard)
+                        if (unit.IsAlive)
+                        {
+                            Assert.That(tokens.UnitToken(unit.Id), Is.Not.Null,
+                                $"unit {unit.Id} (player {player.Id}) must be rendered omnisciently " +
+                                "even though the scenario trains with fog of war");
+                            checkedUnits++;
+                        }
+                Assert.That(checkedUnits, Is.GreaterThan(0));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void HandlePresentation_UnpresentableTransitionStopsWithAnExplicitStatus()
+        {
+            var go = new GameObject("driver-presentation-error", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = go.GetComponent<ModelDuelDriver>();
+                InvokePrivate(driver, "Awake"); // EditMode tests never tick the player loop
+                driver.Environment = MlEnvironmentContract.TacticalV1;
+                SetPrivate(driver, "_duel", new ThrowingModelDuelEnvironment());
+                SetPrivate(driver, "_presentation", new ModelDuelPresentationState(MlEnvironmentContract.TacticalV1));
+                SetPrivate(driver, "_view", default(ModelDuelView));
+
+                LogAssert.Expect(LogType.Error,
+                    "ModelDuelDriver: presentation error: simulated unpresentable transition");
+                InvokePrivate(driver, "HandlePresentation");
+
+                Assert.That(driver.IsDone, Is.True);
+                Assert.That(driver.P0ArenaStatus, Does.Contain("presentation error"));
+                Assert.That(driver.P1ArenaStatus, Does.Contain("presentation error"));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        static ModelDuelDriver StartScriptedDriver(
+            GameObject go, MlEnvironmentContract environment, string p0Spec, string p1Spec, int seed)
+        {
+            var driver = AwakeDriverForTest(go);
+            driver.P0Spec = p0Spec;
+            driver.P1Spec = p1Spec;
+            driver.Environment = environment;
+            driver.Seed = seed;
+            InvokePrivate(driver, "RefreshControllerFlags");
+            SetPrivate(driver, "_activeScenario", driver.ResolveScenario());
+            InvokePrivate(driver, "BeginGame");
+            return driver;
+        }
+
+        /// <summary>EditMode batch tests never tick Unity's player loop, so components this driver
+        /// wires up dynamically (<see cref="ActionPresenter"/>, and the <see cref="TokenStore"/>
+        /// <see cref="BoardRenderer"/> auto-adds on first render) do not reliably run their own Awake()
+        /// — the same reason <c>OnlineBarracksReconcileTests</c> pokes <c>TokenStore._board</c>
+        /// directly rather than trusting Unity to call it. Drive every presentation component's Awake
+        /// by hand so board/token wiring behaves exactly as it does at runtime.</summary>
+        static ModelDuelDriver AwakeDriverForTest(GameObject go)
+        {
+            var driver = go.GetComponent<ModelDuelDriver>();
+            InvokePrivate(driver, "Awake"); // resolves _board, lazily adds+wires _presenter
+            var tokenStore = go.GetComponent<TokenStore>() ?? go.AddComponent<TokenStore>();
+            SetPrivate(tokenStore, "_board", go.GetComponent<BoardRenderer>());
+            var presenter = go.GetComponent<ActionPresenter>();
+            if (presenter != null) InvokePrivate(presenter, "Awake");
+            return driver;
+        }
+
+        /// <summary>Synchronously flushes the presenter's queue for the test. Its <see cref="TokenStore"/>
+        /// prunes dead units through <c>UnityEngine.Object.Destroy</c> — correct at runtime, but Unity
+        /// logs (and this harness fails on) an error when it's called outside Play mode. A real
+        /// scripted-vs-scripted game run in an EditMode test always trips this on any unit death, so
+        /// swallow just that expected noise around the flush rather than asserting on each seed's exact
+        /// (non-deterministic) set of destroyed unit names.</summary>
+        static void FastForwardIgnoringEditModeDestroyWarnings(ActionPresenter presenter)
+        {
+            LogAssert.ignoreFailingMessages = true;
+            try { presenter.FastForward(); }
+            finally { LogAssert.ignoreFailingMessages = false; }
+        }
+
+        static object GetPrivate(object target, string field)
+        {
+            FieldInfo info = target.GetType().GetField(
+                field, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(info, Is.Not.Null, field);
+            return info.GetValue(target);
+        }
+
+        sealed class ThrowingModelDuelEnvironment : IModelDuelEnvironment
+        {
+            public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV1;
+            public MlContract Contract => null;
+            public GameState CurrentState => null;
+            public bool RequiresContinuation => false;
+            public bool CaptureTransitions { get; set; }
+
+            public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1) => default;
+            public ModelDuelView Step(int action) => default;
+            public ModelDuelView Continue() => default;
+
+            public IReadOnlyList<DuelTransition> DrainTransitions() =>
+                throw new InvalidOperationException("simulated unpresentable transition");
         }
     }
 }
