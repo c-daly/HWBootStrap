@@ -745,6 +745,28 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    /// <summary>Outcome of <see cref="MlWatchStartPolicy.Decide"/>: whether the Start & Watch
+    /// auto-trigger should launch the viewer now, wait and poll again, give up after the retry
+    /// deadline, or silently drop a retry whose target run directory is no longer the current
+    /// selection.</summary>
+    public enum MlWatchStartDecision { WaitAndRetry, Watch, GiveUp, Stale }
+
+    /// <summary>Pure decision for the Start & Watch auto-trigger. The Python trainer's first status
+    /// message can arrive a few seconds before run.json is written, so <see
+    /// cref="ReplayViewerMenu.WatchLiveRun"/> (which requires the manifest to exist) cannot be called
+    /// from the very first status poll. This bounds a retry instead of failing outright or spinning
+    /// forever.</summary>
+    public static class MlWatchStartPolicy
+    {
+        public static MlWatchStartDecision Decide(
+            bool pendingRunDirectoryMatchesSelection, bool manifestExists, bool retryDeadlinePassed)
+        {
+            if (!pendingRunDirectoryMatchesSelection) return MlWatchStartDecision.Stale;
+            if (manifestExists) return MlWatchStartDecision.Watch;
+            return retryDeadlinePassed ? MlWatchStartDecision.GiveUp : MlWatchStartDecision.WaitAndRetry;
+        }
+    }
+
     [Serializable]
     public sealed class MlStartAndWatchState
     {
@@ -821,6 +843,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
     {
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
         const double PollIntervalSeconds = 1.0;
+        // The Python trainer's first status response can arrive a few seconds before it finishes
+        // writing run.json; bound the Start & Watch retry instead of failing on that first poll.
+        const double WatchManifestRetryTimeoutSeconds = 30.0;
 
         [SerializeField] MlLabConfig _config = new MlLabConfig();
         [SerializeField] bool _resume;
@@ -851,6 +876,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string _lastMetricTime = string.Empty;
         [SerializeField] MlStartAndWatchState _watch =
             new MlStartAndWatchState();
+        // Run directory for a Start & Watch attempt currently retrying for run.json to appear; empty
+        // when nothing is pending. Keyed to the run directory (not captured via closure) so a stale
+        // retry is dropped if the selection moves to a different run mid-wait.
+        string _pendingWatchRunDirectory = string.Empty;
+        double _watchRetryDeadline;
         string _notice = string.Empty;
         string _arenaError = string.Empty;
         string _arenaNotice = string.Empty;
@@ -1829,20 +1859,55 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ReadLatestMetric();
             if (_watch.TryQueue(status.LatestCheckpoint))
             {
-                string runDirectory = _selectedRun;
-                EditorApplication.delayCall += () =>
-                {
-                    MlViewerLaunchResult result =
-                        ReplayViewerMenu.WatchLiveRun(runDirectory);
-                    _watch.Apply(result, _state);
-                    if (result.Success)
-                        _notice =
-                            "Arena viewer launched. " +
-                            _watch.PresentationStatus;
-                    Repaint();
-                };
+                _pendingWatchRunDirectory = _selectedRun;
+                _watchRetryDeadline =
+                    EditorApplication.timeSinceStartup + WatchManifestRetryTimeoutSeconds;
+                AttemptWatch();
             }
             Repaint();
+        }
+
+        // Retries the Start & Watch launch until run.json exists, the retry deadline passes, or the
+        // pending run directory is superseded by a different selection. See MlWatchStartPolicy for the
+        // pure decision; this method is just the editor-main-thread plumbing around it.
+        void AttemptWatch()
+        {
+            if (this == null || string.IsNullOrEmpty(_pendingWatchRunDirectory)) return;
+            string runDirectory = _pendingWatchRunDirectory;
+            bool matchesSelection = string.Equals(runDirectory, _selectedRun, StringComparison.Ordinal);
+            bool manifestExists = File.Exists(Path.Combine(runDirectory, "run.json"));
+            bool deadlinePassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
+
+            switch (MlWatchStartPolicy.Decide(matchesSelection, manifestExists, deadlinePassed))
+            {
+                case MlWatchStartDecision.Stale:
+                    _pendingWatchRunDirectory = string.Empty;
+                    break;
+
+                case MlWatchStartDecision.WaitAndRetry:
+                    EditorApplication.delayCall += AttemptWatch;
+                    break;
+
+                case MlWatchStartDecision.Watch:
+                    _pendingWatchRunDirectory = string.Empty;
+                    MlViewerLaunchResult result = ReplayViewerMenu.WatchLiveRun(runDirectory);
+                    _watch.Apply(result, _state);
+                    if (result.Success)
+                        _notice = "Arena viewer launched. " + _watch.PresentationStatus;
+                    Repaint();
+                    break;
+
+                case MlWatchStartDecision.GiveUp:
+                    _pendingWatchRunDirectory = string.Empty;
+                    _watch.Apply(
+                        MlViewerLaunchResult.Failed(
+                            "Start & Watch gave up: run.json did not appear within " +
+                            WatchManifestRetryTimeoutSeconds.ToString("0", CultureInfo.InvariantCulture) +
+                            "s of the first status."),
+                        _state);
+                    Repaint();
+                    break;
+            }
         }
 
         void OnTrainingExited(int exitCode)

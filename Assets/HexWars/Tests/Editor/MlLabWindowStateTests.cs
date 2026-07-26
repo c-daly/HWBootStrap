@@ -141,6 +141,66 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void WatchStartPolicy_ManifestMissingBeforeDeadline_WaitsAndRetries()
+        {
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    manifestExists: false,
+                    retryDeadlinePassed: false),
+                Is.EqualTo(MlWatchStartDecision.WaitAndRetry));
+        }
+
+        [Test]
+        public void WatchStartPolicy_ManifestAppears_WatchesExactlyOnce()
+        {
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    manifestExists: true,
+                    retryDeadlinePassed: false),
+                Is.EqualTo(MlWatchStartDecision.Watch));
+        }
+
+        [Test]
+        public void WatchStartPolicy_ManifestAppearsRightAtDeadline_StillWatchesInsteadOfGivingUp()
+        {
+            // The manifest landing is what matters; a deadline check that only just tripped must not
+            // pre-empt a manifest that is already there.
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    manifestExists: true,
+                    retryDeadlinePassed: true),
+                Is.EqualTo(MlWatchStartDecision.Watch));
+        }
+
+        [Test]
+        public void WatchStartPolicy_DeadlinePassesWithoutManifest_GivesUpWithNoInfiniteSpin()
+        {
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: true,
+                    manifestExists: false,
+                    retryDeadlinePassed: true),
+                Is.EqualTo(MlWatchStartDecision.GiveUp));
+        }
+
+        [Test]
+        public void WatchStartPolicy_RunDirectoryChangedMidRetry_DropsTheStaleRetry()
+        {
+            // A second run started (or the selection changed) while the first was still waiting for
+            // its manifest; the stale retry must never launch a viewer for the old run directory, even
+            // if that old run's manifest shows up or its own deadline has passed.
+            Assert.That(
+                MlWatchStartPolicy.Decide(
+                    pendingRunDirectoryMatchesSelection: false,
+                    manifestExists: true,
+                    retryDeadlinePassed: true),
+                Is.EqualTo(MlWatchStartDecision.Stale));
+        }
+
+        [Test]
         public void StartAndWatch_PresentationStatusSurvivesDomainReloadSerialization()
         {
             var watch = new MlStartAndWatchState();
