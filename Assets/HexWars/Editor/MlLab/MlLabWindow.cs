@@ -767,6 +767,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    /// <summary>Outcome of <see cref="MlWatchResumePolicy.Decide"/>: what OnEnable should do about a
+    /// Start & Watch retry that may have been mid-flight when a domain reload happened.</summary>
+    public enum MlWatchResumeDecision { NoPendingWatch, Resume, ResetToRetryable }
+
+    /// <summary>Pure decision for resuming a Start & Watch retry after a domain reload. The pending
+    /// run directory and retry deadline that <see cref="MlLabWindow.AttemptWatch"/> tracks are plain
+    /// fields wiped by a script recompile, but <see cref="MlStartAndWatchState.LaunchPending"/> is
+    /// [SerializeField] and survives on its own -- so without this, LaunchPending can be stuck true
+    /// forever with nothing left to resume it (TryQueue refuses to re-arm, CanRetry never sets, the
+    /// Retry button never appears). MlLabWindow persists the pending run directory through
+    /// SessionState (same mechanism as its selected-run field) so it can be compared against
+    /// LaunchPending here on the next OnEnable.</summary>
+    public static class MlWatchResumePolicy
+    {
+        public static MlWatchResumeDecision Decide(
+            bool hasPersistedPendingRunDirectory,
+            bool persistedPendingRunDirectoryMatchesSelection,
+            bool launchPending)
+        {
+            if (hasPersistedPendingRunDirectory &&
+                persistedPendingRunDirectoryMatchesSelection && launchPending)
+                return MlWatchResumeDecision.Resume;
+            return launchPending
+                ? MlWatchResumeDecision.ResetToRetryable
+                : MlWatchResumeDecision.NoPendingWatch;
+        }
+    }
+
     [Serializable]
     public sealed class MlStartAndWatchState
     {
@@ -837,11 +865,23 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 $"learner P{result.LearnerSeat + 1} " +
                 $"(seat {result.LearnerSeat}) · opponent {result.Opponent}";
         }
+
+        /// <summary>Recovery for a LaunchPending flag left stuck true by a domain reload that wiped
+        /// MlLabWindow's plain-field retry target (see MlWatchResumePolicy). A no-op when nothing is
+        /// actually pending, so it never fabricates a Retry affordance that wasn't earned.</summary>
+        public void ResetStuckLaunch()
+        {
+            if (!_launchPending) return;
+            _launchPending = false;
+            _canRetry = true;
+        }
     }
 
     public sealed class MlLabWindow : EditorWindow
     {
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
+        const string PendingWatchRunDirectoryKey = "HexWars.MlLab.PendingWatchRunDirectory";
+        const string PendingWatchDeadlineKey = "HexWars.MlLab.PendingWatchDeadline";
         const double PollIntervalSeconds = 1.0;
         // The Python trainer's first status response can arrive a few seconds before it finishes
         // writing run.json; bound the Start & Watch retry instead of failing on that first poll.
@@ -878,7 +918,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
             new MlStartAndWatchState();
         // Run directory for a Start & Watch attempt currently retrying for run.json to appear; empty
         // when nothing is pending. Keyed to the run directory (not captured via closure) so a stale
-        // retry is dropped if the selection moves to a different run mid-wait.
+        // retry is dropped if the selection moves to a different run mid-wait. Plain fields, so a
+        // domain reload wipes them in memory; OnDisable persists them to SessionState (same
+        // mechanism as _selectedRun) and OnEnable restores + resumes them, because
+        // MlStartAndWatchState.LaunchPending is [SerializeField] and would otherwise survive the
+        // reload with nothing left able to resume or retry it. See MlWatchResumePolicy.
         string _pendingWatchRunDirectory = string.Empty;
         double _watchRetryDeadline;
         string _notice = string.Empty;
@@ -917,6 +961,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (string.IsNullOrWhiteSpace(_selectedRun) && attached.Exists)
                 _selectedRun = attached.RunDirectory;
             RefreshKnownRuns();
+            RestorePendingWatch();
             EditorApplication.update += Tick;
             _nextPoll = 0;
         }
@@ -925,8 +970,66 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             EditorApplication.update -= Tick;
             SessionState.SetString(SelectedRunKey, _selectedRun ?? string.Empty);
+            PersistPendingWatch();
             DisposeProcessOwners();
         }
+
+        // Restores a Start & Watch retry that may have been mid-flight across a domain reload (see
+        // the field comment on _pendingWatchRunDirectory) and either resumes it, recovers a stuck
+        // LaunchPending into a retryable state, or does nothing if there was never anything pending.
+        void RestorePendingWatch()
+        {
+            _pendingWatchRunDirectory = SessionState.GetString(PendingWatchRunDirectoryKey, string.Empty);
+            _watchRetryDeadline = ParseTimeSinceStartup(
+                SessionState.GetString(PendingWatchDeadlineKey, string.Empty));
+            bool hasPersistedPending = !string.IsNullOrEmpty(_pendingWatchRunDirectory);
+            bool matchesSelection = hasPersistedPending &&
+                string.Equals(_pendingWatchRunDirectory, _selectedRun, StringComparison.Ordinal);
+
+            switch (MlWatchResumePolicy.Decide(hasPersistedPending, matchesSelection, _watch.LaunchPending))
+            {
+                case MlWatchResumeDecision.Resume:
+                    // Defer past OnEnable: WatchLiveRun can create a scene / enter Play Mode, which is
+                    // not safe to do synchronously while the editor is still finishing a domain reload.
+                    EditorApplication.delayCall += AttemptWatch;
+                    break;
+
+                case MlWatchResumeDecision.ResetToRetryable:
+                    _pendingWatchRunDirectory = string.Empty;
+                    SessionState.EraseString(PendingWatchRunDirectoryKey);
+                    SessionState.EraseString(PendingWatchDeadlineKey);
+                    _watch.ResetStuckLaunch();
+                    _notice =
+                        "A pending Start & Watch retry was interrupted by a script reload. " +
+                        "Click Retry viewer to try again.";
+                    break;
+
+                case MlWatchResumeDecision.NoPendingWatch:
+                    _pendingWatchRunDirectory = string.Empty;
+                    SessionState.EraseString(PendingWatchRunDirectoryKey);
+                    SessionState.EraseString(PendingWatchDeadlineKey);
+                    break;
+            }
+        }
+
+        void PersistPendingWatch()
+        {
+            if (string.IsNullOrEmpty(_pendingWatchRunDirectory))
+            {
+                SessionState.EraseString(PendingWatchRunDirectoryKey);
+                SessionState.EraseString(PendingWatchDeadlineKey);
+                return;
+            }
+            SessionState.SetString(PendingWatchRunDirectoryKey, _pendingWatchRunDirectory);
+            SessionState.SetString(
+                PendingWatchDeadlineKey,
+                _watchRetryDeadline.ToString("R", CultureInfo.InvariantCulture));
+        }
+
+        static double ParseTimeSinceStartup(string text) =>
+            double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+                ? value
+                : 0.0;
 
         void CreateProcessOwners()
         {

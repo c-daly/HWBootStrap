@@ -201,6 +201,97 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void WatchResumePolicy_PersistedTargetMatchesSelectionAndLaunchPending_Resumes()
+        {
+            Assert.That(
+                MlWatchResumePolicy.Decide(
+                    hasPersistedPendingRunDirectory: true,
+                    persistedPendingRunDirectoryMatchesSelection: true,
+                    launchPending: true),
+                Is.EqualTo(MlWatchResumeDecision.Resume));
+        }
+
+        [Test]
+        public void WatchResumePolicy_PersistedTargetDoesNotMatchSelection_ResetsToRetryable()
+        {
+            // The window's selection moved to a different run across the reload (or the persisted
+            // record is simply gone stale); the interrupted retry must not resume against the wrong
+            // run, but the user still needs a way forward instead of a silently dead watch.
+            Assert.That(
+                MlWatchResumePolicy.Decide(
+                    hasPersistedPendingRunDirectory: true,
+                    persistedPendingRunDirectoryMatchesSelection: false,
+                    launchPending: true),
+                Is.EqualTo(MlWatchResumeDecision.ResetToRetryable));
+        }
+
+        [Test]
+        public void WatchResumePolicy_LaunchPendingWithNoPersistedTarget_ResetsToRetryable()
+        {
+            // MlStartAndWatchState.LaunchPending is [SerializeField] and survives a reload on its own;
+            // if it is stuck true with nothing persisted to resume, that is exactly the silent-wedge
+            // bug -- recover by resetting it so Retry viewer appears.
+            Assert.That(
+                MlWatchResumePolicy.Decide(
+                    hasPersistedPendingRunDirectory: false,
+                    persistedPendingRunDirectoryMatchesSelection: false,
+                    launchPending: true),
+                Is.EqualTo(MlWatchResumeDecision.ResetToRetryable));
+        }
+
+        [Test]
+        public void WatchResumePolicy_NothingPendingAndNotLaunching_NoPendingWatch()
+        {
+            Assert.That(
+                MlWatchResumePolicy.Decide(
+                    hasPersistedPendingRunDirectory: false,
+                    persistedPendingRunDirectoryMatchesSelection: false,
+                    launchPending: false),
+                Is.EqualTo(MlWatchResumeDecision.NoPendingWatch));
+        }
+
+        [Test]
+        public void WatchResumePolicy_PersistedTargetButLaunchAlreadyResolved_NoPendingWatch()
+        {
+            // A stray persisted key with LaunchPending already false (the watch already succeeded,
+            // failed, or was never armed) must not force a spurious resume.
+            Assert.That(
+                MlWatchResumePolicy.Decide(
+                    hasPersistedPendingRunDirectory: true,
+                    persistedPendingRunDirectoryMatchesSelection: true,
+                    launchPending: false),
+                Is.EqualTo(MlWatchResumeDecision.NoPendingWatch));
+        }
+
+        [Test]
+        public void StartAndWatch_ResetStuckLaunch_WhenPendingClearsFlagAndArmsRetry()
+        {
+            var watch = new MlStartAndWatchState();
+            watch.Begin(requested: true);
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.True);
+            Assert.That(watch.LaunchPending, Is.True);
+
+            watch.ResetStuckLaunch();
+
+            Assert.That(watch.LaunchPending, Is.False);
+            Assert.That(watch.CanRetry, Is.True);
+            Assert.That(watch.Launched, Is.False);
+        }
+
+        [Test]
+        public void StartAndWatch_ResetStuckLaunch_WhenNotPendingIsANoOp()
+        {
+            var watch = new MlStartAndWatchState();
+            watch.Begin(requested: true);
+
+            watch.ResetStuckLaunch();
+
+            Assert.That(watch.LaunchPending, Is.False);
+            Assert.That(watch.CanRetry, Is.False,
+                "must not fabricate a retry affordance when nothing was ever pending");
+        }
+
+        [Test]
         public void StartAndWatch_PresentationStatusSurvivesDomainReloadSerialization()
         {
             var watch = new MlStartAndWatchState();
