@@ -569,6 +569,39 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV2GymServer_DefaultCatalogScenarioReportsInProcessEncodingHash()
+        {
+            // The checked-in "tactical-v2-standard" template is board/rules/reward/roster-identical
+            // to TacticalV2Config.Default() (see TrainingScenario.CreateStandard's tactical-v2 branch,
+            // which builds the same catalog verbatim). Pin the GymServer's reported encoding_hash for
+            // that scenario to the in-process contract so a boundary bug in scenario parsing can't
+            // silently drift the served identity away from what BuildTacticalV2 would compute.
+            string libraryPath = Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "..", "python", "config",
+                "training-game-templates.json"));
+            using JsonDocument library = JsonDocument.Parse(File.ReadAllText(libraryPath));
+            JsonElement template = library.RootElement.GetProperty("templates")
+                .EnumerateArray()
+                .Single(item => item.GetProperty("id").GetString() == "tactical-v2-standard");
+            string scenario = WriteScenarioContent(template.GetRawText());
+            try
+            {
+                using var server = new ServerProcess(
+                    "--environment", "tactical-v2", "--scenario-file", scenario);
+                using JsonDocument spaces = server.Exchange(new { cmd = "spaces" });
+
+                string expectedEncodingHash = MlContract.CreateTacticalV2(TacticalV2Config.Default()).EncodingHash;
+                Assert.That(spaces.RootElement.GetProperty("encoding_hash").GetString(),
+                    Is.EqualTo(expectedEncodingHash));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
         public void GymServer_RejectsTacticalV2ScenarioWithMismatchedCounts()
         {
             string scenario = WriteTacticalV2Scenario(startingUnitCount: 4, maxControllableUnits: 6);

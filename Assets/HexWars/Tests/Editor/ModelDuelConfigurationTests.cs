@@ -470,6 +470,41 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void DriverScenario_AdaptiveSurvivesUnitySerializationAndPreservesEncoding()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("adaptive-v1");
+            scenario.Adaptive.StartingArmyBudget = 176;
+            string expectedEncoding =
+                ModelDuelEnvironmentFactory.ContractIdentity(scenario).EncodingHash;
+            var originalObject = new GameObject("original-driver-adaptive");
+            var restoredObject = new GameObject("restored-driver-adaptive");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.Environment = MlEnvironmentContract.AdaptiveV1;
+                original.Scenario = scenario;
+
+                string serializedComponent = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(serializedComponent, restored);
+                TrainingScenario roundTripped = restored.ResolveScenario();
+
+                Assert.That(roundTripped.Adaptive.StartingArmyBudget, Is.EqualTo(176));
+                Assert.That(roundTripped.TacticalV2, Is.Null,
+                    "Unity's by-value serializer materializes the absent TacticalV2 section; " +
+                    "ResolveScenario must null it back out for adaptive-v1");
+                Assert.That(
+                    ModelDuelEnvironmentFactory.ContractIdentity(roundTripped).EncodingHash,
+                    Is.EqualTo(expectedEncoding));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [Test]
         public void ManualArena_LoadsSelectedRunScenarioWithoutChangingSeatsOrObserver()
         {
             string scratch = NewScratchDirectory();

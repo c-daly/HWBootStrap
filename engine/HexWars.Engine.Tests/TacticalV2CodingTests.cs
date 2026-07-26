@@ -95,6 +95,43 @@ namespace HexWars.Engine.Tests
             Assert.That(fixture.ValueAtFriendlyTemplatePlane(observation, 1), Is.GreaterThan(0f));
         }
 
+        // ---- Contract coupling: observation_channels names must describe Observe's actual plane order ----
+
+        [Test]
+        public void Observe_NonzeroPlaneMatchesContractChannelNameForFriendlyAndEnemyTemplate()
+        {
+            // MlContract.CreateTacticalV2 hand-builds an observation_channels name list that is
+            // supposed to describe TacticalV2Coding.Observe's plane order exactly (nothing in the
+            // types ties them together). Prove the coupling by locating each plane purely by name
+            // — never by re-deriving the offset formula here — and checking Observe actually wrote
+            // a nonzero HP fraction there for a unit of that template.
+            TacticalV2Config config = TacticalV2Config.Default();
+            var layout = new TacticalV2Layout(config);
+            TacticalV2Start start = layout.NewGame(11);
+            MlContract contract = MlContract.CreateTacticalV2(config);
+            var channels = (IReadOnlyList<string>)contract.Semantics["observation_channels"];
+
+            float[] observation = TacticalV2Coding.Observe(
+                start.State, PlayerId.Player0, layout, start.Slots0, start.Slots1);
+            int n = layout.CellCount;
+
+            int friendlyTemplateIndex = start.TemplateIndices0[0];
+            Unit friendlyUnit = start.State.Player(PlayerId.Player0).UnitsOnBoard[0];
+            int friendlyPlane = channels.ToList().IndexOf($"friendly_role_hp_{friendlyTemplateIndex}");
+            Assert.That(friendlyPlane, Is.GreaterThanOrEqualTo(0),
+                "contract's observation_channels must name the friendly plane for this template");
+            int friendlyCell = layout.CellIndex[friendlyUnit.Cell];
+            Assert.That(observation[friendlyPlane * n + friendlyCell], Is.GreaterThan(0f));
+
+            int enemyTemplateIndex = start.TemplateIndices1[0];
+            Unit enemyUnit = start.State.Player(PlayerId.Player1).UnitsOnBoard[0];
+            int enemyPlane = channels.ToList().IndexOf($"visible_enemy_role_hp_{enemyTemplateIndex}");
+            Assert.That(enemyPlane, Is.GreaterThanOrEqualTo(0),
+                "contract's observation_channels must name the enemy plane for this template");
+            int enemyCell = layout.CellIndex[enemyUnit.Cell];
+            Assert.That(observation[enemyPlane * n + enemyCell], Is.GreaterThan(0f));
+        }
+
         // ---- Coding: mask/decode round-trip against the engine's own legal-move enumeration ----
 
         [Test]

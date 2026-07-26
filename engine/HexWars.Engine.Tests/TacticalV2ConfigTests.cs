@@ -45,5 +45,17 @@ namespace HexWars.Engine.Tests
             Assert.That(config.Validate(),
                 Has.Some.Contains("starting unit count must be between 1 and 12"));
         }
+
+        [Test]
+        public void TemplateIds_PinsTheCanonicalBruteIdCheckedIntoTrainingTemplates()
+        {
+            // "brute-85597320" is checked into python/config/training-game-templates.json. If
+            // TacticalV2TemplateIds.From's slug/hash algorithm ever changes, that literal silently
+            // stops matching the catalog it was derived from — pin it here so the break is loud.
+            UnitTemplate brute = BarracksCatalog.DefaultTemplates
+                .Single(template => template.Name == "Brute");
+
+            Assert.That(TacticalV2TemplateIds.From(brute), Is.EqualTo("brute-85597320"));
+        }
     }
 }

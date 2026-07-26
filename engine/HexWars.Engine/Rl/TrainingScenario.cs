@@ -99,7 +99,7 @@ namespace HexWars.Engine.Rl
             bool adaptive = Environment == MlContract.AdaptiveVersion;
             bool tacticalV2 = Environment == MlContract.TacticalV2Version;
             if (!tactical && !adaptive && !tacticalV2)
-                errors.Add("environment must be tactical-v1, adaptive-v1, or tactical-v2");
+                errors.Add("environment must be tactical-v1, tactical-v2, or adaptive-v1");
 
             ValidateBoard(errors);
             ValidateRules(errors);

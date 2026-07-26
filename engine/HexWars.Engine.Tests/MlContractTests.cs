@@ -171,5 +171,27 @@ namespace HexWars.Engine.Tests
             Assert.That(renamedContract.EncodingHash, Is.Not.EqualTo(baselineContract.EncodingHash));
             Assert.That(restattedContract.EncodingHash, Is.Not.EqualTo(baselineContract.EncodingHash));
         }
+
+        [Test]
+        public void TacticalV2Contract_EncodingHashIsIndependentOfRewardShaping()
+        {
+            // Mirrors Create_ChangesHashForBoardRosterAndRewardSemantics' tactical-v1 reward case:
+            // reward fields are part of the run's ContractHash (so a reload can tell reward configs
+            // apart) but deliberately excluded from EncodingHash (so a policy trained under one
+            // reward shape can be reused as another's warm start without a spurious mismatch).
+            TacticalV2Config baseline = TacticalV2Config.Default();
+            MlContract baselineContract = MlContract.CreateTacticalV2(baseline);
+
+            TacticalV2Config changedReward = TacticalV2Config.Default();
+            changedReward.ShapeScale = baseline.ShapeScale + 1f;
+            changedReward.StepPenalty = baseline.StepPenalty + 1f;
+            changedReward.ClosingWeight = baseline.ClosingWeight + 1f;
+            changedReward.DrawCreditWeight = baseline.DrawCreditWeight + 1f;
+            changedReward.PointsWeight = baseline.PointsWeight + 1f;
+            MlContract changedRewardContract = MlContract.CreateTacticalV2(changedReward);
+
+            Assert.That(changedRewardContract.ContractHash, Is.Not.EqualTo(baselineContract.ContractHash));
+            Assert.That(changedRewardContract.EncodingHash, Is.EqualTo(baselineContract.EncodingHash));
+        }
     }
 }
