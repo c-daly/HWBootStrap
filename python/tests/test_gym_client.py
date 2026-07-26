@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -493,3 +494,61 @@ def test_tactical_client_rejects_duel_handshake_and_closes_server_process(tmp_pa
         HexWarsEnv(_fake_server(tmp_path, spaces, close_marker))
 
     assert close_marker.read_text(encoding="utf-8") == "closed"
+
+
+def test_no_window_creationflags_suppresses_console_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hexwars_gym.env import no_window_creationflags
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert no_window_creationflags() == 0x08000000
+
+
+def test_no_window_creationflags_is_zero_off_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hexwars_gym.env import no_window_creationflags
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert no_window_creationflags() == 0
+
+
+class _FakeGymServerProcess:
+    """A stand-in for subprocess.Popen that answers one queued handshake line."""
+
+    def __init__(self, response_line: str) -> None:
+        self._response_line = response_line
+        self.stdin = SimpleNamespace(
+            write=lambda _payload: None, flush=lambda: None, close=lambda: None,
+        )
+        self.stdout = SimpleNamespace(readline=lambda: self._response_line)
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_client_passes_no_window_creationflags_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hexwars_gym.env as env_module
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return _FakeGymServerProcess(json.dumps({"cmd": "spaces"}) + "\n")
+
+    def fake_parse_contract(_spaces, *, environment, required_kind):
+        raise RuntimeError("stop after handshake capture")
+
+    monkeypatch.setattr(env_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(env_module, "parse_contract", fake_parse_contract)
+
+    with pytest.raises(RuntimeError, match="stop after handshake capture"):
+        HexWarsEnv(["dotnet", "server.dll"])
+
+    assert captured.get("creationflags") == env_module.no_window_creationflags()

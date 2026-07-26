@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from hexwars_gym.env import parse_contract
+from hexwars_gym.env import no_window_creationflags, parse_contract
 from .protocol import validate_json_object, validate_step_payload, validate_view_payload
 
 
@@ -33,6 +33,7 @@ class BenchmarkClient:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            creationflags=no_window_creationflags(),
         )
         try:
             spaces = self._rpc({"cmd": "spaces"})

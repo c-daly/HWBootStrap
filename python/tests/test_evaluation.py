@@ -603,6 +603,54 @@ def test_duel_client_rejects_unknown_environment_version(
         evaluation_module.DuelClient(["dotnet", "server.dll"], environment="tactical-v3")
 
 
+def test_duel_client_passes_no_window_creationflags_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_module
+    import ml_lab.evaluation as evaluation_module
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return _FakeDuelProcess(json_module.dumps({"cmd": "duel_spaces"}) + "\n")
+
+    def fake_parse_contract(_spaces, *, environment, required_kind):
+        raise RuntimeError("stop after handshake capture")
+
+    monkeypatch.setattr(evaluation_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(evaluation_module, "parse_contract", fake_parse_contract)
+
+    with pytest.raises(RuntimeError, match="stop after handshake capture"):
+        evaluation_module.DuelClient(["dotnet", "server.dll"], environment="tactical-v2")
+
+    assert captured.get("creationflags") == evaluation_module.no_window_creationflags()
+
+
+def test_benchmark_client_passes_no_window_creationflags_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_module
+    import ml_lab.benchmark as benchmark_module
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return _FakeDuelProcess(json_module.dumps({"cmd": "spaces"}) + "\n")
+
+    def fake_parse_contract(_spaces, *, environment, required_kind):
+        raise RuntimeError("stop after handshake capture")
+
+    monkeypatch.setattr(benchmark_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(benchmark_module, "parse_contract", fake_parse_contract)
+
+    with pytest.raises(RuntimeError, match="stop after handshake capture"):
+        benchmark_module.BenchmarkClient(["dotnet", "server.dll"])
+
+    assert captured.get("creationflags") == benchmark_module.no_window_creationflags()
+
+
 class FakeBenchmarkClient:
     def __init__(self, worker_index: int) -> None:
         self.worker_index = worker_index

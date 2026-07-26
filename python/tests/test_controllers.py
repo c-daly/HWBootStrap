@@ -7,6 +7,7 @@ import time
 import ctypes
 from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -964,3 +965,46 @@ def test_selfplay_constructor_failure_closes_and_reaps_server_process(
             process.kill()
             process.wait(timeout=3)
     del constructor_error
+
+
+class _FakeSelfPlayServerProcess:
+    """A stand-in for subprocess.Popen that answers one queued handshake line."""
+
+    def __init__(self, response_line: str) -> None:
+        self._response_line = response_line
+        self.stdin = SimpleNamespace(
+            write=lambda _payload: None, flush=lambda: None, close=lambda: None,
+        )
+        self.stdout = SimpleNamespace(
+            readline=lambda: self._response_line, close=lambda: None,
+        )
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_selfplay_env_passes_no_window_creationflags_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json as json_module
+
+    captured: dict[str, object] = {}
+    response_line = json_module.dumps({"n_actions": 3, "obs_len": 3}) + "\n"
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return _FakeSelfPlayServerProcess(response_line)
+
+    def fake_parse_contract(_spaces, *, environment, required_kind):
+        raise RuntimeError("stop after handshake capture")
+
+    monkeypatch.setattr(selfplay_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(selfplay_module, "parse_contract", fake_parse_contract)
+
+    with pytest.raises(RuntimeError, match="stop after handshake capture"):
+        SelfPlayEnv(["dotnet", "server.dll"], ["greedy"])
+
+    assert captured.get("creationflags") == selfplay_module.no_window_creationflags()

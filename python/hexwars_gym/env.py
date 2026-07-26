@@ -2,6 +2,7 @@
 import json
 import re
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, List, Optional
@@ -12,6 +13,21 @@ from gymnasium import spaces
 
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.protocol import validate_json_object, validate_step_payload, validate_view_payload
+
+
+def no_window_creationflags() -> int:
+    """Return the subprocess creationflags that suppress a new console window.
+
+    GymServer is a console-subsystem .NET app. Every process that spawns it here is
+    itself windowless (launched by Unity/pythonw with no console of its own), so an
+    unflagged Popen/run call allocates a brand-new console window that steals
+    foreground focus from whatever the user is doing. Every production spawn of
+    GymServer (or any other console-subsystem child) must pass this value as
+    creationflags.
+    """
+    if sys.platform == "win32":
+        return subprocess.CREATE_NO_WINDOW
+    return 0
 
 
 SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
@@ -512,7 +528,14 @@ class HexWarsEnv(gym.Env):
         ]
         if scenario_path is not None:
             cmd.extend(["--scenario-file", str(scenario_path)])
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            creationflags=no_window_creationflags(),
+        )
         self._next_seed = base_seed
         try:
             self.spaces_info = self._rpc({"cmd": "spaces"})

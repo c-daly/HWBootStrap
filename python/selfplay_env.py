@@ -28,6 +28,7 @@ from hexwars_gym.env import (
     SUPPORTED_ENVIRONMENTS,
     _response_arrays,
     _response_info,
+    no_window_creationflags,
     parse_contract,
 )
 from ml_lab.protocol import validate_json_object, validate_step_payload
@@ -69,7 +70,8 @@ class SelfPlayEnv(gym.Env):
             cmd.extend(["--scenario-file", str(scenario_path)])
         self.proc = subprocess.Popen(cmd,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     text=True, bufsize=1)
+                                     text=True, bufsize=1,
+                                     creationflags=no_window_creationflags())
         try:
             self.learner = learner_seat
             self.opp_seat = 1 - learner_seat

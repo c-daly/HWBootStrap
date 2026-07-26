@@ -104,3 +104,38 @@ def test_duel_rejects_unknown_environment_version(
 
     with pytest.raises(SystemExit):
         duel.main()
+
+
+def test_duel_passes_no_window_creationflags_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = object()
+    captured: dict[str, object] = {}
+    closed: list[object] = []
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs)
+        return process
+
+    monkeypatch.setattr(duel.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(duel, "rpc", lambda _proc, _message: (_ for _ in ()).throw(
+        RuntimeError("bad handshake")
+    ))
+    monkeypatch.setattr(duel, "_close_process", closed.append)
+    monkeypatch.setattr(
+        duel.argparse.ArgumentParser,
+        "parse_args",
+        lambda _self: type("Args", (), {
+            "p0": "greedy",
+            "p1": "random",
+            "server": str(duel.DEFAULT_SERVER),
+            "seed": 0,
+            "out": "duel.replay",
+            "environment": "tactical-v1",
+        })(),
+    )
+
+    with pytest.raises(RuntimeError, match="bad handshake"):
+        duel.main()
+
+    assert captured.get("creationflags") == duel.no_window_creationflags()

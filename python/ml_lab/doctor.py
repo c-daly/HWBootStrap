@@ -12,7 +12,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from hexwars_gym.env import parse_contract
+from hexwars_gym.env import no_window_creationflags, parse_contract
 
 
 PackageVersion = Callable[[str], str]
@@ -41,6 +41,7 @@ def _dotnet_version() -> str:
         capture_output=True,
         text=True,
         timeout=15,
+        creationflags=no_window_creationflags(),
     )
     return completed.stdout.strip()
 
@@ -56,6 +57,7 @@ def _gymserver_handshake(command: Sequence[str]) -> dict[str, Any]:
         capture_output=True,
         text=True,
         timeout=30,
+        creationflags=no_window_creationflags(),
     )
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     if not lines:

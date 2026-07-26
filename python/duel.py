@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from hexwars_gym.env import parse_contract
+from hexwars_gym.env import no_window_creationflags, parse_contract
 from ml_lab.controllers import ControllerResolver, predict, validate_inference_input
 from ml_lab.protocol import validate_json_object, validate_step_payload
 
@@ -69,6 +69,7 @@ def main() -> None:
         stdout=subprocess.PIPE,
         text=True,
         bufsize=1,
+        creationflags=no_window_creationflags(),
     )
     try:
         spaces = rpc(proc, {"cmd": "duel_spaces"})

@@ -27,7 +27,7 @@ from .controllers import (
     predict,
     validate_inference_input,
 )
-from hexwars_gym.env import parse_contract
+from hexwars_gym.env import no_window_creationflags, parse_contract
 from .contracts import ADAPTIVE_MONITOR_HEADER
 from .protocol import validate_json_object, validate_step_payload
 from .io import atomic_write_json, read_json
@@ -90,6 +90,7 @@ class DuelClient:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            creationflags=no_window_creationflags(),
         )
         try:
             spaces = self._rpc({"cmd": "duel_spaces"})
