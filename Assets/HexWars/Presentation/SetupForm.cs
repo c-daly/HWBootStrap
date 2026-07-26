@@ -63,7 +63,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            if (DeviceInput.Allowed && Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {
                 var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
                 var selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;

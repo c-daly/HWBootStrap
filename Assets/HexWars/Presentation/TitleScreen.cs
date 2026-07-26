@@ -42,7 +42,7 @@ namespace HexWars.Presentation
         {
             if (_dead || _game == null) return;
 
-            if (UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
+            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {

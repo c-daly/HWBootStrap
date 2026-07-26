@@ -43,5 +43,30 @@ namespace HexWars.Presentation.Tests
             Assert.That(PauseToggle.SnapSpeed(100f), Is.EqualTo(16f));
             Assert.That(PauseToggle.SnapSpeed(16.4f), Is.EqualTo(16f));
         }
+
+        /// <summary>Focus-gating coverage (batch fix: the editor's Input System keeps updating device
+        /// state regardless of app focus, so an unfocused window must not react to a held space bar).
+        /// <see cref="PauseToggle.ShouldTogglePause"/> is the pure extraction that makes this
+        /// testable without simulating an actual Input System keyboard device.</summary>
+        [Test]
+        public void ShouldTogglePause_Unfocused_NeverTogglesEvenWithSpacePressed()
+        {
+            Assert.That(PauseToggle.ShouldTogglePause(deviceInputAllowed: false, spacePressedThisFrame: true),
+                Is.False);
+        }
+
+        [Test]
+        public void ShouldTogglePause_Focused_TogglesOnSpacePress()
+        {
+            Assert.That(PauseToggle.ShouldTogglePause(deviceInputAllowed: true, spacePressedThisFrame: true),
+                Is.True);
+        }
+
+        [Test]
+        public void ShouldTogglePause_Focused_NoSpacePress_DoesNotToggle()
+        {
+            Assert.That(PauseToggle.ShouldTogglePause(deviceInputAllowed: true, spacePressedThisFrame: false),
+                Is.False);
+        }
     }
 }

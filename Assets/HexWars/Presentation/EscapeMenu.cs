@@ -26,7 +26,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            var kb = Keyboard.current;
+            var kb = DeviceInput.Allowed ? Keyboard.current : null;
             if (kb != null && kb.escapeKey.wasPressedThisFrame && !UiKit.AnyInputOwnsFocus()) Toggle();
         }
 

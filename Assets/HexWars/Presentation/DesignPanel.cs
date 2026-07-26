@@ -45,7 +45,7 @@ namespace HexWars.Presentation
         {
             if (_game == null || _canvasGo == null) return;
             var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
-            if (UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
+            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {

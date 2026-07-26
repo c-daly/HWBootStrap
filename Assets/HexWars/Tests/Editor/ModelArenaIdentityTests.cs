@@ -338,5 +338,70 @@ namespace HexWars.Presentation.Tests
             Assert.That(portrait.y, Is.GreaterThan(landscape.y),
                 "portrait rows are taller, so the same row index sits further down the screen");
         }
+
+        // ---- Fullscreen reflection guard (GameViewFullscreen) ----
+        //
+        // The reflection calls in TryResolve/IsMaximized/SetMaximized are wrapped in try/catch so a
+        // failure (unresolvable type, or GetWindow/GetValue/SetValue throwing — e.g. no Game view
+        // exists yet under -batchmode) latches Unavailable and lets the toggle silently disappear
+        // instead of throwing on every OnGUI event. GameViewTypeName is a test seam forcing the
+        // resolve path down its failure branch without needing to fake an actual editor window; the
+        // deeper case (a real GetWindow/GetValue/SetValue throw after a *successful* type/property
+        // resolve) isn't independently forced here — faking that would need a stand-in reflection
+        // target, which is disproportionate scaffolding for this defensive guard.
+
+        [Test]
+        public void GameViewFullscreen_UnresolvableTypeName_IsMaximizedReturnsFalseAndLatchesUnavailable()
+        {
+            string original = GameViewFullscreen.GameViewTypeName;
+            GameViewFullscreen.ResetCacheForTests();
+            GameViewFullscreen.GameViewTypeName = "Totally.Bogus.NonexistentType, NoSuchAssembly";
+            try
+            {
+                Assert.That(GameViewFullscreen.Unavailable, Is.False,
+                    "must not latch before the first resolve attempt");
+                Assert.That(GameViewFullscreen.IsMaximized(), Is.False);
+                Assert.That(GameViewFullscreen.Unavailable, Is.True,
+                    "an unresolvable type must latch Unavailable so the toggle silently stops drawing itself");
+            }
+            finally
+            {
+                GameViewFullscreen.GameViewTypeName = original;
+                GameViewFullscreen.ResetCacheForTests();
+            }
+        }
+
+        [Test]
+        public void GameViewFullscreen_UnresolvableTypeName_SetMaximizedDoesNotThrow()
+        {
+            string original = GameViewFullscreen.GameViewTypeName;
+            GameViewFullscreen.ResetCacheForTests();
+            GameViewFullscreen.GameViewTypeName = "Totally.Bogus.NonexistentType, NoSuchAssembly";
+            try
+            {
+                Assert.DoesNotThrow(() => GameViewFullscreen.SetMaximized(true));
+                Assert.That(GameViewFullscreen.Unavailable, Is.True);
+            }
+            finally
+            {
+                GameViewFullscreen.GameViewTypeName = original;
+                GameViewFullscreen.ResetCacheForTests();
+            }
+        }
+
+        [Test]
+        public void GameViewFullscreen_RealGameViewType_NeverThrows()
+        {
+            GameViewFullscreen.ResetCacheForTests();
+            try
+            {
+                Assert.DoesNotThrow(() => GameViewFullscreen.IsMaximized());
+                Assert.DoesNotThrow(() => GameViewFullscreen.SetMaximized(false));
+            }
+            finally
+            {
+                GameViewFullscreen.ResetCacheForTests();
+            }
+        }
     }
 }

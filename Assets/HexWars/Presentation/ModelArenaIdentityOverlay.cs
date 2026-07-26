@@ -1,3 +1,4 @@
+using System;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
@@ -76,7 +77,7 @@ namespace HexWars.Presentation
             Rect row = ComfortControlsRowRect(rowCount, fogRowShown, logicalWidth, narrow);
             DrawSoundToggle(SoundToggleRect(row));
 #if UNITY_EDITOR
-            DrawFullscreenToggle(FullscreenToggleRect(row));
+            if (!GameViewFullscreen.Unavailable) DrawFullscreenToggle(FullscreenToggleRect(row));
 #endif
         }
 
@@ -224,36 +225,75 @@ namespace HexWars.Presentation
     /// is required because <c>UnityEditor.GameView</c> is internal; this Presentation asmdef is a normal
     /// runtime assembly (see <see cref="HexWars.Presentation.SpectatorDriver"/> for the same
     /// <c>#if UNITY_EDITOR</c> + <c>UnityEditor.*</c> pattern already in use here), so it compiles only
-    /// into editor builds and is never linked into a player.</summary>
-    static class GameViewFullscreen
+    /// into editor builds and is never linked into a player. Every reflection call is wrapped in
+    /// try/catch — an unresolvable type/property is the expected "old Editor version" case already
+    /// latched via <see cref="Unavailable"/>, but <see cref="UnityEditor.EditorWindow.GetWindow"/> and
+    /// the property get/set can themselves throw (e.g. no Game view exists yet, as in
+    /// <c>-batchmode</c>), and an uncaught throw here becomes a per-OnGUI-event exception. On any
+    /// failure the toggle just latches unavailable and silently disappears rather than throwing.</summary>
+    public static class GameViewFullscreen
     {
         static System.Type _gameViewType;
         static PropertyInfo _maximizedProperty;
         static bool _resolveFailed;
+
+        /// <summary>Test seam: the reflection type name normally resolved to
+        /// <c>UnityEditor.GameView</c>. Overridable so a test can force the resolve path down the
+        /// failure branch without needing to fake an actual editor window.</summary>
+        public static string GameViewTypeName = "UnityEditor.GameView";
+
+        /// <summary>True once resolution has failed (or thrown) at least once — the toggle stops
+        /// drawing itself entirely once this latches, per the "silently disappears" contract.</summary>
+        public static bool Unavailable => _resolveFailed;
+
+        /// <summary>Test-only: clears the cached type/property and the failure latch so a test can
+        /// exercise a fresh resolve without leaking state into later tests/usages.</summary>
+        public static void ResetCacheForTests()
+        {
+            _gameViewType = null;
+            _maximizedProperty = null;
+            _resolveFailed = false;
+        }
 
         static bool TryResolve(out UnityEditor.EditorWindow window, out PropertyInfo maximizedProperty)
         {
             window = null;
             maximizedProperty = null;
             if (_resolveFailed) return false;
-            if (_gameViewType == null)
-                _gameViewType = typeof(UnityEditor.EditorWindow).Assembly.GetType("UnityEditor.GameView");
-            if (_gameViewType == null) { _resolveFailed = true; return false; }
-            if (_maximizedProperty == null)
-                _maximizedProperty = _gameViewType.GetProperty("maximized", BindingFlags.Public | BindingFlags.Instance);
-            if (_maximizedProperty == null) { _resolveFailed = true; return false; }
+            try
+            {
+                if (_gameViewType == null)
+                    _gameViewType = typeof(UnityEditor.EditorWindow).Assembly.GetType(GameViewTypeName);
+                if (_gameViewType == null) { _resolveFailed = true; return false; }
+                if (_maximizedProperty == null)
+                    _maximizedProperty = _gameViewType.GetProperty("maximized", BindingFlags.Public | BindingFlags.Instance);
+                if (_maximizedProperty == null) { _resolveFailed = true; return false; }
 
-            window = UnityEditor.EditorWindow.GetWindow(_gameViewType);
-            maximizedProperty = _maximizedProperty;
-            return window != null;
+                window = UnityEditor.EditorWindow.GetWindow(_gameViewType);
+                maximizedProperty = _maximizedProperty;
+                return window != null;
+            }
+            catch (Exception)
+            {
+                _resolveFailed = true;
+                window = null;
+                maximizedProperty = null;
+                return false;
+            }
         }
 
-        public static bool IsMaximized() =>
-            TryResolve(out var window, out var property) && (bool)property.GetValue(window);
+        public static bool IsMaximized()
+        {
+            if (!TryResolve(out var window, out var property)) return false;
+            try { return (bool)property.GetValue(window); }
+            catch (Exception) { _resolveFailed = true; return false; }
+        }
 
         public static void SetMaximized(bool maximized)
         {
-            if (TryResolve(out var window, out var property)) property.SetValue(window, maximized);
+            if (!TryResolve(out var window, out var property)) return;
+            try { property.SetValue(window, maximized); }
+            catch (Exception) { _resolveFailed = true; }
         }
     }
 #endif

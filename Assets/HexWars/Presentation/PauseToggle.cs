@@ -29,6 +29,16 @@ namespace HexWars.Presentation
             return value <= FineStepCeiling ? Mathf.Round(value * 4f) / 4f : Mathf.Round(value);
         }
 
+        /// <summary>Pure extraction of "would this frame toggle pause", mirroring <see cref="SnapSpeed"/>'s
+        /// testable-extraction idiom — simulating an actual Input System keyboard device in a test is
+        /// heavy scaffolding this repo doesn't otherwise use, so the space-bar read
+        /// (<paramref name="spacePressedThisFrame"/>, standing in for
+        /// <c>Keyboard.current.spaceKey.wasPressedThisFrame</c>) and the focus gate
+        /// (<paramref name="deviceInputAllowed"/>, standing in for <see cref="DeviceInput.Allowed"/>)
+        /// are passed in rather than read directly.</summary>
+        public static bool ShouldTogglePause(bool deviceInputAllowed, bool spacePressedThisFrame) =>
+            deviceInputAllowed && spacePressedThisFrame;
+
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoCreate()
         {
@@ -58,7 +68,11 @@ namespace HexWars.Presentation
             if (!_show) return;
 
             var kb = Keyboard.current;
-            if (kb != null && kb.spaceKey.wasPressedThisFrame) { _paused = !_paused; Apply(); }
+            if (kb != null && ShouldTogglePause(DeviceInput.Allowed, kb.spaceKey.wasPressedThisFrame))
+            {
+                _paused = !_paused;
+                Apply();
+            }
         }
 
         void Apply() => Time.timeScale = _paused ? 0f : _speed;

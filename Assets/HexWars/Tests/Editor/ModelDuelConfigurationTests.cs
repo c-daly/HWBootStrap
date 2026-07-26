@@ -62,6 +62,74 @@ namespace HexWars.Presentation.Tests
             Assert.That(spec, Does.Contain("\"inference_mode\":\"stochastic\""));
         }
 
+        // ---- Arena AudioListener (batch fix: LaunchDuel's fresh scene had no listener at all, so
+        // battle SFX were both inaudible and spammed "There are no audio listeners in the scene"
+        // every frame) ----
+
+        [Test]
+        public void EnsureSingleAudioListener_SceneWithNone_AddsExactlyOneEnabledListenerToTheCamera()
+        {
+            // EditMode tests run against whichever scene the Editor had loaded (here, the real
+            // HexWars scene, which legitimately owns its own Main Camera + AudioListener for actual
+            // gameplay) — that ambient listener must not be destroyed to fabricate a "none exist"
+            // scene. FindObjectsByType's default query excludes inactive GameObjects, so deactivating
+            // it for the duration of this one synchronous test (and restoring it in `finally`)
+            // reproduces "no listener anywhere in the scene" without touching real scene state.
+            var ambientListeners = UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None);
+            var reactivate = new System.Collections.Generic.List<GameObject>();
+            foreach (var listener in ambientListeners)
+            {
+                reactivate.Add(listener.gameObject);
+                listener.gameObject.SetActive(false);
+            }
+            var camGo = new GameObject("arena-camera", typeof(Camera));
+            try
+            {
+                Assert.That(UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None),
+                    Is.Empty, "test setup: ambient listeners should be deactivated for this test");
+
+                HexWars.Presentation.EditorTools.ReplayViewerMenu
+                    .EnsureSingleAudioListener(camGo.GetComponent<Camera>());
+
+                var listeners = UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None);
+                Assert.That(listeners, Has.Length.EqualTo(1));
+                Assert.That(listeners[0].gameObject, Is.SameAs(camGo));
+                Assert.That(listeners[0].enabled, Is.True);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(camGo);
+                foreach (var go in reactivate) if (go != null) go.SetActive(true);
+            }
+        }
+
+        [Test]
+        public void EnsureSingleAudioListener_SceneAlreadyHasOne_AddsNoneToTheCamera()
+        {
+            // Doesn't assume an empty ambient scene (see the test above) — just that adding one more
+            // known listener guarantees "at least one exists", and asserts the call is then a strict
+            // no-op: no listener lands on the camera, and the total count doesn't move.
+            var existingGo = new GameObject("existing-listener", typeof(AudioListener));
+            var camGo = new GameObject("arena-camera", typeof(Camera));
+            try
+            {
+                int before = UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None).Length;
+
+                HexWars.Presentation.EditorTools.ReplayViewerMenu
+                    .EnsureSingleAudioListener(camGo.GetComponent<Camera>());
+
+                Assert.That(camGo.GetComponent<AudioListener>(), Is.Null,
+                    "a listener already existed elsewhere in the scene — must never add a second one");
+                Assert.That(UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None).Length,
+                    Is.EqualTo(before));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(camGo);
+                UnityEngine.Object.DestroyImmediate(existingGo);
+            }
+        }
+
         [Test]
         public void Reload_IsAllowedOnlyAtGameBoundaryForLiveSeats()
         {

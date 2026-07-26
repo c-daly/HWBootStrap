@@ -201,6 +201,7 @@ namespace HexWars.Presentation.EditorTools
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.02f, 0.02f, 0.05f);
             camGo.AddComponent<CameraRig>();
+            EnsureSingleAudioListener(cam);
 
             var go = new GameObject("ModelDuel");
             go.AddComponent<BoardRenderer>();
@@ -218,6 +219,22 @@ namespace HexWars.Presentation.EditorTools
             es.AddComponent<InputSystemUIInputModule>();
 
             EditorApplication.EnterPlaymode();
+        }
+
+        /// <summary>Root cause of the "There are no audio listeners in the scene" spam during arena
+        /// playback: <see cref="LaunchDuel"/> always starts from a brand-new, empty scene
+        /// (<see cref="EditorSceneManager.NewScene"/>), which never carries the one listener a normal
+        /// game scene owns — so battle SFX (<see cref="SoundManager"/>) played into it are both
+        /// inaudible and log every frame. Adds exactly one <see cref="AudioListener"/>, on the arena's
+        /// own camera, and only when the scene doesn't already carry one anywhere — adding a second
+        /// listener just flips that same warning into "There are 2 audio listeners" instead of curing
+        /// it. Thin: the caller passes the already-created arena camera; this only decides whether to
+        /// add the component.</summary>
+        public static void EnsureSingleAudioListener(Camera camera)
+        {
+            if (camera == null) return;
+            if (UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None).Length > 0) return;
+            camera.gameObject.AddComponent<AudioListener>();
         }
 
         public static void LaunchDuel(string pyDir, MlRunPresentationPlan plan)
