@@ -43,6 +43,12 @@ namespace HexWars.Engine.Rl
         public EnvConfig Config => _cfg;
         public GameState State => _state;
 
+        /// <summary>Opt-in: when true, every accepted command captures a <see cref="DuelTransition"/>
+        /// for <see cref="DrainTransitions"/>. Defaults to false so headless training (which never
+        /// drains) doesn't pay the memory cost of retaining every intermediate <see cref="GameState"/>
+        /// in a vectorized run until the next Reset.</summary>
+        public bool CaptureTransitions { get; set; }
+
         /// <summary>Start a duel. A null controller = that seat is external (caller supplies its actions);
         /// non-null = the env auto-plays it. <paramref name="learnerSeat"/> sets whose perspective the
         /// per-step reward is from (for self-play training).</summary>
@@ -83,7 +89,7 @@ namespace HexWars.Engine.Rl
                 if (r.Success)
                 {
                     _state = r.NewState; _log.Add(cmd);
-                    _transitions.Add(new DuelTransition(before, cmd, _state));
+                    if (CaptureTransitions) _transitions.Add(new DuelTransition(before, cmd, _state));
                     if (mv != null && gapBefore >= 0)
                     {
                         int gapAfter = RewardShaping.GapOfUnit(_state, mv.UnitId, _learner, Foe);
@@ -123,7 +129,7 @@ namespace HexWars.Engine.Rl
                 if (r.Success)
                 {
                     _state = r.NewState; _log.Add(cmd);
-                    _transitions.Add(new DuelTransition(before, cmd, _state));
+                    if (CaptureTransitions) _transitions.Add(new DuelTransition(before, cmd, _state));
                     continue;
                 }
                 var endCmd = new EndTurn(seat);
@@ -131,7 +137,7 @@ namespace HexWars.Engine.Rl
                 if (end.Success)
                 {
                     _state = end.NewState; _log.Add(endCmd);
-                    _transitions.Add(new DuelTransition(before, endCmd, _state));
+                    if (CaptureTransitions) _transitions.Add(new DuelTransition(before, endCmd, _state));
                 }
                 else break;
             }

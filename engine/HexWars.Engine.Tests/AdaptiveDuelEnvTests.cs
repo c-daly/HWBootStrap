@@ -55,6 +55,7 @@ namespace HexWars.Engine.Tests
         public void DrainTransitions_MatchesReplayLog_ForFullyScriptedGame()
         {
             var env = new AdaptiveDuelEnv();
+            env.CaptureTransitions = true;
             var view = env.Reset(71, new GreedyAgent(1), new GreedyAgent(2),
                 new CombinedArmsDeploymentPolicy(1), new CombinedArmsDeploymentPolicy(2));
 
@@ -64,13 +65,18 @@ namespace HexWars.Engine.Tests
 
             var transitions = env.DrainTransitions();
             Assert.That(transitions, Is.Not.Empty);
-            var data = ReplayFile.Read(env.ToReplay());
+            string replayText = env.ToReplay();
+            var data = ReplayFile.Read(replayText);
             Assert.That(transitions.Count, Is.EqualTo(data.Commands.Count));
             for (int i = 0; i < transitions.Count; i++)
                 Assert.That(transitions[i].Command, Is.EqualTo(data.Commands[i]));
             for (int i = 0; i < transitions.Count - 1; i++)
                 Assert.That(transitions[i].Resulting, Is.SameAs(transitions[i + 1].Previous));
             Assert.That(transitions[transitions.Count - 1].Resulting, Is.SameAs(env.State));
+            // transitions[0].Previous must be the episode's actual start state (the playback anchor):
+            // GameState has no value equality, so re-serializing it with the replay's own commands and
+            // checking it reproduces the replay text byte-for-byte is the cheapest structural proof.
+            Assert.That(ReplayFile.Write(transitions[0].Previous, data.Commands), Is.EqualTo(replayText));
 
             Assert.That(env.DrainTransitions(), Is.Empty, "drain must empty the queue");
         }

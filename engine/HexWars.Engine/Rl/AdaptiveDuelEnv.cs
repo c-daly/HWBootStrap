@@ -66,6 +66,12 @@ namespace HexWars.Engine.Rl
         public AdaptiveEnvConfig Config => _cfg;
         public AdaptiveLayout Layout => _layout;
         public MlContract Contract => _contract;
+
+        /// <summary>Opt-in: when true, every accepted command captures a <see cref="DuelTransition"/>
+        /// for <see cref="DrainTransitions"/>. Defaults to false so headless training (which never
+        /// drains) doesn't pay the memory cost of retaining every intermediate <see cref="GameState"/>
+        /// in a vectorized run until the next Reset.</summary>
+        public bool CaptureTransitions { get; set; }
         public bool DeploymentComplete => _state != null;
         public bool AwaitingPostRevealAdvance => _awaitingPostRevealAdvance;
         public GameState State => _state ?? throw new InvalidOperationException("deployment is not complete");
@@ -167,7 +173,7 @@ namespace HexWars.Engine.Rl
 
                 _state = result.NewState;
                 _log.Add(transition.Command);
-                _transitions.Add(new DuelTransition(before, transition.Command, _state));
+                if (CaptureTransitions) _transitions.Add(new DuelTransition(before, transition.Command, _state));
                 RecordSuccessfulCommand(transition.Command);
                 SyncSlots();
                 AdvancePastInternal();
@@ -309,7 +315,7 @@ namespace HexWars.Engine.Rl
                 {
                     _state = result.NewState;
                     _log.Add(command);
-                    _transitions.Add(new DuelTransition(before, command, _state));
+                    if (CaptureTransitions) _transitions.Add(new DuelTransition(before, command, _state));
                     RecordSuccessfulCommand(command);
                     SyncSlots();
                     continue;
@@ -322,7 +328,7 @@ namespace HexWars.Engine.Rl
                 if (!end.Success) break;
                 _state = end.NewState;
                 _log.Add(endCmd);
-                _transitions.Add(new DuelTransition(before, endCmd, _state));
+                if (CaptureTransitions) _transitions.Add(new DuelTransition(before, endCmd, _state));
                 SyncSlots();
             }
         }

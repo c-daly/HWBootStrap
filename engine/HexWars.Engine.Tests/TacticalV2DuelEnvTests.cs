@@ -39,17 +39,25 @@ namespace HexWars.Engine.Tests
         /// <summary>Asserts the drained transitions are exactly the accepted commands in order — same
         /// count and same commands (record equality) as the replay log — and that consecutive
         /// transitions chain by reference (transition[i].Resulting IS transition[i+1].Previous), so a
-        /// consumer can play them back as one continuous sequence.</summary>
+        /// consumer can play them back as one continuous sequence. Also asserts transitions[0].Previous
+        /// is the episode's actual start state (the playback anchor a viewer seeds from): GameState has
+        /// no value equality, so re-serializing it alongside the replay's own commands and checking that
+        /// reproduces the replay text byte-for-byte is the cheapest structural proof available.</summary>
         private static void AssertTransitionsMatchReplay(TacticalV2DuelEnv env, IReadOnlyList<DuelTransition> transitions)
         {
-            ReplayData data = ReplayFile.Read(env.ToReplay());
+            string replayText = env.ToReplay();
+            ReplayData data = ReplayFile.Read(replayText);
             Assert.That(transitions.Count, Is.EqualTo(data.Commands.Count));
             for (int i = 0; i < transitions.Count; i++)
                 Assert.That(transitions[i].Command, Is.EqualTo(data.Commands[i]));
             for (int i = 0; i < transitions.Count - 1; i++)
                 Assert.That(transitions[i].Resulting, Is.SameAs(transitions[i + 1].Previous));
             if (transitions.Count > 0)
+            {
                 Assert.That(transitions[transitions.Count - 1].Resulting, Is.SameAs(env.State));
+                Assert.That(ReplayFile.Write(transitions[0].Previous, data.Commands), Is.EqualTo(replayText),
+                    "transitions[0].Previous must be the episode's start state (the playback anchor)");
+            }
         }
 
         [Test]
@@ -57,6 +65,7 @@ namespace HexWars.Engine.Tests
         {
             TacticalV2Config config = TacticalV2Config.Default();
             var env = new TacticalV2DuelEnv(config);
+            env.CaptureTransitions = true;
             var view = env.Reset(3, new GreedyAgent(3), new GreedyAgent(4));
             Assert.That(view.Terminated || view.Truncated, Is.True);
 
@@ -70,6 +79,7 @@ namespace HexWars.Engine.Tests
         {
             TacticalV2Config config = TacticalV2Config.Default();
             var env = new TacticalV2DuelEnv(config);
+            env.CaptureTransitions = true;
             var rng = new Random(11);
             var view = env.Reset(11, null, new GreedyAgent(3)); // seat0 external, seat1 internal
 
@@ -98,6 +108,7 @@ namespace HexWars.Engine.Tests
             for (int seed = 0; seed < 20 && !foundAttack; seed++)
             {
                 var env = new TacticalV2DuelEnv(config);
+                env.CaptureTransitions = true;
                 env.Reset(seed, new GreedyAgent(seed), new GreedyAgent(seed + 1));
                 IReadOnlyList<DuelTransition> transitions = env.DrainTransitions();
                 if (transitions.Any(t => t.Command is AttackUnit)) foundAttack = true;
@@ -114,6 +125,7 @@ namespace HexWars.Engine.Tests
         {
             TacticalV2Config config = TacticalV2Config.Default();
             var env = new TacticalV2DuelEnv(config);
+            env.CaptureTransitions = true;
             var view = env.Reset(7, null, null); // both seats external; nothing auto-plays
 
             TacticalV2Layout layout = env.Layout;
@@ -138,6 +150,7 @@ namespace HexWars.Engine.Tests
         {
             TacticalV2Config config = TacticalV2Config.Default();
             var env = new TacticalV2DuelEnv(config);
+            env.CaptureTransitions = true;
             env.Reset(3, new GreedyAgent(3), new GreedyAgent(4)); // plays to completion; NOT drained
 
             env.Reset(9, new GreedyAgent(9), new GreedyAgent(10)); // reset again without draining
@@ -151,10 +164,26 @@ namespace HexWars.Engine.Tests
         {
             TacticalV2Config config = TacticalV2Config.Default();
             var env = new TacticalV2DuelEnv(config);
+            env.CaptureTransitions = true;
             env.Reset(3, new GreedyAgent(3), new GreedyAgent(4));
 
             Assert.That(env.DrainTransitions(), Is.Not.Empty);
             Assert.That(env.DrainTransitions(), Is.Empty);
+        }
+
+        /// <summary>With CaptureTransitions left at its default (false), a scripted episode segment
+        /// still plays to completion and produces a valid replay, but nothing accumulates for
+        /// DrainTransitions — proving headless training (which never touches the flag) pays no capture
+        /// cost.</summary>
+        [Test]
+        public void CaptureTransitionsDefaultsOff_ScriptedEpisodeSegment_DrainsEmpty()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            var env = new TacticalV2DuelEnv(config);
+            var view = env.Reset(3, new GreedyAgent(3), new GreedyAgent(4)); // CaptureTransitions untouched
+
+            Assert.That(view.Terminated || view.Truncated, Is.True);
+            Assert.That(env.DrainTransitions(), Is.Empty, "capture is opt-in; training must pay nothing by default");
         }
     }
 }
