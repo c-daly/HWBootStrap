@@ -40,6 +40,14 @@ namespace HexWars.Presentation
         /// of the moment engine truth committed.</summary>
         public event Action<GameState, Command, GameState> ItemCommitted;
 
+        /// <summary>Fires when the render pipeline (per-item animation or <see cref="Commit"/>) throws
+        /// while draining the queue — right before this coroutine clears <see cref="_playing"/> and
+        /// drops everything still queued, so <see cref="IsBusy"/> reliably goes false instead of
+        /// wedging forever. Always logged via <c>Debug.LogException</c> first regardless of whether
+        /// anything is subscribed here, matching what an uncaught coroutine exception used to log by
+        /// default — interactive games with no subscriber therefore see identical console behavior.</summary>
+        public event Action<Exception> RenderFault;
+
         void Awake()
         {
             // Absent on the ML arena's GameObject (there is no interactive GameBootstrap there), which
@@ -105,8 +113,39 @@ namespace HexWars.Presentation
                 _current = _queue.Dequeue();
                 _reported = false;
                 _presented = false;
-                yield return Play(_current.Value);
-                Commit(_current.Value, skipCombatFx: _reported);
+
+                // C# forbids `yield return` inside a try block that has a catch clause, so this
+                // coroutine can never wrap `yield return Play(...)` directly — an exception thrown
+                // mid-animation (or deep inside a nested per-command coroutine Unity would otherwise
+                // auto-drive) would previously unwind straight out of this coroutine, leaving
+                // `_playing` stuck true and IsBusy wedged forever. FlattenSteps drives every nested
+                // step itself, one MoveNext() at a time, entirely outside any yielding try block, so
+                // each step's exception can be caught right where it happens.
+                Exception fault = null;
+                foreach (object step in FlattenSteps(Play(_current.Value), ex => fault = ex))
+                    yield return step;
+
+                if (fault == null)
+                {
+                    try { Commit(_current.Value, skipCombatFx: _reported); }
+                    catch (Exception ex) { fault = ex; }
+                }
+
+                if (fault != null)
+                {
+                    // Presentation state is now unknown (mid-animation or mid-Commit) — drop
+                    // everything still queued rather than risk compounding the failure by animating
+                    // more items on top of it. Both _playing=false AND an emptied queue are required:
+                    // IsBusy is `_playing || _queue.Count > 0`.
+                    _current = null;
+                    _queue.Clear();
+                    _playing = false;
+                    Debug.LogException(fault); // preserves what an uncaught coroutine exception used
+                                                // to log by default, even with no RenderFault listener
+                    RenderFault?.Invoke(fault);
+                    yield break;
+                }
+
                 bool wasLocal = _current.Value.IsLocal;
                 _current = null;
                 // no pacing beat after a fully-hidden (silent, zero-time) action: spec §4 forbids a
@@ -115,6 +154,42 @@ namespace HexWars.Presentation
                     yield return new WaitForSeconds(OpponentGap);
             }
             _playing = false;
+        }
+
+        /// <summary>Manually drains <paramref name="root"/> and every nested <see cref="IEnumerator"/>
+        /// it yields — the same nesting Unity's own coroutine engine auto-drives for a raw
+        /// `yield return someEnumerator` — one <see cref="IEnumerator.MoveNext"/> call at a time,
+        /// entirely outside any try block that itself yields (illegal in C# once a catch clause is
+        /// present). Any exception, at any nesting depth, is caught exactly where it is thrown and
+        /// handed to <paramref name="onFault"/> instead of propagating out of the caller.</summary>
+        static IEnumerable<object> FlattenSteps(IEnumerator root, Action<Exception> onFault)
+        {
+            var stack = new Stack<IEnumerator>();
+            stack.Push(root);
+            while (stack.Count > 0)
+            {
+                IEnumerator it = stack.Peek();
+                bool moved = false;
+                object current = null;
+                Exception caught = null;
+                try
+                {
+                    moved = it.MoveNext();
+                    if (moved) current = it.Current;
+                }
+                catch (Exception ex)
+                {
+                    caught = ex;
+                }
+                if (caught != null)
+                {
+                    onFault(caught);
+                    yield break; // outside the try/catch above: legal even though this is an iterator
+                }
+                if (!moved) { stack.Pop(); continue; }
+                if (current is IEnumerator nested) { stack.Push(nested); continue; }
+                yield return current; // WaitForSeconds / null: hand real waiting to the real coroutine
+            }
         }
 
         IEnumerator Play(Item item)

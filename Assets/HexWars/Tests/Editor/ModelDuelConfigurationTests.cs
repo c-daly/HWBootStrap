@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using HexWars.Presentation;
@@ -915,6 +916,8 @@ namespace HexWars.Presentation.Tests
 
                 LogAssert.Expect(LogType.Error,
                     "ModelDuelDriver: presentation error: simulated unpresentable transition");
+                LogAssert.Expect(LogType.Exception,
+                    new Regex(Regex.Escape("simulated unpresentable transition")));
                 InvokePrivate(driver, "HandlePresentation");
 
                 Assert.That(driver.IsDone, Is.True);
@@ -923,6 +926,128 @@ namespace HexWars.Presentation.Tests
             }
             finally { UnityEngine.Object.DestroyImmediate(go); }
         }
+
+        [Test]
+        public void ActionPresenter_RenderFaultClearsIsBusyAndSurfacesTheExceptionInsteadOfFreezing()
+        {
+            // No BoardRenderer on this GameObject: ActionPresenter._board stays null after Awake,
+            // so any non-local queued item that resolves an on-screen focal cell (ActionSite, called
+            // from Play() before the animation switch) throws deterministically inside the coroutine
+            // — reproducing "an exception mid-Play terminates the coroutine with _playing stuck true"
+            // without needing a contrived engine state. This particular fault happens on Play's very
+            // first step, before any yield, and Unity runs a coroutine's body synchronously up to its
+            // first yield the instant StartCoroutine is called (even outside Play mode) — so by the
+            // time Enqueue returns, the whole fault-and-recover sequence has already happened.
+            var go = new GameObject("presenter-render-fault", typeof(ActionPresenter));
+            try
+            {
+                var presenter = go.GetComponent<ActionPresenter>();
+                InvokePrivate(presenter, "Awake");
+
+                Exception captured = null;
+                presenter.RenderFault += ex => captured = ex;
+                LogAssert.Expect(LogType.Exception, new Regex(".*"));
+
+                GameState state = MinimalClaimableState(out HexCoord cell);
+                presenter.Enqueue(state, new CaptureHex(PlayerId.Player0, cell), state, isLocal: false);
+
+                Assert.That(presenter.IsBusy, Is.False,
+                    "a faulted render must clear both _playing and the queue, not leave IsBusy wedged");
+                Assert.That(captured, Is.Not.Null.And.InstanceOf<NullReferenceException>());
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void PresenterRenderFault_StopsTheDriverWithSurfacedArenaStatusesInsteadOfFreezing()
+        {
+            var go = new GameObject("driver-render-fault", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                var presenter = go.GetComponent<ActionPresenter>();
+                // Force the same deterministic render-phase fault as the presenter-level test above,
+                // regardless of the real BoardRenderer RequireComponent already wired to this driver.
+                SetPrivate(presenter, "_board", null);
+
+                LogAssert.Expect(LogType.Exception, new Regex(".*"));
+                LogAssert.Expect(LogType.Error, new Regex(@"^ModelDuelDriver: render error: .*"));
+
+                GameState state = MinimalClaimableState(out HexCoord cell);
+                // The fault fires synchronously inside this very call (see the comment on the
+                // presenter-level test above) — the driver's RenderFault subscription, wired in
+                // Awake, must therefore have already routed it into MarkPresentationError by the
+                // time Enqueue returns.
+                presenter.Enqueue(state, new CaptureHex(PlayerId.Player0, cell), state, isLocal: false);
+
+                Assert.That(presenter.IsBusy, Is.False,
+                    "a faulted render must not leave the pacing gate (ActionPresenter.IsBusy) wedged, " +
+                    "which would otherwise freeze ModelDuelDriver.Update forever");
+                Assert.That(driver.IsDone, Is.True);
+                Assert.That(driver.P0ArenaStatus, Does.Contain("render error"));
+                Assert.That(driver.P1ArenaStatus, Does.Contain("render error"));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void IdentitySnapshot_PointsFollowPresentedStateNotTheLiveSimulation()
+        {
+            var go = new GameObject("driver-points-lag", typeof(BoardRenderer), typeof(ModelDuelDriver));
+            try
+            {
+                var driver = AwakeDriverForTest(go);
+                var presenter = go.GetComponent<ActionPresenter>();
+                var board = new Board(new[] { new Tile(new HexCoord(0, 0), 0, TerrainType.Plains) });
+                GameState anchor = PointsState(board, p0Points: 3, p1Points: 4);
+                GameState aheadWhilePending = PointsState(board, p0Points: 30, p1Points: 40);
+
+                InvokePrivate(driver, "InitializeBoard", anchor);
+
+                ModelArenaSeatIdentity[] beforeQueue = driver.IdentitySnapshot();
+                Assert.That(beforeQueue[0].Points, Is.EqualTo(3));
+                Assert.That(beforeQueue[1].Points, Is.EqualTo(4));
+
+                // Engine truth is already ahead (per the pipeline's own doc comment: "the engine state
+                // has ALWAYS already committed, only visuals lag") but this transition is still sitting
+                // in the queue, not yet presented.
+                presenter.Enqueue(anchor, new EndTurn(PlayerId.Player0), aheadWhilePending, isLocal: false);
+                Assert.That(presenter.IsBusy, Is.True,
+                    "EditMode never ticks the player loop; the item is queued, not yet presented");
+
+                ModelArenaSeatIdentity[] pending = driver.IdentitySnapshot();
+                Assert.That(pending[0].Points, Is.EqualTo(3),
+                    "identity points must still lag PresentedState while the transition is only queued");
+                Assert.That(pending[1].Points, Is.EqualTo(4));
+
+                FastForwardIgnoringEditModeDestroyWarnings(presenter);
+
+                ModelArenaSeatIdentity[] caughtUp = driver.IdentitySnapshot();
+                Assert.That(caughtUp[0].Points, Is.EqualTo(30),
+                    "once presentation catches up, identity points must reflect what actually landed " +
+                    "on screen");
+                Assert.That(caughtUp[1].Points, Is.EqualTo(40));
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        static GameState MinimalClaimableState(out HexCoord cell)
+        {
+            cell = new HexCoord(0, 0);
+            var board = new Board(new[] { new Tile(cell, 0, TerrainType.Plains) });
+            return new GameState(board, GameConfig.Default(), new[]
+            {
+                new PlayerState(PlayerId.Player0, 0),
+                new PlayerState(PlayerId.Player1, 0),
+            }, PlayerId.Player0, round: 1, nextEntityId: 1);
+        }
+
+        static GameState PointsState(Board board, int p0Points, int p1Points) =>
+            new GameState(board, GameConfig.Default(), new[]
+            {
+                new PlayerState(PlayerId.Player0, p0Points),
+                new PlayerState(PlayerId.Player1, p1Points),
+            }, PlayerId.Player0, round: 1, nextEntityId: 1);
 
         static ModelDuelDriver StartScriptedDriver(
             GameObject go, MlEnvironmentContract environment, string p0Spec, string p1Spec, int seed)
@@ -955,17 +1080,32 @@ namespace HexWars.Presentation.Tests
             return driver;
         }
 
+        static readonly Regex TokenStoreDestroyEditModeWarning =
+            new Regex(@"Destroy may not be called from edit mode!");
+
         /// <summary>Synchronously flushes the presenter's queue for the test. Its <see cref="TokenStore"/>
         /// prunes dead units through <c>UnityEngine.Object.Destroy</c> — correct at runtime, but Unity
-        /// logs (and this harness fails on) an error when it's called outside Play mode. A real
-        /// scripted-vs-scripted game run in an EditMode test always trips this on any unit death, so
-        /// swallow just that expected noise around the flush rather than asserting on each seed's exact
-        /// (non-deterministic) set of destroyed unit names.</summary>
+        /// logs an error when it's called outside Play mode. A real scripted-vs-scripted game run in an
+        /// EditMode test always trips this on any unit death, in a count that varies per seed, so a
+        /// fixed number of <see cref="LogAssert.Expect(LogType, Regex)"/> calls up front can't cover it.
+        /// Instead, react to each log as it happens and register a matching expectation only for
+        /// messages that are actually this specific, known-safe warning (edit-mode Destroy text,
+        /// originating from <see cref="TokenStore"/>'s own prune/clear) — any OTHER LogError during the
+        /// flush is a real, unexpected failure and still fails the test, unlike the previous blanket
+        /// <c>LogAssert.ignoreFailingMessages</c> toggle this replaces.</summary>
         static void FastForwardIgnoringEditModeDestroyWarnings(ActionPresenter presenter)
         {
-            LogAssert.ignoreFailingMessages = true;
+            void ExpectKnownTokenStoreDestroyWarning(string message, string stackTrace, LogType type)
+            {
+                if (type == LogType.Error
+                    && TokenStoreDestroyEditModeWarning.IsMatch(message)
+                    && stackTrace.Contains("HexWars.Presentation.TokenStore"))
+                    LogAssert.Expect(LogType.Error, message);
+            }
+
+            Application.logMessageReceived += ExpectKnownTokenStoreDestroyWarning;
             try { presenter.FastForward(); }
-            finally { LogAssert.ignoreFailingMessages = false; }
+            finally { Application.logMessageReceived -= ExpectKnownTokenStoreDestroyWarning; }
         }
 
         static object GetPrivate(object target, string field)

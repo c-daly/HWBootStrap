@@ -223,6 +223,7 @@ namespace HexWars.Presentation
             _board = GetComponent<BoardRenderer>();
             _presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
             _presenter.ItemCommitted += OnItemCommitted;
+            _presenter.RenderFault += OnPresenterRenderFault;
         }
 
         async void Start()
@@ -407,9 +408,20 @@ namespace HexWars.Presentation
             }
             catch (Exception error)
             {
-                MarkPresentationError("presentation error: " + error.Message);
+                MarkPresentationError("presentation error: " + error.Message, error);
             }
         }
+
+        /// <summary>Routes a render-path fault (mid-animation, or <see cref="ActionPresenter"/>'s own
+        /// post-item <c>Commit</c>) into the same stop-the-run path as an unpresentable transition —
+        /// spec §"Validation and Failure Behavior". Without this, <see cref="ActionPresenter"/> would
+        /// still recover on its own (queue cleared, <c>IsBusy</c> false), but the driver would keep
+        /// ticking forever with a dead board and no surfaced status. No exception object is forwarded
+        /// to <see cref="MarkPresentationError"/> here — <see cref="ActionPresenter"/> already logged
+        /// this exact exception via <c>Debug.LogException</c> before raising this event, and logging
+        /// it a second time would just duplicate the same stack trace in the console.</summary>
+        void OnPresenterRenderFault(Exception error) =>
+            MarkPresentationError("render error: " + error.Message);
 
         void InitializeBoard(GameState anchor)
         {
@@ -430,11 +442,12 @@ namespace HexWars.Presentation
             EventConsole.Report(next, CombatLog.Diff(prev, next, null), null);
         }
 
-        void MarkPresentationError(string message)
+        void MarkPresentationError(string message, Exception error = null)
         {
             P0ArenaStatus = message;
             P1ArenaStatus = message;
             Debug.LogError("ModelDuelDriver: " + message);
+            if (error != null) Debug.LogException(error); // preserve the stack trace, not just Message
             _done = true;
         }
 
@@ -606,7 +619,11 @@ namespace HexWars.Presentation
         }
         void OnDestroy()
         {
-            if (_presenter != null) _presenter.ItemCommitted -= OnItemCommitted;
+            if (_presenter != null)
+            {
+                _presenter.ItemCommitted -= OnItemCommitted;
+                _presenter.RenderFault -= OnPresenterRenderFault;
+            }
             StopDuel();
         }
 
