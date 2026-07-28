@@ -253,6 +253,9 @@ threatens it, even when the friendly unit cannot return fire. Nearby weak enemie
 occupancy or immediate-action head while the artillery dominates threat assessment and goal selection.
 Multiple attention heads allow both facts to remain relevant instead of forcing the policy to choose one
 universal ranking of objects.
+These head roles are descriptive possibilities, not manually assigned jobs. Attention specialization, the
+importance of each relation, and the tradeoff between immediate opportunity and residual threat are learned
+from outcomes.
 
 The entity encoder represents observed facts, not one final context-free strength ranking. Decision-specific
 queries compute asymmetric relevance:
@@ -266,6 +269,9 @@ attack_opportunity(enemy | my attacker)
 An attack query emphasizes killability, target value, retaliation, and opportunity cost. A defensive query
 emphasizes what the enemy can reach or damage before a response and which friendly asset is at risk. A design
 query emphasizes exploitable capability allocations and possible counters. The same enemy may rank differently
+under each query. No fixed strength, threat, opportunity, or shots-to-kill heuristic selects the action. The
+engine supplies mechanics and relations as facts; the learned policy and value function decide what those facts
+mean in context.
 
 The model uses seat-relative and relative geometry rather than learned absolute cell indices. Translating an
 otherwise identical battle should not change its strategic representation. Boundary and objective features
@@ -299,6 +305,11 @@ Rollout and optimization remain standard actor-critic phases. Network weights ar
 PPO later revisits stored observations and actions, computes advantages, and backpropagates policy and value
 losses through the heads and shared attention encoder.
 
+For transitions whose immediate result is knowable, candidate evaluation uses the exact successor observation
+produced through the authoritative engine transition. The engine determines what each command does; the learned
+network compares the resulting states. Conceptually, net desirability is opportunity created minus threat
+remaining: a learned goal-conditioned afterstate value, not a hand-authored component score.
+
 ## Tactical Action Contract
 
 ### Legal-command candidates
@@ -314,13 +325,45 @@ Build(actor or controlled cell)
 EndTurn
 ```
 
-Candidate features reference their verb, actor, targets, and engine-derived facts such as distance, path
-cost, elevation relation, predicted deterministic damage, lethality, and action-budget consumption. They do
-not reveal hidden information.
+Each legal candidate pairs its command token with the seat-filtered observation of the state resulting from
+that command. In notation, afterstate_i = Observe(Apply(current_state, command_i), evaluating_seat).
+
+In a fully observed deterministic match this is an exact engine result, not a neural prediction. Under fog of
+war, candidate construction may expose only consequences determined by the evaluating seat's information; it
+must never obtain hidden-state knowledge by applying the command to an unfiltered authoritative state.
+
+The learned scorer compares the current state, the candidate command, and its successor. Its preference is
+Q-like: candidate_value_i = immediate_reward_i + gamma * V(afterstate_i).
+
+The policy may learn this comparison directly from candidate and afterstate embeddings rather than using that
+equation as a fixed action rule. The state value remains from the evaluating seat's perspective even if the
+command ends the turn. A low successor value may reflect, for example, that two easy kills do not compensate
+for leaving distant artillery a decisive response. That conclusion is learned from returns rather than encoded
+as an artillery or threat heuristic.
+
+State comparison is goal-conditioned. A locally safe or materially favorable afterstate is not valuable if it
+cannot plausibly lead to annihilation. The shared encoder therefore also predicts:
+
+- probability of eventual victory from the afterstate;
+- probability of victory within each of several opponent-response horizons;
+- remaining rounds and decision steps to victory, conditional on eventual victory.
+
+Together these represent conversion potential: first whether the advantage can become victory, then how long
+and how many opponent responses that conversion is likely to require. They avoid treating an unreachable last
+survivor as a strong state merely because friendly material is dominant.
+
+Candidate construction may also attach engine-derived facts such as distance, path cost, elevation relation,
+deterministic damage, lethality, and action-budget consumption. These facts describe the transition but do not
+prescribe its strategic value or reveal hidden information.
 
 The policy scores the variable candidate matrix and samples from a masked categorical distribution. One
 selected candidate becomes one authoritative engine command. Invalid decoding never silently falls back to
 `EndTurn`; it is a contract error and diagnostic event.
+
+Exact afterstate encoding can be expensive when the legal set is large. Implementations may batch successor
+encodings, represent them as sparse state deltas, or use a learned command prior to shortlist candidates. Any
+shortlisting is a measured approximation and must preserve a path for long-range and unusual legal commands;
+it must not reintroduce fixed board dimensions or fixed unit slots.
 
 ### Persistent intention pointer
 
@@ -451,7 +494,16 @@ altering policy return. Candidate tasks include:
 - legal reachability and targetability prediction;
 - next visible-state prediction;
 - capability-interaction prediction;
-- masked token reconstruction.
+- masked token reconstruction;
+- terminal-outcome prediction;
+- win-within-horizon prediction at several opponent-response horizons;
+- remaining rounds and decision steps to victory, conditional on eventual victory.
+
+Won trajectories provide exact remaining-time labels. For losses and terminal draws, the conditional
+time-to-victory loss is masked; for time-limit truncations, horizons beyond the observed trajectory are treated
+as censored rather than assigned an arbitrary large target. Outcome probability remains primary, so the model
+cannot prefer a rare quick win over a reliably slower win merely because its conditional time estimate is
+shorter.
 
 Auxiliary metrics remain separate from W/L/D and reward reporting.
 
@@ -459,8 +511,9 @@ Auxiliary metrics remain separate from W/L/D and reward reporting.
 
 Training proceeds in measurable stages rather than introducing every novel component simultaneously:
 
-1. Variable board/entity/template tokens, explicit rule state, legal-command pointer, value head, and revised
-   reward using the current nine capabilities and existing commands.
+1. Variable board/entity/template tokens, explicit rule state, legal-command and exact-afterstate scoring,
+   value/outcome/time-to-victory heads, and revised reward using the current nine capabilities and existing
+   commands.
 2. Persistent intention pointer plus failed-conversion endgame curriculum.
 3. Atomic full-template design decoder sharing the same encoder.
 4. Capability-definition tokens and relationship graph, initially representing existing mechanics.
