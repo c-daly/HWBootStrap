@@ -14,6 +14,38 @@ treats annihilation conversion as a distinct learned skill and a first-class eva
 This document defines the new model contract, its training objective, and the baseline evidence required
 before implementation results are judged.
 
+## One Game, Two First-Class Surfaces
+
+HexWars is both a player-facing game and a research platform. They share one authoritative simulation, content
+model, scenario format, command vocabulary, and replay format. The interactive client and research harness are
+adapters around that simulation; neither owns a divergent version of the rules.
+
+The dependency direction is:
+
+- player input or agent output becomes the same authoritative command type;
+- the engine alone validates and applies the command;
+- the resulting immutable state and replay event are identical in interactive and headless execution;
+- presentation systems consume game state, while seat-observation adapters expose only permitted information;
+- research telemetry observes transitions passively and cannot alter legality, reward, or simulation state.
+
+Game quality remains an independent product requirement. RL convenience must not dictate balance, mechanics,
+content authoring, user-interface behavior, save compatibility, or match configuration. Conversely, presentation
+and content changes must not silently perturb deterministic engine behavior or invalidate research artifacts.
+
+Research quality is equally first class: seeded reproducibility, headless throughput, versioned contracts,
+immutable run manifests, replayable datasets, controller interchangeability, benchmark suites, and ablation-ready
+telemetry are product features of the research surface rather than temporary training scripts.
+
+Game-rule versions, scenario/content versions, RL observation/action contracts, and model checkpoints have
+separate identities. A cosmetic client release need not invalidate a checkpoint. A rule change may invalidate
+research comparability without requiring a new observation schema. A schema change always creates a new RL
+contract even when the human-visible rules are unchanged.
+
+Agents receive no privileged game state. Full authoritative state may be used by offline diagnostics, replay
+verification, and label generation only through a quarantined evaluation interface that is inaccessible to the
+policy, reward, memory, and legal-candidate paths. Human and agent controllers operating under the same seat and
+visibility rules have the same actionable information and use the same command semantics.
+
 ## Goals
 
 - One checkpoint per game mode, never one checkpoint per board size.
@@ -740,6 +772,17 @@ No single aggregate win rate may hide a severe regression in one board-size or c
 - Recorded structured actions reconstruct authoritative replay winners and states.
 - Variable-size batching and worker count do not change deterministic results.
 - Physics/task or engine changes run the existing determinism-sensitive suites.
+
+### Game/research parity tests
+
+- The same scenario and command sequence produce the same states, outcome, and replay in interactive and
+  headless paths.
+- Human and agent controllers under the same seat and visibility rules receive equivalent actionable
+  information.
+- Research telemetry can be disabled without changing command acceptance, transitions, rewards, or outcomes.
+- Scenario and content hashes agree between game-client loading, GymServer loading, and replay reconstruction.
+- Cosmetic and presentation-only changes do not change deterministic simulation or RL contract hashes.
+- Full-state diagnostic labels are absent from policy, reward, memory, and candidate payloads.
 
 ### Learning and performance tests
 
