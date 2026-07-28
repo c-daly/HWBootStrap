@@ -254,6 +254,19 @@ occupancy or immediate-action head while the artillery dominates threat assessme
 Multiple attention heads allow both facts to remain relevant instead of forcing the policy to choose one
 universal ranking of objects.
 
+The entity encoder represents observed facts, not one final context-free strength ranking. Decision-specific
+queries compute asymmetric relevance:
+
+```text
+attack_opportunity(enemy | my attacker)
+    != defensive_threat(enemy | protected friendly asset)
+    != counter_design_value(enemy | available budget and capabilities)
+```
+
+An attack query emphasizes killability, target value, retaliation, and opportunity cost. A defensive query
+emphasizes what the enemy can reach or damage before a response and which friendly asset is at risk. A design
+query emphasizes exploitable capability allocations and possible counters. The same enemy may rank differently
+
 The model uses seat-relative and relative geometry rather than learned absolute cell indices. Translating an
 otherwise identical battle should not change its strategic representation. Boundary and objective features
 retain the global context that translation alone cannot supply.
