@@ -232,11 +232,27 @@ as likely routes and intentions. The two mechanisms are complementary.
 Tokens are unordered; spatial structure is supplied explicitly.
 
 For token pair `i, j`, attention may receive relative axial displacement, hex distance and direction,
-elevation difference, neighborhood relation, visibility, reachability, or targeting relations:
+elevation difference, neighborhood relation, visibility, reachability, or targeting relations. Spatial
+relevance is capability- and command-conditioned; it is never a fixed rule that nearer objects are always
+more important:
 
 ```text
-attention(i, j) = semantic_similarity(i, j) + spatial_relation_bias(i, j)
+attention(i, j)
+    = semantic_similarity(i, j)
+    + geometry_bias(i, j)
+    + interaction_bias(capabilities_i, capabilities_j, relation_i_j, candidate)
 ```
+
+Interaction features include range margin, movement-turn distance, line of sight, visibility, threat in both
+directions, and whether the pair participates in a legal command. A target ten hexes away may be irrelevant to
+a melee unit and immediately decisive to a unit with Range 10. Raw distance is evidence, not relevance by
+itself.
+
+Attention is directional: a friendly unit may attend strongly to distant enemy artillery because the enemy
+threatens it, even when the friendly unit cannot return fire. Nearby weak enemies may dominate a local
+occupancy or immediate-action head while the artillery dominates threat assessment and goal selection.
+Multiple attention heads allow both facts to remain relevant instead of forcing the policy to choose one
+universal ranking of objects.
 
 The model uses seat-relative and relative geometry rather than learned absolute cell indices. Translating an
 otherwise identical battle should not change its strategic representation. Boundary and objective features
@@ -245,7 +261,9 @@ retain the global context that translation alone cannot supply.
 To avoid quadratic scaling on large boards:
 
 - cell-to-cell attention is local or sparse;
-- unit tokens attend to relevant cells, entities, and legal targets;
+- unit/entity sparsification takes the union of local neighbors, legal interactions, capability-conditioned
+  threat/reach envelopes, active goals, and selected global links;
+- every legal long-range interaction receives a direct path even when it lies outside the local cell window;
 - global army/economy/rule tokens provide long-range communication;
 - exact reachability and legality relations come from the engine;
 - full all-to-all attention is reserved for bounded entity or summary sets where justified.
