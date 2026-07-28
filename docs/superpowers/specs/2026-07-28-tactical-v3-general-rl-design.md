@@ -90,6 +90,50 @@ an annihilation win.
 Claims of generality require held-out board sizes, designs, rule configurations, and seeds. Training on a
 varied distribution is not itself evidence of generalization.
 
+### Interfaces over implementations
+
+Every architectural boundary is an explicit, versioned interface. Here, interface means the appropriate
+boundary mechanism: a C# interface inside the engine process, a serialized schema across the GymServer boundary,
+a Python protocol between runtime components, or a named tensor contract between the environment and model. It
+does not require a one-method interface around every private helper.
+
+The logical ports are:
+
+- seat-state source: produces an immutable, seat-filtered view without exposing authoritative hidden state;
+- observation encoder: converts that view and its rule descriptors into typed token and relation collections;
+- capacity profile and batcher: pads variable collections to configurable limits and supplies validity masks;
+- legal-candidate source: enumerates complete legal commands from the current seat-visible contract;
+- transition projector: produces an exact safe afterstate or sparse transition delta for a candidate;
+- action resolver: round-trips a selected candidate identity to the exact authoritative command;
+- reward contract: maps a transition to terminal and bounded progress components with a named breakdown;
+- memory provider: supplies and updates last-observed records without acquiring unavailable information;
+- policy interface: maps an observation/candidate batch to a masked candidate distribution and intentions;
+- value/outcome interface: estimates return, terminal outcome, conversion probability, and victory horizon;
+- design interface: maps contextual representations to an atomically valid unit-design proposal;
+- rollout/storage interface: records versioned transitions without depending on one optimizer;
+- optimizer interface: trains policy, value, and auxiliary heads without owning engine semantics;
+- controller/checkpoint interface: validates schema identity and performs inference independently of training;
+- evaluation sink: consumes replayable episodes and diagnostics without affecting observations or reward.
+
+Dependencies point toward these contracts, never toward a downstream concrete implementation. Tactical-v1 and
+tactical-v2 remain separate adapters. Tactical-v3 components may be replaced independently, and a new mechanic
+adds an implementation or descriptor through the relevant port instead of requiring unrelated consumers to be
+rewritten.
+
+Interfaces remove the need to predict future implementations, not the need to specify meaning. Each port owns
+explicit invariants, seat perspective, determinism rules, failure behavior, and a schema hash. The model sees
+semantic records rather than C# object layouts, JSON property accidents, tensor offsets, or roster identities.
+
+Actual row counts are match configuration. Batch capacities are separately configurable model/runtime values:
+maximum cells, entities, templates, capabilities, relations, candidates, memory records, and design steps. The
+observation and action spaces are derived from these capacities and the versioned feature schemas; users never
+set observation length or action offsets independently. A match that exceeds the declared envelope fails
+validation before reset. It never silently drops an entity or legal command.
+
+This boundary grammar deliberately does not enumerate future mechanics. A future capability can provide its
+descriptor, relationships, state records, legal candidates, and transition behavior through these ports. Existing
+models may represent an unfamiliar descriptor generically; learning effective use still requires experience.
+
 ## Mode and Checkpoint Boundary
 
 A model is trained for a game-mode family whose objective and command vocabulary are coherent, such as
@@ -675,6 +719,10 @@ No single aggregate win rate may hide a severe regression in one board-size or c
 - Candidate decode/encode round trips without fallback.
 - Atomic design validity, budget masks, combined log probability, and one-fee behavior.
 - Persistent goal survival, invalidation, and replanning.
+- Every port passes conformance tests against at least one test double and its production implementation.
+- Contract handshakes derive tensor geometry from schema and capacity values without duplicated offsets.
+- Substituting an implementation behind one port does not change unrelated serialized or tensor contracts.
+- Capacity overflow fails before reset; no entity, relation, memory record, or legal candidate is truncated.
 
 ### Reward tests
 
