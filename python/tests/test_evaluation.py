@@ -1008,6 +1008,50 @@ def test_evaluation_rolls_back_published_pair_when_staging_cleanup_fails(
     assert not output_path.exists()
 
 
+def test_evaluation_rolls_back_published_pair_when_adaptive_diagnostics_fail(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    adaptive = replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="f" * 64,
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    candidate = _model_controller(tmp_path, adaptive, "adaptive-diagnostic-failure", 64)
+    opponent = _model_controller(tmp_path, adaptive, "adaptive-diagnostic-opponent", 96)
+    (candidate.spec.path / "adaptive_episodes.csv").write_text(
+        "invalid_header\n",
+        encoding="utf-8",
+    )
+    evidence_dir = tmp_path / "adaptive-diagnostic-failure-evidence"
+    output_path = tmp_path / "adaptive-diagnostic-failure.json"
+    stem = "match-000000-seed-85300-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+
+    with pytest.raises(ValueError, match="adaptive episode sidecar header is invalid"):
+        evaluation_module.evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            seed_start=85_300,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
 def test_retained_artifact_pair_rejects_half_pair_without_changes(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

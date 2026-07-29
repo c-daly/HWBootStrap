@@ -618,7 +618,6 @@ def evaluate_matchup(
                         match["replay_path"] = str(replay_path)
             matches.append(match)
 
-        published_artifacts = _publish_artifact_pairs(artifact_pairs)
 
         if capture_trace:
             evidence_summary = {
@@ -626,6 +625,8 @@ def evaluate_matchup(
                 "control_traces": control_trace_count,
                 "draw_categories": dict(sorted(draw_categories.items())),
             }
+
+        published_artifacts = _publish_artifact_pairs(artifact_pairs)
     finally:
         if staging_owner is not None:
             try:
@@ -634,58 +635,60 @@ def evaluate_matchup(
                 _rollback_artifacts(published_artifacts)
                 raise
 
-    totals = {"wins": 0, "losses": 0, "draws": 0}
-    seat_results = {
-        "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
-        "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
-    }
-    for match in matches:
-        counter = f"{match['outcome']}s" if match["outcome"] != "loss" else "losses"
-        totals[counter] += 1
-        seat_key = (
-            "candidate_as_p0"
-            if match["candidate_seat"] == 0
-            else "candidate_as_p1"
-        )
-        seat_results[seat_key][counter] += 1
-    total_games = len(matches)
-    result = {
-        "schema_version": 1,
-        "generated_at": utc_now(),
-        "candidate": controller_identity(candidate),
-        "opponent": controller_identity(opponent),
-        "seed_start": seed_start,
-        "seeds": list(range(seed_start, seed_start + games)),
-        "reciprocal": both_seats,
-        "games": total_games,
-        **totals,
-        "rates": {
-            "win": totals["wins"] / total_games,
-            "loss": totals["losses"] / total_games,
-            "draw": totals["draws"] / total_games,
-        },
-        "confidence_intervals": {
-            "win": wilson_interval(totals["wins"], total_games, confidence),
-            "loss": wilson_interval(totals["losses"], total_games, confidence),
-            "draw": wilson_interval(totals["draws"], total_games, confidence),
-        },
-        "seat_results": seat_results,
-        "matches": matches,
-    }
-    if evidence_summary is not None:
-        result["evidence"] = evidence_summary
-    if candidate.contract is not None and candidate.contract.version == "adaptive-v1":
-        source_run = candidate.spec.path if candidate.spec.kind == "run" else None
-        result.update(
-            _adaptive_diagnostic_aggregates(Path(source_run) if source_run is not None else None)
-        )
-    if output_path is not None:
-        try:
+    try:
+        totals = {"wins": 0, "losses": 0, "draws": 0}
+        seat_results = {
+            "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+            "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+        }
+        for match in matches:
+            counter = f"{match['outcome']}s" if match["outcome"] != "loss" else "losses"
+            totals[counter] += 1
+            seat_key = (
+                "candidate_as_p0"
+                if match["candidate_seat"] == 0
+                else "candidate_as_p1"
+            )
+            seat_results[seat_key][counter] += 1
+        total_games = len(matches)
+        result = {
+            "schema_version": 1,
+            "generated_at": utc_now(),
+            "candidate": controller_identity(candidate),
+            "opponent": controller_identity(opponent),
+            "seed_start": seed_start,
+            "seeds": list(range(seed_start, seed_start + games)),
+            "reciprocal": both_seats,
+            "games": total_games,
+            **totals,
+            "rates": {
+                "win": totals["wins"] / total_games,
+                "loss": totals["losses"] / total_games,
+                "draw": totals["draws"] / total_games,
+            },
+            "confidence_intervals": {
+                "win": wilson_interval(totals["wins"], total_games, confidence),
+                "loss": wilson_interval(totals["losses"], total_games, confidence),
+                "draw": wilson_interval(totals["draws"], total_games, confidence),
+            },
+            "seat_results": seat_results,
+            "matches": matches,
+        }
+        if evidence_summary is not None:
+            result["evidence"] = evidence_summary
+        if candidate.contract is not None and candidate.contract.version == "adaptive-v1":
+            source_run = candidate.spec.path if candidate.spec.kind == "run" else None
+            result.update(
+                _adaptive_diagnostic_aggregates(
+                    Path(source_run) if source_run is not None else None
+                )
+            )
+        if output_path is not None:
             atomic_write_json(Path(output_path), result)
-        except BaseException:
-            _rollback_artifacts(published_artifacts)
-            raise
-    return result
+        return result
+    except BaseException:
+        _rollback_artifacts(published_artifacts)
+        raise
 
 
 def _adaptive_sidecars(run_dir: Path | None) -> list[Path]:
