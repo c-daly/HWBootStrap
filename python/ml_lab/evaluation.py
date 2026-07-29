@@ -239,7 +239,10 @@ class PlayedGame:
     winner: int
     terminated: bool
     truncated: bool
-    trace: EpisodeTrace | None
+    summary: dict[str, Any] | None
+    classification: dict[str, Any] | None
+    staged_trace_path: Path | None
+    staged_replay_path: Path | None
 
 
 def _play_game(
@@ -249,7 +252,9 @@ def _play_game(
     predict_action: Callable[[Any, str, np.ndarray, np.ndarray], int],
     prediction_locks: dict[int, Lock],
     *,
+    candidate_seat: int,
     capture_trace: bool = False,
+    trace_path: Path | None = None,
     replay_path: Path | None = None,
 ) -> PlayedGame:
     if capture_trace:
@@ -293,18 +298,35 @@ def _play_game(
     )
     terminated = bool(state.get("terminated"))
     truncated = bool(state.get("truncated")) or forced_truncation
-    trace = None
+    summary_payload = None
+    classification_payload = None
     if capture_trace:
         trace = client.drain_trace()
         if not trace.transitions:
             raise RuntimeError("requested empty trace")
+        summary_payload = _summary_payload(summarize_episode(trace, candidate_seat))
+        if winner not in {0, 1}:
+            classification_payload = _classification_payload(
+                classify_draw(
+                    trace,
+                    candidate_seat=candidate_seat,
+                    terminated=terminated,
+                    truncated=truncated,
+                    winner=None,
+                )
+            )
+        if trace_path is not None:
+            atomic_write_json(trace_path, trace.to_dict())
         if replay_path is not None:
             client.save_replay(replay_path)
     return PlayedGame(
         winner=winner,
         terminated=terminated,
         truncated=truncated,
-        trace=trace,
+        summary=summary_payload,
+        classification=classification_payload,
+        staged_trace_path=trace_path,
+        staged_replay_path=replay_path,
     )
 
 
@@ -334,6 +356,67 @@ def _classification_payload(
         "flags": [flag.value for flag in classification.flags],
         "evidence": dict(classification.evidence),
     }
+
+
+def _files_identical(first: Path, second: Path) -> bool:
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_file, second.open("rb") as second_file:
+        while True:
+            first_chunk = first_file.read(1024 * 1024)
+            second_chunk = second_file.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def _copy_file_exclusive(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with source.open("rb") as source_file, destination.open("xb") as target_file:
+            created = True
+            shutil.copyfileobj(source_file, target_file)
+            target_file.flush()
+            os.fsync(target_file.fileno())
+    except BaseException:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _publish_artifact_pair(
+    staged_trace: Path,
+    staged_replay: Path,
+    trace_path: Path,
+    replay_path: Path,
+) -> None:
+    trace_exists = trace_path.exists()
+    replay_exists = replay_path.exists()
+    if trace_exists != replay_exists:
+        raise FileExistsError(
+            f"incomplete artifact pair: {trace_path} and {replay_path}"
+        )
+    if trace_exists:
+        if _files_identical(staged_trace, trace_path) and _files_identical(
+            staged_replay, replay_path
+        ):
+            return
+        raise FileExistsError(
+            f"artifact pair collision: {trace_path} and {replay_path}"
+        )
+
+    created: list[Path] = []
+    try:
+        _copy_file_exclusive(staged_trace, trace_path)
+        created.append(trace_path)
+        _copy_file_exclusive(staged_replay, replay_path)
+        created.append(replay_path)
+    except BaseException:
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
 
 
 def evaluate_matchup(
@@ -379,14 +462,12 @@ def evaluate_matchup(
 
     def run_partition(
         worker_index: int,
-    ) -> list[tuple[int, dict[str, Any], PlayedGame, Path | None]]:
+    ) -> list[tuple[int, dict[str, Any], PlayedGame]]:
         client = client_factory(worker_index)
         try:
             _validate_against_client(candidate, client)
             _validate_against_client(opponent, client)
-            partition: list[
-                tuple[int, dict[str, Any], PlayedGame, Path | None]
-            ] = []
+            partition: list[tuple[int, dict[str, Any], PlayedGame]] = []
             for index in range(worker_index, len(schedule), workers):
                 seed, candidate_seat = schedule[index]
                 seats = (
@@ -395,6 +476,11 @@ def evaluate_matchup(
                     else (opponent, candidate)
                 )
                 stem = _evidence_stem(index, seed, candidate_seat)
+                staged_trace = (
+                    staging_dir / f"{stem}.json"
+                    if staging_dir is not None
+                    else None
+                )
                 staged_replay = (
                     staging_dir / f"{stem}.replay"
                     if staging_dir is not None
@@ -406,7 +492,9 @@ def evaluate_matchup(
                     seed,
                     predict_action,
                     prediction_locks,
+                    candidate_seat=candidate_seat,
                     capture_trace=capture_trace,
+                    trace_path=staged_trace,
                     replay_path=staged_replay,
                 )
                 if played.winner == candidate_seat:
@@ -425,7 +513,6 @@ def evaluate_matchup(
                             "outcome": outcome,
                         },
                         played,
-                        staged_replay,
                     )
                 )
             return partition
@@ -450,7 +537,7 @@ def evaluate_matchup(
         selected_controls: set[tuple[int, str]] = set()
         draw_trace_count = 0
         control_trace_count = 0
-        for index, match, played, staged_replay in ordered_games:
+        for index, match, played in ordered_games:
             retain = match["outcome"] == "draw"
             if retain:
                 draw_trace_count += 1
@@ -462,32 +549,22 @@ def evaluate_matchup(
                     retain = True
 
             if capture_trace:
-                trace = played.trace
-                if trace is None:
-                    raise RuntimeError("requested duel trace is unavailable")
-                summary = summarize_episode(trace, match["candidate_seat"])
-                classification_payload = None
+                if played.summary is None:
+                    raise RuntimeError("requested duel trace summary is unavailable")
+                classification_payload = played.classification
                 if match["outcome"] == "draw":
-                    classification = classify_draw(
-                        trace,
-                        candidate_seat=match["candidate_seat"],
-                        terminated=played.terminated,
-                        truncated=played.truncated,
-                        winner=(
-                            played.winner
-                            if played.winner in {0, 1}
-                            else None
-                        ),
-                    )
-                    classification_payload = _classification_payload(
-                        classification
-                    )
-                    draw_categories[classification.primary.value] += 1
+                    if classification_payload is None:
+                        raise RuntimeError(
+                            "requested duel draw classification is unavailable"
+                        )
+                    draw_categories[
+                        str(classification_payload["primary"])
+                    ] += 1
                 match.update(
                     {
                         "terminated": played.terminated,
                         "truncated": played.truncated,
-                        "summary": _summary_payload(summary),
+                        "summary": played.summary,
                         "classification": classification_payload,
                     }
                 )
@@ -500,13 +577,22 @@ def evaluate_matchup(
                     trace_path = evidence_root / "traces" / f"{stem}.json"
                     replay_path = evidence_root / "replays" / f"{stem}.replay"
                     if retain:
+                        staged_trace = played.staged_trace_path
+                        staged_replay = played.staged_replay_path
+                        if staged_trace is None or not staged_trace.is_file():
+                            raise RuntimeError(
+                                "requested duel trace was not staged"
+                            )
                         if staged_replay is None or not staged_replay.is_file():
                             raise RuntimeError(
                                 "requested duel replay was not saved"
                             )
-                        atomic_write_json(trace_path, trace.to_dict())
-                        replay_path.parent.mkdir(parents=True, exist_ok=True)
-                        os.replace(staged_replay, replay_path)
+                        _publish_artifact_pair(
+                            staged_trace,
+                            staged_replay,
+                            trace_path,
+                            replay_path,
+                        )
                         match["trace_path"] = str(trace_path)
                         match["replay_path"] = str(replay_path)
             matches.append(match)

@@ -801,6 +801,207 @@ def test_evaluation_preserves_preexisting_unretained_destinations(
     assert replay_path.read_bytes() == replay_sentinel
 
 
+def test_retained_artifact_pair_reuses_identical_files_without_republication(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    candidate = _model_controller(tmp_path, contract, "candidate-identical", 64)
+    opponent = _model_controller(tmp_path, contract, "opponent-identical", 96)
+    evidence_dir = tmp_path / "identical-evidence"
+
+    def evaluate() -> dict:
+        return evaluation_module.evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            seed_start=82_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    first = evaluate()
+    trace_path = Path(first["matches"][0]["trace_path"])
+    replay_path = Path(first["matches"][0]["replay_path"])
+    trace_bytes = trace_path.read_bytes()
+    replay_bytes = replay_path.read_bytes()
+    real_replace = evaluation_module.os.replace
+
+    def reject_final_republication(source, destination) -> None:
+        if Path(destination) in {trace_path, replay_path}:
+            raise AssertionError("identical artifact was republished")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(evaluation_module.os, "replace", reject_final_republication)
+    second = evaluate()
+
+    assert second["matches"][0]["trace_path"] == str(trace_path)
+    assert trace_path.read_bytes() == trace_bytes
+    assert replay_path.read_bytes() == replay_bytes
+
+
+def test_retained_artifact_pair_rejects_nonidentical_collision_without_changes(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "collision-evidence"
+    stem = "match-000000-seed-83000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b"prior trace\n"
+    replay_sentinel = b"prior replay\n"
+    trace_path.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+    replay_path.write_bytes(replay_sentinel)
+
+    with pytest.raises(FileExistsError, match="artifact pair collision"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-collision", 64),
+            _model_controller(tmp_path, contract, "opponent-collision", 96),
+            games=1,
+            seed_start=83_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    assert trace_path.read_bytes() == trace_sentinel
+    assert replay_path.read_bytes() == replay_sentinel
+
+
+def test_retained_artifact_pair_rejects_half_pair_without_changes(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "half-pair-evidence"
+    stem = "match-000000-seed-84000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b"orphan trace\n"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+
+    with pytest.raises(FileExistsError, match="incomplete artifact pair"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-half", 64),
+            _model_controller(tmp_path, contract, "opponent-half", 96),
+            games=1,
+            seed_start=84_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    assert trace_path.read_bytes() == trace_sentinel
+    assert not replay_path.exists()
+
+
+def test_retained_artifact_pair_rolls_back_first_member_when_second_publish_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "rollback-evidence"
+    prior_path = evidence_dir / "prior-data.bin"
+    prior_bytes = b"unrelated prior data\n"
+    evidence_dir.mkdir()
+    prior_path.write_bytes(prior_bytes)
+    output_path = evidence_dir / "evaluation.json"
+    stem = "match-000000-seed-85000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_copyfileobj = evaluation_module.shutil.copyfileobj
+    copy_count = 0
+
+    def fail_second_copy(source, destination, *args, **kwargs) -> None:
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise OSError("injected second-member publication failure")
+        real_copyfileobj(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(
+        evaluation_module.shutil,
+        "copyfileobj",
+        fail_second_copy,
+    )
+
+    with pytest.raises(OSError, match="second-member publication failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-rollback", 64),
+            _model_controller(tmp_path, contract, "opponent-rollback", 96),
+            games=1,
+            seed_start=85_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert copy_count == 2
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+    assert prior_path.read_bytes() == prior_bytes
+
+
+def test_evaluation_accumulates_only_compact_played_games(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    real_play_game = evaluation_module._play_game
+    accumulated: list[object] = []
+
+    def checked_play_game(*args, **kwargs):
+        played = real_play_game(*args, **kwargs)
+        assert not any(
+            isinstance(value, EpisodeTrace)
+            for value in vars(played).values()
+        )
+        accumulated.append(played)
+        return played
+
+    monkeypatch.setattr(evaluation_module, "_play_game", checked_play_game)
+    result = evaluation_module.evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-bounded", 64),
+        _model_controller(tmp_path, contract, "opponent-bounded", 96),
+        games=40,
+        seed_start=86_000,
+        both_seats=True,
+        workers=4,
+        client_factory=lambda worker: FakeDuelClient(iter([0] * 20), worker),
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        capture_trace=True,
+    )
+
+    assert result["games"] == 80
+    assert len(accumulated) == 80
+    assert all("trace" not in vars(played) for played in accumulated)
+
+
 def test_trace_capture_without_directory_returns_evidence_without_replay_paths(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
