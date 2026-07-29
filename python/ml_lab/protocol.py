@@ -119,6 +119,18 @@ def validate_view_payload(
         winner = payload["winner"]
         if isinstance(winner, bool) or not isinstance(winner, int) or winner not in {-1, 0, 1}:
             raise ValueError("protocol winner must be integer -1, 0, or 1")
+    if "start_profile" in payload:
+        profile = payload["start_profile"]
+        if not isinstance(profile, str) or not profile:
+            raise ValueError("protocol start_profile must be a non-empty string")
+    if "reference_seat" in payload:
+        reference_seat = payload["reference_seat"]
+        if (
+            isinstance(reference_seat, bool)
+            or not isinstance(reference_seat, int)
+            or reference_seat not in {0, 1}
+        ):
+            raise ValueError("protocol reference_seat must be integer 0 or 1")
     return np.asarray(observation_values, dtype=np.float32), np.asarray(raw_mask, dtype=bool)
 
 

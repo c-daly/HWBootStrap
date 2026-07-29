@@ -306,6 +306,19 @@ while ((line = Console.ReadLine()) != null)
             string? p0 = root.TryGetProperty("p0", out var a) ? a.GetString() : null; // "external"(default)/greedy/random
             string? p1 = root.TryGetProperty("p1", out var b) ? b.GetString() : null;
             int learner = root.TryGetProperty("learner", out var lr) ? lr.GetInt32() : 0; // reward perspective
+            string? startProfile = root.TryGetProperty("start_profile", out var sp)
+                ? sp.GetString()
+                : null;
+            bool hasReferenceSeat = root.TryGetProperty("reference_seat", out var rs);
+            int referenceSeat = hasReferenceSeat ? rs.GetInt32() : 0;
+            if (learner is < 0 or > 1)
+                throw new InvalidDataException("duel_reset learner must be 0 or 1");
+            if (hasReferenceSeat && referenceSeat is < 0 or > 1)
+                throw new InvalidDataException("duel_reset reference_seat must be 0 or 1");
+            if (environment != "tactical-v2" && (startProfile != null || hasReferenceSeat))
+                throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2");
+            if (startProfile != null && !hasReferenceSeat)
+                throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
             if (environment == "tactical-v1")
             {
                 duel ??= new DuelEnv(tacticalConfig);
@@ -331,9 +344,25 @@ while ((line = Console.ReadLine()) != null)
             else
             {
                 tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace);
-                var v = tacticalV2Duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
-                                   learner == 1 ? PlayerId.Player1 : PlayerId.Player0);
-                Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
+                IAgent? controller0 = MakeController(p0, seed * 2 + 1);
+                IAgent? controller1 = MakeController(p1, seed * 2 + 2);
+                PlayerId learnerSeat = learner == 1 ? PlayerId.Player1 : PlayerId.Player0;
+                var v = startProfile == null
+                    ? tacticalV2Duel.Reset(seed, controller0, controller1, learnerSeat)
+                    : tacticalV2Duel.Reset(
+                        seed,
+                        controller0,
+                        controller1,
+                        startProfile,
+                        referenceSeat == 1 ? PlayerId.Player1 : PlayerId.Player0,
+                        learnerSeat);
+                Send(new
+                {
+                    obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward,
+                    winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated,
+                    start_profile = v.StartProfileId,
+                    reference_seat = (int)v.ReferenceSeat,
+                });
             }
             break;
         }
@@ -362,7 +391,13 @@ while ((line = Console.ReadLine()) != null)
             {
                 tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace);
                 var v = tacticalV2Duel.Step(action);
-                Send(new { obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward, winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated });
+                Send(new
+                {
+                    obs = v.Observation, mask = v.ActionMask, seat = v.Seat, reward = v.Reward,
+                    winner = v.Winner, terminated = v.Terminated, truncated = v.Truncated,
+                    start_profile = v.StartProfileId,
+                    reference_seat = (int)v.ReferenceSeat,
+                });
             }
             break;
         }

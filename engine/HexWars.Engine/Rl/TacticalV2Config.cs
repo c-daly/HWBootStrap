@@ -67,6 +67,168 @@ namespace HexWars.Engine.Rl
         }
     }
 
+    /// <summary>Versioned separation labels understood by the profiled tactical-v2 start
+    /// constructor. The distance-band mechanics live in <see cref="TacticalV2Layout"/>; these
+    /// values are contract identities rather than free-form scenario tags.</summary>
+    public static class TacticalV2StartSeparations
+    {
+        public const string LegacyMirrored = "legacy-mirrored";
+        public const string Near = "near";
+        public const string Medium = "medium";
+        public const string Far = "far";
+
+        public static bool IsKnown(string separation) =>
+            separation == LegacyMirrored || separation == Near || separation == Medium || separation == Far;
+    }
+
+    /// <summary>An immutable, learner-relative starting-state profile. Unit counts describe live
+    /// units, not observation/action slot capacity.</summary>
+    public sealed class TacticalV2StartProfile
+    {
+        public TacticalV2StartProfile(
+            string id,
+            int learnerUnitCount,
+            int opponentUnitCount,
+            string separation)
+        {
+            Id = id ?? string.Empty;
+            LearnerUnitCount = learnerUnitCount;
+            OpponentUnitCount = opponentUnitCount;
+            Separation = separation ?? string.Empty;
+        }
+
+        public string Id { get; }
+        public int LearnerUnitCount { get; }
+        public int OpponentUnitCount { get; }
+        public string Separation { get; }
+    }
+
+    /// <summary>The exact profile catalog declared by the profiled-seeded-v1 placement contract.
+    /// Return a fresh read-only collection so callers cannot mutate shared contract authority.</summary>
+    public static class TacticalV2StartCatalog
+    {
+        public static IReadOnlyList<TacticalV2StartProfile> ProfiledSeededV1() => Array.AsReadOnly(new[]
+        {
+            new TacticalV2StartProfile("standard-3v3", 3, 3, TacticalV2StartSeparations.LegacyMirrored),
+            new TacticalV2StartProfile("conversion-3v1-near", 3, 1, TacticalV2StartSeparations.Near),
+            new TacticalV2StartProfile("conversion-3v1-medium", 3, 1, TacticalV2StartSeparations.Medium),
+            new TacticalV2StartProfile("conversion-3v1-far", 3, 1, TacticalV2StartSeparations.Far),
+            new TacticalV2StartProfile("conversion-2v1-near", 2, 1, TacticalV2StartSeparations.Near),
+            new TacticalV2StartProfile("conversion-2v1-medium", 2, 1, TacticalV2StartSeparations.Medium),
+            new TacticalV2StartProfile("conversion-2v1-far", 2, 1, TacticalV2StartSeparations.Far),
+            new TacticalV2StartProfile("conversion-1v1-near", 1, 1, TacticalV2StartSeparations.Near),
+            new TacticalV2StartProfile("conversion-1v1-medium", 1, 1, TacticalV2StartSeparations.Medium),
+            new TacticalV2StartProfile("conversion-1v1-far", 1, 1, TacticalV2StartSeparations.Far),
+        });
+    }
+
+    /// <summary>An immutable basis-point weight attached to a declared start profile.</summary>
+    public sealed class TacticalV2StartWeight
+    {
+        public TacticalV2StartWeight(string profileId, int basisPoints)
+        {
+            ProfileId = profileId ?? string.Empty;
+            BasisPoints = basisPoints;
+        }
+
+        public string ProfileId { get; }
+        public int BasisPoints { get; }
+    }
+
+    /// <summary>Seeded profile-selection weights. Selection sorts by ordinal profile ID, so the
+    /// result cannot depend on dictionary or JSON property iteration order.</summary>
+    public sealed class TacticalV2StartDistribution
+    {
+        public static TacticalV2StartDistribution Empty { get; } =
+            new TacticalV2StartDistribution(Array.Empty<TacticalV2StartWeight>());
+
+        public TacticalV2StartDistribution(IEnumerable<TacticalV2StartWeight> weights)
+        {
+            if (weights == null) throw new ArgumentNullException(nameof(weights));
+            Weights = Array.AsReadOnly(weights.ToArray());
+        }
+
+        public IReadOnlyList<TacticalV2StartWeight> Weights { get; }
+
+        public IReadOnlyList<string> Validate(IEnumerable<string> declaredProfileIds)
+        {
+            if (declaredProfileIds == null) throw new ArgumentNullException(nameof(declaredProfileIds));
+
+            var errors = new List<string>();
+            var declared = new HashSet<string>(declaredProfileIds, StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            long sum = 0;
+
+            foreach (TacticalV2StartWeight weight in Weights)
+            {
+                if (string.IsNullOrEmpty(weight.ProfileId))
+                {
+                    errors.Add("start distribution profile ids must not be empty");
+                }
+                else
+                {
+                    if (!seen.Add(weight.ProfileId))
+                        errors.Add($"duplicate start distribution weight for profile '{weight.ProfileId}'");
+                    if (!declared.Contains(weight.ProfileId))
+                        errors.Add($"weight references undeclared start profile '{weight.ProfileId}'");
+                }
+
+                if (weight.BasisPoints < 0 || weight.BasisPoints > 10000)
+                    errors.Add($"weight for start profile '{weight.ProfileId}' must be between 0 and 10000 basis points");
+                sum += weight.BasisPoints;
+            }
+
+            foreach (string profileId in declared.OrderBy(id => id, StringComparer.Ordinal))
+            {
+                if (!seen.Contains(profileId))
+                    errors.Add($"start distribution is missing declared profile '{profileId}'");
+            }
+
+            if (sum != 10000)
+                errors.Add("start distribution weights must sum to 10000 basis points");
+
+            return errors;
+        }
+
+        /// <summary>Select a profile identifier with a stable integer mixer rather than
+        /// System.Random, whose implementation is not an engine contract across runtimes.</summary>
+        public string Select(int seed)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            long sum = 0;
+            foreach (TacticalV2StartWeight weight in Weights)
+            {
+                if (string.IsNullOrEmpty(weight.ProfileId) || !seen.Add(weight.ProfileId) ||
+                    weight.BasisPoints < 0 || weight.BasisPoints > 10000)
+                {
+                    throw new InvalidOperationException("cannot select from an invalid start distribution");
+                }
+                sum += weight.BasisPoints;
+            }
+            if (sum != 10000)
+                throw new InvalidOperationException("cannot select from an invalid start distribution");
+
+            int roll = (int)(Mix(unchecked((uint)seed) ^ 0xC0A57A17u) % 10000u);
+            int cumulative = 0;
+            foreach (TacticalV2StartWeight weight in Weights.OrderBy(
+                item => item.ProfileId, StringComparer.Ordinal))
+            {
+                cumulative += weight.BasisPoints;
+                if (roll < cumulative) return weight.ProfileId;
+            }
+
+            throw new InvalidOperationException("valid start distribution did not select a profile");
+        }
+
+        private static uint Mix(uint value)
+        {
+            value += 0x9E3779B9u;
+            value = (value ^ (value >> 16)) * 0x85EBCA6Bu;
+            value = (value ^ (value >> 13)) * 0xC2B2AE35u;
+            return value ^ (value >> 16);
+        }
+    }
+
     /// <summary>Versioned tactical-v2 template catalog: board/game config, a stable-id template list,
     /// roster limits, and reward shaping — plus seeded, symmetric starting-army sampling. Later tasks
     /// build layout, observation/action coding, and the training environments on top of this.</summary>
@@ -84,6 +246,10 @@ namespace HexWars.Engine.Rl
         public float DrawCreditWeight { get; set; }
         public float PointsWeight { get; set; }
         public string PlacementPolicy { get; set; } = "symmetric-random-v1";
+        public IReadOnlyList<TacticalV2StartProfile> StartProfiles { get; set; } =
+            Array.Empty<TacticalV2StartProfile>();
+        public TacticalV2StartDistribution StartDistribution { get; set; } =
+            TacticalV2StartDistribution.Empty;
 
         /// <summary>Canonical catalog: the five default barracks templates, a three-unit starting
         /// army/roster cap, and the standard tactical reward shaping.</summary>
@@ -144,14 +310,93 @@ namespace HexWars.Engine.Rl
                 }
             }
 
-            if (StartingUnitCount < 1 || StartingUnitCount > 12)
-                errors.Add("starting unit count must be between 1 and 12");
-            if (MaxControllableUnits != StartingUnitCount)
-                errors.Add("max controllable units must equal starting unit count");
-            if (PlacementPolicy != "symmetric-random-v1")
-                errors.Add("placement policy must be 'symmetric-random-v1'");
+            if (PlacementPolicy == "symmetric-random-v1")
+            {
+                if (StartingUnitCount < 1 || StartingUnitCount > 12)
+                    errors.Add("starting unit count must be between 1 and 12");
+                if (MaxControllableUnits != StartingUnitCount)
+                    errors.Add("max controllable units must equal starting unit count");
+            }
+            else if (PlacementPolicy == "profiled-seeded-v1")
+            {
+                if (StartingUnitCount != 3 || MaxControllableUnits != 3)
+                {
+                    errors.Add(
+                        "profiled-seeded-v1 requires starting unit count and max controllable units to equal 3");
+                }
+
+                if (StartProfiles == null)
+                {
+                    errors.Add("profiled-seeded-v1 start profile catalog must not be null");
+                }
+                else
+                {
+                    var seenProfileIds = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (TacticalV2StartProfile profile in StartProfiles)
+                    {
+                        if (string.IsNullOrEmpty(profile.Id))
+                            errors.Add("profile ids must not be empty");
+                        else if (!seenProfileIds.Add(profile.Id))
+                            errors.Add($"duplicate start profile id '{profile.Id}'");
+
+                        if (profile.LearnerUnitCount < 1 || profile.LearnerUnitCount > MaxControllableUnits)
+                        {
+                            errors.Add(
+                                $"start profile '{profile.Id}' learner unit count must be between 1 and max controllable units");
+                        }
+                        if (profile.OpponentUnitCount < 1 || profile.OpponentUnitCount > MaxControllableUnits)
+                        {
+                            errors.Add(
+                                $"start profile '{profile.Id}' opponent unit count must be between 1 and max controllable units");
+                        }
+                        if (!TacticalV2StartSeparations.IsKnown(profile.Separation))
+                            errors.Add($"start profile '{profile.Id}' has unknown separation '{profile.Separation}'");
+                    }
+
+                    if (!HasExactProfiledSeededV1Catalog(StartProfiles))
+                    {
+                        errors.Add(
+                            "profiled-seeded-v1 requires the exact versioned start profile catalog");
+                    }
+
+                    if (StartDistribution == null)
+                    {
+                        errors.Add("profiled-seeded-v1 start distribution must not be null");
+                    }
+                    else
+                    {
+                        errors.AddRange(StartDistribution.Validate(StartProfiles.Select(profile => profile.Id)));
+                    }
+                }
+            }
+            else
+            {
+                errors.Add(
+                    "placement policy must be 'symmetric-random-v1' or 'profiled-seeded-v1'");
+            }
 
             return errors;
+        }
+
+        private static bool HasExactProfiledSeededV1Catalog(
+            IReadOnlyList<TacticalV2StartProfile> actual)
+        {
+            IReadOnlyList<TacticalV2StartProfile> expected = TacticalV2StartCatalog.ProfiledSeededV1();
+            if (actual.Count != expected.Count) return false;
+
+            for (int index = 0; index < expected.Count; index++)
+            {
+                TacticalV2StartProfile left = actual[index];
+                TacticalV2StartProfile right = expected[index];
+                if (left.Id != right.Id ||
+                    left.LearnerUnitCount != right.LearnerUnitCount ||
+                    left.OpponentUnitCount != right.OpponentUnitCount ||
+                    left.Separation != right.Separation)
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         /// <summary>Samples <see cref="StartingUnitCount"/> templates with replacement, seeded so both

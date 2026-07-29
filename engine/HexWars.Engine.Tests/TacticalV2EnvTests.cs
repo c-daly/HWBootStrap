@@ -21,6 +21,30 @@ namespace HexWars.Engine.Tests
             Assert.That(Signature(first.State, PlayerId.Player0),
                 Is.EqualTo(Signature(first.State, PlayerId.Player1)));
         }
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void ProfiledReset_SelectsDeterministicDistributionRelativeToLearnerSeat(PlayerId learnerSeat)
+        {
+            TacticalV2Config config = ProfiledMixedConfig();
+            var first = new TacticalV2Env(seed => new AlwaysEndTurnAgent(), learnerSeat, config);
+            var second = new TacticalV2Env(seed => new AlwaysEndTurnAgent(), learnerSeat, config);
+
+            for (int seed = 6000000; seed <= 6000009; seed++)
+            {
+                string expectedId = config.StartDistribution.Select(seed);
+                TacticalV2StartProfile expected = config.StartProfiles.Single(profile => profile.Id == expectedId);
+                first.Reset(seed);
+                second.Reset(seed);
+
+                Assert.That(first.SelectedStartProfileId, Is.EqualTo(expectedId));
+                Assert.That(second.SelectedStartProfileId, Is.EqualTo(expectedId));
+                Assert.That(first.State.Player(learnerSeat).UnitsOnBoard,
+                    Has.Count.EqualTo(expected.LearnerUnitCount));
+                PlayerId foe = learnerSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+                Assert.That(first.State.Player(foe).UnitsOnBoard,
+                    Has.Count.EqualTo(expected.OpponentUnitCount));
+            }
+        }
 
         /// <summary>Regression: a scripted opponent (Greedy) decides purely from raw engine legality —
         /// board cells and points, never the RL registry's synthetic per-seat capacity — so nothing
@@ -71,6 +95,25 @@ namespace HexWars.Engine.Tests
         private sealed class AlwaysEndTurnAgent : IAgent
         {
             public Command Decide(GameState state) => new EndTurn(state.ActivePlayer);
+        }
+        private static TacticalV2Config ProfiledMixedConfig()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.PlacementPolicy = "profiled-seeded-v1";
+            config.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1();
+            config.StartDistribution = new TacticalV2StartDistribution(config.StartProfiles.Select(profile =>
+                new TacticalV2StartWeight(profile.Id, profile.Id switch
+                {
+                    "standard-3v3" => 4000,
+                    "conversion-3v1-near" => 1000,
+                    "conversion-3v1-far" => 1000,
+                    "conversion-2v1-near" => 1000,
+                    "conversion-2v1-far" => 1000,
+                    "conversion-1v1-near" => 1000,
+                    "conversion-1v1-far" => 1000,
+                    _ => 0,
+                })));
+            return config;
         }
 
         [Test]

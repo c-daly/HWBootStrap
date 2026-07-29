@@ -114,6 +114,29 @@ TACTICAL_V2_TEMPLATES = [
     },
 ]
 
+TACTICAL_V2_START_PROFILES = [
+    {"id": "standard-3v3", "learner_units": 3, "opponent_units": 3,
+     "separation": "legacy-mirrored"},
+    {"id": "conversion-3v1-near", "learner_units": 3, "opponent_units": 1,
+     "separation": "near"},
+    {"id": "conversion-3v1-medium", "learner_units": 3, "opponent_units": 1,
+     "separation": "medium"},
+    {"id": "conversion-3v1-far", "learner_units": 3, "opponent_units": 1,
+     "separation": "far"},
+    {"id": "conversion-2v1-near", "learner_units": 2, "opponent_units": 1,
+     "separation": "near"},
+    {"id": "conversion-2v1-medium", "learner_units": 2, "opponent_units": 1,
+     "separation": "medium"},
+    {"id": "conversion-2v1-far", "learner_units": 2, "opponent_units": 1,
+     "separation": "far"},
+    {"id": "conversion-1v1-near", "learner_units": 1, "opponent_units": 1,
+     "separation": "near"},
+    {"id": "conversion-1v1-medium", "learner_units": 1, "opponent_units": 1,
+     "separation": "medium"},
+    {"id": "conversion-1v1-far", "learner_units": 1, "opponent_units": 1,
+     "separation": "far"},
+]
+
 
 def tactical_v2_document(*, starting_units: int = 3) -> dict:
     document = scenario_document("tactical-v1")
@@ -128,6 +151,27 @@ def tactical_v2_document(*, starting_units: int = 3) -> dict:
     # Big enough to reach round_cap for any starting_units this helper is called with, so tests that
     # aren't specifically exercising the round-cap warning don't spuriously trigger one.
     document["episode"]["max_steps"] = tactical_v2_round_cap_minimum(document)
+    return document
+
+
+def profiled_tactical_v2_document(*, mixed: bool = False) -> dict:
+    document = tactical_v2_document()
+    tactical_v2 = document["tactical_v2"]
+    tactical_v2["placement_policy"] = "profiled-seeded-v1"
+    tactical_v2["start_profiles"] = copy.deepcopy(TACTICAL_V2_START_PROFILES)
+    tactical_v2["start_distribution"] = [
+        {
+            "profile_id": profile["id"],
+            "basis_points": (
+                4000 if mixed and profile["id"] == "standard-3v3"
+                else 1000 if mixed and not profile["id"].endswith("-medium")
+                else 0 if mixed
+                else 10000 if profile["id"] == "standard-3v3"
+                else 0
+            ),
+        }
+        for profile in TACTICAL_V2_START_PROFILES
+    ]
     return document
 
 
@@ -599,6 +643,43 @@ def test_tactical_v2_rejects_non_canonical_placement_policy() -> None:
     document = tactical_v2_document()
     document["tactical_v2"]["placement_policy"] = "random"
     with pytest.raises(ValueError, match="placement_policy"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v2_profiled_scenarios_accept_zero_weights_and_freeze_different_json() -> None:
+    control = validate_scenario_document(profiled_tactical_v2_document(mixed=False))
+    mixed = validate_scenario_document(profiled_tactical_v2_document(mixed=True))
+
+    assert sum(
+        item["basis_points"]
+        for item in control["tactical_v2"]["start_distribution"]
+    ) == 10000
+    assert control["tactical_v2"]["start_profiles"] == mixed["tactical_v2"]["start_profiles"]
+    assert control["tactical_v2"]["start_distribution"] != mixed["tactical_v2"]["start_distribution"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (lambda value: value["start_profiles"].pop(), "exact versioned start profile catalog"),
+        (lambda value: value["start_profiles"][1].update({"separation": "adjacent"}),
+         "separation"),
+        (lambda value: value["start_distribution"].pop(), "missing declared profile"),
+        (lambda value: value["start_distribution"].append(
+            {"profile_id": "standard-3v3", "basis_points": 0}), "duplicate"),
+        (lambda value: value["start_distribution"][1].update(
+            {"profile_id": "not-declared"}), "undeclared"),
+        (lambda value: value["start_distribution"][0].update(
+            {"basis_points": 9999}), "sum to 10000"),
+    ],
+)
+def test_tactical_v2_profiled_scenario_rejects_invalid_catalog_and_distribution(
+    mutation, match: str
+) -> None:
+    document = profiled_tactical_v2_document()
+    mutation(document["tactical_v2"])
+
+    with pytest.raises(ValueError, match=match):
         validate_scenario_document(document)
 
 

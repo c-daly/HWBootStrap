@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 
 namespace HexWars.Engine.Rl
 {
@@ -44,10 +45,28 @@ namespace HexWars.Engine.Rl
         public GameState State => _state;
         public TacticalV2UnitRegistry Slots0 => _slots0;
         public TacticalV2UnitRegistry Slots1 => _slots1;
+        public string SelectedStartProfileId { get; private set; } = "standard-3v3";
 
         public float[] Reset(int seed)
         {
-            TacticalV2Start start = _layout.NewGame(seed);
+            TacticalV2Start start;
+            if (_cfg.PlacementPolicy == "profiled-seeded-v1")
+            {
+                if (_cfg.StartDistribution == null)
+                    throw new InvalidOperationException("profiled tactical-v2 reset requires a start distribution");
+                string profileId = _cfg.StartDistribution.Select(seed);
+                TacticalV2StartProfile? profile = _cfg.StartProfiles?
+                    .SingleOrDefault(item => item.Id == profileId);
+                if (profile == null)
+                    throw new InvalidOperationException(
+                        $"selected start profile '{profileId}' is not declared by the tactical-v2 config");
+                start = _layout.NewGame(seed, profile, _seat);
+            }
+            else
+            {
+                start = _layout.NewGame(seed);
+            }
+            SelectedStartProfileId = start.ProfileId;
             _state = start.State;
             _slots0 = start.Slots0;
             _slots1 = start.Slots1;

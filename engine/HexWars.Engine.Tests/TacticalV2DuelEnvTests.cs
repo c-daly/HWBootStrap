@@ -9,6 +9,39 @@ namespace HexWars.Engine.Tests
 {
     public class TacticalV2DuelEnvTests
     {
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void ProfiledReset_AppliesDeclaredAdvantageToExplicitReferenceSeat(PlayerId referenceSeat)
+        {
+            TacticalV2Config config = ProfiledConfig();
+            var env = new TacticalV2DuelEnv(config);
+
+            TacticalV2DuelEnv.View view = env.Reset(
+                6000005,
+                controller0: null,
+                controller1: null,
+                startProfileId: "conversion-2v1-far",
+                referenceSeat: referenceSeat,
+                learnerSeat: PlayerId.Player0);
+
+            PlayerId foe = referenceSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+            Assert.That(env.State.Player(referenceSeat).UnitsOnBoard, Has.Count.EqualTo(2));
+            Assert.That(env.State.Player(foe).UnitsOnBoard, Has.Count.EqualTo(1));
+            Assert.That(env.SelectedStartProfileId, Is.EqualTo("conversion-2v1-far"));
+            Assert.That(env.ReferenceSeat, Is.EqualTo(referenceSeat));
+            Assert.That(view.StartProfileId, Is.EqualTo("conversion-2v1-far"));
+            Assert.That(view.ReferenceSeat, Is.EqualTo(referenceSeat));
+        }
+
+        private static TacticalV2Config ProfiledConfig()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.PlacementPolicy = "profiled-seeded-v1";
+            config.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1();
+            config.StartDistribution = new TacticalV2StartDistribution(config.StartProfiles.Select(profile =>
+                new TacticalV2StartWeight(profile.Id, profile.Id == "standard-3v3" ? 10000 : 0)));
+            return config;
+        }
         /// <summary>Regression: an internal scripted controller (Greedy) decides purely from raw engine
         /// legality — board cells and points, never the RL registry's synthetic per-seat capacity — so
         /// nothing stops it from proposing a DeployUnit once every registry slot already holds a living

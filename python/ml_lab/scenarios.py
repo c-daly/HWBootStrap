@@ -70,7 +70,26 @@ _CHEAPEST_ADAPTIVE_TEMPLATE_COST = 20
 _TACTICAL_V2_KEYS = frozenset(
     {"starting_unit_count", "max_controllable_units", "placement_policy", "templates"}
 )
+_TACTICAL_V2_PROFILED_KEYS = _TACTICAL_V2_KEYS | frozenset(
+    {"start_profiles", "start_distribution"}
+)
 _TACTICAL_V2_TEMPLATE_KEYS = frozenset({"id", "name", "stats"})
+_TACTICAL_V2_START_PROFILE_KEYS = frozenset(
+    {"id", "learner_units", "opponent_units", "separation"}
+)
+_TACTICAL_V2_START_WEIGHT_KEYS = frozenset({"profile_id", "basis_points"})
+_TACTICAL_V2_START_PROFILES = (
+    ("standard-3v3", 3, 3, "legacy-mirrored"),
+    ("conversion-3v1-near", 3, 1, "near"),
+    ("conversion-3v1-medium", 3, 1, "medium"),
+    ("conversion-3v1-far", 3, 1, "far"),
+    ("conversion-2v1-near", 2, 1, "near"),
+    ("conversion-2v1-medium", 2, 1, "medium"),
+    ("conversion-2v1-far", 2, 1, "far"),
+    ("conversion-1v1-near", 1, 1, "near"),
+    ("conversion-1v1-medium", 1, 1, "medium"),
+    ("conversion-1v1-far", 1, 1, "far"),
+)
 _TACTICAL_V2_STAT_KEYS = frozenset(
     {
         "health",
@@ -243,27 +262,51 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
 
     if environment == "tactical-v2":
         tactical_v2 = _mapping(document["tactical_v2"], "tactical_v2")
-        _exact_keys(tactical_v2, _TACTICAL_V2_KEYS, "tactical_v2")
+        placement_policy = _text(
+            tactical_v2.get("placement_policy"), "tactical_v2.placement_policy"
+        )
+        expected_tactical_v2_keys = (
+            _TACTICAL_V2_PROFILED_KEYS
+            if placement_policy == "profiled-seeded-v1"
+            or "start_profiles" in tactical_v2
+            or "start_distribution" in tactical_v2
+            else _TACTICAL_V2_KEYS
+        )
+        _exact_keys(tactical_v2, expected_tactical_v2_keys, "tactical_v2")
         starting_units = _integer(
             tactical_v2["starting_unit_count"], "tactical_v2.starting_unit_count"
         )
-        if not 1 <= starting_units <= 12:
-            raise ValueError(
-                "tactical_v2.starting_unit_count must be between 1 and 12"
-            )
         max_controllable = _integer(
             tactical_v2["max_controllable_units"], "tactical_v2.max_controllable_units"
         )
-        if max_controllable != starting_units:
+        if placement_policy == "symmetric-random-v1":
+            if not 1 <= starting_units <= 12:
+                raise ValueError(
+                    "tactical_v2.starting_unit_count must be between 1 and 12"
+                )
+            if max_controllable != starting_units:
+                raise ValueError(
+                    "tactical_v2.max_controllable_units must equal starting_unit_count"
+                )
+            if tactical_v2.get("start_profiles"):
+                raise ValueError(
+                    "tactical_v2.start_profiles is not valid for symmetric-random-v1"
+                )
+            if tactical_v2.get("start_distribution"):
+                raise ValueError(
+                    "tactical_v2.start_distribution is not valid for symmetric-random-v1"
+                )
+        elif placement_policy == "profiled-seeded-v1":
+            if starting_units != 3 or max_controllable != 3:
+                raise ValueError(
+                    "profiled-seeded-v1 requires tactical_v2.starting_unit_count and "
+                    "max_controllable_units to equal 3"
+                )
+            _validate_tactical_v2_start_profiles(tactical_v2, max_controllable)
+        else:
             raise ValueError(
-                "tactical_v2.max_controllable_units must equal starting_unit_count"
-            )
-        placement_policy = _text(
-            tactical_v2["placement_policy"], "tactical_v2.placement_policy"
-        )
-        if placement_policy != "symmetric-random-v1":
-            raise ValueError(
-                "tactical_v2.placement_policy must be 'symmetric-random-v1'"
+                "tactical_v2.placement_policy must be 'symmetric-random-v1' or "
+                "'profiled-seeded-v1'"
             )
 
         raw_templates = tactical_v2["templates"]
@@ -318,6 +361,79 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
         _positive(max_design, "adaptive.max_design_point_cost")
 
     return document
+
+
+def _validate_tactical_v2_start_profiles(
+    tactical_v2: Mapping[str, Any], max_controllable: int
+) -> None:
+    raw_profiles = tactical_v2["start_profiles"]
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError("tactical_v2.start_profiles must be a non-empty array")
+
+    actual_profiles: list[tuple[str, int, int, str]] = []
+    seen_profile_ids: set[str] = set()
+    for index, raw_profile in enumerate(raw_profiles):
+        path = f"tactical_v2.start_profiles[{index}]"
+        profile = _mapping(raw_profile, path)
+        _exact_keys(profile, _TACTICAL_V2_START_PROFILE_KEYS, path)
+        profile_id = _text(profile["id"], f"{path}.id")
+        if profile_id in seen_profile_ids:
+            raise ValueError(f"duplicate tactical-v2 start profile id {profile_id!r}")
+        seen_profile_ids.add(profile_id)
+        learner_units = _integer(profile["learner_units"], f"{path}.learner_units")
+        opponent_units = _integer(profile["opponent_units"], f"{path}.opponent_units")
+        if not 1 <= learner_units <= max_controllable:
+            raise ValueError(
+                f"{path}.learner_units must be between 1 and max_controllable_units"
+            )
+        if not 1 <= opponent_units <= max_controllable:
+            raise ValueError(
+                f"{path}.opponent_units must be between 1 and max_controllable_units"
+            )
+        separation = _text(profile["separation"], f"{path}.separation")
+        if separation not in {"legacy-mirrored", "near", "medium", "far"}:
+            raise ValueError(f"{path}.separation is unknown: {separation!r}")
+        actual_profiles.append(
+            (profile_id, learner_units, opponent_units, separation)
+        )
+
+    if tuple(actual_profiles) != _TACTICAL_V2_START_PROFILES:
+        raise ValueError(
+            "profiled-seeded-v1 requires the exact versioned start profile catalog"
+        )
+
+    raw_distribution = tactical_v2["start_distribution"]
+    if not isinstance(raw_distribution, list) or not raw_distribution:
+        raise ValueError("tactical_v2.start_distribution must be a non-empty array")
+    declared = {profile[0] for profile in _TACTICAL_V2_START_PROFILES}
+    seen_weights: set[str] = set()
+    total_basis_points = 0
+    for index, raw_weight in enumerate(raw_distribution):
+        path = f"tactical_v2.start_distribution[{index}]"
+        weight = _mapping(raw_weight, path)
+        _exact_keys(weight, _TACTICAL_V2_START_WEIGHT_KEYS, path)
+        profile_id = _text(weight["profile_id"], f"{path}.profile_id")
+        if profile_id in seen_weights:
+            raise ValueError(
+                f"duplicate tactical-v2 start distribution weight for {profile_id!r}"
+            )
+        seen_weights.add(profile_id)
+        if profile_id not in declared:
+            raise ValueError(
+                f"weight references undeclared start profile {profile_id!r}"
+            )
+        basis_points = _integer(weight["basis_points"], f"{path}.basis_points")
+        if not 0 <= basis_points <= 10000:
+            raise ValueError(f"{path}.basis_points must be within [0,10000]")
+        total_basis_points += basis_points
+
+    missing = sorted(declared - seen_weights)
+    if missing:
+        raise ValueError(
+            "start distribution is missing declared profile " + repr(missing[0])
+        )
+    if total_basis_points != 10000:
+        raise ValueError("start distribution weights must sum to 10000 basis points")
 
 
 def tactical_v2_round_cap_minimum(document: Mapping[str, Any]) -> int | None:

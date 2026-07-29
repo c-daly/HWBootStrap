@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace HexWars.Engine.Rl
 {
@@ -32,9 +33,7 @@ namespace HexWars.Engine.Rl
         private float _armyValue;
         private int _steps;
 
-        public TacticalV2DuelEnv(
-            TacticalV2Config config,
-            IDuelTransitionSink? transitionSink = null)
+        public TacticalV2DuelEnv(TacticalV2Config config, IDuelTransitionSink? transitionSink = null)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
             _cfg = config;
@@ -45,6 +44,8 @@ namespace HexWars.Engine.Rl
         public TacticalV2Config Config => _cfg;
         public TacticalV2Layout Layout => _layout;
         public GameState State => _state;
+        public string SelectedStartProfileId { get; private set; } = "standard-3v3";
+        public PlayerId ReferenceSeat { get; private set; } = PlayerId.Player0;
 
         /// <summary>Opt-in: when true, every accepted command captures a <see cref="DuelTransition"/>
         /// for <see cref="DrainTransitions"/>. Defaults to false so headless training (which never
@@ -58,10 +59,46 @@ namespace HexWars.Engine.Rl
         public View Reset(int seed, IAgent? controller0, IAgent? controller1, PlayerId learnerSeat = PlayerId.Player0)
         {
             TacticalV2Start start = _layout.NewGame(seed);
+            return ResetFromStart(start, controller0, controller1, learnerSeat, learnerSeat);
+        }
+
+        /// <summary>Start a duel from a declared learner-relative profile. The reference seat owns the
+        /// profile's learner-side counts and composition; it is deliberately independent of the
+        /// learner seat used for reward perspective.</summary>
+        public View Reset(
+            int seed,
+            IAgent? controller0,
+            IAgent? controller1,
+            string startProfileId,
+            PlayerId referenceSeat,
+            PlayerId learnerSeat = PlayerId.Player0)
+        {
+            if (string.IsNullOrEmpty(startProfileId))
+                throw new ArgumentException("start profile id must not be empty", nameof(startProfileId));
+            TacticalV2StartProfile? profile = _cfg.StartProfiles?
+                .SingleOrDefault(item => item.Id == startProfileId);
+            if (profile == null)
+                throw new ArgumentException(
+                    $"start profile '{startProfileId}' is not declared by this tactical-v2 config",
+                    nameof(startProfileId));
+
+            TacticalV2Start start = _layout.NewGame(seed, profile, referenceSeat);
+            return ResetFromStart(start, controller0, controller1, learnerSeat, referenceSeat);
+        }
+
+        private View ResetFromStart(
+            TacticalV2Start start,
+            IAgent? controller0,
+            IAgent? controller1,
+            PlayerId learnerSeat,
+            PlayerId referenceSeat)
+        {
             _start = start.State;
             _state = start.State;
             _slots0 = start.Slots0;
             _slots1 = start.Slots1;
+            SelectedStartProfileId = start.ProfileId;
+            ReferenceSeat = referenceSeat;
             _ctrl0 = controller0;
             _ctrl1 = controller1;
             _learner = learnerSeat;
@@ -193,6 +230,8 @@ namespace HexWars.Engine.Rl
                 Winner = terminated ? _state.Winner : null,
                 Terminated = terminated,
                 Truncated = truncated,
+                StartProfileId = SelectedStartProfileId,
+                ReferenceSeat = ReferenceSeat,
             };
         }
 
@@ -208,6 +247,8 @@ namespace HexWars.Engine.Rl
             public PlayerId? Winner;
             public bool Terminated;
             public bool Truncated;
+            public string StartProfileId = "standard-3v3";
+            public PlayerId ReferenceSeat;
         }
     }
 }
