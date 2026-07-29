@@ -167,6 +167,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--workers", type=int, default=1)
     evaluate.add_argument("--server", default=str(DEFAULT_SERVER))
     evaluate.add_argument("--output", type=Path)
+    evaluate.add_argument(
+        "--capture-trace",
+        action="store_true",
+        help="capture evaluation-only tactical transition evidence",
+    )
+    evaluate.add_argument(
+        "--evidence-dir",
+        type=Path,
+        help="write per-match traces and replays; implies --capture-trace",
+    )
+    evaluate.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        help="explicit environment; required to select tactical-v2 for scripted-only matchups",
+    )
     _add_json_argument(evaluate)
 
     benchmark = subcommands.add_parser(
@@ -573,6 +588,9 @@ def _dispatch(
             workers=args.workers,
             server_cmd=["dotnet", args.server],
             output_path=args.output,
+            environment=args.environment,
+            capture_trace=args.capture_trace or args.evidence_dir is not None,
+            evidence_dir=args.evidence_dir,
         )
     if args.command == "benchmark":
         return benchmark_gymserver(
@@ -684,3 +702,7 @@ def main(
     elif not human_follow:
         _emit_human(output, args.command, result)
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
