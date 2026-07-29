@@ -83,3 +83,22 @@ def test_cli_resolves_scenario_launches_default_client_and_collects(monkeypatch,
     monkeypatch.setattr(module, "collect_partition", lambda value: received.append(value) or value.dataset)
     module.main(["--dataset", str(tmp_path / "dataset"), "--partition", "train", "--scenario", "scenario.json"])
     assert received[0].dataset == tmp_path / "dataset" and received[0].partition == "train"
+
+def test_cli_forwards_resolved_nondefault_scenario_to_every_server(monkeypatch, tmp_path: Path) -> None:
+    import collect_annihilation_demonstrations as module
+    launched: list[list[str]] = []; received: list[CollectionSpec] = []
+    requested = tmp_path / "nested" / "non-default.json"; canonical = requested.resolve()
+    class Scenario: canonical_json = "{\"id\":\"non-default\"}"
+    class Client:
+        contract = contract()
+        def __init__(self, command, **_kwargs): launched.append(list(command))
+        def close(self): return None
+    def resolve(**kwargs):
+        assert kwargs["scenario_file"] == canonical
+        return Scenario()
+    monkeypatch.setattr(module, "resolve_scenario", resolve)
+    monkeypatch.setattr(module, "DuelClient", Client)
+    monkeypatch.setattr(module, "collect_partition", lambda value: received.append(value) or value.dataset)
+    module.main(["--dataset", str(tmp_path / "dataset"), "--partition", "train", "--scenario", str(requested)])
+    received[0].client_factory(1)
+    assert launched and all(["--scenario-file", str(canonical)] in [command[index:index + 2] for index in range(len(command) - 1)] for command in launched)

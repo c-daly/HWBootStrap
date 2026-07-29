@@ -112,11 +112,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--scenario", type=Path, required=True)
     parser.add_argument("--server", type=Path, default=DEFAULT_SERVER)
     args = parser.parse_args(argv)
-    scenario = resolve_scenario(environment="tactical-v2", scenario_file=args.scenario, template_id=None, enforce_round_cap_minimum=True)
+    scenario_path = args.scenario.resolve()
+    scenario = resolve_scenario(environment="tactical-v2", scenario_file=scenario_path, template_id=None, enforce_round_cap_minimum=True)
     scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
-    probe = DuelClient(["dotnet", str(args.server)], environment="tactical-v2")
+    server_command = ["dotnet", str(args.server.resolve()), "--scenario-file", str(scenario_path)]
+    probe = DuelClient(server_command, environment="tactical-v2")
     try:
-        collect_partition(CollectionSpec(args.dataset, args.partition, scenario_hash, probe.contract, lambda worker: probe if worker == 0 else DuelClient(["dotnet", str(args.server)], environment="tactical-v2")))
+        collect_partition(CollectionSpec(args.dataset, args.partition, scenario_hash, probe.contract, lambda worker: probe if worker == 0 else DuelClient(server_command, environment="tactical-v2")))
     except BaseException:
         probe.close()
         raise
