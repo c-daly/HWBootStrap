@@ -78,6 +78,11 @@ IAgent? MakeController(string? spec, int agentSeed)
 {
     if (spec == "greedy") return new GreedyAgent(agentSeed);
     if (spec == "random") return new RandomAgent(agentSeed);
+    if (spec == "bounded-search")
+        return new BoundedSearchAgent(
+            BoundedSearchAgent.DefaultExpansionBudget,
+            BoundedSearchAgent.DefaultDepth,
+            useHeuristic: true);
     return null; // "external" / unset -> caller supplies this seat's actions
 }
 
