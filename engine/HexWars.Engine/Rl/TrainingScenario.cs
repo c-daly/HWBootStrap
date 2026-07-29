@@ -247,6 +247,8 @@ namespace HexWars.Engine.Rl
                 DrawCreditWeight = reward.DrawCreditWeight,
                 PointsWeight = reward.PointsWeight,
                 PlacementPolicy = tacticalV2.PlacementPolicy,
+                StartProfiles = tacticalV2.StartProfiles.AsReadOnly(),
+                StartDistribution = new TacticalV2StartDistribution(tacticalV2.StartDistribution),
             };
         }
 
@@ -331,7 +333,20 @@ namespace HexWars.Engine.Rl
                 errors.Add("tactical-v2 starting unit count must be between 1 and 12");
             if (tacticalV2.MaxControllableUnits != tacticalV2.StartingUnitCount)
                 errors.Add("tactical-v2 max controllable units must equal starting unit count");
-            if (tacticalV2.PlacementPolicy != "symmetric-random-v1")
+            if (tacticalV2.PlacementPolicy == "profiled-seeded-v1")
+            {
+                TacticalV2Config profiled = TacticalV2Config.Default();
+                profiled.StartingUnitCount = tacticalV2.StartingUnitCount;
+                profiled.MaxControllableUnits = tacticalV2.MaxControllableUnits;
+                profiled.PlacementPolicy = tacticalV2.PlacementPolicy;
+                profiled.StartProfiles = tacticalV2.StartProfiles.AsReadOnly();
+                profiled.StartDistribution = new TacticalV2StartDistribution(tacticalV2.StartDistribution);
+                foreach (string error in profiled.Validate())
+                    if (error.Contains("profile") || error.Contains("start distribution") ||
+                        error.Contains("starting unit count and max controllable units"))
+                        errors.Add("tactical-v2 " + error);
+            }
+            else if (tacticalV2.PlacementPolicy != "symmetric-random-v1")
                 errors.Add("tactical-v2 placement policy must be 'symmetric-random-v1'");
 
             if (tacticalV2.Templates == null || tacticalV2.Templates.Count == 0)
@@ -498,6 +513,8 @@ namespace HexWars.Engine.Rl
     public sealed class TrainingTacticalV2Config
     {
         public int StartingUnitCount = 3;
+        public List<TacticalV2StartProfile> StartProfiles = new List<TacticalV2StartProfile>();
+        public List<TacticalV2StartWeight> StartDistribution = new List<TacticalV2StartWeight>();
         public int MaxControllableUnits = 3;
         public string PlacementPolicy = "symmetric-random-v1";
         public List<TrainingUnitTemplateConfig> Templates = new List<TrainingUnitTemplateConfig>();

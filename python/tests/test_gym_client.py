@@ -435,6 +435,23 @@ def test_tactical_v2_client_accepts_complete_contract_and_sends_environment_flag
         env.close()
 
 
+def test_tactical_v2_client_accepts_profiled_contract_with_declared_semantics(
+    tmp_path: Path,
+) -> None:
+    spaces = tactical_v2_spaces(template_count=5, unit_count=3, width=13, height=9)
+    semantics = spaces["tactical_v2"]
+    semantics["placement_policy"] = "profiled-seeded-v1"
+    semantics["start_profiles"] = [
+        {"id": "standard-3v3", "learner_unit_count": 3, "opponent_unit_count": 3,
+         "separation": "legacy-mirrored"},
+    ]
+    semantics["start_distribution"] = [{"profile_id": "standard-3v3", "basis_points": 10000}]
+
+    env = HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
+    try:
+        assert env.contract.semantics["start_profiles"] == semantics["start_profiles"]
+    finally:
+        env.close()
 def test_tactical_v2_client_rejects_duel_handshake_and_closes_server_process(
     tmp_path: Path,
 ) -> None:

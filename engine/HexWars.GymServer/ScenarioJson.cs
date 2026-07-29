@@ -143,7 +143,24 @@ namespace HexWars.GymServer
                     Require(wire.TacticalV2.StartingUnitCount, "tactical_v2.starting_unit_count", errors);
                     Require(wire.TacticalV2.MaxControllableUnits, "tactical_v2.max_controllable_units", errors);
                     RequireText(wire.TacticalV2.PlacementPolicy, "tactical_v2.placement_policy", errors);
+                    if (wire.TacticalV2.PlacementPolicy == "profiled-seeded-v1")
+                    {
+                        Require(wire.TacticalV2.StartProfiles, "tactical_v2.start_profiles", errors);
+                        Require(wire.TacticalV2.StartDistribution, "tactical_v2.start_distribution", errors);
+                        if (wire.TacticalV2.StartProfiles != null)
+                            for (int i = 0; i < wire.TacticalV2.StartProfiles.Count; i++)
+                            {
+                                TacticalV2Wire.TacticalV2StartProfileWire profile = wire.TacticalV2.StartProfiles[i];
+                                RequireText(profile.Id, $"tactical_v2.start_profiles[{i}].id", errors);
+                                Require(profile.LearnerUnitCount, $"tactical_v2.start_profiles[{i}].learner_unit_count", errors);
+                                Require(profile.OpponentUnitCount, $"tactical_v2.start_profiles[{i}].opponent_unit_count", errors);
+                                RequireText(profile.Separation, $"tactical_v2.start_profiles[{i}].separation", errors);
+                            }
+                        if (wire.TacticalV2.StartDistribution != null)
+                            for (int i = 0; i < wire.TacticalV2.StartDistribution.Count; i++)
+                                ValidateTacticalV2StartWeightWire(wire.TacticalV2.StartDistribution[i], i, errors);
 
+                    }
                     if (wire.TacticalV2.Templates == null || wire.TacticalV2.Templates.Count == 0)
                     {
                         errors.Add("tactical_v2.templates is required");
@@ -269,6 +286,8 @@ namespace HexWars.GymServer
                     StartingUnitCount = wire.TacticalV2!.StartingUnitCount!.Value,
                     MaxControllableUnits = wire.TacticalV2.MaxControllableUnits!.Value,
                     PlacementPolicy = wire.TacticalV2.PlacementPolicy!,
+                    StartProfiles = wire.TacticalV2.StartProfiles?.Select(MapTacticalV2StartProfile).ToList() ?? new List<TacticalV2StartProfile>(),
+                    StartDistribution = wire.TacticalV2.StartDistribution?.Select(MapTacticalV2StartWeight).ToList() ?? new List<TacticalV2StartWeight>(),
                     Templates = wire.TacticalV2.Templates!.Select(MapTacticalV2Template).ToList(),
                 };
             }
@@ -291,6 +310,19 @@ namespace HexWars.GymServer
                 Vision = template.Stats.Vision!.Value,
                 VisionArc = template.Stats.VisionArc!.Value,
             };
+        private static TacticalV2StartProfile MapTacticalV2StartProfile(TacticalV2Wire.TacticalV2StartProfileWire profile) =>
+            new TacticalV2StartProfile(profile.Id!, profile.LearnerUnitCount!.Value,
+                profile.OpponentUnitCount!.Value, profile.Separation!);
+
+        private static TacticalV2StartWeight MapTacticalV2StartWeight(TacticalV2Wire.TacticalV2StartWeightWire weight) =>
+            new TacticalV2StartWeight(weight.ProfileId!, weight.BasisPoints!.Value);
+
+        private static void ValidateTacticalV2StartWeightWire(
+            TacticalV2Wire.TacticalV2StartWeightWire weight, int index, List<string> errors)
+        {
+            RequireText(weight.ProfileId, $"tactical_v2.start_distribution[{index}].profile_id", errors);
+            Require(weight.BasisPoints, $"tactical_v2.start_distribution[{index}].basis_points", errors);
+        }
 
         private static void Require(object? value, string field, List<string> errors)
         {
@@ -380,6 +412,21 @@ namespace HexWars.GymServer
             [JsonPropertyName("starting_unit_count")] public int? StartingUnitCount { get; set; }
             [JsonPropertyName("max_controllable_units")] public int? MaxControllableUnits { get; set; }
             [JsonPropertyName("placement_policy")] public string? PlacementPolicy { get; set; }
+            [JsonPropertyName("start_profiles")] public List<TacticalV2StartProfileWire>? StartProfiles { get; set; }
+        public sealed class TacticalV2StartProfileWire
+        {
+            [JsonPropertyName("id")] public string? Id { get; set; }
+            [JsonPropertyName("learner_unit_count")] public int? LearnerUnitCount { get; set; }
+            [JsonPropertyName("opponent_unit_count")] public int? OpponentUnitCount { get; set; }
+            [JsonPropertyName("separation")] public string? Separation { get; set; }
+        }
+
+        public sealed class TacticalV2StartWeightWire
+        {
+            [JsonPropertyName("profile_id")] public string? ProfileId { get; set; }
+            [JsonPropertyName("basis_points")] public int? BasisPoints { get; set; }
+        }
+            [JsonPropertyName("start_distribution")] public List<TacticalV2StartWeightWire>? StartDistribution { get; set; }
             [JsonPropertyName("templates")] public List<TacticalV2TemplateWire>? Templates { get; set; }
         }
 

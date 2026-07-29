@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -397,6 +398,41 @@ namespace HexWars.Engine.Tests
             Assert.That(fromScenarioContract.EncodingHash, Is.EqualTo(engineDefaultContract.EncodingHash));
         }
 
+        [Test]
+        public void TacticalV2Scenario_ProfiledSeededFieldsBuildIntoExactEngineConfig()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.PlacementPolicy = "profiled-seeded-v1";
+            scenario.TacticalV2.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1().ToList();
+            scenario.TacticalV2.StartDistribution = TacticalV2StartCatalog.ProfiledSeededV1()
+                .Select(profile => new TacticalV2StartWeight(
+                    profile.Id, profile.Id == "conversion-2v1-medium" ? 10000 : 0))
+                .ToList();
+
+            TacticalV2Config config = scenario.BuildTacticalV2();
+
+            Assert.That(config.Validate(), Is.Empty);
+            Assert.That(config.StartProfiles.Select(profile => profile.Id), Is.EqualTo(
+                TacticalV2StartCatalog.ProfiledSeededV1().Select(profile => profile.Id)));
+            Assert.That(config.StartDistribution.Select(12345), Is.EqualTo("conversion-2v1-medium"));
+        }
+
+        [Test]
+        public void TacticalV2Scenario_RejectsProfiledSeededCatalogThatIsNotVersionedExact()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.PlacementPolicy = "profiled-seeded-v1";
+            scenario.TacticalV2.StartProfiles = new List<TacticalV2StartProfile>
+            {
+                new TacticalV2StartProfile("arbitrary", 3, 3, "legacy-mirrored"),
+            };
+            scenario.TacticalV2.StartDistribution = new List<TacticalV2StartWeight>
+            {
+                new TacticalV2StartWeight("arbitrary", 10000),
+            };
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("exact versioned start profile catalog"));
+        }
         [Test]
         public void TacticalV2Scenario_RejectsMismatchedCountAndCap()
         {

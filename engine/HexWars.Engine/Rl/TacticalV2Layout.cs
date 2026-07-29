@@ -122,6 +122,11 @@ namespace HexWars.Engine.Rl
         public TacticalV2Layout(TacticalV2Config config)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
+            IReadOnlyList<string> validationErrors = config.Validate();
+            if (validationErrors.Count > 0)
+                throw new ArgumentException(
+                    "invalid tactical-v2 configuration: " + string.Join("; ", validationErrors),
+                    nameof(config));
             if (config.BoardGen == null)
                 throw new ArgumentException("tactical-v2 board configuration is required", nameof(config));
             if (config.Templates == null || config.Templates.Count == 0)

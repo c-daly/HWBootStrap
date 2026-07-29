@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System;
 using System.Linq;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -221,7 +222,25 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void ProfiledSeededV1_DirectConstructionRejectsNonVersionedCatalog()
+        {
+            TacticalV2Config config = ProfiledConfig(new[]
+            {
+                new TacticalV2StartWeight("arbitrary", 10000),
+            }, new[]
+            {
+                new TacticalV2StartProfile("arbitrary", 3, 3, "legacy-mirrored"),
+            });
+
+            Assert.Throws<ArgumentException>(() => new TacticalV2Layout(config));
+            Assert.Throws<ArgumentException>(() => new TacticalV2Env(
+                _ => new GreedyAgent(0), PlayerId.Player0, config));
+            Assert.Throws<ArgumentException>(() => new TacticalV2DuelEnv(config));
+        }
+
+        [Test]
         public void LegacySymmetricPolicy_KeepsEqualCountValidationAndIgnoresProfileFields()
+
         {
             TacticalV2Config config = TacticalV2Config.Default();
             config.StartProfiles = new[] { new TacticalV2StartProfile("unused", 1, 1, "near") };

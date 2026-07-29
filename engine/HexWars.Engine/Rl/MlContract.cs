@@ -263,8 +263,9 @@ namespace HexWars.Engine.Rl
             object[] templates,
             int actionSize,
             int observationSize,
-            string environmentKind) =>
-            ReadOnlyMap(new Dictionary<string, object>
+            string environmentKind)
+        {
+            var values = new Dictionary<string, object>
             {
                 ["contract_version"] = TacticalV2Version,
                 ["environment_kind"] = environmentKind,
@@ -277,7 +278,26 @@ namespace HexWars.Engine.Rl
                 ["action_size"] = actionSize,
                 ["observation_size"] = observationSize,
                 ["board"] = board,
-            });
+            };
+            if (config.PlacementPolicy == "profiled-seeded-v1")
+            {
+                values["start_profiles"] = Array.AsReadOnly(config.StartProfiles.Select(profile =>
+                    (object)ReadOnlyMap(new Dictionary<string, object>
+                    {
+                        ["id"] = profile.Id,
+                        ["learner_unit_count"] = profile.LearnerUnitCount,
+                        ["opponent_unit_count"] = profile.OpponentUnitCount,
+                        ["separation"] = profile.Separation,
+                    })).ToArray());
+                values["start_distribution"] = Array.AsReadOnly(config.StartDistribution.Weights.Select(weight =>
+                    (object)ReadOnlyMap(new Dictionary<string, object>
+                    {
+                        ["profile_id"] = weight.ProfileId,
+                        ["basis_points"] = weight.BasisPoints,
+                    })).ToArray());
+            }
+            return ReadOnlyMap(values);
+        }
 
         // Tactical-v2 keeps its own canonical-JSON builder (rather than sharing CanonicalAdaptiveJson)
         // so a change to one contract version's document shape can never perturb another's hash.

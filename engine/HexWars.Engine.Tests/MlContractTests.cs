@@ -88,6 +88,24 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV2ProfiledContract_EmitsDeclaredProfilesAndDistribution()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.PlacementPolicy = "profiled-seeded-v1";
+            config.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1();
+            config.StartDistribution = new TacticalV2StartDistribution(config.StartProfiles.Select(profile =>
+                new TacticalV2StartWeight(profile.Id, profile.Id == "conversion-1v1-far" ? 10000 : 0)));
+
+            MlContract contract = MlContract.CreateTacticalV2(config, MlEnvironmentKind.Duel);
+
+            var profiles = (IReadOnlyList<object>)contract.Semantics["start_profiles"];
+            var distribution = (IReadOnlyList<object>)contract.Semantics["start_distribution"];
+            Assert.That(profiles.Count, Is.EqualTo(10));
+            Assert.That(distribution.Count, Is.EqualTo(10));
+            Assert.That(contract.Semantics["placement_policy"], Is.EqualTo("profiled-seeded-v1"));
+        }
+
+        [Test]
         public void TacticalV1Contract_RemainsByteIdentical()
         {
             TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
