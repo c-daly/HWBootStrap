@@ -284,11 +284,22 @@ def _validate_tactical_v2(
         )
     placement_policy = semantics.get("placement_policy")
     if placement_policy == "profiled-seeded-v1":
+        expected_fields = {
+            "contract_version", "environment_kind", "starting_unit_count",
+            "max_controllable_units", "placement_policy", "templates",
+            "action_regions", "observation_channels", "action_size",
+            "observation_size", "board", "start_profiles", "start_distribution",
+        }
+        if type(semantics) is not dict or set(semantics) != expected_fields:
+            raise ValueError("GymServer profiled tactical_v2 contract must have exact fields")
+        if type(semantics["starting_unit_count"]) is not int or type(semantics["max_controllable_units"]) is not int:
+            raise ValueError(
+                "GymServer profiled tactical_v2 contract requires plain integer unit counts")
         if starting_units != 3 or max_controllable != 3:
             raise ValueError("GymServer profiled tactical_v2 contract requires three unit slots")
         profiles = semantics.get("start_profiles")
         distribution = semantics.get("start_distribution")
-        if not isinstance(profiles, list) or not profiles:
+        if type(profiles) is not list or not profiles:
             raise ValueError("GymServer profiled tactical_v2 contract requires start_profiles")
         declared: set[str] = set()
         expected_profiles = (
@@ -299,27 +310,32 @@ def _validate_tactical_v2(
         )
         actual_profiles: list[tuple[str, int, int, str]] = []
         for index, raw_profile in enumerate(profiles):
-            profile = _mapping(raw_profile, f"tactical_v2.start_profiles[{index}]")
-            profile_id = profile.get("id")
-            if not isinstance(profile_id, str) or not profile_id or profile_id in declared:
+            if type(raw_profile) is not dict or set(raw_profile) != {"id", "learner_units", "opponent_units", "separation"}:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid start_profiles")
-            if profile.get("learner_units") not in {1, 2, 3} or profile.get("opponent_units") not in {1, 2, 3}:
+            profile = raw_profile
+
+            profile_id = profile.get("id")
+            if type(profile_id) is not str or not profile_id or profile_id in declared:
+                raise ValueError("GymServer profiled tactical_v2 contract has invalid start_profiles")
+            if type(profile["learner_units"]) is not int or type(profile["opponent_units"]) is not int or profile["learner_units"] not in {1, 2, 3} or profile["opponent_units"] not in {1, 2, 3}:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid profile unit counts")
-            if profile.get("separation") not in {"legacy-mirrored", "near", "medium", "far"}:
+            if type(profile["separation"]) is not str or profile["separation"] not in {"legacy-mirrored", "near", "medium", "far"}:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid profile separation")
             declared.add(profile_id)
             actual_profiles.append((profile_id, profile["learner_units"], profile["opponent_units"], profile["separation"]))
         if tuple(actual_profiles) != expected_profiles:
             raise ValueError("GymServer profiled tactical_v2 contract requires the exact versioned start profile catalog")
-        if not isinstance(distribution, list) or not distribution:
+        if type(distribution) is not list or not distribution:
             raise ValueError("GymServer profiled tactical_v2 contract requires start_distribution")
         total = 0
         seen: set[str] = set()
         for index, raw_weight in enumerate(distribution):
-            weight = _mapping(raw_weight, f"tactical_v2.start_distribution[{index}]")
+            if type(raw_weight) is not dict or set(raw_weight) != {"profile_id", "basis_points"}:
+                raise ValueError("GymServer profiled tactical_v2 contract has invalid start_distribution")
+            weight = raw_weight
             profile_id = weight.get("profile_id")
             basis_points = weight.get("basis_points")
-            if profile_id not in declared or profile_id in seen or isinstance(basis_points, bool) or not isinstance(basis_points, int) or not 0 <= basis_points <= 10000:
+            if type(profile_id) is not str or profile_id not in declared or profile_id in seen or type(basis_points) is not int or not 0 <= basis_points <= 10000:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid start_distribution")
             seen.add(profile_id)
             total += basis_points

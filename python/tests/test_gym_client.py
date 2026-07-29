@@ -187,6 +187,10 @@ def _profiled_tactical_v2_start_semantics() -> tuple[list[dict], list[dict]]:
     ]
     return profiles, weights
 
+
+class _IntSubclass(int):
+    pass
+
 def _valid_adaptive_spaces() -> dict:
     spaces = _valid_spaces()
     spaces["contract_version"] = "adaptive-v1"
@@ -480,6 +484,20 @@ def test_tactical_v2_client_accepts_profiled_contract_with_declared_semantics(
         ("extra_profile", "exact versioned start profile catalog"),
         ("wrong_weight", "invalid start_distribution"),
         ("wrong_total", "invalid start_distribution"),
+        ("profile_true", "invalid profile unit counts"),
+        ("profile_float", "invalid profile unit counts"),
+        ("profile_string", "invalid profile unit counts"),
+        ("profile_int_subclass", "invalid profile unit counts"),
+        ("profile_extra_field", "invalid start_profiles"),
+        ("profile_missing_field", "invalid start_profiles"),
+        ("weight_true", "invalid start_distribution"),
+        ("weight_float", "invalid start_distribution"),
+        ("weight_string", "invalid start_distribution"),
+        ("weight_int_subclass", "invalid start_distribution"),
+        ("weight_extra_field", "invalid start_distribution"),
+        ("weight_missing_field", "invalid start_distribution"),
+        ("outer_extra_field", "exact fields"),
+        ("outer_missing_field", "exact fields"),
     ],
 )
 def test_tactical_v2_client_rejects_noncanonical_profiled_contract(
@@ -499,9 +517,40 @@ def test_tactical_v2_client_rejects_noncanonical_profiled_contract(
         weights[0]["basis_points"] = 10001
     elif mutation == "wrong_total":
         weights[0]["basis_points"] = 9999
+    elif mutation == "profile_true":
+        profiles[0]["learner_units"] = True
+    elif mutation == "profile_float":
+        profiles[0]["learner_units"] = 3.0
+    elif mutation == "profile_string":
+        profiles[0]["learner_units"] = "3"
+    elif mutation == "profile_int_subclass":
+        profiles[0]["learner_units"] = _IntSubclass(3)
+    elif mutation == "profile_extra_field":
+        profiles[0]["extra"] = "unexpected"
+    elif mutation == "profile_missing_field":
+        del profiles[0]["separation"]
+    elif mutation == "weight_float":
+        weights[0]["basis_points"] = 10000.0
+    elif mutation == "weight_true":
+        weights[0]["basis_points"] = True
+    elif mutation == "weight_string":
+        weights[0]["basis_points"] = "10000"
+    elif mutation == "weight_int_subclass":
+        weights[0]["basis_points"] = _IntSubclass(10000)
+    elif mutation == "weight_extra_field":
+        weights[0]["extra"] = "unexpected"
+    elif mutation == "weight_missing_field":
+        del weights[0]["basis_points"]
+    elif mutation == "outer_extra_field":
+        semantics["extra"] = "unexpected"
+    elif mutation == "outer_missing_field":
+        del semantics["start_distribution"]
 
     with pytest.raises(ValueError, match=message):
-        HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
+        if mutation.endswith("int_subclass"):
+            parse_contract(spaces, environment="tactical-v2")
+        else:
+            HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
 
 def test_tactical_v2_client_rejects_duel_handshake_and_closes_server_process(
     tmp_path: Path,
