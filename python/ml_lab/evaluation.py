@@ -9,7 +9,7 @@ import csv
 import subprocess
 import tempfile
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from math import sqrt
@@ -134,15 +134,38 @@ class DuelClient:
             raise RuntimeError("GymServer closed unexpectedly")
         return dict(validate_json_object(json.loads(line), "GymServer response"))
 
-    def reset(self, *, seed: int, p0: str, p1: str) -> dict[str, Any]:
-        response = self._rpc(
-            {"cmd": "duel_reset", "seed": seed, "p0": p0, "p1": p1, "learner": 0}
-        )
+    def reset(
+        self,
+        *,
+        seed: int,
+        p0: str,
+        p1: str,
+        start_profile: str | None = None,
+        reference_seat: int | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "cmd": "duel_reset", "seed": seed, "p0": p0, "p1": p1, "learner": 0,
+        }
+        if start_profile is not None:
+            if reference_seat not in {0, 1}:
+                raise ValueError("reference_seat must be 0 or 1 for a forced start profile")
+            declared = _declared_start_profiles(self.contract)
+            if start_profile not in declared:
+                raise ValueError(f"start profile {start_profile!r} is not declared by the duel contract")
+            request.update(start_profile=start_profile, reference_seat=reference_seat)
+        elif reference_seat is not None:
+            raise ValueError("reference_seat requires a forced start profile")
+        response = self._rpc(request)
         validate_step_payload(
             response,
             observation_size=self.contract.observation_size,
             action_size=self.contract.action_size,
         )
+        if start_profile is not None:
+            if response.get("start_profile") != start_profile:
+                raise ValueError("duel reset did not return the forced start profile")
+            if response.get("reference_seat") != reference_seat:
+                raise ValueError("duel reset did not return the requested reference seat")
         return response
 
     def step(self, action: int) -> dict[str, Any]:
@@ -211,6 +234,8 @@ def _contract_from_spaces(spaces: dict[str, Any]) -> EnvironmentContract:
     return EnvironmentContract(
         version=str(spaces["contract_version"]),
         contract_hash=str(spaces["contract_hash"]),
+
+
         encoding_hash=str(spaces["encoding_hash"]),
         observation_size=int(spaces["obs_len"]),
         action_size=int(spaces["n_actions"]),
@@ -220,6 +245,22 @@ def _contract_from_spaces(spaces: dict[str, Any]) -> EnvironmentContract:
         semantics=dict(spaces.get("adaptive", {})),
     )
 
+def _declared_start_profiles(contract: EnvironmentContract) -> tuple[str, ...]:
+    if contract.version != "tactical-v2":
+        return ()
+    raw_profiles = contract.semantics.get("start_profiles")
+    if not isinstance(raw_profiles, list):
+        return ()
+    result: list[str] = []
+    for index, raw_profile in enumerate(raw_profiles):
+        if not isinstance(raw_profile, Mapping):
+            raise ValueError(f"duel contract start_profiles[{index}] must be an object")
+        profile_id = raw_profile.get("id")
+        if not isinstance(profile_id, str) or not profile_id:
+            raise ValueError(f"duel contract start_profiles[{index}].id is invalid")
+        result.append(profile_id)
+
+    return tuple(result)
 
 def _validate_against_client(
     controller: ResolvedController, client: Any
@@ -253,6 +294,8 @@ def _play_game(
     prediction_locks: dict[int, Lock],
     *,
     candidate_seat: int,
+    start_profile: str | None = None,
+    reference_seat: int | None = None,
     capture_trace: bool = False,
     trace_path: Path | None = None,
     replay_path: Path | None = None,
@@ -263,6 +306,10 @@ def _play_game(
         seed=seed,
         p0=seats[0].server_controller,
         p1=seats[1].server_controller,
+        **(
+            {"start_profile": start_profile, "reference_seat": reference_seat}
+            if start_profile is not None else {}
+        ),
     )
     decisions = 0
     forced_truncation = False
@@ -452,6 +499,7 @@ def evaluate_matchup(
     client_factory: Callable[[int], Any],
     predict_action: Callable[[Any, str, np.ndarray, np.ndarray], int] = predict,
     output_path: Path | None = None,
+    start_profile: str | None = None,
     confidence: float = 0.95,
     evidence_dir: Path | None = None,
     capture_trace: bool = False,
@@ -489,6 +537,8 @@ def evaluate_matchup(
         try:
             _validate_against_client(candidate, client)
             _validate_against_client(opponent, client)
+            if start_profile is not None and start_profile not in _declared_start_profiles(client.contract):
+                raise ValueError(f"start profile {start_profile!r} is not declared by the duel contract")
             partition: list[tuple[int, dict[str, Any], PlayedGame]] = []
             for index in range(worker_index, len(schedule), workers):
                 seed, candidate_seat = schedule[index]
@@ -515,6 +565,8 @@ def evaluate_matchup(
                     predict_action,
                     prediction_locks,
                     candidate_seat=candidate_seat,
+                    start_profile=start_profile,
+                    reference_seat=candidate_seat if start_profile is not None else None,
                     capture_trace=capture_trace,
                     trace_path=staged_trace,
                     replay_path=staged_replay,
@@ -537,6 +589,8 @@ def evaluate_matchup(
                         played,
                     )
                 )
+                if start_profile is not None:
+                    partition[-1][1].update({"start_profile": start_profile, "reference_seat": candidate_seat})
             return partition
         finally:
             client.close()
@@ -654,6 +708,10 @@ def evaluate_matchup(
         result = {
             "schema_version": 1,
             "generated_at": utc_now(),
+            "schedule": {
+                "start_profile": start_profile,
+                "reference_seat_policy": "candidate-seat" if start_profile is not None else None,
+            },
             "candidate": controller_identity(candidate),
             "opponent": controller_identity(opponent),
             "seed_start": seed_start,

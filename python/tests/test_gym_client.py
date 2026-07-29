@@ -552,3 +552,9 @@ def test_client_passes_no_window_creationflags_to_popen(
         HexWarsEnv(["dotnet", "server.dll"])
 
     assert captured.get("creationflags") == env_module.no_window_creationflags()
+
+def test_response_info_preserves_profiled_start_id() -> None:
+    from hexwars_gym.env import _response_info
+
+    assert _response_info({"start_profile": "conversion-1v1-far"}) == {
+        "start_profile": "conversion-1v1-far"}

@@ -1583,3 +1583,33 @@ def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) 
     assert server_cmd == ["dotnet", "fake-server.dll"]
     assert run_config.timestep_mode == "absolute"
     assert run_config.allow_unsafe_legacy_resume is False
+
+def test_profiled_tactical_v2_monitor_surfaces_selected_start_profile(tmp_path: Path) -> None:
+    class ProfiledEpisode(FakeGymEnv):
+        def __init__(self) -> None:
+            super().__init__(0)
+            self.contract = replace(
+                self.contract,
+                version="tactical-v2",
+                semantics={"placement_policy": "profiled-seeded-v1"},
+            )
+
+        def reset(self, *, seed=None, options=None):
+            observation, _ = super().reset(seed=seed, options=options)
+            return observation, {"start_profile": "conversion-2v1-near"}
+
+        def step(self, action):
+            observation, reward, terminated, truncated, _ = super().step(action)
+            return observation, reward, terminated, truncated, {}
+
+    monitored = EpisodeMonitor(
+        ProfiledEpisode(),
+        tmp_path / "monitor.csv",
+        threading.Lock(),
+    )
+
+    monitored.reset(seed=0)
+    _, _, terminated, _, info = monitored.step(0)
+
+    assert terminated is True
+    assert info["episode"]["start_profile"] == "conversion-2v1-near"

@@ -161,12 +161,15 @@ class EpisodeMonitor(gym.Wrapper):
         self._length = 0
         self._diagnostics: dict[str, Any] = {}
         self._assignment: EpisodeAssignment | None = None
+        self._start_profile: str | None = None
 
     def reset(self, **kwargs):
         self._reward = 0.0
         self._length = 0
         self._diagnostics = {}
         observation, info = self.env.reset(**kwargs)
+        start_profile = info.get("start_profile") if isinstance(info, Mapping) else None
+        self._start_profile = start_profile if isinstance(start_profile, str) else None
         assignment = getattr(self.env, "current_assignment", None)
         self._assignment = assignment if isinstance(assignment, EpisodeAssignment) else None
         return observation, info
@@ -201,6 +204,8 @@ class EpisodeMonitor(gym.Wrapper):
                         "learner_seat": self._assignment.learner_seat,
                     }
                 )
+            if self._start_profile is not None:
+                episode_info["start_profile"] = self._start_profile
             info["episode"] = episode_info
         return observation, reward, terminated, truncated, info
 

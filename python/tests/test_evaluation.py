@@ -1650,3 +1650,42 @@ def test_benchmark_closes_every_thread_owned_client_when_one_worker_fails() -> N
     assert set(clients) == {0, 1}
     assert all(client.closed for client in clients.values())
     assert all(len(set(client.thread_ids)) == 1 for client in clients.values())
+
+def test_evaluate_matchup_forced_profile_follows_candidate_seat(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    profiled_contract = replace(
+        contract,
+        version="tactical-v2",
+        semantics={"start_profiles": [{"id": "conversion-2v1-far"}]},
+    )
+    candidate = _model_controller(tmp_path, profiled_contract, "candidate", 64)
+    opponent = _model_controller(tmp_path, profiled_contract, "opponent", 96)
+
+    class ProfileClient(FakeDuelClient):
+        def __init__(self) -> None:
+            super().__init__(iter([0, 1]), 0)
+            self.contract = profiled_contract
+            self.requests: list[tuple[str, int]] = []
+
+        def reset(self, **kwargs) -> dict:
+            self.requests.append((kwargs.pop("start_profile"), kwargs.pop("reference_seat")))
+            return super().reset(**kwargs)
+
+    client = ProfileClient()
+    result = evaluate_matchup(
+        candidate,
+        opponent,
+        games=1,
+        both_seats=True,
+        workers=1,
+        client_factory=lambda _worker: client,
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        start_profile="conversion-2v1-far",
+    )
+
+    assert client.requests == [("conversion-2v1-far", 0), ("conversion-2v1-far", 1)]
+    assert [match["reference_seat"] for match in result["matches"]] == [0, 1]
+    assert result["schedule"]["reference_seat_policy"] == "candidate-seat"

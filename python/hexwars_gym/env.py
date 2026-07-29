@@ -638,6 +638,9 @@ def _response_info(response: Mapping[str, Any]) -> dict[str, Any]:
         info["diagnostics"] = dict(diagnostics)
     if "deployment_complete" in response:
         info["deployment_complete"] = bool(response["deployment_complete"])
+    start_profile = response.get("start_profile")
+    if isinstance(start_profile, str) and start_profile:
+        info["start_profile"] = start_profile
     return info
 
 
