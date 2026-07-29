@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ml_lab.cli import DEFAULT_SERVER
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.evaluation import DuelClient
 from ml_lab.imitation import CONVERSION_PROFILES, DemonstrationGame, DemonstrationWriter, sha256_file
 
+from ml_lab.scenarios import resolve_scenario
 
 @dataclass(frozen=True)
 class CollectionSpec:
@@ -39,8 +42,12 @@ def _pair_jobs(spec: CollectionSpec) -> list[tuple[str, str, int]]:
     jobs = [("greedy", "standard-3v3", start + index) for index in range(standard)]
     conversion_start = 12_000_000 + standard if spec.partition == "validation" else 11_500_000
     profiles = ["conversion-3v1-near", "conversion-3v1-far", "conversion-2v1-near", "conversion-2v1-far", "conversion-1v1-near", "conversion-1v1-far"]
-    for index in range(conversion):
-        jobs.append(("bounded-search", profiles[index % len(profiles)], conversion_start + index))
+    if spec.partition == "validation" and spec.conversion_pairs is None:
+        for profile_index, profile in enumerate(profiles):
+            jobs.extend(("bounded-search", profile, conversion_start + profile_index * 20 + index) for index in range(20))
+    else:
+        for index in range(conversion):
+            jobs.append(("bounded-search", profiles[index % len(profiles)], conversion_start + index))
     return jobs
 
 
@@ -65,7 +72,7 @@ def _collect_one(client: Any, writer: DemonstrationWriter, spec: CollectionSpec,
     replay_path = Path("replays") / f"{spec.partition}-{teacher}-{profile}-seed-{seed}-seat-{teacher_seat}.replay"
     saved = client.save_replay(spec.dataset / replay_path)
     if Path(saved) != spec.dataset / replay_path: raise ValueError("duel client saved replay at an unexpected path")
-    parameters: dict[str, Any] = {} if teacher == "greedy" else {"depth": 4, "expansion_budget": 512}
+    parameters: dict[str, Any] = {} if teacher == "greedy" else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}
     writer.append_game(DemonstrationGame(spec.partition, teacher, parameters, "random", profile, seed, teacher_seat, replay_path.as_posix(), sha256_file(spec.dataset / replay_path), _outcome(response.get("winner"), teacher_seat), spec.scenario_hash, spec.contract.contract_hash, spec.contract.encoding_hash), decisions)
 
 
@@ -76,6 +83,12 @@ def collect_partition(spec: CollectionSpec) -> Path:
     clients: dict[int, Any] = {}
     try:
         for index, (teacher, profile, seed) in enumerate(jobs):
+            pair_keys = {(spec.partition, teacher, profile, seed, 0), (spec.partition, teacher, profile, seed, 1)}
+            partial_pair = bool(pair_keys & writer.completed_keys()) and not pair_keys <= writer.completed_keys()
+            if spec.partition == "train" and teacher == "greedy" and spec.standard_pairs is None and writer.retained_decision_count("greedy") >= spec.standard_threshold and not partial_pair:
+                continue
+            if spec.partition == "train" and teacher == "bounded-search" and spec.conversion_pairs is None and writer.retained_decision_count("bounded-search") >= spec.conversion_threshold and not partial_pair:
+                continue
             worker = index % spec.workers
             client = clients.get(worker)
             if client is None:
@@ -92,14 +105,21 @@ def collect_partition(spec: CollectionSpec) -> Path:
     return spec.dataset
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--partition", choices=("train", "validation"), required=True)
     parser.add_argument("--scenario", type=Path, required=True)
-    parser.add_argument("--server", nargs="+", required=True)
-    args = parser.parse_args()
-    raise SystemExit("collection CLI requires a resolved GymServer contract; use the panel runner")
+    parser.add_argument("--server", type=Path, default=DEFAULT_SERVER)
+    args = parser.parse_args(argv)
+    scenario = resolve_scenario(environment="tactical-v2", scenario_file=args.scenario, template_id=None, enforce_round_cap_minimum=True)
+    scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
+    probe = DuelClient(["dotnet", str(args.server)], environment="tactical-v2")
+    try:
+        collect_partition(CollectionSpec(args.dataset, args.partition, scenario_hash, probe.contract, lambda worker: probe if worker == 0 else DuelClient(["dotnet", str(args.server)], environment="tactical-v2")))
+    except BaseException:
+        probe.close()
+        raise
 
 
 if __name__ == "__main__": main()

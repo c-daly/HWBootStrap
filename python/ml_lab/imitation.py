@@ -93,6 +93,9 @@ def _validate_game(game: DemonstrationGame, contract: EnvironmentContract) -> No
         raise ValueError("greedy demonstrations require the standard profile")
     if game.teacher == "bounded-search" and game.profile not in CONVERSION_PROFILES:
         raise ValueError("bounded-search demonstrations require a near/far conversion profile")
+    expected_parameters: Mapping[str, Any] = {} if game.teacher == "greedy" else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}
+    if dict(game.teacher_parameters) != expected_parameters:
+        raise ValueError("demonstration teacher parameters are not locked")
     if type(game.teacher_seat) is not int or game.teacher_seat not in {0, 1}:
         raise ValueError("demonstration teacher seat is invalid")
     if game.outcome not in {"win", "loss", "draw"} or not isinstance(game.teacher_parameters, Mapping):
@@ -107,6 +110,13 @@ def _validate_game(game: DemonstrationGame, contract: EnvironmentContract) -> No
         raise ValueError("training demonstration seed is outside its teacher namespace")
     if game.partition == "validation" and game.seed not in range(12_000_000, 12_100_000):
         raise ValueError("validation demonstration seed is outside its namespace")
+
+
+def _source_ranges(games: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+    for game in games:
+        grouped.setdefault((game["partition"], game["teacher"], game["profile"]), []).append(game)
+    return [{"partition": partition, "teacher": teacher, "profile": profile, "seed_start": min(item["seed"] for item in items), "seed_stop": max(item["seed"] for item in items), "game_count": len(items), "decision_count": sum(item["row_count"] for item in items)} for (partition, teacher, profile), items in sorted(grouped.items())]
 
 
 def validate_decision(row: Mapping[str, Any], contract: EnvironmentContract) -> None:
@@ -162,6 +172,22 @@ def _atomic_jsonl(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _git_metadata(dataset_root: Path) -> tuple[str, bool]:
+    try:
+        repository = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], cwd=dataset_root, text=True, stderr=subprocess.DEVNULL).strip()).resolve()
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True, stderr=subprocess.DEVNULL).strip()
+        excluded = dataset_root.resolve().relative_to(repository).as_posix() + "/"
+        status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=repository, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout.splitlines()
+        changed = []
+        for line in status:
+            path = line[3:].replace("\\", "/")
+            if " -> " in path: path = path.rsplit(" -> ", 1)[-1]
+            if not path.startswith(excluded): changed.append(path)
+        return revision, bool(changed)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "unknown", True
+
+
 class DemonstrationWriter:
     """Commits fully-hashed game shards before atomically publishing their manifest."""
 
@@ -181,11 +207,7 @@ class DemonstrationWriter:
         return writer
 
     def _new_manifest(self) -> dict[str, Any]:
-        try:
-            revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
-            dirty = subprocess.run(["git", "diff", "--quiet"], cwd=self.root).returncode != 0
-        except (OSError, subprocess.SubprocessError):
-            revision, dirty = "unknown", True
+        revision, dirty = _git_metadata(self.root)
         return {"schema_version": DATASET_SCHEMA_VERSION, "code_revision": revision, "dirty": dirty, "contract_hash": self.contract.contract_hash, "encoding_hash": self.contract.encoding_hash, "source_ranges": [], "decision_count": 0, "game_count": 0, "shards": [], "replays": []}
 
     def _recover(self) -> None:
@@ -221,6 +243,7 @@ class DemonstrationWriter:
             if orphan.relative_to(self.root).as_posix() not in owned_shards: orphan.unlink(missing_ok=True)
         self._manifest = manifest
         self._validate_existing_games()
+        self._validate_physical_rows()
 
     def _validate_existing_games(self) -> None:
         keys: set[tuple[str, str, str, int, int]] = set(); seeds: dict[int, str] = {}
@@ -231,6 +254,36 @@ class DemonstrationWriter:
             if game.seed in seeds and seeds[game.seed] != game.partition: raise ValueError("seed reuse across partitions")
             if record.get("game_id") != index or type(record.get("row_count")) is not int or record["row_count"] < 1: raise ValueError("dataset game record is invalid")
             keys.add(game.key); seeds[game.seed] = game.partition
+
+    def _validate_physical_rows(self) -> None:
+        if self._manifest["source_ranges"] != _source_ranges(self._games): raise ValueError("dataset source ranges do not match games")
+        replays = {item["path"]: item["sha256"] for item in self._manifest["replays"]}
+        if len(replays) != len(self._manifest["replays"]): raise ValueError("dataset replay ownership is duplicated")
+        by_game: dict[int, list[Mapping[str, Any]]] = {}
+        for shard in self._manifest["shards"]: by_game.setdefault(shard["game_id"], []).append(shard)
+        cursor = 0; required = {"observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds"}
+        for game_id, game in enumerate(self._games):
+            if game["row_start"] != cursor or game["row_stop"] != cursor + game["row_count"]: raise ValueError("dataset game row spans are inconsistent")
+            cursor = game["row_stop"]
+            if replays.get(game["replay_path"]) != game["replay_hash"]: raise ValueError("dataset replay ownership does not match game")
+            indices: list[int] = []; rows = 0
+            for shard in by_game.get(game_id, []):
+                try:
+                    with np.load(self.root / shard["path"], allow_pickle=False) as data:
+                        if set(data.files) != required: raise ValueError("dataset shard fields are invalid")
+                        obs, masks, actions = data["observations"], data["packed_masks"], data["actions"]
+                        ids, decision_indices, seats, kinds = data["game_ids"], data["decision_indices"], data["seats"], data["action_kinds"]; count = len(actions)
+                        if count != shard["rows"] or obs.dtype != np.float32 or obs.shape != (count, self.contract.observation_size) or not np.isfinite(obs).all() or masks.dtype != np.uint8 or masks.shape != (count, (self.contract.action_size + 7) // 8) or actions.dtype != np.int64 or ids.dtype != np.int64 or decision_indices.dtype != np.int32 or seats.dtype != np.uint8 or kinds.dtype != np.uint8 or any(value.shape != (count,) for value in (actions, ids, decision_indices, seats, kinds)): raise ValueError("dataset shard physical shape or dtype is invalid")
+                        legal = np.unpackbits(masks, axis=1, bitorder="little")[:, :self.contract.action_size]
+                        if np.any(actions < 0) or np.any(actions >= self.contract.action_size) or not np.all(legal[np.arange(count), actions]) or not np.all(ids == game_id) or not np.all(seats == game["teacher_seat"]) or np.any(kinds > max(ACTION_KINDS.values())): raise ValueError("dataset shard physical values are invalid")
+                        indices.extend(int(value) for value in decision_indices); rows += count
+                except (OSError, ValueError) as exc:
+                    raise ValueError("dataset shard physical validation failed") from exc
+            if rows != game["row_count"] or indices != list(range(rows)): raise ValueError("dataset shard rows do not exactly own game")
+        if cursor != self._manifest["decision_count"] or set(by_game) != set(range(len(self._games))) or len(replays) != len(self._games): raise ValueError("dataset artifact ownership counts are inconsistent")
+
+    def retained_decision_count(self, teacher: str) -> int:
+        return sum(item["row_count"] for item in self._games if item["teacher"] == teacher)
 
     def completed_keys(self) -> set[tuple[str, str, str, int, int]]:
         return {(item["partition"], item["teacher"], item["profile"], item["seed"], item["teacher_seat"]) for item in self._games}
@@ -254,7 +307,7 @@ class DemonstrationWriter:
             shards.append({"path": relative, "sha256": sha256_file(self.root / relative), "rows": len(chunk), "game_id": game_id})
         record = {**asdict(game), "teacher_parameters": dict(game.teacher_parameters), "game_id": game_id, "row_count": len(decisions), "row_start": self._manifest["decision_count"], "row_stop": self._manifest["decision_count"] + len(decisions)}
         next_games = [*self._games, record]
-        next_manifest = {**self._manifest, "decision_count": self._manifest["decision_count"] + len(decisions), "game_count": game_id + 1, "shards": [*self._manifest["shards"], *shards], "replays": [*self._manifest["replays"], {"path": game.replay_path, "sha256": game.replay_hash}], "source_ranges": sorted({*(tuple(value) for value in self._manifest["source_ranges"]), (game.partition, game.teacher, game.profile)})}
+        next_manifest = {**self._manifest, "decision_count": self._manifest["decision_count"] + len(decisions), "game_count": game_id + 1, "shards": [*self._manifest["shards"], *shards], "replays": [*self._manifest["replays"], {"path": game.replay_path, "sha256": game.replay_hash}], "source_ranges": _source_ranges(next_games)}
         # An interruption here leaves only unowned data. Recovery truncates games to the old manifest and removes orphan shards.
         _atomic_jsonl(self.root / "games.jsonl", next_games)
         if self.fail_before_manifest_replace: raise RuntimeError("simulated interruption before manifest replacement")

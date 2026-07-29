@@ -63,3 +63,39 @@ def test_writer_rejects_invalid_rows_and_cross_partition_seed_reuse(tmp_path: Pa
     writer.append_game(game(), [decision(0)])
     with pytest.raises(ValueError, match="seed reuse"):
         writer.append_game(DemonstrationGame(**{**game().__dict__, "partition": "validation"}), [decision(0)])
+
+def test_reopen_rejects_corrupt_physical_shard_and_replay_ownership(tmp_path: Path) -> None:
+    stage_replay(tmp_path)
+    writer = DemonstrationWriter.create(tmp_path, contract=contract())
+    writer.append_game(game(), [decision(0)])
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    shard = tmp_path / manifest["shards"][0]["path"]
+    with np.load(shard) as loaded:
+        corrupted = {name: loaded[name] for name in loaded.files}
+    corrupted["actions"] = np.asarray([4], dtype=np.int64)
+    np.savez_compressed(shard, **corrupted)
+    with pytest.raises(ValueError, match="shard hash mismatch"):
+        DemonstrationWriter.create(tmp_path, contract=contract())
+
+
+def test_writer_enforces_locked_search_provenance_and_records_source_ranges(tmp_path: Path) -> None:
+    stage_replay(tmp_path)
+    replay = tmp_path / "replays" / "search.replay"; replay.write_bytes(b"search")
+    search = DemonstrationGame("train", "bounded-search", {"depth": 4, "expansion_budget": 512, "use_heuristic": True}, "random", "conversion-3v1-near", 11_500_000, 0, "replays/search.replay", hashlib.sha256(b"search").hexdigest(), "win", "c" * 64, "a" * 64, "b" * 64)
+    writer = DemonstrationWriter.create(tmp_path, contract=contract())
+    with pytest.raises(ValueError, match="teacher parameters"):
+        writer.append_game(DemonstrationGame(**{**search.__dict__, "teacher_parameters": {"depth": 3}}), [decision(0)])
+    writer.append_game(search, [decision(0)])
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["source_ranges"] == [{"partition": "train", "teacher": "bounded-search", "profile": "conversion-3v1-near", "seed_start": 11_500_000, "seed_stop": 11_500_000, "game_count": 1, "decision_count": 1}]
+
+def test_dirty_provenance_includes_untracked_source_but_excludes_dataset_output(monkeypatch, tmp_path: Path) -> None:
+    import ml_lab.imitation as module
+    source = tmp_path / "repo"; dataset = source / "python" / "datasets" / "annihilation-imitation-v1"
+    def output(command, **_kwargs):
+        return str(source) if command[-1] == "--show-toplevel" else "d" * 40
+    monkeypatch.setattr(module.subprocess, "check_output", output)
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **_kwargs: type("Result", (), {"stdout": "?? python/datasets/annihilation-imitation-v1/shards/new.npz\n?? python/new_source.py\n"})())
+    assert module._git_metadata(dataset) == ("d" * 40, True)
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **_kwargs: type("Result", (), {"stdout": "?? python/datasets/annihilation-imitation-v1/shards/new.npz\n"})())
+    assert module._git_metadata(dataset) == ("d" * 40, False)
