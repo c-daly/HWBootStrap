@@ -6,9 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
-from ml_lab.contracts import EnvironmentContract
-from ml_lab.imitation import DemonstrationGame, DemonstrationWriter, validate_decision
+from ml_lab.contracts import ContractMismatch, EnvironmentContract
+from ml_lab.imitation import DemonstrationGame, DemonstrationWriter, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, validate_decision
 
 
 def contract() -> EnvironmentContract:
@@ -99,3 +100,66 @@ def test_dirty_provenance_includes_untracked_source_but_excludes_dataset_output(
     assert module._git_metadata(dataset) == ("d" * 40, True)
     monkeypatch.setattr(module.subprocess, "run", lambda command, **_kwargs: type("Result", (), {"stdout": "?? python/datasets/annihilation-imitation-v1/shards/new.npz\n"})())
     assert module._git_metadata(dataset) == ("d" * 40, False)
+
+
+def _staged_game(root: Path, partition: str, teacher: str, profile: str, seed: int, seat: int) -> DemonstrationGame:
+    relative = f"replays/{partition}-{teacher}-{seed}-{seat}.replay"
+    payload = relative.encode("utf-8")
+    replay = root / relative
+    replay.parent.mkdir(parents=True, exist_ok=True)
+    replay.write_bytes(payload)
+    return DemonstrationGame(partition, teacher, {} if teacher == "greedy" else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}, "random", profile, seed, seat, relative, hashlib.sha256(payload).hexdigest(), "win", "c" * 64, "a" * 64, "b" * 64)
+
+
+@pytest.fixture
+def sampled_dataset(tmp_path: Path) -> Path:
+    writer = DemonstrationWriter.create(tmp_path, contract=contract(), shard_rows=2)
+    writer.append_game(_staged_game(tmp_path, "train", "greedy", "standard-3v3", 11_000_000, 0), [decision(value, 0) for value in range(3)])
+    writer.append_game(_staged_game(tmp_path, "train", "greedy", "standard-3v3", 11_000_000, 1), [{**decision(value, 1), "decision_index": index} for index, value in enumerate(range(3, 6))])
+    writer.append_game(_staged_game(tmp_path, "train", "bounded-search", "conversion-3v1-near", 11_500_000, 0), [{**decision(value, 0), "action_kind": 2, "decision_index": index} for index, value in enumerate(range(6, 9))])
+    writer.append_game(_staged_game(tmp_path, "train", "bounded-search", "conversion-3v1-near", 11_500_000, 1), [{**decision(value, 1), "action_kind": 3, "decision_index": index} for index, value in enumerate(range(9, 12))])
+    writer.append_game(_staged_game(tmp_path, "validation", "greedy", "standard-3v3", 12_000_000, 0), [{**decision(12, 0), "decision_index": 0}])
+    return tmp_path
+
+
+def test_loader_rejects_contract_content_and_partition_seed_mismatches(sampled_dataset: Path) -> None:
+    other = EnvironmentContract("tactical-v2", "d" * 64, "b" * 64, 3, 5, {}, [], {})
+    with pytest.raises(ContractMismatch):
+        load_imitation_dataset(sampled_dataset, expected_contract=other)
+    records = [json.loads(line) for line in (sampled_dataset / "games.jsonl").read_text().splitlines()]
+    records[-1]["seed"] = records[0]["seed"]
+    (sampled_dataset / "games.jsonl").write_text("".join(json.dumps(item) + "\n" for item in records))
+    with pytest.raises(ValueError, match="partition"):
+        load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    records[-1]["seed"] = 12_000_000
+    (sampled_dataset / "games.jsonl").write_text("".join(json.dumps(item) + "\n" for item in records))
+    manifest = json.loads((sampled_dataset / "manifest.json").read_text())
+    shard = sampled_dataset / manifest["shards"][0]["path"]
+    payload = bytearray(shard.read_bytes()); payload[-1] ^= 1; shard.write_bytes(payload)
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_imitation_dataset(sampled_dataset, expected_contract=contract())
+
+
+def test_sampler_keeps_70_30_ratio_is_seeded_and_excludes_validation_rows(sampled_dataset: Path) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    first = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
+    second = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
+    different = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=212).next_batch()
+    assert (first.sources == Source.GREEDY_STANDARD).sum() == 70
+    assert (first.sources == Source.SEARCH_CONVERSION).sum() == 30
+    assert list(zip(first.game_ids, first.decision_indices)) == list(zip(second.game_ids, second.decision_indices))
+    assert list(zip(first.game_ids, first.decision_indices)) != list(zip(different.game_ids, different.decision_indices))
+    assert set(first.partitions) == {"train"}
+    assert first.observations.flags.owndata
+    assert np.all(first.legal_masks[np.arange(len(first.actions)), first.actions])
+
+
+def test_masked_cross_entropy_masks_illegal_logits_and_has_finite_gradient() -> None:
+    logits = torch.tensor([[0.0, 900.0, 1.0], [2.0, -700.0, -1.0], [3.0, 1.0, 2.0], [0.0, 0.0, 0.0], [1.0, -1.0, 5.0]], requires_grad=True)
+    masks = torch.tensor([[True, False, True], [True, False, True], [True, True, False], [False, True, True], [True, True, True]])
+    actions = torch.tensor([2, 0, 1, 2, 0], dtype=torch.int64)
+    loss = masked_cross_entropy(logits, masks, actions)
+    loss.backward()
+    assert torch.isfinite(loss) and torch.isfinite(logits.grad).all()
+    with pytest.raises(ValueError, match="masked"):
+        masked_cross_entropy(logits.detach(), masks, torch.tensor([1, 0, 1, 2, 0], dtype=torch.int64))

@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from .contracts import EnvironmentContract
+from .contracts import ContractMismatch, EnvironmentContract
 from .io import atomic_write_json
 
 DATASET_SCHEMA_VERSION = 1
@@ -316,3 +316,309 @@ class DemonstrationWriter:
 
     def close(self) -> None:
         return None
+
+# Reader and training primitives deliberately repeat writer validation: a loader must
+# not trust a manifest merely because it was once produced by DemonstrationWriter.
+from collections import OrderedDict
+from enum import Enum
+from types import MappingProxyType
+
+
+class Source(Enum):
+    GREEDY_STANDARD = "greedy_standard"
+    SEARCH_CONVERSION = "search_conversion"
+
+
+@dataclass(frozen=True)
+class _ShardDescriptor:
+    path: str
+    sha256: str
+    rows: int
+    game_id: int
+
+
+@dataclass(frozen=True)
+class ImitationBatch:
+    observations: np.ndarray
+    legal_masks: np.ndarray
+    actions: np.ndarray
+    game_ids: np.ndarray
+    decision_indices: np.ndarray
+    sources: np.ndarray
+    profiles: np.ndarray
+    seats: np.ndarray
+    action_kinds: np.ndarray
+    partitions: np.ndarray
+
+
+class _DecodedShardCache:
+    """A tiny LRU cache; rows returned to callers are always copied."""
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
+
+    def get(
+        self,
+        root: Path,
+        descriptor: _ShardDescriptor,
+        game: Mapping[str, Any],
+        contract: EnvironmentContract,
+    ) -> dict[str, np.ndarray]:
+        key = id(descriptor)
+        cached = self._entries.pop(key, None)
+        if cached is not None:
+            self._entries[key] = cached
+            return cached
+        path = root / descriptor.path
+        if sha256_file(path) != descriptor.sha256:
+            raise ValueError("dataset shard SHA-256 does not match manifest")
+        loaded = _read_shard(path, descriptor, game, contract)
+        self._entries[key] = loaded
+        while len(self._entries) > 2:
+            self._entries.popitem(last=False)
+        return loaded
+
+
+def _immutable_index(index: dict[str, dict[Source, dict[str, dict[int, dict[int, list[tuple[int, int]]]]]]]) -> Mapping[str, Any]:
+    return MappingProxyType({
+        partition: MappingProxyType({
+            source: MappingProxyType({
+                profile: MappingProxyType({
+                    seat: MappingProxyType({kind: tuple(rows) for kind, rows in kinds.items()})
+                    for seat, kinds in seats.items()
+                })
+                for profile, seats in profiles.items()
+            })
+            for source, profiles in sources.items()
+        })
+        for partition, sources in index.items()
+    })
+
+
+@dataclass(frozen=True)
+class ImitationDataset:
+    root: Path
+    contract: EnvironmentContract
+    games: tuple[Mapping[str, Any], ...]
+    shards: tuple[_ShardDescriptor, ...]
+    index: Mapping[str, Any]
+    _cache: _DecodedShardCache
+
+    def _row_data(self, refs: Sequence[tuple[int, int]]) -> dict[str, np.ndarray]:
+        selected: dict[str, list[np.ndarray]] = {name: [] for name in ("observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds")}
+        for shard_index, local_row in refs:
+            descriptor = self.shards[shard_index]
+            arrays = self._cache.get(self.root, descriptor, self.games[descriptor.game_id], self.contract)
+            for name in selected:
+                selected[name].append(arrays[name][local_row].copy())
+        return {name: np.asarray(values) for name, values in selected.items()}
+
+
+def _source_for_game(game: Mapping[str, Any]) -> Source:
+    if game["teacher"] == "greedy" and game["profile"] == STANDARD_PROFILE:
+        return Source.GREEDY_STANDARD
+    if game["teacher"] == "bounded-search" and game["profile"] in CONVERSION_PROFILES:
+        return Source.SEARCH_CONVERSION
+    raise ValueError("demonstration source/profile is invalid")
+
+
+def _read_shard(path: Path, descriptor: _ShardDescriptor, game: Mapping[str, Any], contract: EnvironmentContract) -> dict[str, np.ndarray]:
+    required = {"observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds"}
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if set(data.files) != required:
+                raise ValueError("dataset shard fields are invalid")
+            arrays = {name: data[name].copy() for name in required}
+    except (OSError, ValueError, EOFError) as exc:
+        raise ValueError("dataset shard physical structure is invalid") from exc
+    observations, masks, actions = arrays["observations"], arrays["packed_masks"], arrays["actions"]
+    game_ids, indices, seats, kinds = arrays["game_ids"], arrays["decision_indices"], arrays["seats"], arrays["action_kinds"]
+    count = len(actions)
+    if count != descriptor.rows or observations.dtype != np.float32 or observations.shape != (count, contract.observation_size) or not np.isfinite(observations).all():
+        raise ValueError("dataset shard physical shape, dtype, or values are invalid")
+    if masks.dtype != np.uint8 or masks.shape != (count, (contract.action_size + 7) // 8):
+        raise ValueError("dataset shard physical shape or dtype is invalid")
+    if actions.dtype != np.int64 or game_ids.dtype != np.int64 or indices.dtype != np.int32 or seats.dtype != np.uint8 or kinds.dtype != np.uint8 or any(value.shape != (count,) for value in (actions, game_ids, indices, seats, kinds)):
+        raise ValueError("dataset shard physical shape or dtype is invalid")
+    legal = np.unpackbits(masks, axis=1, count=contract.action_size, bitorder="little").astype(bool, copy=False)
+    if np.any(actions < 0) or np.any(actions >= contract.action_size) or not np.all(legal[np.arange(count), actions]):
+        raise ValueError("dataset shard contains an illegal action")
+    if not np.all(game_ids == descriptor.game_id) or not np.all(seats == game["teacher_seat"]) or np.any(kinds > max(ACTION_KINDS.values())):
+        raise ValueError("dataset shard physical values are invalid")
+    return arrays
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("dataset metadata is unreadable") from exc
+
+
+def _validate_manifest(manifest: Mapping[str, Any], contract: EnvironmentContract) -> None:
+    required = {"schema_version", "code_revision", "dirty", "contract_hash", "encoding_hash", "source_ranges", "decision_count", "game_count", "shards", "replays"}
+    if set(manifest) != required or manifest.get("schema_version") != DATASET_SCHEMA_VERSION:
+        raise ValueError("dataset manifest schema is invalid")
+    if manifest.get("contract_hash") != contract.contract_hash or manifest.get("encoding_hash") != contract.encoding_hash:
+        raise ContractMismatch("dataset contract or encoding hash does not match expected contract")
+    if not isinstance(manifest["code_revision"], str) or type(manifest["dirty"]) is not bool or type(manifest["decision_count"]) is not int or type(manifest["game_count"]) is not int or manifest["decision_count"] < 0 or manifest["game_count"] < 0 or not isinstance(manifest["source_ranges"], list) or not isinstance(manifest["shards"], list) or not isinstance(manifest["replays"], list):
+        raise ValueError("dataset manifest values are invalid")
+
+
+def load_imitation_dataset(root: Path, expected_contract: EnvironmentContract) -> ImitationDataset:
+    """Validate all persisted evidence while retaining only immutable row references."""
+    root = Path(root)
+    manifest = _load_json(root / "manifest.json")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("dataset manifest must be an object")
+    _validate_manifest(manifest, expected_contract)
+    try:
+        game_records = [json.loads(line) for line in (root / "games.jsonl").read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("dataset games metadata is unreadable") from exc
+    if len(game_records) != manifest["game_count"]:
+        raise ValueError("dataset game count does not match manifest")
+    fields = set(DemonstrationGame.__dataclass_fields__) | {"game_id", "row_count", "row_start", "row_stop"}
+    games: list[Mapping[str, Any]] = []
+    seen_keys: set[tuple[str, str, str, int, int]] = set()
+    seeds: dict[int, str] = {}
+    scenarios: set[str] = set()
+    cursor = 0
+    for game_id, record in enumerate(game_records):
+        if not isinstance(record, Mapping) or set(record) != fields:
+            raise ValueError("dataset game record is invalid")
+        if record.get("game_id") != game_id or type(record.get("row_count")) is not int or record["row_count"] < 1 or record.get("row_start") != cursor or record.get("row_stop") != cursor + record["row_count"]:
+            raise ValueError("dataset game spans are inconsistent")
+        if record.get("seed") in seeds and seeds[record["seed"]] != record.get("partition"):
+            raise ValueError("dataset seed is shared across a partition")
+        if record.get("contract_hash") != expected_contract.contract_hash or record.get("encoding_hash") != expected_contract.encoding_hash:
+            raise ContractMismatch("game contract or encoding hash does not match expected contract")
+        try:
+            game = DemonstrationGame(**{name: record[name] for name in DemonstrationGame.__dataclass_fields__})
+            _validate_game(game, expected_contract)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("dataset game provenance is invalid") from exc
+        if game.key in seen_keys:
+            raise ValueError("dataset game key is duplicated")
+        seen_keys.add(game.key); seeds[game.seed] = game.partition; scenarios.add(game.scenario_hash)
+        games.append(MappingProxyType(dict(record))); cursor = record["row_stop"]
+    if cursor != manifest["decision_count"] or len(scenarios) != 1:
+        raise ValueError("dataset scenario or decision count is invalid")
+    replay_hashes: dict[str, str] = {}
+    for replay in manifest["replays"]:
+        if not isinstance(replay, Mapping) or set(replay) != {"path", "sha256"} or not _is_hash(replay.get("sha256")):
+            raise ValueError("dataset replay manifest is invalid")
+        relative = _safe_relative(replay["path"])
+        if replay["path"] in replay_hashes or not (root / relative).is_file() or sha256_file(root / relative) != replay["sha256"]:
+            raise ValueError("dataset replay SHA-256 does not match manifest")
+        replay_hashes[replay["path"]] = replay["sha256"]
+    if len(replay_hashes) != len(games) or any(replay_hashes.get(game["replay_path"]) != game["replay_hash"] for game in games):
+        raise ValueError("dataset replay provenance is invalid")
+    descriptors: list[_ShardDescriptor] = []
+    seen_paths: set[str] = set()
+    by_game: dict[int, list[tuple[int, _ShardDescriptor]]] = {}
+    for item in manifest["shards"]:
+        if not isinstance(item, Mapping) or set(item) != {"path", "sha256", "rows", "game_id"} or item.get("path") in seen_paths or not _is_hash(item.get("sha256")) or type(item.get("rows")) is not int or not 1 <= item["rows"] <= MAX_SHARD_ROWS or type(item.get("game_id")) is not int or item["game_id"] not in range(len(games)):
+            raise ValueError("dataset shard manifest is invalid")
+        relative = _safe_relative(item["path"])
+        if not (root / relative).is_file() or sha256_file(root / relative) != item["sha256"]:
+            raise ValueError("dataset shard SHA-256 does not match manifest")
+        descriptor = _ShardDescriptor(item["path"], item["sha256"], item["rows"], item["game_id"])
+        by_game.setdefault(item["game_id"], []).append((len(descriptors), descriptor)); descriptors.append(descriptor); seen_paths.add(item["path"])
+    actual_shards = {path.relative_to(root).as_posix() for path in (root / "shards").rglob("*.npz")} if (root / "shards").is_dir() else set()
+    if actual_shards != seen_paths or set(by_game) != set(range(len(games))):
+        raise ValueError("dataset shard ownership is invalid")
+    index: dict[str, dict[Source, dict[str, dict[int, dict[int, list[tuple[int, int]]]]]]] = {}
+    for game_id, game in enumerate(games):
+        sequence: list[int] = []
+        rows = 0
+        source = _source_for_game(game)
+        for shard_index, descriptor in by_game[game_id]:
+            arrays = _read_shard(root / descriptor.path, descriptor, game, expected_contract)
+            sequence.extend(int(value) for value in arrays["decision_indices"])
+            for local_row, kind in enumerate(arrays["action_kinds"]):
+                index.setdefault(game["partition"], {}).setdefault(source, {}).setdefault(game["profile"], {}).setdefault(int(game["teacher_seat"]), {}).setdefault(int(kind), []).append((shard_index, local_row))
+            rows += descriptor.rows
+        if rows != game["row_count"] or sequence != list(range(rows)):
+            raise ValueError("dataset decision indices are not contiguous")
+    if manifest["source_ranges"] != _source_ranges(games):
+        raise ValueError("dataset source ranges do not match games")
+    return ImitationDataset(root.resolve(), expected_contract, tuple(games), tuple(descriptors), _immutable_index(index), _DecodedShardCache())
+
+
+class _StratumCycler:
+    def __init__(self, strata: Sequence[Sequence[tuple[int, int]]], rng: np.random.Generator) -> None:
+        if not strata or any(not rows for rows in strata):
+            raise ValueError("sampler source contains an empty stratum")
+        self._rows = [tuple(rows[index] for index in rng.permutation(len(rows))) for rows in strata]
+        self._strata = list(rng.permutation(len(self._rows)))
+        self._row_positions = [0] * len(self._rows)
+        self._stratum_position = 0
+
+    def take(self, count: int) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        for _ in range(count):
+            group = self._strata[self._stratum_position % len(self._strata)]
+            self._stratum_position += 1
+            row = self._rows[group][self._row_positions[group] % len(self._rows[group])]
+            self._row_positions[group] += 1
+            result.append(row)
+        return result
+
+
+def _source_strata(dataset: ImitationDataset, partition: str, source: Source) -> list[tuple[tuple[int, int], ...]]:
+    try:
+        profiles = dataset.index[partition][source]
+    except KeyError as exc:
+        raise ValueError(f"sampler has no {source.value} rows in {partition} partition") from exc
+    return [rows for profile in sorted(profiles) for seat in sorted(profiles[profile]) for kind in sorted(profiles[profile][seat]) for rows in (profiles[profile][seat][kind],)]
+
+
+class StratifiedDecisionSampler:
+    """Partition-scoped, seeded strata cycling; undersized strata cycle deterministically."""
+
+    def __init__(self, dataset: ImitationDataset, batch_size: int = 1, standard_fraction: float = 0.70, seed: int = 0, partition: str = "train") -> None:
+        if type(batch_size) is not int or batch_size < 1 or partition not in {"train", "validation"} or not isinstance(standard_fraction, (int, float)) or not 0.0 < standard_fraction < 1.0:
+            raise ValueError("sampler configuration is invalid")
+        self.dataset, self.batch_size, self.standard_fraction, self.partition = dataset, batch_size, float(standard_fraction), partition
+        self._rng = np.random.default_rng(seed)
+        self._cyclers = {Source.GREEDY_STANDARD: _StratumCycler(_source_strata(dataset, partition, Source.GREEDY_STANDARD), self._rng), Source.SEARCH_CONVERSION: _StratumCycler(_source_strata(dataset, partition, Source.SEARCH_CONVERSION), self._rng)}
+        self._residual = 0.0
+
+    def next_batch(self) -> ImitationBatch:
+        target = self.batch_size * self.standard_fraction + self._residual
+        standard_count = int(np.floor(target + 1e-12))
+        self._residual = target - standard_count
+        refs_and_sources = [(ref, Source.GREEDY_STANDARD) for ref in self._cyclers[Source.GREEDY_STANDARD].take(standard_count)]
+        refs_and_sources += [(ref, Source.SEARCH_CONVERSION) for ref in self._cyclers[Source.SEARCH_CONVERSION].take(self.batch_size - standard_count)]
+        order = self._rng.permutation(len(refs_and_sources))
+        refs_and_sources = [refs_and_sources[int(index)] for index in order]
+        rows = self.dataset._row_data([ref for ref, _source in refs_and_sources])
+        legal_masks = np.unpackbits(rows["packed_masks"], axis=1, count=self.dataset.contract.action_size, bitorder="little").astype(bool, copy=False)
+        if not np.all(legal_masks[np.arange(len(rows["actions"])), rows["actions"]]):
+            raise ValueError("selected teacher action is masked")
+        metadata = [self.dataset.games[int(game_id)] for game_id in rows["game_ids"]]
+        return ImitationBatch(rows["observations"].copy(), legal_masks.copy(), rows["actions"].copy(), rows["game_ids"].copy(), rows["decision_indices"].copy(), np.asarray([source for _ref, source in refs_and_sources], dtype=object), np.asarray([game["profile"] for game in metadata], dtype=object), rows["seats"].copy(), rows["action_kinds"].copy(), np.asarray([game["partition"] for game in metadata], dtype=object))
+
+
+def masked_cross_entropy(logits: Any, legal_masks: Any, actions: Any) -> Any:
+    """Cross-entropy over legal actions only, rejecting malformed teacher data."""
+    import torch
+    import torch.nn.functional as functional
+
+    if not all(isinstance(value, torch.Tensor) for value in (logits, legal_masks, actions)):
+        raise TypeError("logits, legal_masks, and actions must be tensors")
+    if logits.ndim != 2 or legal_masks.shape != logits.shape:
+        raise ValueError("logits and masks must have identical shape")
+    if not logits.is_floating_point() or not torch.isfinite(logits).all():
+        raise ValueError("logits must be finite floating-point values")
+    if legal_masks.dtype is not torch.bool or actions.dtype != torch.int64 or actions.ndim != 1 or actions.shape[0] != logits.shape[0] or logits.shape[0] == 0:
+        raise ValueError("mask or actions shape/dtype is invalid")
+    if legal_masks.device != logits.device or actions.device != logits.device or not legal_masks.any(dim=1).all():
+        raise ValueError("mask or actions device/values are invalid")
+    if torch.any(actions < 0) or torch.any(actions >= logits.shape[1]):
+        raise ValueError("teacher action is out of bounds")
+    if not legal_masks.gather(1, actions[:, None]).all():
+        raise ValueError("teacher action is masked")
+    masked_logits = logits.masked_fill(~legal_masks, torch.finfo(logits.dtype).min)
+    return functional.cross_entropy(masked_logits, actions)
