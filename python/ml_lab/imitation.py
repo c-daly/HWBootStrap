@@ -422,6 +422,26 @@ def _source_for_game(game: Mapping[str, Any]) -> Source:
     raise ValueError("demonstration source/profile is invalid")
 
 
+def _scan_shard_index(path: Path, descriptor: _ShardDescriptor, game: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Read only metadata required for immutable row references during construction."""
+    required = {"observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds"}
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if set(data.files) != required:
+                raise ValueError("dataset shard fields are invalid")
+            game_ids = data["game_ids"]
+            decision_indices = data["decision_indices"]
+            seats = data["seats"]
+            action_kinds = data["action_kinds"]
+    except (OSError, ValueError, EOFError) as exc:
+        raise ValueError("dataset shard index metadata is invalid") from exc
+    count = descriptor.rows
+    if game_ids.dtype != np.int64 or decision_indices.dtype != np.int32 or seats.dtype != np.uint8 or action_kinds.dtype != np.uint8 or any(value.shape != (count,) for value in (game_ids, decision_indices, seats, action_kinds)):
+        raise ValueError("dataset shard index metadata shape or dtype is invalid")
+    if not np.all(game_ids == descriptor.game_id) or not np.all(seats == game["teacher_seat"]) or np.any(action_kinds > max(ACTION_KINDS.values())):
+        raise ValueError("dataset shard index metadata values are invalid")
+    return decision_indices, action_kinds
+
 def _read_shard(path: Path, descriptor: _ShardDescriptor, game: Mapping[str, Any], contract: EnvironmentContract) -> dict[str, np.ndarray]:
     required = {"observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds"}
     try:
@@ -466,7 +486,7 @@ def _validate_manifest(manifest: Mapping[str, Any], contract: EnvironmentContrac
 
 
 def load_imitation_dataset(root: Path, expected_contract: EnvironmentContract) -> ImitationDataset:
-    """Validate all persisted evidence while retaining only immutable row references."""
+    """Validate metadata eagerly; validate payload arrays when their shard enters the cache."""
     root = Path(root)
     manifest = _load_json(root / "manifest.json")
     if not isinstance(manifest, Mapping):
@@ -534,9 +554,9 @@ def load_imitation_dataset(root: Path, expected_contract: EnvironmentContract) -
         rows = 0
         source = _source_for_game(game)
         for shard_index, descriptor in by_game[game_id]:
-            arrays = _read_shard(root / descriptor.path, descriptor, game, expected_contract)
-            sequence.extend(int(value) for value in arrays["decision_indices"])
-            for local_row, kind in enumerate(arrays["action_kinds"]):
+            decision_indices, action_kinds = _scan_shard_index(root / descriptor.path, descriptor, game)
+            sequence.extend(int(value) for value in decision_indices)
+            for local_row, kind in enumerate(action_kinds):
                 index.setdefault(game["partition"], {}).setdefault(source, {}).setdefault(game["profile"], {}).setdefault(int(game["teacher_seat"]), {}).setdefault(int(kind), []).append((shard_index, local_row))
             rows += descriptor.rows
         if rows != game["row_count"] or sequence != list(range(rows)):

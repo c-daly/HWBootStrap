@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+import ml_lab.imitation as imitation_module
 
 from ml_lab.contracts import ContractMismatch, EnvironmentContract
 from ml_lab.imitation import DemonstrationGame, DemonstrationWriter, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, validate_decision
@@ -163,3 +164,67 @@ def test_masked_cross_entropy_masks_illegal_logits_and_has_finite_gradient() -> 
     assert torch.isfinite(loss) and torch.isfinite(logits.grad).all()
     with pytest.raises(ValueError, match="masked"):
         masked_cross_entropy(logits.detach(), masks, torch.tensor([1, 0, 1, 2, 0], dtype=torch.int64))
+
+
+def test_loader_index_scan_does_not_decode_full_shard_payloads(sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requested: set[str] = set()
+    original_load = imitation_module.np.load
+
+    class TrackingNpz:
+        def __init__(self, wrapped): self._wrapped = wrapped
+        @property
+        def files(self): return self._wrapped.files
+        def __getitem__(self, key: str): requested.add(key); return self._wrapped[key]
+        def __enter__(self): self._wrapped.__enter__(); return self
+        def __exit__(self, *args): return self._wrapped.__exit__(*args)
+
+    monkeypatch.setattr(imitation_module.np, "load", lambda *args, **kwargs: TrackingNpz(original_load(*args, **kwargs)))
+    load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    assert requested == {"game_ids", "decision_indices", "seats", "action_kinds"}
+
+
+def test_loader_defers_full_decode_and_keeps_only_two_cached_shards(sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    original_decode = imitation_module._read_shard
+
+    def tracked_decode(path: Path, *args, **kwargs):
+        calls.append(path.name)
+        return original_decode(path, *args, **kwargs)
+
+    monkeypatch.setattr(imitation_module, "_read_shard", tracked_decode)
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    assert calls == []
+    first = dataset._row_data([(0, 0)])
+    assert calls == [dataset.shards[0].path.split("/")[-1]]
+    first["observations"][0, 0] = -999.0
+    second = dataset._row_data([(0, 0)])
+    assert calls == [dataset.shards[0].path.split("/")[-1]]
+    assert second["observations"][0, 0] != -999.0
+    dataset._row_data([(1, 0)])
+    dataset._row_data([(2, 0)])
+    assert len(dataset._cache._entries) == 2
+    dataset._row_data([(0, 0)])
+    assert calls.count(dataset.shards[0].path.split("/")[-1]) == 2
+
+def test_first_sampler_batch_decodes_only_its_selected_shard(sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    original_decode = imitation_module._read_shard
+    monkeypatch.setattr(imitation_module, "_read_shard", lambda path, *args, **kwargs: calls.append(path.name) or original_decode(path, *args, **kwargs))
+    batch = StratifiedDecisionSampler(load_imitation_dataset(sampled_dataset, expected_contract=contract()), batch_size=1, seed=37).next_batch()
+    assert len(calls) == 1
+    assert batch.game_ids.shape == (1,)
+
+
+def test_matching_hash_invalid_payload_is_rejected_on_first_row_use(sampled_dataset: Path) -> None:
+    manifest_path = sampled_dataset / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    shard = sampled_dataset / manifest["shards"][0]["path"]
+    with np.load(shard, allow_pickle=False) as loaded:
+        arrays = {name: loaded[name] for name in loaded.files}
+    arrays["actions"] = np.full(len(arrays["actions"]), 1, dtype=np.int64)
+    np.savez_compressed(shard, **arrays)
+    manifest["shards"][0]["sha256"] = hashlib.sha256(shard.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    with pytest.raises(ValueError, match="illegal action"):
+        dataset._row_data([(0, 0)])
