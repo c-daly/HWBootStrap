@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,6 +29,35 @@ def _finite_number(value: Any, field: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"protocol {field} must be finite")
     return result
+
+
+def validate_trace_enable_response(
+    payload: Mapping[str, Any], *, expected: bool
+) -> None:
+    response = validate_json_object(payload, "duel trace enable response")
+    enabled = response.get("enabled")
+    if (
+        not isinstance(expected, bool)
+        or set(response) != {"enabled"}
+        or not isinstance(enabled, bool)
+        or enabled is not expected
+    ):
+        raise ValueError("duel trace enable response is invalid")
+
+
+def validate_replay_save_response(
+    payload: Mapping[str, Any], *, expected: Path
+) -> Path:
+    response = validate_json_object(payload, "duel save response")
+    saved = response.get("saved")
+    expected = Path(expected)
+    if (
+        set(response) != {"saved"}
+        or not isinstance(saved, str)
+        or Path(saved) != expected
+    ):
+        raise ValueError("duel save response path does not match request")
+    return expected
 
 
 def _validate_diagnostics(value: Any) -> None:
