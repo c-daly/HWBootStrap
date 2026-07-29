@@ -1417,6 +1417,124 @@ def test_duel_client_trace_methods_send_exact_rpc_sequence(tmp_path: Path) -> No
     assert saved == replay_path
 
 
+def _valid_demonstration_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "decisions": [
+            {
+                "Observation": [0.0, 0.25, 1.0],
+                "LegalMask": [True, False, True],
+                "Action": 2,
+                "Seat": 0,
+                "Command": {
+                    "Kind": "move",
+                    "Issuer": 0,
+                    "ActorId": 7,
+                    "TargetId": None,
+                    "Q": 2,
+                    "R": 3,
+                },
+            },
+        ],
+    }
+
+
+def test_duel_client_demonstration_methods_send_exact_rpc_sequence(
+    contract: EnvironmentContract,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    responses = iter(
+        [
+            {"enabled": True},
+            _valid_demonstration_payload(),
+        ]
+    )
+    requests: list[dict[str, object]] = []
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda request: (requests.append(request), next(responses))[1]
+
+    client.enable_demonstrations(True)
+    decisions = client.drain_demonstrations()
+
+    assert requests == [
+        {"cmd": "duel_demo_enable", "enabled": True},
+        {"cmd": "duel_demo_drain"},
+    ]
+    assert decisions == _valid_demonstration_payload()["decisions"]
+
+
+@pytest.mark.parametrize(
+    ("response", "enabled"),
+    [
+        ({"enabled": False}, True),
+        ({"enabled": True, "extra": 1}, True),
+        ({"enabled": 1}, True),
+    ],
+)
+def test_duel_client_demonstration_enable_requires_exact_acknowledgment(
+    contract: EnvironmentContract,
+    response: dict[str, object],
+    enabled: bool,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda _request: response
+
+    with pytest.raises(ValueError, match="acknowledge demonstration capture"):
+        client.enable_demonstrations(enabled)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload.update(schema_version=2), "schema version"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0]), "observation length"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0, float("nan"), 1.0]), "finite"),
+        (lambda payload: payload["decisions"][0].update(LegalMask=[True]), "legal mask length"),
+        (lambda payload: payload["decisions"][0].update(Action=1), "masked off"),
+        (lambda payload: payload["decisions"][0].update(Action=3), "action"),
+        (lambda payload: payload["decisions"][0].update(Seat=2), "seat"),
+        (lambda payload: payload["decisions"][0].update(Command=[]), "command"),
+        (
+            lambda payload: payload["decisions"][0]["Command"].update(Issuer=1),
+            "issuer",
+        ),
+    ],
+)
+def test_validate_demonstration_payload_rejects_malformed_teacher_data(
+    contract: EnvironmentContract,
+    mutate,
+    message: str,
+) -> None:
+    from ml_lab.evaluation import validate_demonstration_payload
+
+    payload = _valid_demonstration_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError, match=message):
+        validate_demonstration_payload(
+            payload, replace(contract, version="tactical-v2")
+        )
+
+
+def test_validate_demonstration_payload_rejects_extra_fields(
+    contract: EnvironmentContract,
+) -> None:
+    from ml_lab.evaluation import validate_demonstration_payload
+
+    payload = _valid_demonstration_payload()
+    payload["decisions"][0]["Unexpected"] = True
+
+    with pytest.raises(ValueError, match="fields"):
+        validate_demonstration_payload(
+            payload, replace(contract, version="tactical-v2")
+        )
+
+
 def test_duel_client_sends_tactical_v2_and_requires_duel_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

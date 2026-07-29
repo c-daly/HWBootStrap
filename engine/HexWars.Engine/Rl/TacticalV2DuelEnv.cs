@@ -21,6 +21,7 @@ namespace HexWars.Engine.Rl
         private readonly List<Command> _log = new List<Command>();
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
         private readonly IDuelTransitionSink _transitionSink;
+        private readonly ITacticalV2DemonstrationSink? _demonstrationSink;
 
         private GameState _start = null!;
         private GameState _state = null!;
@@ -33,12 +34,16 @@ namespace HexWars.Engine.Rl
         private float _armyValue;
         private int _steps;
 
-        public TacticalV2DuelEnv(TacticalV2Config config, IDuelTransitionSink? transitionSink = null)
+        public TacticalV2DuelEnv(
+            TacticalV2Config config,
+            IDuelTransitionSink? transitionSink = null,
+            ITacticalV2DemonstrationSink? demonstrationSink = null)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
             _cfg = config;
             _layout = new TacticalV2Layout(_cfg);
             _transitionSink = transitionSink ?? NullDuelTransitionSink.Instance;
+            _demonstrationSink = demonstrationSink;
         }
 
         public TacticalV2Config Config => _cfg;
@@ -104,6 +109,7 @@ namespace HexWars.Engine.Rl
             _learner = learnerSeat;
             _steps = 0;
             _log.Clear();
+            _demonstrationSink?.Reset();
             _transitions.Clear();
             _transitionSink.Reset(_state);
             AdvancePastInternal();
@@ -170,6 +176,24 @@ namespace HexWars.Engine.Rl
             GameState before = _state;
             var r = GameEngine.Apply(_state, cmd);
             if (!r.Success) return false;
+
+            if (_demonstrationSink?.Enabled == true)
+            {
+                PlayerId seat = cmd.Issuer;
+                TacticalV2UnitRegistry own = Registry(seat);
+                TacticalV2UnitRegistry foe =
+                    Registry(seat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0);
+                float[] observation = TacticalV2Coding.Observe(
+                    before, seat, _layout, own, foe);
+                bool[] legalMask = TacticalV2Coding.Mask(before, seat, _layout, own);
+                if (!TacticalV2Coding.TryEncode(cmd, before, _layout, own, out int action)
+                    || action < 0 || action >= legalMask.Length || !legalMask[action])
+                    throw new InvalidOperationException(
+                        "accepted tactical-v2 command did not encode to a legal teacher label");
+                _demonstrationSink.Accepted(new TacticalV2Demonstration(
+                    observation, legalMask, action, (int)seat,
+                    TacticalEvaluationTrace.ProjectCommand(cmd)));
+            }
 
             _state = r.NewState;
             _log.Add(cmd);

@@ -104,8 +104,7 @@ namespace HexWars.Engine.Rl
             mask[0] = true; // EndTurn always available
             foreach (var command in LegalMoves.For(state))
             {
-                int index = Encode(command, state, own, layout);
-                if (index >= 0 && index < mask.Length) mask[index] = true;
+                if (TryEncode(command, state, layout, own, out int index)) mask[index] = true;
             }
 
             // The engine itself has no live-unit cap — only points and board legality gate a
@@ -118,6 +117,40 @@ namespace HexWars.Engine.Rl
             return mask;
         }
 
+        /// <summary>Encodes an actual currently legal command. Invalid, wrong-seat, stale, and unsupported
+        /// commands fail closed rather than degrading to EndTurn.</summary>
+        public static bool TryEncode(
+            Command command,
+            GameState state,
+            TacticalV2Layout layout,
+            TacticalV2UnitRegistry own,
+            out int action)
+        {
+            if (command == null) throw new ArgumentNullException(nameof(command));
+            if (state == null) throw new ArgumentNullException(nameof(state));
+            if (layout == null) throw new ArgumentNullException(nameof(layout));
+            ValidateRegistry(own, layout, nameof(own));
+
+            action = -1;
+            if (command.Issuer != state.ActivePlayer) return false;
+            if (command is DeployUnit && !own.HasFreeSlot) return false;
+
+            bool legal = false;
+            foreach (Command candidate in LegalMoves.For(state))
+            {
+                if (candidate.Equals(command))
+                {
+                    legal = true;
+                    break;
+                }
+            }
+            if (!legal) return false;
+
+            int encoded = Encode(command, state, own, layout);
+            if (encoded < 0 || encoded >= layout.ActionCount) return false;
+            action = encoded;
+            return true;
+        }
         public static Command Decode(int action, GameState state, PlayerId seat, TacticalV2Layout layout,
             TacticalV2UnitRegistry own)
         {

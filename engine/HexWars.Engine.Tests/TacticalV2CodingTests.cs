@@ -166,6 +166,67 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void EveryMaskedAction_RoundTripsThroughThePublicEncoder()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            var layout = new TacticalV2Layout(config);
+            TacticalV2Start start = layout.NewGame(73);
+            bool[] mask = TacticalV2Coding.Mask(start.State, PlayerId.Player0, layout, start.Slots0);
+
+            for (int action = 0; action < mask.Length; action++)
+            {
+                if (!mask[action]) continue;
+                Command command = TacticalV2Coding.Decode(action, start.State, PlayerId.Player0, layout, start.Slots0);
+
+                Assert.That(TacticalV2Coding.TryEncode(command, start.State, layout, start.Slots0, out int encoded),
+                    Is.True, $"masked action {action} must have a public encoding");
+                Assert.That(encoded, Is.EqualTo(action));
+            }
+        }
+
+        [Test]
+        public void TryEncode_RejectsUnsupportedWrongSeatDeadMissingAndOffBoardCommands()
+        {
+            TacticalV2CodingFixture fixture = TacticalV2CodingFixture.WithEqualStatTemplates();
+            Unit first = fixture.Game.Player(PlayerId.Player0).UnitsOnBoard[0];
+            Unit second = fixture.Game.Player(PlayerId.Player0).UnitsOnBoard[1];
+            Unit dead = first.WithDamage(first.CurrentHp);
+            var deadRegistry = new TacticalV2UnitRegistry(fixture.Layout.UnitSlotCount);
+            deadRegistry.Initialize(new[] { dead, second }, new[] { 0, 1 });
+            var p0 = fixture.Game.Player(PlayerId.Player0);
+            var p1 = fixture.Game.Player(PlayerId.Player1);
+            var deadState = new GameState(
+                fixture.Game.Board,
+                fixture.Game.Config,
+                new[]
+                {
+                    new PlayerState(PlayerId.Player0, p0.Points, p0.Barracks, new[] { dead, second }, p0.Generators),
+                    p1,
+                },
+                PlayerId.Player0,
+                fixture.Game.Round,
+                fixture.Game.Config.RoundCap);
+
+            (Command Command, GameState State, TacticalV2UnitRegistry Registry)[] rejected =
+            {
+                (new CreateUnit(PlayerId.Player0, first.Stats), fixture.Game, fixture.Slots0),
+                (new EndTurn(PlayerId.Player1), fixture.Game, fixture.Slots0),
+                (new MoveUnit(PlayerId.Player0, dead.Id, fixture.Layout.Cells[0]), deadState, deadRegistry),
+                (new MoveUnit(PlayerId.Player0, 9999, fixture.Layout.Cells[0]), fixture.Game, fixture.Slots0),
+                (new AttackUnit(PlayerId.Player0, first.Id, 9999), fixture.Game, fixture.Slots0),
+                (new MoveUnit(PlayerId.Player0, first.Id, new HexCoord(-100, -100)),
+                    fixture.Game, fixture.Slots0),
+            };
+
+            foreach (var item in rejected)
+            {
+                Assert.That(TacticalV2Coding.TryEncode(
+                    item.Command, item.State, fixture.Layout, item.Registry, out int encoded), Is.False);
+                Assert.That(encoded, Is.EqualTo(-1), "rejected commands must not map to EndTurn");
+            }
+        }
+
+        [Test]
         public void Decode_DeployActionAddressesTemplateIndexAndCell()
         {
             // DeployUnit is never affordable at a fresh reset (players start at 0 points) and, by

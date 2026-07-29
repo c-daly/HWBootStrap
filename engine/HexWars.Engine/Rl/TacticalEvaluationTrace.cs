@@ -89,7 +89,7 @@ namespace HexWars.Engine.Rl
             };
         }
 
-        private static TacticalTraceCommand ProjectCommand(Command command)
+        internal static TacticalTraceCommand ProjectCommand(Command command)
         {
             var trace = new TacticalTraceCommand { Issuer = (int)command.Issuer };
             switch (command)

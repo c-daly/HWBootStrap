@@ -63,6 +63,7 @@ TacticalV2Env? tacticalV2Env = environment == "tactical-v2"
     ? new TacticalV2Env(opponentFactory, learningSeat, tacticalV2Config!)
     : null;
 var tacticalV2Trace = new BufferedDuelTransitionSink();
+var tacticalV2Demonstrations = new BufferedTacticalV2DemonstrationSink();
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
 TacticalV2DuelEnv? tacticalV2Duel = null;
@@ -300,7 +301,8 @@ while ((line = Console.ReadLine()) != null)
             }
             else
             {
-                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace);
+                tacticalV2Duel ??= new TacticalV2DuelEnv(
+                    tacticalV2Config!, tacticalV2Trace, tacticalV2Demonstrations);
                 Send(TacticalV2Spaces(tacticalV2Duel.Layout, tacticalV2Duel.Config, MlEnvironmentKind.Duel));
             }
             break;
@@ -348,7 +350,8 @@ while ((line = Console.ReadLine()) != null)
             }
             else
             {
-                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace);
+                tacticalV2Duel ??= new TacticalV2DuelEnv(
+                    tacticalV2Config!, tacticalV2Trace, tacticalV2Demonstrations);
                 IAgent? controller0 = MakeController(p0, seed * 2 + 1);
                 IAgent? controller1 = MakeController(p1, seed * 2 + 2);
                 PlayerId learnerSeat = learner == 1 ? PlayerId.Player1 : PlayerId.Player0;
@@ -394,7 +397,8 @@ while ((line = Console.ReadLine()) != null)
             }
             else
             {
-                tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace);
+                tacticalV2Duel ??= new TacticalV2DuelEnv(
+                    tacticalV2Config!, tacticalV2Trace, tacticalV2Demonstrations);
                 var v = tacticalV2Duel.Step(action);
                 Send(new
                 {
@@ -426,6 +430,27 @@ while ((line = Console.ReadLine()) != null)
                 .Select(TacticalEvaluationTrace.Project)
                 .ToArray();
             Send(new { schema_version = 1, transitions });
+            break;
+        }
+
+        case "duel_demo_enable":
+        {
+            if (environment != "tactical-v2")
+                throw new InvalidDataException(
+                    "duel demonstrations are supported only for tactical-v2");
+            bool enabled = root.GetProperty("enabled").GetBoolean();
+            tacticalV2Demonstrations.Enabled = enabled;
+            if (!enabled) tacticalV2Demonstrations.Drain();
+            Send(new { enabled });
+            break;
+        }
+
+        case "duel_demo_drain":
+        {
+            if (environment != "tactical-v2")
+                throw new InvalidDataException(
+                    "duel demonstrations are supported only for tactical-v2");
+            Send(new { schema_version = 1, decisions = tacticalV2Demonstrations.Drain() });
             break;
         }
 

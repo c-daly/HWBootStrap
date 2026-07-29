@@ -12,7 +12,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from math import sqrt
+from math import isfinite, sqrt
 from statistics import NormalDist
 from pathlib import Path
 from threading import Lock
@@ -94,6 +94,110 @@ def controller_identity(resolved: ResolvedController) -> dict[str, Any]:
     if resolved.spec.kind == "run" and resolved.spec.path is not None:
         identity["source_run"] = str(resolved.spec.path.resolve())
     return identity
+
+
+def _validate_demonstration_command(
+    raw: Any, *, seat: int, index: int
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"demonstration decision {index} command must be an object")
+    required = {"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"}
+    if set(raw) != required:
+        raise ValueError(f"demonstration decision {index} command fields are invalid")
+
+    kind = raw["Kind"]
+    issuer = raw["Issuer"]
+    if not isinstance(kind, str) or kind not in {
+        "end_turn", "move", "attack", "deploy",
+    }:
+        raise ValueError(f"demonstration decision {index} command kind is invalid")
+    if type(issuer) is not int or issuer not in {0, 1} or issuer != seat:
+        raise ValueError(f"demonstration decision {index} command issuer is invalid")
+
+    nullable_fields = ("ActorId", "TargetId", "Q", "R")
+    for field in nullable_fields:
+        value = raw[field]
+        if value is not None and type(value) is not int:
+            raise ValueError(
+                f"demonstration decision {index} command {field} is invalid"
+            )
+
+    actor = raw["ActorId"]
+    target = raw["TargetId"]
+    q = raw["Q"]
+    r = raw["R"]
+    shape_is_valid = (
+        (kind == "end_turn" and actor is None and target is None and q is None and r is None)
+        or (kind == "move" and actor is not None and target is None and q is not None and r is not None)
+        or (kind == "attack" and actor is not None and target is not None and q is None and r is None)
+        or (kind == "deploy" and actor is None and target is None and q is not None and r is not None)
+    )
+    if not shape_is_valid:
+        raise ValueError(f"demonstration decision {index} command shape is invalid")
+    return dict(raw)
+
+
+def validate_demonstration_payload(
+    payload: Any, contract: EnvironmentContract
+) -> list[dict[str, Any]]:
+    """Validate and return a version-1 tactical-v2 demonstration batch."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("demonstration payload must be an object")
+    if set(payload) != {"schema_version", "decisions"}:
+        raise ValueError("demonstration payload fields are invalid")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError("unsupported demonstration schema version")
+    decisions = payload["decisions"]
+    if not isinstance(decisions, list):
+        raise ValueError("demonstration decisions must be a list")
+
+    required = {"Observation", "LegalMask", "Action", "Seat", "Command"}
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(decisions):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"demonstration decision {index} must be an object")
+        if set(raw) != required:
+            raise ValueError(f"demonstration decision {index} fields are invalid")
+
+        observation = raw["Observation"]
+        if not isinstance(observation, list) or len(observation) != contract.observation_size:
+            raise ValueError(
+                f"demonstration decision {index} observation length is invalid"
+            )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(float(value))
+            for value in observation
+        ):
+            raise ValueError(
+                f"demonstration decision {index} observation values must be finite"
+            )
+
+        legal_mask = raw["LegalMask"]
+        if (
+            not isinstance(legal_mask, list)
+            or len(legal_mask) != contract.action_size
+            or any(type(value) is not bool for value in legal_mask)
+        ):
+            raise ValueError(
+                f"demonstration decision {index} legal mask length or values are invalid"
+            )
+        action = raw["Action"]
+        if type(action) is not int or action < 0 or action >= contract.action_size:
+            raise ValueError(f"demonstration decision {index} action is invalid")
+        if not legal_mask[action]:
+            raise ValueError(f"demonstration decision {index} action is masked off")
+        seat = raw["Seat"]
+        if type(seat) is not int or seat not in {0, 1}:
+            raise ValueError(f"demonstration decision {index} seat is invalid")
+
+        decision = dict(raw)
+        decision["Command"] = _validate_demonstration_command(
+            raw["Command"], seat=seat, index=index
+        )
+        result.append(decision)
+    return result
 
 
 class DuelClient:
@@ -185,6 +289,23 @@ class DuelClient:
 
     def drain_trace(self) -> EpisodeTrace:
         return EpisodeTrace.from_payload(self._rpc({"cmd": "duel_trace_drain"}))
+
+    def enable_demonstrations(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise ValueError("demonstration capture enabled flag must be boolean")
+        response = self._rpc({"cmd": "duel_demo_enable", "enabled": enabled})
+        if (
+            set(response) != {"enabled"}
+            or type(response.get("enabled")) is not bool
+            or response["enabled"] is not enabled
+        ):
+            raise ValueError(
+                "GymServer did not acknowledge demonstration capture"
+            )
+
+    def drain_demonstrations(self) -> list[dict[str, Any]]:
+        payload = self._rpc({"cmd": "duel_demo_drain"})
+        return validate_demonstration_payload(payload, self.contract)
 
     def save_replay(self, path: Path) -> Path:
         path = Path(path)

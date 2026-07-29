@@ -297,5 +297,285 @@ namespace HexWars.Engine.Tests
             Assert.That(transitions[0].Previous, Is.SameAs(start));
             Assert.That(transitions[0].Resulting, Is.SameAs(afterFirstAccepted));
         }
+
+        [Test]
+        public void BufferedDemonstrationSink_DefaultsDisabled()
+        {
+            var sink = new BufferedTacticalV2DemonstrationSink();
+            sink.Accepted(new TacticalV2Demonstration(
+                new[] { 1f }, new[] { true }, 0, 0,
+                new TacticalTraceCommand { Kind = "end_turn", Issuer = 0 }));
+
+            Assert.That(sink.Drain(), Is.Empty);
+        }
+
+        [Test]
+        public void Demonstration_IsImmutable_AndBufferedSinkDrainsInDecisionOrder()
+        {
+            var observation = new[] { 0.25f, 0.75f };
+            var legalMask = new[] { true, false };
+            var command = new TacticalTraceCommand { Kind = "end_turn", Issuer = 0 };
+            var first = new TacticalV2Demonstration(observation, legalMask, 0, 0, command);
+            var second = new TacticalV2Demonstration(
+                new[] { 0.5f, 0.5f }, new[] { false, true }, 1, 1,
+                new TacticalTraceCommand { Kind = "move", Issuer = 1, ActorId = 7, Q = 2, R = 3 });
+
+            observation[0] = 99f;
+            legalMask[0] = false;
+            command.Kind = "mutated";
+            float[] returnedObservation = first.Observation;
+            bool[] returnedMask = first.LegalMask;
+            TacticalTraceCommand returnedCommand = first.Command;
+            returnedObservation[0] = 88f;
+            returnedMask[0] = false;
+            returnedCommand.Kind = "also-mutated";
+
+            Assert.That(first.Observation, Is.EqualTo(new[] { 0.25f, 0.75f }));
+            Assert.That(first.LegalMask, Is.EqualTo(new[] { true, false }));
+            Assert.That(first.Command.Kind, Is.EqualTo("end_turn"));
+
+            var sink = new BufferedTacticalV2DemonstrationSink { Enabled = true };
+            sink.Accepted(first);
+            sink.Accepted(second);
+
+            Assert.That(sink.Drain(), Is.EqualTo(new[] { first, second }));
+            Assert.That(sink.Drain(), Is.Empty);
+            sink.Accepted(first);
+            sink.Reset();
+            Assert.That(sink.Drain(), Is.Empty);
+        }
+
+        [Test]
+        public void DemonstrationSink_CapturesAcceptedExternalActionFromItsExactPreActionView()
+        {
+            var sink = new BufferedTacticalV2DemonstrationSink { Enabled = true };
+            var env = new TacticalV2DuelEnv(TacticalV2Config.Default(), demonstrationSink: sink);
+            TacticalV2DuelEnv.View before = env.Reset(91, controller0: null, controller1: null);
+            int action = FirstLegalNonEndTurn(before.ActionMask);
+            GameState stateBefore = env.State;
+            TacticalV2Start start = env.Layout.NewGame(91);
+            Command accepted = TacticalV2Coding.Decode(
+                action, stateBefore, before.Seat, env.Layout, start.Slots0);
+
+            env.Step(action);
+
+            TacticalV2Demonstration item = sink.Drain().Single();
+            Assert.That(item.Seat, Is.EqualTo((int)PlayerId.Player0));
+            Assert.That(item.Action, Is.EqualTo(action));
+            Assert.That(item.LegalMask[item.Action], Is.True);
+            Assert.That(item.Observation, Is.EqualTo(before.Observation));
+            Assert.That(item.LegalMask, Is.EqualTo(before.ActionMask));
+            AssertTraceCommandsEqual(
+                TacticalEvaluationTrace.Project(new DuelTransition(stateBefore, accepted, env.State)).Command,
+                item.Command);
+        }
+
+        [Test]
+        public void DemonstrationCapture_IsTransparentForScriptedGreedyVersusRandomEpisode()
+        {
+            CapturedEpisode withoutCapture = PlayGreedyVersusRandom(capture: false);
+            CapturedEpisode withCapture = PlayGreedyVersusRandom(capture: true);
+
+            Assert.That(withCapture.Env.ToReplay(), Is.EqualTo(withoutCapture.Env.ToReplay()));
+            Assert.That(
+                withCapture.Transitions.Select(item => item.Command),
+                Is.EqualTo(withoutCapture.Transitions.Select(item => item.Command)));
+            Assert.That(withCapture.Rewards, Is.EqualTo(withoutCapture.Rewards));
+            Assert.That(withCapture.View.Terminated, Is.EqualTo(withoutCapture.View.Terminated));
+            Assert.That(withCapture.View.Truncated, Is.EqualTo(withoutCapture.View.Truncated));
+            Assert.That(withCapture.View.Winner, Is.EqualTo(withoutCapture.View.Winner));
+            AssertStatesEquivalent(withoutCapture.Env.State, withCapture.Env.State);
+
+            Assert.That(withCapture.Demonstrations.Count, Is.EqualTo(withCapture.Transitions.Count));
+            TacticalV2Start start = withCapture.Env.Layout.NewGame(91);
+            for (int index = 0; index < withCapture.Demonstrations.Count; index++)
+            {
+                TacticalV2Demonstration decision = withCapture.Demonstrations[index];
+                DuelTransition transition = withCapture.Transitions[index];
+                PlayerId seat = transition.Command.Issuer;
+                TacticalV2UnitRegistry own =
+                    seat == PlayerId.Player0 ? start.Slots0 : start.Slots1;
+                TacticalV2UnitRegistry foe =
+                    seat == PlayerId.Player0 ? start.Slots1 : start.Slots0;
+
+                Assert.That(decision.Seat, Is.EqualTo((int)seat));
+                Assert.That(decision.Observation, Is.EqualTo(TacticalV2Coding.Observe(
+                    transition.Previous, seat, withCapture.Env.Layout, own, foe)));
+                Assert.That(decision.LegalMask, Is.EqualTo(TacticalV2Coding.Mask(
+                    transition.Previous, seat, withCapture.Env.Layout, own)));
+                Assert.That(TacticalV2Coding.TryEncode(
+                    transition.Command, transition.Previous, withCapture.Env.Layout, own,
+                    out int expectedAction), Is.True);
+                Assert.That(decision.Action, Is.EqualTo(expectedAction));
+                Assert.That(decision.LegalMask[decision.Action], Is.True);
+                AssertTraceCommandsEqual(
+                    TacticalEvaluationTrace.Project(transition).Command, decision.Command);
+
+                start.Slots0.ReleaseDead(transition.Resulting, PlayerId.Player0);
+                start.Slots1.ReleaseDead(transition.Resulting, PlayerId.Player1);
+                if (transition.Command is DeployUnit deploy)
+                {
+                    own.RegisterDeployment(
+                        transition.Previous, transition.Resulting, deploy.Issuer, deploy.TemplateIndex);
+                }
+            }
+        }
+
+        [Test]
+        public void DemonstrationCapture_FailsHardWhenEngineAcceptsAnUnencodableCommand()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = GameConfig.Default(biomesEnabled: false, captureCost: 0);
+            var sink = new BufferedTacticalV2DemonstrationSink { Enabled = true };
+            var env = new TacticalV2DuelEnv(config, demonstrationSink: sink);
+
+            Assert.Throws<InvalidOperationException>(() =>
+                env.Reset(5, new ClaimFirstAgent(), new ClaimFirstAgent()));
+        }
+
+        [Test]
+        public void DisabledDemonstrationSink_IsTransparentEvenForUnencodableAcceptedCommand()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = GameConfig.Default(biomesEnabled: false, captureCost: 0);
+            var sink = new BufferedTacticalV2DemonstrationSink();
+            var env = new TacticalV2DuelEnv(config, demonstrationSink: sink);
+
+            TacticalV2DuelEnv.View view =
+                env.Reset(5, new ClaimFirstAgent(), new ClaimFirstAgent());
+
+            Assert.That(view.Terminated || view.Truncated, Is.True);
+            Assert.That(sink.Drain(), Is.Empty);
+        }
+
+        private static CapturedEpisode PlayGreedyVersusRandom(bool capture)
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = GameConfig.Default(
+                biomesEnabled: false,
+                captureCost: int.MaxValue,
+                generatorsEnabled: false,
+                fixedTemplateCount: config.Templates.Count,
+                templateSlotCount: config.Templates.Count);
+            var transitions = new BufferedDuelTransitionSink { Enabled = true };
+            var demonstrations = new BufferedTacticalV2DemonstrationSink { Enabled = capture };
+            var env = new TacticalV2DuelEnv(
+                config, transitions,
+                capture ? demonstrations : null);
+            var greedy = new GreedyAgent(91);
+            TacticalV2Start tracker = env.Layout.NewGame(91);
+            var accepted = new List<DuelTransition>();
+            TacticalV2DuelEnv.View view =
+                env.Reset(91, controller0: null, controller1: new RandomAgent(92));
+            var rewards = new List<float>();
+            int steps = 0;
+            while (!view.Terminated && !view.Truncated)
+            {
+                Command command = greedy.Decide(env.State);
+                if (!TacticalV2Coding.TryEncode(
+                    command, env.State, env.Layout, tracker.Slots0, out int action))
+                {
+                    action = 0;
+                }
+                view = env.Step(action);
+                rewards.Add(view.Reward);
+                foreach (DuelTransition transition in transitions.Drain())
+                {
+                    accepted.Add(transition);
+                    tracker.Slots0.ReleaseDead(transition.Resulting, PlayerId.Player0);
+                    tracker.Slots1.ReleaseDead(transition.Resulting, PlayerId.Player1);
+                    if (transition.Command is DeployUnit deploy)
+                    {
+                        TacticalV2UnitRegistry registry =
+                            deploy.Issuer == PlayerId.Player0 ? tracker.Slots0 : tracker.Slots1;
+                        registry.RegisterDeployment(
+                            transition.Previous, transition.Resulting,
+                            deploy.Issuer, deploy.TemplateIndex);
+                    }
+                }
+                Assert.That(++steps, Is.LessThan(10_000), "scripted episode did not terminate");
+            }
+
+            return new CapturedEpisode(
+                env, view, rewards, accepted, demonstrations.Drain());
+        }
+
+        private static int FirstLegalNonEndTurn(bool[] mask)
+        {
+            for (int action = 1; action < mask.Length; action++)
+                if (mask[action]) return action;
+            Assert.Fail("expected a legal non-EndTurn action");
+            return -1;
+        }
+
+        private static void AssertTraceCommandsEqual(
+            TacticalTraceCommand expected, TacticalTraceCommand actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Kind, Is.EqualTo(expected.Kind));
+                Assert.That(actual.Issuer, Is.EqualTo(expected.Issuer));
+                Assert.That(actual.ActorId, Is.EqualTo(expected.ActorId));
+                Assert.That(actual.TargetId, Is.EqualTo(expected.TargetId));
+                Assert.That(actual.Q, Is.EqualTo(expected.Q));
+                Assert.That(actual.R, Is.EqualTo(expected.R));
+            });
+        }
+
+        private static void AssertStatesEquivalent(GameState expected, GameState actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Round, Is.EqualTo(expected.Round));
+                Assert.That(actual.ActivePlayer, Is.EqualTo(expected.ActivePlayer));
+                Assert.That(actual.IsGameOver, Is.EqualTo(expected.IsGameOver));
+                Assert.That(actual.Winner, Is.EqualTo(expected.Winner));
+                for (int seat = 0; seat < 2; seat++)
+                {
+                    PlayerState expectedPlayer = expected.Player((PlayerId)seat);
+                    PlayerState actualPlayer = actual.Player((PlayerId)seat);
+                    Assert.That(actualPlayer.Points, Is.EqualTo(expectedPlayer.Points));
+                    Assert.That(actualPlayer.DestroyedValue, Is.EqualTo(expectedPlayer.DestroyedValue));
+                    Assert.That(actualPlayer.UnitsOnBoard, Is.EqualTo(expectedPlayer.UnitsOnBoard));
+                    Assert.That(actualPlayer.Generators, Is.EqualTo(expectedPlayer.Generators));
+                }
+            });
+        }
+
+        private sealed class ClaimFirstAgent : IAgent
+        {
+            public Command Decide(GameState state)
+            {
+                Command? capture = LegalMoves.For(state).FirstOrDefault(command => command is CaptureHex);
+                if (capture != null) return capture;
+                Command? moveToUncontrolled = LegalMoves.For(state)
+                    .OfType<MoveUnit>()
+                    .FirstOrDefault(move => state.Board.Controller(move.Dest) != state.ActivePlayer);
+                return moveToUncontrolled ?? new EndTurn(state.ActivePlayer);
+            }
+        }
+
+        private sealed class CapturedEpisode
+        {
+            public CapturedEpisode(
+                TacticalV2DuelEnv env,
+                TacticalV2DuelEnv.View view,
+                IReadOnlyList<float> rewards,
+                IReadOnlyList<DuelTransition> transitions,
+                IReadOnlyList<TacticalV2Demonstration> demonstrations)
+            {
+                Env = env;
+                View = view;
+                Rewards = rewards;
+                Transitions = transitions;
+                Demonstrations = demonstrations;
+            }
+
+            public TacticalV2DuelEnv Env { get; }
+            public TacticalV2DuelEnv.View View { get; }
+            public IReadOnlyList<float> Rewards { get; }
+            public IReadOnlyList<DuelTransition> Transitions { get; }
+            public IReadOnlyList<TacticalV2Demonstration> Demonstrations { get; }
+        }
     }
 }
