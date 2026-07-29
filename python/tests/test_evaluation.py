@@ -922,6 +922,92 @@ def test_evaluation_rolls_back_earlier_pairs_when_later_publication_fails(
     assert not output_path.exists()
 
 
+def test_evaluation_rolls_back_published_pair_when_report_write_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "report-failure-evidence"
+    output_path = tmp_path / "report-failure.json"
+    stem = "match-000000-seed-85100-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_atomic_write_json = evaluation_module.atomic_write_json
+
+    def fail_report_write(path: Path, payload: object) -> None:
+        if Path(path) == output_path:
+            raise OSError("injected report publication failure")
+        real_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(evaluation_module, "atomic_write_json", fail_report_write)
+
+    with pytest.raises(OSError, match="injected report publication failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-report-failure", 64),
+            _model_controller(tmp_path, contract, "opponent-report-failure", 96),
+            games=1,
+            seed_start=85_100,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
+def test_evaluation_rolls_back_published_pair_when_staging_cleanup_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "cleanup-failure-evidence"
+    output_path = tmp_path / "cleanup-failure.json"
+    stem = "match-000000-seed-85200-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_temporary_directory = evaluation_module.tempfile.TemporaryDirectory
+
+    class FailingCleanup:
+        def __init__(self, *args, **kwargs) -> None:
+            self._inner = real_temporary_directory(*args, **kwargs)
+            self.name = self._inner.name
+
+        def cleanup(self) -> None:
+            self._inner.cleanup()
+            raise OSError("injected staging cleanup failure")
+
+    monkeypatch.setattr(evaluation_module.tempfile, "TemporaryDirectory", FailingCleanup)
+
+    with pytest.raises(OSError, match="injected staging cleanup failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-cleanup-failure", 64),
+            _model_controller(tmp_path, contract, "opponent-cleanup-failure", 96),
+            games=1,
+            seed_start=85_200,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
 def test_retained_artifact_pair_rejects_half_pair_without_changes(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

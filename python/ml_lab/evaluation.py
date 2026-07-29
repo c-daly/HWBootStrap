@@ -386,6 +386,11 @@ def _copy_file_exclusive(source: Path, destination: Path) -> None:
         raise
 
 
+def _rollback_artifacts(paths: Sequence[Path]) -> None:
+    for path in reversed(paths):
+        path.unlink(missing_ok=True)
+
+
 def _publish_artifact_pair(
     staged_trace: Path,
     staged_replay: Path,
@@ -414,15 +419,14 @@ def _publish_artifact_pair(
         _copy_file_exclusive(staged_replay, replay_path)
         created.append(replay_path)
     except BaseException:
-        for path in reversed(created):
-            path.unlink(missing_ok=True)
+        _rollback_artifacts(created)
         raise
     return tuple(created)
 
 
 def _publish_artifact_pairs(
     pairs: list[tuple[Path, Path, Path, Path]],
-) -> None:
+) -> tuple[Path, ...]:
     created: list[Path] = []
     try:
         for staged_trace, staged_replay, trace_path, replay_path in pairs:
@@ -432,9 +436,9 @@ def _publish_artifact_pairs(
                 )
             )
     except BaseException:
-        for path in reversed(created):
-            path.unlink(missing_ok=True)
+        _rollback_artifacts(created)
         raise
+    return tuple(created)
 
 
 def evaluate_matchup(
@@ -539,6 +543,7 @@ def evaluate_matchup(
 
     evidence_summary: dict[str, Any] | None = None
     artifact_pairs: list[tuple[Path, Path, Path, Path]] = []
+    published_artifacts: tuple[Path, ...] = ()
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
@@ -613,7 +618,7 @@ def evaluate_matchup(
                         match["replay_path"] = str(replay_path)
             matches.append(match)
 
-        _publish_artifact_pairs(artifact_pairs)
+        published_artifacts = _publish_artifact_pairs(artifact_pairs)
 
         if capture_trace:
             evidence_summary = {
@@ -623,7 +628,11 @@ def evaluate_matchup(
             }
     finally:
         if staging_owner is not None:
-            staging_owner.cleanup()
+            try:
+                staging_owner.cleanup()
+            except BaseException:
+                _rollback_artifacts(published_artifacts)
+                raise
 
     totals = {"wins": 0, "losses": 0, "draws": 0}
     seat_results = {
@@ -671,7 +680,11 @@ def evaluate_matchup(
             _adaptive_diagnostic_aggregates(Path(source_run) if source_run is not None else None)
         )
     if output_path is not None:
-        atomic_write_json(Path(output_path), result)
+        try:
+            atomic_write_json(Path(output_path), result)
+        except BaseException:
+            _rollback_artifacts(published_artifacts)
+            raise
     return result
 
 
