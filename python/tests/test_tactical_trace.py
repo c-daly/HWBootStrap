@@ -24,6 +24,8 @@ def _unit(*, unit_id: int = 10, current_hp: int = 4) -> dict[str, object]:
         "Range": 4,
         "Moved": False,
         "Attacked": False,
+        "MovementSpentH": 2,
+        "MovementSpentV": 1,
     }
 
 
@@ -50,6 +52,10 @@ def _state(*, round_number: int, active_seat: int) -> dict[str, object]:
         "IsGameOver": False,
         "Winner": None,
         "ProductiveLegalActions": 3,
+        "ControlledHexes": [
+            {"Q": 1, "R": 0, "Controller": 1},
+            {"Q": 0, "R": 0, "Controller": 0},
+        ],
         "Seats": [_seat(seat=0, unit_id=10), _seat(seat=1, unit_id=20)],
     }
 
@@ -98,6 +104,7 @@ def canonical_payload() -> dict[str, object]:
             "id": 10, "q": 2, "r": 3, "current_hp": 4, "maximum_hp": 5,
             "point_cost": 7, "damage": 2, "defense": 1, "movement": 3,
             "vertical_movement": 1, "range": 4, "moved": False, "attacked": False,
+            "movement_spent_h": 2, "movement_spent_v": 1,
         }],
     }
     state_1_seat_1 = {
@@ -108,6 +115,10 @@ def canonical_payload() -> dict[str, object]:
     state_1_active_0 = {
         "round": 1, "active_seat": 0, "is_game_over": False, "winner": None,
         "productive_legal_actions": 3, "seats": [state_1_seat_0, state_1_seat_1],
+        "controlled_hexes": [
+            {"q": 0, "r": 0, "controller": 0},
+            {"q": 1, "r": 0, "controller": 1},
+        ],
     }
     state_1_active_1 = {**state_1_active_0, "active_seat": 1}
     state_2_active_0 = {**state_1_active_0, "round": 2}
@@ -302,3 +313,4 @@ def test_episode_trace_records_are_immutable_tuples() -> None:
     assert isinstance(parsed.transitions[0].before.seats[0].units, tuple)
     with pytest.raises(FrozenInstanceError):
         parsed.transitions[0].command.kind = "attack"  # type: ignore[misc]
+    assert isinstance(parsed.transitions[0].before.controlled_hexes, tuple)

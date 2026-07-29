@@ -21,6 +21,16 @@ namespace HexWars.Engine.Rl
             Winner = state.Winner == null ? (int?)null : (int)state.Winner.Value,
             ProductiveLegalActions = LegalMoves.For(state).Count(command => !(command is EndTurn)),
             Seats = new[] { ProjectSeat(state, PlayerId.Player0), ProjectSeat(state, PlayerId.Player1) },
+            ControlledHexes = state.Board.Tiles
+                .Select(tile => new { Cell = tile.Coord, Owner = state.Board.Controller(tile.Coord) })
+                .Where(item => item.Owner.HasValue)
+                .OrderBy(item => item.Cell.Q)
+                .ThenBy(item => item.Cell.R)
+                .Select(item => new TacticalTraceControl
+                {
+                    Q = item.Cell.Q, R = item.Cell.R, Controller = (int)item.Owner!.Value,
+                })
+                .ToArray(),
         };
 
         private static TacticalTraceSeat ProjectSeat(GameState state, PlayerId seat)
@@ -50,22 +60,32 @@ namespace HexWars.Engine.Rl
                         && TargetingService.CanTarget(state, attacker, target.Cell, target.Elevation))),
                 CanMove = units.Any(unit => unit.IsAlive
                     && (unit.Stats.Movement > 0 || unit.Stats.VerticalMovement > 0)),
-                Units = units.Select(unit => new TacticalTraceUnit
-                {
-                    Id = unit.Id,
-                    Q = unit.Cell.Q,
-                    R = unit.Cell.R,
-                    CurrentHp = unit.CurrentHp,
-                    MaximumHp = unit.Stats.Health,
-                    PointCost = unit.Stats.PointCost,
-                    Damage = unit.Stats.Damage,
-                    Defense = unit.Stats.Defense,
-                    Movement = unit.Stats.Movement,
-                    VerticalMovement = unit.Stats.VerticalMovement,
-                    Range = unit.Stats.Range,
-                    Moved = state.MovedUnitIds.Contains(unit.Id),
-                    Attacked = state.AttackedUnitIds.Contains(unit.Id),
-                }).ToArray(),
+                Units = units.Select(unit => ProjectUnit(state, unit)).ToArray(),
+            };
+        }
+
+        private static TacticalTraceUnit ProjectUnit(GameState state, Unit unit)
+        {
+            (int H, int V) spent = state.MovementSpent.TryGetValue(unit.Id, out var value)
+                ? value
+                : (0, 0);
+            return new TacticalTraceUnit
+            {
+                Id = unit.Id,
+                Q = unit.Cell.Q,
+                R = unit.Cell.R,
+                CurrentHp = unit.CurrentHp,
+                MaximumHp = unit.Stats.Health,
+                PointCost = unit.Stats.PointCost,
+                Damage = unit.Stats.Damage,
+                Defense = unit.Stats.Defense,
+                Movement = unit.Stats.Movement,
+                VerticalMovement = unit.Stats.VerticalMovement,
+                Range = unit.Stats.Range,
+                Moved = state.MovedUnitIds.Contains(unit.Id),
+                Attacked = state.AttackedUnitIds.Contains(unit.Id),
+                MovementSpentH = spent.H,
+                MovementSpentV = spent.V,
             };
         }
 
@@ -126,7 +146,16 @@ namespace HexWars.Engine.Rl
         public int? Winner { get; set; }
         public int ProductiveLegalActions { get; set; }
         public TacticalTraceSeat[] Seats { get; set; } = Array.Empty<TacticalTraceSeat>();
+        public TacticalTraceControl[] ControlledHexes { get; set; } = Array.Empty<TacticalTraceControl>();
     }
+
+    public sealed class TacticalTraceControl
+    {
+        public int Q { get; set; }
+        public int R { get; set; }
+        public int Controller { get; set; }
+    }
+
 
     public sealed class TacticalTraceSeat
     {
@@ -158,6 +187,8 @@ namespace HexWars.Engine.Rl
         public int Range { get; set; }
         public bool Moved { get; set; }
         public bool Attacked { get; set; }
+        public int MovementSpentH { get; set; }
+        public int MovementSpentV { get; set; }
     }
 
     public sealed class TacticalTraceCommand

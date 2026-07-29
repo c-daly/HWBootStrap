@@ -221,6 +221,8 @@ def _cycle_key(state: StateFrame) -> tuple[object, ...]:
                 unit.current_hp,
                 unit.moved,
                 unit.attacked,
+                unit.movement_spent_h,
+                unit.movement_spent_v,
             )
             for seat in state.seats
             for unit in seat.units
@@ -229,7 +231,13 @@ def _cycle_key(state: StateFrame) -> tuple[object, ...]:
     )
     return (
         state.active_seat,
-        tuple(seat.points for seat in state.seats),
+        tuple((seat.points, seat.destroyed_value) for seat in state.seats),
+        tuple(
+            sorted(
+                (control.q, control.r, control.controller)
+                for control in state.controlled_hexes
+            )
+        ),
         living_units,
     )
 

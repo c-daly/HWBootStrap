@@ -23,6 +23,8 @@ class UnitFrame:
     range: int
     moved: bool
     attacked: bool
+    movement_spent_h: int = 0
+    movement_spent_v: int = 0
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,13 @@ class SeatFrame:
 
 
 @dataclass(frozen=True)
+class ControlFrame:
+    q: int
+    r: int
+    controller: int
+
+
+@dataclass(frozen=True)
 class StateFrame:
     round: int
     active_seat: int
@@ -48,6 +57,7 @@ class StateFrame:
     winner: int | None
     productive_legal_actions: int
     seats: tuple[SeatFrame, SeatFrame]
+    controlled_hexes: tuple[ControlFrame, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,7 +139,10 @@ def _parse_state(value: Any, path: str) -> StateFrame:
     fields = _dto_fields(
         value,
         path,
-        ("Round", "ActiveSeat", "IsGameOver", "Winner", "ProductiveLegalActions", "Seats"),
+        (
+            "Round", "ActiveSeat", "IsGameOver", "Winner", "ProductiveLegalActions",
+            "Seats", "ControlledHexes",
+        ),
     )
     raw_seats = fields["Seats"]
     if not isinstance(raw_seats, list):
@@ -140,6 +153,17 @@ def _parse_state(value: Any, path: str) -> StateFrame:
     by_seat = {seat.seat: seat for seat in seats}
     if set(by_seat) != {0, 1} or len(by_seat) != 2:
         raise ValueError(f"{path}.seats must contain exactly 0 and 1")
+    raw_controlled_hexes = fields["ControlledHexes"]
+    if not isinstance(raw_controlled_hexes, list):
+        raise ValueError(f"{path}.controlled_hexes must be an array")
+    controlled_hexes = tuple(
+        _parse_control(item, f"{path}.controlled_hexes[{index}]")
+        for index, item in enumerate(raw_controlled_hexes)
+    )
+    control_coords = [(control.q, control.r) for control in controlled_hexes]
+    duplicate = next((coord for coord in control_coords if control_coords.count(coord) > 1), None)
+    if duplicate is not None:
+        raise ValueError(f"{path} has duplicate controlled hex {duplicate}")
     winner = _optional_seat(fields["Winner"], f"{path}.winner")
     return StateFrame(
         round=_non_negative_integer(fields["Round"], f"{path}.round"),
@@ -150,6 +174,16 @@ def _parse_state(value: Any, path: str) -> StateFrame:
             fields["ProductiveLegalActions"], f"{path}.productive_legal_actions"
         ),
         seats=(by_seat[0], by_seat[1]),
+        controlled_hexes=tuple(sorted(controlled_hexes, key=lambda item: (item.q, item.r))),
+    )
+
+
+def _parse_control(value: Any, path: str) -> ControlFrame:
+    fields = _dto_fields(value, path, ("Q", "R", "Controller"))
+    return ControlFrame(
+        q=_integer(fields["Q"], f"{path}.q"),
+        r=_integer(fields["R"], f"{path}.r"),
+        controller=_seat_number(fields["Controller"], f"{path}.controller"),
     )
 
 
@@ -201,6 +235,7 @@ def _parse_unit(value: Any, path: str) -> UnitFrame:
         (
             "Id", "Q", "R", "CurrentHp", "MaximumHp", "PointCost", "Damage",
             "Defense", "Movement", "VerticalMovement", "Range", "Moved", "Attacked",
+            "MovementSpentH", "MovementSpentV",
         ),
     )
     return UnitFrame(
@@ -219,6 +254,12 @@ def _parse_unit(value: Any, path: str) -> UnitFrame:
         range=_non_negative_integer(fields["Range"], f"{path}.range"),
         moved=_boolean(fields["Moved"], f"{path}.moved"),
         attacked=_boolean(fields["Attacked"], f"{path}.attacked"),
+        movement_spent_h=_non_negative_integer(
+            fields["MovementSpentH"], f"{path}.movement_spent_h"
+        ),
+        movement_spent_v=_non_negative_integer(
+            fields["MovementSpentV"], f"{path}.movement_spent_v"
+        ),
     )
 
 
@@ -342,6 +383,10 @@ def _state_dict(state: StateFrame) -> dict[str, Any]:
         "winner": state.winner,
         "productive_legal_actions": state.productive_legal_actions,
         "seats": [_seat_dict(seat) for seat in state.seats],
+        "controlled_hexes": [
+            {"q": item.q, "r": item.r, "controller": item.controller}
+            for item in state.controlled_hexes
+        ],
     }
 
 
@@ -376,4 +421,6 @@ def _unit_dict(unit: UnitFrame) -> dict[str, Any]:
         "range": unit.range,
         "moved": unit.moved,
         "attacked": unit.attacked,
+        "movement_spent_h": unit.movement_spent_h,
+        "movement_spent_v": unit.movement_spent_v,
     }

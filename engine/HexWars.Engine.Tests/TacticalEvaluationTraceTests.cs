@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using HexWars.Engine;
@@ -64,6 +65,30 @@ namespace HexWars.Engine.Tests
             Assert.That(seat.CurrentHitPoints, Is.EqualTo(9));
             Assert.That(seat.MaximumHitPoints, Is.EqualTo(14));
             Assert.That(seat.HealthAdjustedMaterial, Is.EqualTo(16.5d));
+        }
+
+        [Test]
+        public void Project_PreservesMovementExpenditureAndBoardControl()
+        {
+            GameState source = StateWithUnsortedDamagedUnits();
+            GameState state = new GameState(
+                source.Board.WithControl(new HexCoord(1, 0), PlayerId.Player1),
+                source.Config,
+                source.Players,
+                source.ActivePlayer,
+                source.Round,
+                source.NextEntityId,
+                movedUnitIds: new[] { 7 },
+                movementSpent: new Dictionary<int, (int H, int V)> { [7] = (2, 1) });
+
+            TacticalTraceState trace = TacticalEvaluationTrace.Project(
+                new DuelTransition(state, new EndTurn(PlayerId.Player0), state)).Before;
+
+            TacticalTraceUnit unit = trace.Seats[0].Units.Single(item => item.Id == 7);
+            Assert.That(unit.MovementSpentH, Is.EqualTo(2));
+            Assert.That(unit.MovementSpentV, Is.EqualTo(1));
+            Assert.That(trace.ControlledHexes.Select(item => (item.Q, item.R, item.Controller)),
+                Is.EqualTo(new[] { (1, 0, 1) }));
         }
 
         [Test]

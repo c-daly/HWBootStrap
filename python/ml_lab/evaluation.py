@@ -391,7 +391,7 @@ def _publish_artifact_pair(
     staged_replay: Path,
     trace_path: Path,
     replay_path: Path,
-) -> None:
+) -> tuple[Path, ...]:
     trace_exists = trace_path.exists()
     replay_exists = replay_path.exists()
     if trace_exists != replay_exists:
@@ -402,7 +402,7 @@ def _publish_artifact_pair(
         if _files_identical(staged_trace, trace_path) and _files_identical(
             staged_replay, replay_path
         ):
-            return
+            return ()
         raise FileExistsError(
             f"artifact pair collision: {trace_path} and {replay_path}"
         )
@@ -413,6 +413,24 @@ def _publish_artifact_pair(
         created.append(trace_path)
         _copy_file_exclusive(staged_replay, replay_path)
         created.append(replay_path)
+    except BaseException:
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        raise
+    return tuple(created)
+
+
+def _publish_artifact_pairs(
+    pairs: list[tuple[Path, Path, Path, Path]],
+) -> None:
+    created: list[Path] = []
+    try:
+        for staged_trace, staged_replay, trace_path, replay_path in pairs:
+            created.extend(
+                _publish_artifact_pair(
+                    staged_trace, staged_replay, trace_path, replay_path
+                )
+            )
     except BaseException:
         for path in reversed(created):
             path.unlink(missing_ok=True)
@@ -520,6 +538,7 @@ def evaluate_matchup(
             client.close()
 
     evidence_summary: dict[str, Any] | None = None
+    artifact_pairs: list[tuple[Path, Path, Path, Path]] = []
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
@@ -587,15 +606,14 @@ def evaluate_matchup(
                             raise RuntimeError(
                                 "requested duel replay was not saved"
                             )
-                        _publish_artifact_pair(
-                            staged_trace,
-                            staged_replay,
-                            trace_path,
-                            replay_path,
+                        artifact_pairs.append(
+                            (staged_trace, staged_replay, trace_path, replay_path)
                         )
                         match["trace_path"] = str(trace_path)
                         match["replay_path"] = str(replay_path)
             matches.append(match)
+
+        _publish_artifact_pairs(artifact_pairs)
 
         if capture_trace:
             evidence_summary = {

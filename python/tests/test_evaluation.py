@@ -880,6 +880,48 @@ def test_retained_artifact_pair_rejects_nonidentical_collision_without_changes(
     assert replay_path.read_bytes() == replay_sentinel
 
 
+def test_evaluation_rolls_back_earlier_pairs_when_later_publication_fails(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "evaluation-transaction-evidence"
+    output_path = tmp_path / "evaluation-transaction.json"
+    first_stem = "match-000000-seed-83500-candidate-seat-0"
+    second_stem = "match-000001-seed-83501-candidate-seat-0"
+    first_trace = evidence_dir / "traces" / f"{first_stem}.json"
+    first_replay = evidence_dir / "replays" / f"{first_stem}.replay"
+    second_trace = evidence_dir / "traces" / f"{second_stem}.json"
+    second_replay = evidence_dir / "replays" / f"{second_stem}.replay"
+    trace_sentinel = b"prior trace\n"
+    replay_sentinel = b"prior replay\n"
+    second_trace.parent.mkdir(parents=True)
+    second_replay.parent.mkdir(parents=True)
+    second_trace.write_bytes(trace_sentinel)
+    second_replay.write_bytes(replay_sentinel)
+
+    with pytest.raises(FileExistsError, match="artifact pair collision"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-transaction", 64),
+            _model_controller(tmp_path, contract, "opponent-transaction", 96),
+            games=2,
+            seed_start=83_500,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1, -1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not first_trace.exists()
+    assert not first_replay.exists()
+    assert second_trace.read_bytes() == trace_sentinel
+    assert second_replay.read_bytes() == replay_sentinel
+    assert not output_path.exists()
+
+
 def test_retained_artifact_pair_rejects_half_pair_without_changes(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

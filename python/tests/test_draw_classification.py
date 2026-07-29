@@ -12,6 +12,7 @@ from ml_lab.draw_classification import (
 )
 from ml_lab.tactical_trace import (
     CommandFrame,
+    ControlFrame,
     EpisodeTrace,
     SeatFrame,
     StateFrame,
@@ -20,7 +21,14 @@ from ml_lab.tactical_trace import (
 )
 
 
-def _units(*, seat: int, alive: int, hit_points: int, marker: int) -> tuple[UnitFrame, ...]:
+def _units(
+    *,
+    seat: int,
+    alive: int,
+    hit_points: int,
+    marker: int,
+    movement_spent: tuple[int, int],
+) -> tuple[UnitFrame, ...]:
     if alive == 0:
         return ()
     quotient, remainder = divmod(hit_points, alive)
@@ -39,6 +47,8 @@ def _units(*, seat: int, alive: int, hit_points: int, marker: int) -> tuple[Unit
             range=2,
             moved=False,
             attacked=False,
+            movement_spent_h=movement_spent[0],
+            movement_spent_v=movement_spent[1],
         )
         for index in range(alive)
     )
@@ -56,6 +66,8 @@ def _state(
     active_seat: int = 0,
     productive_actions: int = 0,
     marker: int = 0,
+    movement_spent: tuple[int, int] = (0, 0),
+    controlled_hexes: tuple[ControlFrame, ...] = (),
 ) -> StateFrame:
     seats = tuple(
         SeatFrame(
@@ -74,6 +86,7 @@ def _state(
                 alive=alive[seat],
                 hit_points=hit_points[seat],
                 marker=marker,
+                movement_spent=movement_spent,
             ),
         )
         for seat in (0, 1)
@@ -85,6 +98,7 @@ def _state(
         winner=None,
         productive_legal_actions=productive_actions,
         seats=seats,  # type: ignore[arg-type]
+        controlled_hexes=controlled_hexes,
     )
 
 
@@ -166,6 +180,44 @@ def test_episode_summary_attributes_metrics_to_command_issuer() -> None:
     assert summary.maximum_state_repetition == 1
 
 
+def test_episode_summary_distinguishes_incremental_movement_expenditure() -> None:
+    trace = _trace(
+        (
+            _state(round_number=1, movement_spent=(0, 0)),
+            _state(round_number=1, movement_spent=(1, 0)),
+        ),
+        (("move", 0),),
+    )
+
+    assert summarize_episode(trace, candidate_seat=0).maximum_state_repetition == 1
+
+
+def test_episode_summary_distinguishes_board_control() -> None:
+    trace = _trace(
+        (
+            _state(round_number=1, controlled_hexes=(ControlFrame(q=0, r=0, controller=0),)),
+            _state(round_number=1, controlled_hexes=(ControlFrame(q=0, r=0, controller=1),)),
+        ),
+        (("capture", 0),),
+    )
+
+    assert summarize_episode(trace, candidate_seat=0).maximum_state_repetition == 1
+
+
+def test_episode_summary_canonicalizes_board_control_order() -> None:
+    controls = (
+        ControlFrame(q=0, r=0, controller=0),
+        ControlFrame(q=1, r=0, controller=1),
+    )
+    trace = _trace(
+        (
+            _state(round_number=1, controlled_hexes=controls),
+            _state(round_number=1, controlled_hexes=tuple(reversed(controls))),
+        ),
+        (("capture", 0),),
+    )
+
+    assert summarize_episode(trace, candidate_seat=0).maximum_state_repetition == 2
 def test_zero_initial_material_uses_one_as_normalization_denominator() -> None:
     trace = _trace(
         (_state(round_number=1, material=(0.0, 0.0)), _state(round_number=1, material=(0.4, 0.0))),
