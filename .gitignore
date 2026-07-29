@@ -112,6 +112,11 @@ python/wandb/
 python/events.out.tfevents.*
 /replays/*.replay
 
+# Generated imitation-dataset evidence. Keep any hand-authored fixtures/source below datasets trackable.
+/python/datasets/annihilation-imitation-v1/manifest.json
+/python/datasets/annihilation-imitation-v1/games.jsonl
+/python/datasets/annihilation-imitation-v1/shards/
+/python/datasets/annihilation-imitation-v1/replays/
 # Vendor asset kits: local-only, never committed (1.2GB model kit; the game copies the few
 # files it uses into Assets/HexWars/Audio, which IS tracked). Unity crash-recovery snapshots too.
 Assets/Creepy_Cat/
