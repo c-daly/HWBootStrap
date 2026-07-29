@@ -509,9 +509,6 @@ def evaluate_matchup(
                         os.replace(staged_replay, replay_path)
                         match["trace_path"] = str(trace_path)
                         match["replay_path"] = str(replay_path)
-                    else:
-                        trace_path.unlink(missing_ok=True)
-                        replay_path.unlink(missing_ok=True)
             matches.append(match)
 
         if capture_trace:

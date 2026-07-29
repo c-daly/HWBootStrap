@@ -766,6 +766,41 @@ def test_evaluation_writes_all_draws_and_first_controls_per_candidate_seat(
     assert sorted(path.name for path in evidence_dir.iterdir()) == ["replays", "traces"]
 
 
+def test_evaluation_preserves_preexisting_unretained_destinations(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "existing-evidence"
+    stem = "match-000001-seed-81001-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b'{"preexisting":"trace"}\n'
+    replay_sentinel = b"preexisting replay\n"
+    trace_path.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+    replay_path.write_bytes(replay_sentinel)
+
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-sentinel", 64),
+        _model_controller(tmp_path, contract, "opponent-sentinel", 96),
+        games=2,
+        seed_start=81_000,
+        both_seats=False,
+        workers=1,
+        client_factory=lambda worker: FakeDuelClient(iter([0, 0]), worker),
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        evidence_dir=evidence_dir,
+        capture_trace=True,
+    )
+
+    assert result["matches"][0]["trace_path"] is not None
+    assert result["matches"][1]["trace_path"] is None
+    assert trace_path.read_bytes() == trace_sentinel
+    assert replay_path.read_bytes() == replay_sentinel
+
+
 def test_trace_capture_without_directory_returns_evidence_without_replay_paths(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
