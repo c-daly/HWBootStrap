@@ -19,6 +19,7 @@ namespace HexWars.Engine.Rl
         private readonly TacticalV2Layout _layout;
         private readonly List<Command> _log = new List<Command>();
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
+        private readonly IDuelTransitionSink _transitionSink;
 
         private GameState _start = null!;
         private GameState _state = null!;
@@ -31,11 +32,14 @@ namespace HexWars.Engine.Rl
         private float _armyValue;
         private int _steps;
 
-        public TacticalV2DuelEnv(TacticalV2Config config)
+        public TacticalV2DuelEnv(
+            TacticalV2Config config,
+            IDuelTransitionSink? transitionSink = null)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
             _cfg = config;
             _layout = new TacticalV2Layout(_cfg);
+            _transitionSink = transitionSink ?? NullDuelTransitionSink.Instance;
         }
 
         public TacticalV2Config Config => _cfg;
@@ -64,6 +68,7 @@ namespace HexWars.Engine.Rl
             _steps = 0;
             _log.Clear();
             _transitions.Clear();
+            _transitionSink.Reset(_state);
             AdvancePastInternal();
             _prevAdv = Advantage();
             _armyValue = RewardShaping.PositionValue(_state, _learner, _cfg.PointsWeight);
@@ -131,7 +136,9 @@ namespace HexWars.Engine.Rl
 
             _state = r.NewState;
             _log.Add(cmd);
-            if (CaptureTransitions) _transitions.Add(new DuelTransition(before, cmd, _state));
+            var transition = new DuelTransition(before, cmd, _state);
+            _transitionSink.Accepted(transition);
+            if (CaptureTransitions) _transitions.Add(transition);
             _slots0.ReleaseDead(_state, PlayerId.Player0);
             _slots1.ReleaseDead(_state, PlayerId.Player1);
             if (cmd is DeployUnit deploy)

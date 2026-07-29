@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from io import StringIO
@@ -1127,8 +1128,93 @@ def test_evaluate_json_supports_arbitrary_models_reciprocal_seats_and_output(
             "workers": 2,
             "server_cmd": ["dotnet", "fake-server.dll"],
             "output_path": output,
+            "environment": None,
+            "capture_trace": False,
+            "evidence_dir": None,
         }
     ]
+
+
+def test_evidence_directory_enables_trace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_controllers(*args, **kwargs):
+        captured.update(kwargs)
+        return {"wins": 0, "losses": 0, "draws": 1, "games": 1}
+
+    monkeypatch.setattr(cli_module, "evaluate_controllers", fake_evaluate_controllers)
+    assert cli_module.main(
+        [
+            "evaluate",
+            "--p0",
+            "greedy",
+            "--p1",
+            "random",
+            "--games",
+            "1",
+            "--environment",
+            "tactical-v2",
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+        ],
+        stdout=StringIO(),
+    ) == 0
+
+    assert captured["capture_trace"] is True
+    assert captured["evidence_dir"] == tmp_path / "evidence"
+    assert captured["environment"] == "tactical-v2"
+
+
+def test_explicit_trace_capture_does_not_require_evidence_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_controllers(*args, **kwargs):
+        captured.update(kwargs)
+        return {"wins": 1, "losses": 0, "draws": 0, "games": 1}
+
+    monkeypatch.setattr(cli_module, "evaluate_controllers", fake_evaluate_controllers)
+    assert cli_module.main(
+        [
+            "evaluate",
+            "--p0",
+            "greedy",
+            "--p1",
+            "random",
+            "--games",
+            "1",
+            "--capture-trace",
+        ],
+        stdout=StringIO(),
+    ) == 0
+
+    assert captured["capture_trace"] is True
+    assert captured["evidence_dir"] is None
+    assert captured["environment"] is None
+
+
+def test_module_entrypoint_renders_evaluate_help() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ml_lab.cli",
+            "evaluate",
+            "--help",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--capture-trace" in completed.stdout
+    assert "--evidence-dir" in completed.stdout
+    assert "{tactical-v1,tactical-v2,adaptive-v1}" in completed.stdout
 
 
 def test_benchmark_json_reports_headless_protocol_metrics(

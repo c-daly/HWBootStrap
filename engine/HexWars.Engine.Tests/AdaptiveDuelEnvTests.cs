@@ -635,6 +635,157 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV2GymServer_TraceIsOptInAndSeparateFromResetAndStepPayloads()
+        {
+            using var server = new ServerProcess("--environment", "tactical-v2");
+
+            using JsonDocument enabled = server.Exchange(new { cmd = "duel_trace_enable", enabled = true });
+            Assert.That(enabled.RootElement.GetProperty("enabled").GetBoolean(), Is.True);
+
+            using JsonDocument spaces = server.Exchange(new { cmd = "spaces" });
+            Assert.That(spaces.RootElement.TryGetProperty("trace", out _), Is.False);
+            using JsonDocument reset = server.Exchange(new { cmd = "reset", seed = 41 });
+            Assert.That(reset.RootElement.TryGetProperty("trace", out _), Is.False);
+            int trainingAction = reset.RootElement.GetProperty("mask").EnumerateArray()
+                .Select((item, index) => (item, index)).First(pair => pair.item.GetBoolean()).index;
+            using JsonDocument step = server.Exchange(new { cmd = "step", action = trainingAction });
+            Assert.That(step.RootElement.TryGetProperty("trace", out _), Is.False);
+
+            using JsonDocument duelReset = server.Exchange(new { cmd = "duel_reset", seed = 42 });
+            Assert.That(duelReset.RootElement.TryGetProperty("trace", out _), Is.False);
+            int duelAction = duelReset.RootElement.GetProperty("mask").EnumerateArray()
+                .Select((item, index) => (item, index)).First(pair => pair.item.GetBoolean()).index;
+            using JsonDocument duelStep = server.Exchange(new { cmd = "duel_step", action = duelAction });
+            Assert.That(duelStep.RootElement.TryGetProperty("trace", out _), Is.False);
+
+            using JsonDocument resetClearsTrace = server.Exchange(new { cmd = "duel_reset", seed = 43 });
+            Assert.That(resetClearsTrace.RootElement.TryGetProperty("trace", out _), Is.False);
+            using JsonDocument emptyAfterReset = server.Exchange(new { cmd = "duel_trace_drain" });
+            Assert.That(emptyAfterReset.RootElement.GetProperty("schema_version").GetInt32(), Is.EqualTo(1));
+            Assert.That(emptyAfterReset.RootElement.GetProperty("transitions").GetArrayLength(), Is.Zero);
+
+            using JsonDocument traceProducingReset = server.Exchange(new
+            {
+                cmd = "duel_reset", seed = 44, p0 = "greedy", p1 = "greedy", learner = 0,
+            });
+            Assert.That(traceProducingReset.RootElement.TryGetProperty("trace", out _), Is.False);
+            using JsonDocument trace = server.Exchange(new { cmd = "duel_trace_drain" });
+            Assert.That(trace.RootElement.GetProperty("schema_version").GetInt32(), Is.EqualTo(1));
+            Assert.That(trace.RootElement.GetProperty("transitions").GetArrayLength(), Is.GreaterThan(0));
+            using JsonDocument emptyAfterDrain = server.Exchange(new { cmd = "duel_trace_drain" });
+            Assert.That(emptyAfterDrain.RootElement.GetProperty("transitions").GetArrayLength(), Is.Zero);
+
+            using JsonDocument pending = server.Exchange(new
+            {
+                cmd = "duel_reset", seed = 45, p0 = "greedy", p1 = "greedy", learner = 0,
+            });
+            using JsonDocument disabled = server.Exchange(new { cmd = "duel_trace_enable", enabled = false });
+            Assert.That(disabled.RootElement.GetProperty("enabled").GetBoolean(), Is.False);
+            using JsonDocument emptyAfterDisable = server.Exchange(new { cmd = "duel_trace_drain" });
+            Assert.That(emptyAfterDisable.RootElement.GetProperty("schema_version").GetInt32(), Is.EqualTo(1));
+            Assert.That(emptyAfterDisable.RootElement.GetProperty("transitions").GetArrayLength(), Is.Zero);
+        }
+
+        [Test]
+        public void TacticalV2GymServer_TraceCaptureIsBehaviorallyPassiveAndReplayMatchesFinalState()
+        {
+            string tracedReplayPath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "tactical-v2-traced-" + Guid.NewGuid().ToString("N") + ".replay");
+            string untracedReplayPath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "tactical-v2-untraced-" + Guid.NewGuid().ToString("N") + ".replay");
+            try
+            {
+                using var server = new ServerProcess("--environment", "tactical-v2");
+                using JsonDocument enabled = server.Exchange(new
+                {
+                    cmd = "duel_trace_enable", enabled = true,
+                });
+                Assert.That(enabled.RootElement.GetProperty("enabled").GetBoolean(), Is.True);
+
+                using JsonDocument tracedReset = server.Exchange(new
+                {
+                    cmd = "duel_reset", seed = 137, p0 = "greedy", p1 = "random", learner = 0,
+                });
+                Assert.That(tracedReset.RootElement.GetProperty("terminated").GetBoolean(), Is.True);
+                using JsonDocument trace = server.Exchange(new { cmd = "duel_trace_drain" });
+                int tracedTransitionCount = trace.RootElement.GetProperty("transitions").GetArrayLength();
+                Assert.That(tracedTransitionCount, Is.GreaterThan(0));
+
+                using JsonDocument tracedSaved = server.Exchange(new
+                {
+                    cmd = "duel_save", path = tracedReplayPath,
+                });
+                Assert.That(tracedSaved.RootElement.GetProperty("saved").GetString(),
+                    Is.EqualTo(tracedReplayPath));
+                ReplayData tracedData = ReplayFile.Read(File.ReadAllText(tracedReplayPath));
+                var tracedReplay = new Replay(tracedData.Start, tracedData.Commands);
+                Assert.That(tracedReplay.Final.IsGameOver, Is.True);
+                Assert.That(tracedTransitionCount, Is.EqualTo(tracedData.Commands.Count));
+                JsonElement tracedWinner = tracedReset.RootElement.GetProperty("winner");
+                Assert.That(
+                    tracedWinner.ValueKind == JsonValueKind.Null
+                        ? (PlayerId?)null
+                        : (PlayerId)tracedWinner.GetInt32(),
+                    Is.EqualTo(tracedReplay.Final.Winner));
+
+                using JsonDocument disabled = server.Exchange(new
+                {
+                    cmd = "duel_trace_enable", enabled = false,
+                });
+                Assert.That(disabled.RootElement.GetProperty("enabled").GetBoolean(), Is.False);
+                using JsonDocument untracedReset = server.Exchange(new
+                {
+                    cmd = "duel_reset", seed = 137, p0 = "greedy", p1 = "random", learner = 0,
+                });
+                Assert.That(untracedReset.RootElement.GetProperty("terminated").GetBoolean(), Is.True);
+                using JsonDocument noTrace = server.Exchange(new { cmd = "duel_trace_drain" });
+                Assert.That(noTrace.RootElement.GetProperty("transitions").GetArrayLength(), Is.Zero);
+
+                using JsonDocument untracedSaved = server.Exchange(new
+                {
+                    cmd = "duel_save", path = untracedReplayPath,
+                });
+                Assert.That(untracedSaved.RootElement.GetProperty("saved").GetString(),
+                    Is.EqualTo(untracedReplayPath));
+                ReplayData untracedData = ReplayFile.Read(File.ReadAllText(untracedReplayPath));
+                var untracedReplay = new Replay(untracedData.Start, untracedData.Commands);
+                Assert.That(untracedReplay.Final.IsGameOver, Is.True);
+                JsonElement untracedWinner = untracedReset.RootElement.GetProperty("winner");
+                Assert.That(
+                    untracedWinner.ValueKind == JsonValueKind.Null
+                        ? (PlayerId?)null
+                        : (PlayerId)untracedWinner.GetInt32(),
+                    Is.EqualTo(untracedReplay.Final.Winner));
+
+                Assert.That(untracedData.Commands, Is.EqualTo(tracedData.Commands),
+                    "trace capture must not change accepted commands");
+                Assert.That(untracedReplay.Final.Winner, Is.EqualTo(tracedReplay.Final.Winner));
+                Assert.That(
+                    ReplayFile.Write(untracedReplay.Final, Array.Empty<Command>()),
+                    Is.EqualTo(ReplayFile.Write(tracedReplay.Final, Array.Empty<Command>())),
+                    "trace capture must not change the reconstructed final state");
+            }
+            finally
+            {
+                if (File.Exists(tracedReplayPath)) File.Delete(tracedReplayPath);
+                if (File.Exists(untracedReplayPath)) File.Delete(untracedReplayPath);
+            }
+        }
+
+        [TestCase("duel_trace_enable")]
+        [TestCase("duel_trace_drain")]
+        public void GymServer_RejectsTraceRpcOutsideTacticalV2(string command)
+        {
+            using var server = new ServerProcess("--environment", "adaptive-v1");
+
+            string error = server.ExchangeFailure(command == "duel_trace_enable"
+                ? new { cmd = command, enabled = true }
+                : new { cmd = command });
+
+            Assert.That(error, Does.Contain("duel trace is supported only for tactical-v2"));
+        }
+
+        [Test]
         public void GymServer_RejectsTacticalV2ScenarioWithMismatchedCounts()
         {
             string scenario = WriteTacticalV2Scenario(startingUnitCount: 4, maxControllableUnits: 6);
@@ -960,6 +1111,15 @@ namespace HexWars.Engine.Tests
                 if (line == null)
                     Assert.Fail($"GymServer exited without a reply: {_process.StandardError.ReadToEnd()}");
                 return JsonDocument.Parse(line!);
+            }
+
+            public string ExchangeFailure(object request)
+            {
+                _process.StandardInput.WriteLine(JsonSerializer.Serialize(request));
+                _process.StandardInput.Flush();
+                Assert.That(_process.StandardOutput.ReadLine(), Is.Null);
+                Assert.That(_process.WaitForExit(5000), Is.True, "GymServer should reject unsupported trace RPCs");
+                return _process.StandardError.ReadToEnd();
             }
 
             public void Dispose()

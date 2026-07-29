@@ -8,8 +8,10 @@ import json
 import csv
 import subprocess
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from math import sqrt
 from statistics import NormalDist
 from pathlib import Path
@@ -27,10 +29,26 @@ from .controllers import (
     predict,
     validate_inference_input,
 )
-from hexwars_gym.env import no_window_creationflags, parse_contract
+from hexwars_gym.env import (
+    SUPPORTED_ENVIRONMENTS,
+    no_window_creationflags,
+    parse_contract,
+)
 from .contracts import ADAPTIVE_MONITOR_HEADER
-from .protocol import validate_json_object, validate_step_payload
+from .draw_classification import (
+    DrawClassification,
+    EpisodeSummary,
+    classify_draw,
+    summarize_episode,
+)
+from .protocol import (
+    validate_json_object,
+    validate_replay_save_response,
+    validate_step_payload,
+    validate_trace_enable_response,
+)
 from .io import atomic_write_json, read_json
+from .tactical_trace import EpisodeTrace
 
 
 DEFAULT_HELD_OUT_SEED = 1_000_000
@@ -84,6 +102,8 @@ class DuelClient:
     def __init__(
         self, server_cmd: Sequence[str], *, environment: str = "tactical-v1"
     ) -> None:
+        if environment not in SUPPORTED_ENVIRONMENTS:
+            raise ValueError(f"unsupported environment {environment!r}")
         self.proc = subprocess.Popen(
             list(server_cmd) + ["--environment", environment],
             stdin=subprocess.PIPE,
@@ -133,6 +153,20 @@ class DuelClient:
             action_size=self.contract.action_size,
         )
         return response
+
+    def enable_trace(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise ValueError("duel trace enabled flag must be boolean")
+        response = self._rpc({"cmd": "duel_trace_enable", "enabled": enabled})
+        validate_trace_enable_response(response, expected=enabled)
+
+    def drain_trace(self) -> EpisodeTrace:
+        return EpisodeTrace.from_payload(self._rpc({"cmd": "duel_trace_drain"}))
+
+    def save_replay(self, path: Path) -> Path:
+        path = Path(path)
+        response = self._rpc({"cmd": "duel_save", "path": str(path)})
+        return validate_replay_save_response(response, expected=path)
 
     def close(self) -> None:
         proc = getattr(self, "proc", None)
@@ -200,22 +234,42 @@ def _validate_against_client(
         raise ValueError("controller action size does not match duel server")
 
 
+@dataclass(frozen=True)
+class PlayedGame:
+    winner: int
+    terminated: bool
+    truncated: bool
+    summary: dict[str, Any] | None
+    classification: dict[str, Any] | None
+    staged_trace_path: Path | None
+    staged_replay_path: Path | None
+
+
 def _play_game(
     client: Any,
     seats: tuple[ResolvedController, ResolvedController],
     seed: int,
     predict_action: Callable[[Any, str, np.ndarray, np.ndarray], int],
     prediction_locks: dict[int, Lock],
-) -> int:
+    *,
+    candidate_seat: int,
+    capture_trace: bool = False,
+    trace_path: Path | None = None,
+    replay_path: Path | None = None,
+) -> PlayedGame:
+    if capture_trace:
+        client.enable_trace(True)
     state = client.reset(
         seed=seed,
         p0=seats[0].server_controller,
         p1=seats[1].server_controller,
     )
     decisions = 0
+    forced_truncation = False
     while not bool(state.get("terminated")) and not bool(state.get("truncated")):
         if decisions >= MAX_DECISIONS_PER_GAME:
-            return -1
+            forced_truncation = True
+            break
         seat = state.get("seat")
         if isinstance(seat, bool) or not isinstance(seat, int) or seat not in {0, 1}:
             raise RuntimeError("duel server returned an invalid acting seat")
@@ -233,8 +287,158 @@ def _play_game(
             raise RuntimeError("controller selected an action excluded by the action mask")
         state = client.step(action)
         decisions += 1
+
     winner = state.get("winner", -1)
-    return winner if isinstance(winner, int) and not isinstance(winner, bool) and winner in {0, 1} else -1
+    winner = (
+        winner
+        if isinstance(winner, int)
+        and not isinstance(winner, bool)
+        and winner in {0, 1}
+        else -1
+    )
+    terminated = bool(state.get("terminated"))
+    truncated = bool(state.get("truncated")) or forced_truncation
+    summary_payload = None
+    classification_payload = None
+    if capture_trace:
+        trace = client.drain_trace()
+        if not trace.transitions:
+            raise RuntimeError("requested empty trace")
+        summary_payload = _summary_payload(summarize_episode(trace, candidate_seat))
+        if winner not in {0, 1}:
+            classification_payload = _classification_payload(
+                classify_draw(
+                    trace,
+                    candidate_seat=candidate_seat,
+                    terminated=terminated,
+                    truncated=truncated,
+                    winner=None,
+                )
+            )
+        if trace_path is not None:
+            atomic_write_json(trace_path, trace.to_dict())
+        if replay_path is not None:
+            client.save_replay(replay_path)
+    return PlayedGame(
+        winner=winner,
+        terminated=terminated,
+        truncated=truncated,
+        summary=summary_payload,
+        classification=classification_payload,
+        staged_trace_path=trace_path,
+        staged_replay_path=replay_path,
+    )
+
+
+def _evidence_stem(index: int, seed: int, candidate_seat: int) -> str:
+    return f"match-{index:06d}-seed-{seed}-candidate-seat-{candidate_seat}"
+
+
+def _summary_payload(summary: EpisodeSummary) -> dict[str, Any]:
+    return {
+        "command_count": summary.command_count,
+        "round_count": summary.round_count,
+        "damage_by_seat": list(summary.damage_by_seat),
+        "kills_by_seat": list(summary.kills_by_seat),
+        "end_turns_by_seat": list(summary.end_turns_by_seat),
+        "wasted_end_turns_by_seat": list(summary.wasted_end_turns_by_seat),
+        "peak_normalized_advantage": summary.peak_normalized_advantage,
+        "final_normalized_advantage": summary.final_normalized_advantage,
+        "maximum_state_repetition": summary.maximum_state_repetition,
+    }
+
+
+def _classification_payload(
+    classification: DrawClassification,
+) -> dict[str, Any]:
+    return {
+        "primary": classification.primary.value,
+        "flags": [flag.value for flag in classification.flags],
+        "evidence": dict(classification.evidence),
+    }
+
+
+def _files_identical(first: Path, second: Path) -> bool:
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as first_file, second.open("rb") as second_file:
+        while True:
+            first_chunk = first_file.read(1024 * 1024)
+            second_chunk = second_file.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def _copy_file_exclusive(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with source.open("rb") as source_file, destination.open("xb") as target_file:
+            created = True
+            shutil.copyfileobj(source_file, target_file)
+            target_file.flush()
+            os.fsync(target_file.fileno())
+    except BaseException:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _rollback_artifacts(paths: Sequence[Path]) -> None:
+    for path in reversed(paths):
+        path.unlink(missing_ok=True)
+
+
+def _publish_artifact_pair(
+    staged_trace: Path,
+    staged_replay: Path,
+    trace_path: Path,
+    replay_path: Path,
+) -> tuple[Path, ...]:
+    trace_exists = trace_path.exists()
+    replay_exists = replay_path.exists()
+    if trace_exists != replay_exists:
+        raise FileExistsError(
+            f"incomplete artifact pair: {trace_path} and {replay_path}"
+        )
+    if trace_exists:
+        if _files_identical(staged_trace, trace_path) and _files_identical(
+            staged_replay, replay_path
+        ):
+            return ()
+        raise FileExistsError(
+            f"artifact pair collision: {trace_path} and {replay_path}"
+        )
+
+    created: list[Path] = []
+    try:
+        _copy_file_exclusive(staged_trace, trace_path)
+        created.append(trace_path)
+        _copy_file_exclusive(staged_replay, replay_path)
+        created.append(replay_path)
+    except BaseException:
+        _rollback_artifacts(created)
+        raise
+    return tuple(created)
+
+
+def _publish_artifact_pairs(
+    pairs: list[tuple[Path, Path, Path, Path]],
+) -> tuple[Path, ...]:
+    created: list[Path] = []
+    try:
+        for staged_trace, staged_replay, trace_path, replay_path in pairs:
+            created.extend(
+                _publish_artifact_pair(
+                    staged_trace, staged_replay, trace_path, replay_path
+                )
+            )
+    except BaseException:
+        _rollback_artifacts(created)
+        raise
+    return tuple(created)
 
 
 def evaluate_matchup(
@@ -249,6 +453,8 @@ def evaluate_matchup(
     predict_action: Callable[[Any, str, np.ndarray, np.ndarray], int] = predict,
     output_path: Path | None = None,
     confidence: float = 0.95,
+    evidence_dir: Path | None = None,
+    capture_trace: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a fixed controller identity on deterministic held-out seeds."""
     if games <= 0:
@@ -265,15 +471,25 @@ def evaluate_matchup(
         for controller in (candidate, opponent)
         if controller.model is not None
     }
+    evidence_root = Path(evidence_dir) if evidence_dir is not None else None
+    staging_owner: Any | None = None
+    staging_dir: Path | None = None
+    if capture_trace and evidence_root is not None:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        staging_owner = tempfile.TemporaryDirectory(
+            prefix=".evaluation-staging-",
+            dir=evidence_root,
+        )
+        staging_dir = Path(staging_owner.name)
 
     def run_partition(
         worker_index: int,
-    ) -> list[tuple[int, dict[str, Any]]]:
+    ) -> list[tuple[int, dict[str, Any], PlayedGame]]:
         client = client_factory(worker_index)
         try:
             _validate_against_client(candidate, client)
             _validate_against_client(opponent, client)
-            partition: list[tuple[int, dict[str, Any]]] = []
+            partition: list[tuple[int, dict[str, Any], PlayedGame]] = []
             for index in range(worker_index, len(schedule), workers):
                 seed, candidate_seat = schedule[index]
                 seats = (
@@ -281,12 +497,31 @@ def evaluate_matchup(
                     if candidate_seat == 0
                     else (opponent, candidate)
                 )
-                winner = _play_game(
-                    client, seats, seed, predict_action, prediction_locks
+                stem = _evidence_stem(index, seed, candidate_seat)
+                staged_trace = (
+                    staging_dir / f"{stem}.json"
+                    if staging_dir is not None
+                    else None
                 )
-                if winner == candidate_seat:
+                staged_replay = (
+                    staging_dir / f"{stem}.replay"
+                    if staging_dir is not None
+                    else None
+                )
+                played = _play_game(
+                    client,
+                    seats,
+                    seed,
+                    predict_action,
+                    prediction_locks,
+                    candidate_seat=candidate_seat,
+                    capture_trace=capture_trace,
+                    trace_path=staged_trace,
+                    replay_path=staged_replay,
+                )
+                if played.winner == candidate_seat:
                     outcome = "win"
-                elif winner in {0, 1}:
+                elif played.winner in {0, 1}:
                     outcome = "loss"
                 else:
                     outcome = "draw"
@@ -296,69 +531,164 @@ def evaluate_matchup(
                         {
                             "seed": seed,
                             "candidate_seat": candidate_seat,
-                            "winner": winner,
+                            "winner": played.winner,
                             "outcome": outcome,
                         },
+                        played,
                     )
                 )
             return partition
         finally:
             client.close()
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(run_partition, index) for index in range(workers)]
-        indexed_matches = [
-            indexed
-            for future in futures
-            for indexed in future.result()
-        ]
-    matches = [match for _, match in sorted(indexed_matches, key=lambda item: item[0])]
-    totals = {"wins": 0, "losses": 0, "draws": 0}
-    seat_results = {
-        "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
-        "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
-    }
-    for match in matches:
-        counter = f"{match['outcome']}s" if match["outcome"] != "loss" else "losses"
-        totals[counter] += 1
-        seat_key = (
-            "candidate_as_p0"
-            if match["candidate_seat"] == 0
-            else "candidate_as_p1"
-        )
-        seat_results[seat_key][counter] += 1
-    total_games = len(matches)
-    result = {
-        "schema_version": 1,
-        "generated_at": utc_now(),
-        "candidate": controller_identity(candidate),
-        "opponent": controller_identity(opponent),
-        "seed_start": seed_start,
-        "seeds": list(range(seed_start, seed_start + games)),
-        "reciprocal": both_seats,
-        "games": total_games,
-        **totals,
-        "rates": {
-            "win": totals["wins"] / total_games,
-            "loss": totals["losses"] / total_games,
-            "draw": totals["draws"] / total_games,
-        },
-        "confidence_intervals": {
-            "win": wilson_interval(totals["wins"], total_games, confidence),
-            "loss": wilson_interval(totals["losses"], total_games, confidence),
-            "draw": wilson_interval(totals["draws"], total_games, confidence),
-        },
-        "seat_results": seat_results,
-        "matches": matches,
-    }
-    if candidate.contract is not None and candidate.contract.version == "adaptive-v1":
-        source_run = candidate.spec.path if candidate.spec.kind == "run" else None
-        result.update(
-            _adaptive_diagnostic_aggregates(Path(source_run) if source_run is not None else None)
-        )
-    if output_path is not None:
-        atomic_write_json(Path(output_path), result)
-    return result
+    evidence_summary: dict[str, Any] | None = None
+    artifact_pairs: list[tuple[Path, Path, Path, Path]] = []
+    published_artifacts: tuple[Path, ...] = ()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(run_partition, index)
+                for index in range(workers)
+            ]
+            indexed_games = [
+                indexed
+                for future in futures
+                for indexed in future.result()
+            ]
+        ordered_games = sorted(indexed_games, key=lambda item: item[0])
+        matches: list[dict[str, Any]] = []
+        draw_categories: Counter[str] = Counter()
+        selected_controls: set[tuple[int, str]] = set()
+        draw_trace_count = 0
+        control_trace_count = 0
+        for index, match, played in ordered_games:
+            retain = match["outcome"] == "draw"
+            if retain:
+                draw_trace_count += 1
+            else:
+                stratum = (match["candidate_seat"], match["outcome"])
+                if stratum not in selected_controls:
+                    selected_controls.add(stratum)
+                    control_trace_count += 1
+                    retain = True
+
+            if capture_trace:
+                if played.summary is None:
+                    raise RuntimeError("requested duel trace summary is unavailable")
+                classification_payload = played.classification
+                if match["outcome"] == "draw":
+                    if classification_payload is None:
+                        raise RuntimeError(
+                            "requested duel draw classification is unavailable"
+                        )
+                    draw_categories[
+                        str(classification_payload["primary"])
+                    ] += 1
+                match.update(
+                    {
+                        "terminated": played.terminated,
+                        "truncated": played.truncated,
+                        "summary": played.summary,
+                        "classification": classification_payload,
+                    }
+                )
+
+                if evidence_root is not None:
+                    match["trace_path"] = None
+                    match["replay_path"] = None
+                    seed, candidate_seat = schedule[index]
+                    stem = _evidence_stem(index, seed, candidate_seat)
+                    trace_path = evidence_root / "traces" / f"{stem}.json"
+                    replay_path = evidence_root / "replays" / f"{stem}.replay"
+                    if retain:
+                        staged_trace = played.staged_trace_path
+                        staged_replay = played.staged_replay_path
+                        if staged_trace is None or not staged_trace.is_file():
+                            raise RuntimeError(
+                                "requested duel trace was not staged"
+                            )
+                        if staged_replay is None or not staged_replay.is_file():
+                            raise RuntimeError(
+                                "requested duel replay was not saved"
+                            )
+                        artifact_pairs.append(
+                            (staged_trace, staged_replay, trace_path, replay_path)
+                        )
+                        match["trace_path"] = str(trace_path)
+                        match["replay_path"] = str(replay_path)
+            matches.append(match)
+
+
+        if capture_trace:
+            evidence_summary = {
+                "draw_traces": draw_trace_count,
+                "control_traces": control_trace_count,
+                "draw_categories": dict(sorted(draw_categories.items())),
+            }
+
+        published_artifacts = _publish_artifact_pairs(artifact_pairs)
+    finally:
+        if staging_owner is not None:
+            try:
+                staging_owner.cleanup()
+            except BaseException:
+                _rollback_artifacts(published_artifacts)
+                raise
+
+    try:
+        totals = {"wins": 0, "losses": 0, "draws": 0}
+        seat_results = {
+            "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+            "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+        }
+        for match in matches:
+            counter = f"{match['outcome']}s" if match["outcome"] != "loss" else "losses"
+            totals[counter] += 1
+            seat_key = (
+                "candidate_as_p0"
+                if match["candidate_seat"] == 0
+                else "candidate_as_p1"
+            )
+            seat_results[seat_key][counter] += 1
+        total_games = len(matches)
+        result = {
+            "schema_version": 1,
+            "generated_at": utc_now(),
+            "candidate": controller_identity(candidate),
+            "opponent": controller_identity(opponent),
+            "seed_start": seed_start,
+            "seeds": list(range(seed_start, seed_start + games)),
+            "reciprocal": both_seats,
+            "games": total_games,
+            **totals,
+            "rates": {
+                "win": totals["wins"] / total_games,
+                "loss": totals["losses"] / total_games,
+                "draw": totals["draws"] / total_games,
+            },
+            "confidence_intervals": {
+                "win": wilson_interval(totals["wins"], total_games, confidence),
+                "loss": wilson_interval(totals["losses"], total_games, confidence),
+                "draw": wilson_interval(totals["draws"], total_games, confidence),
+            },
+            "seat_results": seat_results,
+            "matches": matches,
+        }
+        if evidence_summary is not None:
+            result["evidence"] = evidence_summary
+        if candidate.contract is not None and candidate.contract.version == "adaptive-v1":
+            source_run = candidate.spec.path if candidate.spec.kind == "run" else None
+            result.update(
+                _adaptive_diagnostic_aggregates(
+                    Path(source_run) if source_run is not None else None
+                )
+            )
+        if output_path is not None:
+            atomic_write_json(Path(output_path), result)
+        return result
+    except BaseException:
+        _rollback_artifacts(published_artifacts)
+        raise
 
 
 def _adaptive_sidecars(run_dir: Path | None) -> list[Path]:
@@ -427,8 +757,13 @@ def evaluate_controllers(
     workers: int = 1,
     server_cmd: Sequence[str],
     output_path: Path | None = None,
+    environment: str | None = None,
+    evidence_dir: Path | None = None,
+    capture_trace: bool = False,
 ) -> dict[str, Any]:
     """Resolve any two supported controller specs and evaluate them headlessly."""
+    if environment is not None and environment not in SUPPORTED_ENVIRONMENTS:
+        raise ValueError(f"unsupported environment {environment!r}")
     # ControllerResolver's default model_loader (ml_lab.controllers.load_model) always
     # loads checkpoints with device="cpu", mirroring policy_server's documented rule:
     # inference must never compete with training for the GPU.
@@ -436,7 +771,17 @@ def evaluate_controllers(
     candidate = resolver.resolve(p0)
     opponent = resolver.resolve(p1)
     _validate_contract_compatibility(candidate.contract, opponent.contract)
-    environment = next(
+    if environment is not None:
+        for controller in (candidate, opponent):
+            if (
+                controller.model is not None
+                and controller.contract is not None
+                and controller.contract.version != environment
+            ):
+                raise ValueError(
+                    "controller contract does not match the explicit environment"
+                )
+    inferred_environment = next(
         (
             controller.contract.version
             for controller in (candidate, opponent)
@@ -444,6 +789,9 @@ def evaluate_controllers(
         ),
         "tactical-v1",
     )
+    selected_environment = environment or inferred_environment
+    if capture_trace and selected_environment != "tactical-v2":
+        raise ValueError("trace capture requires the tactical-v2 environment")
     destination = Path(output_path) if output_path is not None else _default_output_path(p0)
     return evaluate_matchup(
         candidate,
@@ -452,8 +800,13 @@ def evaluate_controllers(
         seed_start=seed_start,
         both_seats=both_seats,
         workers=workers,
-        client_factory=lambda _index: DuelClient(server_cmd, environment=environment),
+        client_factory=lambda _index: DuelClient(
+            server_cmd,
+            environment=selected_environment,
+        ),
         output_path=destination,
+        evidence_dir=evidence_dir,
+        capture_trace=capture_trace,
     )
 
 

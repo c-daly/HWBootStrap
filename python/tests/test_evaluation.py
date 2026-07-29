@@ -13,6 +13,13 @@ import pytest
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.controllers import ControllerResolver, ControllerSpec, ResolvedController
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.tactical_trace import (
+    CommandFrame,
+    EpisodeTrace,
+    SeatFrame,
+    StateFrame,
+    TransitionFrame,
+)
 
 
 @pytest.fixture
@@ -62,14 +69,27 @@ class FakeDuelClient:
         self.closed = False
         self._winner = -1
         self._seat = 0
+        self._seed = -1
+        self.trace_enabled = False
+        self.trace_calls: list[tuple[str, object]] = []
+        self.events: list[str] = []
+        self.saved_replays: list[Path] = []
+
+    def enable_trace(self, enabled: bool) -> None:
+        self.trace_enabled = enabled
+        self.trace_calls.append(("enable", enabled))
+        self.events.append("enable")
 
     def reset(self, *, seed: int, p0: str, p1: str) -> dict:
+        self.events.append("reset")
         self.resets.append((seed, p0, p1))
         self._winner = next(self._outcomes)
         self._seat = 0
+        self._seed = seed
         return self._state()
 
     def step(self, action: int) -> dict:
+        self.events.append("step")
         assert action == 1
         self.actions.append(action)
         if self._seat == 0:
@@ -94,8 +114,74 @@ class FakeDuelClient:
             "mask": [False, True, False],
         }
 
+    def drain_trace(self) -> EpisodeTrace:
+        self.trace_calls.append(("drain", self._seed))
+        self.events.append("drain")
+        return _episode_trace(self._winner)
+
+    def save_replay(self, path: Path) -> Path:
+        path = Path(path)
+        self.trace_calls.append(("save", path))
+        self.events.append("save")
+        self.saved_replays.append(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"seed={self._seed}\n", encoding="utf-8")
+        return path
+
     def close(self) -> None:
+        self.events.append("close")
         self.closed = True
+
+
+def _episode_trace(winner: int) -> EpisodeTrace:
+    seats = tuple(
+        SeatFrame(
+            seat=seat,
+            points=0,
+            destroyed_value=0,
+            alive_units=1,
+            current_hit_points=10,
+            maximum_hit_points=10,
+            health_adjusted_material=10.0,
+            can_damage_enemy=True,
+            can_currently_attack_enemy=False,
+            can_move=True,
+            units=(),
+        )
+        for seat in (0, 1)
+    )
+    before = StateFrame(
+        round=1,
+        active_seat=0,
+        is_game_over=False,
+        winner=None,
+        productive_legal_actions=1,
+        seats=seats,
+    )
+    after = replace(
+        before,
+        active_seat=1,
+        is_game_over=winner in {0, 1},
+        winner=winner if winner in {0, 1} else None,
+        productive_legal_actions=0,
+    )
+    return EpisodeTrace(
+        schema_version=1,
+        transitions=(
+            TransitionFrame(
+                before=before,
+                command=CommandFrame(
+                    kind="end_turn",
+                    issuer=0,
+                    actor_id=None,
+                    target_id=None,
+                    q=None,
+                    r=None,
+                ),
+                after=after,
+            ),
+        ),
+    )
 
 
 def test_wilson_interval_has_stable_95_percent_bounds() -> None:
@@ -583,6 +669,709 @@ def test_evaluation_atomically_replaces_evaluation_json(
     assert not list(output.parent.glob(".evaluation.json.*.tmp"))
 
 
+def test_evaluation_without_capture_preserves_match_schema_and_skips_trace_rpc(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    client = FakeDuelClient(iter([0]), 0)
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-ordinary", 64),
+        _model_controller(tmp_path, contract, "opponent-ordinary", 96),
+        games=1,
+        both_seats=False,
+        workers=1,
+        client_factory=lambda _worker: client,
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+    )
+
+    assert "evidence" not in result
+    assert result["matches"] == [
+        {"seed": 1_000_000, "candidate_seat": 0, "winner": 0, "outcome": "win"}
+    ]
+    assert client.trace_calls == []
+
+
+def test_evaluation_writes_all_draws_and_first_controls_per_candidate_seat(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    client = FakeDuelClient(
+        iter([0, 1, 1, 0, 0, 1, 1, 0, -1, -1]),
+        0,
+    )
+    evidence_dir = tmp_path / "evidence"
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-evidence", 64),
+        _model_controller(tmp_path, contract, "opponent-evidence", 96),
+        games=5,
+        seed_start=80_000,
+        both_seats=True,
+        workers=1,
+        client_factory=lambda _worker: client,
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        evidence_dir=evidence_dir,
+        capture_trace=True,
+    )
+
+    assert result["evidence"]["draw_traces"] == 2
+    assert result["evidence"]["control_traces"] == 4
+    assert result["evidence"]["draw_categories"] == {"truncation": 2}
+    expected_stems = [
+        "match-000000-seed-80000-candidate-seat-0",
+        "match-000001-seed-80000-candidate-seat-1",
+        "match-000002-seed-80001-candidate-seat-0",
+        "match-000003-seed-80001-candidate-seat-1",
+        "match-000008-seed-80004-candidate-seat-0",
+        "match-000009-seed-80004-candidate-seat-1",
+    ]
+    assert sorted(path.stem for path in (evidence_dir / "traces").glob("*.json")) == expected_stems
+    assert sorted(path.stem for path in (evidence_dir / "replays").glob("*.replay")) == expected_stems
+    assert all(
+        {"trace_path", "replay_path"} <= set(match)
+        for match in result["matches"]
+    )
+    retained = [
+        index
+        for index, match in enumerate(result["matches"])
+        if match["trace_path"] is not None
+    ]
+    assert retained == [0, 1, 2, 3, 8, 9]
+    assert all(
+        {"terminated", "truncated", "summary", "classification"} <= set(match)
+        for match in result["matches"]
+    )
+    assert all(
+        result["matches"][index]["classification"] is None
+        for index in (0, 1, 2, 3)
+    )
+    assert all(
+        result["matches"][index]["classification"]["primary"] == "truncation"
+        for index in (8, 9)
+    )
+    assert all(
+        Path(result["matches"][index]["trace_path"])
+        == evidence_dir / "traces" / f"{expected_stems[offset]}.json"
+        for offset, index in enumerate(retained)
+    )
+    assert client.events == [
+        event
+        for _game in range(10)
+        for event in ("enable", "reset", "step", "step", "drain", "save")
+    ] + ["close"]
+    assert len(client.saved_replays) == 10
+    assert all(read_json(path)["schema_version"] == 1 for path in (evidence_dir / "traces").glob("*.json"))
+    assert not list(evidence_dir.rglob("*.tmp"))
+    assert sorted(path.name for path in evidence_dir.iterdir()) == ["replays", "traces"]
+
+
+def test_evaluation_preserves_preexisting_unretained_destinations(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "existing-evidence"
+    stem = "match-000001-seed-81001-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b'{"preexisting":"trace"}\n'
+    replay_sentinel = b"preexisting replay\n"
+    trace_path.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+    replay_path.write_bytes(replay_sentinel)
+
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-sentinel", 64),
+        _model_controller(tmp_path, contract, "opponent-sentinel", 96),
+        games=2,
+        seed_start=81_000,
+        both_seats=False,
+        workers=1,
+        client_factory=lambda worker: FakeDuelClient(iter([0, 0]), worker),
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        evidence_dir=evidence_dir,
+        capture_trace=True,
+    )
+
+    assert result["matches"][0]["trace_path"] is not None
+    assert result["matches"][1]["trace_path"] is None
+    assert trace_path.read_bytes() == trace_sentinel
+    assert replay_path.read_bytes() == replay_sentinel
+
+
+def test_retained_artifact_pair_reuses_identical_files_without_republication(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    candidate = _model_controller(tmp_path, contract, "candidate-identical", 64)
+    opponent = _model_controller(tmp_path, contract, "opponent-identical", 96)
+    evidence_dir = tmp_path / "identical-evidence"
+
+    def evaluate() -> dict:
+        return evaluation_module.evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            seed_start=82_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    first = evaluate()
+    trace_path = Path(first["matches"][0]["trace_path"])
+    replay_path = Path(first["matches"][0]["replay_path"])
+    trace_bytes = trace_path.read_bytes()
+    replay_bytes = replay_path.read_bytes()
+    real_replace = evaluation_module.os.replace
+
+    def reject_final_republication(source, destination) -> None:
+        if Path(destination) in {trace_path, replay_path}:
+            raise AssertionError("identical artifact was republished")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(evaluation_module.os, "replace", reject_final_republication)
+    second = evaluate()
+
+    assert second["matches"][0]["trace_path"] == str(trace_path)
+    assert trace_path.read_bytes() == trace_bytes
+    assert replay_path.read_bytes() == replay_bytes
+
+
+def test_retained_artifact_pair_rejects_nonidentical_collision_without_changes(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "collision-evidence"
+    stem = "match-000000-seed-83000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b"prior trace\n"
+    replay_sentinel = b"prior replay\n"
+    trace_path.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+    replay_path.write_bytes(replay_sentinel)
+
+    with pytest.raises(FileExistsError, match="artifact pair collision"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-collision", 64),
+            _model_controller(tmp_path, contract, "opponent-collision", 96),
+            games=1,
+            seed_start=83_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    assert trace_path.read_bytes() == trace_sentinel
+    assert replay_path.read_bytes() == replay_sentinel
+
+
+def test_evaluation_rolls_back_earlier_pairs_when_later_publication_fails(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "evaluation-transaction-evidence"
+    output_path = tmp_path / "evaluation-transaction.json"
+    first_stem = "match-000000-seed-83500-candidate-seat-0"
+    second_stem = "match-000001-seed-83501-candidate-seat-0"
+    first_trace = evidence_dir / "traces" / f"{first_stem}.json"
+    first_replay = evidence_dir / "replays" / f"{first_stem}.replay"
+    second_trace = evidence_dir / "traces" / f"{second_stem}.json"
+    second_replay = evidence_dir / "replays" / f"{second_stem}.replay"
+    trace_sentinel = b"prior trace\n"
+    replay_sentinel = b"prior replay\n"
+    second_trace.parent.mkdir(parents=True)
+    second_replay.parent.mkdir(parents=True)
+    second_trace.write_bytes(trace_sentinel)
+    second_replay.write_bytes(replay_sentinel)
+
+    with pytest.raises(FileExistsError, match="artifact pair collision"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-transaction", 64),
+            _model_controller(tmp_path, contract, "opponent-transaction", 96),
+            games=2,
+            seed_start=83_500,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1, -1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not first_trace.exists()
+    assert not first_replay.exists()
+    assert second_trace.read_bytes() == trace_sentinel
+    assert second_replay.read_bytes() == replay_sentinel
+    assert not output_path.exists()
+
+
+def test_evaluation_rolls_back_published_pair_when_report_write_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "report-failure-evidence"
+    output_path = tmp_path / "report-failure.json"
+    stem = "match-000000-seed-85100-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_atomic_write_json = evaluation_module.atomic_write_json
+
+    def fail_report_write(path: Path, payload: object) -> None:
+        if Path(path) == output_path:
+            raise OSError("injected report publication failure")
+        real_atomic_write_json(path, payload)
+
+    monkeypatch.setattr(evaluation_module, "atomic_write_json", fail_report_write)
+
+    with pytest.raises(OSError, match="injected report publication failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-report-failure", 64),
+            _model_controller(tmp_path, contract, "opponent-report-failure", 96),
+            games=1,
+            seed_start=85_100,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
+def test_evaluation_rolls_back_published_pair_when_staging_cleanup_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "cleanup-failure-evidence"
+    output_path = tmp_path / "cleanup-failure.json"
+    stem = "match-000000-seed-85200-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_temporary_directory = evaluation_module.tempfile.TemporaryDirectory
+
+    class FailingCleanup:
+        def __init__(self, *args, **kwargs) -> None:
+            self._inner = real_temporary_directory(*args, **kwargs)
+            self.name = self._inner.name
+
+        def cleanup(self) -> None:
+            self._inner.cleanup()
+            raise OSError("injected staging cleanup failure")
+
+    monkeypatch.setattr(evaluation_module.tempfile, "TemporaryDirectory", FailingCleanup)
+
+    with pytest.raises(OSError, match="injected staging cleanup failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-cleanup-failure", 64),
+            _model_controller(tmp_path, contract, "opponent-cleanup-failure", 96),
+            games=1,
+            seed_start=85_200,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
+def test_evaluation_rolls_back_published_pair_when_adaptive_diagnostics_fail(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    adaptive = replace(
+        contract,
+        version="adaptive-v1",
+        contract_hash="f" * 64,
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    candidate = _model_controller(tmp_path, adaptive, "adaptive-diagnostic-failure", 64)
+    opponent = _model_controller(tmp_path, adaptive, "adaptive-diagnostic-opponent", 96)
+    (candidate.spec.path / "adaptive_episodes.csv").write_text(
+        "invalid_header\n",
+        encoding="utf-8",
+    )
+    evidence_dir = tmp_path / "adaptive-diagnostic-failure-evidence"
+    output_path = tmp_path / "adaptive-diagnostic-failure.json"
+    stem = "match-000000-seed-85300-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+
+    with pytest.raises(ValueError, match="adaptive episode sidecar header is invalid"):
+        evaluation_module.evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            seed_start=85_300,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([-1]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+
+
+def test_retained_artifact_pair_rejects_half_pair_without_changes(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    evidence_dir = tmp_path / "half-pair-evidence"
+    stem = "match-000000-seed-84000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    trace_sentinel = b"orphan trace\n"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(trace_sentinel)
+
+    with pytest.raises(FileExistsError, match="incomplete artifact pair"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-half", 64),
+            _model_controller(tmp_path, contract, "opponent-half", 96),
+            games=1,
+            seed_start=84_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+        )
+
+    assert trace_path.read_bytes() == trace_sentinel
+    assert not replay_path.exists()
+
+
+def test_retained_artifact_pair_rolls_back_first_member_when_second_publish_fails(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    evidence_dir = tmp_path / "rollback-evidence"
+    prior_path = evidence_dir / "prior-data.bin"
+    prior_bytes = b"unrelated prior data\n"
+    evidence_dir.mkdir()
+    prior_path.write_bytes(prior_bytes)
+    output_path = evidence_dir / "evaluation.json"
+    stem = "match-000000-seed-85000-candidate-seat-0"
+    trace_path = evidence_dir / "traces" / f"{stem}.json"
+    replay_path = evidence_dir / "replays" / f"{stem}.replay"
+    real_copyfileobj = evaluation_module.shutil.copyfileobj
+    copy_count = 0
+
+    def fail_second_copy(source, destination, *args, **kwargs) -> None:
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise OSError("injected second-member publication failure")
+        real_copyfileobj(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(
+        evaluation_module.shutil,
+        "copyfileobj",
+        fail_second_copy,
+    )
+
+    with pytest.raises(OSError, match="second-member publication failure"):
+        evaluation_module.evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-rollback", 64),
+            _model_controller(tmp_path, contract, "opponent-rollback", 96),
+            games=1,
+            seed_start=85_000,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda worker: FakeDuelClient(iter([0]), worker),
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            evidence_dir=evidence_dir,
+            capture_trace=True,
+            output_path=output_path,
+        )
+
+    assert copy_count == 2
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not output_path.exists()
+    assert prior_path.read_bytes() == prior_bytes
+
+
+def test_evaluation_accumulates_only_compact_played_games(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    real_play_game = evaluation_module._play_game
+    accumulated: list[object] = []
+
+    def checked_play_game(*args, **kwargs):
+        played = real_play_game(*args, **kwargs)
+        assert not any(
+            isinstance(value, EpisodeTrace)
+            for value in vars(played).values()
+        )
+        accumulated.append(played)
+        return played
+
+    monkeypatch.setattr(evaluation_module, "_play_game", checked_play_game)
+    result = evaluation_module.evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-bounded", 64),
+        _model_controller(tmp_path, contract, "opponent-bounded", 96),
+        games=40,
+        seed_start=86_000,
+        both_seats=True,
+        workers=4,
+        client_factory=lambda worker: FakeDuelClient(iter([0] * 20), worker),
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        capture_trace=True,
+    )
+
+    assert result["games"] == 80
+    assert len(accumulated) == 80
+    assert all("trace" not in vars(played) for played in accumulated)
+
+
+def test_trace_capture_without_directory_returns_evidence_without_replay_paths(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    client = FakeDuelClient(iter([-1, 0]), 0)
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-memory", 64),
+        _model_controller(tmp_path, contract, "opponent-memory", 96),
+        games=2,
+        both_seats=False,
+        workers=1,
+        client_factory=lambda _worker: client,
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        capture_trace=True,
+    )
+
+    assert result["evidence"]["draw_traces"] == 1
+    assert result["evidence"]["control_traces"] == 1
+    assert all("trace_path" not in match and "replay_path" not in match for match in result["matches"])
+    assert result["matches"][0]["classification"]["primary"] == "truncation"
+    assert result["matches"][1]["classification"] is None
+    assert client.saved_replays == []
+    assert [call[0] for call in client.trace_calls] == ["enable", "drain", "enable", "drain"]
+
+
+def test_requested_empty_trace_fails_and_closes_worker_client(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    class EmptyTraceClient(FakeDuelClient):
+        def drain_trace(self) -> EpisodeTrace:
+            self.trace_calls.append(("drain", self._seed))
+            self.events.append("drain")
+            return EpisodeTrace(schema_version=1, transitions=())
+
+    client = EmptyTraceClient(iter([0]), 0)
+    with pytest.raises(RuntimeError, match="empty trace"):
+        evaluate_matchup(
+            _model_controller(tmp_path, contract, "candidate-empty", 64),
+            _model_controller(tmp_path, contract, "opponent-empty", 96),
+            games=1,
+            both_seats=False,
+            workers=1,
+            client_factory=lambda _worker: client,
+            predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+            capture_trace=True,
+        )
+
+    assert client.closed is True
+    assert client.saved_replays == []
+
+
+def test_control_selection_uses_schedule_order_not_worker_completion(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    rendezvous = threading.Barrier(2)
+    worker_one_finished = threading.Event()
+    completion_order: list[int] = []
+    completion_lock = threading.Lock()
+
+    class CompletionOrderedClient(FakeDuelClient):
+        def reset(self, *, seed: int, p0: str, p1: str) -> dict:
+            if not self.resets:
+                rendezvous.wait(timeout=2)
+                if self.worker_index == 0:
+                    assert worker_one_finished.wait(timeout=2)
+            return super().reset(seed=seed, p0=p0, p1=p1)
+
+        def close(self) -> None:
+            if self.worker_index == 1:
+                worker_one_finished.set()
+            with completion_lock:
+                completion_order.append(self.worker_index)
+            super().close()
+
+    clients: dict[int, CompletionOrderedClient] = {}
+
+    def client_factory(worker_index: int) -> CompletionOrderedClient:
+        client = CompletionOrderedClient(iter([0, 1, -1]), worker_index)
+        clients[worker_index] = client
+        return client
+
+    evidence_dir = tmp_path / "worker-evidence"
+    result = evaluate_matchup(
+        _model_controller(tmp_path, contract, "candidate-workers", 64),
+        _model_controller(tmp_path, contract, "opponent-workers", 96),
+        games=6,
+        seed_start=90_000,
+        both_seats=False,
+        workers=2,
+        client_factory=client_factory,
+        predict_action=lambda _model, _algorithm, _obs, _mask: 1,
+        evidence_dir=evidence_dir,
+        capture_trace=True,
+    )
+
+    assert completion_order == [1, 0]
+    assert result["evidence"]["draw_traces"] == 2
+    assert result["evidence"]["control_traces"] == 2
+    assert all(
+        {"trace_path", "replay_path"} <= set(match)
+        for match in result["matches"]
+    )
+    assert [
+        index
+        for index, match in enumerate(result["matches"])
+        if match["trace_path"] is not None
+    ] == [0, 2, 4, 5]
+    assert sorted(path.stem for path in (evidence_dir / "traces").glob("*.json")) == [
+        "match-000000-seed-90000-candidate-seat-0",
+        "match-000002-seed-90002-candidate-seat-0",
+        "match-000004-seed-90004-candidate-seat-0",
+        "match-000005-seed-90005-candidate-seat-0",
+    ]
+    assert all(client.closed for client in clients.values())
+
+
+def test_evaluate_controllers_rejects_unknown_environment_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    monkeypatch.setattr(
+        evaluation_module,
+        "ControllerResolver",
+        lambda: pytest.fail("unsupported environment reached controller resolution"),
+    )
+
+    with pytest.raises(ValueError, match="unsupported environment"):
+        evaluation_module.evaluate_controllers(
+            "greedy",
+            "random",
+            games=1,
+            server_cmd=["server"],
+            environment="tactical-v3",
+        )
+
+
+def test_evaluate_controllers_rejects_explicit_model_contract_mismatch_before_server(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    controllers = iter(
+        [
+            _model_controller(tmp_path, contract, "candidate-mismatch", 64),
+            _model_controller(tmp_path, contract, "opponent-mismatch", 96),
+        ]
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "ControllerResolver",
+        lambda: SimpleNamespace(resolve=lambda _raw: next(controllers)),
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "DuelClient",
+        lambda *_args, **_kwargs: pytest.fail("contract mismatch started a server"),
+    )
+
+    with pytest.raises(ValueError, match="explicit environment"):
+        evaluation_module.evaluate_controllers(
+            "candidate",
+            "opponent",
+            games=1,
+            server_cmd=["server"],
+            environment="tactical-v2",
+        )
+
+
+def test_evaluate_controllers_rejects_trace_capture_outside_tactical_v2_before_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    monkeypatch.setattr(
+        evaluation_module,
+        "DuelClient",
+        lambda *_args, **_kwargs: pytest.fail("invalid trace environment started a server"),
+    )
+
+    with pytest.raises(ValueError, match="tactical-v2"):
+        evaluation_module.evaluate_controllers(
+            "greedy",
+            "random",
+            games=1,
+            server_cmd=["server"],
+            environment="tactical-v1",
+            capture_trace=True,
+        )
+
+
 class _FakeDuelProcess:
     """A stand-in for subprocess.Popen that answers one queued handshake line."""
 
@@ -598,6 +1387,34 @@ class _FakeDuelProcess:
 
     def wait(self, timeout=None):
         return 0
+
+
+def test_duel_client_trace_methods_send_exact_rpc_sequence(tmp_path: Path) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    replay_path = tmp_path / "replays" / "match.replay"
+    responses = iter(
+        [
+            {"enabled": True},
+            {"schema_version": 1, "transitions": []},
+            {"saved": str(replay_path)},
+        ]
+    )
+    requests: list[dict[str, object]] = []
+    client = object.__new__(DuelClient)
+    client._rpc = lambda request: (requests.append(request), next(responses))[1]
+
+    client.enable_trace(True)
+    trace = client.drain_trace()
+    saved = client.save_replay(replay_path)
+
+    assert requests == [
+        {"cmd": "duel_trace_enable", "enabled": True},
+        {"cmd": "duel_trace_drain"},
+        {"cmd": "duel_save", "path": str(replay_path)},
+    ]
+    assert trace == EpisodeTrace(schema_version=1, transitions=())
+    assert saved == replay_path
 
 
 def test_duel_client_sends_tactical_v2_and_requires_duel_kind(

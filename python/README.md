@@ -71,6 +71,29 @@ Run names are 1–64 characters, start with a letter or number, and contain only
 
 Controller specifications accepted by evaluation and model tooling are `greedy`, `random`, and `run:PATH`. Standalone checkpoints and legacy `ppo:PATH` / `dqn:PATH` sources are rejected because they lack authoritative contract metadata.
 
+## Tactical-v2 baseline evidence
+
+In a fresh PowerShell session, first expose this checkout's package with `$env:PYTHONPATH = (Resolve-Path '.\python').Path`.
+
+Run a reciprocal candidate baseline from the repository root in PowerShell:
+
+```powershell
+.\python\winenv\Scripts\python.exe -m ml_lab.cli evaluate --p0 run:python\runs\candidate --p1 greedy --games 500 --both-seats --workers 4 --environment tactical-v2 --evidence-dir python\evidence\candidate-vs-greedy
+```
+
+`--environment tactical-v2` is required for a scripted-only matchup to select the tactical-v2 contract explicitly. Evidence capture is opt-in: `--evidence-dir` implies `--capture-trace`, while `--capture-trace` by itself performs the same in-memory analysis without persisting trace or replay files. Existing evaluate commands without either flag retain their ordinary match schema and W/L/D arithmetic.
+
+The command writes the normal `evaluation.json` to the candidate run directory when `--p0` is `run:PATH` and `--output` is omitted; `--output` can select a different report path. The report keeps the authoritative wins, losses, draws, rates, confidence intervals, seat totals, and per-match outcomes, and adds per-match summaries/classifications plus `evidence.draw_traces`, `evidence.control_traces`, and the `evidence.draw_categories` category totals.
+
+With `--both-seats`, each held-out seed is paired: the candidate plays that seed once as player 0 and once as player 1. The schedule and filenames remain in seed/candidate-seat order even with multiple workers. Under the evidence directory, `traces\*.json` records accepted tactical transitions and `replays\*.replay` records the same game's portable engine replay; each retained pair shares a stem containing match index, seed, and candidate seat.
+
+All draws are retained, including draws whose evidence is ambiguous. Non-draw controls use a deterministic rule: retain the first win and first loss encountered for each candidate seat, when those strata exist. Thus category totals describe draws only, while the controls provide reproducible comparisons against decisive games.
+
+Treat classifications as diagnostic quarantine, not promotion arithmetic. A draw can carry multiple supported flags, but only the precedence-selected primary category contributes to `draw_categories`; evidence that supports no category remains `unclassified`. None of these labels, summaries, traces, or controls changes the reported winner, W/L/D totals, rates, confidence intervals, observations, masks, or rewards.
+
+Retained traces are validated as a continuous before/command/after chain, and retained replays can reconstruct the reported final outcome through the engine replay reader. Repeating the same fixed-seed command produces the same ordered matches, retained filenames, summaries, classifications, and replay contents; only the report's `generated_at` timestamp is expected to differ.
+
+
 ## Training game templates and custom scenarios
 
 Choose a checked-in template with `--template`, or pass a complete schema-v1 experiment file with `--scenario-file`; the two options are mutually exclusive. The selected scenario's `environment` must match `--environment`. If neither option is supplied, training selects that environment's `tactical-standard` or `adaptive-standard` template.

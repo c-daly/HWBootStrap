@@ -210,5 +210,59 @@ namespace HexWars.Engine.Tests
             Assert.That(view.Terminated || view.Truncated, Is.True);
             Assert.That(env.DrainTransitions(), Is.Empty, "capture is opt-in; training must pay nothing by default");
         }
+
+        [Test]
+        public void InjectedSink_RecordsAcceptedCommandsOnlyWhileEnabled()
+        {
+            var sink = new BufferedDuelTransitionSink { Enabled = true };
+            var env = new TacticalV2DuelEnv(TacticalV2Config.Default(), sink);
+
+            env.Reset(11, new GreedyAgent(3), new GreedyAgent(4));
+
+            Assert.That(sink.Drain(), Is.Not.Empty);
+            Assert.That(sink.Drain(), Is.Empty);
+        }
+
+        [Test]
+        public void InjectedSink_DisabledByDefault_RetainsNothing()
+        {
+            var sink = new BufferedDuelTransitionSink();
+            var env = new TacticalV2DuelEnv(TacticalV2Config.Default(), sink);
+
+            env.Reset(11, new GreedyAgent(3), new GreedyAgent(4));
+
+            Assert.That(sink.Drain(), Is.Empty);
+        }
+
+        [Test]
+        public void InjectedSink_ExcludesRejectedExternalAction_AndKeepsAcceptedCommandsOrdered()
+        {
+            var sink = new BufferedDuelTransitionSink { Enabled = true };
+            var env = new TacticalV2DuelEnv(TacticalV2Config.Default(), sink);
+            var view = env.Reset(7, null, null);
+
+            TacticalV2Layout layout = env.Layout;
+            int rejectedAction = -1;
+            for (int i = layout.MoveOffset; i < layout.AttackOffset; i++)
+            {
+                if (!view.ActionMask[i]) { rejectedAction = i; break; }
+            }
+            Assert.That(rejectedAction, Is.GreaterThanOrEqualTo(0),
+                "expected at least one masked-off move destination at the start of the episode");
+
+            GameState start = env.State;
+            env.Step(rejectedAction);
+            Assert.That(env.State, Is.SameAs(start), "a rejected command must not change engine state");
+
+            view = env.Step(PickLegal(view.ActionMask, new Random(29)));
+            GameState afterFirstAccepted = env.State;
+            env.Step(PickLegal(view.ActionMask, new Random(30)));
+
+            IReadOnlyList<DuelTransition> transitions = sink.Drain();
+            Assert.That(transitions.Count, Is.EqualTo(2), "only accepted external commands are forwarded to the sink");
+            AssertTransitionsMatchReplay(env, transitions);
+            Assert.That(transitions[0].Previous, Is.SameAs(start));
+            Assert.That(transitions[0].Resulting, Is.SameAs(afterFirstAccepted));
+        }
     }
 }
