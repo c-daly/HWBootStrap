@@ -786,6 +786,86 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void GymServerScenarioJson_LoadsPythonProfiledTacticalV2SchemaIntoTrainingConfig()
+        {
+            string scenario = WriteScenarioContent("""
+            {
+              "schema_version": 1,
+              "id": "python-profiled-tactical-v2",
+              "name": "Python Profiled Tactical V2",
+              "environment": "tactical-v2",
+              "board": {"width": 13, "height": 9, "max_elevation": 4, "zone_depth": 3, "flat_chance": 0.6, "plains_weight": 70, "forest_weight": 15, "rough_weight": 10, "water_weight": 5},
+              "rules": {"actions_per_turn": 0, "round_cap": 100, "starting_points": 12, "fog_of_war": false, "biomes_enabled": false, "bounty_rate": 0.5, "deploy_cost_multiplier": 1.0, "generator_cost": 2, "generator_output": 1, "generator_health": 3},
+              "episode": {"max_steps": 600},
+              "reward": {"shape_scale": 0.01, "step_penalty": 0.005, "closing_weight": 0.02, "draw_credit_weight": 0.25, "points_weight": 0.5},
+              "tactical_v2": {
+                "starting_unit_count": 3,
+                "max_controllable_units": 3,
+                "placement_policy": "profiled-seeded-v1",
+                "start_profiles": [
+                  {"id": "standard-3v3", "learner_units": 3, "opponent_units": 3, "separation": "legacy-mirrored"},
+                  {"id": "conversion-3v1-near", "learner_units": 3, "opponent_units": 1, "separation": "near"},
+                  {"id": "conversion-3v1-medium", "learner_units": 3, "opponent_units": 1, "separation": "medium"},
+                  {"id": "conversion-3v1-far", "learner_units": 3, "opponent_units": 1, "separation": "far"},
+                  {"id": "conversion-2v1-near", "learner_units": 2, "opponent_units": 1, "separation": "near"},
+                  {"id": "conversion-2v1-medium", "learner_units": 2, "opponent_units": 1, "separation": "medium"},
+                  {"id": "conversion-2v1-far", "learner_units": 2, "opponent_units": 1, "separation": "far"},
+                  {"id": "conversion-1v1-near", "learner_units": 1, "opponent_units": 1, "separation": "near"},
+                  {"id": "conversion-1v1-medium", "learner_units": 1, "opponent_units": 1, "separation": "medium"},
+                  {"id": "conversion-1v1-far", "learner_units": 1, "opponent_units": 1, "separation": "far"}
+                ],
+                "start_distribution": [
+                  {"profile_id": "standard-3v3", "basis_points": 10000},
+                  {"profile_id": "conversion-3v1-near", "basis_points": 0},
+                  {"profile_id": "conversion-3v1-medium", "basis_points": 0},
+                  {"profile_id": "conversion-3v1-far", "basis_points": 0},
+                  {"profile_id": "conversion-2v1-near", "basis_points": 0},
+                  {"profile_id": "conversion-2v1-medium", "basis_points": 0},
+                  {"profile_id": "conversion-2v1-far", "basis_points": 0},
+                  {"profile_id": "conversion-1v1-near", "basis_points": 0},
+                  {"profile_id": "conversion-1v1-medium", "basis_points": 0},
+                  {"profile_id": "conversion-1v1-far", "basis_points": 0}
+                ],
+                "templates": [
+                  {"id": "brute", "name": "Brute", "stats": {"health": 7, "damage": 2, "defense": 2, "movement": 3, "vertical_movement": 2, "range": 1, "range_arc": 1, "vision": 2, "vision_arc": 1}}
+                ]
+              }
+            }
+            """);
+            try
+            {
+                var assembly = System.Reflection.Assembly.LoadFrom(ServerProcess.ServerDll);
+                Type parserType = assembly.GetType("HexWars.GymServer.ScenarioJson", throwOnError: true)!;
+                var load = parserType.GetMethod("Load", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+                var parsed = (TrainingScenario)load.Invoke(null, new object[] { scenario })!;
+                TrainingTacticalV2Config tacticalV2 = parsed.TacticalV2;
+
+                Assert.That(tacticalV2.PlacementPolicy, Is.EqualTo("profiled-seeded-v1"));
+                Assert.That(tacticalV2.StartingUnitCount, Is.EqualTo(3));
+                Assert.That(tacticalV2.MaxControllableUnits, Is.EqualTo(3));
+                Assert.That(tacticalV2.StartProfiles.Select(profile =>
+                    (profile.Id, profile.LearnerUnitCount, profile.OpponentUnitCount, profile.Separation)), Is.EqualTo(new[]
+                {
+                    ("standard-3v3", 3, 3, "legacy-mirrored"),
+                    ("conversion-3v1-near", 3, 1, "near"), ("conversion-3v1-medium", 3, 1, "medium"), ("conversion-3v1-far", 3, 1, "far"),
+                    ("conversion-2v1-near", 2, 1, "near"), ("conversion-2v1-medium", 2, 1, "medium"), ("conversion-2v1-far", 2, 1, "far"),
+                    ("conversion-1v1-near", 1, 1, "near"), ("conversion-1v1-medium", 1, 1, "medium"), ("conversion-1v1-far", 1, 1, "far"),
+                }));
+                Assert.That(tacticalV2.StartDistribution.Select(weight =>
+                    (weight.ProfileId, weight.BasisPoints)), Is.EqualTo(new[]
+                {
+                    ("standard-3v3", 10000), ("conversion-3v1-near", 0), ("conversion-3v1-medium", 0), ("conversion-3v1-far", 0),
+                    ("conversion-2v1-near", 0), ("conversion-2v1-medium", 0), ("conversion-2v1-far", 0),
+                    ("conversion-1v1-near", 0), ("conversion-1v1-medium", 0), ("conversion-1v1-far", 0),
+                }));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
         public void GymServer_RejectsTacticalV2ScenarioWithMismatchedCounts()
         {
             string scenario = WriteTacticalV2Scenario(startingUnitCount: 4, maxControllableUnits: 6);

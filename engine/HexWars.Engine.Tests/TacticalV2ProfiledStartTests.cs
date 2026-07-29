@@ -89,6 +89,24 @@ namespace HexWars.Engine.Tests
                 new TacticalV2StartWeight(profile.Id, profile.Id == "conversion-2v1-far" ? 10000 : 0)));
             return config;
         }
+        [Test]
+        public void ExplicitProfileApi_RejectsSymmetricPolicyAndArbitraryListedCatalog()
+        {
+            TacticalV2Config symmetric = TacticalV2Config.Default();
+            symmetric.StartProfiles = new[] { new TacticalV2StartProfile("arbitrary", 1, 1, "near") };
+            symmetric.StartDistribution = new TacticalV2StartDistribution(new[]
+            {
+                new TacticalV2StartWeight("arbitrary", 10000),
+            });
+            var layout = new TacticalV2Layout(symmetric);
+            var duel = new TacticalV2DuelEnv(symmetric);
+            TacticalV2StartProfile arbitrary = symmetric.StartProfiles[0];
+
+            Assert.Throws<InvalidOperationException>(() => layout.NewGame(71, arbitrary, PlayerId.Player0));
+            Assert.Throws<InvalidOperationException>(() => duel.Reset(71, null, null,
+                "arbitrary", PlayerId.Player0));
+            Assert.DoesNotThrow(() => layout.NewGame(71));
+        }
 
         private static TacticalV2StartProfile Profile(TacticalV2Layout layout, string id) =>
             TacticalV2StartCatalog.ProfiledSeededV1().Single(profile => profile.Id == id);

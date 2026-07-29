@@ -152,8 +152,8 @@ namespace HexWars.GymServer
                             {
                                 TacticalV2Wire.TacticalV2StartProfileWire profile = wire.TacticalV2.StartProfiles[i];
                                 RequireText(profile.Id, $"tactical_v2.start_profiles[{i}].id", errors);
-                                Require(profile.LearnerUnitCount, $"tactical_v2.start_profiles[{i}].learner_unit_count", errors);
-                                Require(profile.OpponentUnitCount, $"tactical_v2.start_profiles[{i}].opponent_unit_count", errors);
+                                Require(profile.LearnerUnitCount, $"tactical_v2.start_profiles[{i}].learner_units", errors);
+                                Require(profile.OpponentUnitCount, $"tactical_v2.start_profiles[{i}].opponent_units", errors);
                                 RequireText(profile.Separation, $"tactical_v2.start_profiles[{i}].separation", errors);
                             }
                         if (wire.TacticalV2.StartDistribution != null)
@@ -416,8 +416,8 @@ namespace HexWars.GymServer
         public sealed class TacticalV2StartProfileWire
         {
             [JsonPropertyName("id")] public string? Id { get; set; }
-            [JsonPropertyName("learner_unit_count")] public int? LearnerUnitCount { get; set; }
-            [JsonPropertyName("opponent_unit_count")] public int? OpponentUnitCount { get; set; }
+            [JsonPropertyName("learner_units")] public int? LearnerUnitCount { get; set; }
+            [JsonPropertyName("opponent_units")] public int? OpponentUnitCount { get; set; }
             [JsonPropertyName("separation")] public string? Separation { get; set; }
         }
 

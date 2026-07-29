@@ -291,16 +291,26 @@ def _validate_tactical_v2(
         if not isinstance(profiles, list) or not profiles:
             raise ValueError("GymServer profiled tactical_v2 contract requires start_profiles")
         declared: set[str] = set()
+        expected_profiles = (
+            ("standard-3v3", 3, 3, "legacy-mirrored"),
+            ("conversion-3v1-near", 3, 1, "near"), ("conversion-3v1-medium", 3, 1, "medium"), ("conversion-3v1-far", 3, 1, "far"),
+            ("conversion-2v1-near", 2, 1, "near"), ("conversion-2v1-medium", 2, 1, "medium"), ("conversion-2v1-far", 2, 1, "far"),
+            ("conversion-1v1-near", 1, 1, "near"), ("conversion-1v1-medium", 1, 1, "medium"), ("conversion-1v1-far", 1, 1, "far"),
+        )
+        actual_profiles: list[tuple[str, int, int, str]] = []
         for index, raw_profile in enumerate(profiles):
             profile = _mapping(raw_profile, f"tactical_v2.start_profiles[{index}]")
             profile_id = profile.get("id")
             if not isinstance(profile_id, str) or not profile_id or profile_id in declared:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid start_profiles")
-            if profile.get("learner_unit_count") not in {1, 2, 3} or profile.get("opponent_unit_count") not in {1, 2, 3}:
+            if profile.get("learner_units") not in {1, 2, 3} or profile.get("opponent_units") not in {1, 2, 3}:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid profile unit counts")
             if profile.get("separation") not in {"legacy-mirrored", "near", "medium", "far"}:
                 raise ValueError("GymServer profiled tactical_v2 contract has invalid profile separation")
             declared.add(profile_id)
+            actual_profiles.append((profile_id, profile["learner_units"], profile["opponent_units"], profile["separation"]))
+        if tuple(actual_profiles) != expected_profiles:
+            raise ValueError("GymServer profiled tactical_v2 contract requires the exact versioned start profile catalog")
         if not isinstance(distribution, list) or not distribution:
             raise ValueError("GymServer profiled tactical_v2 contract requires start_distribution")
         total = 0
@@ -314,6 +324,10 @@ def _validate_tactical_v2(
             seen.add(profile_id)
             total += basis_points
 
+        if seen != declared or total != 10000:
+            raise ValueError("GymServer profiled tactical_v2 contract has invalid start_distribution")
+    elif placement_policy != "symmetric-random-v1":
+        raise ValueError("GymServer contract tactical_v2.placement_policy is not canonical")
     templates = semantics.get("templates")
     if not isinstance(templates, list) or not templates:
         raise ValueError("GymServer contract tactical_v2.templates must be a non-empty list")

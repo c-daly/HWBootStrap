@@ -248,6 +248,9 @@ namespace HexWars.Engine.Rl
             if (profile == null) throw new ArgumentNullException(nameof(profile));
             if (learnerSeat != PlayerId.Player0 && learnerSeat != PlayerId.Player1)
                 throw new ArgumentOutOfRangeException(nameof(learnerSeat));
+            if (_config.PlacementPolicy != "profiled-seeded-v1")
+                throw new InvalidOperationException(
+                    "explicit tactical-v2 start profiles require profiled-seeded-v1 placement policy");
             if (!IsDeclaredProfile(profile))
                 throw new ArgumentException(
                     $"start profile '{profile.Id}' is not declared by this tactical-v2 layout",

@@ -167,6 +167,26 @@ def tactical_v2_spaces(
     }
 
 
+def _profiled_tactical_v2_start_semantics() -> tuple[list[dict], list[dict]]:
+    profiles = [
+        {"id": "standard-3v3", "learner_units": 3, "opponent_units": 3,
+         "separation": "legacy-mirrored"},
+        {"id": "conversion-3v1-near", "learner_units": 3, "opponent_units": 1, "separation": "near"},
+        {"id": "conversion-3v1-medium", "learner_units": 3, "opponent_units": 1, "separation": "medium"},
+        {"id": "conversion-3v1-far", "learner_units": 3, "opponent_units": 1, "separation": "far"},
+        {"id": "conversion-2v1-near", "learner_units": 2, "opponent_units": 1, "separation": "near"},
+        {"id": "conversion-2v1-medium", "learner_units": 2, "opponent_units": 1, "separation": "medium"},
+        {"id": "conversion-2v1-far", "learner_units": 2, "opponent_units": 1, "separation": "far"},
+        {"id": "conversion-1v1-near", "learner_units": 1, "opponent_units": 1, "separation": "near"},
+        {"id": "conversion-1v1-medium", "learner_units": 1, "opponent_units": 1, "separation": "medium"},
+        {"id": "conversion-1v1-far", "learner_units": 1, "opponent_units": 1, "separation": "far"},
+    ]
+    weights = [
+        {"profile_id": profile["id"], "basis_points": 10000 if profile["id"] == "standard-3v3" else 0}
+        for profile in profiles
+    ]
+    return profiles, weights
+
 def _valid_adaptive_spaces() -> dict:
     spaces = _valid_spaces()
     spaces["contract_version"] = "adaptive-v1"
@@ -441,17 +461,48 @@ def test_tactical_v2_client_accepts_profiled_contract_with_declared_semantics(
     spaces = tactical_v2_spaces(template_count=5, unit_count=3, width=13, height=9)
     semantics = spaces["tactical_v2"]
     semantics["placement_policy"] = "profiled-seeded-v1"
-    semantics["start_profiles"] = [
-        {"id": "standard-3v3", "learner_unit_count": 3, "opponent_unit_count": 3,
-         "separation": "legacy-mirrored"},
-    ]
-    semantics["start_distribution"] = [{"profile_id": "standard-3v3", "basis_points": 10000}]
+    profiles, weights = _profiled_tactical_v2_start_semantics()
+    semantics["start_profiles"] = profiles
+    semantics["start_distribution"] = weights
 
     env = HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
     try:
         assert env.contract.semantics["start_profiles"] == semantics["start_profiles"]
     finally:
         env.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("unknown_policy", "placement_policy"),
+        ("missing_profile", "exact versioned start profile catalog"),
+        ("extra_profile", "exact versioned start profile catalog"),
+        ("wrong_weight", "invalid start_distribution"),
+        ("wrong_total", "invalid start_distribution"),
+    ],
+)
+def test_tactical_v2_client_rejects_noncanonical_profiled_contract(
+    tmp_path: Path, mutation: str, message: str,
+) -> None:
+    spaces = tactical_v2_spaces(template_count=5, unit_count=3, width=13, height=9)
+    semantics = spaces["tactical_v2"]
+    semantics["placement_policy"] = "unknown-policy" if mutation == "unknown_policy" else "profiled-seeded-v1"
+    profiles, weights = _profiled_tactical_v2_start_semantics()
+    semantics["start_profiles"] = profiles
+    semantics["start_distribution"] = weights
+    if mutation == "missing_profile":
+        profiles.pop()
+    elif mutation == "extra_profile":
+        profiles.append({"id": "extra", "learner_units": 1, "opponent_units": 1, "separation": "near"})
+    elif mutation == "wrong_weight":
+        weights[0]["basis_points"] = 10001
+    elif mutation == "wrong_total":
+        weights[0]["basis_points"] = 9999
+
+    with pytest.raises(ValueError, match=message):
+        HexWarsEnv(_fake_server(tmp_path, spaces), environment="tactical-v2")
+
 def test_tactical_v2_client_rejects_duel_handshake_and_closes_server_process(
     tmp_path: Path,
 ) -> None:

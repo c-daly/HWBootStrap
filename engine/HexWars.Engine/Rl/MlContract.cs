@@ -285,8 +285,8 @@ namespace HexWars.Engine.Rl
                     (object)ReadOnlyMap(new Dictionary<string, object>
                     {
                         ["id"] = profile.Id,
-                        ["learner_unit_count"] = profile.LearnerUnitCount,
-                        ["opponent_unit_count"] = profile.OpponentUnitCount,
+                        ["learner_units"] = profile.LearnerUnitCount,
+                        ["opponent_units"] = profile.OpponentUnitCount,
                         ["separation"] = profile.Separation,
                     })).ToArray());
                 values["start_distribution"] = Array.AsReadOnly(config.StartDistribution.Weights.Select(weight =>
