@@ -383,6 +383,98 @@ def test_actor_transfer_preserves_masked_logits_but_not_value_parameters(
         target_env.close()
 
 
+def test_actor_transfer_restores_target_actor_when_provenance_hashing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _actor_transfer_contract()
+    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        actor_before = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+
+        def fail_hash(_path: Path) -> str:
+            raise RuntimeError("post-copy provenance failure")
+
+        monkeypatch.setattr("ml_lab.algorithms._sha256_file", fail_hash)
+
+        with pytest.raises(RuntimeError, match="post-copy provenance failure"):
+            adapter.initialize_actor(
+                target,
+                source_run=source_run,
+                expected_contract=contract,
+                device="cpu",
+            )
+
+        actor_after = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(actor_after, actor_before)
+    finally:
+        target_env.close()
+
+
+def test_actor_transfer_rejects_noncanonical_zero_step_checkpoint_before_copy(
+    tmp_path: Path,
+) -> None:
+    contract = _actor_transfer_contract()
+    source_run, _source, _observations, _masks, checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    alternate_checkpoint = source_run / "checkpoints" / "alternate.zip"
+    alternate_checkpoint.write_bytes(checkpoint.read_bytes())
+    manifest = read_json(source_run / "run.json")
+    manifest["latest_checkpoint"] = "checkpoints/alternate.zip"
+    atomic_write_json(source_run / "run.json", manifest)
+
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        actor_before = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+
+        with pytest.raises(ValueError, match="metadata does not match"):
+            adapter.initialize_actor(
+                target,
+                source_run=source_run,
+                expected_contract=contract,
+                device="cpu",
+            )
+
+        actor_after = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(actor_after, actor_before)
+    finally:
+        target_env.close()
+
+
 def test_actor_transfer_rejects_bc_metadata_not_bound_to_run(
     tmp_path: Path,
 ) -> None:

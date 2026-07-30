@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from dataclasses import dataclass
 from numbers import Integral
@@ -191,6 +192,7 @@ class MaskablePPOAdapter:
             or manifest.get("state") != "completed"
             or type(manifest.get("timesteps")) is not int
             or manifest.get("timesteps") != 0
+            or manifest.get("latest_checkpoint") != "checkpoints/step_000000000.zip"
             or type(manifest.get("latest_checkpoint_step")) is not int
             or manifest.get("latest_checkpoint_step") != 0
             or not isinstance(manifest_config, Mapping)
@@ -214,6 +216,9 @@ class MaskablePPOAdapter:
         ):
             raise ValueError("behavioral clone metadata does not match run")
 
+        canonical_checkpoint = (
+            source_run / "checkpoints" / "step_000000000.zip"
+        ).resolve()
         resolved = ControllerResolver(expected_contract).resolve(f"run:{source_run}")
         if resolved.contract != expected_contract:
             raise ContractMismatch(
@@ -222,7 +227,9 @@ class MaskablePPOAdapter:
         if (
             resolved.algorithm != self.name
             or resolved.model is None
+            or resolved.step != 0
             or resolved.path is None
+            or resolved.path.resolve() != canonical_checkpoint
         ):
             raise ValueError("actor initialization source is not a MaskablePPO run")
         source_model = resolved.model
@@ -257,6 +264,7 @@ class MaskablePPOAdapter:
             for name, accessor in ACTOR_MODULES.items()
         }
         source_states: dict[str, Mapping[str, Any]] = {}
+        target_states: dict[str, Mapping[str, Any]] = {}
         for name in ACTOR_MODULES:
             source_state = source_modules[name].state_dict()
             target_state = target_modules[name].state_dict()
@@ -274,6 +282,7 @@ class MaskablePPOAdapter:
                         f"actor module {name!r} tensor {key!r} dtype does not match"
                     )
             source_states[name] = source_state
+            target_states[name] = copy.deepcopy(target_state)
 
         requested_device = get_device(device)
         model_device = torch.device(model.device)
@@ -300,39 +309,56 @@ class MaskablePPOAdapter:
                 return distribution.distribution.logits.detach().cpu()
 
         source_logits = masked_logits(source_model.policy)
-        for name in ACTOR_MODULES:
-            target_modules[name].load_state_dict(source_states[name], strict=True)
-        target_logits = masked_logits(model.policy)
-        rtol = 0.0 if requested_device.type == "cpu" else 1e-6
-        atol = 0.0 if requested_device.type == "cpu" else 1e-7
-        torch.testing.assert_close(
-            target_logits,
-            source_logits,
-            rtol=rtol,
-            atol=atol,
-        )
-        maximum_difference = float(
-            torch.max(torch.abs(target_logits - source_logits)).item()
-        )
-        checkpoint = resolved.path.resolve()
-        return {
-            "schema_version": 1,
-            "kind": "actor_only",
-            "actor_modules": list(ACTOR_MODULES),
-            "device": str(requested_device),
-            "comparison_rtol": rtol,
-            "comparison_atol": atol,
-            "maximum_absolute_logit_difference": maximum_difference,
-            "source_run": str(source_run),
-            "source_checkpoint": checkpoint.relative_to(source_run).as_posix(),
-            "source_checkpoint_sha256": _sha256_file(checkpoint),
-            "source_actor_fixtures_sha256": _sha256_file(fixtures_path),
-            "source_run_manifest_sha256": _sha256_file(source_run / "run.json"),
-            "source_bc_sha256": _sha256_file(bc_path),
-            "source_dataset_manifest_sha256": dataset_hash,
-            "source_contract_hash": expected_contract.contract_hash,
-            "source_encoding_hash": expected_contract.encoding_hash,
-        }
+        try:
+            for name in ACTOR_MODULES:
+                target_modules[name].load_state_dict(source_states[name], strict=True)
+            target_logits = masked_logits(model.policy)
+            rtol = 0.0 if requested_device.type == "cpu" else 1e-6
+            atol = 0.0 if requested_device.type == "cpu" else 1e-7
+            torch.testing.assert_close(
+                target_logits,
+                source_logits,
+                rtol=rtol,
+                atol=atol,
+            )
+            maximum_difference = float(
+                torch.max(torch.abs(target_logits - source_logits)).item()
+            )
+            return {
+                "schema_version": 1,
+                "kind": "actor_only",
+                "actor_modules": list(ACTOR_MODULES),
+                "device": str(requested_device),
+                "comparison_rtol": rtol,
+                "comparison_atol": atol,
+                "maximum_absolute_logit_difference": maximum_difference,
+                "source_run": str(source_run),
+                "source_checkpoint": canonical_checkpoint.relative_to(
+                    source_run
+                ).as_posix(),
+                "source_checkpoint_sha256": _sha256_file(canonical_checkpoint),
+                "source_actor_fixtures_sha256": _sha256_file(fixtures_path),
+                "source_run_manifest_sha256": _sha256_file(source_run / "run.json"),
+                "source_bc_sha256": _sha256_file(bc_path),
+                "source_dataset_manifest_sha256": dataset_hash,
+                "source_contract_hash": expected_contract.contract_hash,
+                "source_encoding_hash": expected_contract.encoding_hash,
+            }
+        except BaseException as error:
+            rollback_failures = []
+            for name in ACTOR_MODULES:
+                try:
+                    target_modules[name].load_state_dict(
+                        target_states[name],
+                        strict=True,
+                    )
+                except BaseException as rollback_error:
+                    rollback_failures.append(f"{name}: {rollback_error!r}")
+            if rollback_failures:
+                error.add_note(
+                    "actor rollback also failed: " + "; ".join(rollback_failures)
+                )
+            raise
 
     def load(self, path: Path, *, env: Any, device: str) -> Any:
         from sb3_contrib import MaskablePPO
