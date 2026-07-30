@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
+import zipfile
+from dataclasses import asdict
 
 import numpy as np
 import pytest
 import torch
+import gymnasium as gym
+from gymnasium import spaces
 import ml_lab.imitation as imitation_module
 
 from ml_lab.contracts import ContractMismatch, EnvironmentContract
-from ml_lab.imitation import DemonstrationGame, DemonstrationWriter, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, validate_decision
+from hex_cnn import HexCNN
+from ml_lab.algorithms import MaskablePPOAdapter
+from ml_lab.controllers import ControllerResolver
+from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, train_behavioral_clone, validate_decision
 
 
 def contract() -> EnvironmentContract:
@@ -228,3 +236,275 @@ def test_matching_hash_invalid_payload_is_rejected_on_first_row_use(sampled_data
     dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
     with pytest.raises(ValueError, match="illegal action"):
         dataset._row_data([(0, 0)])
+
+
+
+
+@pytest.fixture
+def clone_dataset(tmp_path: Path) -> Path:
+    writer = DemonstrationWriter.create(tmp_path, contract=contract(), shard_rows=2)
+    writer.append_game(
+        _staged_game(tmp_path, "train", "greedy", "standard-3v3", 11_000_100, 0),
+        [decision(index, 0) for index in range(3)],
+    )
+    writer.append_game(
+        _staged_game(tmp_path, "train", "bounded-search", "conversion-3v1-near", 11_500_100, 1),
+        [{**decision(index + 3, 1), "decision_index": index, "action_kind": 2} for index in range(2)],
+    )
+    writer.append_game(
+        _staged_game(tmp_path, "validation", "greedy", "standard-3v3", 12_000_100, 0),
+        [{**decision(5, 0), "decision_index": 0}],
+    )
+    writer.append_game(
+        _staged_game(tmp_path, "validation", "bounded-search", "conversion-3v1-near", 12_000_101, 1),
+        [{**decision(6, 1), "decision_index": 0, "action_kind": 3}],
+    )
+    writer.close()
+    return tmp_path
+
+class _TinyCloneEnv(gym.Env):
+    observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+    action_space = spaces.Discrete(5)
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(3, dtype=np.float32), {}
+
+    def step(self, action):
+        return np.zeros(3, dtype=np.float32), 0.0, True, False, {}
+
+    def action_masks(self):
+        return np.asarray([True, False, True, False, False], dtype=bool)
+
+
+def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> torch.Tensor:
+    with torch.no_grad():
+        observation_tensor = torch.as_tensor(observations, dtype=torch.float32, device=model.device)
+        mask_tensor = torch.as_tensor(masks, dtype=torch.bool, device=model.device)
+        distribution = model.policy.get_distribution(observation_tensor, action_masks=mask_tensor)
+        return distribution.distribution.logits.detach().cpu()
+
+
+def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, tmp_path: Path) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    run_dir = tmp_path / "bc"
+    result = train_behavioral_clone(
+        dataset=dataset,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=run_dir,
+        config=BehavioralCloningConfig(model_seed=211, batch_size=5, learning_rate=3e-4, max_epochs=200, patience=200),
+    )
+
+    assert result.validation.top1_accuracy == pytest.approx(1.0)
+    assert result.validation.illegal_probability == pytest.approx(0.0)
+    assert result.best_epoch <= result.epochs_trained <= 200
+    expected_files = {
+        "run.json", "scenario.json", "bc.json", "metrics.json", "actor-fixtures.npz",
+        "checkpoints/step_000000000.zip",
+    }
+    assert {path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()} == expected_files
+
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    bc = json.loads((run_dir / "bc.json").read_text(encoding="utf-8"))
+    metrics = json.loads(
+        (run_dir / "metrics.json").read_text(encoding="utf-8"),
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+    )
+    dataset_hash = hashlib.sha256((clone_dataset / "manifest.json").read_bytes()).hexdigest()
+    assert manifest["config"]["algorithm"] == "maskable_ppo"
+    assert manifest["config"]["policy"] == "HexCNN"
+    assert manifest["latest_checkpoint_step"] == 0
+    assert manifest["contract"] == contract().to_dict()
+    assert manifest["dataset_manifest_sha256"] == dataset_hash
+    assert manifest["bc_config"]["model_seed"] == manifest["model_seed"] == 211
+    assert manifest["best_epoch"] == result.best_epoch
+    assert bc["dataset_manifest_sha256"] == dataset_hash
+    assert bc["training_decision_count"] == 5
+    assert bc["validation_decision_count"] == 2
+    assert bc["validation_game_count"] == 2
+    assert bc["value_parameters_sha256_before"] == bc["value_parameters_sha256_after"]
+    assert bc["actor_parameter_count"] > 0 and bc["value_parameter_count"] > 0
+    assert metrics == asdict(result.validation)
+    assert {"teacher/greedy", "teacher/bounded-search", "profile/standard-3v3",
+            "profile/conversion-3v1-near", "action_kind/move", "action_kind/deploy",
+            "seat/0", "seat/1"} <= set(metrics["strata"])
+
+    with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as fixtures:
+        assert set(fixtures.files) == {"observations", "legal_masks"}
+        observations = fixtures["observations"]
+        masks = fixtures["legal_masks"]
+        assert observations.dtype == np.float32 and masks.dtype == np.bool_
+        assert observations.shape == (2, 3) and masks.shape == (2, 5)
+        assert set(observations[:, 0]) == {5.0, 6.0}
+
+    first = ControllerResolver(contract()).resolve(f"run:{run_dir}")
+    second = ControllerResolver(contract()).resolve(f"run:{run_dir}")
+    assert isinstance(first.model.policy.features_extractor, HexCNN)
+    torch.testing.assert_close(
+        _test_masked_logits(first.model, observations, masks),
+        _test_masked_logits(second.model, observations, masks),
+        rtol=0,
+        atol=0,
+    )
+    checkpoint = run_dir / "checkpoints" / "step_000000000.zip"
+    with zipfile.ZipFile(checkpoint) as archive:
+        assert not any("bc_optimizer" in name.lower() for name in archive.namelist())
+        optimizer_state = torch.load(io.BytesIO(archive.read("policy.optimizer.pth")), map_location="cpu", weights_only=True)
+        assert optimizer_state["state"] == {}
+
+
+def _batch_for_metrics(action_size: int = 2) -> ImitationBatch:
+    return ImitationBatch(
+        observations=np.asarray([[0.0, 1.0, 2.0], [1.0, 1.0, 2.0]], dtype=np.float32),
+        legal_masks=np.asarray([[True] * action_size, [False] + [True] * (action_size - 1)], dtype=bool),
+        actions=np.asarray([0, action_size - 1], dtype=np.int64),
+        game_ids=np.asarray([0, 1], dtype=np.int64),
+        decision_indices=np.asarray([0, 0], dtype=np.int32),
+        sources=np.asarray([Source.GREEDY_STANDARD, Source.SEARCH_CONVERSION], dtype=object),
+        profiles=np.asarray(["standard-3v3", "conversion-3v1-near"], dtype=object),
+        seats=np.asarray([0, 1], dtype=np.uint8),
+        action_kinds=np.asarray([0, 1], dtype=np.uint8),
+        partitions=np.asarray(["validation", "validation"], dtype=object),
+    )
+
+
+def test_fixture_selection_is_sorted_and_keeps_non_end_turn_and_both_available_seats() -> None:
+    count = 40
+    batch = ImitationBatch(
+        observations=np.arange(count * 3, dtype=np.float32).reshape(count, 3),
+        legal_masks=np.ones((count, 5), dtype=bool),
+        actions=np.zeros(count, dtype=np.int64),
+        game_ids=np.zeros(count, dtype=np.int64),
+        decision_indices=np.arange(count, dtype=np.int32),
+        sources=np.full(count, Source.GREEDY_STANDARD, dtype=object),
+        profiles=np.full(count, "standard-3v3", dtype=object),
+        seats=np.asarray([0] * 39 + [1], dtype=np.uint8),
+        action_kinds=np.asarray([0] * 38 + [1, 0], dtype=np.uint8),
+        partitions=np.full(count, "validation", dtype=object),
+    )
+
+    fixtures = imitation_module._fixture_batch(batch)
+
+    assert len(fixtures.actions) == 32
+    assert np.all(fixtures.decision_indices[:-1] <= fixtures.decision_indices[1:])
+    assert 38 in fixtures.decision_indices and 39 in fixtures.decision_indices
+    assert set(fixtures.seats) == {0, 1}
+    assert np.any(fixtures.action_kinds != 0)
+    with pytest.raises(ValueError, match="non-EndTurn"):
+        imitation_module._fixture_batch(ImitationBatch(**{
+            name: (np.zeros_like(value) if name == "action_kinds" else value.copy())
+            for name, value in batch.__dict__.items()
+        }))
+
+
+class _TwoActionEnv(_TinyCloneEnv):
+    action_space = spaces.Discrete(2)
+
+    def action_masks(self):
+        return np.asarray([True, True], dtype=bool)
+
+
+def test_clone_metrics_clamp_top_k_for_small_action_spaces_and_remain_finite() -> None:
+    model = MaskablePPOAdapter().create(
+        _TwoActionEnv(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        seed=13,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+
+    metrics = imitation_module._clone_metrics(model, _batch_for_metrics())
+
+    assert metrics.top3_accuracy == pytest.approx(1.0)
+    assert metrics.top5_accuracy == pytest.approx(1.0)
+    assert metrics.illegal_probability == pytest.approx(0.0)
+    assert all(np.isfinite(value) for name, value in asdict(metrics).items() if name != "strata")
+
+
+def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    run_dir = tmp_path / "failed"
+    monkeypatch.setattr(
+        imitation_module,
+        "_verify_reload_identity",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("injected reload failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected reload failure"):
+        train_behavioral_clone(
+            dataset=dataset,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+            run_dir=run_dir,
+            config=BehavioralCloningConfig(model_seed=17, batch_size=5, max_epochs=1, patience=1),
+        )
+
+    assert not run_dir.exists()
+    assert list(tmp_path.glob(".failed.publishing-*")) == []
+
+
+def test_clone_training_is_seed_deterministic_and_validation_is_not_optimized(clone_dataset: Path, tmp_path: Path) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    config = BehavioralCloningConfig(model_seed=29, batch_size=5, max_epochs=3, patience=3)
+    results = [
+        train_behavioral_clone(
+            dataset=dataset,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+            run_dir=tmp_path / name,
+            config=config,
+        )
+        for name in ("first", "second")
+    ]
+
+    assert asdict(results[0].validation) == asdict(results[1].validation)
+    assert results[0].best_epoch == results[1].best_epoch
+    first_bc = json.loads((results[0].run_dir / "bc.json").read_text(encoding="utf-8"))
+    second_bc = json.loads((results[1].run_dir / "bc.json").read_text(encoding="utf-8"))
+    assert first_bc["training_decision_count"] == second_bc["training_decision_count"] == 5
+    assert first_bc["validation_decision_count"] == second_bc["validation_decision_count"] == 2
+    with np.load(results[0].run_dir / "actor-fixtures.npz", allow_pickle=False) as first_fixtures:
+        observations, masks = first_fixtures["observations"], first_fixtures["legal_masks"]
+    first_model = ControllerResolver(contract()).resolve(f"run:{results[0].run_dir}").model
+    second_model = ControllerResolver(contract()).resolve(f"run:{results[1].run_dir}").model
+    torch.testing.assert_close(
+        _test_masked_logits(first_model, observations, masks),
+        _test_masked_logits(second_model, observations, masks),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_behavioral_cloning_defaults_are_the_reviewed_production_limits() -> None:
+    config = BehavioralCloningConfig()
+    assert (config.batch_size, config.learning_rate, config.max_epochs, config.patience) == (256, 3e-4, 50, 5)
+    with pytest.raises(ValueError, match="finite"):
+        BehavioralCloningConfig(learning_rate=float("nan"))
+
+
+def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    original = StratifiedDecisionSampler.next_batch
+
+    def leak_validation(sampler: StratifiedDecisionSampler) -> ImitationBatch:
+        batch = original(sampler)
+        values = {name: getattr(batch, name).copy() for name in ImitationBatch.__dataclass_fields__}
+        values["partitions"][:] = "validation"
+        return ImitationBatch(**values)
+
+    monkeypatch.setattr(StratifiedDecisionSampler, "next_batch", leak_validation)
+    run_dir = tmp_path / "leaked"
+    with pytest.raises(RuntimeError, match="validation rows"):
+        train_behavioral_clone(
+            dataset=dataset,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+            run_dir=run_dir,
+            config=BehavioralCloningConfig(model_seed=31, batch_size=5, max_epochs=1, patience=1),
+        )
+    assert not run_dir.exists()

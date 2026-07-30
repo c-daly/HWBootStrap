@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import zipfile
 from collections.abc import Mapping, Sequence
+from itertools import chain
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -642,3 +646,466 @@ def masked_cross_entropy(logits: Any, legal_masks: Any, actions: Any) -> Any:
         raise ValueError("teacher action is masked")
     masked_logits = logits.masked_fill(~legal_masks, torch.finfo(logits.dtype).min)
     return functional.cross_entropy(masked_logits, actions)
+
+
+@dataclass(frozen=True)
+class BehavioralCloningConfig:
+    model_seed: int = 0
+    batch_size: int = 256
+    learning_rate: float = 3e-4
+    max_epochs: int = 50
+    patience: int = 5
+
+    def __post_init__(self) -> None:
+        if type(self.model_seed) is not int or self.model_seed < 0:
+            raise ValueError("behavioral-cloning model_seed must be a non-negative integer")
+        if type(self.batch_size) is not int or self.batch_size < 1:
+            raise ValueError("behavioral-cloning batch_size must be a positive integer")
+        if not isinstance(self.learning_rate, (int, float)) or not np.isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("behavioral-cloning learning_rate must be finite and positive")
+        if type(self.max_epochs) is not int or self.max_epochs < 1:
+            raise ValueError("behavioral-cloning max_epochs must be a positive integer")
+        if type(self.patience) is not int or self.patience < 1:
+            raise ValueError("behavioral-cloning patience must be a positive integer")
+
+
+@dataclass(frozen=True)
+class CloneMetrics:
+    nll: float
+    top1_accuracy: float
+    top3_accuracy: float
+    top5_accuracy: float
+    expected_calibration_error: float
+    mean_end_turn_probability: float
+    illegal_probability: float
+    strata: Mapping[str, Mapping[str, float | int]]
+
+
+@dataclass(frozen=True)
+class BehavioralCloningResult:
+    run_dir: Path
+    validation: CloneMetrics
+    best_epoch: int
+    epochs_trained: int
+
+
+def _partition_batch(dataset: ImitationDataset, partition: str) -> ImitationBatch:
+    try:
+        sources = dataset.index[partition]
+    except KeyError as exc:
+        raise ValueError(f"imitation dataset has no {partition} partition") from exc
+    refs: list[tuple[int, int]] = []
+    for source in sorted(sources, key=lambda value: value.value):
+        profiles = sources[source]
+        for profile in sorted(profiles):
+            for seat in sorted(profiles[profile]):
+                for kind in sorted(profiles[profile][seat]):
+                    refs.extend(profiles[profile][seat][kind])
+    if not refs:
+        raise ValueError(f"imitation dataset has no {partition} rows")
+    rows = dataset._row_data(refs)
+    order = np.lexsort((rows["decision_indices"], rows["game_ids"]))
+    rows = {name: values[order] for name, values in rows.items()}
+    legal_masks = np.unpackbits(
+        rows["packed_masks"], axis=1, count=dataset.contract.action_size, bitorder="little"
+    ).astype(bool, copy=False)
+    metadata = [dataset.games[int(game_id)] for game_id in rows["game_ids"]]
+    return ImitationBatch(
+        observations=rows["observations"].copy(),
+        legal_masks=legal_masks.copy(),
+        actions=rows["actions"].copy(),
+        game_ids=rows["game_ids"].copy(),
+        decision_indices=rows["decision_indices"].copy(),
+        sources=np.asarray([_source_for_game(game) for game in metadata], dtype=object),
+        profiles=np.asarray([game["profile"] for game in metadata], dtype=object),
+        seats=rows["seats"].copy(),
+        action_kinds=rows["action_kinds"].copy(),
+        partitions=np.asarray([game["partition"] for game in metadata], dtype=object),
+    )
+
+
+def _take_batch(batch: ImitationBatch, indices: np.ndarray) -> ImitationBatch:
+    return ImitationBatch(**{name: getattr(batch, name)[indices].copy() for name in ImitationBatch.__dataclass_fields__})
+
+
+def _fixture_batch(validation: ImitationBatch, limit: int = 32) -> ImitationBatch:
+    if type(limit) is not int or limit < 1:
+        raise ValueError("actor fixture limit must be positive")
+    count = len(validation.actions)
+    non_end = np.flatnonzero(validation.action_kinds != ACTION_KINDS["end_turn"])
+    if not len(non_end):
+        raise ValueError("actor fixtures require a non-EndTurn validation row")
+    required = [int(non_end[0])]
+    for seat in sorted(int(value) for value in np.unique(validation.seats)):
+        required.append(int(np.flatnonzero(validation.seats == seat)[0]))
+    selected: list[int] = []
+    for index in [*required, *range(count)]:
+        if index not in selected:
+            selected.append(index)
+        if len(selected) == min(limit, count):
+            break
+    selected.sort()
+    return _take_batch(validation, np.asarray(selected, dtype=np.int64))
+
+
+def _actor_named_parameters(model: Any) -> tuple[tuple[str, Any], ...]:
+    groups = (
+        ("features_extractor", model.policy.features_extractor),
+        ("mlp_extractor.policy_net", model.policy.mlp_extractor.policy_net),
+        ("action_net", model.policy.action_net),
+    )
+    return tuple((f"{prefix}.{name}", parameter) for prefix, module in groups for name, parameter in module.named_parameters())
+
+
+def _value_named_parameters(model: Any) -> tuple[tuple[str, Any], ...]:
+    groups = (
+        ("mlp_extractor.value_net", model.policy.mlp_extractor.value_net),
+        ("value_net", model.policy.value_net),
+    )
+    return tuple((f"{prefix}.{name}", parameter) for prefix, module in groups for name, parameter in module.named_parameters())
+
+
+def _parameter_hash(named_parameters: Sequence[tuple[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for name, parameter in named_parameters:
+        array = parameter.detach().cpu().contiguous().numpy()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(np.asarray(array.shape, dtype=np.int64).tobytes())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def _distribution_tensors(model: Any, batch: ImitationBatch) -> tuple[Any, Any, Any]:
+    import torch
+
+    observations = torch.as_tensor(batch.observations, dtype=torch.float32, device=model.device)
+    legal_masks = torch.as_tensor(batch.legal_masks, dtype=torch.bool, device=model.device)
+    actions = torch.as_tensor(batch.actions, dtype=torch.int64, device=model.device)
+    distribution = model.policy.get_distribution(observations, action_masks=legal_masks)
+    return distribution, actions, legal_masks
+
+
+def _masked_logits(model: Any, batch: ImitationBatch) -> Any:
+    import torch
+
+    model.policy.set_training_mode(False)
+    with torch.no_grad():
+        distribution, _actions, _masks = _distribution_tensors(model, batch)
+        return distribution.distribution.logits.detach().cpu()
+
+
+def _strata_metrics(predictions: np.ndarray, actions: np.ndarray, batch: ImitationBatch) -> Mapping[str, Mapping[str, float | int]]:
+    teacher = np.asarray(
+        ["greedy" if source is Source.GREEDY_STANDARD else "bounded-search" for source in batch.sources],
+        dtype=object,
+    )
+    kind_names = {value: name for name, value in ACTION_KINDS.items()}
+    dimensions = {
+        "teacher": teacher,
+        "profile": batch.profiles,
+        "action_kind": np.asarray([kind_names[int(value)] for value in batch.action_kinds], dtype=object),
+        "seat": np.asarray([str(int(value)) for value in batch.seats], dtype=object),
+    }
+    strata: dict[str, Mapping[str, float | int]] = {}
+    for dimension, values in dimensions.items():
+        for value in sorted(str(item) for item in np.unique(values)):
+            selected = np.asarray([str(item) == value for item in values], dtype=bool)
+            strata[f"{dimension}/{value}"] = {
+                "count": int(selected.sum()),
+                "accuracy": float(np.mean(predictions[selected] == actions[selected])),
+            }
+    return strata
+
+
+def _clone_metrics(model: Any, batch: ImitationBatch) -> CloneMetrics:
+    import torch
+
+    if len(batch.actions) == 0:
+        raise ValueError("clone metrics require at least one row")
+    model.policy.set_training_mode(False)
+    with torch.no_grad():
+        distribution, actions, legal_masks = _distribution_tensors(model, batch)
+        log_prob = distribution.log_prob(actions)
+        probabilities = distribution.distribution.probs
+        predictions = probabilities.argmax(dim=1)
+        accuracies: dict[int, float] = {}
+        for requested in (1, 3, 5):
+            width = min(requested, probabilities.shape[1])
+            top = probabilities.topk(width, dim=1).indices
+            accuracies[requested] = float((top == actions[:, None]).any(dim=1).float().mean().cpu())
+        confidence = probabilities.max(dim=1).values
+        correct = predictions == actions
+        bins = torch.clamp((confidence * 10).floor().to(torch.int64), max=9)
+        ece = torch.zeros((), dtype=probabilities.dtype, device=probabilities.device)
+        for index in range(10):
+            selected = bins == index
+            if selected.any():
+                ece = ece + selected.float().mean() * torch.abs(
+                    correct[selected].float().mean() - confidence[selected].mean()
+                )
+        metrics = CloneMetrics(
+            nll=float((-log_prob.mean()).cpu()),
+            top1_accuracy=accuracies[1],
+            top3_accuracy=accuracies[3],
+            top5_accuracy=accuracies[5],
+            expected_calibration_error=float(ece.cpu()),
+            mean_end_turn_probability=float(probabilities[:, 0].mean().cpu()),
+            illegal_probability=float((probabilities * (~legal_masks)).sum(dim=1).mean().cpu()),
+            strata=_strata_metrics(
+                predictions.cpu().numpy(), actions.cpu().numpy(), batch
+            ),
+        )
+    scalars = (
+        metrics.nll,
+        metrics.top1_accuracy,
+        metrics.top3_accuracy,
+        metrics.top5_accuracy,
+        metrics.expected_calibration_error,
+        metrics.mean_end_turn_probability,
+        metrics.illegal_probability,
+    )
+    if not all(np.isfinite(value) for value in scalars):
+        raise ValueError("clone validation metrics must be finite")
+    return metrics
+
+
+def _atomic_actor_fixtures(path: Path, fixtures: ImitationBatch) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    try:
+        with open(temporary, "wb") as stream:
+            np.savez_compressed(
+                stream,
+                observations=fixtures.observations.astype(np.float32, copy=False),
+                legal_masks=fixtures.legal_masks.astype(bool, copy=False),
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _assert_no_bc_optimizer_state(checkpoint: Path) -> None:
+    import torch
+
+    with zipfile.ZipFile(checkpoint) as archive:
+        names = archive.namelist()
+        if any("bc_optimizer" in name.lower() for name in names):
+            raise RuntimeError("behavioral-cloning optimizer state entered the saved archive")
+        if "policy.optimizer.pth" in names:
+            state = torch.load(
+                io.BytesIO(archive.read("policy.optimizer.pth")),
+                map_location="cpu",
+                weights_only=True,
+            )
+            if state.get("state"):
+                raise RuntimeError("saved PPO optimizer unexpectedly contains training state")
+
+
+def _verify_reload_identity(run_dir: Path, contract: EnvironmentContract, expected_logits: Any) -> None:
+    import torch
+    from .controllers import ControllerResolver
+
+    with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as loaded:
+        fixtures = ImitationBatch(
+            observations=loaded["observations"],
+            legal_masks=loaded["legal_masks"],
+            actions=np.zeros(len(loaded["observations"]), dtype=np.int64),
+            game_ids=np.zeros(len(loaded["observations"]), dtype=np.int64),
+            decision_indices=np.arange(len(loaded["observations"]), dtype=np.int32),
+            sources=np.full(len(loaded["observations"]), Source.GREEDY_STANDARD, dtype=object),
+            profiles=np.full(len(loaded["observations"]), "fixture", dtype=object),
+            seats=np.zeros(len(loaded["observations"]), dtype=np.uint8),
+            action_kinds=np.ones(len(loaded["observations"]), dtype=np.uint8),
+            partitions=np.full(len(loaded["observations"]), "validation", dtype=object),
+        )
+    resolved = ControllerResolver(contract).resolve(f"run:{run_dir}")
+    actual_logits = _masked_logits(resolved.model, fixtures)
+    torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+
+
+
+def train_behavioral_clone(
+    *,
+    dataset: ImitationDataset,
+    env: Any,
+    contract: EnvironmentContract,
+    spaces_info: Mapping[str, Any],
+    run_dir: Path,
+    config: BehavioralCloningConfig = BehavioralCloningConfig(),
+) -> BehavioralCloningResult:
+    """Train only the production MaskablePPO actor and atomically publish a resolver-backed run."""
+    import torch
+    from .algorithms import MaskablePPOAdapter
+
+    if not isinstance(dataset, ImitationDataset):
+        raise TypeError("dataset must be a loaded ImitationDataset")
+    if dataset.contract != contract:
+        raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(config, BehavioralCloningConfig):
+        raise TypeError("config must be BehavioralCloningConfig")
+    run_dir = Path(run_dir)
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if run_dir.exists():
+        raise FileExistsError(run_dir)
+
+    training = _partition_batch(dataset, "train")
+    validation = _partition_batch(dataset, "validation")
+    fixtures = _fixture_batch(validation)
+    adapter = MaskablePPOAdapter()
+    model = adapter.create(
+        env,
+        spaces_info=dict(spaces_info),
+        seed=config.model_seed,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    adapter.validate_model(model, contract)
+
+    actor_named = _actor_named_parameters(model)
+    value_named = _value_named_parameters(model)
+    actor_parameters = tuple(chain(
+        model.policy.features_extractor.parameters(),
+        model.policy.mlp_extractor.policy_net.parameters(),
+        model.policy.action_net.parameters(),
+    ))
+    assert {id(parameter) for parameter in actor_parameters} == {id(parameter) for _name, parameter in actor_named}
+    value_parameters = tuple(parameter for _name, parameter in value_named)
+    if not actor_parameters or not value_parameters:
+        raise RuntimeError("production policy did not expose actor/value parameter groups")
+    if {id(parameter) for parameter in actor_parameters} & {id(parameter) for parameter in value_parameters}:
+        raise RuntimeError("behavioral-cloning actor and value parameter groups overlap")
+    value_before = tuple(parameter.detach().cpu().clone() for parameter in value_parameters)
+    value_hash_before = _parameter_hash(value_named)
+    optimizer = torch.optim.Adam(actor_parameters, lr=float(config.learning_rate))
+
+    sampler = StratifiedDecisionSampler(
+        dataset,
+        batch_size=config.batch_size,
+        seed=config.model_seed,
+        partition="train",
+    )
+    steps_per_epoch = max(1, int(np.ceil(len(training.actions) / config.batch_size)))
+    best_nll = float("inf")
+    best_epoch = 0
+    best_actor_state: tuple[Any, ...] | None = None
+    epochs_without_improvement = 0
+    epochs_trained = 0
+
+    for epoch in range(1, config.max_epochs + 1):
+        model.policy.set_training_mode(True)
+        for _step in range(steps_per_epoch):
+            batch = sampler.next_batch()
+            if set(batch.partitions) != {"train"}:
+                raise RuntimeError("validation rows entered behavioral-cloning optimization")
+            distribution, actions, _legal_masks = _distribution_tensors(model, batch)
+            loss = -distribution.log_prob(actions).mean()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
+            optimizer.step()
+        epochs_trained = epoch
+        validation_metrics = _clone_metrics(model, validation)
+        if validation_metrics.nll < best_nll:
+            best_nll = validation_metrics.nll
+            best_epoch = epoch
+            best_actor_state = tuple(parameter.detach().cpu().clone() for parameter in actor_parameters)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= config.patience:
+                break
+
+    if best_actor_state is None:
+        raise RuntimeError("behavioral cloning did not produce a finite validation epoch")
+    with torch.no_grad():
+        for parameter, best_value in zip(actor_parameters, best_actor_state, strict=True):
+            parameter.copy_(best_value.to(parameter.device))
+    for parameter, original in zip(value_parameters, value_before, strict=True):
+        if not torch.equal(parameter.detach().cpu(), original):
+            raise RuntimeError("behavioral cloning modified a value-side parameter")
+    value_hash_after = _parameter_hash(value_named)
+    if value_hash_after != value_hash_before:
+        raise RuntimeError("behavioral cloning modified value-side parameters")
+    validation_metrics = _clone_metrics(model, validation)
+    expected_logits = _masked_logits(model, fixtures)
+
+    dataset_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
+    config_data = asdict(config)
+    metrics_data = asdict(validation_metrics)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{run_dir.name}.publishing-", dir=run_dir.parent)
+    )
+    try:
+        checkpoint = temporary / "checkpoints" / "step_000000000.zip"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint = adapter.save(model, checkpoint)
+        _assert_no_bc_optimizer_state(checkpoint)
+        _atomic_actor_fixtures(temporary / "actor-fixtures.npz", fixtures)
+        scenario_data = {
+            "schema_version": 1,
+            "environment": contract.environment,
+            "scenario_hash": dataset.games[0]["scenario_hash"],
+            "contract_hash": contract.contract_hash,
+            "encoding_hash": contract.encoding_hash,
+        }
+        bc_data = {
+            "schema_version": 1,
+            "algorithm": adapter.name,
+            "policy": adapter.policy_name,
+            "dataset_manifest_sha256": dataset_manifest_sha256,
+            "config": config_data,
+            "model_seed": config.model_seed,
+            "best_epoch": best_epoch,
+            "epochs_trained": epochs_trained,
+            "best_validation_nll": validation_metrics.nll,
+            "actor_parameter_count": int(sum(parameter.numel() for parameter in actor_parameters)),
+            "value_parameter_count": int(sum(parameter.numel() for parameter in value_parameters)),
+            "value_parameters_sha256_before": value_hash_before,
+            "value_parameters_sha256_after": value_hash_after,
+            "training_decision_count": int(len(training.actions)),
+            "validation_decision_count": int(len(validation.actions)),
+            "validation_game_count": int(len(np.unique(validation.game_ids))),
+        }
+        manifest = {
+            "schema_version": 1,
+            "state": "completed",
+            "timesteps": 0,
+            "latest_checkpoint": "checkpoints/step_000000000.zip",
+            "latest_checkpoint_step": 0,
+            "config": {
+                "backend": "stable_baselines3",
+                "algorithm": adapter.name,
+                "policy": adapter.policy_name,
+                "seed": config.model_seed,
+                "model_seed": config.model_seed,
+                "device": "cpu",
+                "behavioral_cloning": config_data,
+            },
+            "contract": contract.to_dict(),
+            "scenario": {"path": "scenario.json", "schema_version": 1},
+            "dataset_manifest_sha256": dataset_manifest_sha256,
+            "bc_config": config_data,
+            "model_seed": config.model_seed,
+            "best_epoch": best_epoch,
+        }
+        atomic_write_json(temporary / "scenario.json", scenario_data)
+        atomic_write_json(temporary / "bc.json", bc_data)
+        atomic_write_json(temporary / "metrics.json", metrics_data)
+        atomic_write_json(temporary / "run.json", manifest)
+        _verify_reload_identity(temporary, contract, expected_logits)
+        os.replace(temporary, run_dir)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+    return BehavioralCloningResult(
+        run_dir=run_dir,
+        validation=validation_metrics,
+        best_epoch=best_epoch,
+        epochs_trained=epochs_trained,
+    )
