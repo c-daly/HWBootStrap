@@ -18,6 +18,7 @@ from ml_lab.contracts import ContractMismatch, EnvironmentContract
 from hex_cnn import HexCNN
 from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.controllers import ControllerResolver
+from ml_lab.scenarios import resolve_scenario
 from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, train_behavioral_clone, validate_decision
 
 
@@ -111,13 +112,13 @@ def test_dirty_provenance_includes_untracked_source_but_excludes_dataset_output(
     assert module._git_metadata(dataset) == ("d" * 40, False)
 
 
-def _staged_game(root: Path, partition: str, teacher: str, profile: str, seed: int, seat: int) -> DemonstrationGame:
+def _staged_game(root: Path, partition: str, teacher: str, profile: str, seed: int, seat: int, scenario_hash: str = "c" * 64) -> DemonstrationGame:
     relative = f"replays/{partition}-{teacher}-{seed}-{seat}.replay"
     payload = relative.encode("utf-8")
     replay = root / relative
     replay.parent.mkdir(parents=True, exist_ok=True)
     replay.write_bytes(payload)
-    return DemonstrationGame(partition, teacher, {} if teacher == "greedy" else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}, "random", profile, seed, seat, relative, hashlib.sha256(payload).hexdigest(), "win", "c" * 64, "a" * 64, "b" * 64)
+    return DemonstrationGame(partition, teacher, {} if teacher == "greedy" else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}, "random", profile, seed, seat, relative, hashlib.sha256(payload).hexdigest(), "win", scenario_hash, "a" * 64, "b" * 64)
 
 
 @pytest.fixture
@@ -241,22 +242,28 @@ def test_matching_hash_invalid_payload_is_rejected_on_first_row_use(sampled_data
 
 
 @pytest.fixture
-def clone_dataset(tmp_path: Path) -> Path:
+def clone_scenario():
+    return resolve_scenario(environment="tactical-v2", scenario_file=None, template_id="tactical-v2-standard")
+
+
+@pytest.fixture
+def clone_dataset(tmp_path: Path, clone_scenario) -> Path:
     writer = DemonstrationWriter.create(tmp_path, contract=contract(), shard_rows=2)
+    scenario_hash = hashlib.sha256(clone_scenario.canonical_json.encode("utf-8")).hexdigest()
     writer.append_game(
-        _staged_game(tmp_path, "train", "greedy", "standard-3v3", 11_000_100, 0),
+        _staged_game(tmp_path, "train", "greedy", "standard-3v3", 11_000_100, 0, scenario_hash),
         [decision(index, 0) for index in range(3)],
     )
     writer.append_game(
-        _staged_game(tmp_path, "train", "bounded-search", "conversion-3v1-near", 11_500_100, 1),
+        _staged_game(tmp_path, "train", "bounded-search", "conversion-3v1-near", 11_500_100, 1, scenario_hash),
         [{**decision(index + 3, 1), "decision_index": index, "action_kind": 2} for index in range(2)],
     )
     writer.append_game(
-        _staged_game(tmp_path, "validation", "greedy", "standard-3v3", 12_000_100, 0),
+        _staged_game(tmp_path, "validation", "greedy", "standard-3v3", 12_000_100, 0, scenario_hash),
         [{**decision(5, 0), "decision_index": 0}],
     )
     writer.append_game(
-        _staged_game(tmp_path, "validation", "bounded-search", "conversion-3v1-near", 12_000_101, 1),
+        _staged_game(tmp_path, "validation", "bounded-search", "conversion-3v1-near", 12_000_101, 1, scenario_hash),
         [{**decision(6, 1), "decision_index": 0, "action_kind": 3}],
     )
     writer.close()
@@ -285,11 +292,12 @@ def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> t
         return distribution.distribution.logits.detach().cpu()
 
 
-def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, tmp_path: Path) -> None:
+def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     run_dir = tmp_path / "bc"
     result = train_behavioral_clone(
         dataset=dataset,
+        scenario=clone_scenario,
         env=_TinyCloneEnv(),
         contract=contract(),
         spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
@@ -320,6 +328,14 @@ def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a
     assert manifest["dataset_manifest_sha256"] == dataset_hash
     assert manifest["bc_config"]["model_seed"] == manifest["model_seed"] == 211
     assert manifest["best_epoch"] == result.best_epoch
+    assert manifest["scenario"] == {
+        "path": "scenario.json",
+        "template_id": clone_scenario.template_id,
+        "schema_version": clone_scenario.schema_version,
+    }
+    assert (run_dir / "scenario.json").read_text(encoding="utf-8") == clone_scenario.canonical_json + "\n"
+    published_scenario = resolve_scenario(environment="tactical-v2", scenario_file=run_dir / "scenario.json", template_id=None)
+    assert published_scenario.canonical_json == clone_scenario.canonical_json
     assert bc["dataset_manifest_sha256"] == dataset_hash
     assert bc["training_decision_count"] == 5
     assert bc["validation_decision_count"] == 2
@@ -375,7 +391,7 @@ def test_fixture_selection_is_sorted_and_keeps_non_end_turn_and_both_available_s
     batch = ImitationBatch(
         observations=np.arange(count * 3, dtype=np.float32).reshape(count, 3),
         legal_masks=np.ones((count, 5), dtype=bool),
-        actions=np.zeros(count, dtype=np.int64),
+        actions=np.asarray([0] * 38 + [2, 0], dtype=np.int64),
         game_ids=np.zeros(count, dtype=np.int64),
         decision_indices=np.arange(count, dtype=np.int32),
         sources=np.full(count, Source.GREEDY_STANDARD, dtype=object),
@@ -391,10 +407,10 @@ def test_fixture_selection_is_sorted_and_keeps_non_end_turn_and_both_available_s
     assert np.all(fixtures.decision_indices[:-1] <= fixtures.decision_indices[1:])
     assert 38 in fixtures.decision_indices and 39 in fixtures.decision_indices
     assert set(fixtures.seats) == {0, 1}
-    assert np.any(fixtures.action_kinds != 0)
+    assert np.any(fixtures.actions != 0)
     with pytest.raises(ValueError, match="non-EndTurn"):
         imitation_module._fixture_batch(ImitationBatch(**{
-            name: (np.zeros_like(value) if name == "action_kinds" else value.copy())
+            name: (np.zeros_like(value) if name == "actions" else value.copy())
             for name, value in batch.__dict__.items()
         }))
 
@@ -423,7 +439,7 @@ def test_clone_metrics_clamp_top_k_for_small_action_spaces_and_remain_finite() -
     assert all(np.isfinite(value) for name, value in asdict(metrics).items() if name != "strata")
 
 
-def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Path, clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     run_dir = tmp_path / "failed"
     monkeypatch.setattr(
@@ -435,6 +451,7 @@ def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Pa
     with pytest.raises(RuntimeError, match="injected reload failure"):
         train_behavioral_clone(
             dataset=dataset,
+            scenario=clone_scenario,
             env=_TinyCloneEnv(),
             contract=contract(),
             spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
@@ -446,12 +463,13 @@ def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Pa
     assert list(tmp_path.glob(".failed.publishing-*")) == []
 
 
-def test_clone_training_is_seed_deterministic_and_validation_is_not_optimized(clone_dataset: Path, tmp_path: Path) -> None:
+def test_clone_training_is_seed_deterministic_and_validation_is_not_optimized(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     config = BehavioralCloningConfig(model_seed=29, batch_size=5, max_epochs=3, patience=3)
     results = [
         train_behavioral_clone(
             dataset=dataset,
+            scenario=clone_scenario,
             env=_TinyCloneEnv(),
             contract=contract(),
             spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
@@ -486,7 +504,7 @@ def test_behavioral_cloning_defaults_are_the_reviewed_production_limits() -> Non
         BehavioralCloningConfig(learning_rate=float("nan"))
 
 
-def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset: Path, clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     original = StratifiedDecisionSampler.next_batch
 
@@ -501,6 +519,7 @@ def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset
     with pytest.raises(RuntimeError, match="validation rows"):
         train_behavioral_clone(
             dataset=dataset,
+            scenario=clone_scenario,
             env=_TinyCloneEnv(),
             contract=contract(),
             spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
@@ -508,3 +527,38 @@ def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset
             config=BehavioralCloningConfig(model_seed=31, batch_size=5, max_epochs=1, patience=1),
         )
     assert not run_dir.exists()
+
+
+def test_clone_rejects_scenario_hash_and_environment_mismatches_before_writing(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    common = {
+        "dataset": dataset,
+        "env": _TinyCloneEnv(),
+        "contract": contract(),
+        "spaces_info": {"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        "config": BehavioralCloningConfig(model_seed=37, batch_size=5, max_epochs=1, patience=1),
+    }
+    other_tactical = resolve_scenario(
+        environment="tactical-v2",
+        scenario_file=None,
+        template_id="tactical-v2-long-battle",
+    )
+    with pytest.raises(ContractMismatch, match="scenario hash"):
+        train_behavioral_clone(
+            **common,
+            scenario=other_tactical,
+            run_dir=tmp_path / "hash-mismatch",
+        )
+    adaptive = resolve_scenario(
+        environment="adaptive-v1",
+        scenario_file=None,
+        template_id="adaptive-standard",
+    )
+    with pytest.raises(ContractMismatch, match="scenario environment"):
+        train_behavioral_clone(
+            **common,
+            scenario=adaptive,
+            run_dir=tmp_path / "environment-mismatch",
+        )
+    assert not (tmp_path / "hash-mismatch").exists()
+    assert not (tmp_path / "environment-mismatch").exists()

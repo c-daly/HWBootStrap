@@ -20,6 +20,7 @@ import numpy as np
 
 from .contracts import ContractMismatch, EnvironmentContract
 from .io import atomic_write_json
+from .scenarios import ResolvedScenario
 
 DATASET_SCHEMA_VERSION = 1
 MAX_SHARD_ROWS = 4096
@@ -27,6 +28,7 @@ FORBIDDEN_RANGES = (range(10_000_000, 10_100_000), range(16_000_000, 16_000_100)
 STANDARD_PROFILE = "standard-3v3"
 CONVERSION_PROFILES = frozenset({"conversion-3v1-near", "conversion-3v1-far", "conversion-2v1-near", "conversion-2v1-far", "conversion-1v1-near", "conversion-1v1-far"})
 ACTION_KINDS = {"end_turn": 0, "move": 1, "attack": 2, "deploy": 3}
+END_TURN_ACTION = 0
 
 
 @dataclass(frozen=True)
@@ -732,7 +734,7 @@ def _fixture_batch(validation: ImitationBatch, limit: int = 32) -> ImitationBatc
     if type(limit) is not int or limit < 1:
         raise ValueError("actor fixture limit must be positive")
     count = len(validation.actions)
-    non_end = np.flatnonzero(validation.action_kinds != ACTION_KINDS["end_turn"])
+    non_end = np.flatnonzero(validation.actions != END_TURN_ACTION)
     if not len(non_end):
         raise ValueError("actor fixtures require a non-EndTurn validation row")
     required = [int(non_end[0])]
@@ -850,7 +852,7 @@ def _clone_metrics(model: Any, batch: ImitationBatch) -> CloneMetrics:
             top3_accuracy=accuracies[3],
             top5_accuracy=accuracies[5],
             expected_calibration_error=float(ece.cpu()),
-            mean_end_turn_probability=float(probabilities[:, 0].mean().cpu()),
+            mean_end_turn_probability=float(probabilities[:, END_TURN_ACTION].mean().cpu()),
             illegal_probability=float((probabilities * (~legal_masks)).sum(dim=1).mean().cpu()),
             strata=_strata_metrics(
                 predictions.cpu().numpy(), actions.cpu().numpy(), batch
@@ -932,6 +934,7 @@ def _verify_reload_identity(run_dir: Path, contract: EnvironmentContract, expect
 def train_behavioral_clone(
     *,
     dataset: ImitationDataset,
+    scenario: ResolvedScenario,
     env: Any,
     contract: EnvironmentContract,
     spaces_info: Mapping[str, Any],
@@ -946,6 +949,14 @@ def train_behavioral_clone(
         raise TypeError("dataset must be a loaded ImitationDataset")
     if dataset.contract != contract:
         raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(scenario, ResolvedScenario):
+        raise TypeError("scenario must be a ResolvedScenario")
+    if scenario.environment != contract.environment:
+        raise ContractMismatch("behavioral-cloning scenario environment does not match the contract")
+    scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
+    if any(game["scenario_hash"] != scenario_hash for game in dataset.games):
+        raise ContractMismatch("behavioral-cloning scenario hash does not match the dataset")
+
     if not isinstance(config, BehavioralCloningConfig):
         raise TypeError("config must be BehavioralCloningConfig")
     run_dir = Path(run_dir)
@@ -1046,13 +1057,6 @@ def train_behavioral_clone(
         checkpoint = adapter.save(model, checkpoint)
         _assert_no_bc_optimizer_state(checkpoint)
         _atomic_actor_fixtures(temporary / "actor-fixtures.npz", fixtures)
-        scenario_data = {
-            "schema_version": 1,
-            "environment": contract.environment,
-            "scenario_hash": dataset.games[0]["scenario_hash"],
-            "contract_hash": contract.contract_hash,
-            "encoding_hash": contract.encoding_hash,
-        }
         bc_data = {
             "schema_version": 1,
             "algorithm": adapter.name,
@@ -1087,13 +1091,13 @@ def train_behavioral_clone(
                 "behavioral_cloning": config_data,
             },
             "contract": contract.to_dict(),
-            "scenario": {"path": "scenario.json", "schema_version": 1},
+            "scenario": {"path": "scenario.json", "template_id": scenario.template_id, "schema_version": scenario.schema_version},
             "dataset_manifest_sha256": dataset_manifest_sha256,
             "bc_config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
         }
-        atomic_write_json(temporary / "scenario.json", scenario_data)
+        scenario.write(temporary / "scenario.json")
         atomic_write_json(temporary / "bc.json", bc_data)
         atomic_write_json(temporary / "metrics.json", metrics_data)
         atomic_write_json(temporary / "run.json", manifest)
