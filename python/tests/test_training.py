@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from gymnasium import spaces
 
+from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.callbacks import TrainingLifecycle
 from ml_lab.cli import main as cli_main
 from ml_lab.contracts import (
@@ -69,6 +70,36 @@ def config(run_name: str = "training") -> RunConfig:
         resume_source=None,
         environment="tactical-v1",
     )
+
+
+def test_actor_initialization_is_distinct_from_resume() -> None:
+    run_config = replace(
+        config(),
+        actor_init_source="bc/run",
+        resume_source="ppo/run",
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run_config.to_dict()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"actor_init_source": "bc/run"},
+        {"algorithm_options": {"learning_rate": 0.0003}},
+    ],
+)
+def test_masked_dqn_rejects_ppo_only_initialization_options(changes) -> None:
+    run_config = replace(
+        config(),
+        algorithm="masked_dqn",
+        policy="MlpPolicy",
+        **changes,
+    )
+
+    with pytest.raises(ValueError, match="require maskable_ppo"):
+        run_config.to_dict()
 
 
 def scenario(environment: str = "tactical-v1") -> ResolvedScenario:
@@ -139,6 +170,78 @@ def test_four_workers_alternate_evenly_and_fixed_seats_never_change() -> None:
     assert [fixed.next_episode().learner_seat for _ in range(5)] == [1, 1, 1, 1, 1]
 
 
+def test_maskable_ppo_uses_explicit_locked_algorithm_options() -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        model = MaskablePPOAdapter().create(
+            env,
+            spaces_info=env.spaces_info,
+            seed=17,
+            device="cpu",
+            checkpoint_interval=32,
+            algorithm_options={
+                "learning_rate": 0.0007,
+                "n_epochs": 4,
+                "target_kl": 0.03,
+            },
+        )
+    finally:
+        env.close()
+
+    assert model.learning_rate == 0.0007
+    assert model.n_epochs == 4
+    assert model.target_kl == 0.03
+
+
+def test_maskable_ppo_rejects_unknown_algorithm_options() -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        with pytest.raises(
+            ValueError,
+            match="unsupported MaskablePPO option 'batch_size'",
+        ):
+            MaskablePPOAdapter().create(
+                env,
+                spaces_info=env.spaces_info,
+                seed=17,
+                device="cpu",
+                checkpoint_interval=32,
+                algorithm_options={"batch_size": 32},
+            )
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize(
+    ("algorithm_options", "field"),
+    [
+        ({"learning_rate": 0.0}, "learning_rate"),
+        ({"learning_rate": float("nan")}, "learning_rate"),
+        ({"n_epochs": 0}, "n_epochs"),
+        ({"n_epochs": True}, "n_epochs"),
+        ({"target_kl": -0.01}, "target_kl"),
+        ({"target_kl": float("inf")}, "target_kl"),
+    ],
+)
+def test_maskable_ppo_rejects_invalid_algorithm_option_values(
+    algorithm_options,
+    field: str,
+) -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        with pytest.raises(ValueError, match=field):
+            MaskablePPOAdapter().create(
+                env,
+                spaces_info=env.spaces_info,
+                seed=17,
+                device="cpu",
+                checkpoint_interval=32,
+                algorithm_options=algorithm_options,
+            )
+    finally:
+        env.close()
+
+
 class FakeGymEnv(gym.Env):
     metadata = {"render_modes": []}
 
@@ -180,6 +283,49 @@ class FakeGymEnv(gym.Env):
 
 def build_one_step_env(seat: int, seed: int) -> FakeGymEnv:
     return FakeGymEnv(0, seat, seed)
+
+
+def test_training_environment_uses_episode_seed_base_independently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[FakeGymEnv] = []
+
+    def fake_server_env(
+        _server_cmd,
+        *,
+        opponent,
+        seat,
+        base_seed,
+        environment,
+        scenario_path,
+    ):
+        del opponent, environment, scenario_path
+        result = FakeGymEnv(0, seat, base_seed)
+        built.append(result)
+        return result
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_server_env)
+    run_config = replace(
+        config("episode-seeds"),
+        workers=1,
+        seed=999,
+        episode_seed_base=13_000_000,
+    )
+
+    scheduled = env_module.TrainingEnvironmentFactory(["fake-server"])._build_worker(
+        run_config,
+        tmp_path,
+        0,
+        tmp_path / "scenario.json",
+        {"kind": "scripted", "name": "greedy"},
+        monitor=False,
+    )
+    try:
+        assert scheduled.current_assignment.seed == 13_000_000
+        assert built[0].initial_seed == 13_000_000
+    finally:
+        scheduled.close()
 
 
 class SpawnCleanupProbeEnv(gym.Env):
@@ -1248,6 +1394,112 @@ def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     assert manifest["latest_checkpoint_step"] == 64
     assert env.closed is True
     assert model.learn_calls[0]["reset_num_timesteps"] is True
+
+
+def test_training_passes_and_records_locked_ppo_options(
+    tmp_path: Path,
+) -> None:
+    env = build_vector_env(
+        1,
+        lambda worker: ScheduledEnvironment(
+            WorkerSchedule(
+                base_seed=1,
+                worker_index=worker,
+                worker_count=1,
+            ),
+            build_one_step_env,
+        ),
+    )
+    run_config = replace(
+        config("locked-options"),
+        total_timesteps=2,
+        workers=1,
+        algorithm_options={
+            "learning_rate": 0.0007,
+            "n_epochs": 4,
+            "target_kl": 0.03,
+        },
+    )
+
+    run_dir = run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
+        algorithm_adapter=MaskablePPOAdapter(),
+        console_output=False,
+    )
+
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["config"]["algorithm_options"] == {
+        "learning_rate": 0.0007,
+        "n_epochs": 4,
+        "target_kl": 0.03,
+    }
+    reloaded = MaskablePPOAdapter().load(
+        run_dir / manifest["latest_checkpoint"],
+        env=None,
+        device="cpu",
+    )
+    assert reloaded.learning_rate == 0.0007
+    assert reloaded.n_epochs == 4
+    assert reloaded.target_kl == 0.03
+
+
+def test_training_initializes_actor_before_logger_and_first_rollout(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    class ActorInitRequiredModel(FakeTrainingModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_initialized = False
+
+        def learn(self, **kwargs):
+            if not self.actor_initialized:
+                raise RuntimeError("actor was not initialized before learn")
+            return super().learn(**kwargs)
+
+    class ActorInitRecordingAdapter(FakeTrainingAdapter):
+        def initialize_actor(
+            self,
+            model,
+            source_run: Path,
+            expected_contract: EnvironmentContract,
+            device: str,
+        ):
+            assert model.configured_logger is None
+            assert model.learn_calls == []
+            assert source_run == tmp_path / "clone-source"
+            assert expected_contract == contract
+            assert device == "cpu"
+            model.actor_initialized = True
+            return {
+                "schema_version": 1,
+                "kind": "actor_only",
+                "source_run": str(source_run),
+            }
+
+    env = FakeVectorEnv(contract)
+    model = ActorInitRequiredModel()
+    run_config = replace(
+        config("actor-init-run"),
+        actor_init_source=str(tmp_path / "clone-source"),
+    )
+
+    run_dir = run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
+        algorithm_adapter=ActorInitRecordingAdapter(contract, model),
+        console_output=False,
+    )
+
+    assert model.actor_initialized is True
+    assert read_json(run_dir / "initialization.json") == {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_run": str(tmp_path / "clone-source"),
+    }
 
 
 def test_training_runner_marks_failure_and_closes_env(

@@ -83,11 +83,20 @@ class RunConfig:
     opponent: Mapping[str, Any]
     trackers: list[Mapping[str, Any]]
     resume_source: str | None
+    algorithm_options: Mapping[str, Any] = field(default_factory=dict)
+    actor_init_source: str | None = None
+    episode_seed_base: int | None = None
     timestep_mode: str = "absolute"
     allow_unsafe_legacy_resume: bool = False
     environment: str = "tactical-v2"
 
     def to_dict(self) -> dict[str, Any]:
+        if self.actor_init_source is not None and self.resume_source is not None:
+            raise ValueError("actor initialization and resume are mutually exclusive")
+        if self.algorithm != "maskable_ppo" and (
+            self.actor_init_source is not None or self.algorithm_options
+        ):
+            raise ValueError("actor initialization and algorithm options require maskable_ppo")
         validate_tracker_specs(self.trackers)
         if self.timestep_mode not in {"absolute", "additional"}:
             raise ValueError("timestep mode must be 'absolute' or 'additional'")

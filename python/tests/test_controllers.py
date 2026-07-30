@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -9,8 +10,10 @@ from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import gymnasium as gym
 import numpy as np
 import pytest
+from gymnasium import spaces
 import selfplay_env as selfplay_module
 import ml_lab.controllers as controller_module
 
@@ -22,8 +25,10 @@ from ml_lab.controllers import (
     predict,
     snapshot_opponents,
 )
-from ml_lab.contracts import EnvironmentContract
-from ml_lab.io import atomic_write_json
+from ml_lab.algorithms import MaskablePPOAdapter
+from ml_lab.contracts import ContractMismatch, EnvironmentContract
+from ml_lab.envs import build_vector_env
+from ml_lab.io import atomic_write_json, read_json
 from selfplay_env import SelfPlayEnv, bind_opponents
 
 
@@ -126,6 +131,399 @@ def _write_run(
         },
     )
     return run
+
+
+class _ActorTransferEnv(gym.Env):
+    metadata = {"render_modes": []}
+
+    def __init__(self, contract: EnvironmentContract) -> None:
+        self.observation_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(contract.observation_size,),
+            dtype=np.float32,
+        )
+        self.action_space = spaces.Discrete(contract.action_size)
+        self.contract = contract
+        self.spaces_info = {
+            "channels": 1,
+            "board_h": 1,
+            "board_w": 1,
+            "globals": contract.observation_size - 1,
+        }
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(self.observation_space.shape, dtype=np.float32), {}
+
+    def step(self, action):
+        del action
+        return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, True, False, {}
+
+    def action_masks(self) -> np.ndarray:
+        return np.ones(self.action_space.n, dtype=bool)
+
+
+def _actor_transfer_contract() -> EnvironmentContract:
+    return EnvironmentContract(
+        version="tactical-v1",
+        contract_hash="e" * 64,
+        encoding_hash="f" * 64,
+        observation_size=3,
+        action_size=2,
+        board={"width": 1, "height": 1},
+        roster=["scout"],
+        reward={"terminal_win": 1.0},
+    )
+
+
+def _actor_modules(policy):
+    return {
+        "features_extractor": policy.features_extractor,
+        "policy_net": policy.mlp_extractor.policy_net,
+        "action_net": policy.action_net,
+    }
+
+
+def _module_state(module):
+    return {name: tensor.detach().cpu().clone() for name, tensor in module.state_dict().items()}
+
+
+def _value_state(model):
+    return {
+        "mlp_extractor.value_net": _module_state(model.policy.mlp_extractor.value_net),
+        "value_net": _module_state(model.policy.value_net),
+    }
+
+
+def _assert_state_equal(actual, expected) -> None:
+    import torch
+
+    assert actual.keys() == expected.keys()
+    for group in actual:
+        assert actual[group].keys() == expected[group].keys()
+        for name in actual[group]:
+            assert torch.equal(actual[group][name], expected[group][name])
+
+
+def _fixture_logits(model, observations: np.ndarray, legal_masks: np.ndarray):
+    import torch
+
+    with torch.no_grad():
+        distribution = model.policy.get_distribution(
+            torch.as_tensor(observations, dtype=torch.float32, device=model.device),
+            action_masks=torch.as_tensor(legal_masks, dtype=torch.bool, device=model.device),
+        )
+        return distribution.distribution.logits.detach().cpu()
+
+
+def _write_actor_source_run(root: Path, contract: EnvironmentContract):
+    import torch
+
+    adapter = MaskablePPOAdapter()
+    env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        source = adapter.create(
+            env,
+            spaces_info=env.spaces_info,
+            seed=17,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        with torch.no_grad():
+            for module in _actor_modules(source.policy).values():
+                for parameter in module.parameters():
+                    parameter.add_(0.05)
+        run = root / "clone-run"
+        checkpoint = adapter.save(
+            source,
+            run / "checkpoints" / "step_000000000.zip",
+        )
+    finally:
+        env.close()
+
+    observations = np.asarray(
+        [[0.0, 0.25, -0.5], [0.75, -0.25, 0.5]],
+        dtype=np.float32,
+    )
+    legal_masks = np.asarray([[True, True], [False, True]], dtype=bool)
+    clone_config = {
+        "model_seed": 17,
+        "batch_size": 256,
+        "learning_rate": 0.0003,
+        "max_epochs": 50,
+        "patience": 5,
+    }
+    np.savez(
+        run / "actor-fixtures.npz",
+        observations=observations,
+        legal_masks=legal_masks,
+    )
+    atomic_write_json(
+        run / "bc.json",
+        {
+            "schema_version": 1,
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "dataset_manifest_sha256": "a" * 64,
+            "config": clone_config,
+            "model_seed": 17,
+            "best_epoch": 3,
+            "epochs_trained": 3,
+        },
+    )
+    atomic_write_json(
+        run / "run.json",
+        {
+            "schema_version": 1,
+            "state": "completed",
+            "timesteps": 0,
+            "config": {
+                "algorithm": "maskable_ppo",
+                "policy": "HexCNN",
+                "seed": 17,
+                "model_seed": 17,
+                "behavioral_cloning": clone_config,
+            },
+            "contract": contract.to_dict(),
+            "latest_checkpoint": "checkpoints/step_000000000.zip",
+            "latest_checkpoint_step": 0,
+            "dataset_manifest_sha256": "a" * 64,
+            "bc_config": clone_config,
+            "model_seed": 17,
+            "best_epoch": 3,
+        },
+    )
+    return run, source, observations, legal_masks, checkpoint
+
+
+def test_actor_transfer_preserves_masked_logits_but_not_value_parameters(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    contract = _actor_transfer_contract()
+    source_run, source, observations, legal_masks, checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    resolved = ControllerResolver(contract).resolve(f"run:{source_run}")
+    assert resolved.path == checkpoint.resolve()
+    assert resolved.contract == contract
+
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        source_logits = _fixture_logits(source, observations, legal_masks)
+        assert not torch.equal(
+            source_logits,
+            _fixture_logits(target, observations, legal_masks),
+        )
+        source_actor = {
+            name: _module_state(module)
+            for name, module in _actor_modules(source.policy).items()
+        }
+        source_values = _value_state(source)
+        target_values_before = _value_state(target)
+        optimizer = target.policy.optimizer
+        rollout_buffer = target.rollout_buffer
+        lr_schedule = target.lr_schedule
+        clip_range = target.clip_range
+        progress_before = target._current_progress_remaining
+        episodes_before = target._episode_num
+        timesteps_before = target.num_timesteps
+
+        provenance = adapter.initialize_actor(
+            target,
+            source_run=source_run,
+            expected_contract=contract,
+            device="cpu",
+        )
+
+        torch.testing.assert_close(
+            _fixture_logits(target, observations, legal_masks),
+            source_logits,
+            rtol=0,
+            atol=0,
+        )
+        target_actor = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(target_actor, source_actor)
+        _assert_state_equal(_value_state(target), target_values_before)
+        assert any(
+            not torch.equal(source_values[group][name], target_values_before[group][name])
+            for group in source_values
+            for name in source_values[group]
+        )
+        assert target.policy.optimizer is optimizer
+        assert target.policy.optimizer.state == {}
+        assert target.rollout_buffer is rollout_buffer
+        assert target.lr_schedule is lr_schedule
+        assert target.clip_range is clip_range
+        assert target._current_progress_remaining == progress_before
+        assert target._episode_num == episodes_before
+        assert target.num_timesteps == timesteps_before
+        assert provenance["source_checkpoint_sha256"] == hashlib.sha256(
+            checkpoint.read_bytes()
+        ).hexdigest()
+        assert provenance["source_actor_fixtures_sha256"] == hashlib.sha256(
+            (source_run / "actor-fixtures.npz").read_bytes()
+        ).hexdigest()
+        assert provenance["maximum_absolute_logit_difference"] == 0.0
+    finally:
+        target_env.close()
+
+
+def test_actor_transfer_rejects_bc_metadata_not_bound_to_run(
+    tmp_path: Path,
+) -> None:
+    contract = _actor_transfer_contract()
+    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    bc = read_json(source_run / "bc.json")
+    bc["dataset_manifest_sha256"] = "b" * 64
+    atomic_write_json(source_run / "bc.json", bc)
+
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        actor_before = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+
+        with pytest.raises(ValueError, match="metadata does not match"):
+            adapter.initialize_actor(
+                target,
+                source_run=source_run,
+                expected_contract=contract,
+                device="cpu",
+            )
+
+        actor_after = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(actor_after, actor_before)
+    finally:
+        target_env.close()
+
+
+def test_actor_transfer_rejects_exact_contract_hash_mismatch_before_copy(
+    tmp_path: Path,
+) -> None:
+    contract = _actor_transfer_contract()
+    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    expected_contract = dataclass_replace(contract, contract_hash="d" * 64)
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(
+        1,
+        lambda _worker: _ActorTransferEnv(expected_contract),
+    )
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        actor_before = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+
+        with pytest.raises(
+            ContractMismatch,
+            match="actor initialization contract",
+        ):
+            adapter.initialize_actor(
+                target,
+                source_run=source_run,
+                expected_contract=expected_contract,
+                device="cpu",
+            )
+
+        actor_after = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(actor_after, actor_before)
+    finally:
+        target_env.close()
+
+
+def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    contract = _actor_transfer_contract()
+    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+        tmp_path,
+        contract,
+    )
+    resolved = ControllerResolver(contract).resolve(f"run:{source_run}")
+    assert resolved.model is not None
+    resolved.model.policy.action_net.to(dtype=torch.float64)
+    monkeypatch.setattr(
+        ControllerResolver,
+        "resolve",
+        lambda _resolver, _raw: resolved,
+    )
+
+    adapter = MaskablePPOAdapter()
+    target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
+    try:
+        target = adapter.create(
+            target_env,
+            spaces_info=target_env.spaces_info,
+            seed=999,
+            device="cpu",
+            checkpoint_interval=32,
+        )
+        actor_before = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+
+        with pytest.raises(ContractMismatch, match="dtype"):
+            adapter.initialize_actor(
+                target,
+                source_run=source_run,
+                expected_contract=contract,
+                device="cpu",
+            )
+
+        actor_after = {
+            name: _module_state(module)
+            for name, module in _actor_modules(target.policy).items()
+        }
+        _assert_state_equal(actor_after, actor_before)
+    finally:
+        target_env.close()
 
 
 def test_load_model_forces_cpu_device_for_maskable_ppo(

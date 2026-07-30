@@ -672,7 +672,7 @@ class TrainingEnvironmentFactory:
 
         scheduled = ScheduledEnvironment(
             WorkerSchedule(
-                base_seed=config.seed,
+                base_seed=config.episode_seed_base if config.episode_seed_base is not None else config.seed,
                 worker_index=worker_index,
                 worker_count=config.workers,
                 learner_seat=config.learner_seat,

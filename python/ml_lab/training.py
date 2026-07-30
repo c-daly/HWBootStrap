@@ -14,7 +14,7 @@ from .algorithms import AlgorithmAdapter, create_or_resume_model, get_algorithm_
 from .callbacks import SB3RunCallback, TrainingLifecycle, TrainingStopRequested
 from .contracts import ContractMismatch, EnvironmentContract, RunConfig, create_run, update_run_state
 from .envs import TrainingEnvironmentFactory
-from .io import read_json
+from .io import atomic_write_json, read_json
 from .scenarios import (
     ResolvedScenario,
     legacy_default_scenario,
@@ -260,7 +260,20 @@ def run_training(
             checkpoint_interval=config.checkpoint_interval,
             resume_source=resume_source,
             allow_unsafe_legacy_resume=config.allow_unsafe_legacy_resume,
+            algorithm_options=config.algorithm_options,
         )
+        if config.actor_init_source is not None:
+            if resumed:
+                raise ValueError(
+                    "actor initialization cannot be combined with resume"
+                )
+            provenance = adapter.initialize_actor(
+                model,
+                source_run=Path(config.actor_init_source),
+                expected_contract=contract,
+                device=config.device,
+            )
+            atomic_write_json(run_dir / "initialization.json", provenance)
         sb3_logger = (
             build_sb3_logger(run_dir)
             if console_output

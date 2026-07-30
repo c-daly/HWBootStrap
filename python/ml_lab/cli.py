@@ -102,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
     )
     train.add_argument("--resume")
+    train.add_argument("--actor-init")
+    train.add_argument("--learning-rate", type=float)
+    train.add_argument("--ppo-epochs", type=int)
+    train.add_argument("--target-kl", type=float)
+    train.add_argument("--episode-seed-base", type=int)
     scenario = train.add_mutually_exclusive_group()
     scenario.add_argument("--scenario-file", type=Path)
     scenario.add_argument("--template")
@@ -242,6 +247,17 @@ def _tracker_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
 def _training_config(args: argparse.Namespace) -> RunConfig:
     policy = "HexCNN" if args.algorithm == "maskable_ppo" else "MlpPolicy"
     environment = args.environment or "tactical-v2"
+    requested_algorithm_options = {
+        key: value
+        for key, value in {
+            "learning_rate": args.learning_rate,
+            "n_epochs": args.ppo_epochs,
+            "target_kl": args.target_kl,
+        }.items()
+        if value is not None
+    }
+    algorithm_options = requested_algorithm_options
+    episode_seed_base = args.episode_seed_base
     if args.resume:
         source_manifest = read_json(_source_run_dir(Path(args.resume)) / "run.json")
         source_config = source_manifest.get("config")
@@ -253,6 +269,14 @@ def _training_config(args: argparse.Namespace) -> RunConfig:
         if args.environment is not None and args.environment != source_environment:
             raise ValueError("resume environment does not match the source run")
         environment = source_environment
+        if requested_algorithm_options:
+            raise ValueError("PPO options cannot be overridden during resume")
+        source_options = source_config.get("algorithm_options", {})
+        if not isinstance(source_options, dict):
+            raise ValueError("resume source run has invalid algorithm options")
+        algorithm_options = dict(source_options)
+        if episode_seed_base is None:
+            episode_seed_base = source_config.get("episode_seed_base")
     return RunConfig(
         backend="sb3",
         algorithm=args.algorithm,
@@ -267,6 +291,9 @@ def _training_config(args: argparse.Namespace) -> RunConfig:
         opponent=controller_config(args.opponent),
         trackers=_tracker_configs(args),
         resume_source=args.resume,
+        algorithm_options=algorithm_options,
+        actor_init_source=args.actor_init,
+        episode_seed_base=episode_seed_base,
         environment=environment,
     )
 
@@ -335,6 +362,7 @@ def _resume_config(args: argparse.Namespace) -> RunConfig:
         run_name=args.run,
         total_timesteps=args.timesteps,
         resume_source=str(source_run),
+        actor_init_source=None,
     )
 
 

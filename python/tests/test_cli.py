@@ -74,6 +74,30 @@ def create_run(
     )
 
 
+def parse_train(*options: str):
+    return cli_module.build_parser().parse_args(["train", "--run", "locked-ppo", *options])
+
+
+def test_cli_records_locked_ppo_options() -> None:
+    args = parse_train(
+        "--actor-init", "bc/run",
+        "--learning-rate", "0.0003",
+        "--ppo-epochs", "10",
+        "--target-kl", "0.02",
+        "--episode-seed-base", "13000000",
+    )
+
+    config = cli_module._training_config(args)
+
+    assert config.algorithm_options == {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02,
+    }
+    assert config.actor_init_source == "bc/run"
+    assert config.episode_seed_base == 13_000_000
+
+
 def test_cli_records_explicit_adaptive_environment(tmp_path: Path) -> None:
     received: list[RunConfig] = []
 
@@ -136,6 +160,58 @@ def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> No
     ], runner=runner, stdout=StringIO()) == 0
 
     assert received[0].environment == "adaptive-v1"
+
+
+def test_train_resume_inherits_locked_ppo_options(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(
+        tmp_path,
+        replace(
+            _config("locked-source"),
+            algorithm_options={
+                "learning_rate": 0.0007,
+                "n_epochs": 4,
+                "target_kl": 0.03,
+            },
+            episode_seed_base=13_000_000,
+        ),
+        contract,
+    )
+    args = cli_module.build_parser().parse_args(
+        ["train", "--run", "locked-resume", "--resume", str(source)]
+    )
+
+    resumed = cli_module._training_config(args)
+
+    assert resumed.algorithm_options == {
+        "learning_rate": 0.0007,
+        "n_epochs": 4,
+        "target_kl": 0.03,
+    }
+    assert resumed.episode_seed_base == 13_000_000
+
+
+def test_train_resume_rejects_ignored_ppo_option_override(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(tmp_path, _config("override-source"), contract)
+    args = cli_module.build_parser().parse_args(
+        [
+            "train",
+            "--run",
+            "override-resume",
+            "--resume",
+            str(source),
+            "--learning-rate",
+            "0.0007",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot be overridden during resume"):
+        cli_module._training_config(args)
 
 
 def test_train_cli_rejects_template_and_file_together() -> None:
@@ -690,6 +766,35 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
         total_timesteps=160,
         resume_source=str(source.resolve()),
     )
+
+
+def test_resume_does_not_reapply_actor_initialization(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(
+        tmp_path,
+        replace(
+            _config("actor-initialized-source"),
+            actor_init_source="clone/source",
+        ),
+        contract,
+    )
+    args = cli_module.build_parser().parse_args(
+        [
+            "resume",
+            str(source),
+            "--run",
+            "resumed-ppo",
+            "--timesteps",
+            "128",
+        ]
+    )
+
+    resumed = cli_module._resume_config(args)
+
+    assert resumed.resume_source == str(source.resolve())
+    assert resumed.actor_init_source is None
 
 
 def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_logging(
