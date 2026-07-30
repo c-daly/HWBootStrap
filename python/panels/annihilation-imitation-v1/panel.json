@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "annihilation-imitation-v1",
+  "environment": "tactical-v2",
+  "scenario": "python/config/annihilation-imitation-v1.json",
+  "seed_banks": "python/panels/annihilation-imitation-v1/seed-banks.json",
+  "definition_hashes": {
+    "scenario_sha256": "4f085b8a80f7ba8e450a85dbcceb73e05723ce7b37045f1ddd1ef91d67a95632",
+    "seed_banks_sha256": "ea166aed1ae3885516eb79418a45b60d047a5de153e297bcf190871deec55fd2"
+  },
+  "model_seeds": [211, 223, 227],
+  "sampler_seeds": {"211": 211, "223": 223, "227": 227},
+  "outcome_rewards": {"win": 1, "loss": -1, "draw": 0},
+  "collection": {
+    "standard_decisions_minimum": 100000,
+    "conversion_decisions_minimum": 50000,
+    "validation_standard_maps": 100,
+    "validation_conversion_maps_per_profile": 20
+  },
+  "behavioral_cloning": {
+    "batch_size": 256,
+    "learning_rate": 0.0003,
+    "max_epochs": 50,
+    "patience": 5,
+    "standard_fraction_basis_points": 7000
+  },
+  "clone_gate": {
+    "maps": 100,
+    "games_per_clone": 200,
+    "seed_start": 16000000,
+    "profile": "standard-3v3",
+    "opponent": "random",
+    "per_seed_win_rate_minimum_basis_points": 3000,
+    "pooled_win_rate_minimum_basis_points": 4000
+  }
+}
