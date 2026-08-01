@@ -42,7 +42,7 @@
     },
     "total_timesteps": 51200,
     "checkpoint_interval": 12800,
-    "rollout_steps_per_worker": 2048,
+    "rollout_steps_per_worker": 512,
     "nominal_budgets": [12800, 25600, 51200],
     "learner_seat": "alternating",
     "opponent": {"kind": "scripted", "name": "random"},

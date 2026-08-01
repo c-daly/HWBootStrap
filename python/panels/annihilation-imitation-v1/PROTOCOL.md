@@ -36,25 +36,40 @@ and episode namespace; only the run identity and actor_init_source differ.
 Episode seed bases are 13,000,000, 14,000,000, and 15,000,000 respectively.
 Every run uses fresh MaskablePPO/HexCNN construction, Random, alternating seats,
 51,200 requested timesteps, 12,800 checkpoint intervals, learning rate 0.0003,
-10 epochs, and target KL 0.02. Resume sources are forbidden.
+10 epochs, and target KL 0.02. The production trainer caps each worker rollout
+at 512 steps, so four workers publish on 2,048-step rollout boundaries. Resume
+sources are forbidden.
 
 Published checkpoints must be strictly increasing, unique completed rollout
 boundaries. Nominal budgets 12,800, 25,600, and 51,200 map to the first actual
-published step at or beyond each nominal value. Both values and the checkpoint
-hash are evidence.
+published step at or beyond each nominal value: 14,336, 26,624, and 51,200.
+Both values, the canonical checkpoint/source/controller identity, and a digest
+recomputed from the physical checkpoint are evidence.
+
+Training uses a deterministic per-run .pending destination. An incomplete,
+failed, stopped, or running pending run is scoped-cleaned and retrained without
+resume; a completed pending run is validated and atomically published. A
+bc_ppo run is accepted only when its full actor-only initializer provenance
+matches the physical seed-specific clone checkpoint, fixtures, run manifest,
+BC metadata, dataset manifest, contract, and encoding identities.
 
 evaluate-dev evaluates all 21 candidates: three pure clones plus both PPO
 conditions for three seeds at three budgets. Every candidate receives the same
 100 maps beginning at 16,000,000, both seats, Random, and forced standard-3v3.
 Each of the 4,200 game records retains condition, model seed, nominal and actual
-checkpoint, map seed, candidate seat, outcome, trace, and replay.
+checkpoint, checkpoint digest, controller and opponent identity, profile, map
+seed, candidate seat, outcome, trace, and replay. Validation reopens every
+physical per-map evaluation.json, verifies its controller/opponent/schedule,
+and reconstructs the aggregate rather than trusting copied summary rows.
 
 select-budget requires the complete development schedule and atomically writes
 selection.json. It chooses one nominal budget for all three initialized PPO
 seeds by pooled standard win rate, then higher worst-seed standard win rate,
 higher pooled conversion win rate when conversion evidence exists, lower draw
 rate, and earlier nominal budget. The output records each seed's rollout-aligned
-actual step plus definition, development-table, and candidate-checkpoint hashes.
+actual step plus definition and development-table hashes. Candidate checkpoint
+hashes are recomputed immediately before publication from the canonical
+physical checkpoint paths.
 
     python python/run_annihilation_imitation_panel.py train-ppo
     python python/run_annihilation_imitation_panel.py evaluate-dev

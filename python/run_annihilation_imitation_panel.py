@@ -706,7 +706,8 @@ def _relativize_evaluation(
                 continue
             if not isinstance(raw, str):
                 raise ValueError(f"evaluation {field} is invalid")
-            path = Path(raw).resolve()
+            supplied = Path(raw)
+            path = (supplied if supplied.is_absolute() else root / supplied).resolve()
             try:
                 relative = path.relative_to(root)
             except ValueError as exc:
@@ -1364,8 +1365,11 @@ class DevelopmentCandidate:
     model_seed: int
     nominal_step: int
     actual_step: int
-    controller: str
+    controller: Any
     checkpoint_sha256: str | None = None
+    checkpoint_path: str | None = None
+    source_run: str | None = None
+    algorithm: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1449,12 +1453,36 @@ def publish_selection(
             f"nominal-{candidate['nominal_step']}"
         )
         digest = candidate.get("checkpoint_sha256")
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-        ):
+        if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("development checkpoint hash is incomplete")
-        checkpoint_hashes[key] = digest
+        checkpoint_path = candidate.get("checkpoint_path")
+        if not isinstance(checkpoint_path, str) or not checkpoint_path:
+            raise ValueError("development checkpoint identity is incomplete")
+        physical_path = Path(checkpoint_path)
+        if (
+            not physical_path.is_absolute()
+            or str(physical_path.resolve()) != checkpoint_path
+            or not physical_path.is_file()
+        ):
+            raise ValueError("development checkpoint identity is not canonical")
+        physical_digest = _sha256(physical_path)
+        if physical_digest != digest:
+            raise ValueError("development checkpoint digest does not match physical bytes")
+        source_run = candidate.get("source_run")
+        algorithm = candidate.get("algorithm")
+        controller = candidate.get("controller")
+        if (
+            not isinstance(source_run, str)
+            or str(Path(source_run).resolve()) != source_run
+            or algorithm != "maskable_ppo"
+            or not isinstance(controller, Mapping)
+            or controller.get("path") != checkpoint_path
+            or controller.get("source_run") != source_run
+            or controller.get("algorithm") != algorithm
+            or controller.get("step") != candidate.get("actual_step")
+        ):
+            raise ValueError("development checkpoint controller identity is incomplete")
+        checkpoint_hashes[key] = physical_digest
     hashes["candidate_checkpoints_sha256"] = checkpoint_hashes
     selected = select_global_budget(candidates)
     selection = {
@@ -1484,7 +1512,7 @@ _PPO = {
     "episode_seed_bases": {"211": 13_000_000, "223": 14_000_000, "227": 15_000_000},
     "total_timesteps": 51_200,
     "checkpoint_interval": 12_800,
-    "rollout_steps_per_worker": 2_048,
+    "rollout_steps_per_worker": 512,
     "nominal_budgets": [12_800, 25_600, 51_200],
     "learner_seat": "alternating",
     "opponent": {"kind": "scripted", "name": "random"},
@@ -1527,7 +1555,7 @@ def evaluate_development_candidates(
                 / f"map-{map_seed}"
             )
             output_path = map_root / "evaluation.json"
-            result = selected_evaluator(
+            selected_evaluator(
                 candidate.controller,
                 _DEVELOPMENT["opponent"],
                 games=1,
@@ -1541,25 +1569,8 @@ def evaluate_development_candidates(
                 capture_trace=True,
                 start_profile=_DEVELOPMENT["profile"],
             )
-            normalized = _relativize_evaluation(result, root, output_path)
-            raw_matches = normalized.get("matches")
-            if not isinstance(raw_matches, list) or len(raw_matches) != 2:
-                raise ValueError("development map evaluation is incomplete")
-            for raw in raw_matches:
-                if not isinstance(raw, Mapping):
-                    raise ValueError("development match is malformed")
-                row = dict(raw)
-                if (
-                    row.get("seed") != map_seed
-                    or row.get("candidate_seat") not in {0, 1}
-                    or row.get("outcome") not in {"win", "loss", "draw"}
-                    or "trace_path" not in row
-                    or "replay_path" not in row
-                ):
-                    raise ValueError("development match identity or evidence is incomplete")
-                row["map_seed"] = row.pop("seed")
-                row["actual_step"] = candidate.actual_step
-                matches.append(row)
+            _normalized, physical_matches = _validated_development_map(root, candidate, map_seed, output_path)
+            matches.extend(physical_matches)
         if [(row["map_seed"], row["candidate_seat"]) for row in matches] != [
             (map_seed, seat)
             for map_seed in range(_DEVELOPMENT["seed_start"], _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"])
@@ -1572,6 +1583,11 @@ def evaluate_development_candidates(
                 "model_seed": candidate.model_seed,
                 "nominal_step": candidate.nominal_step,
                 "actual_step": candidate.actual_step,
+                "checkpoint_sha256": candidate.checkpoint_sha256,
+                "checkpoint_path": candidate.checkpoint_path or matches[0]["controller"].get("path"),
+                "source_run": candidate.source_run or matches[0]["controller"].get("source_run"),
+                "algorithm": candidate.algorithm or matches[0]["controller"].get("algorithm"),
+                "controller": matches[0]["controller"],
                 "standard": [row["outcome"] for row in matches],
                 "conversion": [],
                 "matches": matches,
@@ -1585,6 +1601,62 @@ def evaluate_development_candidates(
     }
     _atomic_json(root / "development.json", result)
     return result
+
+
+_ACTOR_INITIALIZER_MODULES = [
+    "features_extractor",
+    "mlp_extractor.policy_net",
+    "action_net",
+]
+
+
+def _validate_actor_initialization(run: TrainingRun, provenance: Mapping[str, Any]) -> None:
+    source = Path(run.config.actor_init_source).resolve()
+    source_manifest = _read_json(source / "run.json")
+    source_checkpoint_relative = source_manifest.get("latest_checkpoint")
+    source_checkpoint = _safe_relative_file(
+        source, source_checkpoint_relative, "actor initializer checkpoint"
+    )
+    source_panel = _read_json(source / "panel-provenance.json")
+    dataset_path_raw = source_panel.get("dataset_manifest")
+    if not isinstance(dataset_path_raw, str):
+        raise ValueError("PPO initialization provenance dataset identity is invalid")
+    dataset_path = Path(dataset_path_raw)
+    dataset_digest = _sha256(dataset_path)
+    if dataset_digest != source_manifest.get("dataset_manifest_sha256"):
+        raise ValueError("PPO initialization provenance dataset identity is invalid")
+    contract = source_manifest.get("contract")
+    if not isinstance(contract, Mapping):
+        raise ValueError("PPO initialization provenance contract is invalid")
+    expected = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_run": str(source),
+        "source_checkpoint": source_checkpoint_relative,
+        "source_checkpoint_sha256": _sha256(source_checkpoint),
+        "source_actor_fixtures_sha256": _sha256(source / "actor-fixtures.npz"),
+        "source_run_manifest_sha256": _sha256(source / "run.json"),
+        "source_bc_sha256": _sha256(source / "bc.json"),
+        "source_dataset_manifest_sha256": dataset_digest,
+        "source_contract_hash": contract.get("contract_hash"),
+        "source_encoding_hash": contract.get("encoding_hash"),
+    }
+    if any(provenance.get(key) != value for key, value in expected.items()):
+        raise ValueError("PPO initialization provenance does not match physical clone inputs")
+    if (
+        provenance.get("actor_modules") != _ACTOR_INITIALIZER_MODULES
+        or not isinstance(provenance.get("device"), str)
+        or not provenance["device"]
+    ):
+        raise ValueError("PPO initialization provenance metadata is incomplete")
+    for field in (
+        "comparison_rtol",
+        "comparison_atol",
+        "maximum_absolute_logit_difference",
+    ):
+        value = provenance.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError("PPO initialization provenance comparison is invalid")
 
 
 def _ppo_budget_map(
@@ -1622,14 +1694,7 @@ def _ppo_budget_map(
             raise ValueError(f"PPO run {run.config.run_name} initialization provenance is invalid")
         if run.condition == "bc_ppo":
             provenance = _read_json(initialization)
-            if (
-                provenance.get("schema_version") != 1
-                or provenance.get("kind") != "actor_only"
-                or provenance.get("source_run") != run.config.actor_init_source
-            ):
-                raise ValueError(
-                    f"PPO run {run.config.run_name} initialization source is invalid"
-                )
+            _validate_actor_initialization(run, provenance)
         checkpoints: list[CheckpointIdentity] = []
         for path in sorted((run_dir / "checkpoints").glob("step_*.zip")):
             try:
@@ -1678,31 +1743,53 @@ def train_ppo_runs(
     selected_trainer = trainer or run_training
     root = Path(runs_root)
     root.mkdir(parents=True, exist_ok=True)
+    pending_root = root / ".pending"
+    pending_root.mkdir(exist_ok=True)
+
+    def reusable(path: Path, run: TrainingRun) -> bool:
+        manifest_path = path / "run.json"
+        if not manifest_path.is_file():
+            return False
+        try:
+            manifest = _read_json(manifest_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return False
+        return (
+            manifest.get("state") == "completed"
+            and manifest.get("config") == run.config.to_dict()
+        )
+
     outputs: list[Path] = []
     for run in runs:
         expected = root / run.config.run_name
-        if (expected / "run.json").is_file():
-            manifest = _read_json(expected / "run.json")
-            if (
-                manifest.get("state") != "completed"
-                or manifest.get("config") != run.config.to_dict()
-            ):
-                raise ValueError(f"existing PPO run {run.config.run_name} is not reusable")
+        pending = pending_root / run.config.run_name
+        if reusable(expected, run):
             outputs.append(expected)
             continue
+        if expected.exists():
+            shutil.rmtree(expected)
+        if pending.exists():
+            if reusable(pending, run):
+                os.replace(pending, expected)
+                outputs.append(expected)
+                continue
+            shutil.rmtree(pending)
         output = Path(
             selected_trainer(
                 run.config,
-                runs_root=root,
+                runs_root=pending_root,
                 scenario=scenario,
                 server_cmd=list(server_cmd),
             )
         )
-        if output != expected:
+        if output != pending:
             raise ValueError(
-                f"PPO run {run.config.run_name} published outside its assigned destination"
+                f"PPO run {run.config.run_name} trained outside its pending destination"
             )
-        outputs.append(output)
+        if not reusable(pending, run):
+            raise ValueError(f"PPO run {run.config.run_name} did not complete in pending")
+        os.replace(pending, expected)
+        outputs.append(expected)
     if len({path.resolve() for path in outputs}) != len(outputs):
         raise ValueError("PPO conditions share a run destination")
     return outputs
@@ -1751,6 +1838,8 @@ def build_panel_development_candidates(
             DevelopmentCandidate(
                 "pure_bc", seed, 0, 0, f"run:{run}",
                 checkpoint_sha256=_sha256(checkpoint),
+                checkpoint_path=str(checkpoint.resolve()),
+                source_run=str(run.resolve()),
             )
         )
     for run in matrix:
@@ -1774,6 +1863,9 @@ def build_panel_development_candidates(
                     budget.actual_step,
                     controller,
                     checkpoint_sha256=_sha256(budget.path),
+                    checkpoint_path=str(budget.path.resolve()),
+                    source_run=str(run_dir.resolve()),
+                    algorithm="maskable_ppo",
                 )
             )
     if len(candidates) != 21:
@@ -1838,6 +1930,56 @@ def _validate_development_stage(
                 or not _artifact_exists(root, match, "replay_path")
             ):
                 raise ValueError("development match checkpoint or evidence is incomplete")
+        checkpoint_path_raw = candidate.get("checkpoint_path")
+        checkpoint_digest = candidate.get("checkpoint_sha256")
+        if (
+            not isinstance(checkpoint_path_raw, str)
+            or not isinstance(checkpoint_digest, str)
+        ):
+            raise ValueError("development checkpoint identity is incomplete")
+        checkpoint_path = Path(checkpoint_path_raw)
+        if (
+            not checkpoint_path.is_absolute()
+            or str(checkpoint_path.resolve()) != checkpoint_path_raw
+            or not checkpoint_path.is_file()
+            or _sha256(checkpoint_path) != checkpoint_digest
+        ):
+            raise ValueError("development checkpoint digest does not match physical bytes")
+        identity = DevelopmentCandidate(
+            str(candidate.get("condition")),
+            int(candidate.get("model_seed")),
+            int(candidate.get("nominal_step")),
+            int(candidate.get("actual_step")),
+            candidate.get("controller"),
+            checkpoint_sha256=candidate.get("checkpoint_sha256"),
+            checkpoint_path=candidate.get("checkpoint_path"),
+            source_run=candidate.get("source_run"),
+            algorithm=candidate.get("algorithm"),
+        )
+        physical_matches: list[dict[str, Any]] = []
+        for map_seed in range(
+            _DEVELOPMENT["seed_start"],
+            _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+        ):
+            output_path = (
+                root
+                / identity.condition
+                / f"seed-{identity.model_seed}"
+                / f"nominal-{identity.nominal_step}"
+                / f"map-{map_seed}"
+                / "evaluation.json"
+            )
+            _normalized, map_matches = _validated_development_map(
+                root, identity, map_seed, output_path
+            )
+            physical_matches.extend(map_matches)
+        if (
+            matches != physical_matches
+            or candidate.get("standard")
+            != [match["outcome"] for match in physical_matches]
+        ):
+            raise ValueError("development aggregate does not match physical evaluations")
+
     return {"candidate_count": 21, "games": 4_200}
 
 
@@ -1885,6 +2027,80 @@ def _select_budget_command() -> Mapping[str, Any]:
         output_path=SELECTION_PATH,
         definition_hashes=hashes,
     )
+
+
+def _validated_development_map(
+    root: Path,
+    candidate: DevelopmentCandidate,
+    map_seed: int,
+    output_path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    try:
+        physical = _read_json(output_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("physical development evaluation is missing or malformed") from exc
+    controller = physical.get("candidate")
+    opponent = physical.get("opponent")
+    schedule = physical.get("schedule")
+    raw_matches = physical.get("matches")
+    if (
+        not isinstance(controller, Mapping)
+        or controller.get("step") != candidate.actual_step
+        or opponent != {"kind": "scripted", "name": "random"}
+        or physical.get("seed_start") != map_seed
+        or physical.get("seeds") != [map_seed]
+        or physical.get("reciprocal") is not True
+        or physical.get("games") != 2
+        or schedule
+        != {
+            "start_profile": "standard-3v3",
+            "reference_seat_policy": "candidate-seat",
+        }
+        or not isinstance(raw_matches, list)
+        or len(raw_matches) != 2
+    ):
+        raise ValueError("physical development evaluation identity is invalid")
+    if candidate.checkpoint_path is not None and (
+        not isinstance(controller.get("path"), str)
+        or Path(controller["path"]).resolve() != Path(candidate.checkpoint_path).resolve()
+    ):
+        raise ValueError("physical development evaluation checkpoint is invalid")
+    if candidate.source_run is not None and (
+        not isinstance(controller.get("source_run"), str)
+        or Path(controller["source_run"]).resolve() != Path(candidate.source_run).resolve()
+    ):
+        raise ValueError("physical development evaluation source run is invalid")
+    if candidate.algorithm is not None and controller.get("algorithm") != candidate.algorithm:
+        raise ValueError("physical development evaluation algorithm is invalid")
+
+    normalized = _relativize_evaluation(physical, root, output_path)
+    matches: list[dict[str, Any]] = []
+    for seat, raw in enumerate(normalized["matches"]):
+        if (
+            not isinstance(raw, Mapping)
+            or raw.get("seed") != map_seed
+            or raw.get("candidate_seat") != seat
+            or raw.get("outcome") not in {"win", "loss", "draw"}
+            or "trace_path" not in raw
+            or "replay_path" not in raw
+        ):
+            raise ValueError("physical development evaluation match is invalid")
+        row = dict(raw)
+        row["map_seed"] = row.pop("seed")
+        row.update(
+            {
+                "condition": candidate.condition,
+                "model_seed": candidate.model_seed,
+                "nominal_step": candidate.nominal_step,
+                "actual_step": candidate.actual_step,
+                "checkpoint_sha256": candidate.checkpoint_sha256,
+                "controller": dict(controller),
+                "opponent": dict(opponent),
+                "profile": "standard-3v3",
+            }
+        )
+        matches.append(row)
+    return normalized, matches
 
 
 if __name__ == "__main__":

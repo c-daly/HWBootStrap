@@ -361,6 +361,37 @@ def _write_clone_runs(root: Path, module, *, changed_hash: bool = False) -> list
     return runs
 
 
+def _write_actor_initialization(run_dir: Path, training_run) -> None:
+    source = Path(training_run.config.actor_init_source)
+    source_manifest = _json(source / "run.json")
+    checkpoint_relative = source_manifest["latest_checkpoint"]
+    provenance = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "actor_modules": [
+            "features_extractor",
+            "mlp_extractor.policy_net",
+            "action_net",
+        ],
+        "device": "cpu",
+        "comparison_rtol": 0.0,
+        "comparison_atol": 0.0,
+        "maximum_absolute_logit_difference": 0.0,
+        "source_run": str(source.resolve()),
+        "source_checkpoint": checkpoint_relative,
+        "source_checkpoint_sha256": _sha256(source / checkpoint_relative),
+        "source_actor_fixtures_sha256": _sha256(source / "actor-fixtures.npz"),
+        "source_run_manifest_sha256": _sha256(source / "run.json"),
+        "source_bc_sha256": _sha256(source / "bc.json"),
+        "source_dataset_manifest_sha256": source_manifest["dataset_manifest_sha256"],
+        "source_contract_hash": source_manifest["contract"]["contract_hash"],
+        "source_encoding_hash": source_manifest["contract"]["encoding_hash"],
+    }
+    (run_dir / "initialization.json").write_text(
+        json.dumps(provenance), encoding="utf-8"
+    )
+
+
 class ControlledEvaluator:
     """Local substitute for the external GymServer evaluation boundary."""
 
@@ -1226,8 +1257,22 @@ def test_selection_publication_is_atomic_restart_safe_and_hashes_every_input(
     for row in table:
         row["standard"] = (row["standard"] * 100)[:200]
         key = f"{row['condition']}/seed-{row['model_seed']}/nominal-{row['nominal_step']}"
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        checkpoint = tmp_path / "checkpoints" / f"{key}.zip"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(key.encode("utf-8"))
+        digest = _sha256(checkpoint)
         row["checkpoint_sha256"] = digest
+        row["checkpoint_path"] = str(checkpoint.resolve())
+        row["source_run"] = str(checkpoint.parent.parent.resolve())
+        row["algorithm"] = "maskable_ppo"
+        row["controller"] = {
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": row["source_run"],
+            "algorithm": "maskable_ppo",
+            "step": row["actual_step"],
+            "inference_mode": "deterministic",
+        }
         checkpoint_hashes[key] = digest
     development = tmp_path / "development.json"
     development.write_text(
@@ -1281,7 +1326,14 @@ def test_train_ppo_runs_uses_real_training_boundary_with_fresh_run_configs(
 
     def trainer(config, **kwargs):
         calls.append({"config": config, **kwargs})
-        return Path(kwargs["runs_root"]) / config.run_name
+        destination = Path(kwargs["runs_root"]) / config.run_name
+        destination.mkdir(parents=True)
+        scenario.write(destination / "scenario.json")
+        (destination / "run.json").write_text(
+            json.dumps({"state": "completed", "config": config.to_dict()}),
+            encoding="utf-8",
+        )
+        return destination
 
     paths = module.train_ppo_runs(
         matrix,
@@ -1305,6 +1357,14 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
     """Aggregating before recording seat, map, checkpoint, trace, and replay loses evidence."""
 
     module = _subject()
+    controller_identity = {
+        "kind": "snapshot",
+        "path": str((tmp_path / "step_000016384.zip").resolve()),
+        "source_run": str(tmp_path.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": 16_384,
+        "inference_mode": "deterministic",
+    }
     candidate = module.DevelopmentCandidate(
         "bc_ppo", 211, 12_800, 16_384, "snapshot-controller"
     )
@@ -1331,8 +1391,8 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
                 }
             )
         result = {
-            "candidate": {"step": 16_384},
-            "opponent": {"name": "random"},
+            "candidate": dict(controller_identity),
+            "opponent": {"kind": "scripted", "name": "random"},
             "seed_start": map_seed,
             "seeds": [map_seed],
             "reciprocal": True,
@@ -1373,6 +1433,16 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
     ]
     assert all(row["actual_step"] == 16_384 for row in rows)
     assert all(
+        row["condition"] == "bc_ppo"
+        and row["model_seed"] == 211
+        and row["nominal_step"] == 12_800
+        and row["checkpoint_sha256"] == candidate.checkpoint_sha256
+        and row["controller"] == controller_identity
+        and row["opponent"] == {"kind": "scripted", "name": "random"}
+        and row["profile"] == "standard-3v3"
+        for row in rows
+    )
+    assert all(
         (tmp_path / "development" / row[field]).is_file()
         for row in rows
         for field in ("trace_path", "replay_path")
@@ -1386,6 +1456,7 @@ def test_ppo_stage_resolves_actual_budgets_and_rejects_wrong_actor_source(
 
     module = _subject()
     panel, _banks, scenario = module.validate_definitions()
+    _write_clone_runs(tmp_path / "clones", module)
     matrix = module.build_training_matrix(
         panel,
         clone_runs_root=tmp_path / "clones",
@@ -1402,19 +1473,10 @@ def test_ppo_stage_resolves_actual_budgets_and_rejects_wrong_actor_source(
             json.dumps({"state": "completed", "config": run.config.to_dict()}),
             encoding="utf-8",
         )
-        for step in (8_192, 16_384, 32_768, 57_344):
+        for step in (2_048, 14_336, 26_624, 38_912, 51_200):
             (checkpoints / f"step_{step:09d}.zip").write_bytes(b"checkpoint")
         if run.condition == "bc_ppo":
-            (run_dir / "initialization.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "kind": "actor_only",
-                        "source_run": run.config.actor_init_source,
-                    }
-                ),
-                encoding="utf-8",
-            )
+            _write_actor_initialization(run_dir, run)
 
     budgets = module._ppo_budget_map(root, matrix, scenario)
     assert {
@@ -1422,23 +1484,248 @@ def test_ppo_stage_resolves_actual_budgets_and_rejects_wrong_actor_source(
         for name, items in budgets.items()
     } == {
         run.config.run_name: [
-            (12_800, 16_384),
-            (25_600, 32_768),
-            (51_200, 57_344),
+            (12_800, 14_336),
+            (25_600, 26_624),
+            (51_200, 51_200),
         ]
         for run in matrix
     }
 
     initialized = root / "bc-ppo-seed-211" / "initialization.json"
-    initialized.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "kind": "actor_only",
-                "source_run": str(tmp_path / "clones" / "seed-223"),
-            }
-        ),
+    changed = _json(initialized)
+    changed["source_actor_fixtures_sha256"] = "f" * 64
+    initialized.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError, match="initialization provenance"):
+        module._ppo_budget_map(root, matrix, scenario)
+
+
+def test_ppo_budget_mapping_uses_the_real_2048_step_rollout_boundary(
+    tmp_path: Path,
+) -> None:
+    """Using the preregistration's stale 8192-step rollout selects the wrong snapshots."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    run = next(
+        item
+        for item in module.build_training_matrix(
+            panel,
+            clone_runs_root=tmp_path / "clones",
+            workers=4,
+            device="cpu",
+        )
+        if item.condition == "scratch_ppo" and item.model_seed == 211
+    )
+    root = tmp_path / "ppo"
+    run_dir = root / run.config.run_name
+    checkpoints = run_dir / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    scenario.write(run_dir / "scenario.json")
+    (run_dir / "run.json").write_text(
+        json.dumps({"state": "completed", "config": run.config.to_dict()}),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="initialization source"):
-        module._ppo_budget_map(root, matrix, scenario)
+    for step in (2_048, 14_336, 26_624, 38_912, 51_200):
+        (checkpoints / f"step_{step:09d}.zip").write_bytes(b"checkpoint")
+
+    budgets = module._ppo_budget_map(root, [run], scenario)
+
+    assert [
+        (item.nominal_step, item.actual_step)
+        for item in budgets[run.config.run_name]
+    ] == [(12_800, 14_336), (25_600, 26_624), (51_200, 51_200)]
+
+
+def test_development_evaluation_reopens_physical_map_evidence(
+    tmp_path: Path,
+) -> None:
+    """Trusting the evaluator return lets a different on-disk controller enter selection."""
+
+    module = _subject()
+    candidate = module.DevelopmentCandidate(
+        "bc_ppo", 211, 12_800, 14_336, "snapshot-controller", "a" * 64
+    )
+
+    def evaluator(_p0, _p1, **kwargs):
+        map_seed = kwargs["seed_start"]
+        evidence = Path(kwargs["evidence_dir"])
+        evidence.mkdir(parents=True, exist_ok=True)
+        matches = []
+        for seat in (0, 1):
+            trace = evidence / f"{map_seed}-{seat}.json"
+            replay = evidence / f"{map_seed}-{seat}.replay"
+            trace.write_text("{}", encoding="utf-8")
+            replay.write_bytes(b"replay")
+            matches.append(
+                {
+                    "seed": map_seed,
+                    "candidate_seat": seat,
+                    "outcome": "win",
+                    "trace_path": str(trace),
+                    "replay_path": str(replay),
+                }
+            )
+        returned = {
+            "candidate": {
+                "kind": "snapshot",
+                "path": "expected.zip",
+                "source_run": "expected-run",
+                "algorithm": "maskable_ppo",
+                "step": 14_336,
+                "inference_mode": "deterministic",
+            },
+            "opponent": {"kind": "scripted", "name": "random"},
+            "seed_start": map_seed,
+            "seeds": [map_seed],
+            "reciprocal": True,
+            "games": 2,
+            "schedule": {
+                "start_profile": "standard-3v3",
+                "reference_seat_policy": "candidate-seat",
+            },
+            "matches": matches,
+        }
+        persisted = dict(returned)
+        persisted["candidate"] = {**returned["candidate"], "step": 26_624}
+        output = Path(kwargs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(persisted), encoding="utf-8")
+        return returned
+
+    with pytest.raises(ValueError, match="physical development evaluation"):
+        module.evaluate_development_candidates(
+            [candidate],
+            output_root=tmp_path / "development",
+            evaluator=evaluator,
+            server_cmd=["fake-server"],
+        )
+
+
+def test_selection_recomputes_physical_checkpoint_digests(tmp_path: Path) -> None:
+    """A copied 64-character digest must not bless checkpoint bytes changed after evaluation."""
+
+    module = _subject()
+    table = _selection_table()
+    for row in table:
+        row["standard"] = (row["standard"] * 100)[:200]
+        checkpoint = (
+            tmp_path
+            / "checkpoints"
+            / f"{row['model_seed']}-{row['nominal_step']}.zip"
+        )
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(b"evaluated")
+        row["checkpoint_path"] = str(checkpoint.resolve())
+        row["source_run"] = str(tmp_path.resolve())
+        row["algorithm"] = "maskable_ppo"
+        row["checkpoint_sha256"] = _sha256(checkpoint)
+    Path(table[0]["checkpoint_path"]).write_bytes(b"tampered")
+    development = tmp_path / "development.json"
+    development.write_text(
+        json.dumps({"schema_version": 1, "candidates": table}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="checkpoint digest"):
+        module.publish_selection(
+            development_path=development,
+            output_path=tmp_path / "selection.json",
+            definition_hashes={"panel_sha256": "a" * 64},
+        )
+
+
+def test_train_ppo_runs_retries_incomplete_deterministic_pending_run(
+    tmp_path: Path,
+) -> None:
+    """An interrupted first attempt must not require resume flags or manual cleanup."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    run = module.build_training_matrix(
+        panel,
+        clone_runs_root=tmp_path / "clones",
+        workers=4,
+        device="cpu",
+    )[0]
+    root = tmp_path / "ppo"
+    trainer_roots: list[Path] = []
+    attempts = 0
+
+    def trainer(config, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        trainer_root = Path(kwargs["runs_root"])
+        trainer_roots.append(trainer_root)
+        destination = trainer_root / config.run_name
+        if attempts == 1:
+            destination.mkdir(parents=True)
+            (destination / "partial.marker").write_text("partial", encoding="utf-8")
+            raise RuntimeError("interrupted")
+        assert not (destination / "partial.marker").exists()
+        destination.mkdir(parents=True, exist_ok=True)
+        scenario.write(destination / "scenario.json")
+        (destination / "run.json").write_text(
+            json.dumps({"state": "completed", "config": config.to_dict()}),
+            encoding="utf-8",
+        )
+        return destination
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        module.train_ppo_runs(
+            [run],
+            runs_root=root,
+            scenario=scenario,
+            server_cmd=["fake-server"],
+            trainer=trainer,
+        )
+
+    outputs = module.train_ppo_runs(
+        [run],
+        runs_root=root,
+        scenario=scenario,
+        server_cmd=["fake-server"],
+        trainer=trainer,
+    )
+
+    assert outputs == [root / run.config.run_name]
+    assert trainer_roots == [root / ".pending", root / ".pending"]
+    assert not (root / ".pending" / run.config.run_name).exists()
+
+
+def test_ppo_stage_recomputes_complete_actor_initializer_provenance(
+    tmp_path: Path,
+) -> None:
+    """A seed-matched source_run string alone cannot prove which actor bytes initialized PPO."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    _write_clone_runs(tmp_path / "clones", module)
+    run = next(
+        item
+        for item in module.build_training_matrix(
+            panel,
+            clone_runs_root=tmp_path / "clones",
+            workers=4,
+            device="cpu",
+        )
+        if item.condition == "bc_ppo" and item.model_seed == 211
+    )
+    root = tmp_path / "ppo"
+    run_dir = root / run.config.run_name
+    checkpoints = run_dir / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    scenario.write(run_dir / "scenario.json")
+    (run_dir / "run.json").write_text(
+        json.dumps({"state": "completed", "config": run.config.to_dict()}),
+        encoding="utf-8",
+    )
+    for step in (14_336, 26_624, 51_200):
+        (checkpoints / f"step_{step:09d}.zip").write_bytes(b"checkpoint")
+    _write_actor_initialization(run_dir, run)
+    provenance_path = run_dir / "initialization.json"
+    provenance = _json(provenance_path)
+    provenance["source_bc_sha256"] = "f" * 64
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="initialization provenance"):
+        module._ppo_budget_map(root, [run], scenario)
