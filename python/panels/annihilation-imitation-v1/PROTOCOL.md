@@ -88,9 +88,15 @@ top-level source run and checkpoint-under-source/checkpoints relationship.
 `freeze-final --incumbent-panel <path>` is legal only after the one global
 checkpoint budget is complete. The atomic `final-seal.json` records the code
 revision and dirty state; hashes of the panel, scenario, and still-immutable
-seed-bank definitions; every dataset file; all six PPO run trees; three
-initialized checkpoints; three scratch controls; and exactly three completed
-profiled-standard incumbent runs. The seal's assignment snapshot flips
+seed-bank definitions; every dataset file; all six PPO run trees; sealed clone
+gate and BC metric sources; three initialized checkpoints; three scratch
+controls; and exactly three completed profiled-standard incumbent runs. The
+incumbents are read from the production conversion aggregate's seed-keyed
+`models.profiled_standard` entries (seeds 101, 113, and 127), then mapped to
+explicit pairing slots 211, 223, and 227. Each fixed incumbent snapshot binds
+the aggregate checkpoint digest to the completed run's `config.seed`,
+algorithm, environment, contract hash, standard-only profile distribution,
+checkpoint path, and checkpoint step. The seal's assignment snapshot flips
 `final.assigned` to true without rewriting `seed-banks.json`, preserving all
 earlier definition hashes. There is no unassign operation and a second freeze
 is refused.
@@ -116,9 +122,16 @@ two-sided sign test on discordant wins.
 
 `report` places the primary gate table before every secondary result, followed
 by clone, initialized PPO, scratch PPO, incumbent PPO, conversion, BC, learning
-curve, compute, failure-trace, and limitation sections. `aggregate.json` and
-`REPORT.md` are staged and published as one rollback-safe pair, so a failure
-cannot expose either new final artifact alone.
+curve, compute, failure-trace, and limitation sections. Clone, conversion, BC,
+learning, and compute values are derived from hash-sealed artifacts; comparator
+loss/draw intervals, seat summaries, diagnostics, and draw categories come from
+the same aggregate as the Markdown report.
+
+Publication writes `aggregate.json` and `REPORT.md` into an immutable
+content-addressed directory under `.final-generations`. Readers first open the
+single atomically replaced `final-publication.json` pointer and verify both
+generation hashes. A failure while staging either file or before the pointer
+swap leaves the prior reader-visible generation intact.
 
     python python/run_annihilation_imitation_panel.py freeze-final --incumbent-panel <path>
     python python/run_annihilation_imitation_panel.py evaluate-final

@@ -2002,24 +2002,75 @@ def _final_panel_fixture(tmp_path: Path, *, selection: bool = True):
             checkpoint = run / "checkpoints" / "step_000025600.zip"
             checkpoint.parent.mkdir(parents=True)
             checkpoint.write_bytes(f"{condition}-{seed}".encode())
-            (run / "run.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "model_seed": seed, "condition": condition}), encoding="utf-8")
-            candidates.append({"condition": condition, "model_seed": seed, "nominal_step": 25_600, "actual_step": 25_600, "checkpoint_path": str(checkpoint.resolve()), "checkpoint_sha256": _sha256(checkpoint), "source_run": str(run.resolve())})
+            (run / "run.json").write_text(json.dumps({
+                "schema_version": 1, "state": "completed", "model_seed": seed,
+                "condition": condition, "timesteps": 25_600, "wall_clock_seconds": 10.0,
+            }), encoding="utf-8")
+            candidates.append({
+                "condition": condition, "model_seed": seed, "nominal_step": 25_600,
+                "actual_step": 25_600, "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": _sha256(checkpoint), "source_run": str(run.resolve()),
+                "standard": ["win", "loss"],
+                "conversion": ["win", "draw"] if condition == "bc_ppo" else [],
+            })
     development = panel_dir / "development"
     development.mkdir()
     (development / "development.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "candidates": candidates}), encoding="utf-8")
     if selection:
         (panel_dir / "selection.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "selection": {"nominal_step": 25_600, "actual_steps": {"211": 25_600, "223": 25_600, "227": 25_600}}}), encoding="utf-8")
-    incumbent = tmp_path / "incumbent"
-    incumbent.mkdir()
-    selected_runs = []
-    for seed in (211, 223, 227):
-        run = incumbent / f"seed-{seed}"
-        checkpoint = run / "checkpoint.zip"
-        run.mkdir()
+    incumbent = tmp_path / "python" / "panels" / "incumbent"
+    incumbent.mkdir(parents=True)
+    runs_root = tmp_path / "python" / "runs"
+    profiled_standard = {}
+    for seed in (101, 113, 127):
+        run_name = f"annihilation-conversion-profiled_standard-seed{seed}-tb-v1"
+        run = runs_root / run_name
+        checkpoint = run / "checkpoints" / "step_000051200.zip"
+        checkpoint.parent.mkdir(parents=True)
         checkpoint.write_bytes(f"incumbent-{seed}".encode())
-        (run / "run.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "model_seed": seed, "start_profile": "standard-3v3"}), encoding="utf-8")
-        selected_runs.append({"model_seed": seed, "run_path": str(run.resolve()), "checkpoint_path": str(checkpoint.resolve())})
-    (incumbent / "aggregate.json").write_text(json.dumps({"schema_version": 1, "selected_runs": selected_runs}), encoding="utf-8")
+        (run / "scenario.json").write_text(json.dumps({
+            "schema_version": 1, "environment": "tactical-v2",
+            "id": "tactical-v2-annihilation-profiled-standard",
+            "tactical_v2": {"start_distribution": [
+                {"profile_id": "standard-3v3", "basis_points": 10_000},
+            ]},
+        }), encoding="utf-8")
+        (run / "run.json").write_text(json.dumps({
+            "schema_version": 1, "state": "completed",
+            "config": {"seed": seed, "algorithm": "maskable_ppo", "environment": "tactical-v2"},
+            "contract": {"contract_hash": "c" * 64, "encoding_hash": "e" * 64, "environment": "tactical-v2"},
+            "scenario": {"path": "scenario.json", "template_id": "tactical-v2-annihilation-profiled-standard"},
+            "latest_checkpoint": "checkpoints/step_000051200.zip",
+            "latest_checkpoint_step": 51_200,
+        }), encoding="utf-8")
+        profiled_standard[str(seed)] = {"standard": {}, "conversion": {}, "training": {
+            "run": run_name,
+            "checkpoint": "checkpoints/step_000051200.zip",
+            "checkpoint_sha256": _sha256(checkpoint),
+            "environment_steps": 51_200,
+            "wall_clock_seconds": 12.5,
+        }}
+    (incumbent / "aggregate.json").write_text(json.dumps({
+        "schema_version": 1, "models": {"profiled_standard": profiled_standard},
+    }), encoding="utf-8")
+    clone_gate = panel_dir / "bc-development-gate"
+    clone_gate.mkdir()
+    (clone_gate / "gate.json").write_text(json.dumps({
+        "schema_version": 1,
+        "clones": [
+            {"model_seed": seed, "wins": 10, "losses": 5, "draws": 5}
+            for seed in (211, 223, 227)
+        ],
+    }), encoding="utf-8")
+    for seed in (211, 223, 227):
+        clone_run = panel_dir / "bc-clones" / f"seed-{seed}"
+        clone_run.mkdir(parents=True)
+        (clone_run / "metrics.json").write_text(json.dumps({
+            "nll": 0.4, "top1_accuracy": 0.8,
+        }), encoding="utf-8")
+        (clone_run / "run.json").write_text(json.dumps({
+            "state": "completed", "model_seed": seed, "wall_clock_seconds": 2.0,
+        }), encoding="utf-8")
     return panel_dir, dataset_dir, incumbent
 
 
@@ -2107,6 +2158,11 @@ def test_final_evaluation_runs_exact_reciprocal_bank_once(tmp_path: Path) -> Non
     assert all(call["games"] == 250 and call["seed_start"] == 17_000_000
                and call["both_seats"] is True and call["opponent"] == "random"
                and call["start_profile"] == "standard-3v3" for call in calls)
+    incumbent_specs = [json.loads(call["candidate"]) for call in calls[-3:]]
+    assert all(spec["kind"] == "snapshot" for spec in incumbent_specs)
+    assert all(Path(spec["path"]).name == "step_000051200.zip" for spec in incumbent_specs)
+    assert all(spec["algorithm"] == "maskable_ppo" and spec["step"] == 51_200
+               and spec["contract_hash"] == "c" * 64 for spec in incumbent_specs)
     assert len(result["matches"]) == 1_500
     assert len(result["comparison_matches"]) == 3_000
     assert len({(row["model_seed"], row["seed"], row["candidate_seat"])
@@ -2161,6 +2217,17 @@ def _report_matches() -> list[dict[str, Any]]:
     return rows
 
 
+def _report_evidence() -> dict[str, Any]:
+    return {
+        "clone": {"pooled": {"wins": 900, "losses": 450, "draws": 150, "games": 1500}},
+        "conversion": {"initialized_wins": 71, "initialized_games": 90},
+        "bc_metrics": {"validation_loss": 0.4321, "validation_accuracy": 0.8765},
+        "learning_curves": {"initialized_final_reward": 1.25, "scratch_final_reward": 0.75},
+        "compute": {"teacher_games": 12_000, "bc_wall_clock_seconds": 41.5,
+                    "ppo_environment_steps": 153_600, "ppo_wall_clock_seconds": 301.25},
+    }
+
+
 def test_exact_sign_test_and_statistics_use_wilson_and_preserve_draws() -> None:
     """Approximate tests or reclassifying lopsided draws can overstate the learned policy."""
     module = _subject()
@@ -2169,7 +2236,9 @@ def test_exact_sign_test_and_statistics_use_wilson_and_preserve_draws() -> None:
     assert module.exact_sign_test(0, 0) == 1.0
     assert module.exact_sign_test(3, 0) == 0.25
     assert module.exact_sign_test(4, 1) == 0.375
-    aggregate = module.build_final_aggregate(_report_matches())
+    aggregate = module.build_final_aggregate(
+        _report_matches(), supporting_evidence=_report_evidence()
+    )
     primary = aggregate["conditions"]["initialized_ppo"]["pooled"]
     assert primary["counts"] == {"wins": 975, "losses": 300, "draws": 225, "games": 1500}
     assert primary["confidence_intervals"]["win"] == wilson_interval(975, 1500)
@@ -2185,6 +2254,7 @@ def test_exact_sign_test_and_statistics_use_wilson_and_preserve_draws() -> None:
     }
     assert aggregate["comparisons"]["scratch_ppo"]["pairs"] == 1_500
     assert aggregate["comparisons"]["incumbent_ppo"]["pairs"] == 1_500
+    assert aggregate["supporting_evidence"] == _report_evidence()
 
 
 def test_report_recomputes_raw_matches_orders_primary_first_and_is_consistent(
@@ -2196,7 +2266,9 @@ def test_report_recomputes_raw_matches_orders_primary_first_and_is_consistent(
     panel_dir.mkdir()
     matches = _report_matches()
 
-    aggregate, report = module.publish_final_report(panel_dir, matches=matches)
+    aggregate, report = module.publish_final_report(
+        panel_dir, matches=matches, supporting_evidence=_report_evidence()
+    )
 
     raw_primary = [row for row in matches if row["condition"] == "initialized_ppo"]
     recomputed = {
@@ -2213,32 +2285,120 @@ def test_report_recomputes_raw_matches_orders_primary_first_and_is_consistent(
     assert "exact two-sided sign p=3.7092061506874214e-68" in report
     assert "Incumbent pooled W/L/D: 600/600/300" in report
     assert "exact two-sided sign p=2.598852441411225e-113" in report
-    assert _json(panel_dir / "aggregate.json") == aggregate
-    assert (panel_dir / "REPORT.md").read_text(encoding="utf-8") == report
+    assert "Loss/draw Wilson 95% intervals:" in report
+    assert "Comparator seat summaries:" in report
+    assert "Comparator diagnostics:" in report
+    assert "Comparator draw categories:" in report
+    assert "900/450/150 over 1500 games" in report
+    assert "71/90" in report
+    assert "validation loss 0.4321" in report
+    assert "initialized final reward 1.25; scratch final reward 0.75" in report
+    assert "teacher games 12000" in report and "PPO environment steps 153600" in report
+    published_aggregate, published_report, manifest = module.load_final_publication(panel_dir)
+    assert published_aggregate == aggregate
+    assert published_report == report
+    assert manifest["generation"]
 
 
-def test_report_publication_failure_leaves_neither_final_visible(tmp_path: Path) -> None:
-    """A crash between publishing aggregate and report must not expose a half-result."""
+def test_report_publication_failure_preserves_prior_atomic_generation(tmp_path: Path) -> None:
+    """A crash between generation files must preserve the prior reader-visible pair."""
     module = _subject()
     panel_dir = tmp_path / "panel"
     panel_dir.mkdir()
+    first_aggregate, first_report = module.publish_final_report(
+        panel_dir, matches=_report_matches(), supporting_evidence=_report_evidence()
+    )
+    first_manifest_bytes = (panel_dir / "final-publication.json").read_bytes()
+    first_manifest = _json(panel_dir / "final-publication.json")
 
-    def fail_before_visibility(stage: str) -> None:
-        if stage != "after_aggregate":
-            return
-        assert not (panel_dir / "aggregate.json").exists()
-        assert not (panel_dir / "REPORT.md").exists()
-        raise OSError("injected")
+    def fail_between_files(stage: str) -> None:
+        if stage == "after_staged_aggregate":
+            raise OSError("injected")
 
     with pytest.raises(OSError, match="injected"):
         module.publish_final_report(
             panel_dir,
-            matches=_report_matches(),
-            failure_injector=fail_before_visibility,
+            matches=[dict(row, outcome="loss") for row in _report_matches()],
+            supporting_evidence=_report_evidence(),
+            failure_injector=fail_between_files,
         )
 
-    assert not (panel_dir / "aggregate.json").exists()
-    assert not (panel_dir / "REPORT.md").exists()
+    assert (panel_dir / "final-publication.json").read_bytes() == first_manifest_bytes
+    aggregate, report, manifest = module.load_final_publication(panel_dir)
+    assert aggregate == first_aggregate
+    assert report == first_report
+    assert manifest == first_manifest
+    generation = panel_dir / ".final-generations" / first_manifest["generation"]
+    assert (generation / "aggregate.json").is_file()
+    assert (generation / "REPORT.md").is_file()
+
+
+def test_selected_incumbents_accepts_production_aggregate_schema(tmp_path: Path) -> None:
+    module = _subject()
+    panel = tmp_path / "python" / "panels" / "incumbent"
+    runs = tmp_path / "python" / "runs"
+    panel.mkdir(parents=True)
+    models = {}
+    for seed in (101, 113, 127):
+        run_name = f"profiled-standard-seed-{seed}"
+        run = runs / run_name
+        checkpoint = run / "checkpoints" / "step_000051200.zip"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(str(seed).encode())
+        (run / "scenario.json").write_text(json.dumps({
+            "environment": "tactical-v2",
+            "id": "tactical-v2-annihilation-profiled-standard",
+            "tactical_v2": {"start_distribution": [
+                {"profile_id": "standard-3v3", "basis_points": 10_000},
+            ]},
+        }), encoding="utf-8")
+        (run / "run.json").write_text(json.dumps({
+            "state": "completed",
+            "config": {"seed": seed, "algorithm": "maskable_ppo", "environment": "tactical-v2"},
+            "contract": {"contract_hash": "c" * 64, "encoding_hash": "e" * 64},
+            "scenario": {"path": "scenario.json"},
+            "latest_checkpoint": "checkpoints/step_000051200.zip",
+            "latest_checkpoint_step": 51_200,
+        }), encoding="utf-8")
+        models[str(seed)] = {"training": {
+            "run": run_name,
+            "checkpoint": "checkpoints/step_000051200.zip",
+            "checkpoint_sha256": _sha256(checkpoint),
+        }}
+    (panel / "aggregate.json").write_text(json.dumps({
+        "schema_version": 1,
+        "models": {"profiled_standard": models},
+    }), encoding="utf-8")
+
+    selected = module._selected_incumbents(panel)
+
+    assert [item["pairing_seed"] for item in selected] == [211, 223, 227]
+    assert [item["incumbent_seed"] for item in selected] == [101, 113, 127]
+    assert all(item["algorithm"] == "maskable_ppo" for item in selected)
+    assert all(item["step"] == 51_200 and item["contract_hash"] == "c" * 64 for item in selected)
+
+
+def test_report_evidence_is_derived_from_hash_sealed_artifacts(tmp_path: Path) -> None:
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(
+        panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+        revision="37cc8f9", dirty=False,
+    )
+
+    evidence = module._sealed_report_evidence(panel_dir)
+
+    assert evidence == {
+        "clone": {"pooled": {"wins": 30, "losses": 15, "draws": 15, "games": 60}},
+        "conversion": {"initialized_wins": 3, "initialized_games": 6},
+        "bc_metrics": {"validation_loss": 0.4000000000000001,
+                       "validation_accuracy": 0.8000000000000002},
+        "learning_curves": {"initialized_final_reward": 0.5,
+                            "scratch_final_reward": 0.5},
+        "compute": {"teacher_games": 1, "bc_wall_clock_seconds": 6.0,
+                    "ppo_environment_steps": 153_600,
+                    "ppo_wall_clock_seconds": 60.0},
+    }
 
 
 def test_parser_exposes_final_seal_commands() -> None:
@@ -2299,7 +2459,8 @@ def test_final_evaluation_rejects_any_changed_sealed_input(
         )
         checkpoint.write_bytes(b"changed")
     else:
-        run = incumbent / "seed-211" / "run.json"
+        seal = _json(panel_dir / "final-seal.json")
+        run = Path(seal["incumbent_comparators"][0]["run_path"]) / "run.json"
         run.write_text('{"changed":true}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="sealed"):

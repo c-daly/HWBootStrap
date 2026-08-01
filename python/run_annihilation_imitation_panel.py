@@ -2239,44 +2239,79 @@ def _repository_identity(repository: Path) -> tuple[str, bool]:
 
 def _selected_incumbents(incumbent_panel: Path) -> list[dict[str, Any]]:
     incumbent_panel = Path(incumbent_panel)
-    metadata_path = incumbent_panel / "aggregate.json"
-    if not metadata_path.is_file():
-        metadata_path = incumbent_panel / "selection.json"
-    metadata = _read_json(metadata_path)
-    raw = metadata.get("selected_runs")
-    if not isinstance(raw, list) or len(raw) != 3:
-        raise ValueError("incumbent panel must resolve exactly three selected runs")
+    metadata = _read_json(incumbent_panel / "aggregate.json")
+    models = metadata.get("models")
+    raw = models.get("profiled_standard") if isinstance(models, Mapping) else None
+    if not isinstance(raw, Mapping) or set(raw) != {"101", "113", "127"}:
+        raise ValueError("incumbent panel must resolve exactly three profiled-standard runs")
+
+    runs_root = incumbent_panel.parent.parent / "runs"
     selected = []
-    seen = set()
-    for item in raw:
-        if not isinstance(item, Mapping):
+    for pairing_seed, incumbent_seed in zip(_MODEL_SEEDS, (101, 113, 127), strict=True):
+        item = raw[str(incumbent_seed)]
+        training = item.get("training") if isinstance(item, Mapping) else None
+        if not isinstance(training, Mapping):
             raise ValueError("incumbent comparator metadata is malformed")
-        seed = item.get("model_seed")
-        run_path = Path(str(item.get("run_path", "")))
-        checkpoint = Path(str(item.get("checkpoint_path", "")))
-        if (
-            seed not in _MODEL_SEEDS or seed in seen
-            or not run_path.is_absolute() or not run_path.is_dir()
-            or not checkpoint.is_absolute() or not checkpoint.is_file()
-            or run_path not in checkpoint.parents
-        ):
+        run_name = training.get("run")
+        checkpoint_name = training.get("checkpoint")
+        if not isinstance(run_name, str) or not isinstance(checkpoint_name, str):
             raise ValueError("incumbent comparator identity is incomplete")
+        run_path = (runs_root / run_name).resolve()
+        checkpoint = (run_path / checkpoint_name).resolve()
+        if (
+            not run_path.is_dir()
+            or not checkpoint.is_file()
+            or checkpoint.parent != run_path / "checkpoints"
+            or training.get("checkpoint_sha256") != _sha256(checkpoint)
+        ):
+            raise ValueError("incumbent comparator physical identity changed")
+
         manifest = _read_json(run_path / "run.json")
+        config = manifest.get("config")
+        contract = manifest.get("contract")
+        scenario_record = manifest.get("scenario")
+        scenario_path = run_path / str(
+            scenario_record.get("path", "") if isinstance(scenario_record, Mapping) else ""
+        )
+        scenario = _read_json(scenario_path)
+        tactical = scenario.get("tactical_v2")
+        distribution = tactical.get("start_distribution") if isinstance(tactical, Mapping) else None
+        profile_weights = {
+            row.get("profile_id"): row.get("basis_points")
+            for row in distribution
+            if isinstance(row, Mapping)
+        } if isinstance(distribution, list) else {}
+        algorithm = config.get("algorithm") if isinstance(config, Mapping) else None
+        step = manifest.get("latest_checkpoint_step")
+        contract_hash = contract.get("contract_hash") if isinstance(contract, Mapping) else None
         if (
             manifest.get("state") != "completed"
-            or manifest.get("model_seed") != seed
-            or manifest.get("start_profile") != "standard-3v3"
+            or not isinstance(config, Mapping)
+            or config.get("seed") != incumbent_seed
+            or config.get("environment") != "tactical-v2"
+            or algorithm != "maskable_ppo"
+            or manifest.get("latest_checkpoint") != checkpoint_name
+            or step != 51_200
+            or not isinstance(contract_hash, str)
+            or len(contract_hash) != 64
+            or scenario.get("environment") != "tactical-v2"
+            or profile_weights.get("standard-3v3") != 10_000
+            or sum(value for value in profile_weights.values() if isinstance(value, int)) != 10_000
         ):
             raise ValueError("incumbent comparator is not a profiled-standard completed run")
-        seen.add(seed)
         selected.append({
-            "model_seed": seed,
-            "run_path": str(run_path.resolve()),
+            "model_seed": pairing_seed,
+            "pairing_seed": pairing_seed,
+            "incumbent_seed": incumbent_seed,
+            "run_path": str(run_path),
             "run_sha256": _tree_sha256(run_path),
-            "checkpoint_path": str(checkpoint.resolve()),
+            "checkpoint_path": str(checkpoint),
             "checkpoint_sha256": _sha256(checkpoint),
+            "algorithm": algorithm,
+            "step": step,
+            "contract_hash": contract_hash,
         })
-    return sorted(selected, key=lambda item: item["model_seed"])
+    return selected
 
 
 def freeze_final(
@@ -2404,6 +2439,20 @@ def freeze_final(
         revision = actual_revision if revision is None else revision
         dirty = actual_dirty if dirty is None else dirty
 
+    report_source_paths = {}
+    for source_root in (
+        panel_dir / "bc-development-gate",
+        panel_dir / "bc-clones",
+    ):
+        if source_root.is_dir():
+            for path in sorted(source_root.rglob("*")):
+                if path.is_file():
+                    key = path.relative_to(panel_dir).as_posix()
+                    report_source_paths[key] = str(path.resolve())
+    report_source_hashes = {
+        key: _sha256(Path(path)) for key, path in report_source_paths.items()
+    }
+
     assigned_banks = json.loads(json.dumps(banks))
     assigned_banks["final"]["assigned"] = True
     payload = {
@@ -2431,6 +2480,8 @@ def freeze_final(
             name: str((runs_root / name).resolve()) for name in sorted(expected_run_names)
         },
         "training_run_hashes": training_hashes,
+        "report_source_paths": report_source_paths,
+        "report_source_hashes": report_source_hashes,
         "selected_checkpoints": selected_checkpoints,
         "incumbent_comparators": incumbents,
         "seed_banks": assigned_banks,
@@ -2537,9 +2588,15 @@ def evaluate_final(
             }, sort_keys=True)
             evaluation_specs.append((condition, item, controller))
     for item in seal["incumbent_comparators"]:
-        evaluation_specs.append(
-            ("incumbent_ppo", item, f"run:{Path(item['run_path']).resolve()}")
-        )
+        controller = json.dumps({
+            "kind": "snapshot",
+            "path": str(Path(item["checkpoint_path"]).resolve()),
+            "source_run": item["run_path"],
+            "algorithm": item["algorithm"],
+            "step": item["step"],
+            "contract_hash": item["contract_hash"],
+        }, sort_keys=True)
+        evaluation_specs.append(("incumbent_ppo", item, controller))
 
     by_condition: dict[str, list[dict[str, Any]]] = {
         "initialized_ppo": [],
@@ -2681,7 +2738,15 @@ def _outcome_statistics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def build_final_aggregate(matches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def build_final_aggregate(
+    matches: Sequence[Mapping[str, Any]],
+    *,
+    supporting_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    required_evidence = {"clone", "conversion", "bc_metrics", "learning_curves", "compute"}
+    if not isinstance(supporting_evidence, Mapping) or set(supporting_evidence) != required_evidence:
+        raise ValueError("sealed report evidence is incomplete")
+    evidence = json.loads(json.dumps(supporting_evidence))
     rows = [dict(row) for row in matches]
     primary = [row for row in rows if row.get("condition") == "initialized_ppo"]
     _validate_final_schedule(primary)
@@ -2739,6 +2804,7 @@ def build_final_aggregate(matches: Sequence[Mapping[str, Any]]) -> dict[str, Any
         },
         "conditions": conditions,
         "comparisons": comparisons,
+        "supporting_evidence": evidence,
         "matches": rows,
     }
 
@@ -2749,6 +2815,7 @@ def _render_final_report(aggregate: Mapping[str, Any]) -> str:
     scratch = conditions["scratch_ppo"]
     incumbent = conditions["incumbent_ppo"]
     gate = aggregate["gate"]
+    evidence = aggregate["supporting_evidence"]
     lines = [
         "# Annihilation imitation v1 results",
         "",
@@ -2772,55 +2839,66 @@ def _render_final_report(aggregate: Mapping[str, Any]) -> str:
         f"{counts['games']} | {pooled['rates']['win']:.3%} | "
         f"{'PASS' if gate['passed'] else 'FAIL'} |"
     )
-    scratch_counts = scratch["pooled"]["counts"]
-    incumbent_counts = incumbent["pooled"]["counts"]
-    scratch_comparison = aggregate["comparisons"]["scratch_ppo"]
-    incumbent_comparison = aggregate["comparisons"]["incumbent_ppo"]
+    clone = evidence["clone"]["pooled"]
+    conversion = evidence["conversion"]
+    bc = evidence["bc_metrics"]
+    curves = evidence["learning_curves"]
+    compute = evidence["compute"]
     lines.extend([
         "",
         "The primary result treats every draw and loss as a non-win; material diagnostics never alter the gate.",
         "",
         "## Clone",
         "",
-        "Pure-clone development evidence remains secondary context and cannot alter the gate.",
+        f"Clone pooled W/L/D: {clone['wins']}/{clone['losses']}/{clone['draws']} over {clone['games']} games.",
         "",
         "## Initialized PPO",
         "",
         f"Initialized pooled W/L/D: {counts['wins']}/{counts['losses']}/{counts['draws']}.",
         f"Win Wilson 95% interval: {pooled['confidence_intervals']['win']}.",
-        f"Seat summaries: {pooled['seats']}. Diagnostics: {pooled['diagnostics']}.",
-        "",
-        "## Scratch PPO",
-        "",
-        f"Scratch pooled W/L/D: {scratch_counts['wins']}/{scratch_counts['losses']}/{scratch_counts['draws']}.",
-        f"Win Wilson 95% interval: {scratch['pooled']['confidence_intervals']['win']}.",
-        f"Paired initialized-only/comparator-only wins: {scratch_comparison['initialized_only_wins']}/"
-        f"{scratch_comparison['comparator_only_wins']}; exact two-sided sign p="
-        f"{scratch_comparison['exact_two_sided_sign_p']}.",
-        "",
-        "## Incumbent PPO",
-        "",
-        f"Incumbent pooled W/L/D: {incumbent_counts['wins']}/{incumbent_counts['losses']}/{incumbent_counts['draws']}.",
-        f"Win Wilson 95% interval: {incumbent['pooled']['confidence_intervals']['win']}.",
-        f"Paired initialized-only/comparator-only wins: {incumbent_comparison['initialized_only_wins']}/"
-        f"{incumbent_comparison['comparator_only_wins']}; exact two-sided sign p="
-        f"{incumbent_comparison['exact_two_sided_sign_p']}.",
+        f"Loss/draw Wilson 95% intervals: {pooled['confidence_intervals']['loss']} / {pooled['confidence_intervals']['draw']}.",
+        f"Seat summaries: {pooled['seats']}. Diagnostics: {pooled['diagnostics']}. Draw categories: {pooled['draw_categories']}.",
+    ])
+    for title, condition, summary in (
+        ("Scratch PPO", "scratch_ppo", scratch),
+        ("Incumbent PPO", "incumbent_ppo", incumbent),
+    ):
+        stats = summary["pooled"]
+        condition_counts = stats["counts"]
+        comparison = aggregate["comparisons"][condition]
+        label = "Scratch" if condition == "scratch_ppo" else "Incumbent"
+        lines.extend([
+            "",
+            f"## {title}",
+            "",
+            f"{label} pooled W/L/D: {condition_counts['wins']}/{condition_counts['losses']}/{condition_counts['draws']}.",
+            f"Win Wilson 95% interval: {stats['confidence_intervals']['win']}.",
+            f"Loss/draw Wilson 95% intervals: {stats['confidence_intervals']['loss']} / {stats['confidence_intervals']['draw']}.",
+            f"Comparator seat summaries: {stats['seats']}.",
+            f"Comparator diagnostics: {stats['diagnostics']}.",
+            f"Comparator draw categories: {stats['draw_categories']}.",
+            f"Paired initialized-only/comparator-only wins: {comparison['initialized_only_wins']}/"
+            f"{comparison['comparator_only_wins']}; exact two-sided sign p="
+            f"{comparison['exact_two_sided_sign_p']}.",
+        ])
+    lines.extend([
         "",
         "## Conversion performance",
         "",
-        "Conversion development evidence is diagnostic only.",
+        f"Initialized conversion wins/games: {conversion['initialized_wins']}/{conversion['initialized_games']}.",
         "",
         "## BC metrics",
         "",
-        "Behavioral-cloning validation metrics remain bound to the frozen dataset.",
+        f"BC validation loss {bc['validation_loss']}; validation accuracy {bc['validation_accuracy']}.",
         "",
         "## Learning curves",
         "",
-        "Learning curves are descriptive and were not used to select per-seed checkpoints.",
+        f"Learning curve initialized final reward {curves['initialized_final_reward']}; scratch final reward {curves['scratch_final_reward']}.",
         "",
         "## Compute",
         "",
-        "Teacher, BC, PPO, and inference compute are reported separately in frozen run metadata.",
+        f"Compute: teacher games {compute['teacher_games']}; BC wall clock seconds {compute['bc_wall_clock_seconds']}; "
+        f"PPO environment steps {compute['ppo_environment_steps']}; PPO wall clock seconds {compute['ppo_wall_clock_seconds']}.",
         "",
         "## Failure traces",
         "",
@@ -2833,46 +2911,207 @@ def _render_final_report(aggregate: Mapping[str, Any]) -> str:
     ])
     return "\n".join(lines)
 
+
+def _sealed_report_evidence(panel_dir: Path) -> dict[str, Any]:
+    panel_dir = Path(panel_dir)
+    seal = _read_json(panel_dir / "final-seal.json")
+    _validate_final_seal(seal)
+    source_paths = {
+        name: Path(path) for name, path in seal["report_source_paths"].items()
+    }
+    gate_candidates = [
+        path for name, path in source_paths.items()
+        if name.endswith("bc-development-gate/gate.json")
+    ]
+    metric_paths = [
+        path for name, path in source_paths.items()
+        if name.startswith("bc-clones/") and name.endswith("/metrics.json")
+    ]
+    if len(gate_candidates) != 1 or len(metric_paths) != 3:
+        raise ValueError("sealed clone and BC report evidence is incomplete")
+
+    gate = _read_json(gate_candidates[0])
+    clones = gate.get("clones")
+    if not isinstance(clones, list) or len(clones) != 3:
+        raise ValueError("sealed clone report evidence is incomplete")
+    clone_counts = {"wins": 0, "losses": 0, "draws": 0, "games": 0}
+    for clone in clones:
+        if not isinstance(clone, Mapping):
+            raise ValueError("sealed clone report evidence is malformed")
+        raw_matches = clone.get("matches")
+        if isinstance(raw_matches, list):
+            outcomes = [row.get("outcome") for row in raw_matches if isinstance(row, Mapping)]
+            wins = outcomes.count("win")
+            losses = outcomes.count("loss")
+            draws = outcomes.count("draw")
+        else:
+            wins = int(clone.get("wins", 0))
+            losses = int(clone.get("losses", 0))
+            draws = int(clone.get("draws", 0))
+        clone_counts["wins"] += wins
+        clone_counts["losses"] += losses
+        clone_counts["draws"] += draws
+        clone_counts["games"] += wins + losses + draws
+
+    bc_rows = [_read_json(path) for path in metric_paths]
+    validation_loss = sum(float(row["nll"]) for row in bc_rows) / len(bc_rows)
+    validation_accuracy = sum(float(row["top1_accuracy"]) for row in bc_rows) / len(bc_rows)
+
+    development = _read_json(Path(seal["selection_paths"]["development.json"]))
+    selection = _read_json(Path(seal["selection_paths"]["selection.json"]))
+    nominal = selection["selection"]["nominal_step"]
+    candidates = development.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("sealed development report evidence is incomplete")
+    selected = [
+        row for row in candidates
+        if isinstance(row, Mapping) and row.get("nominal_step") == nominal
+    ]
+    initialized_rows = [row for row in selected if row.get("condition") == "bc_ppo"]
+    scratch_rows = [row for row in selected if row.get("condition") == "scratch_ppo"]
+    conversion_outcomes = [
+        outcome for row in initialized_rows for outcome in row.get("conversion", [])
+    ]
+
+    def development_win_rate(rows: Sequence[Mapping[str, Any]]) -> float:
+        outcomes = [outcome for row in rows for outcome in row.get("standard", [])]
+        if not outcomes:
+            raise ValueError("sealed learning-curve evidence is incomplete")
+        return outcomes.count("win") / len(outcomes)
+
+    dataset_games = seal["dataset_root"]
+    games_path = Path(dataset_games) / "games.jsonl"
+    teacher_games = sum(
+        1 for line in games_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    ppo_steps = 0
+    ppo_wall = 0.0
+    for run_path in seal["training_run_paths"].values():
+        manifest = _read_json(Path(run_path) / "run.json")
+        ppo_steps += int(manifest.get("timesteps", manifest.get("latest_checkpoint_step", 0)))
+        value = manifest.get("wall_clock_seconds")
+        if isinstance(value, (int, float)):
+            ppo_wall += float(value)
+    bc_wall = 0.0
+    for name, path in source_paths.items():
+        if name.startswith("bc-clones/") and name.endswith("/run.json"):
+            value = _read_json(path).get("wall_clock_seconds")
+            if isinstance(value, (int, float)):
+                bc_wall += float(value)
+
+    return {
+        "clone": {"pooled": clone_counts},
+        "conversion": {
+            "initialized_wins": conversion_outcomes.count("win"),
+            "initialized_games": len(conversion_outcomes),
+        },
+        "bc_metrics": {
+            "validation_loss": validation_loss,
+            "validation_accuracy": validation_accuracy,
+        },
+        "learning_curves": {
+            "initialized_final_reward": development_win_rate(initialized_rows),
+            "scratch_final_reward": development_win_rate(scratch_rows),
+        },
+        "compute": {
+            "teacher_games": teacher_games,
+            "bc_wall_clock_seconds": bc_wall,
+            "ppo_environment_steps": ppo_steps,
+            "ppo_wall_clock_seconds": ppo_wall,
+        },
+    }
+
+
+def load_final_publication(
+    panel_dir: Path,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    panel_dir = Path(panel_dir)
+    manifest = _read_json(panel_dir / "final-publication.json")
+    generation = manifest.get("generation")
+    if (
+        manifest.get("schema_version") != 1
+        or not isinstance(generation, str)
+        or len(generation) != 64
+        or any(character not in "0123456789abcdef" for character in generation)
+    ):
+        raise ValueError("final publication pointer is invalid")
+    root = panel_dir / ".final-generations" / generation
+    aggregate_path = root / "aggregate.json"
+    report_path = root / "REPORT.md"
+    if (
+        not aggregate_path.is_file()
+        or not report_path.is_file()
+        or _sha256(aggregate_path) != manifest.get("aggregate_sha256")
+        or _sha256(report_path) != manifest.get("report_sha256")
+    ):
+        raise ValueError("final publication generation is incomplete or changed")
+    aggregate = _read_json(aggregate_path)
+    report = report_path.read_text(encoding="utf-8")
+    return aggregate, report, manifest
+
+
 def publish_final_report(
     panel_dir: Path,
     *,
     matches: Sequence[Mapping[str, Any]] | None = None,
+    supporting_evidence: Mapping[str, Any] | None = None,
     failure_injector: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     panel_dir = Path(panel_dir)
     if matches is None:
         evaluation = _read_json(panel_dir / "final-evaluation.json")
-        matches = evaluation.get("matches")
+        primary_matches = evaluation.get("matches")
         comparison_matches = evaluation.get("comparison_matches")
-        matches = [*matches, *comparison_matches] if isinstance(matches, list) and isinstance(comparison_matches, list) else None
+        matches = (
+            [*primary_matches, *comparison_matches]
+            if isinstance(primary_matches, list) and isinstance(comparison_matches, list)
+            else None
+        )
         if not isinstance(matches, list):
             raise ValueError("final evaluation raw match table is missing")
-    aggregate = build_final_aggregate(matches)
+    if supporting_evidence is None:
+        supporting_evidence = _sealed_report_evidence(panel_dir)
+    aggregate = build_final_aggregate(matches, supporting_evidence=supporting_evidence)
     report = _render_final_report(aggregate)
-    aggregate_path = panel_dir / "aggregate.json"
-    report_path = panel_dir / "REPORT.md"
-    staging = Path(tempfile.mkdtemp(prefix=".final-publication.", dir=panel_dir))
+
+    generations = panel_dir / ".final-generations"
+    generations.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".pending-", dir=generations))
     aggregate_stage = staging / "aggregate.json"
     report_stage = staging / "REPORT.md"
-    old_aggregate = aggregate_path.read_bytes() if aggregate_path.exists() else None
-    old_report = report_path.read_bytes() if report_path.exists() else None
+    moved = False
     try:
         _atomic_json(aggregate_stage, aggregate)
-        _atomic_text(report_stage, report)
         if failure_injector is not None:
-            failure_injector("after_aggregate")
-        os.replace(aggregate_stage, aggregate_path)
-        os.replace(report_stage, report_path)
-    except Exception:
-        aggregate_path.unlink(missing_ok=True)
-        report_path.unlink(missing_ok=True)
-        if old_aggregate is not None:
-            aggregate_path.write_bytes(old_aggregate)
-        if old_report is not None:
-            report_path.write_bytes(old_report)
-        raise
+            failure_injector("after_staged_aggregate")
+        _atomic_text(report_stage, report)
+        aggregate_hash = _sha256(aggregate_stage)
+        report_hash = _sha256(report_stage)
+        generation = hashlib.sha256(
+            f"{aggregate_hash}\n{report_hash}\n".encode("ascii")
+        ).hexdigest()
+        generation_root = generations / generation
+        if generation_root.exists():
+            if (
+                _sha256(generation_root / "aggregate.json") != aggregate_hash
+                or _sha256(generation_root / "REPORT.md") != report_hash
+            ):
+                raise ValueError("immutable final publication generation changed")
+        else:
+            os.replace(staging, generation_root)
+            moved = True
+        manifest = {
+            "schema_version": 1,
+            "generation": generation,
+            "aggregate_sha256": aggregate_hash,
+            "report_sha256": report_hash,
+        }
+        if failure_injector is not None:
+            failure_injector("before_pointer")
+        _atomic_json(panel_dir / "final-publication.json", manifest)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not moved:
+            shutil.rmtree(staging, ignore_errors=True)
     return aggregate, report
 
 
@@ -2919,6 +3158,19 @@ def _validate_final_seal(seal: Mapping[str, Any]) -> None:
         path = Path(str(training_paths[name]))
         if not path.is_dir() or _tree_sha256(path) != expected:
             raise ValueError(f"sealed training run {name} changed")
+
+    report_hashes = seal.get("report_source_hashes")
+    report_paths = seal.get("report_source_paths")
+    if (
+        not isinstance(report_hashes, Mapping)
+        or not isinstance(report_paths, Mapping)
+        or set(report_hashes) != set(report_paths)
+    ):
+        raise ValueError("sealed report provenance is incomplete")
+    for name, expected in report_hashes.items():
+        path = Path(str(report_paths[name]))
+        if not path.is_file() or _sha256(path) != expected:
+            raise ValueError(f"sealed report source {name} changed")
 
     selected = seal.get("selected_checkpoints")
     if not isinstance(selected, Mapping):
