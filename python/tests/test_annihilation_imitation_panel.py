@@ -293,7 +293,18 @@ def _write_clone_artifact(
         encoding="utf-8",
     )
     (run / "metrics.json").write_text(
-        json.dumps({"nll": 1.0, "top1_accuracy": 0.5}),
+        json.dumps(
+            {
+                "nll": 1.0,
+                "top1_accuracy": 0.5,
+                "top3_accuracy": 0.75,
+                "top5_accuracy": 0.9,
+                "expected_calibration_error": 0.1,
+                "mean_end_turn_probability": 0.2,
+                "illegal_probability": 0.0,
+                "strata": {"teacher/greedy": {"count": 1, "accuracy": 0.5}},
+            }
+        ),
         encoding="utf-8",
     )
     (run / "run.json").write_text(
@@ -781,3 +792,128 @@ def test_runtime_scenario_snapshot_is_immune_to_definition_path_mutation(
         scenario.canonical_json.encode("utf-8")
     ).hexdigest()
     assert _json(snapshot)["reward"]["points_weight"] == 0.5
+
+def test_clone_stage_accepts_real_nested_clone_metrics(tmp_path: Path) -> None:
+    module = _subject()
+    root = tmp_path / "runs"
+    _write_clone_runs(root, module)
+    for seed in (211, 223, 227):
+        metrics_path = root / f"seed-{seed}" / "metrics.json"
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "nll": 1.0,
+                    "top1_accuracy": 0.5,
+                    "top3_accuracy": 0.75,
+                    "top5_accuracy": 0.9,
+                    "expected_calibration_error": 0.1,
+                    "mean_end_turn_probability": 0.2,
+                    "illegal_probability": 0.0,
+                    "strata": {
+                        "partition/train": {
+                            "count": 4,
+                            "accuracy": 0.5,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    assert module._validate_clone_stage(root, module.current_definition_hashes())["clone_runs"] == 3
+
+
+def test_clone_stage_rejects_malformed_nested_clone_metrics(tmp_path: Path) -> None:
+    module = _subject()
+    root = tmp_path / "runs"
+    _write_clone_runs(root, module)
+    metrics_path = root / "seed-211" / "metrics.json"
+    metrics_path.write_text(
+        json.dumps({"nll": 1.0, "strata": {"partition/train": {"count": "bad"}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="metrics"):
+        module._validate_clone_stage(root, module.current_definition_hashes())
+
+
+def test_collect_command_uses_immutable_stage_scenario_after_source_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _subject()
+    original = module.SCENARIO_PATH.read_bytes()
+    captured: list[bytes] = []
+
+    class FakeClient:
+        def __init__(self, command, *, environment):
+            captured.append(Path(command[command.index("--scenario-file") + 1]).read_bytes())
+            self.contract = SimpleNamespace(contract_hash="c" * 64, encoding_hash="e" * 64)
+        def close(self) -> None:
+            return None
+
+    def fake_collect(spec) -> None:
+        client = spec.client_factory(0)
+        client.close()
+
+    def fake_atomic(destination, hashes, *, build, validate):
+        changed = _json(module.SCENARIO_PATH)
+        changed["reward"]["points_weight"] = 0.25
+        module.SCENARIO_PATH.write_text(json.dumps(changed), encoding="utf-8")
+        staging = tmp_path / "dataset-stage"
+        staging.mkdir()
+        build(staging)
+        return {"state": "completed"}
+
+    import ml_lab.evaluation
+    import collect_annihilation_demonstrations
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeClient)
+    monkeypatch.setattr(collect_annihilation_demonstrations, "collect_partition", fake_collect)
+    monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
+    try:
+        module._collect_command()
+    finally:
+        module.SCENARIO_PATH.write_bytes(original)
+    assert captured
+    assert all(
+        json.loads(data.decode("utf-8")) == json.loads(module.validate_definitions()[2].canonical_json)
+        for data in captured
+    )
+
+
+def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _subject()
+    original = module.SCENARIO_PATH.read_bytes()
+    captured: list[bytes] = []
+
+    class FakeEnv:
+        def __init__(self, command, **kwargs):
+            captured.append(Path(kwargs["scenario_path"]).read_bytes())
+            self.contract = SimpleNamespace(contract_hash="c" * 64, encoding_hash="e" * 64)
+            self.spaces_info = {}
+        def close(self) -> None:
+            return None
+
+    def fake_atomic(destination, hashes, *, build, validate):
+        changed = _json(module.SCENARIO_PATH)
+        changed["reward"]["points_weight"] = 0.25
+        module.SCENARIO_PATH.write_text(json.dumps(changed), encoding="utf-8")
+        staging = tmp_path / "clones-stage"
+        staging.mkdir()
+        build(staging)
+        return {"state": "completed"}
+
+    import hexwars_gym
+    import ml_lab.imitation
+    monkeypatch.setattr(hexwars_gym, "HexWarsEnv", FakeEnv)
+    monkeypatch.setattr(ml_lab.imitation, "load_imitation_dataset", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module, "train_clone_runs", lambda **kwargs: [])
+    monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
+    try:
+        module._train_bc_command()
+    finally:
+        module.SCENARIO_PATH.write_bytes(original)
+    assert captured
+    assert all(
+        json.loads(data.decode("utf-8")) == json.loads(module.validate_definitions()[2].canonical_json)
+        for data in captured
+    )

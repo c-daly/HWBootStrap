@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
@@ -383,13 +384,35 @@ def _validate_clone_run(
 
     bc = _read_json(run / "bc.json")
     metrics = _read_json(run / "metrics.json")
-    if not metrics or any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        for value in metrics.values()
-    ):
+    scalar_metrics = {
+        "nll", "top1_accuracy", "top3_accuracy", "top5_accuracy",
+        "expected_calibration_error", "mean_end_turn_probability",
+        "illegal_probability",
+    }
+    if set(metrics) != scalar_metrics | {"strata"}:
         raise ValueError(f"clone seed {seed} metrics are invalid")
+    for name in scalar_metrics:
+        value = metrics.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError(f"clone seed {seed} metrics are invalid")
+    strata = metrics.get("strata")
+    if not isinstance(strata, Mapping) or not strata:
+        raise ValueError(f"clone seed {seed} metrics are invalid")
+    for key, value in strata.items():
+        if (
+            not isinstance(key, str)
+            or "/" not in key
+            or not isinstance(value, Mapping)
+            or set(value) != {"count", "accuracy"}
+            or isinstance(value["count"], bool)
+            or not isinstance(value["count"], int)
+            or value["count"] <= 0
+            or isinstance(value["accuracy"], bool)
+            or not isinstance(value["accuracy"], (int, float))
+            or not math.isfinite(float(value["accuracy"]))
+            or not 0.0 <= float(value["accuracy"]) <= 1.0
+        ):
+            raise ValueError(f"clone seed {seed} metrics are invalid")
     if (
         bc.get("schema_version") != 1
         or bc.get("model_seed") != seed
@@ -981,15 +1004,22 @@ def _collect_command() -> Mapping[str, Any]:
 
     _panel, _banks, scenario = validate_definitions()
     hashes = current_definition_hashes()
-    command = _server_command(SCENARIO_PATH)
-    probe = DuelClient(command, environment="tactical-v2")
+    probe_root = Path(tempfile.mkdtemp(prefix=".collect-runtime-"))
     try:
-        contract = probe.contract
+        probe_scenario = _materialize_runtime_scenario(scenario, probe_root, hashes)
+        probe_command = _server_command(probe_scenario)
+        probe = DuelClient(probe_command, environment="tactical-v2")
+        try:
+            contract = probe.contract
+        finally:
+            probe.close()
     finally:
-        probe.close()
+        shutil.rmtree(probe_root, ignore_errors=True)
 
     def build(staging: Path) -> None:
-        factory = lambda _worker: DuelClient(command, environment="tactical-v2")
+        stage_scenario = _materialize_runtime_scenario(scenario, staging, hashes)
+        stage_command = _server_command(stage_scenario)
+        factory = lambda _worker: DuelClient(stage_command, environment="tactical-v2")
         collect_partition(
             CollectionSpec(
                 staging, "train",
@@ -1019,10 +1049,11 @@ def _train_bc_command() -> Mapping[str, Any]:
     hashes = current_definition_hashes()
 
     def build(staging: Path) -> None:
+        stage_scenario = _materialize_runtime_scenario(scenario, staging, hashes)
         env = HexWarsEnv(
-            _server_command(SCENARIO_PATH)[:-2],
+            _server_command(stage_scenario)[:-2],
             opponent="random", seat=0, base_seed=12_000_000,
-            environment="tactical-v2", scenario_path=SCENARIO_PATH,
+            environment="tactical-v2", scenario_path=stage_scenario,
         )
         try:
             dataset = load_imitation_dataset(DATASET_PATH, expected_contract=env.contract)
