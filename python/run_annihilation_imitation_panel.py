@@ -1873,6 +1873,85 @@ def build_panel_development_candidates(
     return candidates
 
 
+def _validate_development_candidate_evidence(
+    root: Path,
+    candidate: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    matches = candidate.get("matches")
+    if (
+        not isinstance(matches, list)
+        or len(matches) != 200
+        or candidate.get("standard") != [match.get("outcome") for match in matches]
+        or not isinstance(candidate.get("checkpoint_sha256"), str)
+    ):
+        raise ValueError("development candidate schedule is incomplete")
+    expected_schedule = [
+        (seed, seat)
+        for seed in range(
+            _DEVELOPMENT["seed_start"],
+            _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+        )
+        for seat in (0, 1)
+    ]
+    if [
+        (match.get("map_seed"), match.get("candidate_seat"))
+        for match in matches
+        if isinstance(match, Mapping)
+    ] != expected_schedule:
+        raise ValueError("development candidate seed/seat schedule is incomplete")
+
+    checkpoint_path_raw = candidate.get("checkpoint_path")
+    checkpoint_digest = candidate.get("checkpoint_sha256")
+    if (
+        not isinstance(checkpoint_path_raw, str)
+        or not isinstance(checkpoint_digest, str)
+    ):
+        raise ValueError("development checkpoint identity is incomplete")
+    checkpoint_path = Path(checkpoint_path_raw)
+    if (
+        not checkpoint_path.is_absolute()
+        or str(checkpoint_path.resolve()) != checkpoint_path_raw
+        or not checkpoint_path.is_file()
+        or _sha256(checkpoint_path) != checkpoint_digest
+    ):
+        raise ValueError("development checkpoint digest does not match physical bytes")
+    identity = DevelopmentCandidate(
+        str(candidate.get("condition")),
+        int(candidate.get("model_seed")),
+        int(candidate.get("nominal_step")),
+        int(candidate.get("actual_step")),
+        candidate.get("controller"),
+        checkpoint_sha256=checkpoint_digest,
+        checkpoint_path=checkpoint_path_raw,
+        source_run=candidate.get("source_run"),
+        algorithm=candidate.get("algorithm"),
+    )
+    physical_matches: list[dict[str, Any]] = []
+    for map_seed in range(
+        _DEVELOPMENT["seed_start"],
+        _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+    ):
+        output_path = (
+            Path(root)
+            / identity.condition
+            / f"seed-{identity.model_seed}"
+            / f"nominal-{identity.nominal_step}"
+            / f"map-{map_seed}"
+            / "evaluation.json"
+        )
+        _normalized, map_matches = _validated_development_map(
+            Path(root), identity, map_seed, output_path
+        )
+        physical_matches.extend(map_matches)
+    if (
+        matches != physical_matches
+        or candidate.get("standard")
+        != [match["outcome"] for match in physical_matches]
+    ):
+        raise ValueError("development aggregate does not match physical evaluations")
+    return physical_matches
+
+
 def _validate_development_stage(
     root: Path,
     hashes: Mapping[str, str],
@@ -1904,81 +1983,7 @@ def _validate_development_stage(
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("development candidate is malformed")
-        matches = candidate.get("matches")
-        if (
-            not isinstance(matches, list)
-            or len(matches) != 200
-            or candidate.get("standard") != [match.get("outcome") for match in matches]
-            or not isinstance(candidate.get("checkpoint_sha256"), str)
-        ):
-            raise ValueError("development candidate schedule is incomplete")
-        actual_keys = [
-            (match.get("map_seed"), match.get("candidate_seat"))
-            for match in matches
-        ]
-        expected_schedule = [
-            (seed, seat)
-            for seed in range(16_000_000, 16_000_100)
-            for seat in (0, 1)
-        ]
-        if actual_keys != expected_schedule:
-            raise ValueError("development candidate seed/seat schedule is incomplete")
-        for match in matches:
-            if (
-                match.get("actual_step") != candidate.get("actual_step")
-                or not _artifact_exists(root, match, "trace_path")
-                or not _artifact_exists(root, match, "replay_path")
-            ):
-                raise ValueError("development match checkpoint or evidence is incomplete")
-        checkpoint_path_raw = candidate.get("checkpoint_path")
-        checkpoint_digest = candidate.get("checkpoint_sha256")
-        if (
-            not isinstance(checkpoint_path_raw, str)
-            or not isinstance(checkpoint_digest, str)
-        ):
-            raise ValueError("development checkpoint identity is incomplete")
-        checkpoint_path = Path(checkpoint_path_raw)
-        if (
-            not checkpoint_path.is_absolute()
-            or str(checkpoint_path.resolve()) != checkpoint_path_raw
-            or not checkpoint_path.is_file()
-            or _sha256(checkpoint_path) != checkpoint_digest
-        ):
-            raise ValueError("development checkpoint digest does not match physical bytes")
-        identity = DevelopmentCandidate(
-            str(candidate.get("condition")),
-            int(candidate.get("model_seed")),
-            int(candidate.get("nominal_step")),
-            int(candidate.get("actual_step")),
-            candidate.get("controller"),
-            checkpoint_sha256=candidate.get("checkpoint_sha256"),
-            checkpoint_path=candidate.get("checkpoint_path"),
-            source_run=candidate.get("source_run"),
-            algorithm=candidate.get("algorithm"),
-        )
-        physical_matches: list[dict[str, Any]] = []
-        for map_seed in range(
-            _DEVELOPMENT["seed_start"],
-            _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
-        ):
-            output_path = (
-                root
-                / identity.condition
-                / f"seed-{identity.model_seed}"
-                / f"nominal-{identity.nominal_step}"
-                / f"map-{map_seed}"
-                / "evaluation.json"
-            )
-            _normalized, map_matches = _validated_development_map(
-                root, identity, map_seed, output_path
-            )
-            physical_matches.extend(map_matches)
-        if (
-            matches != physical_matches
-            or candidate.get("standard")
-            != [match["outcome"] for match in physical_matches]
-        ):
-            raise ValueError("development aggregate does not match physical evaluations")
+        _validate_development_candidate_evidence(root, candidate)
 
     return {"candidate_count": 21, "games": 4_200}
 
@@ -2044,9 +2049,12 @@ def _validated_development_map(
     schedule = physical.get("schedule")
     raw_matches = physical.get("matches")
     if (
-        not isinstance(controller, Mapping)
-        or controller.get("step") != candidate.actual_step
-        or opponent != {"kind": "scripted", "name": "random"}
+        physical.get("schema_version") != 1
+        or not isinstance(physical.get("generated_at"), str)
+        or not isinstance(controller, Mapping)
+        or not isinstance(opponent, Mapping)
+        or opponent.get("kind") != "scripted"
+        or opponent.get("name") != "random"
         or physical.get("seed_start") != map_seed
         or physical.get("seeds") != [map_seed]
         or physical.get("reciprocal") is not True
@@ -2060,31 +2068,77 @@ def _validated_development_map(
         or len(raw_matches) != 2
     ):
         raise ValueError("physical development evaluation identity is invalid")
-    if candidate.checkpoint_path is not None and (
+
+    expected_kind = "run" if candidate.condition == "pure_bc" else "snapshot"
+    if controller.get("kind") != expected_kind:
+        raise ValueError("physical development evaluation controller kind is invalid")
+    checkpoint_path = (
+        Path(candidate.checkpoint_path).resolve()
+        if candidate.checkpoint_path is not None
+        else None
+    )
+    source_run = (
+        Path(candidate.source_run).resolve()
+        if candidate.source_run is not None
+        else None
+    )
+    if checkpoint_path is not None and (
         not isinstance(controller.get("path"), str)
-        or Path(controller["path"]).resolve() != Path(candidate.checkpoint_path).resolve()
+        or Path(controller["path"]).resolve() != checkpoint_path
     ):
         raise ValueError("physical development evaluation checkpoint is invalid")
-    if candidate.source_run is not None and (
-        not isinstance(controller.get("source_run"), str)
-        or Path(controller["source_run"]).resolve() != Path(candidate.source_run).resolve()
+    if source_run is not None:
+        if checkpoint_path is None or checkpoint_path.parent != source_run / "checkpoints":
+            raise ValueError("physical development evaluation source run is invalid")
+        recorded_source = controller.get("source_run")
+        if recorded_source is not None and (
+            not isinstance(recorded_source, str)
+            or Path(recorded_source).resolve() != source_run
+        ):
+            raise ValueError("physical development evaluation source run is invalid")
+        if expected_kind == "snapshot":
+            raw_spec = candidate.controller
+            if isinstance(raw_spec, str):
+                try:
+                    raw_spec = json.loads(raw_spec)
+                except json.JSONDecodeError:
+                    raw_spec = None
+            if isinstance(raw_spec, Mapping) and "source_run" in raw_spec and (
+                not isinstance(raw_spec.get("source_run"), str)
+                or Path(raw_spec["source_run"]).resolve() != source_run
+            ):
+                raise ValueError("physical development evaluation source run is invalid")
+    if (
+        controller.get("step") != candidate.actual_step
+        or (
+            candidate.algorithm is not None
+            and controller.get("algorithm") != candidate.algorithm
+        )
     ):
-        raise ValueError("physical development evaluation source run is invalid")
-    if candidate.algorithm is not None and controller.get("algorithm") != candidate.algorithm:
-        raise ValueError("physical development evaluation algorithm is invalid")
+        raise ValueError("physical development evaluation algorithm or step is invalid")
 
     normalized = _relativize_evaluation(physical, root, output_path)
     matches: list[dict[str, Any]] = []
+    totals = {"wins": 0, "losses": 0, "draws": 0}
+    seat_results = {
+        "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+        "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+    }
     for seat, raw in enumerate(normalized["matches"]):
         if (
             not isinstance(raw, Mapping)
             or raw.get("seed") != map_seed
             or raw.get("candidate_seat") != seat
             or raw.get("outcome") not in {"win", "loss", "draw"}
-            or "trace_path" not in raw
-            or "replay_path" not in raw
+            or not isinstance(raw.get("trace_path"), str)
+            or not isinstance(raw.get("replay_path"), str)
         ):
             raise ValueError("physical development evaluation match is invalid")
+        outcome = raw["outcome"]
+        counter = f"{outcome}s" if outcome != "loss" else "losses"
+        totals[counter] += 1
+        seat_key = "candidate_as_p0" if seat == 0 else "candidate_as_p1"
+        seat_results[seat_key][counter] += 1
         row = dict(raw)
         row["map_seed"] = row.pop("seed")
         row.update(
@@ -2100,6 +2154,26 @@ def _validated_development_map(
             }
         )
         matches.append(row)
+
+    rates = {
+        "win": totals["wins"] / 2,
+        "loss": totals["losses"] / 2,
+        "draw": totals["draws"] / 2,
+    }
+    confidence = physical.get("confidence_intervals")
+    evidence = physical.get("evidence")
+    if (
+        any(physical.get(key) != value for key, value in totals.items())
+        or physical.get("rates") != rates
+        or physical.get("seat_results") != seat_results
+        or not isinstance(confidence, Mapping)
+        or set(confidence) != {"win", "loss", "draw"}
+        or not isinstance(evidence, Mapping)
+        or evidence.get("draw_traces") != totals["draws"]
+        or evidence.get("control_traces") != 2 - totals["draws"]
+        or not isinstance(evidence.get("draw_categories"), Mapping)
+    ):
+        raise ValueError("physical development evaluation aggregate is invalid")
     return normalized, matches
 
 

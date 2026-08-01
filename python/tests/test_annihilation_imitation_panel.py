@@ -51,6 +51,36 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _production_controller_identity(
+    *,
+    kind: str,
+    path: Path | None = None,
+    algorithm: str | None = None,
+    step: int | None = None,
+    name: str | None = None,
+) -> dict[str, Any]:
+    identity = {
+        "kind": kind,
+        "inference_mode": "deterministic",
+        "path": str(path.resolve()) if path is not None else None,
+        "algorithm": algorithm,
+        "step": step,
+        "contract_hash": None,
+        "contract_version": None,
+        "environment": None,
+        "encoding_hash": None,
+        "contract": None,
+        "observation_size": None,
+        "action_size": None,
+        "legacy": False,
+        "promotable": False,
+    }
+    if name is not None:
+        identity["name"] = name
+    return identity
+
+
+
 def test_panel_orchestrator_is_importable() -> None:
     """Removing the Task 8 command module must make the protocol unusable."""
 
@@ -1357,16 +1387,39 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
     """Aggregating before recording seat, map, checkpoint, trace, and replay loses evidence."""
 
     module = _subject()
-    controller_identity = {
-        "kind": "snapshot",
-        "path": str((tmp_path / "step_000016384.zip").resolve()),
-        "source_run": str(tmp_path.resolve()),
-        "algorithm": "maskable_ppo",
-        "step": 16_384,
-        "inference_mode": "deterministic",
-    }
+    source_run = tmp_path / "run"
+    checkpoint = source_run / "checkpoints" / "step_000016384.zip"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    controller_spec = json.dumps(
+        {
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(source_run.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": 16_384,
+        },
+        sort_keys=True,
+    )
+    controller_identity = _production_controller_identity(
+        kind="snapshot",
+        path=checkpoint,
+        algorithm="maskable_ppo",
+        step=16_384,
+    )
+    opponent_identity = _production_controller_identity(
+        kind="scripted", name="random"
+    )
     candidate = module.DevelopmentCandidate(
-        "bc_ppo", 211, 12_800, 16_384, "snapshot-controller"
+        "bc_ppo",
+        211,
+        12_800,
+        16_384,
+        controller_spec,
+        _sha256(checkpoint),
+        str(checkpoint.resolve()),
+        str(source_run.resolve()),
+        "maskable_ppo",
     )
     calls: list[dict[str, Any]] = []
 
@@ -1391,8 +1444,29 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
                 }
             )
         result = {
+            "schema_version": 1,
+            "generated_at": "2026-08-01T00:00:00+00:00",
+            "wins": 1,
+            "losses": 1,
+            "draws": 0,
+            "rates": {"win": 0.5, "loss": 0.5, "draw": 0.0},
+            "confidence_intervals": {
+                "win": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+                "loss": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+                "draw": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+            },
+            "seat_results": {
+                "candidate_as_p0": {"wins": 1, "losses": 0, "draws": 0},
+                "candidate_as_p1": {"wins": 0, "losses": 1, "draws": 0},
+            },
+            "evidence": {
+                "draw_traces": 0,
+                "control_traces": 2,
+                "draw_categories": {},
+            },
+
             "candidate": dict(controller_identity),
-            "opponent": {"kind": "scripted", "name": "random"},
+            "opponent": dict(opponent_identity),
             "seed_start": map_seed,
             "seeds": [map_seed],
             "reciprocal": True,
@@ -1416,7 +1490,7 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
 
     assert len(calls) == 100
     assert all(
-        call["p0"] == "snapshot-controller"
+        call["p0"] == controller_spec
         and call["p1"] == "random"
         and call["games"] == 1
         and call["both_seats"] is True
@@ -1438,7 +1512,7 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
         and row["nominal_step"] == 12_800
         and row["checkpoint_sha256"] == candidate.checkpoint_sha256
         and row["controller"] == controller_identity
-        and row["opponent"] == {"kind": "scripted", "name": "random"}
+        and row["opponent"] == opponent_identity
         and row["profile"] == "standard-3v3"
         for row in rows
     )
@@ -1729,3 +1803,173 @@ def test_ppo_stage_recomputes_complete_actor_initializer_provenance(
 
     with pytest.raises(ValueError, match="initialization provenance"):
         module._ppo_budget_map(root, [run], scenario)
+
+
+def _actual_development_candidate_fixture(
+    tmp_path: Path, module
+) -> tuple[Path, dict[str, Any]]:
+    root = tmp_path / "development"
+    source_run = tmp_path / "source-run"
+    checkpoint = source_run / "checkpoints" / "step_000014336.zip"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    controller_spec = json.dumps(
+        {
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(source_run.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": 14_336,
+        },
+        sort_keys=True,
+    )
+    controller_identity = _production_controller_identity(
+        kind="snapshot",
+        path=checkpoint,
+        algorithm="maskable_ppo",
+        step=14_336,
+    )
+    opponent_identity = _production_controller_identity(
+        kind="scripted", name="random"
+    )
+    candidate = module.DevelopmentCandidate(
+        "bc_ppo",
+        211,
+        12_800,
+        14_336,
+        controller_spec,
+        _sha256(checkpoint),
+        str(checkpoint.resolve()),
+        str(source_run.resolve()),
+        "maskable_ppo",
+    )
+
+    def evaluator(_p0, _p1, **kwargs):
+        map_seed = kwargs["seed_start"]
+        evidence_root = Path(kwargs["evidence_dir"])
+        matches = []
+        for seat, outcome in ((0, "win"), (1, "loss")):
+            trace = evidence_root / "traces" / f"{map_seed}-{seat}.json"
+            replay = evidence_root / "replays" / f"{map_seed}-{seat}.replay"
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            replay.parent.mkdir(parents=True, exist_ok=True)
+            trace.write_text("{}", encoding="utf-8")
+            replay.write_bytes(b"replay")
+            matches.append(
+                {
+                    "seed": map_seed,
+                    "candidate_seat": seat,
+                    "winner": seat,
+                    "outcome": outcome,
+                    "terminated": True,
+                    "truncated": False,
+                    "summary": {},
+                    "classification": None,
+                    "trace_path": str(trace),
+                    "replay_path": str(replay),
+                }
+            )
+        manifest = {
+            "schema_version": 1,
+            "generated_at": "2026-08-01T00:00:00+00:00",
+            "schedule": {
+                "start_profile": "standard-3v3",
+                "reference_seat_policy": "candidate-seat",
+            },
+            "candidate": dict(controller_identity),
+            "opponent": dict(opponent_identity),
+            "seed_start": map_seed,
+            "seeds": [map_seed],
+            "reciprocal": True,
+            "games": 2,
+            "wins": 1,
+            "losses": 1,
+            "draws": 0,
+            "rates": {"win": 0.5, "loss": 0.5, "draw": 0.0},
+            "confidence_intervals": {
+                "win": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+                "loss": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+                "draw": {"low": 0.0, "high": 1.0, "confidence": 0.95},
+            },
+            "seat_results": {
+                "candidate_as_p0": {"wins": 1, "losses": 0, "draws": 0},
+                "candidate_as_p1": {"wins": 0, "losses": 1, "draws": 0},
+            },
+            "matches": matches,
+            "evidence": {
+                "draw_traces": 0,
+                "control_traces": 2,
+                "draw_categories": {},
+            },
+        }
+        output = Path(kwargs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
+
+    result = module.evaluate_development_candidates(
+        [candidate],
+        output_root=root,
+        evaluator=evaluator,
+        server_cmd=["fake-server"],
+    )
+    return root, result["candidates"][0]
+
+
+def test_development_candidate_audit_reopens_all_100_actual_manifests(
+    tmp_path: Path,
+) -> None:
+    """Auditing only copied aggregate rows cannot prove all physical maps were evaluated."""
+
+    module = _subject()
+    root, aggregate = _actual_development_candidate_fixture(tmp_path, module)
+
+    matches = module._validate_development_candidate_evidence(root, aggregate)
+
+    assert len(matches) == 200
+    assert [(row["map_seed"], row["candidate_seat"]) for row in matches] == [
+        (map_seed, seat)
+        for map_seed in range(16_000_000, 16_000_100)
+        for seat in (0, 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["manifest", "controller", "opponent", "schedule", "aggregate"],
+)
+def test_development_candidate_audit_rejects_physical_or_aggregate_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Any changed manifest identity, summary, or copied aggregate must block selection."""
+
+    module = _subject()
+    root, aggregate = _actual_development_candidate_fixture(tmp_path, module)
+    first_manifest = (
+        root
+        / "bc_ppo"
+        / "seed-211"
+        / "nominal-12800"
+        / "map-16000000"
+        / "evaluation.json"
+    )
+    physical = _json(first_manifest)
+    if mutation == "manifest":
+        physical["wins"] = 2
+    elif mutation == "controller":
+        physical["candidate"]["path"] = str((tmp_path / "other.zip").resolve())
+    elif mutation == "opponent":
+        physical["opponent"]["name"] = "greedy"
+    elif mutation == "schedule":
+        physical["schedule"]["start_profile"] = "conversion-3v1-near"
+    else:
+        aggregate["standard"][0] = "draw"
+    if mutation != "aggregate":
+        first_manifest.write_text(json.dumps(physical), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="physical development|development aggregate|development candidate schedule",
+    ):
+        module._validate_development_candidate_evidence(root, aggregate)

@@ -61,6 +61,10 @@ checkpoint, checkpoint digest, controller and opponent identity, profile, map
 seed, candidate seat, outcome, trace, and replay. Validation reopens every
 physical per-map evaluation.json, verifies its controller/opponent/schedule,
 and reconstructs the aggregate rather than trusting copied summary rows.
+The validator accepts the full production controller metadata shape while
+requiring the snapshot path, algorithm, and step; snapshot source identity is
+bound through the canonical candidate snapshot specification and checkpoint
+location. All 100 manifests are reopened for each of the 21 candidates.
 
 select-budget requires the complete development schedule and atomically writes
 selection.json. It chooses one nominal budget for all three initialized PPO
