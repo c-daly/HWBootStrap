@@ -563,15 +563,16 @@ def test_clone_gate_rejects_changed_definition_provenance_before_evaluation(tmp_
     assert evaluator.calls == []
 
 
-def test_parser_exposes_only_restart_safe_task_8_commands() -> None:
-    """Renaming or adding later-phase commands would expand Task 8's protocol surface."""
+def test_parser_exposes_restart_safe_task_9_commands() -> None:
+    """Omitting a staged Task 9 command would make the preregistered workflow manual."""
 
     module = _subject()
     parser = module.build_parser()
-    for command in ("validate", "collect", "train-bc", "evaluate-bc"):
+    for command in (
+        "validate", "collect", "train-bc", "evaluate-bc",
+        "train-ppo", "evaluate-dev", "select-budget",
+    ):
         assert parser.parse_args([command]).command == command
-    with pytest.raises(SystemExit):
-        parser.parse_args(["train-ppo"])
 
 
 
@@ -917,3 +918,527 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
         json.loads(data.decode("utf-8")) == json.loads(module.validate_definitions()[2].canonical_json)
         for data in captured
     )
+
+
+def test_training_matrix_pairs_initialized_and_control_runs_with_isolated_configs(
+    tmp_path: Path,
+) -> None:
+    """Changing online settings or sharing a config inside a seed pair breaks the control."""
+
+    module = _subject()
+    panel, _banks, _scenario = module.validate_definitions()
+    runs = module.build_training_matrix(
+        panel,
+        clone_runs_root=tmp_path / "clones",
+        workers=4,
+        device="cpu",
+    )
+
+    assert [(run.model_seed, run.episode_seed_base, run.condition) for run in runs] == [
+        (211, 13_000_000, "bc_ppo"),
+        (211, 13_000_000, "scratch_ppo"),
+        (223, 14_000_000, "bc_ppo"),
+        (223, 14_000_000, "scratch_ppo"),
+        (227, 15_000_000, "bc_ppo"),
+        (227, 15_000_000, "scratch_ppo"),
+    ]
+    assert len({id(run.config) for run in runs}) == 6
+    assert all(run.scenario_sha256 == runs[0].scenario_sha256 for run in runs)
+
+    for initialized, scratch in zip(runs[::2], runs[1::2], strict=True):
+        initialized_config = initialized.config.to_dict()
+        scratch_config = scratch.config.to_dict()
+        assert initialized_config.pop("actor_init_source") == str(
+            (tmp_path / "clones" / f"seed-{initialized.model_seed}").resolve()
+        )
+        assert scratch_config.pop("actor_init_source") is None
+        assert initialized_config.pop("run_name") == f"bc-ppo-seed-{initialized.model_seed}"
+        assert scratch_config.pop("run_name") == f"scratch-ppo-seed-{scratch.model_seed}"
+        assert initialized_config == scratch_config
+        assert initialized_config == {
+            "backend": "sb3",
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "seed": initialized.model_seed,
+            "total_timesteps": 51_200,
+            "checkpoint_interval": 12_800,
+            "workers": 4,
+            "device": "cpu",
+            "learner_seat": "alternating",
+            "opponent": {"kind": "scripted", "name": "random"},
+            "trackers": [{"kind": "local"}],
+            "resume_source": None,
+            "algorithm_options": {
+                "learning_rate": 0.0003,
+                "n_epochs": 10,
+                "target_kl": 0.02,
+            },
+            "episode_seed_base": initialized.episode_seed_base,
+            "timestep_mode": "absolute",
+            "allow_unsafe_legacy_resume": False,
+            "environment": "tactical-v2",
+        }
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ([100, 100, 300], "duplicated"),
+        ([100, 300, 200], "decreasing"),
+        ([100, 250, 300], "rollout boundary"),
+    ],
+)
+def test_checkpoint_validation_rejects_duplicate_decreasing_and_unaligned_steps(
+    tmp_path: Path, steps: list[int], message: str,
+) -> None:
+    """Accepting a malformed publication sequence could relabel a non-comparable budget."""
+
+    module = _subject()
+    checkpoints = [
+        module.CheckpointIdentity(
+            actual_step=step,
+            path=tmp_path / f"step_{index:09d}.zip",
+        )
+        for index, step in enumerate(steps)
+    ]
+
+    with pytest.raises(ValueError, match=message):
+        module.validate_rollout_checkpoints(checkpoints, rollout_size=100)
+
+
+def test_checkpoint_budgets_use_first_completed_rollout_at_or_after_nominal(
+    tmp_path: Path,
+) -> None:
+    """Selecting the preceding rollout or inventing the nominal step changes model identity."""
+
+    module = _subject()
+    checkpoints = [
+        module.CheckpointIdentity(8_192, tmp_path / "step_000008192.zip"),
+        module.CheckpointIdentity(16_384, tmp_path / "step_000016384.zip"),
+        module.CheckpointIdentity(32_768, tmp_path / "step_000032768.zip"),
+        module.CheckpointIdentity(57_344, tmp_path / "step_000057344.zip"),
+    ]
+
+    selected = module.resolve_checkpoint_budgets(
+        checkpoints,
+        nominal_steps=(12_800, 25_600, 51_200),
+        rollout_size=8_192,
+    )
+
+    assert [(item.nominal_step, item.actual_step) for item in selected] == [
+        (12_800, 16_384),
+        (25_600, 32_768),
+        (51_200, 57_344),
+    ]
+    with pytest.raises(RuntimeError, match="no completed rollout reaches 60"):
+        module.first_checkpoint_at_or_after(checkpoints, 60_000)
+
+
+def _selection_table() -> list[dict[str, Any]]:
+    return [
+        {
+            "condition": "bc_ppo",
+            "model_seed": seed,
+            "nominal_step": nominal,
+            "actual_step": nominal + seed,
+            "standard": standard,
+            "conversion": conversion,
+        }
+        for nominal, rows in [
+            (
+                12_800,
+                [
+                    (211, ["win", "loss"], ["loss"]),
+                    (223, ["win", "loss"], ["loss"]),
+                    (227, ["win", "loss"], ["loss"]),
+                ],
+            ),
+            (
+                25_600,
+                [
+                    (211, ["win", "win"], ["loss"]),
+                    (223, ["win", "loss"], ["win"]),
+                    (227, ["win", "loss"], ["loss"]),
+                ],
+            ),
+            (
+                51_200,
+                [
+                    (211, ["win", "win"], ["loss"]),
+                    (223, ["win", "loss"], ["win"]),
+                    (227, ["win", "loss"], ["loss"]),
+                ],
+            ),
+        ]
+        for seed, standard, conversion in rows
+    ]
+
+
+def test_selection_uses_one_global_budget_and_seed_specific_actual_steps() -> None:
+    """Per-seed best checkpoints would invalidate the preregistered pooled comparison."""
+
+    module = _subject()
+    selected = module.select_global_budget(_selection_table())
+
+    assert selected.nominal_step == 25_600
+    assert selected.actual_steps == {
+        211: 25_811,
+        223: 25_823,
+        227: 25_827,
+    }
+
+
+def test_selection_tiebreak_order_is_pooled_worst_conversion_draw_then_earlier() -> None:
+    """Reordering any tie-break can choose a different budget after development data."""
+
+    module = _subject()
+
+    def tied() -> list[dict[str, Any]]:
+        rows = _selection_table()
+        for row in rows:
+            row["standard"] = ["win", "loss"]
+            row["conversion"] = ["loss"]
+        return rows
+
+    table = tied()
+    table[6]["standard"] = ["win", "win"]
+    assert module.select_global_budget(table).nominal_step == 51_200
+
+    table = tied()
+    table[0]["standard"] = ["win", "win"]
+    table[2]["standard"] = ["loss", "loss"]
+    for row in table[:3]:
+        row["conversion"] = ["win"]
+
+    assert module.select_global_budget(table).nominal_step == 25_600
+
+    table = tied()
+    table[3]["conversion"] = ["win"]
+    assert module.select_global_budget(table).nominal_step == 25_600
+
+    table = tied()
+    table[0]["standard"] = ["win", "draw"]
+    assert module.select_global_budget(table).nominal_step == 25_600
+
+    assert module.select_global_budget(tied()).nominal_step == 12_800
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "decreasing"])
+def test_selection_rejects_incomplete_duplicate_or_decreasing_candidate_rows(
+    mutation: str,
+) -> None:
+    """A partial or inconsistent development table must never publish a selection."""
+
+    module = _subject()
+    table = _selection_table()
+    if mutation == "missing":
+        table.pop()
+    elif mutation == "duplicate":
+        table.append(dict(table[-1]))
+    else:
+        table[-1]["actual_step"] = 1
+
+    with pytest.raises(ValueError, match=mutation):
+        module.select_global_budget(table)
+
+
+def test_development_schedule_reuses_all_100_maps_and_both_seats_for_every_candidate() -> None:
+    """Dropping a condition, seed, budget, map, or seat destroys paired comparability."""
+
+    module = _subject()
+    candidates = [
+        module.DevelopmentCandidate("pure_bc", seed, 0, 0, f"bc-{seed}")
+        for seed in (211, 223, 227)
+    ] + [
+        module.DevelopmentCandidate(
+            condition,
+            seed,
+            nominal,
+            nominal + seed,
+            f"{condition}-{seed}-{nominal}",
+        )
+        for condition in ("bc_ppo", "scratch_ppo")
+        for seed in (211, 223, 227)
+        for nominal in (12_800, 25_600, 51_200)
+    ]
+
+    schedule = module.build_development_schedule(candidates)
+
+    assert len(candidates) == 21
+    assert len(schedule) == 4_200
+    for candidate in candidates:
+        games = [
+            game
+            for game in schedule
+            if (
+                game.condition,
+                game.model_seed,
+                game.nominal_step,
+                game.actual_step,
+            ) == (
+                candidate.condition,
+                candidate.model_seed,
+                candidate.nominal_step,
+                candidate.actual_step,
+            )
+        ]
+        assert [(game.map_seed, game.candidate_seat) for game in games] == [
+            (map_seed, seat)
+            for map_seed in range(16_000_000, 16_000_100)
+            for seat in (0, 1)
+        ]
+        assert all(
+            game.profile == "standard-3v3" and game.opponent == "random"
+            for game in games
+        )
+
+
+def test_train_ppo_command_refuses_to_start_before_clone_gate_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Training before the clone gate passes would spend compute outside the protocol."""
+
+    module = _subject()
+    monkeypatch.setattr(module, "_validate_clone_stage", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "_validate_gate_stage",
+        lambda *_args: (_ for _ in ()).throw(ValueError("clone gate did not pass")),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_training_matrix",
+        lambda *_args, **_kwargs: pytest.fail("training matrix must not be built"),
+    )
+
+    with pytest.raises(ValueError, match="clone gate did not pass"):
+        module._train_ppo_command()
+
+
+def test_selection_publication_is_atomic_restart_safe_and_hashes_every_input(
+    tmp_path: Path,
+) -> None:
+    """A rewritten or unhashed development table could silently change the chosen budget."""
+
+    module = _subject()
+    table = _selection_table()
+    checkpoint_hashes: dict[str, str] = {}
+    for row in table:
+        row["standard"] = (row["standard"] * 100)[:200]
+        key = f"{row['condition']}/seed-{row['model_seed']}/nominal-{row['nominal_step']}"
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        row["checkpoint_sha256"] = digest
+        checkpoint_hashes[key] = digest
+    development = tmp_path / "development.json"
+    development.write_text(
+        json.dumps({"schema_version": 1, "candidates": table}),
+        encoding="utf-8",
+    )
+    output = tmp_path / "selection.json"
+    hashes = {
+        "panel_sha256": "a" * 64,
+        "scenario_sha256": "b" * 64,
+        "seed_banks_sha256": "c" * 64,
+    }
+
+    first = module.publish_selection(
+        development_path=development,
+        output_path=output,
+        definition_hashes=hashes,
+    )
+    before = output.stat().st_mtime_ns
+    second = module.publish_selection(
+        development_path=development,
+        output_path=output,
+        definition_hashes=hashes,
+    )
+
+    assert first["selection"]["nominal_step"] == 25_600
+    assert first["input_hashes"] == {
+        **hashes,
+        "development_sha256": _sha256(development),
+        "candidate_checkpoints_sha256": checkpoint_hashes,
+    }
+    assert second == {**first, "reused": True}
+    assert output.stat().st_mtime_ns == before
+    assert not list(tmp_path.glob(".selection.json.*.tmp"))
+
+
+def test_train_ppo_runs_uses_real_training_boundary_with_fresh_run_configs(
+    tmp_path: Path,
+) -> None:
+    """Bypassing run_training or reusing one config can share mutable optimizer state."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    matrix = module.build_training_matrix(
+        panel,
+        clone_runs_root=tmp_path / "clones",
+        workers=4,
+        device="cpu",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def trainer(config, **kwargs):
+        calls.append({"config": config, **kwargs})
+        return Path(kwargs["runs_root"]) / config.run_name
+
+    paths = module.train_ppo_runs(
+        matrix,
+        runs_root=tmp_path / "ppo",
+        scenario=scenario,
+        server_cmd=["fake-server"],
+        trainer=trainer,
+    )
+
+    assert len(paths) == len(calls) == 6
+    assert len({id(call["config"]) for call in calls}) == 6
+    assert len(set(paths)) == 6
+    assert all(call["scenario"] is scenario for call in calls)
+    assert all(call["server_cmd"] == ["fake-server"] for call in calls)
+    assert all(call["config"].resume_source is None for call in calls)
+
+
+def test_development_evaluation_uses_real_boundary_and_records_every_game_identity(
+    tmp_path: Path,
+) -> None:
+    """Aggregating before recording seat, map, checkpoint, trace, and replay loses evidence."""
+
+    module = _subject()
+    candidate = module.DevelopmentCandidate(
+        "bc_ppo", 211, 12_800, 16_384, "snapshot-controller"
+    )
+    calls: list[dict[str, Any]] = []
+
+    def evaluator(p0, p1, **kwargs):
+        calls.append({"p0": p0, "p1": p1, **kwargs})
+        map_seed = kwargs["seed_start"]
+        evidence = Path(kwargs["evidence_dir"])
+        evidence.mkdir(parents=True, exist_ok=True)
+        matches = []
+        for seat in (0, 1):
+            trace = evidence / f"{map_seed}-{seat}.json"
+            replay = evidence / f"{map_seed}-{seat}.replay"
+            trace.write_text("{}", encoding="utf-8")
+            replay.write_bytes(b"replay")
+            matches.append(
+                {
+                    "seed": map_seed,
+                    "candidate_seat": seat,
+                    "outcome": "win" if seat == 0 else "loss",
+                    "trace_path": str(trace),
+                    "replay_path": str(replay),
+                }
+            )
+        result = {
+            "candidate": {"step": 16_384},
+            "opponent": {"name": "random"},
+            "seed_start": map_seed,
+            "seeds": [map_seed],
+            "reciprocal": True,
+            "games": 2,
+            "schedule": {
+                "start_profile": "standard-3v3",
+                "reference_seat_policy": "candidate-seat",
+            },
+            "matches": matches,
+        }
+        Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(kwargs["output_path"]).write_text(json.dumps(result), encoding="utf-8")
+        return result
+
+    result = module.evaluate_development_candidates(
+        [candidate],
+        output_root=tmp_path / "development",
+        evaluator=evaluator,
+        server_cmd=["fake-server"],
+    )
+
+    assert len(calls) == 100
+    assert all(
+        call["p0"] == "snapshot-controller"
+        and call["p1"] == "random"
+        and call["games"] == 1
+        and call["both_seats"] is True
+        and call["capture_trace"] is True
+        and call["start_profile"] == "standard-3v3"
+        for call in calls
+    )
+    rows = result["candidates"][0]["matches"]
+    assert len(rows) == 200
+    assert [(row["map_seed"], row["candidate_seat"]) for row in rows] == [
+        (seed, seat)
+        for seed in range(16_000_000, 16_000_100)
+        for seat in (0, 1)
+    ]
+    assert all(row["actual_step"] == 16_384 for row in rows)
+    assert all(
+        (tmp_path / "development" / row[field]).is_file()
+        for row in rows
+        for field in ("trace_path", "replay_path")
+    )
+
+
+def test_ppo_stage_resolves_actual_budgets_and_rejects_wrong_actor_source(
+    tmp_path: Path,
+) -> None:
+    """A shared or wrong clone source invalidates initialized-vs-scratch attribution."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    matrix = module.build_training_matrix(
+        panel,
+        clone_runs_root=tmp_path / "clones",
+        workers=4,
+        device="cpu",
+    )
+    root = tmp_path / "ppo"
+    for run in matrix:
+        run_dir = root / run.config.run_name
+        checkpoints = run_dir / "checkpoints"
+        checkpoints.mkdir(parents=True)
+        scenario.write(run_dir / "scenario.json")
+        (run_dir / "run.json").write_text(
+            json.dumps({"state": "completed", "config": run.config.to_dict()}),
+            encoding="utf-8",
+        )
+        for step in (8_192, 16_384, 32_768, 57_344):
+            (checkpoints / f"step_{step:09d}.zip").write_bytes(b"checkpoint")
+        if run.condition == "bc_ppo":
+            (run_dir / "initialization.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": "actor_only",
+                        "source_run": run.config.actor_init_source,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    budgets = module._ppo_budget_map(root, matrix, scenario)
+    assert {
+        name: [(item.nominal_step, item.actual_step) for item in items]
+        for name, items in budgets.items()
+    } == {
+        run.config.run_name: [
+            (12_800, 16_384),
+            (25_600, 32_768),
+            (51_200, 57_344),
+        ]
+        for run in matrix
+    }
+
+    initialized = root / "bc-ppo-seed-211" / "initialization.json"
+    initialized.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "actor_only",
+                "source_run": str(tmp_path / "clones" / "seed-223"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="initialization source"):
+        module._ppo_budget_map(root, matrix, scenario)

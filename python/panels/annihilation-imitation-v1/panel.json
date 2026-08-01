@@ -32,5 +32,32 @@
     "opponent": "random",
     "per_seed_win_rate_minimum_basis_points": 3000,
     "pooled_win_rate_minimum_basis_points": 4000
+  },
+  "ppo": {
+    "conditions": ["bc_ppo", "scratch_ppo"],
+    "episode_seed_bases": {
+      "211": 13000000,
+      "223": 14000000,
+      "227": 15000000
+    },
+    "total_timesteps": 51200,
+    "checkpoint_interval": 12800,
+    "rollout_steps_per_worker": 2048,
+    "nominal_budgets": [12800, 25600, 51200],
+    "learner_seat": "alternating",
+    "opponent": {"kind": "scripted", "name": "random"},
+    "trackers": [{"kind": "local"}],
+    "algorithm_options": {
+      "learning_rate": 0.0003,
+      "n_epochs": 10,
+      "target_kl": 0.02
+    }
+  },
+  "development": {
+    "maps": 100,
+    "seed_start": 16000000,
+    "both_seats": true,
+    "profile": "standard-3v3",
+    "opponent": "random"
   }
 }

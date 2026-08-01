@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,9 @@ SEED_BANKS_PATH = PANEL_ROOT / "seed-banks.json"
 DATASET_PATH = PROJECT_ROOT / "python" / "datasets" / "annihilation-imitation-v1"
 CLONE_RUNS_PATH = PANEL_ROOT / "bc-clones"
 CLONE_EVALUATION_PATH = PANEL_ROOT / "bc-development-gate"
+PPO_RUNS_PATH = PANEL_ROOT / "ppo-runs"
+DEVELOPMENT_PATH = PANEL_ROOT / "development"
+SELECTION_PATH = PANEL_ROOT / "selection.json"
 
 _MODEL_SEEDS = [211, 223, 227]
 _SAMPLER_SEEDS = {"211": 211, "223": 223, "227": 227}
@@ -173,7 +177,7 @@ def validate_definitions(
     expected_panel_keys = {
         "schema_version", "id", "environment", "scenario", "seed_banks",
         "definition_hashes", "model_seeds", "sampler_seeds", "outcome_rewards",
-        "collection", "behavioral_cloning", "clone_gate",
+        "collection", "behavioral_cloning", "clone_gate", "ppo", "development",
     }
     if set(panel) != expected_panel_keys or panel.get("schema_version") != 1:
         raise ValueError("panel definition schema is invalid")
@@ -187,8 +191,15 @@ def validate_definitions(
         raise ValueError("panel model or sampler seeds changed")
     if panel["outcome_rewards"] != _OUTCOME_REWARDS:
         raise ValueError("panel outcome rewards changed")
-    if panel["collection"] != _COLLECTION or panel["clone_gate"] != _CLONE_GATE:
-        raise ValueError("panel collection or clone gate changed")
+    if (
+        panel["collection"] != _COLLECTION
+        or panel["clone_gate"] != _CLONE_GATE
+        or panel["ppo"] != _PPO
+        or panel["development"] != _DEVELOPMENT
+    ):
+        raise ValueError(
+            "panel collection, clone gate, PPO, or development definition changed"
+        )
     expected_bc = {
         "batch_size": 256,
         "learning_rate": 0.0003,
@@ -1096,6 +1107,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("collect")
     commands.add_parser("train-bc")
     commands.add_parser("evaluate-bc")
+    commands.add_parser("train-ppo")
+    commands.add_parser("evaluate-dev")
+    commands.add_parser("select-budget")
     return parser
 
 
@@ -1112,9 +1126,765 @@ def main(argv: Sequence[str] | None = None) -> None:
         result = _train_bc_command()
     elif args.command == "evaluate-bc":
         result = _evaluate_bc_command()
+    elif args.command == "train-ppo":
+        result = _train_ppo_command()
+    elif args.command == "evaluate-dev":
+        result = _evaluate_dev_command()
+    elif args.command == "select-budget":
+        result = _select_budget_command()
     else:
         raise AssertionError(f"unreachable command {args.command!r}")
     print(json.dumps(result, sort_keys=True))
+
+
+@dataclass(frozen=True)
+class TrainingRun:
+    model_seed: int
+    episode_seed_base: int
+    condition: str
+    scenario_sha256: str
+    config: Any
+
+
+def build_training_matrix(
+    panel: Mapping[str, Any],
+    *,
+    clone_runs_root: Path = CLONE_RUNS_PATH,
+    workers: int = 4,
+    device: str = "auto",
+) -> list[TrainingRun]:
+    from ml_lab.contracts import RunConfig
+
+    ppo = panel["ppo"]
+    episode_bases = {int(seed): value for seed, value in ppo["episode_seed_bases"].items()}
+    runs: list[TrainingRun] = []
+    for model_seed in panel["model_seeds"]:
+        for condition in ppo["conditions"]:
+            initialized = condition == "bc_ppo"
+            run_name = (
+                f"bc-ppo-seed-{model_seed}"
+                if initialized
+                else f"scratch-ppo-seed-{model_seed}"
+            )
+            config = RunConfig(
+                backend="sb3",
+                algorithm="maskable_ppo",
+                policy="HexCNN",
+                run_name=run_name,
+                seed=model_seed,
+                episode_seed_base=episode_bases[model_seed],
+                total_timesteps=51_200,
+                checkpoint_interval=12_800,
+                workers=workers,
+                device=device,
+                learner_seat="alternating",
+                opponent={"kind": "scripted", "name": "random"},
+                trackers=[{"kind": "local"}],
+                resume_source=None,
+                environment="tactical-v2",
+                algorithm_options={
+                    "learning_rate": 3e-4,
+                    "n_epochs": 10,
+                    "target_kl": 0.02,
+                },
+                actor_init_source=(
+                    str((Path(clone_runs_root) / f"seed-{model_seed}").resolve())
+                    if initialized
+                    else None
+                ),
+            )
+            runs.append(
+                TrainingRun(
+                    model_seed=model_seed,
+                    episode_seed_base=episode_bases[model_seed],
+                    condition=condition,
+                    scenario_sha256=_sha256(SCENARIO_PATH),
+                    config=config,
+                )
+            )
+    return runs
+
+
+@dataclass(frozen=True)
+class CheckpointIdentity:
+    actual_step: int
+    path: Path
+
+
+@dataclass(frozen=True)
+class BudgetCheckpoint:
+    nominal_step: int
+    actual_step: int
+    path: Path
+
+
+@dataclass(frozen=True)
+class BudgetSelection:
+    nominal_step: int
+    actual_steps: dict[int, int]
+
+
+def validate_rollout_checkpoints(
+    checkpoints: Sequence[CheckpointIdentity],
+    *,
+    rollout_size: int,
+) -> None:
+    if rollout_size <= 0:
+        raise ValueError("rollout size must be positive")
+    previous: int | None = None
+    for checkpoint in checkpoints:
+        step = checkpoint.actual_step
+        if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
+            raise ValueError("checkpoint actual step must be positive")
+        if previous is not None:
+            if step == previous:
+                raise ValueError("checkpoint actual steps are duplicated")
+            if step < previous:
+                raise ValueError("checkpoint actual steps are decreasing")
+        if step % rollout_size:
+            raise ValueError("checkpoint actual step is not a rollout boundary")
+        previous = step
+
+
+def first_checkpoint_at_or_after(
+    checkpoints: Sequence[CheckpointIdentity],
+    nominal: int,
+) -> CheckpointIdentity:
+    eligible = sorted(
+        (checkpoint for checkpoint in checkpoints if checkpoint.actual_step >= nominal),
+        key=lambda checkpoint: checkpoint.actual_step,
+    )
+    if not eligible:
+        raise RuntimeError(f"no completed rollout reaches {nominal}")
+    return eligible[0]
+
+
+def resolve_checkpoint_budgets(
+    checkpoints: Sequence[CheckpointIdentity],
+    *,
+    nominal_steps: Sequence[int],
+    rollout_size: int,
+) -> list[BudgetCheckpoint]:
+    validate_rollout_checkpoints(checkpoints, rollout_size=rollout_size)
+    return [
+        BudgetCheckpoint(
+            nominal_step=nominal,
+            actual_step=(selected := first_checkpoint_at_or_after(checkpoints, nominal)).actual_step,
+            path=selected.path,
+        )
+        for nominal in nominal_steps
+    ]
+
+
+def _outcomes(
+    row: Mapping[str, Any], field: str, *, allow_empty: bool = False
+) -> list[str]:
+    raw = row.get(field)
+    if not isinstance(raw, list) or (not raw and not allow_empty):
+        raise ValueError(f"selection row {field} outcomes are incomplete")
+    if any(outcome not in {"win", "loss", "draw"} for outcome in raw):
+        raise ValueError(f"selection row {field} outcome is invalid")
+    return list(raw)
+
+
+def select_global_budget(table: Sequence[Mapping[str, Any]]) -> BudgetSelection:
+    rows = [dict(row) for row in table if row.get("condition") == "bc_ppo"]
+    keys = [
+        (row.get("model_seed"), row.get("nominal_step"))
+        for row in rows
+    ]
+    if len(keys) != len(set(keys)):
+        raise ValueError("development candidate rows are duplicate")
+    expected = {
+        (seed, nominal)
+        for seed in _MODEL_SEEDS
+        for nominal in (12_800, 25_600, 51_200)
+    }
+    if set(keys) != expected:
+        raise ValueError("development candidate rows are missing")
+    by_seed: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        seed = row["model_seed"]
+        actual = row.get("actual_step")
+        if isinstance(actual, bool) or not isinstance(actual, int) or actual <= 0:
+            raise ValueError("development actual checkpoint is invalid")
+        _outcomes(row, "standard")
+        _outcomes(row, "conversion", allow_empty=True)
+        by_seed.setdefault(seed, []).append(row)
+    for seed_rows in by_seed.values():
+        ordered = sorted(seed_rows, key=lambda row: row["nominal_step"])
+        actual = [row["actual_step"] for row in ordered]
+        if any(following < previous for previous, following in zip(actual, actual[1:])):
+            raise ValueError("development actual checkpoints are decreasing")
+        if len(actual) != len(set(actual)):
+            raise ValueError("development actual checkpoints are duplicate")
+
+    scores: dict[int, tuple[float, float, float, float, int]] = {}
+    for nominal in (12_800, 25_600, 51_200):
+        candidates = [row for row in rows if row["nominal_step"] == nominal]
+        standard_by_seed = {
+            row["model_seed"]: _outcomes(row, "standard")
+            for row in candidates
+        }
+        standard = [
+            outcome for outcomes in standard_by_seed.values() for outcome in outcomes
+        ]
+        conversion = [
+            outcome
+            for row in candidates
+            for outcome in _outcomes(row, "conversion", allow_empty=True)
+        ]
+        all_outcomes = standard + conversion
+        scores[nominal] = (
+            standard.count("win") / len(standard),
+            min(
+                outcomes.count("win") / len(outcomes)
+                for outcomes in standard_by_seed.values()
+            ),
+            conversion.count("win") / len(conversion) if conversion else 0.0,
+            -all_outcomes.count("draw") / len(all_outcomes),
+            -nominal,
+        )
+    selected_nominal = max(scores, key=scores.__getitem__)
+    return BudgetSelection(
+        nominal_step=selected_nominal,
+        actual_steps={
+            row["model_seed"]: row["actual_step"]
+            for row in rows
+            if row["nominal_step"] == selected_nominal
+        },
+    )
+
+
+
+
+@dataclass(frozen=True)
+class DevelopmentCandidate:
+    condition: str
+    model_seed: int
+    nominal_step: int
+    actual_step: int
+    controller: str
+    checkpoint_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class DevelopmentGame:
+    condition: str
+    model_seed: int
+    nominal_step: int
+    actual_step: int
+    controller: str
+    map_seed: int
+    candidate_seat: int
+    profile: str
+    opponent: str
+
+
+def build_development_schedule(
+    candidates: Sequence[DevelopmentCandidate],
+) -> list[DevelopmentGame]:
+    keys = [
+        (
+            candidate.condition,
+            candidate.model_seed,
+            candidate.nominal_step,
+            candidate.actual_step,
+        )
+        for candidate in candidates
+    ]
+    if len(keys) != len(set(keys)):
+        raise ValueError("development candidates are duplicate")
+    return [
+        DevelopmentGame(
+            condition=candidate.condition,
+            model_seed=candidate.model_seed,
+            nominal_step=candidate.nominal_step,
+            actual_step=candidate.actual_step,
+            controller=candidate.controller,
+            map_seed=map_seed,
+            candidate_seat=seat,
+            profile="standard-3v3",
+            opponent="random",
+        )
+        for candidate in candidates
+        for map_seed in range(16_000_000, 16_000_100)
+        for seat in (0, 1)
+    ]
+
+
+def publish_selection(
+    *,
+    development_path: Path,
+    output_path: Path,
+    definition_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    development_path = Path(development_path)
+    output_path = Path(output_path)
+    hashes = {
+        **dict(definition_hashes),
+        "development_sha256": _sha256(development_path),
+    }
+    development = _read_json(development_path)
+    candidates = development.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("development candidates are incomplete")
+    selectable = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping) and candidate.get("condition") == "bc_ppo"
+    ]
+    if len(selectable) != 9:
+        raise ValueError("development schedule is incomplete")
+    for candidate in selectable:
+        if (
+            not isinstance(candidate.get("standard"), list)
+            or len(candidate["standard"]) != 200
+        ):
+            raise ValueError("development schedule is incomplete")
+    checkpoint_hashes: dict[str, str] = {}
+    for candidate in selectable:
+        key = (
+            f"{candidate['condition']}/seed-{candidate['model_seed']}/"
+            f"nominal-{candidate['nominal_step']}"
+        )
+        digest = candidate.get("checkpoint_sha256")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+        ):
+            raise ValueError("development checkpoint hash is incomplete")
+        checkpoint_hashes[key] = digest
+    hashes["candidate_checkpoints_sha256"] = checkpoint_hashes
+    selected = select_global_budget(candidates)
+    selection = {
+        "nominal_step": selected.nominal_step,
+        "actual_steps": {
+            str(seed): step for seed, step in sorted(selected.actual_steps.items())
+        },
+    }
+    payload = {
+        "schema_version": 1,
+        "state": "completed",
+        "input_hashes": hashes,
+        "selection": selection,
+        "reused": False,
+    }
+    if output_path.exists():
+        existing = _read_json(output_path)
+        if existing != payload:
+            raise ValueError("existing selection does not match current inputs")
+        return {**existing, "reused": True}
+    _atomic_json(output_path, payload)
+    return payload
+
+
+_PPO = {
+    "conditions": ["bc_ppo", "scratch_ppo"],
+    "episode_seed_bases": {"211": 13_000_000, "223": 14_000_000, "227": 15_000_000},
+    "total_timesteps": 51_200,
+    "checkpoint_interval": 12_800,
+    "rollout_steps_per_worker": 2_048,
+    "nominal_budgets": [12_800, 25_600, 51_200],
+    "learner_seat": "alternating",
+    "opponent": {"kind": "scripted", "name": "random"},
+    "trackers": [{"kind": "local"}],
+    "algorithm_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02,
+    },
+}
+_DEVELOPMENT = {
+    "maps": 100,
+    "seed_start": 16_000_000,
+    "both_seats": True,
+    "profile": "standard-3v3",
+    "opponent": "random",
+}
+
+
+def evaluate_development_candidates(
+    candidates: Sequence[DevelopmentCandidate],
+    *,
+    output_root: Path,
+    evaluator: Callable[..., Mapping[str, Any]] | None = None,
+    server_cmd: Sequence[str],
+    workers: int = 1,
+) -> dict[str, Any]:
+    selected_evaluator = evaluator or _evaluate_standard_controllers
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    candidate_results: list[dict[str, Any]] = []
+    for candidate in candidates:
+        matches: list[dict[str, Any]] = []
+        for map_seed in range(_DEVELOPMENT["seed_start"], _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"]):
+            map_root = (
+                root
+                / candidate.condition
+                / f"seed-{candidate.model_seed}"
+                / f"nominal-{candidate.nominal_step}"
+                / f"map-{map_seed}"
+            )
+            output_path = map_root / "evaluation.json"
+            result = selected_evaluator(
+                candidate.controller,
+                _DEVELOPMENT["opponent"],
+                games=1,
+                seed_start=map_seed,
+                both_seats=True,
+                workers=workers,
+                server_cmd=list(server_cmd),
+                output_path=output_path,
+                environment="tactical-v2",
+                evidence_dir=map_root / "evidence",
+                capture_trace=True,
+                start_profile=_DEVELOPMENT["profile"],
+            )
+            normalized = _relativize_evaluation(result, root, output_path)
+            raw_matches = normalized.get("matches")
+            if not isinstance(raw_matches, list) or len(raw_matches) != 2:
+                raise ValueError("development map evaluation is incomplete")
+            for raw in raw_matches:
+                if not isinstance(raw, Mapping):
+                    raise ValueError("development match is malformed")
+                row = dict(raw)
+                if (
+                    row.get("seed") != map_seed
+                    or row.get("candidate_seat") not in {0, 1}
+                    or row.get("outcome") not in {"win", "loss", "draw"}
+                    or "trace_path" not in row
+                    or "replay_path" not in row
+                ):
+                    raise ValueError("development match identity or evidence is incomplete")
+                row["map_seed"] = row.pop("seed")
+                row["actual_step"] = candidate.actual_step
+                matches.append(row)
+        if [(row["map_seed"], row["candidate_seat"]) for row in matches] != [
+            (map_seed, seat)
+            for map_seed in range(_DEVELOPMENT["seed_start"], _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"])
+            for seat in (0, 1)
+        ]:
+            raise ValueError("development candidate schedule is incomplete")
+        candidate_results.append(
+            {
+                "condition": candidate.condition,
+                "model_seed": candidate.model_seed,
+                "nominal_step": candidate.nominal_step,
+                "actual_step": candidate.actual_step,
+                "standard": [row["outcome"] for row in matches],
+                "conversion": [],
+                "matches": matches,
+            }
+        )
+    result = {
+        "schema_version": 1,
+        "state": "completed",
+        "schedule": dict(_DEVELOPMENT),
+        "candidates": candidate_results,
+    }
+    _atomic_json(root / "development.json", result)
+    return result
+
+
+def _ppo_budget_map(
+    root: Path,
+    matrix: Sequence[TrainingRun],
+    scenario: ResolvedScenario,
+) -> dict[str, list[BudgetCheckpoint]]:
+    root = Path(root)
+    expected_names = {run.config.run_name for run in matrix}
+    actual_names = {
+        path.name for path in root.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    } if root.is_dir() else set()
+    if actual_names != expected_names:
+        raise ValueError("PPO stage run destinations are incomplete or unexpected")
+    budgets: dict[str, list[BudgetCheckpoint]] = {}
+    for run in matrix:
+        run_dir = root / run.config.run_name
+        manifest = _read_json(run_dir / "run.json")
+        if (
+            manifest.get("state") != "completed"
+            or manifest.get("config") != run.config.to_dict()
+        ):
+            raise ValueError(f"PPO run {run.config.run_name} is incomplete or changed")
+        frozen = resolve_scenario(
+            environment="tactical-v2",
+            scenario_file=run_dir / "scenario.json",
+            template_id=None,
+            enforce_round_cap_minimum=True,
+        )
+        if frozen.canonical_json != scenario.canonical_json:
+            raise ValueError(f"PPO run {run.config.run_name} scenario changed")
+        initialization = run_dir / "initialization.json"
+        if (run.condition == "bc_ppo") != initialization.is_file():
+            raise ValueError(f"PPO run {run.config.run_name} initialization provenance is invalid")
+        if run.condition == "bc_ppo":
+            provenance = _read_json(initialization)
+            if (
+                provenance.get("schema_version") != 1
+                or provenance.get("kind") != "actor_only"
+                or provenance.get("source_run") != run.config.actor_init_source
+            ):
+                raise ValueError(
+                    f"PPO run {run.config.run_name} initialization source is invalid"
+                )
+        checkpoints: list[CheckpointIdentity] = []
+        for path in sorted((run_dir / "checkpoints").glob("step_*.zip")):
+            try:
+                step = int(path.stem.removeprefix("step_"))
+            except ValueError as exc:
+                raise ValueError(f"PPO run {run.config.run_name} checkpoint identity is invalid") from exc
+            checkpoints.append(CheckpointIdentity(step, path))
+        budgets[run.config.run_name] = resolve_checkpoint_budgets(
+            checkpoints,
+            nominal_steps=_PPO["nominal_budgets"],
+            rollout_size=_PPO["rollout_steps_per_worker"] * run.config.workers,
+        )
+    return budgets
+
+
+def _validate_ppo_stage(
+    root: Path,
+    hashes: Mapping[str, str],
+    matrix: Sequence[TrainingRun],
+    scenario: ResolvedScenario,
+) -> Mapping[str, Any]:
+    budget_map = _ppo_budget_map(root, matrix, scenario)
+    if any(
+        run.scenario_sha256 != hashes.get("scenario_sha256")
+        for run in matrix
+    ):
+        raise ValueError("PPO matrix scenario hash does not match definitions")
+    return {
+        "run_count": len(budget_map),
+        "conditions": list(_PPO["conditions"]),
+        "model_seeds": list(_MODEL_SEEDS),
+        "nominal_budgets": list(_PPO["nominal_budgets"]),
+    }
+
+
+def train_ppo_runs(
+    runs: Sequence[TrainingRun],
+    *,
+    runs_root: Path,
+    scenario: ResolvedScenario,
+    server_cmd: list[str],
+    trainer: Callable[..., Path] | None = None,
+) -> list[Path]:
+    from ml_lab.training import run_training
+
+    selected_trainer = trainer or run_training
+    root = Path(runs_root)
+    root.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    for run in runs:
+        expected = root / run.config.run_name
+        if (expected / "run.json").is_file():
+            manifest = _read_json(expected / "run.json")
+            if (
+                manifest.get("state") != "completed"
+                or manifest.get("config") != run.config.to_dict()
+            ):
+                raise ValueError(f"existing PPO run {run.config.run_name} is not reusable")
+            outputs.append(expected)
+            continue
+        output = Path(
+            selected_trainer(
+                run.config,
+                runs_root=root,
+                scenario=scenario,
+                server_cmd=list(server_cmd),
+            )
+        )
+        if output != expected:
+            raise ValueError(
+                f"PPO run {run.config.run_name} published outside its assigned destination"
+            )
+        outputs.append(output)
+    if len({path.resolve() for path in outputs}) != len(outputs):
+        raise ValueError("PPO conditions share a run destination")
+    return outputs
+
+
+def _train_ppo_command() -> Mapping[str, Any]:
+    panel, _banks, scenario = validate_definitions()
+    hashes = current_definition_hashes()
+    _validate_clone_stage(CLONE_RUNS_PATH, hashes)
+    _validate_gate_stage(CLONE_EVALUATION_PATH, hashes)
+    matrix = build_training_matrix(panel)
+
+    def build(staging: Path) -> None:
+        train_ppo_runs(
+            matrix,
+            runs_root=staging,
+            scenario=scenario,
+            server_cmd=_server_command(SCENARIO_PATH)[:-2],
+        )
+
+    return run_atomic_stage(
+        PPO_RUNS_PATH,
+        hashes,
+        build=build,
+        validate=lambda root: _validate_ppo_stage(root, hashes, matrix, scenario),
+    )
+
+
+def build_panel_development_candidates(
+    panel: Mapping[str, Any],
+    *,
+    clone_runs_root: Path,
+    ppo_runs_root: Path,
+    scenario: ResolvedScenario,
+) -> list[DevelopmentCandidate]:
+    matrix = build_training_matrix(panel, clone_runs_root=clone_runs_root)
+    budget_map = _ppo_budget_map(ppo_runs_root, matrix, scenario)
+    candidates: list[DevelopmentCandidate] = []
+    for seed in _MODEL_SEEDS:
+        run = Path(clone_runs_root) / f"seed-{seed}"
+        manifest = _read_json(run / "run.json")
+        checkpoint = _safe_relative_file(
+            run, manifest.get("latest_checkpoint"), f"clone seed {seed} checkpoint"
+        )
+        candidates.append(
+            DevelopmentCandidate(
+                "pure_bc", seed, 0, 0, f"run:{run}",
+                checkpoint_sha256=_sha256(checkpoint),
+            )
+        )
+    for run in matrix:
+        run_dir = Path(ppo_runs_root) / run.config.run_name
+        for budget in budget_map[run.config.run_name]:
+            controller = json.dumps(
+                {
+                    "kind": "snapshot",
+                    "path": str(budget.path.resolve()),
+                    "source_run": str(run_dir.resolve()),
+                    "algorithm": "maskable_ppo",
+                    "step": budget.actual_step,
+                },
+                sort_keys=True,
+            )
+            candidates.append(
+                DevelopmentCandidate(
+                    run.condition,
+                    run.model_seed,
+                    budget.nominal_step,
+                    budget.actual_step,
+                    controller,
+                    checkpoint_sha256=_sha256(budget.path),
+                )
+            )
+    if len(candidates) != 21:
+        raise ValueError("development candidate matrix is incomplete")
+    return candidates
+
+
+def _validate_development_stage(
+    root: Path,
+    hashes: Mapping[str, str],
+    scenario: ResolvedScenario,
+) -> Mapping[str, Any]:
+    root = Path(root)
+    _validate_runtime_scenario(root, scenario, hashes)
+    development = _read_json(root / "development.json")
+    if development.get("definition_hashes") != dict(hashes):
+        raise ValueError("development definition hashes do not match")
+    candidates = development.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) != 21:
+        raise ValueError("development candidates are incomplete")
+    expected_keys = {
+        ("pure_bc", seed, 0) for seed in _MODEL_SEEDS
+    } | {
+        (condition, seed, nominal)
+        for condition in _PPO["conditions"]
+        for seed in _MODEL_SEEDS
+        for nominal in _PPO["nominal_budgets"]
+    }
+    keys = {
+        (candidate.get("condition"), candidate.get("model_seed"), candidate.get("nominal_step"))
+        for candidate in candidates
+        if isinstance(candidate, Mapping)
+    }
+    if keys != expected_keys:
+        raise ValueError("development candidate identities are incomplete")
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("development candidate is malformed")
+        matches = candidate.get("matches")
+        if (
+            not isinstance(matches, list)
+            or len(matches) != 200
+            or candidate.get("standard") != [match.get("outcome") for match in matches]
+            or not isinstance(candidate.get("checkpoint_sha256"), str)
+        ):
+            raise ValueError("development candidate schedule is incomplete")
+        actual_keys = [
+            (match.get("map_seed"), match.get("candidate_seat"))
+            for match in matches
+        ]
+        expected_schedule = [
+            (seed, seat)
+            for seed in range(16_000_000, 16_000_100)
+            for seat in (0, 1)
+        ]
+        if actual_keys != expected_schedule:
+            raise ValueError("development candidate seed/seat schedule is incomplete")
+        for match in matches:
+            if (
+                match.get("actual_step") != candidate.get("actual_step")
+                or not _artifact_exists(root, match, "trace_path")
+                or not _artifact_exists(root, match, "replay_path")
+            ):
+                raise ValueError("development match checkpoint or evidence is incomplete")
+    return {"candidate_count": 21, "games": 4_200}
+
+
+def _evaluate_dev_command() -> Mapping[str, Any]:
+    panel, _banks, scenario = validate_definitions()
+    hashes = current_definition_hashes()
+    _validate_clone_stage(CLONE_RUNS_PATH, hashes)
+    _validate_gate_stage(CLONE_EVALUATION_PATH, hashes)
+    matrix = build_training_matrix(panel)
+    _validate_ppo_stage(PPO_RUNS_PATH, hashes, matrix, scenario)
+    candidates = build_panel_development_candidates(
+        panel,
+        clone_runs_root=CLONE_RUNS_PATH,
+        ppo_runs_root=PPO_RUNS_PATH,
+        scenario=scenario,
+    )
+
+    def build(staging: Path) -> None:
+        runtime_scenario = _materialize_runtime_scenario(scenario, staging, hashes)
+        result = evaluate_development_candidates(
+            candidates,
+            output_root=staging,
+            server_cmd=_server_command(runtime_scenario),
+        )
+        for row, candidate in zip(result["candidates"], candidates, strict=True):
+            row["checkpoint_sha256"] = candidate.checkpoint_sha256
+        result["definition_hashes"] = dict(hashes)
+        _atomic_json(staging / "development.json", result)
+
+    return run_atomic_stage(
+        DEVELOPMENT_PATH,
+        hashes,
+        build=build,
+        validate=lambda root: _validate_development_stage(root, hashes, scenario),
+    )
+
+
+def _select_budget_command() -> Mapping[str, Any]:
+    panel, _banks, scenario = validate_definitions()
+    del panel
+    hashes = current_definition_hashes()
+    _validate_development_stage(DEVELOPMENT_PATH, hashes, scenario)
+    return publish_selection(
+        development_path=DEVELOPMENT_PATH / "development.json",
+        output_path=SELECTION_PATH,
+        definition_hashes=hashes,
+    )
 
 
 if __name__ == "__main__":
