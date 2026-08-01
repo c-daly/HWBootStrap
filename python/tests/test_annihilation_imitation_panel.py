@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zipfile import ZipFile
+
+import numpy as np
 
 import pytest
 
@@ -197,27 +200,21 @@ def test_clone_run_construction_uses_fresh_configs_and_distinct_destinations(tmp
 
     module = _subject()
     panel, _banks, scenario = module.validate_definitions()
-    dataset = object()
+    dataset_manifest = tmp_path / "dataset" / "manifest.json"
+    dataset_manifest.parent.mkdir()
+    dataset_manifest.write_text('{"state":"complete"}', encoding="utf-8")
+    dataset = SimpleNamespace(root=dataset_manifest.parent)
     contract = SimpleNamespace(contract_hash="c" * 64, encoding_hash="e" * 64)
     calls: list[dict[str, Any]] = []
 
     def trainer(**kwargs):
         calls.append(kwargs)
         run_dir = kwargs["run_dir"]
-        run_dir.mkdir(parents=True)
-        (run_dir / "run.json").write_text(
-            json.dumps(
-                {
-                    "state": "completed",
-                    "model_seed": kwargs["config"].model_seed,
-                    "config": {"model_seed": kwargs["config"].model_seed},
-                    "contract": {
-                        "contract_hash": contract.contract_hash,
-                        "encoding_hash": contract.encoding_hash,
-                    },
-                }
-            ),
-            encoding="utf-8",
+        _write_clone_artifact(
+            run_dir,
+            module,
+            kwargs["config"].model_seed,
+            dataset_manifest=dataset_manifest,
         )
         return SimpleNamespace(run_dir=run_dir)
 
@@ -245,22 +242,108 @@ def test_clone_run_construction_uses_fresh_configs_and_distinct_destinations(tmp
         assert provenance["definition_hashes"] == {"panel_sha256": "a" * 64}
 
 
+def _write_clone_artifact(
+    run: Path,
+    module,
+    seed: int,
+    *,
+    dataset_manifest: Path,
+) -> None:
+    run.mkdir(parents=True)
+    checkpoint = run / "checkpoints" / "step_000000000.zip"
+    checkpoint.parent.mkdir()
+    with ZipFile(checkpoint, "w") as archive:
+        archive.writestr("data", "{}")
+    np.savez(
+        run / "actor-fixtures.npz",
+        observations=np.zeros((1, 2), dtype=np.float32),
+        legal_masks=np.ones((1, 3), dtype=np.bool_),
+    )
+    (run / "scenario.json").write_bytes(module.SCENARIO_PATH.read_bytes())
+    dataset_hash = _sha256(dataset_manifest)
+    contract = {
+        "environment": "tactical-v2",
+        "version": "tactical-v2",
+        "contract_hash": "c" * 64,
+        "encoding_hash": "e" * 64,
+        "observation_size": 2,
+        "action_size": 3,
+        "board": {},
+        "roster": [],
+        "reward": {},
+        "semantics": {"start_profiles": [{"id": "standard-3v3"}]},
+    }
+    config = {
+        "model_seed": seed,
+        "batch_size": 256,
+        "learning_rate": 0.0003,
+        "max_epochs": 50,
+        "patience": 5,
+    }
+    (run / "bc.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_seed": seed,
+                "dataset_manifest_sha256": dataset_hash,
+                "config": config,
+                "best_epoch": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "metrics.json").write_text(
+        json.dumps({"nll": 1.0, "top1_accuracy": 0.5}),
+        encoding="utf-8",
+    )
+    (run / "run.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "completed",
+                "timesteps": 0,
+                "latest_checkpoint": "checkpoints/step_000000000.zip",
+                "latest_checkpoint_step": 0,
+                "model_seed": seed,
+                "config": {"model_seed": seed, "behavioral_cloning": config},
+                "contract": contract,
+                "scenario": {
+                    "path": "scenario.json",
+                    "template_id": "annihilation-imitation-v1",
+                    "schema_version": 1,
+                },
+                "dataset_manifest_sha256": dataset_hash,
+                "bc_config": config,
+                "best_epoch": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_clone_runs(root: Path, module, *, changed_hash: bool = False) -> list[Path]:
     hashes = module.current_definition_hashes()
+    dataset_manifest = root.parent / "dataset" / "manifest.json"
+    dataset_manifest.parent.mkdir(parents=True, exist_ok=True)
+    dataset_manifest.write_text('{"state":"complete"}', encoding="utf-8")
     runs = []
     for seed in (211, 223, 227):
         run = root / f"seed-{seed}"
-        run.mkdir(parents=True)
-        contract = {"contract_hash": "c" * 64, "encoding_hash": "e" * 64}
-        (run / "run.json").write_text(
-            json.dumps({"state": "completed", "model_seed": seed, "config": {"model_seed": seed}, "contract": contract}),
-            encoding="utf-8",
-        )
+        _write_clone_artifact(run, module, seed, dataset_manifest=dataset_manifest)
         provenance_hashes = dict(hashes)
         if changed_hash and seed == 211:
             provenance_hashes["panel_sha256"] = "f" * 64
         (run / "panel-provenance.json").write_text(
-            json.dumps({"model_seed": seed, "sampler_seed": seed, "definition_hashes": provenance_hashes}),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "model_seed": seed,
+                    "sampler_seed": seed,
+                    "definition_hashes": provenance_hashes,
+                    "dataset_manifest": str(dataset_manifest.resolve()),
+                    "dataset_manifest_sha256": _sha256(dataset_manifest),
+                }
+            ),
             encoding="utf-8",
         )
         runs.append(run)
@@ -301,6 +384,11 @@ class ControlledEvaluator:
             matches.append(dict(matches[0]))
         contract_hash = "x" * 64 if self.mutation == "contract" and seed == 211 else "c" * 64
         result = {
+            "schema_version": 1,
+            "schedule": {
+                "start_profile": kwargs.get("start_profile"),
+                "reference_seat_policy": "candidate-seat",
+            },
             "candidate": {"contract_hash": contract_hash, "encoding_hash": "e" * 64},
             "opponent": {"kind": "builtin", "name": "random"},
             "seed_start": map_seed,
@@ -342,16 +430,62 @@ def test_evaluate_clone_gate_runs_exact_development_schedule_and_passes(tmp_path
         assert all(call["games"] == 1 and call["both_seats"] is True for call in calls)
         assert all(call["p1"] == "random" and call["environment"] == "tactical-v2" for call in calls)
         assert all(call["capture_trace"] is True for call in calls)
-    standard = _json(tmp_path / "evaluation" / "standard-gate-scenario.json")
-    assert standard["tactical_v2"]["start_distribution"][0]["basis_points"] == 10_000
-    assert all(item["basis_points"] == 0 for item in standard["tactical_v2"]["start_distribution"][1:])
+        assert all(call.get("start_profile") == "standard-3v3" for call in calls)
+    assert not (tmp_path / "evaluation" / "standard-gate-scenario.json").exists()
+    launched_scenario = Path(evaluator.calls[0]["server_cmd"][-1])
+    assert json.loads(launched_scenario.read_text(encoding="utf-8")) == json.loads(
+        module.validate_definitions()[2].canonical_json
+    )
+    assert _json(launched_scenario)["tactical_v2"]["start_distribution"] == LOCKED_WEIGHTS
     assert all(
-        Path(match[field]).is_file()
+        not Path(match[field]).is_absolute()
+        and (tmp_path / "evaluation" / match[field]).is_file()
         for clone in result["clones"]
         for match in clone["matches"]
         if match["outcome"] in {"draw", "loss"}
         for field in ("trace_path", "replay_path")
     )
+
+
+
+def test_atomic_gate_publication_keeps_relative_evidence_references_valid(
+    tmp_path: Path,
+) -> None:
+    """Publishing a staged gate must not strand JSON references under the old staging path."""
+
+    module = _subject()
+    runs = _write_clone_runs(tmp_path / "runs", module)
+    evaluator = ControlledEvaluator({211: 60, 223: 90, 227: 90})
+    destination = tmp_path / "published-gate"
+    hashes = module.current_definition_hashes()
+
+    def build(staging: Path) -> None:
+        result = module.evaluate_clone_gate(
+            runs,
+            output_dir=staging,
+            evaluator=evaluator,
+            server_cmd=["fake-server"],
+        )
+        assert result["passed"] is True
+
+    module.run_atomic_stage(
+        destination,
+        hashes,
+        build=build,
+        validate=lambda _root: {"development_games": 600},
+    )
+    published = _json(destination / "gate.json")
+    references = [
+        match[field]
+        for clone in published["clones"]
+        for match in clone["matches"]
+        if match["outcome"] in {"loss", "draw"}
+        for field in ("trace_path", "replay_path")
+    ]
+    assert references
+    assert all(not Path(reference).is_absolute() for reference in references)
+    assert all((destination / reference).is_file() for reference in references)
+    assert all(".staging" not in reference for reference in references)
 
 
 @pytest.mark.parametrize(
@@ -427,3 +561,223 @@ def test_parser_exposes_only_restart_safe_task_8_commands() -> None:
         assert parser.parse_args([command]).command == command
     with pytest.raises(SystemExit):
         parser.parse_args(["train-ppo"])
+
+
+
+def test_real_evaluation_boundary_forces_standard_profile_without_changing_contract(
+    tmp_path: Path,
+) -> None:
+    """Task 8 must force the profile through evaluate_matchup, not rewrite scenario semantics."""
+
+    module = _subject()
+    assert callable(getattr(module, "_evaluate_standard_controllers", None))
+    from ml_lab.contracts import EnvironmentContract
+
+    class ProfileClient:
+        def __init__(self) -> None:
+            self.contract = EnvironmentContract(
+                version="tactical-v2",
+                contract_hash="c" * 64,
+                encoding_hash="e" * 64,
+                observation_size=2,
+                action_size=3,
+                board={},
+                roster=[],
+                reward={},
+                semantics={"start_profiles": [{"id": "standard-3v3"}]},
+            )
+            self.resets: list[dict[str, Any]] = []
+
+        def reset(self, **kwargs):
+            self.resets.append(kwargs)
+            return {
+                "terminated": True,
+                "truncated": False,
+                "winner": kwargs["reference_seat"],
+            }
+
+        def close(self) -> None:
+            return None
+
+    clients: list[ProfileClient] = []
+
+    def factory(_worker: int) -> ProfileClient:
+        client = ProfileClient()
+        clients.append(client)
+        return client
+
+    result = module._evaluate_standard_controllers(
+        "random",
+        "random",
+        games=1,
+        seed_start=16_000_000,
+        both_seats=True,
+        workers=1,
+        server_cmd=["unused"],
+        output_path=tmp_path / "evaluation.json",
+        environment="tactical-v2",
+        evidence_dir=tmp_path / "evidence",
+        capture_trace=False,
+        start_profile="standard-3v3",
+        client_factory=factory,
+    )
+
+    assert result["schedule"]["start_profile"] == "standard-3v3"
+    assert [(call["start_profile"], call["reference_seat"]) for call in clients[0].resets] == [
+        ("standard-3v3", 0),
+        ("standard-3v3", 1),
+    ]
+
+
+def test_clone_stage_reopens_physical_checkpoint_and_sidecars(tmp_path: Path) -> None:
+    """Deleting a checkpoint after publication must make restart validation fail."""
+
+    module = _subject()
+    root = tmp_path / "runs"
+    _write_clone_runs(root, module)
+    hashes = module.current_definition_hashes()
+    assert module._validate_clone_stage(root, hashes)["clone_runs"] == 3
+
+    (root / "seed-211" / "checkpoints" / "step_000000000.zip").unlink()
+
+    with pytest.raises(ValueError, match="checkpoint"):
+        module._validate_clone_stage(root, hashes)
+
+
+def test_gate_stage_rejects_deleted_map_evaluation(tmp_path: Path) -> None:
+    """A gate summary cannot substitute for any of its 300 physical evaluation manifests."""
+
+    module = _subject()
+    runs = _write_clone_runs(tmp_path / "runs", module)
+    root = tmp_path / "gate"
+    result = module.evaluate_clone_gate(
+        runs,
+        output_dir=root,
+        evaluator=ControlledEvaluator({211: 60, 223: 90, 227: 90}),
+        server_cmd=["fake-server"],
+    )
+    assert result["passed"] is True
+    hashes = module.current_definition_hashes()
+
+    (root / "seed-211" / "map-16000000" / "evaluation.json").unlink()
+
+    with pytest.raises(ValueError, match="evaluation"):
+        module._validate_gate_stage(root, hashes)
+
+
+def test_gate_stage_recomputes_thresholds_instead_of_trusting_summary(tmp_path: Path) -> None:
+    """Tampering a passing aggregate must be detected from immutable map evaluations."""
+
+    module = _subject()
+    runs = _write_clone_runs(tmp_path / "runs", module)
+    root = tmp_path / "gate"
+    result = module.evaluate_clone_gate(
+        runs,
+        output_dir=root,
+        evaluator=ControlledEvaluator({211: 60, 223: 90, 227: 90}),
+        server_cmd=["fake-server"],
+    )
+    assert result["passed"] is True
+    gate_path = root / "gate.json"
+    gate = _json(gate_path)
+    gate["per_seed_wins"] = {"211": 200, "223": 200, "227": 200}
+    gate["pooled_win_rate"] = 1.0
+    for clone in gate["clones"]:
+        clone["wins"] = 200
+    gate_path.write_text(json.dumps(gate), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="recomputed"):
+        module._validate_gate_stage(root, module.current_definition_hashes())
+
+
+def test_clone_training_recovers_interruption_before_provenance_publication(
+    tmp_path: Path,
+) -> None:
+    """A fully trained pending clone must be completed on retry without retraining it."""
+
+    module = _subject()
+    panel, _banks, scenario = module.validate_definitions()
+    dataset_manifest = tmp_path / "dataset" / "manifest.json"
+    dataset_manifest.parent.mkdir()
+    dataset_manifest.write_text('{"state":"complete"}', encoding="utf-8")
+    dataset = SimpleNamespace(root=dataset_manifest.parent)
+    interrupted = False
+    calls: list[int] = []
+
+    def trainer(**kwargs):
+        nonlocal interrupted
+        seed = kwargs["config"].model_seed
+        calls.append(seed)
+        _write_clone_artifact(
+            kwargs["run_dir"],
+            module,
+            seed,
+            dataset_manifest=dataset_manifest,
+        )
+        if seed == 211 and not interrupted:
+            interrupted = True
+            raise RuntimeError("interrupt after trainer publication")
+        return SimpleNamespace(run_dir=kwargs["run_dir"])
+
+    common = {
+        "dataset": dataset,
+        "scenario": scenario,
+        "env": object(),
+        "contract": SimpleNamespace(contract_hash="c" * 64, encoding_hash="e" * 64),
+        "spaces_info": {"channels": 1},
+        "output_root": tmp_path / "clones",
+        "panel": panel,
+        "definition_hashes": module.current_definition_hashes(),
+        "trainer": trainer,
+    }
+    with pytest.raises(RuntimeError, match="interrupt"):
+        module.train_clone_runs(**common)
+
+    runs = module.train_clone_runs(**common)
+
+    assert [run.name for run in runs] == ["seed-211", "seed-223", "seed-227"]
+    assert calls.count(211) == 1
+    assert not list((tmp_path / "clones").glob(".seed-*.staging"))
+    assert all((run / "panel-provenance.json").is_file() for run in runs)
+
+
+def test_runtime_scenario_snapshot_is_immune_to_definition_path_mutation(
+    tmp_path: Path,
+) -> None:
+    """Runtime launch bytes and provenance must come from the validated immutable snapshot."""
+
+    module = _subject()
+    panel_path = tmp_path / "panel.json"
+    banks_path = tmp_path / "seed-banks.json"
+    scenario_path = tmp_path / "scenario.json"
+    panel_path.write_bytes(module.PANEL_PATH.read_bytes())
+    banks_path.write_bytes(module.SEED_BANKS_PATH.read_bytes())
+    scenario_path.write_bytes(module.SCENARIO_PATH.read_bytes())
+    panel, _banks, scenario = module.validate_definitions(
+        panel_path=panel_path,
+        seed_banks_path=banks_path,
+        scenario_path=scenario_path,
+    )
+    hashes = module.current_definition_hashes(
+        panel_path=panel_path,
+        seed_banks_path=banks_path,
+        scenario_path=scenario_path,
+    )
+    changed = _json(scenario_path)
+    changed["reward"]["points_weight"] = 0.25
+    scenario_path.write_text(json.dumps(changed), encoding="utf-8")
+
+    assert callable(getattr(module, "_materialize_runtime_scenario", None))
+    snapshot = module._materialize_runtime_scenario(
+        scenario,
+        tmp_path / "stage",
+        hashes,
+    )
+
+    assert json.loads(snapshot.read_text(encoding="utf-8")) == json.loads(scenario.canonical_json)
+    provenance = _json(snapshot.parent / "runtime-scenario-provenance.json")
+    assert provenance["definition_hashes"] == hashes
+    assert provenance["canonical_sha256"] == hashlib.sha256(
+        scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    assert _json(snapshot)["reward"]["points_weight"] == 0.5

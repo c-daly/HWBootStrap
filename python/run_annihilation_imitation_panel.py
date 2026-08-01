@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
+import math
 import os
 import tempfile
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,26 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _atomic_text(path: Path, value: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=f".{path.name}.", suffix=".tmp",
+            dir=path.parent, delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def current_definition_hashes(
     *,
     panel_path: Path = PANEL_PATH,
@@ -204,6 +225,53 @@ def validate_definitions(
     return panel, banks, scenario
 
 
+def _materialize_runtime_scenario(
+    scenario: ResolvedScenario,
+    stage_root: Path,
+    definition_hashes: Mapping[str, str],
+) -> Path:
+    """Freeze validated scenario semantics inside the artifact being published."""
+    root = Path(stage_root)
+    path = root / "runtime-scenario.json"
+    canonical = scenario.canonical_json
+    _atomic_text(path, canonical + "\n")
+    frozen = resolve_scenario(
+        environment="tactical-v2", scenario_file=path, template_id=None,
+        enforce_round_cap_minimum=True,
+    )
+    if frozen.canonical_json != canonical:
+        raise ValueError("runtime scenario snapshot does not match the validated definition")
+    _atomic_json(
+        root / "runtime-scenario-provenance.json",
+        {
+            "schema_version": 1,
+            "definition_hashes": dict(definition_hashes),
+            "canonical_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        },
+    )
+    return path
+
+
+def _validate_runtime_scenario(
+    root: Path, scenario: ResolvedScenario, hashes: Mapping[str, str]
+) -> Path:
+    path = Path(root) / "runtime-scenario.json"
+    provenance = _read_json(Path(root) / "runtime-scenario-provenance.json")
+    if provenance.get("definition_hashes") != dict(hashes):
+        raise ValueError("runtime scenario definition hashes do not match")
+    frozen = resolve_scenario(
+        environment="tactical-v2", scenario_file=path, template_id=None,
+        enforce_round_cap_minimum=True,
+    )
+    canonical_hash = hashlib.sha256(frozen.canonical_json.encode("utf-8")).hexdigest()
+    if (
+        frozen.canonical_json != scenario.canonical_json
+        or provenance.get("canonical_sha256") != canonical_hash
+    ):
+        raise ValueError("runtime scenario snapshot does not match the locked scenario")
+    return path
+
+
 def _stage_definitions(path: Path) -> dict[str, Any]:
     value = _read_json(path)
     hashes = value.get("definition_hashes")
@@ -253,6 +321,160 @@ def run_atomic_stage(
     return result
 
 
+def _safe_relative_file(root: Path, raw: Any, label: str) -> Path:
+    if not isinstance(raw, str) or not raw or Path(raw).is_absolute():
+        raise ValueError(f"{label} must be a stage-root-relative path")
+    root = Path(root).resolve()
+    path = (root / raw).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"{label} escapes its artifact root") from exc
+    if not path.is_file():
+        raise ValueError(f"{label} is missing: {raw}")
+    return path
+
+
+def _validate_clone_run(
+    run: Path,
+    seed: int,
+    hashes: Mapping[str, str],
+    *,
+    expected_scenario: ResolvedScenario | None = None,
+    require_provenance: bool = True,
+    expected_dataset_manifest: Path | None = None,
+) -> dict[str, str]:
+    import numpy as np
+
+    run = Path(run)
+    manifest = _read_json(run / "run.json")
+    if manifest.get("schema_version") != 1 or manifest.get("state") != "completed":
+        raise ValueError(f"clone seed {seed} run manifest is incomplete")
+    actual_seed = manifest.get("model_seed", manifest.get("config", {}).get("model_seed"))
+    if actual_seed != seed:
+        raise ValueError(f"clone seed {seed} run identity does not match")
+
+    checkpoint = _safe_relative_file(
+        run, manifest.get("latest_checkpoint"), f"clone seed {seed} checkpoint"
+    )
+    try:
+        with zipfile.ZipFile(checkpoint) as archive:
+            if not archive.namelist() or archive.testzip() is not None:
+                raise ValueError(f"clone seed {seed} checkpoint archive is corrupt")
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"clone seed {seed} checkpoint archive is unreadable") from exc
+
+    scenario_record = manifest.get("scenario")
+    if not isinstance(scenario_record, Mapping):
+        raise ValueError(f"clone seed {seed} scenario metadata is missing")
+    scenario_path = _safe_relative_file(
+        run, scenario_record.get("path"), f"clone seed {seed} scenario"
+    )
+    frozen_scenario = resolve_scenario(
+        environment="tactical-v2", scenario_file=scenario_path, template_id=None,
+        enforce_round_cap_minimum=True,
+    )
+    locked = expected_scenario or validate_definitions()[2]
+    if (
+        frozen_scenario.canonical_json != locked.canonical_json
+        or scenario_record.get("template_id") != locked.template_id
+    ):
+        raise ValueError(f"clone seed {seed} scenario does not match the locked scenario")
+
+    bc = _read_json(run / "bc.json")
+    metrics = _read_json(run / "metrics.json")
+    if not metrics or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in metrics.values()
+    ):
+        raise ValueError(f"clone seed {seed} metrics are invalid")
+    if (
+        bc.get("schema_version") != 1
+        or bc.get("model_seed") != seed
+        or bc.get("config") != manifest.get("bc_config")
+    ):
+        raise ValueError(f"clone seed {seed} behavioral-cloning metadata does not match")
+
+    contract = manifest.get("contract")
+    required_contract = {
+        "version", "contract_hash", "encoding_hash", "observation_size", "action_size",
+        "board", "roster", "reward",
+    }
+    if not isinstance(contract, Mapping) or not required_contract.issubset(contract):
+        raise ValueError(f"clone seed {seed} contract is incomplete")
+    observation_size = contract.get("observation_size")
+    action_size = contract.get("action_size")
+    if (
+        isinstance(observation_size, bool) or not isinstance(observation_size, int)
+        or isinstance(action_size, bool) or not isinstance(action_size, int)
+        or observation_size <= 0 or action_size <= 0
+    ):
+        raise ValueError(f"clone seed {seed} contract geometry is invalid")
+    fixtures_path = _safe_relative_file(
+        run, "actor-fixtures.npz", f"clone seed {seed} actor fixtures"
+    )
+    try:
+        with np.load(fixtures_path, allow_pickle=False) as fixtures:
+            observations = fixtures["observations"]
+            legal_masks = fixtures["legal_masks"]
+            if (
+                observations.dtype != np.float32
+                or legal_masks.dtype != np.bool_
+                or observations.ndim != 2
+                or legal_masks.ndim != 2
+                or observations.shape[0] == 0
+                or observations.shape != (legal_masks.shape[0], observation_size)
+                or legal_masks.shape[1] != action_size
+            ):
+                raise ValueError(f"clone seed {seed} actor fixtures do not match its contract")
+    except (OSError, KeyError, ValueError) as exc:
+        if isinstance(exc, ValueError) and "clone seed" in str(exc):
+            raise
+        raise ValueError(f"clone seed {seed} actor fixtures are unreadable") from exc
+
+    dataset_hash = manifest.get("dataset_manifest_sha256")
+    if (
+        not isinstance(dataset_hash, str)
+        or bc.get("dataset_manifest_sha256") != dataset_hash
+    ):
+        raise ValueError(f"clone seed {seed} dataset identity does not match")
+    if expected_dataset_manifest is not None:
+        expected_dataset_manifest = Path(expected_dataset_manifest)
+        if (
+            not expected_dataset_manifest.is_file()
+            or _sha256(expected_dataset_manifest) != dataset_hash
+        ):
+            raise ValueError(f"clone seed {seed} dataset manifest does not match")
+
+    if require_provenance:
+        provenance = _read_json(run / "panel-provenance.json")
+        dataset_path_raw = provenance.get("dataset_manifest")
+        if not isinstance(dataset_path_raw, str):
+            raise ValueError(f"clone seed {seed} dataset provenance is missing")
+        dataset_path = Path(dataset_path_raw)
+        if not dataset_path.is_file():
+            raise ValueError(f"clone seed {seed} dataset manifest is missing")
+        if (
+            provenance.get("schema_version") != 1
+            or provenance.get("model_seed") != seed
+            or provenance.get("sampler_seed") != _SAMPLER_SEEDS[str(seed)]
+            or provenance.get("definition_hashes") != dict(hashes)
+            or provenance.get("dataset_manifest_sha256") != dataset_hash
+            or _sha256(dataset_path) != dataset_hash
+        ):
+            raise ValueError(f"clone seed {seed} definition provenance does not match physical artifacts")
+
+    identity = {
+        "contract_hash": contract.get("contract_hash"),
+        "encoding_hash": contract.get("encoding_hash"),
+    }
+    if not all(isinstance(value, str) and len(value) == 64 for value in identity.values()):
+        raise ValueError(f"clone seed {seed} contract identity is invalid")
+    return identity
+
+
 def train_clone_runs(
     *,
     dataset: Any,
@@ -271,50 +493,59 @@ def train_clone_runs(
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
     bc = panel["behavioral_cloning"]
+    dataset_manifest = Path(getattr(dataset, "root", "")) / "manifest.json"
+    if not dataset_manifest.is_file():
+        raise ValueError("behavioral-cloning dataset manifest is missing")
     runs: list[Path] = []
     for seed in panel["model_seeds"]:
         run = root / f"seed-{seed}"
-        provenance_path = run / "panel-provenance.json"
+        pending = root / f".seed-{seed}.staging"
         if run.exists():
-            manifest = _read_json(run / "run.json")
-            provenance = _read_json(provenance_path)
-            if (
-                manifest.get("state") != "completed"
-                or manifest.get("model_seed", manifest.get("config", {}).get("model_seed")) != seed
-                or provenance.get("model_seed") != seed
-                or provenance.get("sampler_seed") != panel["sampler_seeds"][str(seed)]
-                or provenance.get("definition_hashes") != dict(definition_hashes)
-            ):
-                raise ValueError(f"clone seed {seed} is incomplete or incompatible")
+            _validate_clone_run(
+                run, seed, definition_hashes, expected_scenario=scenario,
+                expected_dataset_manifest=dataset_manifest,
+            )
             runs.append(run)
             continue
-        config = BehavioralCloningConfig(
-            model_seed=seed,
-            batch_size=bc["batch_size"],
-            learning_rate=bc["learning_rate"],
-            max_epochs=bc["max_epochs"],
-            patience=bc["patience"],
+        if not pending.exists():
+            config = BehavioralCloningConfig(
+                model_seed=seed,
+                batch_size=bc["batch_size"],
+                learning_rate=bc["learning_rate"],
+                max_epochs=bc["max_epochs"],
+                patience=bc["patience"],
+            )
+            result = selected_trainer(
+                dataset=dataset,
+                scenario=scenario,
+                env=env,
+                contract=contract,
+                spaces_info=dict(spaces_info),
+                run_dir=pending,
+                config=config,
+            )
+            if Path(result.run_dir) != pending or not (pending / "run.json").is_file():
+                raise ValueError(f"clone seed {seed} did not publish the expected pending run")
+        _validate_clone_run(
+            pending, seed, definition_hashes, expected_scenario=scenario,
+            require_provenance=False, expected_dataset_manifest=dataset_manifest,
         )
-        result = selected_trainer(
-            dataset=dataset,
-            scenario=scenario,
-            env=env,
-            contract=contract,
-            spaces_info=dict(spaces_info),
-            run_dir=run,
-            config=config,
-        )
-        if Path(result.run_dir) != run or not (run / "run.json").is_file():
-            raise ValueError(f"clone seed {seed} did not publish the expected run")
         _atomic_json(
-            provenance_path,
+            pending / "panel-provenance.json",
             {
                 "schema_version": 1,
                 "model_seed": seed,
                 "sampler_seed": panel["sampler_seeds"][str(seed)],
                 "definition_hashes": dict(definition_hashes),
+                "dataset_manifest": str(dataset_manifest.resolve()),
+                "dataset_manifest_sha256": _sha256(dataset_manifest),
             },
         )
+        _validate_clone_run(
+            pending, seed, definition_hashes, expected_scenario=scenario,
+            expected_dataset_manifest=dataset_manifest,
+        )
+        os.replace(pending, run)
         runs.append(run)
     return runs
 
@@ -341,11 +572,11 @@ def _clone_metadata(
     by_seed: dict[int, Path] = {}
     expected_contract: dict[str, str] | None = None
     errors: list[str] = []
+    locked = validate_definitions()[2]
     for raw_run in clone_runs:
         run = Path(raw_run)
         try:
             manifest = _read_json(run / "run.json")
-            provenance = _read_json(run / "panel-provenance.json")
         except ValueError as exc:
             errors.append(str(exc))
             continue
@@ -354,25 +585,14 @@ def _clone_metadata(
             errors.append(f"clone run has duplicate or unexpected model seed {seed!r}")
             continue
         by_seed[seed] = run
-        if manifest.get("state") != "completed":
-            errors.append(f"clone seed {seed} is not completed")
-        if (
-            provenance.get("model_seed") != seed
-            or provenance.get("sampler_seed") != _SAMPLER_SEEDS[str(seed)]
-            or provenance.get("definition_hashes") != dict(hashes)
-        ):
-            errors.append(f"clone seed {seed} definition provenance does not match")
-        contract = manifest.get("contract")
-        if not isinstance(contract, dict):
-            errors.append(f"clone seed {seed} contract is missing")
+        try:
+            identity = _validate_clone_run(
+                run, seed, hashes, expected_scenario=locked
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
             continue
-        identity = {
-            "contract_hash": contract.get("contract_hash"),
-            "encoding_hash": contract.get("encoding_hash"),
-        }
-        if not all(isinstance(value, str) and value for value in identity.values()):
-            errors.append(f"clone seed {seed} contract identity is invalid")
-        elif expected_contract is None:
+        if expected_contract is None:
             expected_contract = identity
         elif identity != expected_contract:
             errors.append(f"clone seed {seed} contract does not match the panel")
@@ -381,20 +601,97 @@ def _clone_metadata(
     return by_seed, expected_contract or {}, errors
 
 
-def _standard_gate_scenario(scenario: ResolvedScenario, path: Path) -> None:
-    document = copy.deepcopy(json.loads(scenario.canonical_json))
-    for item in document["tactical_v2"]["start_distribution"]:
-        item["basis_points"] = 10_000 if item["profile_id"] == "standard-3v3" else 0
-    _atomic_json(path, document)
-    resolve_scenario(
-        environment="tactical-v2", scenario_file=path, template_id=None,
-        enforce_round_cap_minimum=True,
+def _evaluate_standard_controllers(
+    p0: str,
+    p1: str,
+    *,
+    games: int,
+    seed_start: int,
+    both_seats: bool,
+    workers: int,
+    server_cmd: Sequence[str],
+    output_path: Path | None,
+    environment: str | None,
+    evidence_dir: Path | None,
+    capture_trace: bool,
+    start_profile: str,
+    client_factory: Callable[[int], Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve controllers normally and force the locked profile at reset."""
+    from ml_lab.controllers import ControllerResolver, _validate_contract_compatibility
+    from ml_lab.evaluation import DuelClient, evaluate_matchup
+
+    resolver = ControllerResolver()
+    candidate = resolver.resolve(p0)
+    opponent = resolver.resolve(p1)
+    _validate_contract_compatibility(candidate.contract, opponent.contract)
+    for controller in (candidate, opponent):
+        if (
+            environment is not None
+            and controller.model is not None
+            and controller.contract is not None
+            and controller.contract.version != environment
+        ):
+            raise ValueError("controller contract does not match the explicit environment")
+    selected_environment = environment or next(
+        (
+            controller.contract.version
+            for controller in (candidate, opponent)
+            if controller.contract is not None
+        ),
+        "tactical-v1",
+    )
+    factory = client_factory or (
+        lambda _index: DuelClient(server_cmd, environment=selected_environment)
+    )
+    return evaluate_matchup(
+        candidate, opponent, games=games, seed_start=seed_start,
+        both_seats=both_seats, workers=workers, client_factory=factory,
+        output_path=output_path, start_profile=start_profile,
+        evidence_dir=evidence_dir, capture_trace=capture_trace,
     )
 
 
-def _artifact_exists(match: Mapping[str, Any], field: str) -> bool:
-    raw = match.get(field)
-    return isinstance(raw, str) and Path(raw).is_file()
+def _relativize_evaluation(
+    result: Mapping[str, Any], output_root: Path, output_path: Path
+) -> dict[str, Any]:
+    root = Path(output_root).resolve()
+    normalized = dict(result)
+    raw_matches = normalized.get("matches")
+    if not isinstance(raw_matches, list):
+        return normalized
+    matches: list[Any] = []
+    for raw_match in raw_matches:
+        if not isinstance(raw_match, Mapping):
+            matches.append(raw_match)
+            continue
+        match = dict(raw_match)
+        for field in ("trace_path", "replay_path"):
+            raw = match.get(field)
+            if raw is None:
+                continue
+            if not isinstance(raw, str):
+                raise ValueError(f"evaluation {field} is invalid")
+            path = Path(raw).resolve()
+            try:
+                relative = path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(f"evaluation {field} escapes the gate artifact") from exc
+            if not path.is_file():
+                raise ValueError(f"evaluation {field} is missing")
+            match[field] = relative.as_posix()
+        matches.append(match)
+    normalized["matches"] = matches
+    _atomic_json(output_path, normalized)
+    return normalized
+
+
+def _artifact_exists(root: Path, match: Mapping[str, Any], field: str) -> bool:
+    try:
+        _safe_relative_file(root, match.get(field), f"evaluation {field}")
+    except ValueError:
+        return False
+    return True
 
 
 def evaluate_clone_gate(
@@ -406,7 +703,6 @@ def evaluate_clone_gate(
     evaluator: Callable[..., Mapping[str, Any]] | None = None,
 ) -> Mapping[str, Any]:
     from ml_lab.cli import DEFAULT_SERVER
-    from ml_lab.evaluation import evaluate_controllers
 
     panel, _banks, scenario = validate_definitions()
     hashes = current_definition_hashes()
@@ -416,11 +712,10 @@ def evaluate_clone_gate(
 
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
-    gate_scenario = output_root / "standard-gate-scenario.json"
-    _standard_gate_scenario(scenario, gate_scenario)
+    gate_scenario = _materialize_runtime_scenario(scenario, output_root, hashes)
     command = list(server_cmd) if server_cmd is not None else ["dotnet", str(DEFAULT_SERVER)]
     command.extend(["--scenario-file", str(gate_scenario)])
-    selected_evaluator = evaluator or evaluate_controllers
+    selected_evaluator = evaluator or _evaluate_standard_controllers
     start = panel["clone_gate"]["seed_start"]
     stop = start + panel["clone_gate"]["maps"]
     expected_keys = {(map_seed, seat) for map_seed in range(start, stop) for seat in (0, 1)}
@@ -433,13 +728,15 @@ def evaluate_clone_gate(
         seen: set[tuple[int, int]] = set()
         for map_seed in range(start, stop):
             map_root = output_root / f"seed-{model_seed}" / f"map-{map_seed}"
+            output_path = map_root / "evaluation.json"
             result = selected_evaluator(
                 f"run:{run}", panel["clone_gate"]["opponent"], games=1,
                 seed_start=map_seed, both_seats=True, workers=workers,
-                server_cmd=command, output_path=map_root / "evaluation.json",
+                server_cmd=command, output_path=output_path,
                 environment="tactical-v2", evidence_dir=map_root / "evidence",
-                capture_trace=True,
+                capture_trace=True, start_profile=panel["clone_gate"]["profile"],
             )
+            result = _relativize_evaluation(result, output_root, output_path)
             candidate = result.get("candidate")
             if (
                 not isinstance(candidate, Mapping)
@@ -451,6 +748,10 @@ def evaluate_clone_gate(
                 result.get("reciprocal") is not True
                 or result.get("seeds") != [map_seed]
                 or result.get("games") != 2
+                or result.get("schedule") != {
+                    "start_profile": panel["clone_gate"]["profile"],
+                    "reference_seat_policy": "candidate-seat",
+                }
             ):
                 errors.append(f"clone seed {model_seed} map {map_seed} schedule is not reciprocal")
             raw_matches = result.get("matches")
@@ -473,8 +774,8 @@ def evaluate_clone_gate(
                 if outcome not in {"win", "loss", "draw"}:
                     errors.append(f"clone seed {model_seed} has an invalid outcome")
                 if outcome in {"loss", "draw"} and (
-                    not _artifact_exists(match, "trace_path")
-                    or not _artifact_exists(match, "replay_path")
+                    not _artifact_exists(output_root, match, "trace_path")
+                    or not _artifact_exists(output_root, match, "replay_path")
                 ):
                     errors.append(f"clone seed {model_seed} loss/draw evidence is missing")
                 matches.append(match)
@@ -485,7 +786,11 @@ def evaluate_clone_gate(
         wins = sum(match.get("outcome") == "win" for match in matches)
         per_seed_wins[model_seed] = wins
         clones.append(
-            {"model_seed": model_seed, "wins": wins, "games": len(matches), "matches": matches}
+            {
+                "model_seed": model_seed, "run_path": str(run.resolve()),
+                "contract": expected_contract, "wins": wins,
+                "games": len(matches), "matches": matches,
+            }
         )
 
     pooled = sum(per_seed_wins.values()) / 600
@@ -570,20 +875,97 @@ def _validate_clone_stage(root: Path, hashes: Mapping[str, str]) -> Mapping[str,
 
 
 def _validate_gate_stage(root: Path, hashes: Mapping[str, str]) -> Mapping[str, Any]:
-    gate = _read_json(Path(root) / "gate.json")
+    root = Path(root)
+    gate = _read_json(root / "gate.json")
+    _panel, _banks, scenario = validate_definitions()
+    _validate_runtime_scenario(root, scenario, hashes)
     if gate.get("definition_hashes") != dict(hashes):
         raise ValueError("clone gate definition hashes do not match")
-    if gate.get("state") != "completed" or gate.get("passed") is not True:
-        raise ValueError("clone gate did not pass")
-    if gate.get("per_seed_wins", {}).keys() != {str(seed) for seed in _MODEL_SEEDS}:
-        raise ValueError("clone gate model-seed results are incomplete")
     clones = gate.get("clones")
-    if (
-        not isinstance(clones, list)
-        or len(clones) != 3
-        or any(item.get("games") != 200 for item in clones if isinstance(item, dict))
-    ):
+    if not isinstance(clones, list) or len(clones) != 3:
         raise ValueError("clone gate expected outputs are incomplete")
+    expected = {
+        (root / f"seed-{seed}" / f"map-{map_seed}" / "evaluation.json").resolve()
+        for seed in _MODEL_SEEDS
+        for map_seed in range(_CLONE_GATE["seed_start"], _CLONE_GATE["seed_start"] + _CLONE_GATE["maps"])
+    }
+    actual = {path.resolve() for path in root.glob("seed-*/map-*/evaluation.json")}
+    if actual != expected:
+        raise ValueError("clone gate evaluation manifests are missing or unexpected")
+    recomputed: dict[int, int] = {}
+    for clone in clones:
+        if not isinstance(clone, Mapping):
+            raise ValueError("clone gate clone result is malformed")
+        seed = clone.get("model_seed")
+        run_path = clone.get("run_path")
+        if seed not in _MODEL_SEEDS or seed in recomputed or not isinstance(run_path, str):
+            raise ValueError("clone gate model-seed results are incomplete")
+        identity = _validate_clone_run(Path(run_path), seed, hashes, expected_scenario=scenario)
+        if clone.get("contract") != identity:
+            raise ValueError(f"clone seed {seed} gate contract identity does not match")
+        physical: list[dict[str, Any]] = []
+        for map_seed in range(_CLONE_GATE["seed_start"], _CLONE_GATE["seed_start"] + _CLONE_GATE["maps"]):
+            path = root / f"seed-{seed}" / f"map-{map_seed}" / "evaluation.json"
+            try:
+                evaluation = _read_json(path)
+            except ValueError as exc:
+                raise ValueError(f"clone gate evaluation is unreadable: {path}") from exc
+            candidate = evaluation.get("candidate")
+            opponent = evaluation.get("opponent")
+            if (
+                not isinstance(candidate, Mapping)
+                or candidate.get("contract_hash") != identity["contract_hash"]
+                or candidate.get("encoding_hash") != identity["encoding_hash"]
+                or not isinstance(opponent, Mapping)
+                or opponent.get("name") != _CLONE_GATE["opponent"]
+            ):
+                raise ValueError(f"clone seed {seed} map {map_seed} evaluation identity is invalid")
+            if (
+                evaluation.get("seed_start") != map_seed
+                or evaluation.get("seeds") != [map_seed]
+                or evaluation.get("reciprocal") is not True
+                or evaluation.get("games") != 2
+                or evaluation.get("schedule") != {
+                    "start_profile": _CLONE_GATE["profile"],
+                    "reference_seat_policy": "candidate-seat",
+                }
+            ):
+                raise ValueError(f"clone seed {seed} map {map_seed} evaluation schedule is invalid")
+            matches = evaluation.get("matches")
+            if not isinstance(matches, list) or len(matches) != 2:
+                raise ValueError(f"clone seed {seed} map {map_seed} evaluation matches are invalid")
+            keys: set[tuple[Any, Any]] = set()
+            for raw in matches:
+                if not isinstance(raw, Mapping):
+                    raise ValueError(f"clone seed {seed} evaluation match is malformed")
+                match = dict(raw)
+                keys.add((match.get("seed"), match.get("candidate_seat")))
+                if match.get("outcome") not in {"win", "loss", "draw"}:
+                    raise ValueError(f"clone seed {seed} evaluation outcome is invalid")
+                if match["outcome"] in {"loss", "draw"} and (
+                    not _artifact_exists(root, match, "trace_path")
+                    or not _artifact_exists(root, match, "replay_path")
+                ):
+                    raise ValueError(f"clone seed {seed} evaluation evidence is missing")
+                physical.append(match)
+            if keys != {(map_seed, 0), (map_seed, 1)}:
+                raise ValueError(f"clone seed {seed} map {map_seed} evaluation seats are invalid")
+        wins = sum(match["outcome"] == "win" for match in physical)
+        recomputed[seed] = wins
+        if clone.get("games") != len(physical) or clone.get("wins") != wins or clone.get("matches") != physical:
+            raise ValueError(f"clone seed {seed} gate summary differs from recomputed evidence")
+    pooled = sum(recomputed.values()) / 600
+    passed = clone_gate(recomputed)
+    if (
+        gate.get("per_seed_wins") != {str(seed): wins for seed, wins in recomputed.items()}
+        or gate.get("pooled_win_rate") != pooled
+        or gate.get("passed") is not passed
+        or gate.get("state") != ("completed" if passed else "failed")
+        or gate.get("integrity_errors") != []
+    ):
+        raise ValueError("clone gate aggregate differs from recomputed physical evidence")
+    if not passed:
+        raise ValueError("clone gate did not pass recomputed thresholds")
     return {"clone_runs": 3, "development_games": 600}
 
 
