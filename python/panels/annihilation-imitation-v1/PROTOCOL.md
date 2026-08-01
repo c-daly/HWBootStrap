@@ -104,9 +104,12 @@ is refused.
 `evaluate-final` spends the sealed bank once. Each initialized model receives
 maps 17,000,000 through 17,000,249 from both candidate seats against Random
 with forced `standard-3v3`: exactly 500 games per model and 1,500 primary games
-total. Publication is refused for missing or duplicated seed/seat/model keys,
-either missing seat, a seed outside the bank, a changed sealed checkpoint, or
-an already completed final evaluation.
+total. The seal hash is captured after initial validation. Immediately after
+the last game and before publishing `final-evaluation.json`, the seal file must
+still have that exact hash and every sealed file plus repository identity is
+validated again. Publication is refused for missing or duplicated
+seed/seat/model keys, either missing seat, a seed outside the bank, any
+mid-evaluation sealed-input change, or an already completed final evaluation.
 
 The preregistered primary gate passes only at both thresholds:
 
@@ -123,9 +126,19 @@ two-sided sign test on discordant wins.
 `report` places the primary gate table before every secondary result, followed
 by clone, initialized PPO, scratch PPO, incumbent PPO, conversion, BC, learning
 curve, compute, failure-trace, and limitation sections. Clone, conversion, BC,
-learning, and compute values are derived from hash-sealed artifacts; comparator
-loss/draw intervals, seat summaries, diagnostics, and draw categories come from
-the same aggregate as the Markdown report.
+learning, and compute values are derived from hash-sealed artifacts. Learning
+curves contain the pooled standard win rate at every locked nominal budget for
+both initialized and scratch PPO. Empty conversion evidence is an error rather
+than a reported 0/0 result. Wall-clock timing is reported only when every
+authoritative run records it; otherwise the aggregate and report explicitly
+mark that timing unavailable. Comparator loss/draw intervals, seat summaries,
+diagnostics, and draw categories come from the same aggregate as the Markdown
+report.
+
+Before aggregation, `report` requires a schema-v1 completed
+`final-evaluation.json` whose schedule exactly equals the locked final
+schedule and whose seal hash equals the current, fully revalidated seal.
+The same captured seal is checked again before the publication pointer swap.
 
 Publication writes `aggregate.json` and `REPORT.md` into an immutable
 content-addressed directory under `.final-generations`. Readers first open the

@@ -2004,7 +2004,7 @@ def _final_panel_fixture(tmp_path: Path, *, selection: bool = True):
             checkpoint.write_bytes(f"{condition}-{seed}".encode())
             (run / "run.json").write_text(json.dumps({
                 "schema_version": 1, "state": "completed", "model_seed": seed,
-                "condition": condition, "timesteps": 25_600, "wall_clock_seconds": 10.0,
+                "condition": condition, "timesteps": 25_600,
             }), encoding="utf-8")
             candidates.append({
                 "condition": condition, "model_seed": seed, "nominal_step": 25_600,
@@ -2013,6 +2013,16 @@ def _final_panel_fixture(tmp_path: Path, *, selection: bool = True):
                 "standard": ["win", "loss"],
                 "conversion": ["win", "draw"] if condition == "bc_ppo" else [],
             })
+            for nominal, standard in (
+                (12_800, ["loss", "draw"]),
+                (51_200, ["win", "win"]),
+            ):
+                candidates.append({
+                    "condition": condition, "model_seed": seed,
+                    "nominal_step": nominal, "actual_step": nominal,
+                    "standard": standard,
+                    "conversion": [],
+                })
     development = panel_dir / "development"
     development.mkdir()
     (development / "development.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "candidates": candidates}), encoding="utf-8")
@@ -2069,7 +2079,7 @@ def _final_panel_fixture(tmp_path: Path, *, selection: bool = True):
             "nll": 0.4, "top1_accuracy": 0.8,
         }), encoding="utf-8")
         (clone_run / "run.json").write_text(json.dumps({
-            "state": "completed", "model_seed": seed, "wall_clock_seconds": 2.0,
+            "state": "completed", "model_seed": seed,
         }), encoding="utf-8")
     return panel_dir, dataset_dir, incumbent
 
@@ -2189,6 +2199,32 @@ def test_final_evaluation_refuses_incomplete_duplicate_or_out_of_bank_results(
     assert not (panel_dir / "final-evaluation.json").exists()
 
 
+def test_final_evaluation_revalidates_seal_after_games_before_publication(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(
+        panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+        revision="37cc8f9", dirty=False,
+    )
+    calls: list[dict[str, Any]] = []
+    base = _final_evaluator(calls)
+
+    def mutate_during_evaluation(candidate, opponent, **kwargs):
+        result = base(candidate, opponent, **kwargs)
+        if len(calls) == 1:
+            (dataset_dir / "games.jsonl").write_text('{"changed":true}\n', encoding="utf-8")
+        return result
+
+    with pytest.raises(ValueError, match="sealed dataset changed"):
+        module.evaluate_final(
+            panel_dir, evaluator=mutate_during_evaluation, server_cmd=["fake-server"]
+        )
+
+    assert not (panel_dir / "final-evaluation.json").exists()
+
+
 def _report_matches() -> list[dict[str, Any]]:
     rows = []
     outcome_counts = {
@@ -2222,9 +2258,24 @@ def _report_evidence() -> dict[str, Any]:
         "clone": {"pooled": {"wins": 900, "losses": 450, "draws": 150, "games": 1500}},
         "conversion": {"initialized_wins": 71, "initialized_games": 90},
         "bc_metrics": {"validation_loss": 0.4321, "validation_accuracy": 0.8765},
-        "learning_curves": {"initialized_final_reward": 1.25, "scratch_final_reward": 0.75},
-        "compute": {"teacher_games": 12_000, "bc_wall_clock_seconds": 41.5,
-                    "ppo_environment_steps": 153_600, "ppo_wall_clock_seconds": 301.25},
+        "learning_curves": {
+            "initialized": [
+                {"nominal_step": 12_800, "pooled_standard_win_rate": 0.25},
+                {"nominal_step": 25_600, "pooled_standard_win_rate": 0.5},
+                {"nominal_step": 51_200, "pooled_standard_win_rate": 0.75},
+            ],
+            "scratch": [
+                {"nominal_step": 12_800, "pooled_standard_win_rate": 0.2},
+                {"nominal_step": 25_600, "pooled_standard_win_rate": 0.4},
+                {"nominal_step": 51_200, "pooled_standard_win_rate": 0.6},
+            ],
+        },
+        "compute": {
+            "teacher_games": 12_000,
+            "bc_wall_clock": {"status": "unavailable"},
+            "ppo_environment_steps": 153_600,
+            "ppo_wall_clock": {"status": "available", "seconds": 301.25},
+        },
     }
 
 
@@ -2292,7 +2343,8 @@ def test_report_recomputes_raw_matches_orders_primary_first_and_is_consistent(
     assert "900/450/150 over 1500 games" in report
     assert "71/90" in report
     assert "validation loss 0.4321" in report
-    assert "initialized final reward 1.25; scratch final reward 0.75" in report
+    assert "12800: 25.000%" in report and "51200: 75.000%" in report
+    assert "BC wall clock unavailable" in report
     assert "teacher games 12000" in report and "PPO environment steps 153600" in report
     published_aggregate, published_report, manifest = module.load_final_publication(panel_dir)
     assert published_aggregate == aggregate
@@ -2393,12 +2445,87 @@ def test_report_evidence_is_derived_from_hash_sealed_artifacts(tmp_path: Path) -
         "conversion": {"initialized_wins": 3, "initialized_games": 6},
         "bc_metrics": {"validation_loss": 0.4000000000000001,
                        "validation_accuracy": 0.8000000000000002},
-        "learning_curves": {"initialized_final_reward": 0.5,
-                            "scratch_final_reward": 0.5},
-        "compute": {"teacher_games": 1, "bc_wall_clock_seconds": 6.0,
-                    "ppo_environment_steps": 153_600,
-                    "ppo_wall_clock_seconds": 60.0},
+        "learning_curves": {
+            "initialized": [
+                {"nominal_step": 12_800, "pooled_standard_win_rate": 0.0},
+                {"nominal_step": 25_600, "pooled_standard_win_rate": 0.5},
+                {"nominal_step": 51_200, "pooled_standard_win_rate": 1.0},
+            ],
+            "scratch": [
+                {"nominal_step": 12_800, "pooled_standard_win_rate": 0.0},
+                {"nominal_step": 25_600, "pooled_standard_win_rate": 0.5},
+                {"nominal_step": 51_200, "pooled_standard_win_rate": 1.0},
+            ],
+        },
+        "compute": {
+            "teacher_games": 1,
+            "bc_wall_clock": {"status": "unavailable"},
+            "ppo_environment_steps": 153_600,
+            "ppo_wall_clock": {"status": "unavailable"},
+        },
     }
+
+
+def test_report_evidence_rejects_missing_conversion_instead_of_zero_over_zero(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    development_path = panel_dir / "development" / "development.json"
+    development = _json(development_path)
+    for row in development["candidates"]:
+        row["conversion"] = []
+    development_path.write_text(json.dumps(development), encoding="utf-8")
+    module.freeze_final(
+        panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+        revision="37cc8f9", dirty=False,
+    )
+
+    with pytest.raises(ValueError, match="conversion report evidence is unavailable"):
+        module._sealed_report_evidence(panel_dir)
+
+
+@pytest.mark.parametrize("mutation", ["schema", "state", "schedule", "seal"])
+def test_report_rejects_invalid_or_transplanted_final_evaluation_envelope(
+    tmp_path: Path, mutation: str,
+) -> None:
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(
+        panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+        revision="37cc8f9", dirty=False,
+    )
+    seal_hash = _sha256(panel_dir / "final-seal.json")
+    payload = {
+        "schema_version": 1,
+        "state": "completed",
+        "seal_sha256": seal_hash,
+        "schedule": dict(module._FINAL),
+        "matches": [
+            row for row in _report_matches() if row["condition"] == "initialized_ppo"
+        ],
+        "comparison_matches": [
+            row for row in _report_matches() if row["condition"] != "initialized_ppo"
+        ],
+    }
+    if mutation == "schema":
+        payload["schema_version"] = 2
+    elif mutation == "state":
+        payload["state"] = "running"
+    elif mutation == "schedule":
+        payload["schedule"]["maps"] = 249
+    else:
+        payload["seal_sha256"] = "0" * 64
+    (panel_dir / "final-evaluation.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="final evaluation envelope"):
+        module.publish_final_report(
+            panel_dir, supporting_evidence=_report_evidence()
+        )
+
+    assert not (panel_dir / "final-publication.json").exists()
 
 
 def test_parser_exposes_final_seal_commands() -> None:

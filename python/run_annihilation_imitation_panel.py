@@ -2566,6 +2566,7 @@ def evaluate_final(
         raise RuntimeError("final bank is not assigned")
     seal = _read_json(seal_path)
     _validate_final_seal(seal)
+    captured_seal_sha256 = _sha256(seal_path)
     selected_evaluator = evaluator or _evaluate_standard_controllers
     work_root = panel_dir / ".final-evaluation.pending"
     if work_root.exists():
@@ -2632,10 +2633,13 @@ def evaluate_final(
                 by_condition[condition].append(normalized)
         for rows in by_condition.values():
             _validate_final_schedule(rows)
+        if _sha256(seal_path) != captured_seal_sha256:
+            raise ValueError("sealed final assignment changed during evaluation")
+        _validate_final_seal(_read_json(seal_path))
         payload = {
             "schema_version": 1,
             "state": "completed",
-            "seal_sha256": _sha256(seal_path),
+            "seal_sha256": captured_seal_sha256,
             "schedule": dict(_FINAL),
             "matches": by_condition["initialized_ppo"],
             "comparison_matches": [
@@ -2844,6 +2848,18 @@ def _render_final_report(aggregate: Mapping[str, Any]) -> str:
     bc = evidence["bc_metrics"]
     curves = evidence["learning_curves"]
     compute = evidence["compute"]
+
+    def curve_text(points: Sequence[Mapping[str, Any]]) -> str:
+        return ", ".join(
+            f"{point['nominal_step']}: {point['pooled_standard_win_rate']:.3%}"
+            for point in points
+        )
+
+    def timing_text(label: str, value: Mapping[str, Any]) -> str:
+        if value.get("status") == "available":
+            return f"{label} {value['seconds']} seconds"
+        return f"{label} unavailable ({value.get('reason', 'not recorded')})"
+
     lines.extend([
         "",
         "The primary result treats every draw and loss as a non-win; material diagnostics never alter the gate.",
@@ -2893,12 +2909,15 @@ def _render_final_report(aggregate: Mapping[str, Any]) -> str:
         "",
         "## Learning curves",
         "",
-        f"Learning curve initialized final reward {curves['initialized_final_reward']}; scratch final reward {curves['scratch_final_reward']}.",
+        f"Initialized pooled standard win rate by nominal step: {curve_text(curves['initialized'])}.",
+        f"Scratch pooled standard win rate by nominal step: {curve_text(curves['scratch'])}.",
         "",
         "## Compute",
         "",
-        f"Compute: teacher games {compute['teacher_games']}; BC wall clock seconds {compute['bc_wall_clock_seconds']}; "
-        f"PPO environment steps {compute['ppo_environment_steps']}; PPO wall clock seconds {compute['ppo_wall_clock_seconds']}.",
+        f"Compute: teacher games {compute['teacher_games']}; "
+        f"{timing_text('BC wall clock', compute['bc_wall_clock'])}; "
+        f"PPO environment steps {compute['ppo_environment_steps']}; "
+        f"{timing_text('PPO wall clock', compute['ppo_wall_clock'])}.",
         "",
         "## Failure traces",
         "",
@@ -2963,41 +2982,69 @@ def _sealed_report_evidence(panel_dir: Path) -> dict[str, Any]:
     candidates = development.get("candidates")
     if not isinstance(candidates, list):
         raise ValueError("sealed development report evidence is incomplete")
-    selected = [
+    ppo_rows = [
         row for row in candidates
-        if isinstance(row, Mapping) and row.get("nominal_step") == nominal
+        if isinstance(row, Mapping) and row.get("condition") in {"bc_ppo", "scratch_ppo"}
     ]
-    initialized_rows = [row for row in selected if row.get("condition") == "bc_ppo"]
-    scratch_rows = [row for row in selected if row.get("condition") == "scratch_ppo"]
+
+    def learning_curve(condition: str) -> list[dict[str, Any]]:
+        points = []
+        for budget in _PPO["nominal_budgets"]:
+            rows = [
+                row for row in ppo_rows
+                if row.get("condition") == condition and row.get("nominal_step") == budget
+            ]
+            if len(rows) != len(_MODEL_SEEDS):
+                raise ValueError("sealed learning-curve evidence is incomplete")
+            outcomes = [outcome for row in rows for outcome in row.get("standard", [])]
+            if not outcomes:
+                raise ValueError("sealed learning-curve evidence is incomplete")
+            points.append({
+                "nominal_step": budget,
+                "pooled_standard_win_rate": outcomes.count("win") / len(outcomes),
+            })
+        return points
+
+    initialized_rows = [
+        row for row in ppo_rows
+        if row.get("condition") == "bc_ppo" and row.get("nominal_step") == nominal
+    ]
     conversion_outcomes = [
         outcome for row in initialized_rows for outcome in row.get("conversion", [])
     ]
+    if not conversion_outcomes:
+        raise ValueError("conversion report evidence is unavailable")
 
-    def development_win_rate(rows: Sequence[Mapping[str, Any]]) -> float:
-        outcomes = [outcome for row in rows for outcome in row.get("standard", [])]
-        if not outcomes:
-            raise ValueError("sealed learning-curve evidence is incomplete")
-        return outcomes.count("win") / len(outcomes)
-
-    dataset_games = seal["dataset_root"]
-    games_path = Path(dataset_games) / "games.jsonl"
+    games_path = Path(seal["dataset_root"]) / "games.jsonl"
     teacher_games = sum(
         1 for line in games_path.read_text(encoding="utf-8").splitlines() if line.strip()
     )
     ppo_steps = 0
-    ppo_wall = 0.0
+    ppo_wall_values = []
     for run_path in seal["training_run_paths"].values():
         manifest = _read_json(Path(run_path) / "run.json")
-        ppo_steps += int(manifest.get("timesteps", manifest.get("latest_checkpoint_step", 0)))
+        timesteps = manifest.get("timesteps")
+        if isinstance(timesteps, bool) or not isinstance(timesteps, int):
+            raise ValueError("sealed PPO compute evidence is incomplete")
+        ppo_steps += timesteps
         value = manifest.get("wall_clock_seconds")
-        if isinstance(value, (int, float)):
-            ppo_wall += float(value)
-    bc_wall = 0.0
-    for name, path in source_paths.items():
-        if name.startswith("bc-clones/") and name.endswith("/run.json"):
-            value = _read_json(path).get("wall_clock_seconds")
-            if isinstance(value, (int, float)):
-                bc_wall += float(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            ppo_wall_values.append(float(value))
+
+    bc_run_paths = [
+        path for name, path in source_paths.items()
+        if name.startswith("bc-clones/") and name.endswith("/run.json")
+    ]
+    bc_wall_values = []
+    for path in bc_run_paths:
+        value = _read_json(path).get("wall_clock_seconds")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            bc_wall_values.append(float(value))
+
+    def timing(values: Sequence[float], expected: int) -> dict[str, Any]:
+        if len(values) == expected:
+            return {"status": "available", "seconds": sum(values)}
+        return {"status": "unavailable"}
 
     return {
         "clone": {"pooled": clone_counts},
@@ -3010,14 +3057,16 @@ def _sealed_report_evidence(panel_dir: Path) -> dict[str, Any]:
             "validation_accuracy": validation_accuracy,
         },
         "learning_curves": {
-            "initialized_final_reward": development_win_rate(initialized_rows),
-            "scratch_final_reward": development_win_rate(scratch_rows),
+            "initialized": learning_curve("bc_ppo"),
+            "scratch": learning_curve("scratch_ppo"),
         },
         "compute": {
             "teacher_games": teacher_games,
-            "bc_wall_clock_seconds": bc_wall,
+            "bc_wall_clock": timing(bc_wall_values, len(bc_run_paths)),
             "ppo_environment_steps": ppo_steps,
-            "ppo_wall_clock_seconds": ppo_wall,
+            "ppo_wall_clock": timing(
+                ppo_wall_values, len(seal["training_run_paths"])
+            ),
         },
     }
 
@@ -3050,6 +3099,49 @@ def load_final_publication(
     return aggregate, report, manifest
 
 
+def _validated_final_evaluation(
+    panel_dir: Path,
+) -> tuple[list[dict[str, Any]], str]:
+    panel_dir = Path(panel_dir)
+    seal_path = panel_dir / "final-seal.json"
+    if not seal_path.is_file():
+        raise ValueError("final evaluation envelope has no current seal")
+    seal = _read_json(seal_path)
+    _validate_final_seal(seal)
+    captured_seal_sha256 = _sha256(seal_path)
+    evaluation = _read_json(panel_dir / "final-evaluation.json")
+    primary = evaluation.get("matches")
+    comparisons = evaluation.get("comparison_matches")
+    if (
+        evaluation.get("schema_version") != 1
+        or evaluation.get("state") != "completed"
+        or evaluation.get("schedule") != _FINAL
+        or evaluation.get("seal_sha256") != captured_seal_sha256
+        or not isinstance(primary, list)
+        or not isinstance(comparisons, list)
+    ):
+        raise ValueError("final evaluation envelope does not match the current sealed bank")
+
+    primary_rows = [dict(row) for row in primary if isinstance(row, Mapping)]
+    comparison_rows = [dict(row) for row in comparisons if isinstance(row, Mapping)]
+    if (
+        len(primary_rows) != len(primary)
+        or len(comparison_rows) != len(comparisons)
+        or any(row.get("condition") != "initialized_ppo" for row in primary_rows)
+    ):
+        raise ValueError("final evaluation envelope contains malformed match tables")
+    _validate_final_schedule(primary_rows)
+    for condition in ("scratch_ppo", "incumbent_ppo"):
+        rows = [row for row in comparison_rows if row.get("condition") == condition]
+        _validate_final_schedule(rows)
+    if any(
+        row.get("condition") not in {"scratch_ppo", "incumbent_ppo"}
+        for row in comparison_rows
+    ):
+        raise ValueError("final evaluation envelope contains malformed comparison tables")
+    return [*primary_rows, *comparison_rows], captured_seal_sha256
+
+
 def publish_final_report(
     panel_dir: Path,
     *,
@@ -3058,17 +3150,9 @@ def publish_final_report(
     failure_injector: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     panel_dir = Path(panel_dir)
+    captured_seal_sha256 = None
     if matches is None:
-        evaluation = _read_json(panel_dir / "final-evaluation.json")
-        primary_matches = evaluation.get("matches")
-        comparison_matches = evaluation.get("comparison_matches")
-        matches = (
-            [*primary_matches, *comparison_matches]
-            if isinstance(primary_matches, list) and isinstance(comparison_matches, list)
-            else None
-        )
-        if not isinstance(matches, list):
-            raise ValueError("final evaluation raw match table is missing")
+        matches, captured_seal_sha256 = _validated_final_evaluation(panel_dir)
     if supporting_evidence is None:
         supporting_evidence = _sealed_report_evidence(panel_dir)
     aggregate = build_final_aggregate(matches, supporting_evidence=supporting_evidence)
@@ -3108,6 +3192,11 @@ def publish_final_report(
         }
         if failure_injector is not None:
             failure_injector("before_pointer")
+        if captured_seal_sha256 is not None:
+            seal_path = panel_dir / "final-seal.json"
+            if _sha256(seal_path) != captured_seal_sha256:
+                raise ValueError("final evaluation envelope seal changed during reporting")
+            _validate_final_seal(_read_json(seal_path))
         _atomic_json(panel_dir / "final-publication.json", manifest)
     finally:
         if not moved:
