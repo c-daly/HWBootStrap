@@ -1,6 +1,6 @@
 # Annihilation imitation v1 protocol
 
-This directory preregisters demonstration collection, three independent pure behavioral clones and their gate, paired initialized/scratch PPO training, development evaluation, and one global PPO budget. It does not assign the final bank or authorize final evaluation.
+This directory preregisters demonstration collection, three independent pure behavioral clones and their gate, paired initialized/scratch PPO training, development evaluation, one global PPO budget, and a single-use final evaluation.
 
 Definitions are immutable and hash-bound. Every command validates `panel.json`, `seed-banks.json`, and the scenario before doing work. Stages resume in a sibling staging directory and publish by atomic rename only after manifests, hashes, counts, reciprocal schedules, and expected outputs validate.
 
@@ -81,3 +81,45 @@ top-level source run and checkpoint-under-source/checkpoints relationship.
     python python/run_annihilation_imitation_panel.py train-ppo
     python python/run_annihilation_imitation_panel.py evaluate-dev
     python python/run_annihilation_imitation_panel.py select-budget
+
+
+## Final seal, evaluation, and report
+
+`freeze-final --incumbent-panel <path>` is legal only after the one global
+checkpoint budget is complete. The atomic `final-seal.json` records the code
+revision and dirty state; hashes of the panel, scenario, and still-immutable
+seed-bank definitions; every dataset file; all six PPO run trees; three
+initialized checkpoints; three scratch controls; and exactly three completed
+profiled-standard incumbent runs. The seal's assignment snapshot flips
+`final.assigned` to true without rewriting `seed-banks.json`, preserving all
+earlier definition hashes. There is no unassign operation and a second freeze
+is refused.
+
+`evaluate-final` spends the sealed bank once. Each initialized model receives
+maps 17,000,000 through 17,000,249 from both candidate seats against Random
+with forced `standard-3v3`: exactly 500 games per model and 1,500 primary games
+total. Publication is refused for missing or duplicated seed/seat/model keys,
+either missing seat, a seed outside the bank, a changed sealed checkpoint, or
+an already completed final evaluation.
+
+The preregistered primary gate passes only at both thresholds:
+
+- at least 325 wins out of 500 for each of seeds 211, 223, and 227;
+- at least 1,050 wins out of 1,500 pooled.
+
+Every draw and loss remains a non-win regardless of material advantage or draw
+classification. W/L/D counts and rates, Wilson 95-percent intervals, seat
+summaries, rounds, decisions, action waste, peak material advantage, and draw
+categories are recomputed from raw match rows. Scratch and incumbent
+comparisons pair by model seed, map seed, and candidate seat and use the exact
+two-sided sign test on discordant wins.
+
+`report` places the primary gate table before every secondary result, followed
+by clone, initialized PPO, scratch PPO, incumbent PPO, conversion, BC, learning
+curve, compute, failure-trace, and limitation sections. `aggregate.json` and
+`REPORT.md` are staged and published as one rollback-safe pair, so a failure
+cannot expose either new final artifact alone.
+
+    python python/run_annihilation_imitation_panel.py freeze-final --incumbent-panel <path>
+    python python/run_annihilation_imitation_panel.py evaluate-final
+    python python/run_annihilation_imitation_panel.py report

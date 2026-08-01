@@ -8,6 +8,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
@@ -1111,6 +1112,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("train-ppo")
     commands.add_parser("evaluate-dev")
     commands.add_parser("select-budget")
+    freeze = commands.add_parser("freeze-final")
+    freeze.add_argument("--incumbent-panel", type=Path, required=True)
+    commands.add_parser("evaluate-final")
+    commands.add_parser("report")
     return parser
 
 
@@ -1133,6 +1138,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         result = _evaluate_dev_command()
     elif args.command == "select-budget":
         result = _select_budget_command()
+    elif args.command == "freeze-final":
+        result = freeze_final(PANEL_ROOT, incumbent_panel=args.incumbent_panel)
+    elif args.command == "evaluate-final":
+        result = evaluate_final(PANEL_ROOT, server_cmd=_server_command(SCENARIO_PATH)[:-2])
+    elif args.command == "report":
+        result, _report = publish_final_report(PANEL_ROOT)
     else:
         raise AssertionError(f"unreachable command {args.command!r}")
     print(json.dumps(result, sort_keys=True))
@@ -2179,6 +2190,765 @@ def _validated_development_map(
         raise ValueError("physical development evaluation aggregate is invalid")
     return normalized, matches
 
+
+@dataclass(frozen=True)
+class GateResult:
+    passed: bool
+    per_seed_wins: dict[int, int]
+    pooled_wins: int
+    games_per_seed: int
+    per_seed_minimum: int = 325
+    pooled_minimum: int = 1050
+
+
+_FINAL = {
+    "seed_start": 17_000_000,
+    "maps": 250,
+    "games_per_model": 500,
+    "profile": "standard-3v3",
+    "opponent": "random",
+}
+
+
+def _tree_sha256(root: Path) -> str:
+    root = Path(root)
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise ValueError(f"{root}: hash source is empty")
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _repository_identity(repository: Path) -> tuple[str, bool]:
+    repository = Path(repository)
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repository, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    dirty = bool(subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repository, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip())
+    return revision, dirty
+
+
+def _selected_incumbents(incumbent_panel: Path) -> list[dict[str, Any]]:
+    incumbent_panel = Path(incumbent_panel)
+    metadata_path = incumbent_panel / "aggregate.json"
+    if not metadata_path.is_file():
+        metadata_path = incumbent_panel / "selection.json"
+    metadata = _read_json(metadata_path)
+    raw = metadata.get("selected_runs")
+    if not isinstance(raw, list) or len(raw) != 3:
+        raise ValueError("incumbent panel must resolve exactly three selected runs")
+    selected = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ValueError("incumbent comparator metadata is malformed")
+        seed = item.get("model_seed")
+        run_path = Path(str(item.get("run_path", "")))
+        checkpoint = Path(str(item.get("checkpoint_path", "")))
+        if (
+            seed not in _MODEL_SEEDS or seed in seen
+            or not run_path.is_absolute() or not run_path.is_dir()
+            or not checkpoint.is_absolute() or not checkpoint.is_file()
+            or run_path not in checkpoint.parents
+        ):
+            raise ValueError("incumbent comparator identity is incomplete")
+        manifest = _read_json(run_path / "run.json")
+        if (
+            manifest.get("state") != "completed"
+            or manifest.get("model_seed") != seed
+            or manifest.get("start_profile") != "standard-3v3"
+        ):
+            raise ValueError("incumbent comparator is not a profiled-standard completed run")
+        seen.add(seed)
+        selected.append({
+            "model_seed": seed,
+            "run_path": str(run_path.resolve()),
+            "run_sha256": _tree_sha256(run_path),
+            "checkpoint_path": str(checkpoint.resolve()),
+            "checkpoint_sha256": _sha256(checkpoint),
+        })
+    return sorted(selected, key=lambda item: item["model_seed"])
+
+
+def freeze_final(
+    panel_dir: Path,
+    *,
+    incumbent_panel: Path | None = None,
+    dataset_dir: Path | None = None,
+    revision: str | None = None,
+    dirty: bool | None = None,
+    repository: Path = PROJECT_ROOT,
+) -> dict[str, Any]:
+    panel_dir = Path(panel_dir)
+    verify_repository = revision is None and dirty is None
+    seal_path = panel_dir / "final-seal.json"
+    if seal_path.exists():
+        raise RuntimeError("final bank is already assigned")
+    selection_path = panel_dir / "selection.json"
+    if not selection_path.is_file():
+        raise RuntimeError("global checkpoint selection is not frozen")
+    selection = _read_json(selection_path)
+    choice = selection.get("selection")
+    if selection.get("state") != "completed" or not isinstance(choice, Mapping):
+        raise RuntimeError("global checkpoint selection is not frozen")
+    nominal = choice.get("nominal_step")
+    actual_steps = choice.get("actual_steps")
+    if (
+        nominal not in _PPO["nominal_budgets"]
+        or not isinstance(actual_steps, Mapping)
+        or set(actual_steps) != {str(seed) for seed in _MODEL_SEEDS}
+    ):
+        raise RuntimeError("global checkpoint selection is not frozen")
+
+    seed_path = panel_dir / "seed-banks.json"
+    banks_document = _read_json(seed_path)
+    banks = banks_document.get("banks", banks_document)
+    final_bank = banks.get("final") if isinstance(banks, Mapping) else None
+    if (
+        not isinstance(final_bank, Mapping)
+        or final_bank.get("start") != _FINAL["seed_start"]
+        or final_bank.get("stop") != _FINAL["seed_start"] + _FINAL["maps"] - 1
+        or final_bank.get("assigned") is not False
+    ):
+        raise RuntimeError("final bank is already assigned or does not match the locked bank")
+
+    scenario_path = panel_dir / "scenario.json"
+    if not scenario_path.is_file():
+        scenario_path = SCENARIO_PATH
+    definitions = {
+        "panel.json": _sha256(panel_dir / "panel.json"),
+        "scenario.json": _sha256(scenario_path),
+        "seed-banks.json": _sha256(seed_path),
+    }
+    dataset_root = Path(dataset_dir) if dataset_dir is not None else DATASET_PATH
+    if not (dataset_root / "manifest.json").is_file():
+        raise ValueError("completed dataset manifest is missing")
+    dataset_hashes = {
+        path.relative_to(dataset_root).as_posix(): _sha256(path)
+        for path in sorted(dataset_root.rglob("*"))
+        if path.is_file()
+    }
+
+    runs_root = panel_dir / "ppo-runs"
+    expected_run_names = {
+        f"{prefix}-seed-{seed}"
+        for seed in _MODEL_SEEDS
+        for prefix in ("bc-ppo", "scratch-ppo")
+    }
+    actual_run_names = {
+        path.name for path in runs_root.iterdir() if path.is_dir() and not path.name.startswith(".")
+    } if runs_root.is_dir() else set()
+    if actual_run_names != expected_run_names:
+        raise ValueError("six PPO training runs are not complete")
+    for name in sorted(expected_run_names):
+        manifest = _read_json(runs_root / name / "run.json")
+        if manifest.get("state") != "completed":
+            raise ValueError("six PPO training runs are not complete")
+    training_hashes = {name: _tree_sha256(runs_root / name) for name in sorted(expected_run_names)}
+
+    development_path = panel_dir / "development" / "development.json"
+    development = _read_json(development_path)
+    candidates = development.get("candidates")
+    if development.get("state") != "completed" or not isinstance(candidates, list):
+        raise ValueError("development evidence is incomplete")
+    selected_checkpoints = {"initialized": [], "control": []}
+    expected_identities = {
+        (condition, seed)
+        for condition in ("bc_ppo", "scratch_ppo")
+        for seed in _MODEL_SEEDS
+    }
+    chosen = [
+        row for row in candidates
+        if isinstance(row, Mapping) and row.get("nominal_step") == nominal
+        and row.get("condition") in {"bc_ppo", "scratch_ppo"}
+    ]
+    identities = {(row.get("condition"), row.get("model_seed")) for row in chosen}
+    if identities != expected_identities or len(chosen) != 6:
+        raise ValueError("selected initialized/control checkpoints are incomplete")
+    for row in sorted(chosen, key=lambda value: (value["condition"], value["model_seed"])):
+        seed = row["model_seed"]
+        checkpoint = Path(str(row.get("checkpoint_path", "")))
+        run_path = Path(str(row.get("source_run", "")))
+        if (
+            not checkpoint.is_absolute() or not checkpoint.is_file()
+            or not run_path.is_absolute() or run_path not in checkpoint.parents
+            or row.get("actual_step") != actual_steps[str(seed)]
+            or row.get("checkpoint_sha256") != _sha256(checkpoint)
+        ):
+            raise ValueError("selected checkpoint physical identity changed")
+        item = {
+            "model_seed": seed,
+            "nominal_step": nominal,
+            "actual_step": row["actual_step"],
+            "checkpoint_path": str(checkpoint.resolve()),
+            "checkpoint_sha256": _sha256(checkpoint),
+            "source_run": str(run_path.resolve()),
+        }
+        key = "initialized" if row["condition"] == "bc_ppo" else "control"
+        selected_checkpoints[key].append(item)
+
+    if incumbent_panel is None:
+        raise ValueError("--incumbent-panel is required")
+    incumbents = _selected_incumbents(incumbent_panel)
+    if revision is None or dirty is None:
+        actual_revision, actual_dirty = _repository_identity(repository)
+        revision = actual_revision if revision is None else revision
+        dirty = actual_dirty if dirty is None else dirty
+
+    assigned_banks = json.loads(json.dumps(banks))
+    assigned_banks["final"]["assigned"] = True
+    payload = {
+        "schema_version": 1,
+        "state": "assigned",
+        "revision": {"commit": revision, "dirty": bool(dirty)},
+        "repository_root": str(Path(repository).resolve()) if verify_repository else None,
+        "definition_hashes": definitions,
+        "definition_paths": {
+            "panel.json": str((panel_dir / "panel.json").resolve()),
+            "scenario.json": str(scenario_path.resolve()),
+            "seed-banks.json": str(seed_path.resolve()),
+        },
+        "selection_hashes": {
+            "selection.json": _sha256(selection_path),
+            "development.json": _sha256(development_path),
+        },
+        "selection_paths": {
+            "selection.json": str(selection_path.resolve()),
+            "development.json": str(development_path.resolve()),
+        },
+        "dataset_root": str(dataset_root.resolve()),
+        "dataset_hashes": dataset_hashes,
+        "training_run_paths": {
+            name: str((runs_root / name).resolve()) for name in sorted(expected_run_names)
+        },
+        "training_run_hashes": training_hashes,
+        "selected_checkpoints": selected_checkpoints,
+        "incumbent_comparators": incumbents,
+        "seed_banks": assigned_banks,
+        "final": dict(assigned_banks["final"]),
+    }
+    _atomic_json(seal_path, payload)
+    return payload
+
+
+def apply_final_gate(
+    matches: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    wins: Mapping[int, int] | None = None,
+    games: int = 500,
+) -> GateResult:
+    if games != 500:
+        raise ValueError("final gate requires exactly 500 games per model seed")
+    if wins is None:
+        if matches is None:
+            raise ValueError("final gate requires matches or per-seed wins")
+        primary = [
+            row for row in matches
+            if row.get("condition") in (None, "initialized_ppo")
+        ]
+        wins = {
+            seed: sum(
+                row.get("outcome") == "win"
+                for row in primary
+                if row.get("model_seed") == seed
+            )
+            for seed in _MODEL_SEEDS
+        }
+        counts = {
+            seed: sum(row.get("model_seed") == seed for row in primary)
+            for seed in _MODEL_SEEDS
+        }
+        if set(counts.values()) != {games}:
+            raise ValueError("final gate requires exactly 500 games per model seed")
+    normalized = {int(seed): int(value) for seed, value in wins.items()}
+    if any(value < 0 or value > games for value in normalized.values()):
+        raise ValueError("final gate wins must be between zero and 500")
+    if set(normalized) != set(_MODEL_SEEDS):
+        raise ValueError("final gate requires all three model seeds")
+    pooled = sum(normalized.values())
+    passed = all(normalized[seed] >= 325 for seed in _MODEL_SEEDS) and pooled >= 1050
+    return GateResult(passed, normalized, pooled, games)
+
+
+def _validate_final_schedule(matches: Sequence[Mapping[str, Any]]) -> None:
+    expected = {
+        (seed, map_seed, seat)
+        for seed in _MODEL_SEEDS
+        for map_seed in range(_FINAL["seed_start"], _FINAL["seed_start"] + _FINAL["maps"])
+        for seat in (0, 1)
+    }
+    actual = []
+    for row in matches:
+        if (
+            not isinstance(row, Mapping)
+            or row.get("model_seed") not in _MODEL_SEEDS
+            or row.get("outcome") not in {"win", "loss", "draw"}
+        ):
+            raise ValueError("final schedule contains a malformed match")
+        actual.append((row.get("model_seed"), row.get("seed"), row.get("candidate_seat")))
+    if len(actual) != 1500 or len(set(actual)) != 1500 or set(actual) != expected:
+        raise ValueError("final schedule is incomplete, duplicated, or outside the bank")
+
+
+def evaluate_final(
+    panel_dir: Path,
+    *,
+    evaluator: Callable[..., Mapping[str, Any]] | None = None,
+    server_cmd: Sequence[str],
+    workers: int = 1,
+) -> dict[str, Any]:
+    panel_dir = Path(panel_dir)
+    output_path = panel_dir / "final-evaluation.json"
+    if output_path.exists():
+        raise RuntimeError("final evaluation already completed")
+    seal_path = panel_dir / "final-seal.json"
+    if not seal_path.is_file():
+        raise RuntimeError("final bank is not assigned")
+    seal = _read_json(seal_path)
+    _validate_final_seal(seal)
+    selected_evaluator = evaluator or _evaluate_standard_controllers
+    work_root = panel_dir / ".final-evaluation.pending"
+    if work_root.exists():
+        shutil.rmtree(work_root)
+    work_root.mkdir(parents=True)
+
+    evaluation_specs: list[tuple[str, Mapping[str, Any], str]] = []
+    for condition, sealed_key in (
+        ("initialized_ppo", "initialized"),
+        ("scratch_ppo", "control"),
+    ):
+        for item in seal["selected_checkpoints"][sealed_key]:
+            checkpoint = Path(item["checkpoint_path"])
+            controller = json.dumps({
+                "kind": "snapshot",
+                "path": str(checkpoint.resolve()),
+                "source_run": item["source_run"],
+                "algorithm": "maskable_ppo",
+                "step": item["actual_step"],
+            }, sort_keys=True)
+            evaluation_specs.append((condition, item, controller))
+    for item in seal["incumbent_comparators"]:
+        evaluation_specs.append(
+            ("incumbent_ppo", item, f"run:{Path(item['run_path']).resolve()}")
+        )
+
+    by_condition: dict[str, list[dict[str, Any]]] = {
+        "initialized_ppo": [],
+        "scratch_ppo": [],
+        "incumbent_ppo": [],
+    }
+    try:
+        for condition, item, controller in evaluation_specs:
+            seed = item["model_seed"]
+            result_path = work_root / condition / f"seed-{seed}" / "evaluation.json"
+            selected_evaluator(
+                controller,
+                _FINAL["opponent"],
+                games=_FINAL["maps"],
+                seed_start=_FINAL["seed_start"],
+                both_seats=True,
+                workers=workers,
+                server_cmd=list(server_cmd),
+                output_path=result_path,
+                environment="tactical-v2",
+                evidence_dir=result_path.parent / "evidence",
+                capture_trace=True,
+                start_profile=_FINAL["profile"],
+            )
+            physical = _read_json(result_path)
+            raw = physical.get("matches")
+            if not isinstance(raw, list):
+                raise ValueError("final schedule contains no raw matches")
+            for row in raw:
+                normalized = dict(row)
+                normalized["model_seed"] = seed
+                normalized["condition"] = condition
+                by_condition[condition].append(normalized)
+        for rows in by_condition.values():
+            _validate_final_schedule(rows)
+        payload = {
+            "schema_version": 1,
+            "state": "completed",
+            "seal_sha256": _sha256(seal_path),
+            "schedule": dict(_FINAL),
+            "matches": by_condition["initialized_ppo"],
+            "comparison_matches": [
+                *by_condition["scratch_ppo"],
+                *by_condition["incumbent_ppo"],
+            ],
+        }
+        _atomic_json(output_path, payload)
+        return payload
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+
+def exact_sign_test(left_only: int, right_only: int) -> float:
+    if left_only < 0 or right_only < 0:
+        raise ValueError("discordant counts cannot be negative")
+    n = left_only + right_only
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(min(left_only, right_only) + 1))
+    return min(1.0, 2.0 * tail / (2 ** n))
+
+
+def _outcome_statistics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    from ml_lab.evaluation import wilson_interval
+
+    total = len(rows)
+    if total <= 0:
+        raise ValueError("cannot summarize an empty match table")
+    counts = {
+        "wins": sum(row.get("outcome") == "win" for row in rows),
+        "losses": sum(row.get("outcome") == "loss" for row in rows),
+        "draws": sum(row.get("outcome") == "draw" for row in rows),
+        "games": total,
+    }
+    rates = {
+        name: counts[f"{name}s" if name != "loss" else "losses"] / total
+        for name in ("win", "loss", "draw")
+    }
+    intervals = {
+        name: wilson_interval(
+            counts[f"{name}s" if name != "loss" else "losses"], total
+        )
+        for name in ("win", "loss", "draw")
+    }
+    diagnostics = {}
+    metric_fields = {
+        "rounds": "round_count",
+        "decisions": "command_count",
+        "action_waste": "wasted_end_turns_by_seat",
+        "peak_material_advantage": "peak_normalized_advantage",
+    }
+    for field, source_field in metric_fields.items():
+        values = []
+        for row in rows:
+            summary = row.get("summary")
+            value = summary.get(source_field) if isinstance(summary, Mapping) else None
+            if source_field == "wasted_end_turns_by_seat":
+                seat = row.get("candidate_seat")
+                if (
+                    not isinstance(value, list)
+                    or seat not in {0, 1}
+                    or len(value) != 2
+                ):
+                    value = None
+                else:
+                    value = value[seat]
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(value)
+        diagnostics[field] = sum(values) / len(values) if values else None
+    draw_categories: dict[str, int] = {}
+    for row in rows:
+        if row.get("outcome") != "draw":
+            continue
+        classification = row.get("classification")
+        category = classification.get("primary") if isinstance(classification, Mapping) else classification
+        category = category if isinstance(category, str) and category else "unclassified"
+        draw_categories[category] = draw_categories.get(category, 0) + 1
+    seats = {}
+    for seat, name in ((0, "candidate_as_p0"), (1, "candidate_as_p1")):
+        seat_rows = [row for row in rows if row.get("candidate_seat") == seat]
+        seat_total = len(seat_rows)
+        seats[name] = {
+            "wins": sum(row.get("outcome") == "win" for row in seat_rows),
+            "losses": sum(row.get("outcome") == "loss" for row in seat_rows),
+            "draws": sum(row.get("outcome") == "draw" for row in seat_rows),
+            "games": seat_total,
+        }
+        seats[name]["rates"] = {
+            outcome: seats[name][f"{outcome}s" if outcome != "loss" else "losses"] / seat_total
+            for outcome in ("win", "loss", "draw")
+        }
+    return {
+        "counts": counts,
+        "rates": rates,
+        "confidence_intervals": intervals,
+        "seats": seats,
+        "diagnostics": diagnostics,
+        "draw_categories": dict(sorted(draw_categories.items())),
+    }
+
+
+def build_final_aggregate(matches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    rows = [dict(row) for row in matches]
+    primary = [row for row in rows if row.get("condition") == "initialized_ppo"]
+    _validate_final_schedule(primary)
+    conditions = {}
+    for condition in ("initialized_ppo", "scratch_ppo", "incumbent_ppo"):
+        condition_rows = [row for row in rows if row.get("condition") == condition]
+        if not condition_rows:
+            continue
+        conditions[condition] = {
+            "per_seed": {
+                str(seed): _outcome_statistics([
+                    row for row in condition_rows if row.get("model_seed") == seed
+                ])
+                for seed in _MODEL_SEEDS
+            },
+            "pooled": _outcome_statistics(condition_rows),
+        }
+    comparisons = {}
+    left_index = {
+        (row["model_seed"], row["seed"], row["candidate_seat"]): row["outcome"]
+        for row in primary
+    }
+    for condition in ("scratch_ppo", "incumbent_ppo"):
+        right_rows = [row for row in rows if row.get("condition") == condition]
+        if not right_rows:
+            continue
+        right_index = {
+            (row["model_seed"], row["seed"], row["candidate_seat"]): row["outcome"]
+            for row in right_rows
+        }
+        if len(right_index) != len(right_rows) or set(right_index) != set(left_index):
+            raise ValueError(f"{condition} comparison schedule is incomplete or duplicated")
+        left_only = sum(
+            left_index[key] == "win" and right_index[key] != "win" for key in left_index
+        )
+        right_only = sum(
+            left_index[key] != "win" and right_index[key] == "win" for key in left_index
+        )
+        comparisons[condition] = {
+            "pairs": len(left_index),
+            "initialized_only_wins": left_only,
+            "comparator_only_wins": right_only,
+            "exact_two_sided_sign_p": exact_sign_test(left_only, right_only),
+        }
+    gate = apply_final_gate(primary)
+    return {
+        "schema_version": 1,
+        "primary_metric": "annihilation win rate against Random",
+        "gate": {
+            "passed": gate.passed,
+            "per_seed_minimum": gate.per_seed_minimum,
+            "pooled_minimum": gate.pooled_minimum,
+            "per_seed_wins": {str(key): value for key, value in gate.per_seed_wins.items()},
+            "pooled_wins": gate.pooled_wins,
+        },
+        "conditions": conditions,
+        "comparisons": comparisons,
+        "matches": rows,
+    }
+
+
+def _render_final_report(aggregate: Mapping[str, Any]) -> str:
+    conditions = aggregate["conditions"]
+    initialized = conditions["initialized_ppo"]
+    scratch = conditions["scratch_ppo"]
+    incumbent = conditions["incumbent_ppo"]
+    gate = aggregate["gate"]
+    lines = [
+        "# Annihilation imitation v1 results",
+        "",
+        "## Primary milestone gate",
+        "",
+        "| Model seed | Wins | Losses | Draws | Games | Win rate | Gate |",
+        "|---:|---:|---:|---:|---:|---:|:---:|",
+    ]
+    for seed in _MODEL_SEEDS:
+        summary = initialized["per_seed"][str(seed)]
+        counts = summary["counts"]
+        passed = counts["wins"] >= gate["per_seed_minimum"]
+        lines.append(
+            f"| {seed} | {counts['wins']} | {counts['losses']} | {counts['draws']} | "
+            f"{counts['games']} | {summary['rates']['win']:.3%} | {'PASS' if passed else 'FAIL'} |"
+        )
+    pooled = initialized["pooled"]
+    counts = pooled["counts"]
+    lines.append(
+        f"| Pooled | {counts['wins']} | {counts['losses']} | {counts['draws']} | "
+        f"{counts['games']} | {pooled['rates']['win']:.3%} | "
+        f"{'PASS' if gate['passed'] else 'FAIL'} |"
+    )
+    scratch_counts = scratch["pooled"]["counts"]
+    incumbent_counts = incumbent["pooled"]["counts"]
+    scratch_comparison = aggregate["comparisons"]["scratch_ppo"]
+    incumbent_comparison = aggregate["comparisons"]["incumbent_ppo"]
+    lines.extend([
+        "",
+        "The primary result treats every draw and loss as a non-win; material diagnostics never alter the gate.",
+        "",
+        "## Clone",
+        "",
+        "Pure-clone development evidence remains secondary context and cannot alter the gate.",
+        "",
+        "## Initialized PPO",
+        "",
+        f"Initialized pooled W/L/D: {counts['wins']}/{counts['losses']}/{counts['draws']}.",
+        f"Win Wilson 95% interval: {pooled['confidence_intervals']['win']}.",
+        f"Seat summaries: {pooled['seats']}. Diagnostics: {pooled['diagnostics']}.",
+        "",
+        "## Scratch PPO",
+        "",
+        f"Scratch pooled W/L/D: {scratch_counts['wins']}/{scratch_counts['losses']}/{scratch_counts['draws']}.",
+        f"Win Wilson 95% interval: {scratch['pooled']['confidence_intervals']['win']}.",
+        f"Paired initialized-only/comparator-only wins: {scratch_comparison['initialized_only_wins']}/"
+        f"{scratch_comparison['comparator_only_wins']}; exact two-sided sign p="
+        f"{scratch_comparison['exact_two_sided_sign_p']}.",
+        "",
+        "## Incumbent PPO",
+        "",
+        f"Incumbent pooled W/L/D: {incumbent_counts['wins']}/{incumbent_counts['losses']}/{incumbent_counts['draws']}.",
+        f"Win Wilson 95% interval: {incumbent['pooled']['confidence_intervals']['win']}.",
+        f"Paired initialized-only/comparator-only wins: {incumbent_comparison['initialized_only_wins']}/"
+        f"{incumbent_comparison['comparator_only_wins']}; exact two-sided sign p="
+        f"{incumbent_comparison['exact_two_sided_sign_p']}.",
+        "",
+        "## Conversion performance",
+        "",
+        "Conversion development evidence is diagnostic only.",
+        "",
+        "## BC metrics",
+        "",
+        "Behavioral-cloning validation metrics remain bound to the frozen dataset.",
+        "",
+        "## Learning curves",
+        "",
+        "Learning curves are descriptive and were not used to select per-seed checkpoints.",
+        "",
+        "## Compute",
+        "",
+        "Teacher, BC, PPO, and inference compute are reported separately in frozen run metadata.",
+        "",
+        "## Failure traces",
+        "",
+        f"Draw categories: {pooled['draw_categories']}. Loss and draw traces remain authoritative evidence.",
+        "",
+        "## Limitations",
+        "",
+        "This milestone covers only fixed tactical-v2 standard-3v3 games against Random.",
+        "",
+    ])
+    return "\n".join(lines)
+
+def publish_final_report(
+    panel_dir: Path,
+    *,
+    matches: Sequence[Mapping[str, Any]] | None = None,
+    failure_injector: Callable[[str], None] | None = None,
+) -> tuple[dict[str, Any], str]:
+    panel_dir = Path(panel_dir)
+    if matches is None:
+        evaluation = _read_json(panel_dir / "final-evaluation.json")
+        matches = evaluation.get("matches")
+        comparison_matches = evaluation.get("comparison_matches")
+        matches = [*matches, *comparison_matches] if isinstance(matches, list) and isinstance(comparison_matches, list) else None
+        if not isinstance(matches, list):
+            raise ValueError("final evaluation raw match table is missing")
+    aggregate = build_final_aggregate(matches)
+    report = _render_final_report(aggregate)
+    aggregate_path = panel_dir / "aggregate.json"
+    report_path = panel_dir / "REPORT.md"
+    staging = Path(tempfile.mkdtemp(prefix=".final-publication.", dir=panel_dir))
+    aggregate_stage = staging / "aggregate.json"
+    report_stage = staging / "REPORT.md"
+    old_aggregate = aggregate_path.read_bytes() if aggregate_path.exists() else None
+    old_report = report_path.read_bytes() if report_path.exists() else None
+    try:
+        _atomic_json(aggregate_stage, aggregate)
+        _atomic_text(report_stage, report)
+        if failure_injector is not None:
+            failure_injector("after_aggregate")
+        os.replace(aggregate_stage, aggregate_path)
+        os.replace(report_stage, report_path)
+    except Exception:
+        aggregate_path.unlink(missing_ok=True)
+        report_path.unlink(missing_ok=True)
+        if old_aggregate is not None:
+            aggregate_path.write_bytes(old_aggregate)
+        if old_report is not None:
+            report_path.write_bytes(old_report)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return aggregate, report
+
+
+def _validate_final_seal(seal: Mapping[str, Any]) -> None:
+    if seal.get("state") != "assigned" or seal.get("final", {}).get("assigned") is not True:
+        raise ValueError("sealed final assignment is invalid")
+
+    for hashes_key, paths_key in (
+        ("definition_hashes", "definition_paths"),
+        ("selection_hashes", "selection_paths"),
+    ):
+        hashes = seal.get(hashes_key)
+        paths = seal.get(paths_key)
+        if not isinstance(hashes, Mapping) or not isinstance(paths, Mapping):
+            raise ValueError("sealed provenance paths are incomplete")
+        if set(hashes) != set(paths):
+            raise ValueError("sealed provenance paths are incomplete")
+        for name, expected in hashes.items():
+            path = Path(str(paths[name]))
+            if not path.is_file() or _sha256(path) != expected:
+                raise ValueError(f"sealed {name} changed")
+
+    dataset_root = Path(str(seal.get("dataset_root", "")))
+    dataset_hashes = seal.get("dataset_hashes")
+    if not dataset_root.is_absolute() or not isinstance(dataset_hashes, Mapping):
+        raise ValueError("sealed dataset provenance is incomplete")
+    current_dataset = {
+        path.relative_to(dataset_root).as_posix(): _sha256(path)
+        for path in sorted(dataset_root.rglob("*"))
+        if path.is_file()
+    }
+    if current_dataset != dict(dataset_hashes):
+        raise ValueError("sealed dataset changed")
+
+    training_hashes = seal.get("training_run_hashes")
+    training_paths = seal.get("training_run_paths")
+    if (
+        not isinstance(training_hashes, Mapping)
+        or not isinstance(training_paths, Mapping)
+        or set(training_hashes) != set(training_paths)
+    ):
+        raise ValueError("sealed training provenance is incomplete")
+    for name, expected in training_hashes.items():
+        path = Path(str(training_paths[name]))
+        if not path.is_dir() or _tree_sha256(path) != expected:
+            raise ValueError(f"sealed training run {name} changed")
+
+    selected = seal.get("selected_checkpoints")
+    if not isinstance(selected, Mapping):
+        raise ValueError("sealed checkpoint provenance is incomplete")
+    for condition in ("initialized", "control"):
+        rows = selected.get(condition)
+        if not isinstance(rows, list) or len(rows) != 3:
+            raise ValueError("sealed checkpoint provenance is incomplete")
+        for row in rows:
+            checkpoint = Path(str(row.get("checkpoint_path", "")))
+            if not checkpoint.is_file() or _sha256(checkpoint) != row.get("checkpoint_sha256"):
+                raise ValueError(f"sealed {condition} checkpoint changed")
+
+    incumbents = seal.get("incumbent_comparators")
+    if not isinstance(incumbents, list) or len(incumbents) != 3:
+        raise ValueError("sealed incumbent provenance is incomplete")
+    for row in incumbents:
+        run_path = Path(str(row.get("run_path", "")))
+        checkpoint = Path(str(row.get("checkpoint_path", "")))
+        if (
+            not run_path.is_dir() or _tree_sha256(run_path) != row.get("run_sha256")
+            or not checkpoint.is_file() or _sha256(checkpoint) != row.get("checkpoint_sha256")
+        ):
+            raise ValueError("sealed incumbent comparator changed")
+
+    repository_root = seal.get("repository_root")
+    if isinstance(repository_root, str):
+        revision, dirty = _repository_identity(Path(repository_root))
+        if {"commit": revision, "dirty": dirty} != seal.get("revision"):
+            raise ValueError("sealed code revision or dirty state changed")
 
 if __name__ == "__main__":
     main()

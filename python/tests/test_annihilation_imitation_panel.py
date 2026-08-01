@@ -4,6 +4,8 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1981,3 +1983,343 @@ def test_development_candidate_audit_rejects_physical_or_aggregate_tampering(
         match="physical development|development aggregate|development candidate schedule",
     ):
         module._validate_development_candidate_evidence(root, aggregate)
+
+
+def _final_panel_fixture(tmp_path: Path, *, selection: bool = True):
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    (panel_dir / "panel.json").write_text(json.dumps({"schema_version": 1, "model_seeds": [211, 223, 227]}), encoding="utf-8")
+    (panel_dir / "scenario.json").write_text(json.dumps({"environment": "tactical-v2", "contract_hash": "c" * 64, "encoding_hash": "e" * 64}), encoding="utf-8")
+    (panel_dir / "seed-banks.json").write_text(json.dumps({"schema_version": 1, "banks": {name: {"start": start, "stop": stop, "assigned": assigned} for name, (start, stop, assigned) in EXPECTED_BANKS.items()}}), encoding="utf-8")
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "games.jsonl").write_text('{"seed":11000000}\\n', encoding="utf-8")
+    (dataset_dir / "manifest.json").write_text(json.dumps({"schema_version": 1, "state": "completed"}), encoding="utf-8")
+    candidates = []
+    for seed in (211, 223, 227):
+        for condition, prefix in (("bc_ppo", "bc-ppo"), ("scratch_ppo", "scratch-ppo")):
+            run = panel_dir / "ppo-runs" / f"{prefix}-seed-{seed}"
+            checkpoint = run / "checkpoints" / "step_000025600.zip"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_bytes(f"{condition}-{seed}".encode())
+            (run / "run.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "model_seed": seed, "condition": condition}), encoding="utf-8")
+            candidates.append({"condition": condition, "model_seed": seed, "nominal_step": 25_600, "actual_step": 25_600, "checkpoint_path": str(checkpoint.resolve()), "checkpoint_sha256": _sha256(checkpoint), "source_run": str(run.resolve())})
+    development = panel_dir / "development"
+    development.mkdir()
+    (development / "development.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "candidates": candidates}), encoding="utf-8")
+    if selection:
+        (panel_dir / "selection.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "selection": {"nominal_step": 25_600, "actual_steps": {"211": 25_600, "223": 25_600, "227": 25_600}}}), encoding="utf-8")
+    incumbent = tmp_path / "incumbent"
+    incumbent.mkdir()
+    selected_runs = []
+    for seed in (211, 223, 227):
+        run = incumbent / f"seed-{seed}"
+        checkpoint = run / "checkpoint.zip"
+        run.mkdir()
+        checkpoint.write_bytes(f"incumbent-{seed}".encode())
+        (run / "run.json").write_text(json.dumps({"schema_version": 1, "state": "completed", "model_seed": seed, "start_profile": "standard-3v3"}), encoding="utf-8")
+        selected_runs.append({"model_seed": seed, "run_path": str(run.resolve()), "checkpoint_path": str(checkpoint.resolve())})
+    (incumbent / "aggregate.json").write_text(json.dumps({"schema_version": 1, "selected_runs": selected_runs}), encoding="utf-8")
+    return panel_dir, dataset_dir, incumbent
+
+
+def test_final_bank_cannot_be_assigned_before_selection_is_frozen(tmp_path: Path) -> None:
+    """Removing the completed global selection must keep the final bank sealed."""
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path, selection=False)
+    with pytest.raises(RuntimeError, match="global checkpoint"):
+        module.freeze_final(panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir, revision="37cc8f9", dirty=False)
+
+
+def test_final_bank_seal_is_complete_immutable_and_single_use(tmp_path: Path) -> None:
+    """Omitting any frozen input or allowing resealing makes the held-out bank mutable."""
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    seal = module.freeze_final(panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir, revision="37cc8f9", dirty=False)
+    assert seal["revision"] == {"commit": "37cc8f9", "dirty": False}
+    assert set(seal["definition_hashes"]) == {"panel.json", "scenario.json", "seed-banks.json"}
+    assert set(seal["dataset_hashes"]) == {"games.jsonl", "manifest.json"}
+    assert len(seal["training_run_hashes"]) == 6
+    assert len(seal["selected_checkpoints"]["initialized"]) == 3
+    assert len(seal["selected_checkpoints"]["control"]) == 3
+    assert len(seal["incumbent_comparators"]) == 3
+    assert seal["seed_banks"]["final"]["assigned"] is True
+    before = (panel_dir / "final-seal.json").read_bytes()
+    with pytest.raises(RuntimeError, match="already assigned"):
+        module.freeze_final(panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir, revision="different", dirty=True)
+    assert (panel_dir / "final-seal.json").read_bytes() == before
+
+
+def test_final_gate_requires_each_seed_and_pooled_thresholds() -> None:
+    """Weakening either threshold would turn a preregistered milestone failure into a pass."""
+    module = _subject()
+    assert module.apply_final_gate(wins={211: 325, 223: 325, 227: 400}, games=500).passed
+    assert not module.apply_final_gate(wins={211: 324, 223: 400, 227: 400}, games=500).passed
+    assert not module.apply_final_gate(wins={211: 325, 223: 325, 227: 399}, games=500).passed
+
+
+
+def _final_evaluator(calls: list[dict[str, Any]], *, mutation: str | None = None):
+    def evaluator(candidate, opponent, **kwargs):
+        calls.append({"candidate": candidate, "opponent": opponent, **kwargs})
+        seed_start = kwargs["seed_start"]
+        matches = []
+        for map_seed in range(seed_start, seed_start + kwargs["games"]):
+            for seat in (0, 1):
+                matches.append({
+                    "seed": map_seed,
+                    "candidate_seat": seat,
+                    "outcome": "win" if (map_seed + seat) % 3 else "draw",
+                    "summary": {
+                        "rounds": 10,
+                        "decisions": 20,
+                        "action_waste": 2,
+                        "peak_material_advantage": 4,
+                    },
+                    "classification": {"category": "material_lead"} if (map_seed + seat) % 3 == 0 else None,
+                })
+        if mutation == "partial":
+            matches.pop()
+        elif mutation == "duplicate":
+            matches[-1] = dict(matches[0])
+        elif mutation == "outside":
+            matches[-1]["seed"] = 17_000_250
+        result = {"schema_version": 1, "matches": matches}
+        output = Path(kwargs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result), encoding="utf-8")
+        return result
+    return evaluator
+
+
+def test_final_evaluation_runs_exact_reciprocal_bank_once(tmp_path: Path) -> None:
+    """Changing map count, seat policy, opponent, profile, or reuse invalidates the final bank."""
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+                        revision="37cc8f9", dirty=False)
+    calls: list[dict[str, Any]] = []
+
+    result = module.evaluate_final(panel_dir, evaluator=_final_evaluator(calls),
+                                   server_cmd=["fake-server"])
+
+    assert len(calls) == 9
+    assert all(call["games"] == 250 and call["seed_start"] == 17_000_000
+               and call["both_seats"] is True and call["opponent"] == "random"
+               and call["start_profile"] == "standard-3v3" for call in calls)
+    assert len(result["matches"]) == 1_500
+    assert len(result["comparison_matches"]) == 3_000
+    assert len({(row["model_seed"], row["seed"], row["candidate_seat"])
+                for row in result["matches"]}) == 1_500
+    with pytest.raises(RuntimeError, match="already completed"):
+        module.evaluate_final(panel_dir, evaluator=_final_evaluator([]),
+                              server_cmd=["fake-server"])
+
+
+@pytest.mark.parametrize("mutation", ["partial", "duplicate", "outside"])
+def test_final_evaluation_refuses_incomplete_duplicate_or_out_of_bank_results(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Publishing any result other than the exact sealed schedule spends the bank incorrectly."""
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+                        revision="37cc8f9", dirty=False)
+
+    with pytest.raises(ValueError, match="final schedule"):
+        module.evaluate_final(panel_dir, evaluator=_final_evaluator([], mutation=mutation),
+                              server_cmd=["fake-server"])
+
+    assert not (panel_dir / "final-evaluation.json").exists()
+
+
+def _report_matches() -> list[dict[str, Any]]:
+    rows = []
+    outcome_counts = {
+        "initialized_ppo": (325, 100, 75),
+        "scratch_ppo": (250, 150, 100),
+        "incumbent_ppo": (200, 200, 100),
+    }
+    for condition, (wins, losses, draws) in outcome_counts.items():
+        for model_seed in (211, 223, 227):
+            outcomes = ["win"] * wins + ["loss"] * losses + ["draw"] * draws
+            for index, outcome in enumerate(outcomes):
+                rows.append({
+                    "condition": condition,
+                    "model_seed": model_seed,
+                    "seed": 17_000_000 + index // 2,
+                    "candidate_seat": index % 2,
+                    "outcome": outcome,
+                    "summary": {
+                        "round_count": 10 + index % 3,
+                        "command_count": 20 + index % 5,
+                        "wasted_end_turns_by_seat": [index % 4, (index + 1) % 4],
+                        "peak_normalized_advantage": 99 if outcome == "draw" else index % 7,
+                    },
+                    "classification": {"primary": "lopsided"} if outcome == "draw" else None,
+                })
+    return rows
+
+
+def test_exact_sign_test_and_statistics_use_wilson_and_preserve_draws() -> None:
+    """Approximate tests or reclassifying lopsided draws can overstate the learned policy."""
+    module = _subject()
+    from ml_lab.evaluation import wilson_interval
+
+    assert module.exact_sign_test(0, 0) == 1.0
+    assert module.exact_sign_test(3, 0) == 0.25
+    assert module.exact_sign_test(4, 1) == 0.375
+    aggregate = module.build_final_aggregate(_report_matches())
+    primary = aggregate["conditions"]["initialized_ppo"]["pooled"]
+    assert primary["counts"] == {"wins": 975, "losses": 300, "draws": 225, "games": 1500}
+    assert primary["confidence_intervals"]["win"] == wilson_interval(975, 1500)
+    assert primary["confidence_intervals"]["loss"] == wilson_interval(300, 1500)
+    assert primary["confidence_intervals"]["draw"] == wilson_interval(225, 1500)
+    assert primary["draw_categories"] == {"lopsided": 225}
+    assert set(primary["seats"]) == {"candidate_as_p0", "candidate_as_p1"}
+    assert primary["diagnostics"] == {
+        "rounds": 10.998,
+        "decisions": 22.0,
+        "action_waste": 1.0,
+        "peak_material_advantage": 17.39,
+    }
+    assert aggregate["comparisons"]["scratch_ppo"]["pairs"] == 1_500
+    assert aggregate["comparisons"]["incumbent_ppo"]["pairs"] == 1_500
+
+
+def test_report_recomputes_raw_matches_orders_primary_first_and_is_consistent(
+    tmp_path: Path,
+) -> None:
+    """Copied summaries or secondary-first prose can silently substitute diagnostics for the gate."""
+    module = _subject()
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+    matches = _report_matches()
+
+    aggregate, report = module.publish_final_report(panel_dir, matches=matches)
+
+    raw_primary = [row for row in matches if row["condition"] == "initialized_ppo"]
+    recomputed = {
+        "wins": sum(row["outcome"] == "win" for row in raw_primary),
+        "losses": sum(row["outcome"] == "loss" for row in raw_primary),
+        "draws": sum(row["outcome"] == "draw" for row in raw_primary),
+        "games": len(raw_primary),
+    }
+    assert aggregate["conditions"]["initialized_ppo"]["pooled"]["counts"] == recomputed
+    assert report.index("## Primary milestone gate") < report.index("## Clone") < report.index("## Initialized PPO")
+    assert report.index("## Initialized PPO") < report.index("## Scratch PPO") < report.index("## Incumbent PPO")
+    assert "| Pooled | 975 | 300 | 225 | 1500 | 65.000% | FAIL |" in report
+    assert "Scratch pooled W/L/D: 750/450/300" in report
+    assert "exact two-sided sign p=3.7092061506874214e-68" in report
+    assert "Incumbent pooled W/L/D: 600/600/300" in report
+    assert "exact two-sided sign p=2.598852441411225e-113" in report
+    assert _json(panel_dir / "aggregate.json") == aggregate
+    assert (panel_dir / "REPORT.md").read_text(encoding="utf-8") == report
+
+
+def test_report_publication_failure_leaves_neither_final_visible(tmp_path: Path) -> None:
+    """A crash between publishing aggregate and report must not expose a half-result."""
+    module = _subject()
+    panel_dir = tmp_path / "panel"
+    panel_dir.mkdir()
+
+    def fail_before_visibility(stage: str) -> None:
+        if stage != "after_aggregate":
+            return
+        assert not (panel_dir / "aggregate.json").exists()
+        assert not (panel_dir / "REPORT.md").exists()
+        raise OSError("injected")
+
+    with pytest.raises(OSError, match="injected"):
+        module.publish_final_report(
+            panel_dir,
+            matches=_report_matches(),
+            failure_injector=fail_before_visibility,
+        )
+
+    assert not (panel_dir / "aggregate.json").exists()
+    assert not (panel_dir / "REPORT.md").exists()
+
+
+def test_parser_exposes_final_seal_commands() -> None:
+    """Dropping a final command makes the sealed workflow impossible to execute."""
+    module = _subject()
+    parser = module.build_parser()
+    actions = next(action for action in parser._actions if action.dest == "command")
+    assert set(actions.choices) == {
+        "validate", "collect", "train-bc", "evaluate-bc", "train-ppo",
+        "evaluate-dev", "select-budget", "freeze-final", "evaluate-final", "report",
+    }
+
+
+def test_final_commands_are_defined_before_the_script_entry_point(tmp_path: Path) -> None:
+    """Moving final functions below main's invocation makes the advertised CLI crash."""
+    module = _subject()
+
+    completed = subprocess.run(
+        [sys.executable, str(Path(module.__file__).resolve()), "freeze-final",
+         "--incumbent-panel", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "global checkpoint selection is not frozen" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["definition", "dataset", "training", "control", "incumbent"],
+)
+def test_final_evaluation_rejects_any_changed_sealed_input(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A final run after any frozen input changes is not a sealed evaluation."""
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    module.freeze_final(
+        panel_dir,
+        incumbent_panel=incumbent,
+        dataset_dir=dataset_dir,
+        revision="37cc8f9",
+        dirty=False,
+    )
+    if mutation == "definition":
+        (panel_dir / "panel.json").write_text('{"changed":true}', encoding="utf-8")
+    elif mutation == "dataset":
+        (dataset_dir / "games.jsonl").write_text('{"changed":true}\n', encoding="utf-8")
+    elif mutation == "training":
+        run = panel_dir / "ppo-runs" / "bc-ppo-seed-211" / "run.json"
+        run.write_text('{"changed":true}', encoding="utf-8")
+    elif mutation == "control":
+        checkpoint = (
+            panel_dir / "ppo-runs" / "scratch-ppo-seed-211"
+            / "checkpoints" / "step_000025600.zip"
+        )
+        checkpoint.write_bytes(b"changed")
+    else:
+        run = incumbent / "seed-211" / "run.json"
+        run.write_text('{"changed":true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="sealed"):
+        module.evaluate_final(
+            panel_dir,
+            evaluator=_final_evaluator([]),
+            server_cmd=["fake-server"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("wins", "games"),
+    [
+        ({211: 325, 223: 325, 227: 400}, 499),
+        ({211: -1, 223: 400, 227: 400}, 500),
+        ({211: 501, 223: 325, 227: 325}, 500),
+    ],
+)
+def test_final_gate_rejects_nonprotocol_counts(wins: dict[int, int], games: int) -> None:
+    """Non-500 denominators or impossible win counts cannot enter the final gate."""
+    module = _subject()
+    with pytest.raises(ValueError, match="500|wins"):
+        module.apply_final_gate(wins=wins, games=games)
