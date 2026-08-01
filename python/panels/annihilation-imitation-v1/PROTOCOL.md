@@ -74,6 +74,9 @@ rate, and earlier nominal budget. The output records each seed's rollout-aligned
 actual step plus definition and development-table hashes. Candidate checkpoint
 hashes are recomputed immediately before publication from the canonical
 physical checkpoint paths.
+Final selection uses the same snapshot binding: controller metadata must match
+kind, path, algorithm, and step, while source identity comes from the canonical
+top-level source run and checkpoint-under-source/checkpoints relationship.
 
     python python/run_annihilation_imitation_panel.py train-ppo
     python python/run_annihilation_imitation_panel.py evaluate-dev

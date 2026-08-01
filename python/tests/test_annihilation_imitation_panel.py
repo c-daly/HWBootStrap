@@ -1287,22 +1287,30 @@ def test_selection_publication_is_atomic_restart_safe_and_hashes_every_input(
     for row in table:
         row["standard"] = (row["standard"] * 100)[:200]
         key = f"{row['condition']}/seed-{row['model_seed']}/nominal-{row['nominal_step']}"
-        checkpoint = tmp_path / "checkpoints" / f"{key}.zip"
+        source_run = (
+            tmp_path
+            / "runs"
+            / row["condition"]
+            / f"seed-{row['model_seed']}"
+        )
+        checkpoint = (
+            source_run
+            / "checkpoints"
+            / f"step_{row['actual_step']:09d}.zip"
+        )
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         checkpoint.write_bytes(key.encode("utf-8"))
         digest = _sha256(checkpoint)
         row["checkpoint_sha256"] = digest
         row["checkpoint_path"] = str(checkpoint.resolve())
-        row["source_run"] = str(checkpoint.parent.parent.resolve())
+        row["source_run"] = str(source_run.resolve())
         row["algorithm"] = "maskable_ppo"
-        row["controller"] = {
-            "kind": "snapshot",
-            "path": str(checkpoint.resolve()),
-            "source_run": row["source_run"],
-            "algorithm": "maskable_ppo",
-            "step": row["actual_step"],
-            "inference_mode": "deterministic",
-        }
+        row["controller"] = _production_controller_identity(
+            kind="snapshot",
+            path=checkpoint,
+            algorithm="maskable_ppo",
+            step=row["actual_step"],
+        )
         checkpoint_hashes[key] = digest
     development = tmp_path / "development.json"
     development.write_text(

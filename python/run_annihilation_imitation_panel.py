@@ -1471,13 +1471,16 @@ def publish_selection(
         source_run = candidate.get("source_run")
         algorithm = candidate.get("algorithm")
         controller = candidate.get("controller")
+        source_path = Path(source_run) if isinstance(source_run, str) else None
         if (
-            not isinstance(source_run, str)
-            or str(Path(source_run).resolve()) != source_run
+            source_path is None
+            or not source_path.is_absolute()
+            or str(source_path.resolve()) != source_run
+            or physical_path.parent != source_path / "checkpoints"
             or algorithm != "maskable_ppo"
             or not isinstance(controller, Mapping)
+            or controller.get("kind") != "snapshot"
             or controller.get("path") != checkpoint_path
-            or controller.get("source_run") != source_run
             or controller.get("algorithm") != algorithm
             or controller.get("step") != candidate.get("actual_step")
         ):
