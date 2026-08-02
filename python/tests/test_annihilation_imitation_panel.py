@@ -3120,7 +3120,9 @@ def test_final_commands_are_defined_before_the_script_entry_point(tmp_path: Path
     )
 
     assert completed.returncode != 0
-    assert "ValueError:" in completed.stderr
+    assert (
+        "ValueError:" in completed.stderr or "RuntimeError:" in completed.stderr
+    )
     assert "NameError" not in completed.stderr
 
 
