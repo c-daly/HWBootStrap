@@ -9,11 +9,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from collections.abc import Mapping, Sequence
 from itertools import chain
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 from typing import Any
 
 import numpy as np
@@ -1029,6 +1031,27 @@ def canonicalize_behavioral_clone_for_publication(model: Any) -> None:
 
 
 
+def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> None:
+    count_fields = (
+        "schema_version", "model_seed", "epoch", "max_epochs", "batches", "examples",
+        "best_epoch", "epochs_without_improvement", "patience",
+    )
+    scalar_fields = (
+        "mean_training_loss", "validation_nll", "top1_accuracy", "top3_accuracy",
+        "top5_accuracy", "best_validation_nll", "epoch_seconds", "elapsed_seconds",
+        "examples_per_second",
+    )
+    for field in count_fields:
+        value = event[field]
+        if type(value) is not int or value < 0:
+            raise ValueError(f"behavioral-cloning progress {field} must be a non-negative integer")
+    for field in scalar_fields:
+        value = event[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value):
+            raise ValueError(f"behavioral-cloning progress {field} must be finite")
+    if any(event[field] < 0 for field in ("epoch_seconds", "elapsed_seconds", "examples_per_second")):
+        raise ValueError("behavioral-cloning progress timings and rate must be non-negative")
+
 def train_behavioral_clone(
     *,
     dataset: ImitationDataset,
@@ -1038,6 +1061,7 @@ def train_behavioral_clone(
     spaces_info: Mapping[str, Any],
     run_dir: Path,
     config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> BehavioralCloningResult:
     """Train only the production MaskablePPO actor and atomically publish a resolver-backed run."""
     import torch
@@ -1109,14 +1133,19 @@ def train_behavioral_clone(
     epochs_without_improvement = 0
     epochs_trained = 0
 
+    history: list[dict[str, Any]] = []
+    training_started = time.perf_counter()
     for epoch in range(1, config.max_epochs + 1):
         model.policy.set_training_mode(True)
+        epoch_started = time.perf_counter()
+        losses: list[float] = []
         for _step in range(steps_per_epoch):
             batch = sampler.next_batch()
             if set(batch.partitions) != {"train"}:
                 raise RuntimeError("validation rows entered behavioral-cloning optimization")
             distribution, actions, _legal_masks = _distribution_tensors(model, batch)
             loss = -distribution.log_prob(actions).mean()
+            losses.append(float(loss.detach().cpu()))
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
@@ -1130,8 +1159,37 @@ def train_behavioral_clone(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= config.patience:
-                break
+        epoch_elapsed = time.perf_counter() - epoch_started
+        total_elapsed = time.perf_counter() - training_started
+        examples = steps_per_epoch * config.batch_size
+        event = {
+            "schema_version": 1,
+            "event": "bc_epoch",
+            "model_seed": config.model_seed,
+            "device": training_device["resolved"],
+            "epoch": epoch,
+            "max_epochs": config.max_epochs,
+            "batches": steps_per_epoch,
+            "examples": examples,
+            "mean_training_loss": float(sum(losses) / len(losses)),
+            "validation_nll": float(validation_metrics.nll),
+            "top1_accuracy": float(validation_metrics.top1_accuracy),
+            "top3_accuracy": float(validation_metrics.top3_accuracy),
+            "top5_accuracy": float(validation_metrics.top5_accuracy),
+            "best_epoch": int(best_epoch),
+            "best_validation_nll": float(best_nll),
+            "epochs_without_improvement": int(epochs_without_improvement),
+            "patience": int(config.patience),
+            "epoch_seconds": float(epoch_elapsed),
+            "elapsed_seconds": float(total_elapsed),
+            "examples_per_second": float(examples / epoch_elapsed) if epoch_elapsed else 0.0,
+        }
+        _validate_behavioral_cloning_progress_event(event)
+        history.append(event)
+        if progress is not None:
+            progress(dict(event))
+        if epochs_without_improvement >= config.patience:
+            break
 
     if best_actor_state is None:
         raise RuntimeError("behavioral cloning did not produce a finite validation epoch")
@@ -1202,6 +1260,16 @@ def train_behavioral_clone(
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
         }
+        atomic_write_json(
+            temporary / "training-history.json",
+            {
+                "schema_version": 1,
+                "model_seed": config.model_seed,
+                "training_device": training_device,
+                "publication_device": "cpu",
+                "epochs": history,
+            },
+        )
         scenario.write(temporary / "scenario.json")
         atomic_write_json(temporary / "bc.json", bc_data)
         atomic_write_json(temporary / "metrics.json", metrics_data)
@@ -1211,6 +1279,18 @@ def train_behavioral_clone(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+
+    if progress is not None:
+        progress({
+            "schema_version": 1,
+            "event": "bc_complete",
+            "model_seed": config.model_seed,
+            "device": training_device["resolved"],
+            "best_epoch": best_epoch,
+            "epochs_trained": epochs_trained,
+            "elapsed_seconds": total_elapsed,
+            "run_dir": str(run_dir.resolve()),
+        })
 
     return BehavioralCloningResult(
         run_dir=run_dir,

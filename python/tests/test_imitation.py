@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 from pathlib import Path
+from typing import Any
 import zipfile
 from dataclasses import asdict
 
@@ -310,6 +312,7 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
     assert result.best_epoch <= result.epochs_trained <= 200
     expected_files = {
         "run.json", "scenario.json", "bc.json", "metrics.json", "actor-fixtures.npz",
+        "training-history.json",
         "checkpoints/step_000000000.zip",
     }
     assert {path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()} == expected_files
@@ -685,3 +688,69 @@ def test_clone_rejects_scenario_hash_and_environment_mismatches_before_writing(c
         )
     assert not (tmp_path / "hash-mismatch").exists()
     assert not (tmp_path / "environment-mismatch").exists()
+
+
+def test_clone_trainer_emits_finite_epoch_and_completion_progress(
+    clone_dataset: Path, clone_scenario, tmp_path: Path
+) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    events: list[dict[str, Any]] = []
+    result = train_behavioral_clone(
+        dataset=dataset,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "progress-bc",
+        config=BehavioralCloningConfig(
+            model_seed=211, batch_size=5, max_epochs=1, patience=1,
+            device="cpu",
+        ),
+        progress=events.append,
+    )
+
+    assert [event["event"] for event in events] == ["bc_epoch", "bc_complete"]
+    epoch = events[0]
+    assert epoch["schema_version"] == 1
+    assert epoch["model_seed"] == 211
+    assert epoch["device"] == "cpu"
+    assert epoch["epoch"] == epoch["max_epochs"] == 1
+    assert epoch["batches"] > 0
+    assert epoch["examples"] > 0
+    for key in (
+        "mean_training_loss", "validation_nll", "top1_accuracy",
+        "top3_accuracy", "top5_accuracy", "epoch_seconds",
+        "elapsed_seconds", "examples_per_second",
+    ):
+        assert math.isfinite(epoch[key])
+    assert epoch["epoch_seconds"] >= 0
+    assert epoch["examples_per_second"] >= 0
+    assert events[-1]["run_dir"] == str(result.run_dir.resolve())
+
+def test_clone_publishes_complete_epoch_history(
+    clone_dataset: Path, clone_scenario, tmp_path: Path
+) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    result = train_behavioral_clone(
+        dataset=dataset,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "history-bc",
+        config=BehavioralCloningConfig(
+            model_seed=211, batch_size=5, max_epochs=2, patience=2,
+            device="cpu",
+        ),
+    )
+    payload = json.loads(
+        (result.run_dir / "training-history.json").read_text(encoding="utf-8")
+    )
+    assert payload["schema_version"] == 1
+    assert payload["model_seed"] == 211
+    assert payload["training_device"]["requested"] == "cpu"
+    assert len(payload["epochs"]) == result.epochs_trained
+    assert [row["epoch"] for row in payload["epochs"]] == list(
+        range(1, result.epochs_trained + 1)
+    )
+    assert payload["epochs"][-1]["best_epoch"] == result.best_epoch
