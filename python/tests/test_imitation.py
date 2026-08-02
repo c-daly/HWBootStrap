@@ -22,7 +22,7 @@ from hex_cnn import HexCNN
 from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.controllers import ControllerResolver
 from ml_lab.scenarios import resolve_scenario
-from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, MaterializedImitationPartition, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, materialize_imitation_partition, resolve_behavioral_cloning_device, train_behavioral_clone, validate_decision
+from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, MaterializedImitationPartition, Source, StratifiedDecisionSampler, benchmark_imitation_sampler, load_imitation_dataset, masked_cross_entropy, materialize_imitation_partition, resolve_behavioral_cloning_device, train_behavioral_clone, validate_decision
 
 
 def contract() -> EnvironmentContract:
@@ -191,6 +191,22 @@ def test_sampler_keeps_70_30_ratio_is_seeded_and_excludes_validation_rows(sample
     assert set(first.partitions) == {"train"}
     assert first.observations.flags.owndata
     assert np.all(first.legal_masks[np.arange(len(first.actions)), first.actions])
+
+
+def test_sampler_benchmark_runs_exact_batches_and_reports_checksum(
+    sampled_dataset: Path,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    result = benchmark_imitation_sampler(
+        dataset, batch_size=100, seed=211, batches=4,
+    )
+    assert result["schema_version"] == 1
+    assert result["batches"] == 4
+    assert result["examples"] == 400
+    assert result["examples_per_second"] > 0
+    assert result["materialization_seconds"] >= 0
+    assert result["sampling_seconds"] > 0
+    assert len(result["sequence_sha256"]) == 64
 
 
 def test_masked_cross_entropy_masks_illegal_logits_and_has_finite_gradient() -> None:

@@ -747,6 +747,61 @@ class StratifiedDecisionSampler:
         return batch
 
 
+def benchmark_imitation_sampler(
+    dataset: ImitationDataset, *, batch_size: int, seed: int, batches: int = 200,
+) -> Mapping[str, Any]:
+    """Measure deterministic materialized sampler throughput without touching shards."""
+    if (
+        type(batch_size) is not int
+        or batch_size < 1
+        or type(seed) is not int
+        or seed < 0
+        or type(batches) is not int
+        or batches < 1
+    ):
+        raise ValueError("sampler benchmark configuration is invalid")
+
+    materialization_started = time.perf_counter()
+    training = materialize_imitation_partition(dataset, "train")
+    sampler = StratifiedDecisionSampler(
+        dataset, training, batch_size=batch_size, seed=seed, partition="train",
+    )
+    materialization_seconds = time.perf_counter() - materialization_started
+    sampling_started = time.perf_counter()
+    digest = hashlib.sha256()
+    source_codes = {
+        Source.GREEDY_STANDARD: 0,
+        Source.SEARCH_CONVERSION: 1,
+    }
+    for _ in range(batches):
+        batch = sampler.next_batch()
+        for values in (
+            batch.game_ids,
+            batch.decision_indices,
+            batch.actions,
+            np.fromiter(
+                (source_codes[source] for source in batch.sources),
+                dtype=np.uint8,
+                count=len(batch.sources),
+            ),
+        ):
+            digest.update(np.ascontiguousarray(values).tobytes())
+    sampling_seconds = time.perf_counter() - sampling_started
+    if not math.isfinite(sampling_seconds) or sampling_seconds <= 0:
+        raise ValueError("sampler benchmark elapsed duration is invalid")
+
+    examples = batches * batch_size
+    return MappingProxyType({
+        "schema_version": 1,
+        "batches": batches,
+        "examples": examples,
+        "examples_per_second": examples / sampling_seconds,
+        "materialization_seconds": materialization_seconds,
+        "sampling_seconds": sampling_seconds,
+        "sequence_sha256": digest.hexdigest(),
+    })
+
+
 def masked_cross_entropy(logits: Any, legal_masks: Any, actions: Any) -> Any:
     """Cross-entropy over legal actions only, rejecting malformed teacher data."""
     import torch

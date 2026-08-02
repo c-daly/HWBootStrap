@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ml_lab.imitation import _BC_PHASE_FIELDS
+from ml_lab.imitation import _BC_PHASE_FIELDS, benchmark_imitation_sampler, load_imitation_dataset
 from ml_lab.scenarios import ResolvedScenario, resolve_scenario
 
 
@@ -34,6 +34,9 @@ SELECTION_PATH = PANEL_ROOT / "selection.json"
 SMOKE_ROOT = PANEL_ROOT / "evidence" / "smoke"
 EXECUTION_IDENTITY_PATH = PANEL_ROOT / "execution-identity.json"
 _SMOKE_GENERATED_ROOT = "python/panels/annihilation-imitation-v1/evidence/"
+
+_BC_INPUT_BENCHMARK_BATCHES = 200
+_BC_INPUT_MIN_EXAMPLES_PER_SECOND = 2825.0
 _FULL_GENERATED_PATHS = (
     "python/datasets/annihilation-imitation-v1/manifest.json",
     "python/datasets/annihilation-imitation-v1/games.jsonl",
@@ -1548,6 +1551,56 @@ def _collect_command(
     )
 
 
+def _benchmark_bc_input_command(
+    *,
+    dataset_dir: Path = DATASET_PATH,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    """Benchmark the identity-bound deterministic behavioral-cloning input path."""
+    panel, _banks, scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    dataset_dir = Path(dataset_dir)
+    _validate_dataset_execution_identity(dataset_dir, identity)
+    probe_root = Path(tempfile.mkdtemp(prefix=".benchmark-bc-runtime-"))
+    try:
+        probe_scenario = _materialize_runtime_scenario(scenario, probe_root, hashes)
+        probe_command = _server_command(probe_scenario)
+        from ml_lab.evaluation import DuelClient
+
+        probe = DuelClient(probe_command, environment="tactical-v2")
+        try:
+            contract = probe.contract
+        finally:
+            probe.close()
+        dataset = load_imitation_dataset(dataset_dir, expected_contract=contract)
+        result = benchmark_imitation_sampler(
+            dataset,
+            batch_size=panel["behavioral_cloning"]["batch_size"],
+            seed=panel["model_seeds"][0],
+            batches=_BC_INPUT_BENCHMARK_BATCHES,
+        )
+    finally:
+        shutil.rmtree(probe_root, ignore_errors=True)
+
+    if result["examples_per_second"] < _BC_INPUT_MIN_EXAMPLES_PER_SECOND:
+        raise ValueError("input benchmark throughput gate failed")
+    return {
+        **result,
+        "threshold_examples_per_second": _BC_INPUT_MIN_EXAMPLES_PER_SECOND,
+        "passed": True,
+    }
+
+
+
+
+
 def _validate_bc_source_target_compatibility(
     source_contract: Any,
     target_contract: Any,
@@ -2588,6 +2641,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     commands.add_parser("collect")
+    commands.add_parser("benchmark-bc-input")
     commands.add_parser("train-bc")
     commands.add_parser("evaluate-bc")
     commands.add_parser("train-ppo")
@@ -2678,6 +2732,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         result: Mapping[str, Any] = _validate_command()
     elif args.command == "collect":
         result = _collect_command()
+    elif args.command == "benchmark-bc-input":
+        result = _benchmark_bc_input_command()
     elif args.command == "train-bc":
         result = _train_bc_command()
     elif args.command == "evaluate-bc":

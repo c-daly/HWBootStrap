@@ -129,6 +129,124 @@ def _subject():
     return importlib.import_module(MODULE_NAME)
 
 
+def test_benchmark_bc_input_parser_command() -> None:
+    assert _subject().build_parser().parse_args(
+        ["benchmark-bc-input"]
+    ).command == "benchmark-bc-input"
+
+
+def test_benchmark_bc_input_locks_200_batches_and_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    module = _subject()
+    calls: list[dict[str, Any]] = []
+    lifecycle: list[tuple[str, Any]] = []
+    identity = {"commit": "a" * 40, "dirty": False}
+    panel = {"behavioral_cloning": {"batch_size": 256}, "model_seeds": [211]}
+    contract = object()
+
+    monkeypatch.setattr(
+        module, "_full_execution_context",
+        lambda **kwargs: (panel, {}, object(), {}, identity),
+    )
+    monkeypatch.setattr(
+        module, "_validate_dataset_execution_identity",
+        lambda dataset_dir, received_identity: lifecycle.append(
+            ("identity", (Path(dataset_dir), received_identity))
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_materialize_runtime_scenario",
+        lambda _scenario, root, _hashes: Path(root) / "runtime.json",
+    )
+    monkeypatch.setattr(module, "_server_command", lambda path: ["server", str(path)])
+    monkeypatch.setattr(
+        module, "benchmark_imitation_sampler",
+        lambda *args, **kwargs: calls.append(kwargs) or {
+            "schema_version": 1,
+            "batches": 200,
+            "examples": 51200,
+            "examples_per_second": 3000.0,
+            "materialization_seconds": 1.0,
+            "sampling_seconds": 17.0,
+            "sequence_sha256": "a" * 64,
+        },
+    )
+
+    import ml_lab.evaluation
+    import ml_lab.imitation
+
+    class FakeDuelClient:
+        def __init__(self, command, *, environment):
+            lifecycle.append(("client", (command, environment)))
+            self.contract = contract
+
+        def close(self) -> None:
+            lifecycle.append(("close", None))
+
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeDuelClient)
+    monkeypatch.setattr(
+        module, "load_imitation_dataset",
+        lambda dataset_dir, *, expected_contract: lifecycle.append(
+            ("load", (Path(dataset_dir), expected_contract))
+        ) or object(),
+    )
+
+    result = module._benchmark_bc_input_command(dataset_dir=tmp_path)
+
+    assert lifecycle[0] == ("identity", (tmp_path, identity))
+    assert lifecycle[1][0] == "client"
+    assert lifecycle[2] == ("close", None)
+    assert lifecycle[3] == ("load", (tmp_path, contract))
+    assert calls == [{"batch_size": 256, "seed": 211, "batches": 200}]
+    assert result["threshold_examples_per_second"] == 2825.0
+    assert result["passed"] is True
+
+
+def test_benchmark_bc_input_rejects_throughput_below_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    module = _subject()
+    identity = {"commit": "a" * 40, "dirty": False}
+    panel = {"behavioral_cloning": {"batch_size": 256}, "model_seeds": [211]}
+    monkeypatch.setattr(
+        module, "_full_execution_context",
+        lambda **kwargs: (panel, {}, object(), {}, identity),
+    )
+    monkeypatch.setattr(module, "_validate_dataset_execution_identity", lambda *args: None)
+    monkeypatch.setattr(module, "_materialize_runtime_scenario", lambda *_args: tmp_path / "runtime.json")
+    monkeypatch.setattr(module, "_server_command", lambda _path: ["server"])
+    monkeypatch.setattr(
+        module, "benchmark_imitation_sampler",
+        lambda *args, **kwargs: {
+            "schema_version": 1,
+            "batches": 200,
+            "examples": 51200,
+            "examples_per_second": 2824.999,
+            "materialization_seconds": 1.0,
+            "sampling_seconds": 17.0,
+            "sequence_sha256": "a" * 64,
+        },
+    )
+
+    import ml_lab.evaluation
+    import ml_lab.imitation
+
+    class FakeDuelClient:
+        def __init__(self, *_args, **_kwargs):
+            self.contract = object()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeDuelClient)
+    monkeypatch.setattr(module, "load_imitation_dataset", lambda *args, **kwargs: object())
+
+    with pytest.raises(ValueError, match="input benchmark throughput gate failed"):
+        module._benchmark_bc_input_command(dataset_dir=tmp_path)
+
+
+
 def _json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -2964,7 +3082,7 @@ def test_parser_exposes_final_seal_commands() -> None:
     parser = module.build_parser()
     actions = next(action for action in parser._actions if action.dest == "command")
     assert set(actions.choices) == {
-        "validate", "collect", "train-bc", "evaluate-bc", "train-ppo", "smoke",
+        "validate", "collect", "benchmark-bc-input", "train-bc", "evaluate-bc", "train-ppo", "smoke",
         "evaluate-dev", "select-budget", "freeze-final", "evaluate-final", "report",
     }
 

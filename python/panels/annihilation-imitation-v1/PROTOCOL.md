@@ -45,9 +45,24 @@ The scenario samples 70% standard starts and 30% near/far conversions in basis p
 $env:PYTHONPATH='python'
 python python/run_annihilation_imitation_panel.py validate
 python python/run_annihilation_imitation_panel.py collect
+python python/run_annihilation_imitation_panel.py benchmark-bc-input
 python python/run_annihilation_imitation_panel.py train-bc
 python python/run_annihilation_imitation_panel.py evaluate-bc
 ```
+
+`benchmark-bc-input` is mandatory after collection and before a production
+clone restart. It validates the same execution identity as collection, probes a
+temporary immutable runtime scenario, reopens the frozen dataset against that
+capture contract, materializes the exact deterministic train sequence, and
+samples exactly 200 batches. The command passes only at or above 2,825 examples
+per second; the reported sequence SHA-256 covers ordered game IDs, decision
+indices, actions, and encoded sources. GPU utilization is diagnostic only and
+does not replace this input-throughput gate.
+
+After the accepted code revision is validated and the dataset is recollected,
+the one-epoch real-CUDA proof must pass and publish a CPU controller before the
+full CUDA behavioral-cloning restart. The old dataset and interrupted staging
+remain archived evidence and must not be reused.
 
 The train-bc command re-probes the exact Duel capture contract from its
 immutable staged scenario and reopens the frozen dataset against that source
@@ -76,8 +91,12 @@ refused if any parameter remains off CPU or any fixture logit differs.
 During `train-bc`, each epoch is printed as one sorted JSON object with an
 immediate flush. The schema-v1 event records the model seed, resolved device,
 epoch/max-epoch, batch and example counts, mean training loss, validation NLL,
-top-1/top-3/top-5 accuracy, best epoch and NLL, patience state, epoch and elapsed
-seconds, and examples per second. Completion is also emitted as flushed JSON.
+top-1/top-3/top-5 accuracy, best epoch and NLL, patience state, epoch and
+elapsed seconds, examples per second, and the five phase fields
+`sampling_seconds`, `transfer_forward_seconds`, `optimization_seconds`,
+`validation_seconds`, and `unclassified_seconds`. Completion is also
+emitted as flushed JSON.
+
 The same validated epoch rows are retained atomically in
 `training-history.json`, bound to the model seed, device provenance, CPU
 publication, contiguous epoch sequence, and final `bc.json` best epoch/NLL.
