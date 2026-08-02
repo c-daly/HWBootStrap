@@ -324,6 +324,66 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void ProfiledTacticalV2Scenario_LoadsStrictFixture()
+        {
+            string path = Path.Combine(
+                "Assets", "HexWars", "Tests", "Editor", "Fixtures",
+                "ProfiledTacticalV2Scenario.json");
+
+            MlTrainingScenario loaded = MlTrainingScenarioFile.Load(path);
+
+            Assert.That(loaded.Id, Is.EqualTo("annihilation-imitation-v1"));
+        }
+
+        [Test]
+        public void ProfiledTacticalV2Scenario_SerializePreservesProfileData()
+        {
+            string path = Path.Combine(
+                "Assets", "HexWars", "Tests", "Editor", "Fixtures",
+                "ProfiledTacticalV2Scenario.json");
+            MlTrainingScenario loaded = MlTrainingScenarioFile.Load(path);
+
+            string outputPath =
+                MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, loaded);
+            string serialized = File.ReadAllText(outputPath);
+
+            Assert.That(serialized, Does.Contain("\"start_profiles\""));
+            Assert.That(serialized, Does.Contain("\"start_distribution\""));
+            Assert.That(serialized, Does.Contain("\"conversion-1v1-far\""));
+            Assert.That(serialized, Does.Contain("\"standard-3v3\""));
+            Assert.That(serialized, Does.Contain("\"basis_points\": 7000"));
+            Assert.That(
+                MlTrainingScenarioFile.Load(outputPath).Id,
+                Is.EqualTo("annihilation-imitation-v1"));
+        }
+
+        [Test]
+        public void ProfiledTacticalV2Scenario_EngineConversionPreservesStartContract()
+        {
+            string path = Path.Combine(
+                "Assets", "HexWars", "Tests", "Editor", "Fixtures",
+                "ProfiledTacticalV2Scenario.json");
+            MlTrainingScenario loaded = MlTrainingScenarioFile.Load(path);
+
+            TrainingScenario converted = MlTrainingScenarioPreflight.ToEngine(loaded);
+
+            Assert.That(loaded.TacticalV2.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(
+                loaded.TacticalV2.StartDistribution
+                    .Single(item => item.ProfileId == "standard-3v3").BasisPoints,
+                Is.EqualTo(7000));
+            Assert.That(converted.TacticalV2.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(
+                converted.TacticalV2.StartProfiles
+                    .Single(item => item.Id == "conversion-1v1-far").Separation,
+                Is.EqualTo("far"));
+            Assert.That(
+                converted.TacticalV2.StartDistribution
+                    .Single(item => item.ProfileId == "standard-3v3").BasisPoints,
+                Is.EqualTo(7000));
+        }
+
+        [Test]
         public void SourceRunPreflight_LoadsTheResolvedRunScenario()
         {
             string run = Path.Combine(_scratch, "source-run");

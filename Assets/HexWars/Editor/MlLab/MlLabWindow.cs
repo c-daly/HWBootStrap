@@ -609,6 +609,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         StartingUnitCount = scenario.TacticalV2.StartingUnitCount,
                         MaxControllableUnits = scenario.TacticalV2.MaxControllableUnits,
                         PlacementPolicy = scenario.TacticalV2.PlacementPolicy,
+                        StartProfiles = (scenario.TacticalV2.StartProfiles ??
+                                new List<MlTrainingTacticalV2StartProfile>())
+                            .Select(item => new TacticalV2StartProfile(
+                                item.Id,
+                                item.LearnerUnitCount,
+                                item.OpponentUnitCount,
+                                item.Separation))
+                            .ToList(),
+                        StartDistribution = (scenario.TacticalV2.StartDistribution ??
+                                new List<MlTrainingTacticalV2StartWeight>())
+                            .Select(item => new TacticalV2StartWeight(
+                                item.ProfileId, item.BasisPoints))
+                            .ToList(),
                         Templates = (scenario.TacticalV2.Templates ??
                                 new List<MlTrainingUnitTemplate>())
                             .Select(item => new TrainingUnitTemplateConfig

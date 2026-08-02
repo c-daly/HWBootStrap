@@ -148,8 +148,58 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("tactical-v2 starting unit count must be between 1 and 12");
             if (TacticalV2.MaxControllableUnits != TacticalV2.StartingUnitCount)
                 errors.Add("tactical-v2 max controllable units must equal starting unit count");
-            if (TacticalV2.PlacementPolicy != "symmetric-random-v1")
-                errors.Add("tactical-v2 placement policy must be 'symmetric-random-v1'");
+            if (TacticalV2.PlacementPolicy == "symmetric-random-v1")
+            {
+                if ((TacticalV2.StartProfiles?.Count ?? 0) != 0)
+                    errors.Add(
+                        "symmetric tactical-v2 placement must not declare start profiles");
+                if ((TacticalV2.StartDistribution?.Count ?? 0) != 0)
+                    errors.Add(
+                        "symmetric tactical-v2 placement must not declare a start distribution");
+            }
+            else if (TacticalV2.PlacementPolicy == "profiled-seeded-v1")
+            {
+                if (TacticalV2.StartProfiles == null ||
+                    TacticalV2.StartProfiles.Count == 0)
+                {
+                    errors.Add(
+                        "profiled tactical-v2 placement requires start profiles");
+                }
+                else
+                {
+                    foreach (MlTrainingTacticalV2StartProfile profile in
+                             TacticalV2.StartProfiles)
+                    {
+                        if (profile == null || string.IsNullOrWhiteSpace(profile.Id))
+                            errors.Add("tactical-v2 start profile ids must not be empty");
+                        if (profile == null || profile.LearnerUnitCount <= 0 ||
+                            profile.OpponentUnitCount <= 0)
+                            errors.Add(
+                                "tactical-v2 start profile unit counts must be positive");
+                        if (profile == null ||
+                            string.IsNullOrWhiteSpace(profile.Separation))
+                            errors.Add(
+                                "tactical-v2 start profile separations must not be empty");
+                    }
+                }
+                if (TacticalV2.StartDistribution == null ||
+                    TacticalV2.StartDistribution.Count == 0)
+                {
+                    errors.Add(
+                        "profiled tactical-v2 placement requires a start distribution");
+                }
+                else
+                {
+                    foreach (MlTrainingTacticalV2StartWeight weight in
+                             TacticalV2.StartDistribution)
+                        if (weight == null || string.IsNullOrWhiteSpace(weight.ProfileId) ||
+                            weight.BasisPoints < 0)
+                            errors.Add("tactical-v2 start distribution entries are invalid");
+                }
+            }
+            else
+                errors.Add(
+                    "tactical-v2 placement policy must be 'symmetric-random-v1' or 'profiled-seeded-v1'");
 
             if (TacticalV2.Templates == null || TacticalV2.Templates.Count == 0)
             {
@@ -258,7 +308,23 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int StartingUnitCount { get; set; }
         public int MaxControllableUnits { get; set; }
         public string PlacementPolicy { get; set; }
+        public List<MlTrainingTacticalV2StartProfile> StartProfiles { get; set; }
+        public List<MlTrainingTacticalV2StartWeight> StartDistribution { get; set; }
         public List<MlTrainingUnitTemplate> Templates { get; set; }
+    }
+
+    public sealed class MlTrainingTacticalV2StartProfile
+    {
+        public string Id { get; set; }
+        public int LearnerUnitCount { get; set; }
+        public int OpponentUnitCount { get; set; }
+        public string Separation { get; set; }
+    }
+
+    public sealed class MlTrainingTacticalV2StartWeight
+    {
+        public string ProfileId { get; set; }
+        public int BasisPoints { get; set; }
     }
 
     public sealed class MlTrainingUnitTemplate
@@ -413,7 +479,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (scenario.Environment == MlEnvironmentContract.AdaptiveV1)
                 return JsonUtility.ToJson(MlAdaptiveScenarioWire.FromScenario(scenario), true);
             if (scenario.Environment == MlEnvironmentContract.TacticalV2)
-                return JsonUtility.ToJson(MlTacticalV2ScenarioWire.FromScenario(scenario), true);
+            {
+                if (scenario.TacticalV2.PlacementPolicy == "profiled-seeded-v1")
+                    return JsonUtility.ToJson(
+                        MlTacticalV2ScenarioWire.FromScenario(scenario), true);
+                return JsonUtility.ToJson(
+                    MlSymmetricTacticalV2ScenarioWire.FromScenario(scenario), true);
+            }
             return JsonUtility.ToJson(MlTacticalScenarioWire.FromScenario(scenario), true);
         }
 
@@ -519,6 +591,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
         static readonly string[] TacticalV2Keys =
         {
             "starting_unit_count", "max_controllable_units", "placement_policy", "templates",
+        };
+        static readonly string[] ProfiledTacticalV2Keys =
+        {
+            "starting_unit_count", "max_controllable_units", "placement_policy",
+            "start_profiles", "start_distribution", "templates",
+        };
+        static readonly string[] StartProfileKeys =
+        {
+            "id", "learner_units", "opponent_units", "separation",
+        };
+        static readonly string[] StartWeightKeys =
+        {
+            "profile_id", "basis_points",
         };
         static readonly string[] UnitTemplateKeys = { "id", "name", "stats" };
         static readonly string[] UnitStatsKeys =
@@ -633,13 +718,50 @@ namespace HexWars.Presentation.EditorTools.MlLab
         static void ValidateTacticalV2(JsonNode node, string path)
         {
             Dictionary<string, JsonNode> value = RequireObject(node, path);
-            ExactKeys(value, TacticalV2Keys, path);
+            value.TryGetValue("placement_policy", out JsonNode placementNode);
+            string placementPolicy =
+                RequireString(placementNode, path + ".placement_policy");
+            if (string.IsNullOrWhiteSpace(placementPolicy))
+                Fail(path + ".placement_policy must be a non-empty string");
+            bool profiled = string.Equals(
+                placementPolicy, "profiled-seeded-v1", StringComparison.Ordinal);
+            ExactKeys(value, profiled ? ProfiledTacticalV2Keys : TacticalV2Keys, path);
             RequireInteger(value["starting_unit_count"], path + ".starting_unit_count");
             RequireInteger(value["max_controllable_units"], path + ".max_controllable_units");
-            RequireNonEmptyString(value["placement_policy"], path + ".placement_policy");
+            if (profiled)
+            {
+                List<JsonNode> profiles =
+                    RequireArray(value["start_profiles"], path + ".start_profiles");
+                for (int i = 0; i < profiles.Count; i++)
+                    ValidateStartProfile(
+                        profiles[i], path + ".start_profiles[" + i + "]");
+                List<JsonNode> weights =
+                    RequireArray(value["start_distribution"], path + ".start_distribution");
+                for (int i = 0; i < weights.Count; i++)
+                    ValidateStartWeight(
+                        weights[i], path + ".start_distribution[" + i + "]");
+            }
             List<JsonNode> templates = RequireArray(value["templates"], path + ".templates");
             for (int i = 0; i < templates.Count; i++)
                 ValidateUnitTemplate(templates[i], path + ".templates[" + i + "]");
+        }
+
+        static void ValidateStartProfile(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, StartProfileKeys, path);
+            RequireNonEmptyString(value["id"], path + ".id");
+            RequireInteger(value["learner_units"], path + ".learner_units");
+            RequireInteger(value["opponent_units"], path + ".opponent_units");
+            RequireNonEmptyString(value["separation"], path + ".separation");
+        }
+
+        static void ValidateStartWeight(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, StartWeightKeys, path);
+            RequireNonEmptyString(value["profile_id"], path + ".profile_id");
+            RequireInteger(value["basis_points"], path + ".basis_points");
         }
 
         static void ValidateUnitTemplate(JsonNode node, string path)
@@ -1138,6 +1260,56 @@ namespace HexWars.Presentation.EditorTools.MlLab
     }
 
     [Serializable]
+    sealed class MlSymmetricTacticalV2ScenarioWire
+    {
+        public int schema_version;
+        public string id;
+        public string name;
+        public string environment;
+        public MlTrainingBoardWire board;
+        public MlTrainingRulesWire rules;
+        public MlTrainingEpisodeWire episode;
+        public MlTacticalRewardWire reward;
+        public MlSymmetricTrainingTacticalV2Wire tactical_v2;
+
+        public static MlSymmetricTacticalV2ScenarioWire FromScenario(
+            MlTrainingScenario scenario) =>
+            new MlSymmetricTacticalV2ScenarioWire
+            {
+                schema_version = scenario.SchemaVersion,
+                id = scenario.Id,
+                name = scenario.Name,
+                environment = "tactical-v2",
+                board = MlTrainingBoardWire.FromModel(scenario.Board),
+                rules = MlTrainingRulesWire.FromModel(scenario.Rules),
+                episode = MlTrainingEpisodeWire.FromModel(scenario.Episode),
+                reward = MlTacticalRewardWire.FromModel(scenario.TacticalReward),
+                tactical_v2 =
+                    MlSymmetricTrainingTacticalV2Wire.FromModel(scenario.TacticalV2),
+            };
+    }
+
+    [Serializable]
+    sealed class MlSymmetricTrainingTacticalV2Wire
+    {
+        public int starting_unit_count;
+        public int max_controllable_units;
+        public string placement_policy;
+        public MlTrainingUnitTemplateWire[] templates;
+
+        public static MlSymmetricTrainingTacticalV2Wire FromModel(
+            MlTrainingTacticalV2 model) =>
+            new MlSymmetricTrainingTacticalV2Wire
+            {
+                starting_unit_count = model.StartingUnitCount,
+                max_controllable_units = model.MaxControllableUnits,
+                placement_policy = model.PlacementPolicy,
+                templates = (model.Templates ?? new List<MlTrainingUnitTemplate>())
+                    .Select(MlTrainingUnitTemplateWire.FromModel).ToArray(),
+            };
+    }
+
+    [Serializable]
     sealed class MlTacticalV2ScenarioWire
     {
         public int schema_version;
@@ -1351,6 +1523,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int starting_unit_count;
         public int max_controllable_units;
         public string placement_policy;
+        public MlTrainingTacticalV2StartProfileWire[] start_profiles;
+        public MlTrainingTacticalV2StartWeightWire[] start_distribution;
         public MlTrainingUnitTemplateWire[] templates;
 
         public MlTrainingTacticalV2 ToModel() => new MlTrainingTacticalV2
@@ -1358,6 +1532,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
             StartingUnitCount = starting_unit_count,
             MaxControllableUnits = max_controllable_units,
             PlacementPolicy = placement_policy,
+            StartProfiles =
+                (start_profiles ?? Array.Empty<MlTrainingTacticalV2StartProfileWire>())
+                .Select(item => item.ToModel()).ToList(),
+            StartDistribution =
+                (start_distribution ?? Array.Empty<MlTrainingTacticalV2StartWeightWire>())
+                .Select(item => item.ToModel()).ToList(),
             Templates = (templates ?? Array.Empty<MlTrainingUnitTemplateWire>())
                 .Select(item => item.ToModel()).ToList(),
         };
@@ -1368,8 +1548,68 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 starting_unit_count = model.StartingUnitCount,
                 max_controllable_units = model.MaxControllableUnits,
                 placement_policy = model.PlacementPolicy,
+                start_profiles = model.PlacementPolicy == "profiled-seeded-v1"
+                    ? (model.StartProfiles ??
+                            new List<MlTrainingTacticalV2StartProfile>())
+                        .Select(MlTrainingTacticalV2StartProfileWire.FromModel).ToArray()
+                    : null,
+                start_distribution = model.PlacementPolicy == "profiled-seeded-v1"
+                    ? (model.StartDistribution ??
+                            new List<MlTrainingTacticalV2StartWeight>())
+                        .Select(MlTrainingTacticalV2StartWeightWire.FromModel).ToArray()
+                    : null,
                 templates = (model.Templates ?? new List<MlTrainingUnitTemplate>())
                     .Select(MlTrainingUnitTemplateWire.FromModel).ToArray(),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV2StartProfileWire
+    {
+        public string id;
+        public int learner_units;
+        public int opponent_units;
+        public string separation;
+
+        public MlTrainingTacticalV2StartProfile ToModel() =>
+            new MlTrainingTacticalV2StartProfile
+            {
+                Id = id,
+                LearnerUnitCount = learner_units,
+                OpponentUnitCount = opponent_units,
+                Separation = separation,
+            };
+
+        public static MlTrainingTacticalV2StartProfileWire FromModel(
+            MlTrainingTacticalV2StartProfile model) =>
+            new MlTrainingTacticalV2StartProfileWire
+            {
+                id = model.Id,
+                learner_units = model.LearnerUnitCount,
+                opponent_units = model.OpponentUnitCount,
+                separation = model.Separation,
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV2StartWeightWire
+    {
+        public string profile_id;
+        public int basis_points;
+
+        public MlTrainingTacticalV2StartWeight ToModel() =>
+            new MlTrainingTacticalV2StartWeight
+            {
+                ProfileId = profile_id,
+                BasisPoints = basis_points,
+            };
+
+        public static MlTrainingTacticalV2StartWeightWire FromModel(
+            MlTrainingTacticalV2StartWeight model) =>
+            new MlTrainingTacticalV2StartWeightWire
+            {
+                profile_id = model.ProfileId,
+                basis_points = model.BasisPoints,
             };
     }
 
