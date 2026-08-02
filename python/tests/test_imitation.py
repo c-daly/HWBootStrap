@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from types import MappingProxyType
 import zipfile
 from dataclasses import asdict
 
@@ -21,7 +22,7 @@ from hex_cnn import HexCNN
 from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.controllers import ControllerResolver
 from ml_lab.scenarios import resolve_scenario
-from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, resolve_behavioral_cloning_device, train_behavioral_clone, validate_decision
+from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, MaterializedImitationPartition, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, materialize_imitation_partition, resolve_behavioral_cloning_device, train_behavioral_clone, validate_decision
 
 
 def contract() -> EnvironmentContract:
@@ -152,11 +153,37 @@ def test_loader_rejects_contract_content_and_partition_seed_mismatches(sampled_d
         load_imitation_dataset(sampled_dataset, expected_contract=contract())
 
 
+def _physical_batch_for_scheduled_refs(
+    dataset,
+    refs_and_sources: list[tuple[tuple[int, int], Source]],
+) -> ImitationBatch:
+    refs = [ref for ref, _source in refs_and_sources]
+    rows = dataset._row_data(refs)
+    legal_masks = np.unpackbits(
+        rows["packed_masks"], axis=1,
+        count=dataset.contract.action_size, bitorder="little",
+    ).astype(bool, copy=False)
+    metadata = [dataset.games[int(game_id)] for game_id in rows["game_ids"]]
+    return ImitationBatch(
+        observations=rows["observations"].copy(),
+        legal_masks=legal_masks.copy(),
+        actions=rows["actions"].copy(),
+        game_ids=rows["game_ids"].copy(),
+        decision_indices=rows["decision_indices"].copy(),
+        sources=np.asarray([source for _ref, source in refs_and_sources], dtype=object),
+        profiles=np.asarray([game["profile"] for game in metadata], dtype=object),
+        seats=rows["seats"].copy(),
+        action_kinds=rows["action_kinds"].copy(),
+        partitions=np.asarray([game["partition"] for game in metadata], dtype=object),
+    )
+
+
 def test_sampler_keeps_70_30_ratio_is_seeded_and_excludes_validation_rows(sampled_dataset: Path) -> None:
     dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
-    first = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
-    second = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
-    different = StratifiedDecisionSampler(dataset, batch_size=100, standard_fraction=0.70, seed=212).next_batch()
+    training = materialize_imitation_partition(dataset, "train")
+    first = StratifiedDecisionSampler(dataset, training, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
+    second = StratifiedDecisionSampler(dataset, training, batch_size=100, standard_fraction=0.70, seed=211).next_batch()
+    different = StratifiedDecisionSampler(dataset, training, batch_size=100, standard_fraction=0.70, seed=212).next_batch()
     assert (first.sources == Source.GREEDY_STANDARD).sum() == 70
     assert (first.sources == Source.SEARCH_CONVERSION).sum() == 30
     assert list(zip(first.game_ids, first.decision_indices)) == list(zip(second.game_ids, second.decision_indices))
@@ -217,13 +244,68 @@ def test_loader_defers_full_decode_and_keeps_only_two_cached_shards(sampled_data
     dataset._row_data([(0, 0)])
     assert calls.count(dataset.shards[0].path.split("/")[-1]) == 2
 
-def test_first_sampler_batch_decodes_only_its_selected_shard(sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_materialization_decodes_shards_but_sampler_batches_do_not(sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     original_decode = imitation_module._read_shard
     monkeypatch.setattr(imitation_module, "_read_shard", lambda path, *args, **kwargs: calls.append(path.name) or original_decode(path, *args, **kwargs))
-    batch = StratifiedDecisionSampler(load_imitation_dataset(sampled_dataset, expected_contract=contract()), batch_size=1, seed=37).next_batch()
-    assert len(calls) == 1
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    training = materialize_imitation_partition(dataset, "train")
+    assert calls
+    calls.clear()
+    batch = StratifiedDecisionSampler(dataset, training, batch_size=1, seed=37).next_batch()
+    assert calls == []
     assert batch.game_ids.shape == (1,)
+
+
+def test_materialized_sampler_matches_physical_batches_and_never_rereads(
+    sampled_dataset: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    oracle_scheduler = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=100,
+        standard_fraction=0.70, seed=211,
+    )
+    optimized = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=100,
+        standard_fraction=0.70, seed=211,
+    )
+    expected_batches = [
+        _physical_batch_for_scheduled_refs(
+            dataset, oracle_scheduler._next_refs_and_sources()
+        )
+        for _ in range(4)
+    ]
+    monkeypatch.setattr(
+        dataset._cache, "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("physical shard access entered sampler hot path")
+        ),
+    )
+    actual_batches = [optimized.next_batch() for _ in range(4)]
+    for expected, actual in zip(expected_batches, actual_batches, strict=True):
+        for field in ImitationBatch.__dataclass_fields__:
+            np.testing.assert_array_equal(
+                getattr(actual, field), getattr(expected, field)
+            )
+
+
+def test_materialized_partition_rejects_wrong_partition_and_missing_reference(
+    sampled_dataset: Path,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    validation = materialize_imitation_partition(dataset, "validation")
+    with pytest.raises(ValueError, match="partition"):
+        StratifiedDecisionSampler(
+            dataset, validation, batch_size=1, partition="train", seed=211,
+        )
+    train = materialize_imitation_partition(dataset, "train")
+    with pytest.raises(ValueError, match="reference map"):
+        MaterializedImitationPartition(
+            partition=train.partition,
+            batch=train.batch,
+            offsets=MappingProxyType(dict(list(train.offsets.items())[1:])),
+        )
 
 
 def test_matching_hash_invalid_payload_is_rejected_on_first_row_use(sampled_dataset: Path) -> None:

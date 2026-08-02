@@ -413,13 +413,54 @@ class ImitationDataset:
     _cache: _DecodedShardCache
 
     def _row_data(self, refs: Sequence[tuple[int, int]]) -> dict[str, np.ndarray]:
-        selected: dict[str, list[np.ndarray]] = {name: [] for name in ("observations", "packed_masks", "actions", "game_ids", "decision_indices", "seats", "action_kinds")}
-        for shard_index, local_row in refs:
+        if not refs:
+            raise ValueError("row gathering requires at least one reference")
+        grouped: dict[int, list[tuple[int, int]]] = {}
+        for destination, (shard_index, local_row) in enumerate(refs):
+            if shard_index not in range(len(self.shards)):
+                raise ValueError("row reference shard is invalid")
             descriptor = self.shards[shard_index]
-            arrays = self._cache.get(self.root, descriptor, self.games[descriptor.game_id], self.contract)
+            if local_row not in range(descriptor.rows):
+                raise ValueError("row reference offset is invalid")
+            grouped.setdefault(shard_index, []).append((destination, local_row))
+
+        selected: dict[str, np.ndarray] | None = None
+        for shard_index, placements in grouped.items():
+            descriptor = self.shards[shard_index]
+            arrays = self._cache.get(
+                self.root, descriptor, self.games[descriptor.game_id], self.contract,
+            )
+            destinations = np.asarray([item[0] for item in placements], dtype=np.int64)
+            local_rows = np.asarray([item[1] for item in placements], dtype=np.int64)
+            if selected is None:
+                selected = {
+                    name: np.empty(
+                        (len(refs), *values.shape[1:]), dtype=values.dtype,
+                    )
+                    for name, values in arrays.items()
+                }
             for name in selected:
-                selected[name].append(arrays[name][local_row].copy())
-        return {name: np.asarray(values) for name, values in selected.items()}
+                selected[name][destinations] = arrays[name][local_rows]
+
+        assert selected is not None
+        return selected
+
+@dataclass(frozen=True)
+class MaterializedImitationPartition:
+    partition: str
+    batch: ImitationBatch
+    offsets: Mapping[tuple[int, int], int]
+
+    def __post_init__(self) -> None:
+        if self.partition not in {"train", "validation"}:
+            raise ValueError("materialized partition name is invalid")
+        count = len(self.batch.actions)
+        if count < 1 or len(self.offsets) != count:
+            raise ValueError("materialized partition reference map is incomplete")
+        if set(self.batch.partitions) != {self.partition}:
+            raise ValueError("materialized partition metadata differs")
+        if set(self.offsets.values()) != set(range(count)):
+            raise ValueError("materialized partition offsets are invalid")
 
 
 def training_rows_as_validation(dataset: ImitationDataset) -> ImitationDataset:
@@ -661,28 +702,48 @@ def _source_strata(dataset: ImitationDataset, partition: str, source: Source) ->
 class StratifiedDecisionSampler:
     """Partition-scoped, seeded strata cycling; undersized strata cycle deterministically."""
 
-    def __init__(self, dataset: ImitationDataset, batch_size: int = 1, standard_fraction: float = 0.70, seed: int = 0, partition: str = "train") -> None:
+    def __init__(self, dataset: ImitationDataset, materialized: MaterializedImitationPartition, batch_size: int = 1, standard_fraction: float = 0.70, seed: int = 0, partition: str = "train") -> None:
         if type(batch_size) is not int or batch_size < 1 or partition not in {"train", "validation"} or not isinstance(standard_fraction, (int, float)) or not 0.0 < standard_fraction < 1.0:
             raise ValueError("sampler configuration is invalid")
-        self.dataset, self.batch_size, self.standard_fraction, self.partition = dataset, batch_size, float(standard_fraction), partition
+        if not isinstance(materialized, MaterializedImitationPartition) or materialized.partition != partition:
+            raise ValueError("sampler materialized partition differs")
+        if set(materialized.offsets) != set(_partition_refs(dataset, partition)):
+            raise ValueError("sampler materialized reference map differs")
+        self.dataset, self.materialized, self.batch_size, self.standard_fraction, self.partition = dataset, materialized, batch_size, float(standard_fraction), partition
         self._rng = np.random.default_rng(seed)
         self._cyclers = {Source.GREEDY_STANDARD: _StratumCycler(_source_strata(dataset, partition, Source.GREEDY_STANDARD), self._rng), Source.SEARCH_CONVERSION: _StratumCycler(_source_strata(dataset, partition, Source.SEARCH_CONVERSION), self._rng)}
         self._residual = 0.0
 
-    def next_batch(self) -> ImitationBatch:
+    def _next_refs_and_sources(self) -> list[tuple[tuple[int, int], Source]]:
         target = self.batch_size * self.standard_fraction + self._residual
         standard_count = int(np.floor(target + 1e-12))
         self._residual = target - standard_count
         refs_and_sources = [(ref, Source.GREEDY_STANDARD) for ref in self._cyclers[Source.GREEDY_STANDARD].take(standard_count)]
         refs_and_sources += [(ref, Source.SEARCH_CONVERSION) for ref in self._cyclers[Source.SEARCH_CONVERSION].take(self.batch_size - standard_count)]
         order = self._rng.permutation(len(refs_and_sources))
-        refs_and_sources = [refs_and_sources[int(index)] for index in order]
-        rows = self.dataset._row_data([ref for ref, _source in refs_and_sources])
-        legal_masks = np.unpackbits(rows["packed_masks"], axis=1, count=self.dataset.contract.action_size, bitorder="little").astype(bool, copy=False)
-        if not np.all(legal_masks[np.arange(len(rows["actions"])), rows["actions"]]):
+        return [refs_and_sources[int(index)] for index in order]
+
+    def next_batch(self) -> ImitationBatch:
+        refs_and_sources = self._next_refs_and_sources()
+        try:
+            offsets = np.fromiter(
+                (self.materialized.offsets[ref] for ref, _source in refs_and_sources),
+                dtype=np.int64,
+                count=len(refs_and_sources),
+            )
+        except KeyError as exc:
+            raise RuntimeError("sampler selected a missing materialized reference") from exc
+        batch = _take_batch(self.materialized.batch, offsets)
+        scheduled_sources = np.asarray(
+            [source for _ref, source in refs_and_sources], dtype=object,
+        )
+        if not np.array_equal(batch.sources, scheduled_sources):
+            raise RuntimeError("materialized source metadata differs from scheduler")
+        if set(batch.partitions) != {self.partition}:
+            raise RuntimeError("materialized sampler crossed a partition")
+        if not np.all(batch.legal_masks[np.arange(len(batch.actions)), batch.actions]):
             raise ValueError("selected teacher action is masked")
-        metadata = [self.dataset.games[int(game_id)] for game_id in rows["game_ids"]]
-        return ImitationBatch(rows["observations"].copy(), legal_masks.copy(), rows["actions"].copy(), rows["game_ids"].copy(), rows["decision_indices"].copy(), np.asarray([source for _ref, source in refs_and_sources], dtype=object), np.asarray([game["profile"] for game in metadata], dtype=object), rows["seats"].copy(), rows["action_kinds"].copy(), np.asarray([game["partition"] for game in metadata], dtype=object))
+        return batch
 
 
 def masked_cross_entropy(logits: Any, legal_masks: Any, actions: Any) -> Any:
@@ -781,38 +842,50 @@ class BehavioralCloningResult:
     epochs_trained: int
 
 
-def _partition_batch(dataset: ImitationDataset, partition: str) -> ImitationBatch:
+def _partition_refs(dataset: ImitationDataset, partition: str) -> list[tuple[int, int]]:
     try:
         sources = dataset.index[partition]
     except KeyError as exc:
         raise ValueError(f"imitation dataset has no {partition} partition") from exc
     refs: list[tuple[int, int]] = []
     for source in sorted(sources, key=lambda value: value.value):
-        profiles = sources[source]
-        for profile in sorted(profiles):
-            for seat in sorted(profiles[profile]):
-                for kind in sorted(profiles[profile][seat]):
-                    refs.extend(profiles[profile][seat][kind])
-    if not refs:
-        raise ValueError(f"imitation dataset has no {partition} rows")
+        for profile in sorted(sources[source]):
+            for seat in sorted(sources[source][profile]):
+                for kind in sorted(sources[source][profile][seat]):
+                    refs.extend(sources[source][profile][seat][kind])
+    if not refs or len(set(refs)) != len(refs):
+        raise ValueError("partition references are empty or duplicated")
+    return refs
+
+
+def materialize_imitation_partition(
+    dataset: ImitationDataset, partition: str,
+) -> MaterializedImitationPartition:
+    refs = _partition_refs(dataset, partition)
     rows = dataset._row_data(refs)
     order = np.lexsort((rows["decision_indices"], rows["game_ids"]))
     rows = {name: values[order] for name, values in rows.items()}
+    ordered_refs = [refs[int(index)] for index in order]
     legal_masks = np.unpackbits(
         rows["packed_masks"], axis=1, count=dataset.contract.action_size, bitorder="little"
     ).astype(bool, copy=False)
     metadata = [dataset.games[int(game_id)] for game_id in rows["game_ids"]]
-    return ImitationBatch(
-        observations=rows["observations"].copy(),
-        legal_masks=legal_masks.copy(),
-        actions=rows["actions"].copy(),
-        game_ids=rows["game_ids"].copy(),
-        decision_indices=rows["decision_indices"].copy(),
+    batch = ImitationBatch(
+        observations=rows["observations"],
+        legal_masks=legal_masks,
+        actions=rows["actions"],
+        game_ids=rows["game_ids"],
+        decision_indices=rows["decision_indices"],
         sources=np.asarray([_source_for_game(game) for game in metadata], dtype=object),
         profiles=np.asarray([game["profile"] for game in metadata], dtype=object),
-        seats=rows["seats"].copy(),
-        action_kinds=rows["action_kinds"].copy(),
-        partitions=np.asarray([game["partition"] for game in metadata], dtype=object),
+        seats=rows["seats"],
+        action_kinds=rows["action_kinds"],
+        partitions=np.full(len(rows["actions"]), partition, dtype=object),
+    )
+    return MaterializedImitationPartition(
+        partition=partition,
+        batch=batch,
+        offsets=MappingProxyType({ref: index for index, ref in enumerate(ordered_refs)}),
     )
 
 
@@ -1087,9 +1160,9 @@ def train_behavioral_clone(
     if run_dir.exists():
         raise FileExistsError(run_dir)
 
-    training = _partition_batch(dataset, "train")
-    validation = _partition_batch(dataset, "validation")
-    fixtures = _fixture_batch(validation)
+    training = materialize_imitation_partition(dataset, "train")
+    validation = materialize_imitation_partition(dataset, "validation")
+    fixtures = _fixture_batch(validation.batch)
     adapter = MaskablePPOAdapter()
     model = adapter.create(
         env,
@@ -1122,11 +1195,12 @@ def train_behavioral_clone(
 
     sampler = StratifiedDecisionSampler(
         dataset,
+        training,
         batch_size=config.batch_size,
         seed=config.model_seed,
         partition="train",
     )
-    steps_per_epoch = max(1, int(np.ceil(len(training.actions) / config.batch_size)))
+    steps_per_epoch = max(1, int(np.ceil(len(training.batch.actions) / config.batch_size)))
     best_nll = float("inf")
     best_epoch = 0
     best_actor_state: tuple[Any, ...] | None = None
@@ -1151,7 +1225,7 @@ def train_behavioral_clone(
             torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
             optimizer.step()
         epochs_trained = epoch
-        validation_metrics = _clone_metrics(model, validation)
+        validation_metrics = _clone_metrics(model, validation.batch)
         if validation_metrics.nll < best_nll:
             best_nll = validation_metrics.nll
             best_epoch = epoch
@@ -1203,7 +1277,7 @@ def train_behavioral_clone(
     value_hash_after = _parameter_hash(value_named)
     if value_hash_after != value_hash_before:
         raise RuntimeError("behavioral cloning modified value-side parameters")
-    validation_metrics = _clone_metrics(model, validation)
+    validation_metrics = _clone_metrics(model, validation.batch)
     expected_logits = _masked_logits(model, fixtures)
 
     dataset_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
@@ -1234,9 +1308,9 @@ def train_behavioral_clone(
             "value_parameter_count": int(sum(parameter.numel() for parameter in value_parameters)),
             "value_parameters_sha256_before": value_hash_before,
             "value_parameters_sha256_after": value_hash_after,
-            "training_decision_count": int(len(training.actions)),
-            "validation_decision_count": int(len(validation.actions)),
-            "validation_game_count": int(len(np.unique(validation.game_ids))),
+            "training_decision_count": int(len(training.batch.actions)),
+            "validation_decision_count": int(len(validation.batch.actions)),
+            "validation_game_count": int(len(np.unique(validation.batch.game_ids))),
         }
         manifest = {
             "schema_version": 1,
