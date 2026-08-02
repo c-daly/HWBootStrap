@@ -19,7 +19,7 @@ from hex_cnn import HexCNN
 from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.controllers import ControllerResolver
 from ml_lab.scenarios import resolve_scenario
-from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, train_behavioral_clone, validate_decision
+from ml_lab.imitation import BehavioralCloningConfig, DemonstrationGame, DemonstrationWriter, ImitationBatch, Source, StratifiedDecisionSampler, load_imitation_dataset, masked_cross_entropy, resolve_behavioral_cloning_device, train_behavioral_clone, validate_decision
 
 
 def contract() -> EnvironmentContract:
@@ -292,7 +292,7 @@ def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> t
         return distribution.distribution.logits.detach().cpu()
 
 
-def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
+def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     run_dir = tmp_path / "bc"
     result = train_behavioral_clone(
@@ -302,7 +302,7 @@ def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a
         contract=contract(),
         spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
         run_dir=run_dir,
-        config=BehavioralCloningConfig(model_seed=211, batch_size=5, learning_rate=3e-4, max_epochs=200, patience=200),
+        config=BehavioralCloningConfig(model_seed=211, batch_size=5, learning_rate=3e-4, max_epochs=200, patience=200, device="cpu"),
     )
 
     assert result.validation.top1_accuracy == pytest.approx(1.0)
@@ -357,6 +357,10 @@ def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a
 
     first = ControllerResolver(contract()).resolve(f"run:{run_dir}")
     second = ControllerResolver(contract()).resolve(f"run:{run_dir}")
+    assert bc["publication_device"] == "cpu"
+    assert bc["training_device"]["requested"] == "cpu"
+    assert bc["training_device"]["resolved"] == "cpu"
+    assert {parameter.device.type for parameter in first.model.policy.parameters()} == {"cpu"}
     assert isinstance(first.model.policy.features_extractor, HexCNN)
     torch.testing.assert_close(
         _test_masked_logits(first.model, observations, masks),
@@ -389,6 +393,7 @@ def test_smoke_validation_view_reuses_training_rows_without_mutating_dataset(
         config=BehavioralCloningConfig(
             model_seed=211,
             batch_size=5,
+            device="cpu",
             learning_rate=3e-4,
             max_epochs=1,
             patience=1,
@@ -504,7 +509,7 @@ def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Pa
             contract=contract(),
             spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
             run_dir=run_dir,
-            config=BehavioralCloningConfig(model_seed=17, batch_size=5, max_epochs=1, patience=1),
+            config=BehavioralCloningConfig(model_seed=17, batch_size=5, max_epochs=1, patience=1, device="cpu"),
         )
 
     assert not run_dir.exists()
@@ -513,7 +518,7 @@ def test_clone_publication_failure_never_exposes_a_partial_run(clone_dataset: Pa
 
 def test_clone_training_is_seed_deterministic_and_validation_is_not_optimized(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
-    config = BehavioralCloningConfig(model_seed=29, batch_size=5, max_epochs=3, patience=3)
+    config = BehavioralCloningConfig(model_seed=29, batch_size=5, max_epochs=3, patience=3, device="cpu")
     results = [
         train_behavioral_clone(
             dataset=dataset,
@@ -546,10 +551,80 @@ def test_clone_training_is_seed_deterministic_and_validation_is_not_optimized(cl
 
 
 def test_behavioral_cloning_defaults_are_the_reviewed_production_limits() -> None:
-    config = BehavioralCloningConfig()
+    config = BehavioralCloningConfig(device="cpu")
     assert (config.batch_size, config.learning_rate, config.max_epochs, config.patience) == (256, 3e-4, 50, 5)
     with pytest.raises(ValueError, match="finite"):
-        BehavioralCloningConfig(learning_rate=float("nan"))
+        BehavioralCloningConfig(learning_rate=float("nan"), device="cpu")
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_behavioral_cloning_config_accepts_explicit_supported_device(device: str) -> None:
+    assert BehavioralCloningConfig(device=device).device == device
+
+
+@pytest.mark.parametrize("device", ["", "auto", "cuda:0", "mps", "CPU"])
+def test_behavioral_cloning_config_rejects_unlocked_device(device: str) -> None:
+    with pytest.raises(ValueError, match="device"):
+        BehavioralCloningConfig(device=device)
+
+
+def test_cuda_preflight_fails_closed_when_cuda_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    with pytest.raises(RuntimeError, match="CUDA"):
+        resolve_behavioral_cloning_device("cuda")
+
+
+class _CapturedDevice(RuntimeError):
+    pass
+
+
+def test_clone_trainer_passes_requested_device_to_production_adapter(
+    clone_dataset: Path,
+    clone_scenario,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    captured: dict[str, str] = {}
+
+    def capture_create(
+        self, env, *, spaces_info, seed, device, checkpoint_interval, options=None
+    ):
+        captured["device"] = device
+        raise _CapturedDevice(device)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "create", capture_create)
+    monkeypatch.setattr(
+        imitation_module,
+        "resolve_behavioral_cloning_device",
+        lambda requested: {
+            "requested": requested,
+            "resolved": "cuda:0",
+            "torch_version": "test",
+            "cuda_runtime": "test",
+            "device_index": 0,
+            "device_name": "test-gpu",
+        },
+    )
+
+    with pytest.raises(_CapturedDevice, match="cuda"):
+        train_behavioral_clone(
+            dataset=dataset,
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=tmp_path / "bc",
+            config=BehavioralCloningConfig(
+                model_seed=211, batch_size=5, max_epochs=1, patience=1,
+                device="cuda",
+            ),
+        )
+
+    assert captured == {"device": "cuda"}
 
 
 def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset: Path, clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -572,7 +647,7 @@ def test_clone_rejects_any_validation_row_before_an_optimizer_step(clone_dataset
             contract=contract(),
             spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
             run_dir=run_dir,
-            config=BehavioralCloningConfig(model_seed=31, batch_size=5, max_epochs=1, patience=1),
+            config=BehavioralCloningConfig(model_seed=31, batch_size=5, max_epochs=1, patience=1, device="cpu"),
         )
     assert not run_dir.exists()
 
@@ -584,7 +659,7 @@ def test_clone_rejects_scenario_hash_and_environment_mismatches_before_writing(c
         "env": _TinyCloneEnv(),
         "contract": contract(),
         "spaces_info": {"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
-        "config": BehavioralCloningConfig(model_seed=37, batch_size=5, max_epochs=1, patience=1),
+        "config": BehavioralCloningConfig(model_seed=37, batch_size=5, max_epochs=1, patience=1, device="cpu"),
     }
     other_tactical = resolve_scenario(
         environment="tactical-v2",

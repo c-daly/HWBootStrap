@@ -713,6 +713,7 @@ class BehavioralCloningConfig:
     learning_rate: float = 3e-4
     max_epochs: int = 50
     patience: int = 5
+    device: str = ""
 
     def __post_init__(self) -> None:
         if type(self.model_seed) is not int or self.model_seed < 0:
@@ -725,7 +726,38 @@ class BehavioralCloningConfig:
             raise ValueError("behavioral-cloning max_epochs must be a positive integer")
         if type(self.patience) is not int or self.patience < 1:
             raise ValueError("behavioral-cloning patience must be a positive integer")
+        if self.device not in {"cpu", "cuda"}:
+            raise ValueError(
+                "behavioral-cloning device must be exactly 'cpu' or 'cuda'"
+            )
 
+
+
+def resolve_behavioral_cloning_device(requested: str) -> dict[str, Any]:
+    import torch
+
+    if requested not in {"cpu", "cuda"}:
+        raise ValueError("unsupported behavioral-cloning device")
+    if requested == "cuda":
+        if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+            raise RuntimeError("behavioral-cloning CUDA device is unavailable")
+        index = int(torch.cuda.current_device())
+        return {
+            "requested": "cuda",
+            "resolved": f"cuda:{index}",
+            "torch_version": str(torch.__version__),
+            "cuda_runtime": str(torch.version.cuda),
+            "device_index": index,
+            "device_name": str(torch.cuda.get_device_name(index)),
+        }
+    return {
+        "requested": "cpu",
+        "resolved": "cpu",
+        "torch_version": str(torch.__version__),
+        "cuda_runtime": None,
+        "device_index": None,
+        "device_name": None,
+    }
 
 @dataclass(frozen=True)
 class CloneMetrics:
@@ -986,6 +1018,16 @@ def _verify_reload_identity(run_dir: Path, contract: EnvironmentContract, expect
     torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
 
 
+def canonicalize_behavioral_clone_for_publication(model: Any) -> None:
+    import torch
+
+    model.policy.to(torch.device("cpu"))
+    model.device = torch.device("cpu")
+    devices = {parameter.device.type for parameter in model.policy.parameters()}
+    if devices != {"cpu"}:
+        raise RuntimeError("behavioral-cloning publication model is not on CPU")
+
+
 
 def train_behavioral_clone(
     *,
@@ -995,7 +1037,7 @@ def train_behavioral_clone(
     contract: EnvironmentContract,
     spaces_info: Mapping[str, Any],
     run_dir: Path,
-    config: BehavioralCloningConfig = BehavioralCloningConfig(),
+    config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
 ) -> BehavioralCloningResult:
     """Train only the production MaskablePPO actor and atomically publish a resolver-backed run."""
     import torch
@@ -1016,6 +1058,7 @@ def train_behavioral_clone(
     if not isinstance(config, BehavioralCloningConfig):
         raise TypeError("config must be BehavioralCloningConfig")
     run_dir = Path(run_dir)
+    training_device = resolve_behavioral_cloning_device(config.device)
     run_dir.parent.mkdir(parents=True, exist_ok=True)
     if run_dir.exists():
         raise FileExistsError(run_dir)
@@ -1028,10 +1071,13 @@ def train_behavioral_clone(
         env,
         spaces_info=dict(spaces_info),
         seed=config.model_seed,
-        device="cpu",
+        device=config.device,
         checkpoint_interval=2,
     )
     adapter.validate_model(model, contract)
+    parameter_devices = {parameter.device.type for parameter in model.policy.parameters()}
+    if parameter_devices != {config.device}:
+        raise RuntimeError("behavioral-cloning model parameters are not on the requested device")
 
     actor_named = _actor_named_parameters(model)
     value_named = _value_named_parameters(model)
@@ -1092,6 +1138,7 @@ def train_behavioral_clone(
     with torch.no_grad():
         for parameter, best_value in zip(actor_parameters, best_actor_state, strict=True):
             parameter.copy_(best_value.to(parameter.device))
+    canonicalize_behavioral_clone_for_publication(model)
     for parameter, original in zip(value_parameters, value_before, strict=True):
         if not torch.equal(parameter.detach().cpu(), original):
             raise RuntimeError("behavioral cloning modified a value-side parameter")
@@ -1122,6 +1169,8 @@ def train_behavioral_clone(
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
             "epochs_trained": epochs_trained,
+            "training_device": training_device,
+            "publication_device": "cpu",
             "best_validation_nll": validation_metrics.nll,
             "actor_parameter_count": int(sum(parameter.numel() for parameter in actor_parameters)),
             "value_parameter_count": int(sum(parameter.numel() for parameter in value_parameters)),
