@@ -5,7 +5,7 @@
 The real isolated smoke gate completed and atomically published
 `python/panels/annihilation-imitation-v1/evidence/smoke/smoke.json`. The
 generated dataset, model archives, traces, replays, and preserved failed-attempt
-diagnostics remain local and uncommitted.
+diagnostics remain local, ignored under the exact panel evidence root, and uncommitted.
 
 The published manifest records:
 
@@ -18,8 +18,13 @@ The published manifest records:
 - four evaluation games over two unused maps from both seats.
 
 The manifest binds 57 physical artifacts, including the runtime scenario and
-its provenance. `stage.json` binds the completed stage to the panel, scenario, and
-seed-bank definition hashes.
+its provenance, plus a clean repository identity containing the exact HEAD commit,
+source-tree digest, and narrow generated-evidence policy. `stage.json` binds the
+completed stage to the same repository identity and to the panel, scenario, and
+seed-bank definition hashes. Final inspection verifies the dataset
+`code_revision`, smoke repository commit, and HEAD are identical; the dataset and
+repository identity are both clean; and stage identity exactly matches the smoke
+identity.
 
 ## Command
 
@@ -32,6 +37,8 @@ C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe python\run_annihilation_
 
 Re-running the command reopens every recorded artifact and returns the completed
 stage with `reused = true`; it does not recollect, retrain, or reevaluate.
+Cross-commit, cross-source-tree, dirty-policy, and mid-run identity changes fail
+closed before reuse or publication.
 
 ## RED/GREEN defect evidence
 
@@ -63,15 +70,31 @@ Every behavior change was driven by a focused failing test before its fix:
    initialization source hash was recomputed. A final callable-boundary
    regression caught and repaired a missing evidence-collector function header
    before publication.
+8. Post-manifest validation initially left a completed-looking `smoke.json` in
+   staging. Failure-injection tests failed until every `run_atomic_stage` error
+   removed only that completion marker while preserving diagnostics and the
+   original exception even if cleanup also failed.
+9. Python value equality initially admitted bools and floats as integer evidence,
+   and set equality admitted type-aliased or duplicate evaluation rows. Negative
+   tests failed until all counters and seed-seat keys used exact types, exactly
+   four unique reciprocal rows were required, and actor error was finite,
+   non-boolean, numeric zero.
+10. Matching definition hashes initially allowed cross-code reuse. Identity tests
+    failed until manifests, staging provenance, completed stages, and the final
+    pre-publication check bound a clean commit, source tree, and exact evidence
+    exclusion policy.
+11. Smoke isolation initially omitted selection and final publication paths.
+    Six destination regressions failed until those files and directories became
+    protected roots.
 
-Focused GREEN evidence included the three recovery/source-chain tests, the
-callable-boundary regression, ten panel smoke tests, the full dataset audit,
-and compatible actor-transfer regression.
+Focused GREEN evidence included 34 smoke/identity cases, followed by all 119
+annihilation-imitation panel tests, the full dataset audit, and compatible
+actor-transfer regression.
 
 ## Verification
 
 - `dotnet build engine\HexWars.GymServer\HexWars.GymServer.csproj --nologo`: passed, zero warnings and zero errors.
-- `$env:PYTHONPATH='python'; C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe -m pytest python\tests -q`: passed, 572 tests and one expected scenario auto-raise warning.
+- `$env:PYTHONPATH='python'; C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe -m pytest python\tests -q`: passed, 596 tests and one expected scenario auto-raise warning.
 - `dotnet test engine\HexWars.Engine.Tests\HexWars.Engine.Tests.csproj --nologo`: passed, 653 tests.
 - `git diff --check`: passed.
 

@@ -2751,16 +2751,21 @@ def test_smoke_manifest_has_exact_versioned_physical_evidence_contract() -> None
         "schedule": module.build_smoke_schedule(),
         "checks": _smoke_checks(),
         "artifacts": _smoke_artifacts(),
+        "repository_identity": _smoke_repository_identity(),
     }
 
     assert module.build_smoke_manifest(
-        checks=_smoke_checks(), artifacts=_smoke_artifacts()
+        checks=_smoke_checks(), artifacts=_smoke_artifacts(),
+        repository_identity=_smoke_repository_identity(),
     ) == expected
 
     invalid = _smoke_checks()
     invalid["masked_labels"] = 1
     with pytest.raises(ValueError, match="smoke checks"):
-        module.build_smoke_manifest(checks=invalid, artifacts=_smoke_artifacts())
+        module.build_smoke_manifest(
+            checks=invalid, artifacts=_smoke_artifacts(),
+            repository_identity=_smoke_repository_identity(),
+        )
 
 
 def test_smoke_stage_is_isolated_and_failure_cannot_publish(
@@ -2806,8 +2811,9 @@ def test_smoke_command_reopens_hashes_and_atomically_publishes_only_smoke_root(
 
     module = _subject()
     smoke_root = tmp_path / "evidence" / "smoke"
+    identity = _smoke_repository_identity()
 
-    def pipeline(staging: Path, _scenario, _hashes) -> None:
+    def pipeline(staging: Path, _scenario, _hashes, repository_identity) -> None:
         artifacts: dict[str, str] = {}
         for relative in _smoke_artifacts():
             path = staging / relative
@@ -2819,10 +2825,15 @@ def test_smoke_command_reopens_hashes_and_atomically_publishes_only_smoke_root(
             module.build_smoke_manifest(
                 checks=_smoke_checks(),
                 artifacts=artifacts,
+                repository_identity=repository_identity,
             ),
         )
 
-    result = module._smoke_command(smoke_root=smoke_root, pipeline=pipeline)
+    result = module._smoke_command(
+        smoke_root=smoke_root,
+        pipeline=pipeline,
+        repository_identity_provider=lambda _repository: identity,
+    )
 
     manifest = _json(smoke_root / "smoke.json")
     assert result["summary"] == _smoke_checks()
@@ -2833,7 +2844,9 @@ def test_smoke_command_reopens_hashes_and_atomically_publishes_only_smoke_root(
             relative: _sha256(smoke_root / relative)
             for relative in _smoke_artifacts()
         },
+        repository_identity=identity,
     )
+
     assert not smoke_root.with_name(".smoke.staging").exists()
 
     changed = smoke_root / next(iter(manifest["artifacts"]))
@@ -2849,7 +2862,8 @@ def test_main_dispatches_smoke_and_prints_completed_manifest(
 
     module = _subject()
     expected = module.build_smoke_manifest(
-        checks=_smoke_checks(), artifacts=_smoke_artifacts()
+        checks=_smoke_checks(), artifacts=_smoke_artifacts(),
+        repository_identity=_smoke_repository_identity(),
     )
     monkeypatch.setattr(module, "_smoke_command", lambda: expected)
 
@@ -3108,3 +3122,268 @@ def test_smoke_evidence_collector_is_a_callable_module_boundary() -> None:
 
     collector = getattr(_subject(), "_collect_smoke_evidence", None)
     assert callable(collector)
+
+
+def _smoke_repository_identity(
+    *, commit: str = "a" * 40, source_tree: str = "b" * 40, dirty: bool = False,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "commit": commit,
+        "source_tree": source_tree,
+        "dirty": dirty,
+        "policy": {
+            "required_clean": True,
+            "ignored_generated_root": "python/panels/annihilation-imitation-v1/evidence/",
+        },
+    }
+
+
+def test_smoke_validation_failure_removes_only_staged_completion_manifest(
+    tmp_path: Path,
+) -> None:
+    """A post-build validation error must not leave a completed-looking staged smoke."""
+
+    module = _subject()
+    destination = tmp_path / "evidence" / "smoke"
+    staging = destination.with_name(".smoke.staging")
+
+    def build(root: Path) -> None:
+        (root / "diagnostic.txt").write_text("preserve me", encoding="utf-8")
+        (root / "smoke.json").write_text(
+            '{"schema_version":1,"state":"completed"}', encoding="utf-8",
+        )
+
+    with pytest.raises(RuntimeError, match="post-manifest failure"):
+        module.run_smoke_stage(
+            destination,
+            {"panel_sha256": "a" * 64},
+            build=build,
+            validate=lambda _root: (_ for _ in ()).throw(
+                RuntimeError("post-manifest failure")
+            ),
+        )
+
+    assert not destination.exists()
+    assert staging.is_dir()
+    assert (staging / "diagnostic.txt").read_text(encoding="utf-8") == "preserve me"
+    assert not (staging / "smoke.json").exists()
+
+
+def test_smoke_completion_cleanup_failure_preserves_original_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A filesystem cleanup error must annotate, not mask, the publication failure."""
+
+    module = _subject()
+    destination = tmp_path / "evidence" / "smoke"
+    staging = destination.with_name(".smoke.staging")
+    completion = staging / "smoke.json"
+    original_unlink = Path.unlink
+
+    def fail_completion_unlink(path: Path, *args, **kwargs) -> None:
+        if path == completion:
+            raise OSError("injected cleanup failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_completion_unlink)
+
+    def build(root: Path) -> None:
+        (root / "smoke.json").write_text(
+            '{"schema_version":1,"state":"completed"}', encoding="utf-8",
+        )
+
+    with pytest.raises(RuntimeError, match="original validation failure") as captured:
+        module.run_smoke_stage(
+            destination,
+            {"panel_sha256": "a" * 64},
+            build=build,
+            validate=lambda _root: (_ for _ in ()).throw(
+                RuntimeError("original validation failure")
+            ),
+        )
+
+    assert any(
+        "injected cleanup failure" in note
+        for note in getattr(captured.value, "__notes__", ())
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("reciprocal_pairs", 7.0),
+        ("games", 14.0),
+        ("teacher_labels", 19.0),
+        ("masked_labels", False),
+        ("round_trip_mismatches", False),
+        ("replay_mismatches", False),
+        ("ppo_timesteps", 2.0),
+        ("ppo_completed_rollouts", True),
+        ("evaluation_games", 4.0),
+    ],
+)
+def test_smoke_manifest_rejects_bool_or_float_count_fields(
+    field: str, invalid: Any,
+) -> None:
+    """Python equality must not let bools/floats impersonate integer evidence counts."""
+
+    module = _subject()
+    checks = _smoke_checks()
+    checks[field] = invalid
+    with pytest.raises(ValueError, match="smoke checks"):
+        module.build_smoke_manifest(
+            checks=checks, artifacts=_smoke_artifacts(),
+            repository_identity=_smoke_repository_identity(),
+        )
+
+
+def test_smoke_manifest_rejects_boolean_actor_error() -> None:
+    """False compares equal to zero but is not a numeric logit-error measurement."""
+
+    module = _subject()
+    checks = _smoke_checks()
+    checks["actor_fixture_max_error"] = False
+    with pytest.raises(ValueError, match="smoke checks"):
+        module.build_smoke_manifest(
+            checks=checks, artifacts=_smoke_artifacts(),
+            repository_identity=_smoke_repository_identity(),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate",
+        "float-seed",
+        "bool-seat",
+    ],
+)
+def test_smoke_evaluation_matches_require_four_exact_unique_integer_keys(
+    mutation: str,
+) -> None:
+    """Set equality alone must not accept duplicate or type-aliased match identities."""
+
+    module = _subject()
+    matches = [
+        {"seed": 18_200_000, "candidate_seat": 0},
+        {"seed": 18_200_000, "candidate_seat": 1},
+        {"seed": 18_200_001, "candidate_seat": 0},
+        {"seed": 18_200_001, "candidate_seat": 1},
+    ]
+    if mutation == "duplicate":
+        matches.append(dict(matches[0]))
+    elif mutation == "float-seed":
+        matches[0]["seed"] = 18_200_000.0
+    else:
+        matches[0]["candidate_seat"] = False
+
+    with pytest.raises(ValueError, match="matches"):
+        module._validate_smoke_evaluation_matches(
+            matches, seed_start=18_200_000, maps=2,
+        )
+
+
+def test_atomic_stage_identity_prevents_cross_revision_reuse(tmp_path: Path) -> None:
+    """Matching definitions cannot authorize reuse of artifacts from different code."""
+
+    module = _subject()
+    destination = tmp_path / "published"
+    definitions = {"panel_sha256": "a" * 64}
+    first_identity = _smoke_repository_identity()
+    changed_identity = _smoke_repository_identity(commit="c" * 40, source_tree="d" * 40)
+
+    def build(staging: Path) -> None:
+        (staging / "payload.txt").write_text("complete", encoding="utf-8")
+
+    module.run_atomic_stage(
+        destination,
+        definitions,
+        stage_identity=first_identity,
+        build=build,
+        validate=lambda _root: {"outputs": 1},
+    )
+    with pytest.raises(ValueError, match="stage identity"):
+        module.run_atomic_stage(
+            destination,
+            definitions,
+            stage_identity=changed_identity,
+            build=lambda _root: pytest.fail("cross-revision stage was rebuilt"),
+            validate=lambda _root: pytest.fail("cross-revision stage was reused"),
+        )
+
+
+def test_smoke_repository_identity_requires_clean_source_and_exact_policy() -> None:
+    """A dirty source tree or relaxed evidence exclusion cannot be authoritative."""
+
+    module = _subject()
+    module._validate_smoke_repository_identity(_smoke_repository_identity())
+    dirty = _smoke_repository_identity(dirty=True)
+    with pytest.raises(ValueError, match="clean"):
+        module._validate_smoke_repository_identity(dirty)
+    relaxed = _smoke_repository_identity()
+    relaxed["policy"]["ignored_generated_root"] = "python/panels/"
+    with pytest.raises(ValueError, match="policy"):
+        module._validate_smoke_repository_identity(relaxed)
+
+
+def test_smoke_command_rechecks_repository_identity_after_physical_validation(
+    tmp_path: Path,
+) -> None:
+    """A tracked change during the long smoke must fail before atomic publication."""
+
+    module = _subject()
+    destination = tmp_path / "evidence" / "smoke"
+    initial = _smoke_repository_identity()
+    changed = _smoke_repository_identity(commit="c" * 40, source_tree="d" * 40)
+    identities = iter((initial, changed))
+
+    def identity_provider(_repository: Path) -> dict[str, Any]:
+        return next(identities)
+
+    def pipeline(staging: Path, _scenario, _hashes, identity) -> None:
+        artifact = staging / "artifact.txt"
+        artifact.write_text("physical", encoding="utf-8")
+        module._atomic_json(
+            staging / "smoke.json",
+            module.build_smoke_manifest(
+                checks=_smoke_checks(),
+                artifacts={"artifact.txt": _sha256(artifact)},
+                repository_identity=identity,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="repository identity changed"):
+        module._smoke_command(
+            smoke_root=destination,
+            pipeline=pipeline,
+            repository_identity_provider=identity_provider,
+        )
+    assert not destination.exists()
+    assert not (destination.with_name(".smoke.staging") / "smoke.json").exists()
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "selection.json",
+        "final-seal.json",
+        "final-evaluation.json",
+        ".final-evaluation.pending",
+        "final-publication.json",
+        ".final-generations",
+    ],
+)
+def test_smoke_root_refuses_selection_and_final_artifact_destinations(
+    destination: str,
+) -> None:
+    """An isolated smoke must never occupy a selection or final publication path."""
+
+    module = _subject()
+    with pytest.raises(ValueError, match="overlaps"):
+        module.run_smoke_stage(
+            module.PANEL_ROOT / destination,
+            {"panel_sha256": "a" * 64},
+            build=lambda _root: pytest.fail("protected destination reached build"),
+            validate=lambda _root: pytest.fail("protected destination reached validation"),
+        )

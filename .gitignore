@@ -117,6 +117,9 @@ python/events.out.tfevents.*
 /python/datasets/annihilation-imitation-v1/games.jsonl
 /python/datasets/annihilation-imitation-v1/shards/
 /python/datasets/annihilation-imitation-v1/replays/
+
+# Generated end-to-end imitation smoke evidence (identity-bound but never committed).
+/python/panels/annihilation-imitation-v1/evidence/
 # Vendor asset kits: local-only, never committed (1.2GB model kit; the game copies the few
 # files it uses into Assets/HexWars/Audio, which IS tracked). Unity crash-recovery snapshots too.
 Assets/Creepy_Cat/

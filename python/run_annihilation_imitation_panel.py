@@ -31,6 +31,7 @@ PPO_RUNS_PATH = PANEL_ROOT / "ppo-runs"
 DEVELOPMENT_PATH = PANEL_ROOT / "development"
 SELECTION_PATH = PANEL_ROOT / "selection.json"
 SMOKE_ROOT = PANEL_ROOT / "evidence" / "smoke"
+_SMOKE_GENERATED_ROOT = "python/panels/annihilation-imitation-v1/evidence/"
 
 _MODEL_SEEDS = [211, 223, 227]
 _SAMPLER_SEEDS = {"211": 211, "223": 223, "227": 227}
@@ -294,20 +295,34 @@ def _stage_definitions(path: Path) -> dict[str, Any]:
     return dict(hashes)
 
 
+def _stage_identity(path: Path) -> dict[str, Any] | None:
+    value = _read_json(path)
+    if "stage_identity" not in value:
+        return None
+    identity = value["stage_identity"]
+    if not isinstance(identity, dict):
+        raise ValueError("stage identity is invalid")
+    return dict(identity)
+
+
 def run_atomic_stage(
     destination: Path,
     definition_hashes: Mapping[str, str],
     *,
+    stage_identity: Mapping[str, Any] | None = None,
     build: Callable[[Path], None],
     validate: Callable[[Path], Mapping[str, Any]],
 ) -> dict[str, Any]:
     destination = Path(destination)
     hashes = dict(definition_hashes)
+    identity = dict(stage_identity) if stage_identity is not None else None
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         stage_path = destination / "stage.json"
         if not stage_path.is_file() or _stage_definitions(stage_path) != hashes:
             raise ValueError("completed stage definition hashes do not match")
+        if _stage_identity(stage_path) != identity:
+            raise ValueError("completed stage identity does not match")
         summary = dict(validate(destination))
         result = _read_json(stage_path)
         result.update(summary=summary, reused=True)
@@ -318,9 +333,14 @@ def run_atomic_stage(
     if staging.exists():
         if not provenance_path.is_file() or _stage_definitions(provenance_path) != hashes:
             raise ValueError("staged definition hashes do not match")
+        if _stage_identity(provenance_path) != identity:
+            raise ValueError("staged stage identity does not match")
     else:
         staging.mkdir(parents=True)
-        _atomic_json(provenance_path, {"definition_hashes": hashes})
+        provenance = {"definition_hashes": hashes}
+        if identity is not None:
+            provenance["stage_identity"] = identity
+        _atomic_json(provenance_path, provenance)
     build(staging)
     summary = dict(validate(staging))
     result = {
@@ -330,6 +350,8 @@ def run_atomic_stage(
         "summary": summary,
         "reused": False,
     }
+    if identity is not None:
+        result["stage_identity"] = identity
     _atomic_json(staging / "stage.json", result)
     os.replace(staging, destination)
     return result
@@ -1149,11 +1171,70 @@ def build_smoke_schedule() -> dict[str, Any]:
     }
 
 
+def _validate_smoke_repository_identity(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("smoke repository identity is missing")
+    identity = dict(raw)
+    if set(identity) != {
+        "schema_version", "commit", "source_tree", "dirty", "policy",
+    }:
+        raise ValueError("smoke repository identity schema is invalid")
+    policy = identity.get("policy")
+    expected_policy = {
+        "required_clean": True,
+        "ignored_generated_root": _SMOKE_GENERATED_ROOT,
+    }
+    if policy != expected_policy:
+        raise ValueError("smoke repository identity policy is invalid")
+    for field in ("commit", "source_tree"):
+        digest = identity.get(field)
+        if (
+            not isinstance(digest, str)
+            or len(digest) not in {40, 64}
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("smoke repository source digest is invalid")
+    if identity.get("schema_version") != 1 or identity.get("dirty") is not False:
+        raise ValueError("authoritative smoke requires a clean repository identity")
+    identity["policy"] = dict(expected_policy)
+    return identity
+
+
+def _smoke_repository_identity(repository: Path = PROJECT_ROOT) -> dict[str, Any]:
+    repository = Path(repository)
+    revision, dirty = _repository_identity(repository)
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return _validate_smoke_repository_identity({
+        "schema_version": 1,
+        "commit": revision,
+        "source_tree": source_tree,
+        "dirty": dirty,
+        "policy": {
+            "required_clean": True,
+            "ignored_generated_root": _SMOKE_GENERATED_ROOT,
+        },
+    })
+
+
 def build_smoke_manifest(
-    *, checks: Mapping[str, Any], artifacts: Mapping[str, str]
+    *, checks: Mapping[str, Any], artifacts: Mapping[str, str],
+    repository_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     schedule = build_smoke_schedule()
     values = dict(checks)
+    identity = _validate_smoke_repository_identity(repository_identity)
+    integer_fields = {
+        "reciprocal_pairs", "games", "teacher_labels", "masked_labels",
+        "round_trip_mismatches", "replay_mismatches", "ppo_timesteps",
+        "ppo_completed_rollouts", "evaluation_games",
+    }
+    actor_error = values.get("actor_fixture_max_error")
     required = {
         "reciprocal_pairs",
         "games",
@@ -1170,7 +1251,11 @@ def build_smoke_manifest(
     }
     ppo = schedule["ppo"]
     if (
-        set(values) != required
+        any(type(values.get(field)) is not int for field in integer_fields)
+        or isinstance(actor_error, bool)
+        or not isinstance(actor_error, (int, float))
+        or not math.isfinite(float(actor_error))
+        or set(values) != required
         or values["reciprocal_pairs"] != schedule["collection"]["reciprocal_pairs"]
         or values["games"] != schedule["collection"]["games"]
         or type(values["teacher_labels"]) is not int
@@ -1178,7 +1263,7 @@ def build_smoke_manifest(
         or values["masked_labels"] != 0
         or values["round_trip_mismatches"] != 0
         or values["replay_mismatches"] != 0
-        or values["actor_fixture_max_error"] != 0
+        or actor_error != 0
         or values["actor_fixture_device"] != "cpu"
         or type(values["ppo_timesteps"]) is not int
         or values["ppo_timesteps"] < ppo["completed_rollout_size"]
@@ -1207,6 +1292,7 @@ def build_smoke_manifest(
         "schema_version": 1,
         "state": "completed",
         "schedule": schedule,
+        "repository_identity": identity,
         "checks": values,
         "artifacts": physical,
     }
@@ -1216,31 +1302,87 @@ def run_smoke_stage(
     destination: Path,
     definition_hashes: Mapping[str, str],
     *,
+    stage_identity: Mapping[str, Any] | None = None,
     build: Callable[[Path], None],
     validate: Callable[[Path], Mapping[str, Any]],
 ) -> dict[str, Any]:
     destination = Path(destination).resolve()
-    full_roots = (
+    protected = (
         DATASET_PATH, CLONE_RUNS_PATH, CLONE_EVALUATION_PATH,
-        PPO_RUNS_PATH, DEVELOPMENT_PATH,
+        PPO_RUNS_PATH, DEVELOPMENT_PATH, SELECTION_PATH,
+        PANEL_ROOT / "final-seal.json",
+        PANEL_ROOT / "final-evaluation.json",
+        PANEL_ROOT / ".final-evaluation.pending",
+        PANEL_ROOT / "final-publication.json",
+        PANEL_ROOT / ".final-generations",
     )
-    for raw in full_roots:
+    for raw in protected:
         full = Path(raw).resolve()
         if destination == full or destination in full.parents or full in destination.parents:
             raise ValueError("smoke root overlaps a full experiment artifact")
-    return run_atomic_stage(
-        destination, definition_hashes, build=build, validate=validate
-    )
+    try:
+        return run_atomic_stage(
+            destination, definition_hashes, stage_identity=stage_identity,
+            build=build, validate=validate,
+        )
+    except BaseException as error:
+        completion = (
+            destination.with_name(f".{destination.name}.staging") / "smoke.json"
+        )
+        try:
+            completion.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            error.add_note(
+                f"could not remove staged smoke completion manifest: {cleanup_error}"
+            )
+        raise
 
 
-def _validate_smoke_stage(root: Path) -> Mapping[str, Any]:
+def _validate_smoke_evaluation_matches(
+    matches: Any, *, seed_start: int, maps: int,
+) -> None:
+    expected = {
+        (seed, seat)
+        for seed in range(seed_start, seed_start + maps)
+        for seat in (0, 1)
+    }
+    if not isinstance(matches, list) or len(matches) != maps * 2:
+        raise ValueError("smoke evaluation matches are incomplete")
+    keys = []
+    for row in matches:
+        if (
+            not isinstance(row, Mapping)
+            or type(row.get("seed")) is not int
+            or type(row.get("candidate_seat")) is not int
+        ):
+            raise ValueError("smoke evaluation matches have invalid identities")
+        keys.append((row["seed"], row["candidate_seat"]))
+    if len(set(keys)) != len(keys) or set(keys) != expected:
+        raise ValueError("smoke evaluation matches are incomplete")
+
+
+def _validate_smoke_stage(
+    root: Path,
+    expected_repository_identity: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
     root = Path(root)
     manifest = _read_json(root / "smoke.json")
     checks = manifest.get("checks")
     artifacts = manifest.get("artifacts")
+    identity = _validate_smoke_repository_identity(
+        manifest.get("repository_identity")
+    )
+    if (
+        expected_repository_identity is not None
+        and identity != dict(expected_repository_identity)
+    ):
+        raise ValueError("smoke repository identity changed")
     if not isinstance(checks, Mapping) or not isinstance(artifacts, Mapping):
         raise ValueError("smoke manifest evidence is incomplete")
-    expected = build_smoke_manifest(checks=checks, artifacts=artifacts)
+    expected = build_smoke_manifest(
+        checks=checks, artifacts=artifacts,
+        repository_identity=identity,
+    )
     if manifest != expected:
         raise ValueError("smoke manifest schema or schedule is invalid")
     for relative, digest in artifacts.items():
@@ -1612,19 +1754,12 @@ def _collect_smoke_evidence(root: Path) -> tuple[dict[str, Any], dict[str, str]]
     ):
         raise ValueError("smoke reciprocal evaluation evidence is invalid")
     matches = evaluation.get("matches")
-    expected_keys = {
-        (seed, seat)
-        for seed in range(
-            evaluation_schedule["seed_start"],
-            evaluation_schedule["seed_start"] + evaluation_schedule["maps"],
-        )
-        for seat in (0, 1)
-    }
-    if (
-        not isinstance(matches, list)
-        or {(row.get("seed"), row.get("candidate_seat")) for row in matches} != expected_keys
-    ):
-        raise ValueError("smoke reciprocal evaluation matches are incomplete")
+    _validate_smoke_evaluation_matches(
+        matches,
+        seed_start=evaluation_schedule["seed_start"],
+        maps=evaluation_schedule["maps"],
+    )
+    assert isinstance(matches, list)
     declared: set[Path] = set()
     for match in matches:
         trace, replay = match.get("trace_path"), match.get("replay_path")
@@ -1662,6 +1797,7 @@ def _build_smoke_pipeline(
     root: Path,
     scenario: ResolvedScenario,
     definition_hashes: Mapping[str, str],
+    repository_identity: Mapping[str, Any],
 ) -> None:
     from collect_annihilation_demonstrations import CollectionSpec, collect_partition
     from hexwars_gym import HexWarsEnv
@@ -1826,13 +1962,20 @@ def _build_smoke_pipeline(
     checks, artifacts = _collect_smoke_evidence(root)
     _atomic_json(
         root / "smoke.json",
-        build_smoke_manifest(checks=checks, artifacts=artifacts),
+        build_smoke_manifest(
+            checks=checks,
+            artifacts=artifacts,
+            repository_identity=repository_identity,
+        ),
     )
 
 
-def _validate_real_smoke_stage(root: Path) -> Mapping[str, Any]:
+def _validate_real_smoke_stage(
+    root: Path,
+    repository_identity: Mapping[str, Any],
+) -> Mapping[str, Any]:
     root = Path(root)
-    checks = dict(_validate_smoke_stage(root))
+    checks = dict(_validate_smoke_stage(root, repository_identity))
     recomputed_checks, recomputed_artifacts = _collect_smoke_evidence(root)
     manifest = _read_json(root / "smoke.json")
     if (
@@ -1846,25 +1989,46 @@ def _validate_real_smoke_stage(root: Path) -> Mapping[str, Any]:
 def _smoke_command(
     *,
     smoke_root: Path = SMOKE_ROOT,
-    pipeline: Callable[[Path, ResolvedScenario, Mapping[str, str]], None] | None = None,
+    pipeline: Callable[
+        [Path, ResolvedScenario, Mapping[str, str], Mapping[str, Any]], None
+    ]
+    | None = None,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
 ) -> Mapping[str, Any]:
     _panel, _banks, scenario = validate_definitions()
     hashes = current_definition_hashes()
     selected = pipeline
     if selected is None:
         selected = _build_smoke_pipeline
+    identity_provider = repository_identity_provider or _smoke_repository_identity
+    repository_identity = _validate_smoke_repository_identity(
+        identity_provider(PROJECT_ROOT)
+    )
 
     def build(staging: Path) -> None:
-        selected(staging, scenario, hashes)
+        selected(staging, scenario, hashes, repository_identity)
 
-    validator = (
-        _validate_smoke_stage if pipeline is not None else _validate_real_smoke_stage
-    )
+    def validate(root: Path) -> Mapping[str, Any]:
+        summary = (
+            _validate_smoke_stage(root, repository_identity)
+            if pipeline is not None
+            else _validate_real_smoke_stage(root, repository_identity)
+        )
+        current = _validate_smoke_repository_identity(
+            identity_provider(PROJECT_ROOT)
+        )
+        if current != repository_identity:
+            raise ValueError("smoke repository identity changed during execution")
+        return summary
+
     return run_smoke_stage(
         smoke_root,
         hashes,
+        stage_identity=repository_identity,
         build=build,
-        validate=validator,
+        validate=validate,
     )
 
 

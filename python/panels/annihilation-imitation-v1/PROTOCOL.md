@@ -44,6 +44,14 @@ and 14 games. It then runs one BC epoch, transfers only the actor into fresh
 CPU MaskablePPO, completes one two-step rollout, saves and reloads its physical
 checkpoint, and evaluates two unused standard maps from both seats (four games).
 
+An authoritative invocation requires a clean tracked Git worktree. `smoke.json`
+and `stage.json` bind the exact HEAD commit and source-tree digest under a
+fail-closed policy whose sole generated-evidence exclusion is this panel's
+`evidence/` root. The command recomputes that repository identity after reopening
+and physically validating the evidence, immediately before atomic publication.
+Any intervening source change fails the run and removes only the staged
+completion manifest, preserving non-authoritative diagnostics.
+
 The one-epoch clone deliberately reuses its training rows as the validation
 view. This exercises batching, masking, checkpointing, and actor transfer; it
 is not held-out evidence and must not be interpreted as clone generalization.
@@ -55,10 +63,12 @@ source contract and artifact hashes.
 Publication is atomic and occurs only after every shard, replay, label, mask,
 round trip, checkpoint, initialization source, evaluation trace, and evaluation
 replay is reopened and hashed into `smoke.json`. A completed BC or PPO stage is
-reused only after exact validation. A failed PPO attempt is preserved in the
-deterministic sibling `.smoke.recovery`, outside the publishable tree. Generated
-smoke and recovery artifacts are evidence for the local gate and are not
-committed.
+reused only after exact validation. The published smoke root itself is reusable
+only under the identical repository commit, source tree, clean policy, and
+definition hashes. A failed PPO attempt is preserved in the deterministic sibling
+`.smoke.recovery`, outside the publishable tree. Generated smoke and recovery
+artifacts are evidence for the local gate, are ignored only under the exact
+`evidence/` root, and are not committed.
 
 A clone passes only when each seed wins at least 60 of 200 games and the panel wins at least 240 of 600. Any missing/duplicate seed-seat record, contract mismatch, changed definition provenance, missing loss/draw trace, or missing loss/draw replay fails the stage regardless of rates.
 
