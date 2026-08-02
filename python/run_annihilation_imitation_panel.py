@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ml_lab.imitation import _BC_PHASE_FIELDS
 from ml_lab.scenarios import ResolvedScenario, resolve_scenario
 
 
@@ -694,7 +695,7 @@ def _validate_clone_training_history(
         "validation_nll", "top1_accuracy", "top3_accuracy",
         "top5_accuracy", "best_epoch", "best_validation_nll",
         "epochs_without_improvement", "patience", "epoch_seconds",
-        "elapsed_seconds", "examples_per_second",
+        "elapsed_seconds", "examples_per_second", *_BC_PHASE_FIELDS,
     }
     count_fields = {
         "model_seed", "epoch", "max_epochs", "batches", "examples",
@@ -703,11 +704,15 @@ def _validate_clone_training_history(
     scalar_fields = {
         "mean_training_loss", "validation_nll", "top1_accuracy",
         "top3_accuracy", "top5_accuracy", "best_validation_nll",
-        "epoch_seconds", "elapsed_seconds", "examples_per_second",
+        "epoch_seconds", "elapsed_seconds", "examples_per_second", *_BC_PHASE_FIELDS,
     }
     previous_elapsed = 0.0
     for expected_epoch, event in enumerate(epochs, start=1):
-        if not isinstance(event, Mapping) or set(event) != event_fields:
+        if not isinstance(event, Mapping):
+            raise ValueError(f"clone seed {seed} training history is invalid")
+        if any(field not in event for field in _BC_PHASE_FIELDS):
+            raise ValueError(f"clone seed {seed} training history timing is invalid")
+        if set(event) != event_fields:
             raise ValueError(f"clone seed {seed} training history is invalid")
         if any(type(event.get(field)) is not int for field in count_fields):
             raise ValueError(f"clone seed {seed} training history is invalid")
@@ -718,6 +723,15 @@ def _validate_clone_training_history(
             for field in scalar_fields
         ):
             raise ValueError(f"clone seed {seed} training history is invalid")
+        if any(event[field] < 0 for field in _BC_PHASE_FIELDS):
+            raise ValueError(f"clone seed {seed} training history timing is invalid")
+        if not math.isclose(
+            sum(float(event[field]) for field in _BC_PHASE_FIELDS),
+            float(event["epoch_seconds"]),
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ):
+            raise ValueError(f"clone seed {seed} training history timing is invalid")
         expected_examples = event["batches"] * batch_size
         epoch_seconds = float(event["epoch_seconds"])
         expected_rate = event["examples"] / epoch_seconds if epoch_seconds else 0.0

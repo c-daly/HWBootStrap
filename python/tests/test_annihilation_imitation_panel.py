@@ -475,6 +475,11 @@ def _write_clone_artifact(
                         "epoch_seconds": 0.1,
                         "elapsed_seconds": 0.1,
                         "examples_per_second": 2560.0,
+                        "sampling_seconds": 0.01,
+                        "transfer_forward_seconds": 0.02,
+                        "optimization_seconds": 0.03,
+                        "validation_seconds": 0.04,
+                        "unclassified_seconds": 0.0,
                     }
                 ],
             }
@@ -596,6 +601,28 @@ def test_clone_validation_rejects_non_finite_training_history(
     history_path.write_text(json.dumps(history), encoding="utf-8")
 
     with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda row: row.pop("sampling_seconds"),
+        lambda row: row.__setitem__("optimization_seconds", -1.0),
+        lambda row: row.__setitem__("unclassified_seconds", 9.0),
+    ],
+)
+def test_clone_validation_rejects_invalid_phase_timing(
+    tmp_path: Path, mutation,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    mutation(history["epochs"][0])
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="timing"):
         _validate_cuda_clone(run, module)
 
 

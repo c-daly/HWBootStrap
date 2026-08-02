@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -1103,6 +1104,14 @@ def canonicalize_behavioral_clone_for_publication(model: Any) -> None:
         raise RuntimeError("behavioral-cloning publication model is not on CPU")
 
 
+_BC_PHASE_FIELDS = (
+    "sampling_seconds",
+    "transfer_forward_seconds",
+    "optimization_seconds",
+    "validation_seconds",
+    "unclassified_seconds",
+)
+
 
 def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> None:
     count_fields = (
@@ -1112,8 +1121,10 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
     scalar_fields = (
         "mean_training_loss", "validation_nll", "top1_accuracy", "top3_accuracy",
         "top5_accuracy", "best_validation_nll", "epoch_seconds", "elapsed_seconds",
-        "examples_per_second",
+        "examples_per_second", *_BC_PHASE_FIELDS,
     )
+    if any(field not in event for field in _BC_PHASE_FIELDS):
+        raise ValueError("behavioral-cloning progress phase timing fields are required")
     for field in count_fields:
         value = event[field]
         if type(value) is not int or value < 0:
@@ -1124,6 +1135,13 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
             raise ValueError(f"behavioral-cloning progress {field} must be finite")
     if any(event[field] < 0 for field in ("epoch_seconds", "elapsed_seconds", "examples_per_second")):
         raise ValueError("behavioral-cloning progress timings and rate must be non-negative")
+    if any(event[field] < 0 for field in _BC_PHASE_FIELDS):
+        raise ValueError("behavioral-cloning progress phase timing must be non-negative")
+    if not math.isclose(
+        sum(float(event[key]) for key in _BC_PHASE_FIELDS), float(event["epoch_seconds"]),
+        rel_tol=1e-9, abs_tol=1e-6,
+    ):
+        raise ValueError("behavioral-cloning phase timing differs from epoch duration")
 
 def train_behavioral_clone(
     *,
@@ -1213,19 +1231,33 @@ def train_behavioral_clone(
         model.policy.set_training_mode(True)
         epoch_started = time.perf_counter()
         losses: list[float] = []
+        sampling_seconds = 0.0
+        transfer_forward_seconds = 0.0
+        optimization_seconds = 0.0
+        validation_seconds = 0.0
         for _step in range(steps_per_epoch):
+            phase_started = time.perf_counter()
             batch = sampler.next_batch()
+            sampling_seconds += time.perf_counter() - phase_started
             if set(batch.partitions) != {"train"}:
                 raise RuntimeError("validation rows entered behavioral-cloning optimization")
+
+            phase_started = time.perf_counter()
             distribution, actions, _legal_masks = _distribution_tensors(model, batch)
             loss = -distribution.log_prob(actions).mean()
             losses.append(float(loss.detach().cpu()))
+            transfer_forward_seconds += time.perf_counter() - phase_started
+
+            phase_started = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
             optimizer.step()
+            optimization_seconds += time.perf_counter() - phase_started
         epochs_trained = epoch
+        validation_started = time.perf_counter()
         validation_metrics = _clone_metrics(model, validation.batch)
+        validation_seconds = time.perf_counter() - validation_started
         if validation_metrics.nll < best_nll:
             best_nll = validation_metrics.nll
             best_epoch = epoch
@@ -1235,6 +1267,16 @@ def train_behavioral_clone(
             epochs_without_improvement += 1
         epoch_elapsed = time.perf_counter() - epoch_started
         total_elapsed = time.perf_counter() - training_started
+        classified = (
+            sampling_seconds
+            + transfer_forward_seconds
+            + optimization_seconds
+            + validation_seconds
+        )
+        raw_unclassified = epoch_elapsed - classified
+        if raw_unclassified < -1e-6:
+            raise RuntimeError("behavioral-cloning phase timing exceeds epoch duration")
+        unclassified_seconds = max(0.0, raw_unclassified)
         examples = steps_per_epoch * config.batch_size
         event = {
             "schema_version": 1,
@@ -1257,6 +1299,11 @@ def train_behavioral_clone(
             "epoch_seconds": float(epoch_elapsed),
             "elapsed_seconds": float(total_elapsed),
             "examples_per_second": float(examples / epoch_elapsed) if epoch_elapsed else 0.0,
+            "sampling_seconds": float(sampling_seconds),
+            "transfer_forward_seconds": float(transfer_forward_seconds),
+            "optimization_seconds": float(optimization_seconds),
+            "validation_seconds": float(validation_seconds),
+            "unclassified_seconds": float(unclassified_seconds),
         }
         _validate_behavioral_cloning_progress_event(event)
         history.append(event)

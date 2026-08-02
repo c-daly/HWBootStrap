@@ -807,7 +807,64 @@ def test_clone_trainer_emits_finite_epoch_and_completion_progress(
         assert math.isfinite(epoch[key])
     assert epoch["epoch_seconds"] >= 0
     assert epoch["examples_per_second"] >= 0
+    phase_fields = (
+        "sampling_seconds",
+        "transfer_forward_seconds",
+        "optimization_seconds",
+        "validation_seconds",
+        "unclassified_seconds",
+    )
+    for key in phase_fields:
+        assert math.isfinite(epoch[key])
+        assert epoch[key] >= 0
+    assert math.isclose(
+        sum(epoch[key] for key in phase_fields),
+        epoch["epoch_seconds"],
+        rel_tol=1e-9,
+        abs_tol=1e-6,
+    )
     assert events[-1]["run_dir"] == str(result.run_dir.resolve())
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda event: event.pop("sampling_seconds"),
+        lambda event: event.__setitem__("optimization_seconds", -1.0),
+        lambda event: event.__setitem__("unclassified_seconds", 9.0),
+    ],
+)
+def test_behavioral_cloning_progress_event_rejects_invalid_phase_timing(mutation) -> None:
+    event = {
+        "schema_version": 1,
+        "model_seed": 211,
+        "epoch": 1,
+        "max_epochs": 1,
+        "batches": 1,
+        "examples": 5,
+        "mean_training_loss": 1.0,
+        "validation_nll": 1.0,
+        "top1_accuracy": 0.5,
+        "top3_accuracy": 0.75,
+        "top5_accuracy": 0.9,
+        "best_epoch": 1,
+        "best_validation_nll": 1.0,
+        "epochs_without_improvement": 0,
+        "patience": 1,
+        "epoch_seconds": 0.1,
+        "elapsed_seconds": 0.1,
+        "examples_per_second": 50.0,
+        "sampling_seconds": 0.01,
+        "transfer_forward_seconds": 0.02,
+        "optimization_seconds": 0.03,
+        "validation_seconds": 0.04,
+        "unclassified_seconds": 0.0,
+    }
+    mutation(event)
+
+    with pytest.raises(ValueError, match="timing"):
+        imitation_module._validate_behavioral_cloning_progress_event(event)
+
 
 def test_clone_publishes_complete_epoch_history(
     clone_dataset: Path, clone_scenario, tmp_path: Path
@@ -860,6 +917,23 @@ def test_behavioral_clone_real_cuda_training_publishes_cpu_artifact(
         progress=events.append,
     )
     assert events[0]["device"].startswith("cuda:")
+    epoch = events[0]
+    phase_fields = (
+        "sampling_seconds",
+        "transfer_forward_seconds",
+        "optimization_seconds",
+        "validation_seconds",
+        "unclassified_seconds",
+    )
+    for key in phase_fields:
+        assert math.isfinite(epoch[key])
+        assert epoch[key] >= 0
+    assert math.isclose(
+        sum(epoch[key] for key in phase_fields),
+        epoch["epoch_seconds"],
+        rel_tol=1e-9,
+        abs_tol=1e-6,
+    )
     bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
     assert bc["training_device"]["device_name"] == torch.cuda.get_device_name(
         torch.cuda.current_device()
@@ -881,3 +955,7 @@ def test_behavioral_clone_real_cuda_training_publishes_cpu_artifact(
         "contract_hash": contract().contract_hash,
         "encoding_hash": contract().encoding_hash,
     }
+    print(json.dumps({
+        key: epoch[key]
+        for key in ("device", "epoch_seconds", *phase_fields)
+    }, sort_keys=True))
