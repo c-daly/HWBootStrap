@@ -599,6 +599,55 @@ def test_clone_validation_rejects_non_finite_training_history(
         _validate_cuda_clone(run, module)
 
 
+def test_clone_validation_accepts_cuda_to_cpu_best_nll_rounding_difference(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    bc_path = run / "bc.json"
+    bc = _json(bc_path)
+    bc["best_validation_nll"] = 1.0000005
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    _validate_cuda_clone(run, module)
+
+
+def test_clone_validation_rejects_material_best_nll_difference(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    bc_path = run / "bc.json"
+    bc = _json(bc_path)
+    bc["best_validation_nll"] = 1.0001
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("examples", 255),
+        ("examples_per_second", 2559.0),
+        ("epoch_seconds", 0.0),
+    ],
+)
+def test_clone_validation_rejects_inconsistent_training_history_counts_or_rate(
+    tmp_path: Path, field: str, value: int | float,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    history["epochs"][0][field] = value
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
 @pytest.mark.parametrize(
     ("location", "field", "value"),
     [("history", "model_seed", 223), ("epoch", "patience", 4)],

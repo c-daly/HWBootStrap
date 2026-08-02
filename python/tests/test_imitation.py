@@ -760,6 +760,8 @@ def test_clone_publishes_complete_epoch_history(
 def test_behavioral_clone_real_cuda_training_publishes_cpu_artifact(
     clone_dataset: Path, clone_scenario, tmp_path: Path
 ) -> None:
+    import run_annihilation_imitation_panel as panel_module
+
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     events: list[dict[str, Any]] = []
     result = train_behavioral_clone(
@@ -785,3 +787,15 @@ def test_behavioral_clone_real_cuda_training_publishes_cpu_artifact(
     assert {
         parameter.device.type for parameter in resolved.model.policy.parameters()
     } == {"cpu"}
+    assert panel_module._validate_clone_run(
+        result.run_dir,
+        211,
+        {},
+        expected_scenario=clone_scenario,
+        require_provenance=False,
+        expected_dataset_manifest=clone_dataset / "manifest.json",
+        expected_device="cuda",
+    ) == {
+        "contract_hash": contract().contract_hash,
+        "encoding_hash": contract().encoding_hash,
+    }

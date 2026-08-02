@@ -660,6 +660,7 @@ def _validate_clone_training_history(
     best_nll = bc.get("best_validation_nll")
     max_epochs = bc_config.get("max_epochs")
     patience = bc_config.get("patience")
+    batch_size = bc_config.get("batch_size")
     epochs = history.get("epochs")
     if (
         set(history) != {
@@ -676,6 +677,8 @@ def _validate_clone_training_history(
         or type(patience) is not int
         or patience < 1
         or type(best_epoch) is not int
+        or type(batch_size) is not int
+        or batch_size < 1
         or not 1 <= best_epoch <= epochs_trained
         or isinstance(best_nll, bool)
         or not isinstance(best_nll, (int, float))
@@ -715,6 +718,10 @@ def _validate_clone_training_history(
             for field in scalar_fields
         ):
             raise ValueError(f"clone seed {seed} training history is invalid")
+        expected_examples = event["batches"] * batch_size
+        epoch_seconds = float(event["epoch_seconds"])
+        expected_rate = event["examples"] / epoch_seconds if epoch_seconds else 0.0
+
         if (
             event.get("schema_version") != 1
             or event.get("event") != "bc_epoch"
@@ -725,6 +732,7 @@ def _validate_clone_training_history(
             or event.get("batches") < 1
             or event.get("examples") < 1
             or not 1 <= event.get("best_epoch") <= expected_epoch
+            or event.get("examples") != expected_examples
             or event.get("epochs_without_improvement") < 0
             or event.get("epochs_without_improvement") > patience
             or event.get("epochs_without_improvement")
@@ -744,6 +752,12 @@ def _validate_clone_training_history(
             or event.get("elapsed_seconds") < previous_elapsed
             or event.get("epoch_seconds") > event.get("elapsed_seconds")
             or event.get("examples_per_second") < 0
+            or not math.isclose(
+                float(event["examples_per_second"]),
+                float(expected_rate),
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
         ):
             raise ValueError(f"clone seed {seed} training history is invalid")
         previous_elapsed = float(event["elapsed_seconds"])
@@ -751,7 +765,12 @@ def _validate_clone_training_history(
     last = epochs[-1]
     if (
         last.get("best_epoch") != best_epoch
-        or float(last.get("best_validation_nll")) != float(best_nll)
+        # GPU optimization and CPU-canonical publication independently reduce
+        # float32 tensors; agreement is narrow but cannot be bit-exact.
+        or not math.isclose(
+            float(last.get("best_validation_nll")), float(best_nll),
+            rel_tol=1e-5, abs_tol=1e-7,
+        )
     ):
         raise ValueError(f"clone seed {seed} training history does not match bc metadata")
 
