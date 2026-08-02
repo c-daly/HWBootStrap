@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import importlib
 import importlib.util
@@ -213,6 +214,29 @@ def test_locked_definitions_have_disjoint_exact_namespaces_and_values() -> None:
     }
 
 
+def test_locked_behavioral_cloning_uses_cuda() -> None:
+    panel, _banks, _scenario = _subject().validate_definitions()
+    assert panel["behavioral_cloning"] == {
+        "batch_size": 256,
+        "learning_rate": 0.0003,
+        "max_epochs": 50,
+        "patience": 5,
+        "standard_fraction_basis_points": 7000,
+        "device": "cuda",
+    }
+
+
+def test_emit_bc_progress_prints_one_sorted_flushed_json_object(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        builtins, "print",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    event = {"event": "bc_epoch", "schema_version": 1, "epoch": 1}
+    _subject().emit_bc_progress(event)
+    assert calls == [((json.dumps(event, sort_keys=True),), {"flush": True})]
+
+
 def test_definition_hashes_bind_the_exact_scenario_and_seed_bank_bytes() -> None:
     """Editing either locked subordinate definition without updating its registration must fail."""
 
@@ -350,6 +374,8 @@ def test_clone_run_construction_uses_fresh_configs_and_distinct_destinations(tmp
     assert len({id(call["config"]) for call in calls}) == 3
     assert len({call["run_dir"] for call in calls}) == 3
     assert all(call["dataset"] is dataset for call in calls)
+    assert [call["config"].device for call in calls] == ["cuda", "cuda", "cuda"]
+    assert all(call["progress"] is module.emit_bc_progress for call in calls)
     for seed, run in zip((211, 223, 227), runs, strict=True):
         provenance = _json(run / "panel-provenance.json")
         assert provenance["model_seed"] == seed
@@ -394,6 +420,15 @@ def _write_clone_artifact(
         "learning_rate": 0.0003,
         "max_epochs": 50,
         "patience": 5,
+        "device": "cuda",
+    }
+    training_device = {
+        "requested": "cuda",
+        "resolved": "cuda:0",
+        "torch_version": "2.12.1+cu130",
+        "cuda_runtime": "13.0",
+        "device_index": 0,
+        "device_name": "NVIDIA GeForce RTX 5070",
     }
     (run / "bc.json").write_text(
         json.dumps(
@@ -403,6 +438,45 @@ def _write_clone_artifact(
                 "dataset_manifest_sha256": dataset_hash,
                 "config": config,
                 "best_epoch": 1,
+                "epochs_trained": 1,
+                "training_device": training_device,
+                "publication_device": "cpu",
+                "best_validation_nll": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "training-history.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_seed": seed,
+                "training_device": training_device,
+                "publication_device": "cpu",
+                "epochs": [
+                    {
+                        "schema_version": 1,
+                        "event": "bc_epoch",
+                        "model_seed": seed,
+                        "device": "cuda:0",
+                        "epoch": 1,
+                        "max_epochs": 50,
+                        "batches": 1,
+                        "examples": 256,
+                        "mean_training_loss": 1.0,
+                        "validation_nll": 1.0,
+                        "top1_accuracy": 0.5,
+                        "top3_accuracy": 0.75,
+                        "top5_accuracy": 0.9,
+                        "best_epoch": 1,
+                        "best_validation_nll": 1.0,
+                        "epochs_without_improvement": 0,
+                        "patience": 5,
+                        "epoch_seconds": 0.1,
+                        "elapsed_seconds": 0.1,
+                        "examples_per_second": 2560.0,
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -474,6 +548,136 @@ def _write_clone_runs(root: Path, module, *, changed_hash: bool = False) -> list
         )
         runs.append(run)
     return runs
+
+
+def _validate_cuda_clone(run: Path, module) -> dict[str, str]:
+    return module._validate_clone_run(
+        run,
+        211,
+        module.current_definition_hashes(),
+        expected_scenario=module.validate_definitions()[2],
+        expected_device="cuda",
+    )
+
+
+def test_clone_validation_rejects_missing_training_history(tmp_path: Path) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    (run / "training-history.json").unlink()
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+def test_clone_validation_rejects_non_contiguous_training_history(tmp_path: Path) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    history["epochs"][0]["epoch"] = 2
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("mean_training_loss", float("inf")), ("epoch_seconds", float("nan"))],
+)
+def test_clone_validation_rejects_non_finite_training_history(
+    tmp_path: Path, field: str, value: float,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    history["epochs"][0][field] = value
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+@pytest.mark.parametrize(
+    ("location", "field", "value"),
+    [("history", "model_seed", 223), ("epoch", "patience", 4)],
+)
+def test_clone_validation_rejects_training_history_seed_or_config_mismatch(
+    tmp_path: Path, location: str, field: str, value: Any,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    target = history if location == "history" else history["epochs"][0]
+    target[field] = value
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+def test_clone_validation_rejects_invalid_training_history_patience_counter(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    history["epochs"][0]["epochs_without_improvement"] = 1
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        _validate_cuda_clone(run, module)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("training_device", None),
+        ("requested", "cpu"),
+        ("resolved", "cuda:not-an-index"),
+        ("torch_version", ""),
+        ("cuda_runtime", None),
+        ("device_index", True),
+        ("device_name", ""),
+    ],
+)
+def test_clone_validation_rejects_missing_or_malformed_cuda_device_provenance(
+    tmp_path: Path, field: str, value: Any,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    bc_path = run / "bc.json"
+    bc = _json(bc_path)
+    if field == "training_device":
+        bc.pop(field)
+    else:
+        bc["training_device"][field] = value
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="device provenance"):
+        _validate_cuda_clone(run, module)
+
+
+def test_clone_validation_rejects_device_provenance_different_from_locked_panel(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[0]
+    manifest_path = run / "run.json"
+    manifest = _json(manifest_path)
+    manifest["bc_config"]["device"] = "cpu"
+    manifest["config"]["behavioral_cloning"]["device"] = "cpu"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    bc_path = run / "bc.json"
+    bc = _json(bc_path)
+    bc["config"]["device"] = "cpu"
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="device"):
+        _validate_cuda_clone(run, module)
 
 
 def _write_actor_initialization(run_dir: Path, training_run) -> None:
@@ -2702,7 +2906,8 @@ def test_final_commands_are_defined_before_the_script_entry_point(tmp_path: Path
     )
 
     assert completed.returncode != 0
-    assert "execution identity is missing or invalid" in completed.stderr
+    assert "ValueError:" in completed.stderr
+    assert "NameError" not in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -2796,6 +3001,7 @@ def test_smoke_schedule_is_exact_and_disjoint_from_full_experiment_artifacts() -
             "batch_size": 32,
             "max_epochs": 1,
             "patience": 1,
+            "device": "cpu",
             "validation_source": "training-rows-reused-not-held-out",
         },
         "ppo": {
@@ -3179,6 +3385,7 @@ def test_smoke_restart_validates_and_reuses_completed_bc(
         learning_rate=3e-4,
         max_epochs=1,
         patience=1,
+        device="cpu",
     )
     run = tmp_path / "bc"
     run.mkdir()
@@ -3193,6 +3400,7 @@ def test_smoke_restart_validates_and_reuses_completed_bc(
                 "learning_rate": 3e-4,
                 "max_epochs": 1,
                 "patience": 1,
+                "device": "cpu",
             },
         }),
         encoding="utf-8",
@@ -3211,6 +3419,7 @@ def test_smoke_restart_validates_and_reuses_completed_bc(
             "expected_scenario": scenario,
             "require_provenance": False,
             "expected_dataset_manifest": dataset_manifest,
+            "expected_device": "cpu",
         }
         return {
             "contract_hash": source.contract_hash,

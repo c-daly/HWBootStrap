@@ -56,6 +56,39 @@ spaces only after the source and target match on environment, encoding
 version/hash, and observation/action geometry. Published clone runs retain the
 Duel source contract rather than relabeling captured demonstrations as tactical.
 
+## Locked behavioral-cloning device and progress evidence
+
+Production behavioral cloning is locked to `device="cuda"`. Device resolution
+and CUDA availability are checked before a run directory is created; an
+unavailable CUDA runtime fails closed and does not fall back to CPU. The smoke
+clone remains explicitly `device="cpu"` so the isolated plumbing gate does not
+change the production optimization requirement.
+
+Each completed clone records exact hardware/software provenance in
+`bc.json.training_device`: the requested and resolved device, PyTorch version,
+CUDA runtime version, device index, and device name. Completed-clone validation
+requires those fields to be well formed and to match the locked config. Before
+publication, the policy is canonicalized to CPU. The staged controller is then
+reloaded from the published checkpoint and its masked logits are compared
+exactly (`rtol=0`, `atol=0`) against `actor-fixtures.npz`; publication is
+refused if any parameter remains off CPU or any fixture logit differs.
+
+During `train-bc`, each epoch is printed as one sorted JSON object with an
+immediate flush. The schema-v1 event records the model seed, resolved device,
+epoch/max-epoch, batch and example counts, mean training loss, validation NLL,
+top-1/top-3/top-5 accuracy, best epoch and NLL, patience state, epoch and elapsed
+seconds, and examples per second. Completion is also emitted as flushed JSON.
+The same validated epoch rows are retained atomically in
+`training-history.json`, bound to the model seed, device provenance, CPU
+publication, contiguous epoch sequence, and final `bc.json` best epoch/NLL.
+
+There is deliberately no live progress file. Operators monitor ordinary process
+output and do not open or infer state from clone staging artifacts while training
+is active. Because the accepted code and panel definition change the
+identity-bound experiment, the prior dataset and interrupted staging cannot be
+reused: after review acceptance, archive them intact, validate the accepted
+clean commit, and recollect before restarting production clone training.
+
 ## Isolated end-to-end smoke gate
 
 Build the Debug GymServer and run the smoke command with the repository's

@@ -754,3 +754,34 @@ def test_clone_publishes_complete_epoch_history(
         range(1, result.epochs_trained + 1)
     )
     assert payload["epochs"][-1]["best_epoch"] == result.best_epoch
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_behavioral_clone_real_cuda_training_publishes_cpu_artifact(
+    clone_dataset: Path, clone_scenario, tmp_path: Path
+) -> None:
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    events: list[dict[str, Any]] = []
+    result = train_behavioral_clone(
+        dataset=dataset,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "cuda-bc",
+        config=BehavioralCloningConfig(
+            model_seed=211, batch_size=5, max_epochs=1, patience=1,
+            device="cuda",
+        ),
+        progress=events.append,
+    )
+    assert events[0]["device"].startswith("cuda:")
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    assert bc["training_device"]["device_name"] == torch.cuda.get_device_name(
+        torch.cuda.current_device()
+    )
+    assert bc["publication_device"] == "cpu"
+    resolved = ControllerResolver(contract()).resolve(f"run:{result.run_dir}")
+    assert {
+        parameter.device.type for parameter in resolved.model.policy.parameters()
+    } == {"cpu"}

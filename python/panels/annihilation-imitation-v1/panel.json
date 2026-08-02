@@ -22,7 +22,8 @@
     "learning_rate": 0.0003,
     "max_epochs": 50,
     "patience": 5,
-    "standard_fraction_basis_points": 7000
+    "standard_fraction_basis_points": 7000,
+    "device": "cuda"
   },
   "clone_gate": {
     "maps": 100,

@@ -65,6 +65,11 @@ _PUBLISHABLE_RESULT_PATHS = (
     "python/panels/annihilation-imitation-v1/REPORT.md",
 )
 
+
+def emit_bc_progress(event: Mapping[str, Any]) -> None:
+    print(json.dumps(dict(event), sort_keys=True), flush=True)
+
+
 _MODEL_SEEDS = [211, 223, 227]
 _SAMPLER_SEEDS = {"211": 211, "223": 223, "227": 227}
 _OUTCOME_REWARDS = {"win": 1, "loss": -1, "draw": 0}
@@ -437,6 +442,7 @@ def validate_definitions(
         "max_epochs": 50,
         "patience": 5,
         "standard_fraction_basis_points": 7000,
+        "device": "cuda",
     }
     if panel["behavioral_cloning"] != expected_bc:
         raise ValueError("behavioral-cloning definition changed")
@@ -599,6 +605,157 @@ def _safe_relative_file(root: Path, raw: Any, label: str) -> Path:
     return path
 
 
+def _validate_training_device_provenance(
+    raw: Any, requested: str, seed: int,
+) -> dict[str, Any]:
+    fields = {
+        "requested", "resolved", "torch_version", "cuda_runtime",
+        "device_index", "device_name",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != fields:
+        raise ValueError(f"clone seed {seed} training device provenance is invalid")
+    if (
+        raw.get("requested") != requested
+        or not isinstance(raw.get("torch_version"), str)
+        or not raw["torch_version"]
+    ):
+        raise ValueError(f"clone seed {seed} training device provenance is invalid")
+    if requested == "cpu":
+        if (
+            raw.get("resolved") != "cpu"
+            or raw.get("cuda_runtime") is not None
+            or raw.get("device_index") is not None
+            or raw.get("device_name") is not None
+        ):
+            raise ValueError(f"clone seed {seed} training device provenance is invalid")
+    else:
+        index = raw.get("device_index")
+        if (
+            type(index) is not int
+            or index < 0
+            or raw.get("resolved") != f"cuda:{index}"
+            or not isinstance(raw.get("cuda_runtime"), str)
+            or not raw["cuda_runtime"]
+            or not isinstance(raw.get("device_name"), str)
+            or not raw["device_name"]
+        ):
+            raise ValueError(f"clone seed {seed} training device provenance is invalid")
+    return dict(raw)
+
+
+def _validate_clone_training_history(
+    run: Path,
+    seed: int,
+    bc_config: Mapping[str, Any],
+    bc: Mapping[str, Any],
+    training_device: Mapping[str, Any],
+) -> None:
+    try:
+        history = _read_json(Path(run) / "training-history.json")
+    except ValueError as exc:
+        raise ValueError(f"clone seed {seed} training history is unreadable") from exc
+
+    epochs_trained = bc.get("epochs_trained")
+    best_epoch = bc.get("best_epoch")
+    best_nll = bc.get("best_validation_nll")
+    max_epochs = bc_config.get("max_epochs")
+    patience = bc_config.get("patience")
+    epochs = history.get("epochs")
+    if (
+        set(history) != {
+            "schema_version", "model_seed", "training_device",
+            "publication_device", "epochs",
+        }
+        or history.get("schema_version") != 1
+        or history.get("model_seed") != seed
+        or history.get("training_device") != dict(training_device)
+        or history.get("publication_device") != "cpu"
+        or type(epochs_trained) is not int
+        or type(max_epochs) is not int
+        or not 1 <= epochs_trained <= max_epochs
+        or type(patience) is not int
+        or patience < 1
+        or type(best_epoch) is not int
+        or not 1 <= best_epoch <= epochs_trained
+        or isinstance(best_nll, bool)
+        or not isinstance(best_nll, (int, float))
+        or not math.isfinite(float(best_nll))
+        or not isinstance(epochs, list)
+        or len(epochs) != epochs_trained
+    ):
+        raise ValueError(f"clone seed {seed} training history is invalid")
+
+    event_fields = {
+        "schema_version", "event", "model_seed", "device", "epoch",
+        "max_epochs", "batches", "examples", "mean_training_loss",
+        "validation_nll", "top1_accuracy", "top3_accuracy",
+        "top5_accuracy", "best_epoch", "best_validation_nll",
+        "epochs_without_improvement", "patience", "epoch_seconds",
+        "elapsed_seconds", "examples_per_second",
+    }
+    count_fields = {
+        "model_seed", "epoch", "max_epochs", "batches", "examples",
+        "best_epoch", "epochs_without_improvement", "patience",
+    }
+    scalar_fields = {
+        "mean_training_loss", "validation_nll", "top1_accuracy",
+        "top3_accuracy", "top5_accuracy", "best_validation_nll",
+        "epoch_seconds", "elapsed_seconds", "examples_per_second",
+    }
+    previous_elapsed = 0.0
+    for expected_epoch, event in enumerate(epochs, start=1):
+        if not isinstance(event, Mapping) or set(event) != event_fields:
+            raise ValueError(f"clone seed {seed} training history is invalid")
+        if any(type(event.get(field)) is not int for field in count_fields):
+            raise ValueError(f"clone seed {seed} training history is invalid")
+        if any(
+            isinstance(event.get(field), bool)
+            or not isinstance(event.get(field), (int, float))
+            or not math.isfinite(float(event[field]))
+            for field in scalar_fields
+        ):
+            raise ValueError(f"clone seed {seed} training history is invalid")
+        if (
+            event.get("schema_version") != 1
+            or event.get("event") != "bc_epoch"
+            or event.get("model_seed") != seed
+            or event.get("device") != training_device["resolved"]
+            or event.get("epoch") != expected_epoch
+            or event.get("max_epochs") != max_epochs
+            or event.get("batches") < 1
+            or event.get("examples") < 1
+            or not 1 <= event.get("best_epoch") <= expected_epoch
+            or event.get("epochs_without_improvement") < 0
+            or event.get("epochs_without_improvement") > patience
+            or event.get("epochs_without_improvement")
+            != expected_epoch - event.get("best_epoch")
+            or (event.get("epochs_without_improvement") == patience
+                and expected_epoch != epochs_trained)
+            or event.get("patience") != patience
+            or event.get("mean_training_loss") < 0
+            or event.get("validation_nll") < 0
+            or event.get("best_validation_nll") < 0
+            or event.get("best_validation_nll") > event.get("validation_nll")
+            or any(
+                not 0.0 <= event.get(field) <= 1.0
+                for field in ("top1_accuracy", "top3_accuracy", "top5_accuracy")
+            )
+            or event.get("epoch_seconds") < 0
+            or event.get("elapsed_seconds") < previous_elapsed
+            or event.get("epoch_seconds") > event.get("elapsed_seconds")
+            or event.get("examples_per_second") < 0
+        ):
+            raise ValueError(f"clone seed {seed} training history is invalid")
+        previous_elapsed = float(event["elapsed_seconds"])
+
+    last = epochs[-1]
+    if (
+        last.get("best_epoch") != best_epoch
+        or float(last.get("best_validation_nll")) != float(best_nll)
+    ):
+        raise ValueError(f"clone seed {seed} training history does not match bc metadata")
+
+
 def _validate_clone_run(
     run: Path,
     seed: int,
@@ -607,6 +764,7 @@ def _validate_clone_run(
     expected_scenario: ResolvedScenario | None = None,
     require_provenance: bool = True,
     expected_dataset_manifest: Path | None = None,
+    expected_device: str | None = None,
 ) -> dict[str, str]:
     import numpy as np
 
@@ -617,6 +775,16 @@ def _validate_clone_run(
     actual_seed = manifest.get("model_seed", manifest.get("config", {}).get("model_seed"))
     if actual_seed != seed:
         raise ValueError(f"clone seed {seed} run identity does not match")
+    bc_config = manifest.get("bc_config")
+    if not isinstance(bc_config, Mapping):
+        raise ValueError(f"clone seed {seed} behavioral-cloning config is invalid")
+    config_device = bc_config.get("device")
+    if config_device not in {"cpu", "cuda"}:
+        raise ValueError(f"clone seed {seed} behavioral-cloning device is invalid")
+    if expected_device is not None and config_device != expected_device:
+        raise ValueError(
+            f"clone seed {seed} behavioral-cloning device does not match the expected device"
+        )
 
     checkpoint = _safe_relative_file(
         run, manifest.get("latest_checkpoint"), f"clone seed {seed} checkpoint"
@@ -646,6 +814,14 @@ def _validate_clone_run(
         raise ValueError(f"clone seed {seed} scenario does not match the locked scenario")
 
     bc = _read_json(run / "bc.json")
+    training_device = _validate_training_device_provenance(
+        bc.get("training_device"), config_device, seed,
+    )
+    if bc.get("publication_device") != "cpu":
+        raise ValueError(f"clone seed {seed} publication device is invalid")
+    _validate_clone_training_history(
+        run, seed, bc_config, bc, training_device,
+    )
     metrics = _read_json(run / "metrics.json")
     scalar_metrics = {
         "nll", "top1_accuracy", "top3_accuracy", "top5_accuracy",
@@ -790,6 +966,7 @@ def train_clone_runs(
             _validate_clone_run(
                 run, seed, definition_hashes, expected_scenario=scenario,
                 expected_dataset_manifest=dataset_manifest,
+                expected_device=bc["device"],
             )
             runs.append(run)
             continue
@@ -800,6 +977,7 @@ def train_clone_runs(
                 learning_rate=bc["learning_rate"],
                 max_epochs=bc["max_epochs"],
                 patience=bc["patience"],
+                device=bc["device"],
             )
             result = selected_trainer(
                 dataset=dataset,
@@ -809,12 +987,14 @@ def train_clone_runs(
                 spaces_info=dict(spaces_info),
                 run_dir=pending,
                 config=config,
+                progress=emit_bc_progress,
             )
             if Path(result.run_dir) != pending or not (pending / "run.json").is_file():
                 raise ValueError(f"clone seed {seed} did not publish the expected pending run")
         _validate_clone_run(
             pending, seed, definition_hashes, expected_scenario=scenario,
             require_provenance=False, expected_dataset_manifest=dataset_manifest,
+            expected_device=bc["device"],
         )
         _atomic_json(
             pending / "panel-provenance.json",
@@ -830,6 +1010,7 @@ def train_clone_runs(
         _validate_clone_run(
             pending, seed, definition_hashes, expected_scenario=scenario,
             expected_dataset_manifest=dataset_manifest,
+            expected_device=bc["device"],
         )
         os.replace(pending, run)
         runs.append(run)
@@ -873,7 +1054,8 @@ def _clone_metadata(
         by_seed[seed] = run
         try:
             identity = _validate_clone_run(
-                run, seed, hashes, expected_scenario=locked
+                run, seed, hashes, expected_scenario=locked,
+                expected_device="cuda",
             )
         except ValueError as exc:
             errors.append(str(exc))
@@ -1191,7 +1373,10 @@ def _validate_gate_stage(root: Path, hashes: Mapping[str, str]) -> Mapping[str, 
         run_path = clone.get("run_path")
         if seed not in _MODEL_SEEDS or seed in recomputed or not isinstance(run_path, str):
             raise ValueError("clone gate model-seed results are incomplete")
-        identity = _validate_clone_run(Path(run_path), seed, hashes, expected_scenario=scenario)
+        identity = _validate_clone_run(
+            Path(run_path), seed, hashes, expected_scenario=scenario,
+            expected_device="cuda",
+        )
         if clone.get("contract") != identity:
             raise ValueError(f"clone seed {seed} gate contract identity does not match")
         physical: list[dict[str, Any]] = []
@@ -1468,6 +1653,7 @@ def build_smoke_schedule() -> dict[str, Any]:
             "batch_size": 32,
             "max_epochs": 1,
             "patience": 1,
+            "device": "cpu",
             "validation_source": "training-rows-reused-not-held-out",
         },
         "ppo": {
@@ -1808,6 +1994,7 @@ def _reuse_completed_smoke_bc(
         "learning_rate": config.learning_rate,
         "max_epochs": config.max_epochs,
         "patience": config.patience,
+        "device": config.device,
     }
     if (
         manifest.get("schema_version") != 1
@@ -1823,6 +2010,7 @@ def _reuse_completed_smoke_bc(
         expected_scenario=scenario,
         require_provenance=False,
         expected_dataset_manifest=dataset_manifest,
+        expected_device=config.device,
     )
     if identity != {
         "contract_hash": contract.contract_hash,
@@ -2175,6 +2363,7 @@ def _build_smoke_pipeline(
         learning_rate=3e-4,
         max_epochs=bc_schedule["max_epochs"],
         patience=bc_schedule["patience"],
+        device="cpu",
     )
     bc_root = root / "bc"
     if not _reuse_completed_smoke_bc(
