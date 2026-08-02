@@ -786,7 +786,7 @@ def _validate_clone_training_history(
         # float32 tensors; agreement is narrow but cannot be bit-exact.
         or not math.isclose(
             float(last.get("best_validation_nll")), float(best_nll),
-            rel_tol=1e-5, abs_tol=1e-7,
+            rel_tol=2e-5, abs_tol=1e-7,
         )
     ):
         raise ValueError(f"clone seed {seed} training history does not match bc metadata")

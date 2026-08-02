@@ -673,10 +673,12 @@ def _write_clone_runs(root: Path, module, *, changed_hash: bool = False) -> list
     return runs
 
 
-def _validate_cuda_clone(run: Path, module) -> dict[str, str]:
+def _validate_cuda_clone(
+    run: Path, module, *, seed: int = 211,
+) -> dict[str, str]:
     return module._validate_clone_run(
         run,
-        211,
+        seed,
         module.current_definition_hashes(),
         expected_scenario=module.validate_definitions()[2],
         expected_device="cuda",
@@ -755,6 +757,24 @@ def test_clone_validation_accepts_cuda_to_cpu_best_nll_rounding_difference(
     bc_path.write_text(json.dumps(bc), encoding="utf-8")
 
     _validate_cuda_clone(run, module)
+
+
+def test_clone_validation_accepts_seed_227_cuda_to_cpu_best_nll_difference(
+    tmp_path: Path,
+) -> None:
+    module = _subject()
+    run = _write_clone_runs(tmp_path / "runs", module)[2]
+    history_path = run / "training-history.json"
+    history = _json(history_path)
+    history["epochs"][-1]["validation_nll"] = 1.290179967880249
+    history["epochs"][-1]["best_validation_nll"] = 1.290179967880249
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    bc_path = run / "bc.json"
+    bc = _json(bc_path)
+    bc["best_validation_nll"] = 1.2901667356491089
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    _validate_cuda_clone(run, module, seed=227)
 
 
 def test_clone_validation_rejects_material_best_nll_difference(
