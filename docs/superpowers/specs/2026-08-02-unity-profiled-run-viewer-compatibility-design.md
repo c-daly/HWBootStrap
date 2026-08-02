@@ -7,7 +7,7 @@
 
 A metadata-backed tactical-v2 run using the annihilation imitation curriculum
 cannot be watched from Unity even when the user selects the correct run. The
-Editor log records two independent boundary failures:
+Editor log and code inspection identify three independent boundary failures:
 
 1. Unity's strict scenario reader rejects the versioned tactical-v2
    `start_profiles` and `start_distribution` fields.
@@ -15,6 +15,9 @@ Editor log records two independent boundary failures:
    `<worktree>/python/winenv/Scripts/python.exe`, while ML Lab training already
    uses `MlLabPaths.ResolvePythonExecutable` to find the shared main-checkout
    environment from a linked worktree.
+3. `ReplayViewerMenu` maps every non-adaptive contract to `tactical-v1`, so a
+   successfully loaded `tactical-v2` scenario would still launch under the
+   wrong viewer environment.
 
 The selected run and its immutable metadata are correct. The viewer is behind
 the training contract.
@@ -90,6 +93,14 @@ This deliberately shares only the interpreter environment. It does not redirect
 the worktree's `policy_server.py`, GymServer, scenarios, or run metadata to a
 different checkout.
 
+### Environment identity
+
+Add a single inverse mapping at `MlEnvironmentContracts` from the three exact
+contract strings (`tactical-v1`, `adaptive-v1`, and `tactical-v2`) to the Unity
+enum. Use it for both run-manifest and presentation-scenario viewer paths.
+Unknown contract strings remain errors rather than silently falling back to
+`tactical-v1`.
+
 ### Failure behavior
 
 If neither a local nor shared Windows environment exists, keep a visible,
@@ -109,6 +120,8 @@ Use strict TDD with two independent red-green cycles.
    layout. It must show that the viewer resolves the same shared executable as
    `MlLabPaths`. Before implementation it fails because the viewer constructs
    only the local worktree path.
+3. Add viewer environment tests proving that both a tactical-v2 run manifest
+   and a tactical-v2 presentation scenario resolve to `TacticalV2`.
 
 Retain existing tests that reject truly unknown JSON properties and invalid
 placement policies. After each C# edit, verify Unity compilation. Run the
