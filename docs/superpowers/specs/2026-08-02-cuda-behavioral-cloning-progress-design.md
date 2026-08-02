@@ -1,7 +1,7 @@
 # CUDA Behavioral Cloning and Progress Logging Design
 
-**Date:** 2026-08-02  
-**Status:** Approved in conversation; written-spec review pending  
+**Date:** 2026-08-02
+**Status:** Approved in conversation; written-spec review pending
 **Parent experiment:** Annihilation imitation v1
 
 ## Problem
@@ -184,4 +184,3 @@ GPU models, drivers, or PyTorch/CUDA releases. Recording the realized hardware
 and software stack makes this limitation explicit. The published model remains
 canonicalized and verified on CPU, so downstream actor transfer consumes the
 same stable artifact format as before.
-
