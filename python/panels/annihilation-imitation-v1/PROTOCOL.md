@@ -25,6 +25,13 @@ python python/run_annihilation_imitation_panel.py train-bc
 python python/run_annihilation_imitation_panel.py evaluate-bc
 ```
 
+The train-bc command re-probes the exact Duel capture contract from its
+immutable staged scenario and reopens the frozen dataset against that source
+contract. It builds the production policy from the tactical environment and
+spaces only after the source and target match on environment, encoding
+version/hash, and observation/action geometry. Published clone runs retain the
+Duel source contract rather than relabeling captured demonstrations as tactical.
+
 ## Isolated end-to-end smoke gate
 
 Build the Debug GymServer and run the smoke command with the repository's

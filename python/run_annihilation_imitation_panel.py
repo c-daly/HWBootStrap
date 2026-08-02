@@ -1079,8 +1079,28 @@ def _collect_command() -> Mapping[str, Any]:
     )
 
 
+def _validate_bc_source_target_compatibility(
+    source_contract: Any,
+    target_contract: Any,
+) -> None:
+    from ml_lab.controllers import (
+        ControllerResolutionError,
+        _validate_contract_compatibility,
+    )
+
+    if source_contract is None or target_contract is None:
+        raise ValueError("behavioral-cloning source or target contract is missing")
+    try:
+        _validate_contract_compatibility(source_contract, target_contract)
+    except ControllerResolutionError as exc:
+        raise ValueError(
+            "behavioral-cloning source contract is incompatible with target policy"
+        ) from exc
+
+
 def _train_bc_command() -> Mapping[str, Any]:
     from hexwars_gym import HexWarsEnv
+    from ml_lab.evaluation import DuelClient
     from ml_lab.imitation import load_imitation_dataset
 
     panel, _banks, scenario = validate_definitions()
@@ -1088,20 +1108,32 @@ def _train_bc_command() -> Mapping[str, Any]:
 
     def build(staging: Path) -> None:
         stage_scenario = _materialize_runtime_scenario(scenario, staging, hashes)
-        env = HexWarsEnv(
-            _server_command(stage_scenario)[:-2],
-            opponent="random", seat=0, base_seed=12_000_000,
-            environment="tactical-v2", scenario_path=stage_scenario,
-        )
+        stage_command = _server_command(stage_scenario)
+        source_probe = DuelClient(stage_command, environment="tactical-v2")
         try:
-            dataset = load_imitation_dataset(DATASET_PATH, expected_contract=env.contract)
-            train_clone_runs(
-                dataset=dataset, scenario=scenario, env=env, contract=env.contract,
-                spaces_info=env.spaces_info, output_root=staging, panel=panel,
-                definition_hashes=hashes,
+            source_contract = source_probe.contract
+            env = HexWarsEnv(
+                stage_command[:-2],
+                opponent="random", seat=0, base_seed=12_000_000,
+                environment="tactical-v2", scenario_path=stage_scenario,
             )
+            try:
+                dataset = load_imitation_dataset(
+                    DATASET_PATH, expected_contract=source_contract,
+                )
+                _validate_bc_source_target_compatibility(
+                    source_contract, env.contract,
+                )
+                train_clone_runs(
+                    dataset=dataset, scenario=scenario, env=env,
+                    contract=source_contract, spaces_info=env.spaces_info,
+                    output_root=staging, panel=panel,
+                    definition_hashes=hashes,
+                )
+            finally:
+                env.close()
         finally:
-            env.close()
+            source_probe.close()
 
     return run_atomic_stage(
         CLONE_RUNS_PATH, hashes, build=build,
@@ -1462,14 +1494,7 @@ def _validate_smoke_actor_source(
     resolved_contract: Any,
     initialization: Mapping[str, Any],
 ) -> None:
-    if (
-        source_contract.environment != target_contract.environment
-        or source_contract.version != target_contract.version
-        or source_contract.encoding_hash != target_contract.encoding_hash
-        or source_contract.observation_size != target_contract.observation_size
-        or source_contract.action_size != target_contract.action_size
-    ):
-        raise ValueError("smoke BC source contract is incompatible with PPO")
+    _validate_bc_source_target_compatibility(source_contract, target_contract)
     if resolved_contract != source_contract:
         raise ValueError("smoke actor resolver did not return the exact source contract")
     if (

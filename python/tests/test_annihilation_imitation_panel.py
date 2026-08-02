@@ -948,11 +948,27 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
     module = _subject()
     original = module.SCENARIO_PATH.read_bytes()
     captured: list[bytes] = []
+    source = _bc_boundary_contract(
+        contract_hash="a" * 64, environment_kind="duel",
+    )
+    target = _bc_boundary_contract(
+        contract_hash="b" * 64, environment_kind="tactical",
+    )
+
+    class FakeDuelClient:
+        def __init__(self, command, *, environment):
+            assert environment == "tactical-v2"
+            scenario_path = Path(command[command.index("--scenario-file") + 1])
+            captured.append(scenario_path.read_bytes())
+            self.contract = source
+        def close(self) -> None:
+            return None
 
     class FakeEnv:
         def __init__(self, command, **kwargs):
+            del command
             captured.append(Path(kwargs["scenario_path"]).read_bytes())
-            self.contract = SimpleNamespace(contract_hash="c" * 64, encoding_hash="e" * 64)
+            self.contract = target
             self.spaces_info = {}
         def close(self) -> None:
             return None
@@ -967,8 +983,10 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
         return {"state": "completed"}
 
     import hexwars_gym
+    import ml_lab.evaluation
     import ml_lab.imitation
     monkeypatch.setattr(hexwars_gym, "HexWarsEnv", FakeEnv)
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeDuelClient)
     monkeypatch.setattr(ml_lab.imitation, "load_imitation_dataset", lambda *args, **kwargs: object())
     monkeypatch.setattr(module, "train_clone_runs", lambda **kwargs: [])
     monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
@@ -3442,3 +3460,175 @@ def test_smoke_root_refuses_selection_and_final_artifact_destinations(
             build=lambda _root: pytest.fail("protected destination reached build"),
             validate=lambda _root: pytest.fail("protected destination reached validation"),
         )
+
+
+def _bc_boundary_contract(
+    *,
+    contract_hash: str,
+    environment_kind: str,
+    encoding_hash: str = "e" * 64,
+    observation_size: int = 12,
+    action_size: int = 8,
+):
+    from ml_lab.contracts import EnvironmentContract
+
+    return EnvironmentContract(
+        version="tactical-v2",
+        contract_hash=contract_hash,
+        encoding_hash=encoding_hash,
+        observation_size=observation_size,
+        action_size=action_size,
+        board={"environment_kind": environment_kind},
+        roster=["unit"],
+        reward={"terminal_win": 1},
+    )
+
+
+def test_train_bc_loads_and_records_exact_duel_source_contract_for_tactical_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Using the tactical hash for strict dataset loading would erase capture provenance."""
+
+    module = _subject()
+    source = _bc_boundary_contract(
+        contract_hash="a" * 64, environment_kind="duel",
+    )
+    target = _bc_boundary_contract(
+        contract_hash="b" * 64, environment_kind="tactical",
+    )
+    events: list[tuple[str, Any]] = []
+    stage_scenarios: list[Path] = []
+    dataset = SimpleNamespace(contract=source)
+
+    class FakeDuelClient:
+        def __init__(self, command, *, environment):
+            assert environment == "tactical-v2"
+            stage_scenarios.append(Path(command[command.index("--scenario-file") + 1]))
+            self.contract = source
+
+        def close(self) -> None:
+            events.append(("closed", "duel"))
+
+    class FakeEnv:
+        def __init__(self, command, **kwargs):
+            del command
+            stage_scenarios.append(Path(kwargs["scenario_path"]))
+            self.contract = target
+            self.spaces_info = {"channels": 11}
+
+        def close(self) -> None:
+            events.append(("closed", "tactical"))
+
+    def loader(root: Path, *, expected_contract):
+        events.append(("loaded", (Path(root), expected_contract)))
+        return dataset
+
+    def train_clones(**kwargs):
+        events.append(("trained", kwargs))
+        return []
+
+    def fake_atomic(_destination, _hashes, *, build, validate):
+        del validate
+        staging = tmp_path / "clones-stage"
+        staging.mkdir()
+        build(staging)
+        return {"state": "completed"}
+
+    import hexwars_gym
+    import ml_lab.evaluation
+    import ml_lab.imitation
+
+    monkeypatch.setattr(hexwars_gym, "HexWarsEnv", FakeEnv)
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeDuelClient)
+    monkeypatch.setattr(ml_lab.imitation, "load_imitation_dataset", loader)
+    monkeypatch.setattr(module, "train_clone_runs", train_clones)
+    monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
+
+    module._train_bc_command()
+
+    loaded = next(value for name, value in events if name == "loaded")
+    trained = next(value for name, value in events if name == "trained")
+    assert loaded == (module.DATASET_PATH, source)
+    assert trained["dataset"] is dataset
+    assert trained["contract"] is source
+    assert trained["env"].contract is target
+    assert trained["spaces_info"] == {"channels": 11}
+    assert source.contract_hash != target.contract_hash
+    assert stage_scenarios[0] == stage_scenarios[1]
+    assert events[-2:] == [("closed", "tactical"), ("closed", "duel")]
+
+
+@pytest.mark.parametrize(
+    "target_overrides",
+    [
+        {"encoding_hash": "f" * 64},
+        {"observation_size": 13},
+        {"action_size": 9},
+    ],
+    ids=("encoding", "observation-geometry", "action-geometry"),
+)
+def test_train_bc_rejects_incompatible_source_before_trainer_and_closes_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_overrides: dict[str, Any],
+) -> None:
+    """A source/target tensor mismatch must never enter behavioral-clone optimization."""
+
+    module = _subject()
+    source = _bc_boundary_contract(
+        contract_hash="a" * 64, environment_kind="duel",
+    )
+    target = _bc_boundary_contract(
+        contract_hash="b" * 64,
+        environment_kind="tactical",
+        **target_overrides,
+    )
+    closed: list[str] = []
+    trainer_calls: list[dict[str, Any]] = []
+
+    class FakeDuelClient:
+        def __init__(self, _command, *, environment):
+            assert environment == "tactical-v2"
+            self.contract = source
+
+        def close(self) -> None:
+            closed.append("duel")
+
+    class FakeEnv:
+        def __init__(self, _command, **_kwargs):
+            self.contract = target
+            self.spaces_info = {}
+
+        def close(self) -> None:
+            closed.append("tactical")
+
+    def fake_atomic(_destination, _hashes, *, build, validate):
+        del validate
+        staging = tmp_path / "clones-stage"
+        staging.mkdir()
+        build(staging)
+        return {"state": "completed"}
+
+    import hexwars_gym
+    import ml_lab.evaluation
+    import ml_lab.imitation
+
+    monkeypatch.setattr(hexwars_gym, "HexWarsEnv", FakeEnv)
+    monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeDuelClient)
+    monkeypatch.setattr(
+        ml_lab.imitation,
+        "load_imitation_dataset",
+        lambda _root, *, expected_contract: SimpleNamespace(contract=expected_contract),
+    )
+    monkeypatch.setattr(
+        module,
+        "train_clone_runs",
+        lambda **kwargs: trainer_calls.append(kwargs),
+    )
+    monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
+
+    with pytest.raises(ValueError, match="incompatible"):
+        module._train_bc_command()
+
+    assert trainer_calls == []
+    assert closed == ["tactical", "duel"]
