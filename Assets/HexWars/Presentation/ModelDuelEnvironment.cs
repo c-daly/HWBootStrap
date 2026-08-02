@@ -226,7 +226,7 @@ namespace HexWars.Presentation
 
         static ModelDuelView Convert(TacticalV2DuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, (int)view.Seat,
-            view.Winner.HasValue ? (int)view.Winner.Value : -1,
+            view.Winner,
             view.Terminated, view.Truncated, deploymentComplete: true);
     }
 

@@ -739,7 +739,10 @@ namespace HexWars.Presentation.Tests
             var environment = ModelDuelEnvironmentFactory.Create(scenario);
             environment.CaptureTransitions = true;
 
-            environment.Reset(seed: 46, controller0: first, controller1: null);
+            ModelDuelView view = environment.Reset(seed: 46, controller0: first, controller1: null);
+
+            Assert.That(view.Winner, Is.EqualTo(-1),
+                "a nonterminal tactical-v2 view preserves the engine's -1 winner sentinel");
 
             IReadOnlyList<DuelTransition> transitions = environment.DrainTransitions();
             Assert.That(transitions, Is.Not.Empty);
