@@ -15,9 +15,18 @@ or definition change requires a new validation and a fresh execution.
 Each reusable full stage also records this exact object as its atomic
 `stage_identity`. Collection and behavioral cloning additionally require the
 dataset manifest's `code_revision` to match the execution commit and its
-`dirty` value to be exactly `false`. Generated dataset, model, staging, and
-final-evidence paths are ignored narrowly; root `aggregate.json` and
-`REPORT.md` remain visible for the eventual result commit.
+`dirty` value to be exactly `false`. Collection, clone training, clone
+evaluation, PPO training, and development evaluation recheck the repository
+and definition identity after reopening and physically validating the staged
+or reusable artifact, immediately before publication or reuse can return.
+
+Final freeze carries the validated commit and `dirty=false` from the stored
+identity into the seal and performs the same identity check at the last point
+before atomically writing `final-seal.json`. Generated dataset files, model
+roots, staging roots, and final-evidence paths are ignored individually; the
+dataset directory itself remains visible so new source fixtures cannot be
+silently hidden. Root `aggregate.json` and `REPORT.md` likewise remain visible
+for the eventual result commit.
 
 ## Locked data and models
 

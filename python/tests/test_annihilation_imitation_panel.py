@@ -40,7 +40,14 @@ LOCKED_WEIGHTS = [
 
 
 FULL_GENERATED_PATHS = [
-    "python/datasets/annihilation-imitation-v1/",
+    "python/datasets/annihilation-imitation-v1/manifest.json",
+    "python/datasets/annihilation-imitation-v1/games.jsonl",
+    "python/datasets/annihilation-imitation-v1/shards/",
+    "python/datasets/annihilation-imitation-v1/replays/",
+    "python/datasets/annihilation-imitation-v1/runtime-scenario.json",
+    "python/datasets/annihilation-imitation-v1/runtime-scenario-provenance.json",
+    "python/datasets/annihilation-imitation-v1/.stage-definitions.json",
+    "python/datasets/annihilation-imitation-v1/stage.json",
     "python/datasets/.annihilation-imitation-v1.staging/",
     "python/panels/annihilation-imitation-v1/execution-identity.json",
     "python/panels/annihilation-imitation-v1/bc-clones/",
@@ -3843,6 +3850,15 @@ def test_full_generated_output_policy_is_narrow_and_keeps_results_visible() -> N
             check=False,
         )
         assert visible.returncode == 1, relative
+    source_fixture = subprocess.run(
+        [
+            "git", "check-ignore", "--no-index", "--quiet",
+            "python/datasets/annihilation-imitation-v1/source-fixture.json",
+        ],
+        cwd=module.PROJECT_ROOT,
+        check=False,
+    )
+    assert source_fixture.returncode == 1
 
 @pytest.mark.parametrize(
     "command",
@@ -4041,3 +4057,223 @@ def test_train_bc_rejects_wrong_dataset_identity_before_atomic_or_optimizer_work
 
     with pytest.raises(ValueError, match="dataset execution identity"):
         module._train_bc_command(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["collect", "train-bc", "evaluate-bc", "train-ppo", "evaluate-dev"],
+)
+@pytest.mark.parametrize("lifecycle", ["publication", "reuse"])
+@pytest.mark.parametrize("mutation", ["repository", "definitions"])
+def test_full_stage_rechecks_identity_after_physical_validation_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    lifecycle: str,
+    mutation: str,
+) -> None:
+    """A long build/reuse may not publish after code or definitions drift."""
+
+    module = _subject()
+    identity = _execution_identity(module)
+    identity_path = tmp_path / "execution-identity.json"
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    physical_root = tmp_path / "physical-stage"
+    state = {"changed": False}
+    events: list[str] = []
+
+    def repository_identity(_repository: Path) -> dict[str, Any]:
+        changed = state["changed"] and mutation == "repository"
+        return {
+            "commit": ("c" if changed else "a") * 40,
+            "source_tree": ("d" if changed else "b") * 40,
+            "dirty": False,
+        }
+
+    original_hashes = dict(identity["definition_hashes"])
+
+    def definition_hashes(*_args, **_kwargs) -> dict[str, str]:
+        hashes = dict(original_hashes)
+        if state["changed"] and mutation == "definitions":
+            hashes["panel_sha256"] = "f" * 64
+        return hashes
+
+    monkeypatch.setattr(module, "current_definition_hashes", definition_hashes)
+
+    def physical_validator(root: Path, *_args, **_kwargs) -> dict[str, int]:
+        if Path(root) == physical_root:
+            events.append("physical")
+            state["changed"] = True
+        return {"outputs": 1}
+
+    monkeypatch.setattr(
+        module, "_validate_collection_dataset", physical_validator,
+    )
+    monkeypatch.setattr(module, "_validate_clone_stage", physical_validator)
+    monkeypatch.setattr(module, "_validate_gate_stage", physical_validator)
+    monkeypatch.setattr(module, "_validate_ppo_stage", physical_validator)
+    monkeypatch.setattr(
+        module, "_validate_development_stage", physical_validator,
+    )
+
+    def atomic(
+        _destination,
+        _definitions,
+        *,
+        stage_identity,
+        build,
+        validate,
+    ) -> dict[str, Any]:
+        del stage_identity, build
+        summary = validate(physical_root)
+        events.append(lifecycle)
+        return {
+            "state": "completed",
+            "reused": lifecycle == "reuse",
+            "summary": summary,
+        }
+
+    monkeypatch.setattr(module, "run_atomic_stage", atomic)
+    kwargs = {
+        "execution_identity_path": identity_path,
+        "repository": tmp_path,
+        "repository_identity_provider": repository_identity,
+    }
+
+    if command == "collect":
+        import ml_lab.evaluation
+
+        class FakeClient:
+            def __init__(self, _command, *, environment):
+                assert environment == "tactical-v2"
+                self.contract = SimpleNamespace(
+                    contract_hash="c" * 64,
+                    encoding_hash="e" * 64,
+                )
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeClient)
+        invoke = lambda: module._collect_command(**kwargs)
+    elif command == "train-bc":
+        dataset = tmp_path / "dataset"
+        dataset.mkdir()
+        (dataset / "manifest.json").write_text(
+            json.dumps({
+                "code_revision": identity["commit"],
+                "dirty": False,
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(module, "DATASET_PATH", dataset)
+        invoke = lambda: module._train_bc_command(**kwargs)
+    elif command == "evaluate-bc":
+        invoke = lambda: module._evaluate_bc_command(**kwargs)
+    elif command == "train-ppo":
+        invoke = lambda: module._train_ppo_command(**kwargs)
+    else:
+        monkeypatch.setattr(
+            module,
+            "build_panel_development_candidates",
+            lambda *_args, **_kwargs: [],
+        )
+        invoke = lambda: module._evaluate_dev_command(**kwargs)
+
+    with pytest.raises(ValueError, match="execution identity"):
+        invoke()
+    assert events == ["physical"]
+
+
+
+def test_freeze_command_passes_recorded_clean_revision_and_late_validator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final freeze must seal the validated revision, not query an ad hoc one."""
+
+    module = _subject()
+    identity, kwargs = _command_identity_kwargs(tmp_path, module)
+    captured: dict[str, Any] = {}
+
+    def freeze(panel_dir: Path, **freeze_kwargs) -> dict[str, Any]:
+        captured["panel_dir"] = Path(panel_dir)
+        captured.update(freeze_kwargs)
+        return {"state": "assigned"}
+
+    monkeypatch.setattr(module, "freeze_final", freeze)
+    incumbent = tmp_path / "incumbent"
+
+    assert module._freeze_final_command(
+        incumbent_panel=incumbent,
+        **kwargs,
+    ) == {"state": "assigned"}
+    assert captured["panel_dir"] == module.PANEL_ROOT
+    assert captured["incumbent_panel"] == incumbent
+    assert captured["repository"] == tmp_path
+    assert captured["revision"] == identity["commit"]
+    assert captured["dirty"] is False
+    assert callable(captured["final_identity_validator"])
+
+
+def test_freeze_final_rejects_dirty_revision_before_seal(
+    tmp_path: Path,
+) -> None:
+    """No direct caller may create a final seal whose revision is dirty."""
+
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="clean"):
+        module.freeze_final(
+            panel_dir,
+            incumbent_panel=incumbent,
+            dataset_dir=dataset_dir,
+            revision="a" * 40,
+            dirty=True,
+        )
+
+    assert not (panel_dir / "final-seal.json").exists()
+
+
+def test_freeze_command_rechecks_identity_at_last_point_before_seal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repository drift during physical sealing must leave the bank unassigned."""
+
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    identity = _execution_identity(module)
+    identity_path = tmp_path / "execution-identity.json"
+    identity_path.write_text(json.dumps(identity), encoding="utf-8")
+    calls = 0
+
+    def repository_identity(_repository: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        changed = calls > 1
+        return {
+            "commit": ("c" if changed else "a") * 40,
+            "source_tree": ("d" if changed else "b") * 40,
+            "dirty": False,
+        }
+
+    monkeypatch.setattr(module, "PANEL_ROOT", panel_dir)
+    monkeypatch.setattr(module, "DATASET_PATH", dataset_dir)
+    monkeypatch.setattr(
+        module,
+        "_repository_identity",
+        lambda _repository: (identity["commit"], False),
+    )
+
+    with pytest.raises(ValueError, match="execution identity"):
+        module._freeze_final_command(
+            incumbent_panel=incumbent,
+            execution_identity_path=identity_path,
+            repository=tmp_path,
+            repository_identity_provider=repository_identity,
+        )
+
+    assert calls == 2
+    assert not (panel_dir / "final-seal.json").exists()

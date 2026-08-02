@@ -34,7 +34,14 @@ SMOKE_ROOT = PANEL_ROOT / "evidence" / "smoke"
 EXECUTION_IDENTITY_PATH = PANEL_ROOT / "execution-identity.json"
 _SMOKE_GENERATED_ROOT = "python/panels/annihilation-imitation-v1/evidence/"
 _FULL_GENERATED_PATHS = (
-    "python/datasets/annihilation-imitation-v1/",
+    "python/datasets/annihilation-imitation-v1/manifest.json",
+    "python/datasets/annihilation-imitation-v1/games.jsonl",
+    "python/datasets/annihilation-imitation-v1/shards/",
+    "python/datasets/annihilation-imitation-v1/replays/",
+    "python/datasets/annihilation-imitation-v1/runtime-scenario.json",
+    "python/datasets/annihilation-imitation-v1/runtime-scenario-provenance.json",
+    "python/datasets/annihilation-imitation-v1/.stage-definitions.json",
+    "python/datasets/annihilation-imitation-v1/stage.json",
     "python/datasets/.annihilation-imitation-v1.staging/",
     "python/panels/annihilation-imitation-v1/execution-identity.json",
     "python/panels/annihilation-imitation-v1/bc-clones/",
@@ -338,6 +345,33 @@ def _full_execution_context(
         repository_identity_provider=repository_identity_provider,
     )
     return panel, banks, scenario, hashes, identity
+
+
+def _full_stage_validator(
+    physical_validator: Callable[[Path], Mapping[str, Any]],
+    *,
+    expected_identity: Mapping[str, Any],
+    execution_identity_path: Path,
+    repository: Path,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None,
+) -> Callable[[Path], Mapping[str, Any]]:
+    expected = _validate_execution_identity(expected_identity)
+
+    def validate(root: Path) -> Mapping[str, Any]:
+        summary = dict(physical_validator(Path(root)))
+        current = _require_execution_identity(
+            execution_identity_path=execution_identity_path,
+            definition_hashes=current_definition_hashes(),
+            repository=repository,
+            repository_identity_provider=repository_identity_provider,
+        )
+        if current != expected:
+            raise ValueError("execution identity changed during stage")
+        return summary
+
+    return validate
 
 
 def _validate_dataset_execution_identity(
@@ -1281,11 +1315,18 @@ def _collect_command(
             )
         )
 
-    return run_atomic_stage(
-        DATASET_PATH, hashes, stage_identity=identity, build=build,
-        validate=lambda root: _validate_collection_dataset(
+    validate = _full_stage_validator(
+        lambda root: _validate_collection_dataset(
             root, contract, scenario, identity,
         ),
+        expected_identity=identity,
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    return run_atomic_stage(
+        DATASET_PATH, hashes, stage_identity=identity, build=build,
+        validate=validate,
     )
 
 
@@ -1356,9 +1397,16 @@ def _train_bc_command(
         finally:
             source_probe.close()
 
+    validate = _full_stage_validator(
+        lambda root: _validate_clone_stage(root, hashes),
+        expected_identity=identity,
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     return run_atomic_stage(
         CLONE_RUNS_PATH, hashes, stage_identity=identity, build=build,
-        validate=lambda root: _validate_clone_stage(root, hashes),
+        validate=validate,
     )
 
 
@@ -1384,9 +1432,16 @@ def _evaluate_bc_command(
             server_cmd=_server_command(SCENARIO_PATH)[:-2],
         )
 
+    validate = _full_stage_validator(
+        lambda root: _validate_gate_stage(root, hashes),
+        expected_identity=identity,
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     return run_atomic_stage(
         CLONE_EVALUATION_PATH, hashes, stage_identity=identity, build=build,
-        validate=lambda root: _validate_gate_stage(root, hashes),
+        validate=validate,
     )
 
 
@@ -2333,15 +2388,29 @@ def _freeze_final_command(
         [Path], Mapping[str, Any]
     ] | None = None,
 ) -> Mapping[str, Any]:
-    _panel, _banks, _scenario, _hashes, _identity = _full_execution_context(
+    _panel, _banks, _scenario, _hashes, identity = _full_execution_context(
         execution_identity_path=execution_identity_path,
         repository=repository,
         repository_identity_provider=repository_identity_provider,
     )
+
+    def final_identity_validator() -> None:
+        current = _require_execution_identity(
+            execution_identity_path=execution_identity_path,
+            definition_hashes=current_definition_hashes(),
+            repository=repository,
+            repository_identity_provider=repository_identity_provider,
+        )
+        if current != identity:
+            raise ValueError("execution identity changed during final freeze")
+
     return freeze_final(
         PANEL_ROOT,
         incumbent_panel=incumbent_panel,
+        revision=identity["commit"],
+        dirty=identity["dirty"],
         repository=repository,
+        final_identity_validator=final_identity_validator,
     )
 
 
@@ -3172,12 +3241,19 @@ def _train_ppo_command(
             server_cmd=_server_command(SCENARIO_PATH)[:-2],
         )
 
+    validate = _full_stage_validator(
+        lambda root: _validate_ppo_stage(root, hashes, matrix, scenario),
+        expected_identity=identity,
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     return run_atomic_stage(
         PPO_RUNS_PATH,
         hashes,
         stage_identity=identity,
         build=build,
-        validate=lambda root: _validate_ppo_stage(root, hashes, matrix, scenario),
+        validate=validate,
     )
 
 
@@ -3463,12 +3539,19 @@ def _evaluate_dev_command(
         result["definition_hashes"] = dict(hashes)
         _atomic_json(staging / "development.json", result)
 
+    validate = _full_stage_validator(
+        lambda root: _validate_development_stage(root, hashes, scenario),
+        expected_identity=identity,
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     return run_atomic_stage(
         DEVELOPMENT_PATH,
         hashes,
         stage_identity=identity,
         build=build,
-        validate=lambda root: _validate_development_stage(root, hashes, scenario),
+        validate=validate,
     )
 
 
@@ -3770,12 +3853,19 @@ def freeze_final(
     revision: str | None = None,
     dirty: bool | None = None,
     repository: Path = PROJECT_ROOT,
+    final_identity_validator: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     panel_dir = Path(panel_dir)
-    verify_repository = revision is None and dirty is None
+    verify_repository = (
+        final_identity_validator is not None
+        or revision is None
+        or dirty is None
+    )
     seal_path = panel_dir / "final-seal.json"
     if seal_path.exists():
         raise RuntimeError("final bank is already assigned")
+    if dirty is not None and dirty is not False:
+        raise ValueError("final seal requires a clean execution identity")
     selection_path = panel_dir / "selection.json"
     if not selection_path.is_file():
         raise RuntimeError("global checkpoint selection is not frozen")
@@ -3886,6 +3976,8 @@ def freeze_final(
         actual_revision, actual_dirty = _repository_identity(repository)
         revision = actual_revision if revision is None else revision
         dirty = actual_dirty if dirty is None else dirty
+    if dirty is not False:
+        raise ValueError("final seal requires a clean execution identity")
 
     report_source_paths = {}
     for source_root in (
@@ -3935,6 +4027,8 @@ def freeze_final(
         "seed_banks": assigned_banks,
         "final": dict(assigned_banks["final"]),
     }
+    if final_identity_validator is not None:
+        final_identity_validator()
     _atomic_json(seal_path, payload)
     return payload
 

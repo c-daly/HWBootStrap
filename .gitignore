@@ -113,7 +113,14 @@ python/events.out.tfevents.*
 /replays/*.replay
 
 # Generated annihilation-imitation experiment artifacts (identity-bound, never committed).
-/python/datasets/annihilation-imitation-v1/
+/python/datasets/annihilation-imitation-v1/manifest.json
+/python/datasets/annihilation-imitation-v1/games.jsonl
+/python/datasets/annihilation-imitation-v1/shards/
+/python/datasets/annihilation-imitation-v1/replays/
+/python/datasets/annihilation-imitation-v1/runtime-scenario.json
+/python/datasets/annihilation-imitation-v1/runtime-scenario-provenance.json
+/python/datasets/annihilation-imitation-v1/.stage-definitions.json
+/python/datasets/annihilation-imitation-v1/stage.json
 /python/datasets/.annihilation-imitation-v1.staging/
 /python/panels/annihilation-imitation-v1/execution-identity.json
 /python/panels/annihilation-imitation-v1/bc-clones/
