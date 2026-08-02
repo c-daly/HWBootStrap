@@ -1482,7 +1482,7 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
             "reciprocal": True,
             "games": 2,
             "schedule": {
-                "start_profile": "standard-3v3",
+                "start_profile": kwargs["start_profile"],
                 "reference_seat_policy": "candidate-seat",
             },
             "matches": matches,
@@ -1496,18 +1496,22 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
         output_root=tmp_path / "development",
         evaluator=evaluator,
         server_cmd=["fake-server"],
+        conversion_profiles=module._CONVERSION_PROFILES,
     )
 
-    assert len(calls) == 100
+    assert len(calls) == 700
     assert all(
         call["p0"] == controller_spec
         and call["p1"] == "random"
         and call["games"] == 1
         and call["both_seats"] is True
         and call["capture_trace"] is True
-        and call["start_profile"] == "standard-3v3"
         for call in calls
     )
+    assert sum(call["start_profile"] == "standard-3v3" for call in calls) == 100
+    assert {
+        call["start_profile"] for call in calls if call["start_profile"] != "standard-3v3"
+    } == set(module._CONVERSION_PROFILES)
     rows = result["candidates"][0]["matches"]
     assert len(rows) == 200
     assert [(row["map_seed"], row["candidate_seat"]) for row in rows] == [
@@ -1516,6 +1520,13 @@ def test_development_evaluation_uses_real_boundary_and_records_every_game_identi
         for seat in (0, 1)
     ]
     assert all(row["actual_step"] == 16_384 for row in rows)
+    assert len(result["candidates"][0]["conversion"]) == 1_200
+    assert result["candidates"][0]["conversion_schedule"] == {
+        "profiles": list(module._CONVERSION_PROFILES),
+        "maps_per_profile": 100,
+        "both_seats": True,
+        "seed_start": 16_000_000,
+    }
     assert all(
         row["condition"] == "bc_ppo"
         and row["model_seed"] == 211
@@ -1664,7 +1675,7 @@ def test_development_evaluation_reopens_physical_map_evidence(
             "reciprocal": True,
             "games": 2,
             "schedule": {
-                "start_profile": "standard-3v3",
+                "start_profile": kwargs["start_profile"],
                 "reference_seat_policy": "candidate-seat",
             },
             "matches": matches,
@@ -1883,7 +1894,7 @@ def _actual_development_candidate_fixture(
             "schema_version": 1,
             "generated_at": "2026-08-01T00:00:00+00:00",
             "schedule": {
-                "start_profile": "standard-3v3",
+                "start_profile": kwargs["start_profile"],
                 "reference_seat_policy": "candidate-seat",
             },
             "candidate": dict(controller_identity),
@@ -2464,6 +2475,30 @@ def test_report_evidence_is_derived_from_hash_sealed_artifacts(tmp_path: Path) -
             "ppo_wall_clock": {"status": "unavailable"},
         },
     }
+
+
+@pytest.mark.parametrize("mutation", ["missing", "negative", "nonfinite"])
+def test_report_evidence_rejects_missing_or_invalid_bc_timing_manifests(
+    tmp_path: Path, mutation: str,
+) -> None:
+    module = _subject()
+    panel_dir, dataset_dir, incumbent = _final_panel_fixture(tmp_path)
+    runs = [panel_dir / "bc-clones" / f"seed-{seed}" / "run.json"
+            for seed in (211, 223, 227)]
+    if mutation == "missing":
+        for path in runs:
+            path.unlink()
+    else:
+        manifest = _json(runs[0])
+        manifest["wall_clock_seconds"] = -1.0 if mutation == "negative" else float("nan")
+        runs[0].write_text(json.dumps(manifest), encoding="utf-8")
+    module.freeze_final(
+        panel_dir, incumbent_panel=incumbent, dataset_dir=dataset_dir,
+        revision="37cc8f9", dirty=False,
+    )
+
+    with pytest.raises(ValueError, match="BC compute evidence"):
+        module._sealed_report_evidence(panel_dir)
 
 
 def test_report_evidence_rejects_missing_conversion_instead_of_zero_over_zero(

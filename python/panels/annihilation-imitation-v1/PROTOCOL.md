@@ -64,7 +64,14 @@ and reconstructs the aggregate rather than trusting copied summary rows.
 The validator accepts the full production controller metadata shape while
 requiring the snapshot path, algorithm, and step; snapshot source identity is
 bound through the canonical candidate snapshot specification and checkpoint
-location. All 100 manifests are reopened for each of the 21 candidates.
+location. All 100 standard manifests are reopened for each of the 21
+candidates. Initialized-PPO candidates additionally receive a preregistered
+conversion diagnostic over all six near/far conversion profiles, the same 100
+development seeds, and both candidate seats: 1,200 games per candidate and
+10,800 games total. These conversion outcomes are produced by the real
+evaluation boundary, retained with their physical trace/replay identities, and
+reopened during validation. They supply the global-budget conversion tiebreak
+without changing the locked standard development gate.
 
 select-budget requires the complete development schedule and atomically writes
 selection.json. It chooses one nominal budget for all three initialized PPO
@@ -129,9 +136,11 @@ curve, compute, failure-trace, and limitation sections. Clone, conversion, BC,
 learning, and compute values are derived from hash-sealed artifacts. Learning
 curves contain the pooled standard win rate at every locked nominal budget for
 both initialized and scratch PPO. Empty conversion evidence is an error rather
-than a reported 0/0 result. Wall-clock timing is reported only when every
+than a reported 0/0 result. BC compute evidence requires exactly three sealed
+clone run manifests. Wall-clock timing is reported only when every
 authoritative run records it; otherwise the aggregate and report explicitly
-mark that timing unavailable. Comparator loss/draw intervals, seat summaries,
+mark that timing unavailable. Recorded durations must be finite and
+non-negative. Comparator loss/draw intervals, seat summaries,
 diagnostics, and draw categories come from the same aggregate as the Markdown
 report.
 

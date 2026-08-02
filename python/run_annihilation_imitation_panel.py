@@ -1544,6 +1544,12 @@ _DEVELOPMENT = {
     "profile": "standard-3v3",
     "opponent": "random",
 }
+_DEVELOPMENT_CONVERSION = {
+    "profiles": list(_CONVERSION_PROFILES),
+    "maps_per_profile": _DEVELOPMENT["maps"],
+    "both_seats": True,
+    "seed_start": _DEVELOPMENT["seed_start"],
+}
 
 
 def evaluate_development_candidates(
@@ -1553,7 +1559,14 @@ def evaluate_development_candidates(
     evaluator: Callable[..., Mapping[str, Any]] | None = None,
     server_cmd: Sequence[str],
     workers: int = 1,
+    conversion_profiles: Sequence[str] = (),
 ) -> dict[str, Any]:
+    conversion_profiles = tuple(conversion_profiles)
+    if (
+        len(set(conversion_profiles)) != len(conversion_profiles)
+        or any(profile not in _CONVERSION_PROFILES for profile in conversion_profiles)
+    ):
+        raise ValueError("development conversion profiles are invalid")
     selected_evaluator = evaluator or _evaluate_standard_controllers
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -1591,6 +1604,59 @@ def evaluate_development_candidates(
             for seat in (0, 1)
         ]:
             raise ValueError("development candidate schedule is incomplete")
+        conversion_matches: list[dict[str, Any]] = []
+        if candidate.condition == "bc_ppo":
+            for profile in conversion_profiles:
+                for map_seed in range(
+                    _DEVELOPMENT["seed_start"],
+                    _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+                ):
+                    map_root = (
+                        root
+                        / candidate.condition
+                        / f"seed-{candidate.model_seed}"
+                        / f"nominal-{candidate.nominal_step}"
+                        / "conversion"
+                        / profile
+                        / f"map-{map_seed}"
+                    )
+                    output_path = map_root / "evaluation.json"
+                    selected_evaluator(
+                        candidate.controller,
+                        _DEVELOPMENT["opponent"],
+                        games=1,
+                        seed_start=map_seed,
+                        both_seats=True,
+                        workers=workers,
+                        server_cmd=list(server_cmd),
+                        output_path=output_path,
+                        environment="tactical-v2",
+                        evidence_dir=map_root / "evidence",
+                        capture_trace=True,
+                        start_profile=profile,
+                    )
+                    _normalized, physical_matches = _validated_development_map(
+                        root,
+                        candidate,
+                        map_seed,
+                        output_path,
+                        expected_profile=profile,
+                    )
+                    conversion_matches.extend(physical_matches)
+        expected_conversion_schedule = [
+            (profile, map_seed, seat)
+            for profile in conversion_profiles
+            for map_seed in range(
+                _DEVELOPMENT["seed_start"],
+                _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+            )
+            for seat in (0, 1)
+        ]
+        if candidate.condition == "bc_ppo" and [
+            (row["profile"], row["map_seed"], row["candidate_seat"])
+            for row in conversion_matches
+        ] != expected_conversion_schedule:
+            raise ValueError("development conversion schedule is incomplete")
         candidate_results.append(
             {
                 "condition": candidate.condition,
@@ -1603,7 +1669,18 @@ def evaluate_development_candidates(
                 "algorithm": candidate.algorithm or matches[0]["controller"].get("algorithm"),
                 "controller": matches[0]["controller"],
                 "standard": [row["outcome"] for row in matches],
-                "conversion": [],
+                "conversion": [row["outcome"] for row in conversion_matches],
+                "conversion_matches": conversion_matches,
+                "conversion_schedule": (
+                    {
+                        "profiles": list(conversion_profiles),
+                        "maps_per_profile": _DEVELOPMENT["maps"],
+                        "both_seats": True,
+                        "seed_start": _DEVELOPMENT["seed_start"],
+                    }
+                    if candidate.condition == "bc_ppo" and conversion_profiles
+                    else None
+                ),
                 "matches": matches,
             }
         )
@@ -1963,6 +2040,62 @@ def _validate_development_candidate_evidence(
         != [match["outcome"] for match in physical_matches]
     ):
         raise ValueError("development aggregate does not match physical evaluations")
+
+    conversion_schedule = candidate.get("conversion_schedule")
+    if conversion_schedule is not None:
+        if conversion_schedule != _DEVELOPMENT_CONVERSION:
+            raise ValueError("development conversion schedule is incomplete")
+        conversion_matches = candidate.get("conversion_matches")
+        expected_conversion_schedule = [
+            (profile, seed, seat)
+            for profile in _CONVERSION_PROFILES
+            for seed in range(
+                _DEVELOPMENT["seed_start"],
+                _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+            )
+            for seat in (0, 1)
+        ]
+        if (
+            not isinstance(conversion_matches, list)
+            or [
+                (match.get("profile"), match.get("map_seed"), match.get("candidate_seat"))
+                for match in conversion_matches
+                if isinstance(match, Mapping)
+            ]
+            != expected_conversion_schedule
+            or candidate.get("conversion")
+            != [match.get("outcome") for match in conversion_matches]
+        ):
+            raise ValueError("development conversion schedule is incomplete")
+
+        physical_conversion_matches: list[dict[str, Any]] = []
+        for profile in _CONVERSION_PROFILES:
+            for map_seed in range(
+                _DEVELOPMENT["seed_start"],
+                _DEVELOPMENT["seed_start"] + _DEVELOPMENT["maps"],
+            ):
+                output_path = (
+                    Path(root)
+                    / identity.condition
+                    / f"seed-{identity.model_seed}"
+                    / f"nominal-{identity.nominal_step}"
+                    / "conversion"
+                    / profile
+                    / f"map-{map_seed}"
+                    / "evaluation.json"
+                )
+                _normalized, map_matches = _validated_development_map(
+                    Path(root),
+                    identity,
+                    map_seed,
+                    output_path,
+                    expected_profile=profile,
+                )
+                physical_conversion_matches.extend(map_matches)
+        if conversion_matches != physical_conversion_matches:
+            raise ValueError(
+                "development conversion aggregate does not match physical evaluations"
+            )
     return physical_matches
 
 
@@ -1997,9 +2130,28 @@ def _validate_development_stage(
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise ValueError("development candidate is malformed")
+        if candidate.get("condition") == "bc_ppo":
+            if candidate.get("conversion_schedule") != _DEVELOPMENT_CONVERSION:
+                raise ValueError("initialized-PPO conversion evidence is incomplete")
+        elif (
+            candidate.get("conversion_schedule") is not None
+            or candidate.get("conversion") != []
+            or candidate.get("conversion_matches") != []
+        ):
+            raise ValueError("unexpected development conversion evidence")
         _validate_development_candidate_evidence(root, candidate)
 
-    return {"candidate_count": 21, "games": 4_200}
+    return {
+        "candidate_count": 21,
+        "standard_games": 4_200,
+        "conversion_games": (
+            len(_MODEL_SEEDS)
+            * len(_PPO["nominal_budgets"])
+            * len(_CONVERSION_PROFILES)
+            * _DEVELOPMENT["maps"]
+            * 2
+        ),
+    }
 
 
 def _evaluate_dev_command() -> Mapping[str, Any]:
@@ -2022,6 +2174,7 @@ def _evaluate_dev_command() -> Mapping[str, Any]:
             candidates,
             output_root=staging,
             server_cmd=_server_command(runtime_scenario),
+            conversion_profiles=_CONVERSION_PROFILES,
         )
         for row, candidate in zip(result["candidates"], candidates, strict=True):
             row["checkpoint_sha256"] = candidate.checkpoint_sha256
@@ -2053,6 +2206,8 @@ def _validated_development_map(
     candidate: DevelopmentCandidate,
     map_seed: int,
     output_path: Path,
+    *,
+    expected_profile: str = _DEVELOPMENT["profile"],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     try:
         physical = _read_json(output_path)
@@ -2075,7 +2230,7 @@ def _validated_development_map(
         or physical.get("games") != 2
         or schedule
         != {
-            "start_profile": "standard-3v3",
+            "start_profile": expected_profile,
             "reference_seat_policy": "candidate-seat",
         }
         or not isinstance(raw_matches, list)
@@ -2164,7 +2319,7 @@ def _validated_development_map(
                 "checkpoint_sha256": candidate.checkpoint_sha256,
                 "controller": dict(controller),
                 "opponent": dict(opponent),
-                "profile": "standard-3v3",
+                "profile": expected_profile,
             }
         )
         matches.append(row)
@@ -3028,17 +3183,33 @@ def _sealed_report_evidence(panel_dir: Path) -> dict[str, Any]:
             raise ValueError("sealed PPO compute evidence is incomplete")
         ppo_steps += timesteps
         value = manifest.get("wall_clock_seconds")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value is not None:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError("sealed PPO compute evidence has invalid timing")
             ppo_wall_values.append(float(value))
 
     bc_run_paths = [
         path for name, path in source_paths.items()
         if name.startswith("bc-clones/") and name.endswith("/run.json")
     ]
+    if len(bc_run_paths) != len(_MODEL_SEEDS):
+        raise ValueError("BC compute evidence requires exactly three run manifests")
     bc_wall_values = []
     for path in bc_run_paths:
         value = _read_json(path).get("wall_clock_seconds")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value is not None:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError("BC compute evidence has invalid timing")
             bc_wall_values.append(float(value))
 
     def timing(values: Sequence[float], expected: int) -> dict[str, Any]:
@@ -3062,7 +3233,7 @@ def _sealed_report_evidence(panel_dir: Path) -> dict[str, Any]:
         },
         "compute": {
             "teacher_games": teacher_games,
-            "bc_wall_clock": timing(bc_wall_values, len(bc_run_paths)),
+            "bc_wall_clock": timing(bc_wall_values, len(_MODEL_SEEDS)),
             "ppo_environment_steps": ppo_steps,
             "ppo_wall_clock": timing(
                 ppo_wall_values, len(seal["training_run_paths"])
