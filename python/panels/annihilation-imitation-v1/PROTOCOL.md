@@ -49,6 +49,9 @@ and `stage.json` bind the exact HEAD commit and source-tree digest under a
 fail-closed policy whose sole generated-evidence exclusion is this panel's
 `evidence/` root. The command recomputes that repository identity after reopening
 and physically validating the evidence, immediately before atomic publication.
+That physical validation requires `dataset/manifest.json` to record the same
+commit and to declare `dirty` as exactly `false` during both initial publication
+and completed-stage reuse.
 Any intervening source change fails the run and removes only the staged
 completion manifest, preserving non-authoritative diagnostics.
 

@@ -86,15 +86,20 @@ Every behavior change was driven by a focused failing test before its fix:
 11. Smoke isolation initially omitted selection and final publication paths.
     Six destination regressions failed until those files and directories became
     protected roots.
+12. Physical reopening initially trusted the dataset manifest without comparing
+    its code identity to the smoke identity. Mismatched-revision and dirty-dataset
+    tests failed until publication and reuse both supplied the expected identity
+    to the evidence collector, which now requires the dataset revision to equal
+    the bound commit and `dirty` to be exactly `false`.
 
-Focused GREEN evidence included 34 smoke/identity cases, followed by all 119
+Focused GREEN evidence included 36 smoke/identity cases, followed by all 121
 annihilation-imitation panel tests, the full dataset audit, and compatible
 actor-transfer regression.
 
 ## Verification
 
 - `dotnet build engine\HexWars.GymServer\HexWars.GymServer.csproj --nologo`: passed, zero warnings and zero errors.
-- `$env:PYTHONPATH='python'; C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe -m pytest python\tests -q`: passed, 596 tests and one expected scenario auto-raise warning.
+- `$env:PYTHONPATH='python'; C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe -m pytest python\tests -q`: passed, 598 tests and one expected scenario auto-raise warning.
 - `dotnet test engine\HexWars.Engine.Tests\HexWars.Engine.Tests.csproj --nologo`: passed, 653 tests.
 - `git diff --check`: passed.
 

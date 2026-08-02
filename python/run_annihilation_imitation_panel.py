@@ -1595,11 +1595,16 @@ def _smoke_artifact_hashes(root: Path) -> dict[str, str]:
     return artifacts
 
 
-def _collect_smoke_evidence(root: Path) -> tuple[dict[str, Any], dict[str, str]]:
+def _collect_smoke_evidence(
+    root: Path,
+    *, expected_repository_identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
     from ml_lab.controllers import ControllerResolver
     from ml_lab.imitation import audit_imitation_dataset
 
     root = Path(root).resolve()
+    identity = _validate_smoke_repository_identity(expected_repository_identity)
+
     schedule = build_smoke_schedule()
     ppo_run = root / "ppo" / schedule["ppo"]["run_name"]
     ppo_manifest = _read_json(ppo_run / "run.json")
@@ -1607,6 +1612,13 @@ def _collect_smoke_evidence(root: Path) -> tuple[dict[str, Any], dict[str, str]]
 
     dataset_root = root / "dataset"
     bc_root = root / "bc"
+    dataset_manifest = _read_json(dataset_root / "manifest.json")
+    if (
+        dataset_manifest.get("code_revision") != identity["commit"]
+        or dataset_manifest.get("dirty") is not False
+    ):
+        raise ValueError("smoke dataset repository identity does not match")
+
     bc_manifest = _read_json(bc_root / "run.json")
     dataset, source_contract = _load_smoke_source_dataset(
         dataset_root, bc_manifest,
@@ -1959,7 +1971,10 @@ def _build_smoke_pipeline(
     evaluation_manifest["candidate"] = candidate
     _atomic_json(evaluation_path, evaluation_manifest)
 
-    checks, artifacts = _collect_smoke_evidence(root)
+    checks, artifacts = _collect_smoke_evidence(
+        root,
+        expected_repository_identity=repository_identity,
+    )
     _atomic_json(
         root / "smoke.json",
         build_smoke_manifest(
@@ -1976,7 +1991,10 @@ def _validate_real_smoke_stage(
 ) -> Mapping[str, Any]:
     root = Path(root)
     checks = dict(_validate_smoke_stage(root, repository_identity))
-    recomputed_checks, recomputed_artifacts = _collect_smoke_evidence(root)
+    recomputed_checks, recomputed_artifacts = _collect_smoke_evidence(
+        root,
+        expected_repository_identity=repository_identity,
+    )
     manifest = _read_json(root / "smoke.json")
     if (
         checks != recomputed_checks

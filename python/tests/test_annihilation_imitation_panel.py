@@ -3139,6 +3139,61 @@ def _smoke_repository_identity(
     }
 
 
+@pytest.mark.parametrize(
+    ("code_revision", "dirty"),
+    [
+        ("c" * 40, False),
+        ("a" * 40, True),
+    ],
+    ids=("mismatched-revision", "dirty-dataset"),
+)
+def test_smoke_evidence_rejects_dataset_from_different_or_dirty_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code_revision: str,
+    dirty: bool,
+) -> None:
+    """Physical evidence must come from the same clean code identity as its smoke."""
+
+    module = _subject()
+    root = tmp_path / "evidence" / "smoke"
+    identity = _smoke_repository_identity()
+    dataset_root = root / "dataset"
+    dataset_root.mkdir(parents=True)
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": code_revision,
+            "dirty": dirty,
+        }),
+        encoding="utf-8",
+    )
+    ppo_manifest = root / "ppo" / "initialized-ppo" / "run.json"
+    bc_manifest = root / "bc" / "run.json"
+    original_read = module._read_json
+
+    def read_manifest(path: Path) -> dict[str, Any]:
+        path = Path(path)
+        if path == ppo_manifest:
+            return {"contract": {}}
+        if path == bc_manifest:
+            return {}
+        return original_read(path)
+
+    monkeypatch.setattr(module, "_read_json", read_manifest)
+    monkeypatch.setattr(module, "_smoke_contract", lambda _raw: object())
+    monkeypatch.setattr(
+        module,
+        "_load_smoke_source_dataset",
+        lambda *_args: pytest.fail("invalid dataset identity reached dataset loading"),
+    )
+
+    with pytest.raises(ValueError, match="smoke dataset repository identity"):
+        module._collect_smoke_evidence(
+            root,
+            expected_repository_identity=identity,
+        )
+
+
 def test_smoke_validation_failure_removes_only_staged_completion_manifest(
     tmp_path: Path,
 ) -> None:
