@@ -4,6 +4,21 @@ This directory preregisters demonstration collection, three independent pure beh
 
 Definitions are immutable and hash-bound. Every command validates `panel.json`, `seed-banks.json`, and the scenario before doing work. Stages resume in a sibling staging directory and publish by atomic rename only after manifests, hashes, counts, reciprocal schedules, and expected outputs validate.
 
+The full experiment starts with `validate` on a clean tracked worktree. That
+command atomically writes `execution-identity.json` with the exact HEAD commit,
+source-tree digest, `dirty=false`, the narrow generated-output policy, and all
+three definition hashes. Every later full command reopens that file and
+recomputes the same identity before reading, reusing, building, freezing,
+evaluating, or reporting experiment artifacts. Any commit, source-tree, policy,
+or definition change requires a new validation and a fresh execution.
+
+Each reusable full stage also records this exact object as its atomic
+`stage_identity`. Collection and behavioral cloning additionally require the
+dataset manifest's `code_revision` to match the execution commit and its
+`dirty` value to be exactly `false`. Generated dataset, model, staging, and
+final-evidence paths are ignored narrowly; root `aggregate.json` and
+`REPORT.md` remain visible for the eventual result commit.
+
 ## Locked data and models
 
 - Greedy standard demonstrations: seeds 11,000,000?11,499,999; at least 100,000 retained decisions.

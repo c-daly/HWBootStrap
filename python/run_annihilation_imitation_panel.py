@@ -31,7 +31,32 @@ PPO_RUNS_PATH = PANEL_ROOT / "ppo-runs"
 DEVELOPMENT_PATH = PANEL_ROOT / "development"
 SELECTION_PATH = PANEL_ROOT / "selection.json"
 SMOKE_ROOT = PANEL_ROOT / "evidence" / "smoke"
+EXECUTION_IDENTITY_PATH = PANEL_ROOT / "execution-identity.json"
 _SMOKE_GENERATED_ROOT = "python/panels/annihilation-imitation-v1/evidence/"
+_FULL_GENERATED_PATHS = (
+    "python/datasets/annihilation-imitation-v1/",
+    "python/datasets/.annihilation-imitation-v1.staging/",
+    "python/panels/annihilation-imitation-v1/execution-identity.json",
+    "python/panels/annihilation-imitation-v1/bc-clones/",
+    "python/panels/annihilation-imitation-v1/.bc-clones.staging/",
+    "python/panels/annihilation-imitation-v1/bc-development-gate/",
+    "python/panels/annihilation-imitation-v1/.bc-development-gate.staging/",
+    "python/panels/annihilation-imitation-v1/ppo-runs/",
+    "python/panels/annihilation-imitation-v1/.ppo-runs.staging/",
+    "python/panels/annihilation-imitation-v1/development/",
+    "python/panels/annihilation-imitation-v1/.development.staging/",
+    "python/panels/annihilation-imitation-v1/selection.json",
+    "python/panels/annihilation-imitation-v1/final-seal.json",
+    "python/panels/annihilation-imitation-v1/final-evaluation.json",
+    "python/panels/annihilation-imitation-v1/.final-evaluation.pending/",
+    "python/panels/annihilation-imitation-v1/final-publication.json",
+    "python/panels/annihilation-imitation-v1/.final-generations/",
+    _SMOKE_GENERATED_ROOT,
+)
+_PUBLISHABLE_RESULT_PATHS = (
+    "python/panels/annihilation-imitation-v1/aggregate.json",
+    "python/panels/annihilation-imitation-v1/REPORT.md",
+)
 
 _MODEL_SEEDS = [211, 223, 227]
 _SAMPLER_SEEDS = {"211": 211, "223": 223, "227": 227}
@@ -158,6 +183,175 @@ def current_definition_hashes(
         "scenario_sha256": _sha256(scenario_path),
         "seed_banks_sha256": _sha256(seed_banks_path),
     }
+
+
+def _execution_policy() -> dict[str, Any]:
+    return {
+        "required_clean": True,
+        "ignored_generated_paths": list(_FULL_GENERATED_PATHS),
+        "publishable_result_paths": list(_PUBLISHABLE_RESULT_PATHS),
+    }
+
+
+def _validate_hex_digest(value: Any, label: str, lengths: set[int]) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) not in lengths
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"execution identity {label} is invalid")
+    return value
+
+
+def _validate_execution_identity(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError("execution identity is missing")
+    identity = dict(raw)
+    if set(identity) != {
+        "schema_version", "commit", "source_tree", "dirty", "policy",
+        "definition_hashes",
+    }:
+        raise ValueError("execution identity schema is invalid")
+    if identity.get("schema_version") != 1:
+        raise ValueError("execution identity schema is invalid")
+    _validate_hex_digest(identity.get("commit"), "commit", {40, 64})
+    _validate_hex_digest(identity.get("source_tree"), "source tree", {40, 64})
+    if identity.get("dirty") is not False:
+        raise ValueError("execution identity requires a clean repository")
+    if identity.get("policy") != _execution_policy():
+        raise ValueError("execution identity policy is invalid")
+    hashes = identity.get("definition_hashes")
+    if (
+        not isinstance(hashes, Mapping)
+        or set(hashes)
+        != {"panel_sha256", "scenario_sha256", "seed_banks_sha256"}
+    ):
+        raise ValueError("execution identity definition hashes are invalid")
+    normalized_hashes = {
+        name: _validate_hex_digest(value, name, {64})
+        for name, value in hashes.items()
+    }
+    return {
+        "schema_version": 1,
+        "commit": identity["commit"],
+        "source_tree": identity["source_tree"],
+        "dirty": False,
+        "policy": _execution_policy(),
+        "definition_hashes": normalized_hashes,
+    }
+
+
+def _repository_execution_source(repository: Path) -> dict[str, Any]:
+    repository = Path(repository)
+    revision, dirty = _repository_identity(repository)
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return {"commit": revision, "source_tree": source_tree, "dirty": dirty}
+
+
+def _build_execution_identity(
+    *,
+    definition_hashes: Mapping[str, str],
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> dict[str, Any]:
+    provider = repository_identity_provider or _repository_execution_source
+    source = provider(Path(repository))
+    if not isinstance(source, Mapping) or set(source) != {
+        "commit", "source_tree", "dirty",
+    }:
+        raise ValueError("execution identity repository source is invalid")
+    return _validate_execution_identity({
+        "schema_version": 1,
+        "commit": source["commit"],
+        "source_tree": source["source_tree"],
+        "dirty": source["dirty"],
+        "policy": _execution_policy(),
+        "definition_hashes": dict(definition_hashes),
+    })
+
+
+def _validate_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> dict[str, Any]:
+    validate_definitions()
+    identity = _build_execution_identity(
+        definition_hashes=current_definition_hashes(),
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    _atomic_json(Path(execution_identity_path), identity)
+    return {"state": "validated", "execution_identity": identity}
+
+
+def _require_execution_identity(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    definition_hashes: Mapping[str, str],
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> dict[str, Any]:
+    try:
+        stored = _validate_execution_identity(
+            _read_json(Path(execution_identity_path))
+        )
+    except ValueError as exc:
+        raise ValueError("execution identity is missing or invalid") from exc
+    current = _build_execution_identity(
+        definition_hashes=definition_hashes,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    if stored != current:
+        raise ValueError("execution identity changed after validation")
+    return stored
+
+
+def _full_execution_context(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> tuple[dict, dict, ResolvedScenario, dict[str, str], dict[str, Any]]:
+    panel, banks, scenario = validate_definitions()
+    hashes = current_definition_hashes()
+    identity = _require_execution_identity(
+        execution_identity_path=execution_identity_path,
+        definition_hashes=hashes,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    return panel, banks, scenario, hashes, identity
+
+
+def _validate_dataset_execution_identity(
+    dataset_root: Path,
+    execution_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    identity = _validate_execution_identity(execution_identity)
+    manifest = _read_json(Path(dataset_root) / "manifest.json")
+    if (
+        manifest.get("code_revision") != identity["commit"]
+        or manifest.get("dirty") is not False
+    ):
+        raise ValueError("dataset execution identity does not match")
+    return manifest
 
 
 def validate_definitions(
@@ -869,10 +1063,14 @@ def evaluate_clone_gate(
 
 
 def _validate_collection_dataset(
-    root: Path, contract: Any, scenario: ResolvedScenario
+    root: Path,
+    contract: Any,
+    scenario: ResolvedScenario,
+    execution_identity: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     from ml_lab.imitation import load_imitation_dataset
 
+    _validate_dataset_execution_identity(root, execution_identity)
     dataset = load_imitation_dataset(Path(root), expected_contract=contract)
     scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
     pairs: dict[tuple[Any, ...], set[int]] = {}
@@ -1036,12 +1234,22 @@ def _server_command(scenario_path: Path) -> list[str]:
     return ["dotnet", str(server), "--scenario-file", str(scenario_path)]
 
 
-def _collect_command() -> Mapping[str, Any]:
+def _collect_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
     from collect_annihilation_demonstrations import CollectionSpec, collect_partition
     from ml_lab.evaluation import DuelClient
 
-    _panel, _banks, scenario = validate_definitions()
-    hashes = current_definition_hashes()
+    _panel, _banks, scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     probe_root = Path(tempfile.mkdtemp(prefix=".collect-runtime-"))
     try:
         probe_scenario = _materialize_runtime_scenario(scenario, probe_root, hashes)
@@ -1074,8 +1282,10 @@ def _collect_command() -> Mapping[str, Any]:
         )
 
     return run_atomic_stage(
-        DATASET_PATH, hashes, build=build,
-        validate=lambda root: _validate_collection_dataset(root, contract, scenario),
+        DATASET_PATH, hashes, stage_identity=identity, build=build,
+        validate=lambda root: _validate_collection_dataset(
+            root, contract, scenario, identity,
+        ),
     )
 
 
@@ -1098,13 +1308,24 @@ def _validate_bc_source_target_compatibility(
         ) from exc
 
 
-def _train_bc_command() -> Mapping[str, Any]:
+def _train_bc_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
     from hexwars_gym import HexWarsEnv
     from ml_lab.evaluation import DuelClient
     from ml_lab.imitation import load_imitation_dataset
 
-    panel, _banks, scenario = validate_definitions()
-    hashes = current_definition_hashes()
+    panel, _banks, scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    _validate_dataset_execution_identity(DATASET_PATH, identity)
 
     def build(staging: Path) -> None:
         stage_scenario = _materialize_runtime_scenario(scenario, staging, hashes)
@@ -1136,14 +1357,24 @@ def _train_bc_command() -> Mapping[str, Any]:
             source_probe.close()
 
     return run_atomic_stage(
-        CLONE_RUNS_PATH, hashes, build=build,
+        CLONE_RUNS_PATH, hashes, stage_identity=identity, build=build,
         validate=lambda root: _validate_clone_stage(root, hashes),
     )
 
 
-def _evaluate_bc_command() -> Mapping[str, Any]:
-    validate_definitions()
-    hashes = current_definition_hashes()
+def _evaluate_bc_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    _panel, _banks, _scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     clone_runs = [CLONE_RUNS_PATH / f"seed-{seed}" for seed in _MODEL_SEEDS]
     _validate_clone_stage(CLONE_RUNS_PATH, hashes)
 
@@ -1154,7 +1385,7 @@ def _evaluate_bc_command() -> Mapping[str, Any]:
         )
 
     return run_atomic_stage(
-        CLONE_EVALUATION_PATH, hashes, build=build,
+        CLONE_EVALUATION_PATH, hashes, stage_identity=identity, build=build,
         validate=lambda root: _validate_gate_stage(root, hashes),
     )
 
@@ -2093,13 +2324,67 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _freeze_final_command(
+    *,
+    incumbent_panel: Path,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    _panel, _banks, _scenario, _hashes, _identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    return freeze_final(
+        PANEL_ROOT,
+        incumbent_panel=incumbent_panel,
+        repository=repository,
+    )
+
+
+def _evaluate_final_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    _panel, _banks, _scenario, _hashes, _identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    return evaluate_final(
+        PANEL_ROOT,
+        server_cmd=_server_command(SCENARIO_PATH)[:-2],
+    )
+
+
+def _report_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    _panel, _banks, _scenario, _hashes, _identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
+    result, _report = publish_final_report(PANEL_ROOT)
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "validate":
-        validate_definitions()
-        result: Mapping[str, Any] = {
-            "state": "validated", "definition_hashes": current_definition_hashes()
-        }
+        result: Mapping[str, Any] = _validate_command()
     elif args.command == "collect":
         result = _collect_command()
     elif args.command == "train-bc":
@@ -2115,11 +2400,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "select-budget":
         result = _select_budget_command()
     elif args.command == "freeze-final":
-        result = freeze_final(PANEL_ROOT, incumbent_panel=args.incumbent_panel)
+        result = _freeze_final_command(incumbent_panel=args.incumbent_panel)
     elif args.command == "evaluate-final":
-        result = evaluate_final(PANEL_ROOT, server_cmd=_server_command(SCENARIO_PATH)[:-2])
+        result = _evaluate_final_command()
     elif args.command == "report":
-        result, _report = publish_final_report(PANEL_ROOT)
+        result = _report_command()
     else:
         raise AssertionError(f"unreachable command {args.command!r}")
     print(json.dumps(result, sort_keys=True))
@@ -2862,9 +3147,19 @@ def train_ppo_runs(
     return outputs
 
 
-def _train_ppo_command() -> Mapping[str, Any]:
-    panel, _banks, scenario = validate_definitions()
-    hashes = current_definition_hashes()
+def _train_ppo_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    panel, _banks, scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     _validate_clone_stage(CLONE_RUNS_PATH, hashes)
     _validate_gate_stage(CLONE_EVALUATION_PATH, hashes)
     matrix = build_training_matrix(panel)
@@ -2880,6 +3175,7 @@ def _train_ppo_command() -> Mapping[str, Any]:
     return run_atomic_stage(
         PPO_RUNS_PATH,
         hashes,
+        stage_identity=identity,
         build=build,
         validate=lambda root: _validate_ppo_stage(root, hashes, matrix, scenario),
     )
@@ -3130,9 +3426,19 @@ def _validate_development_stage(
     }
 
 
-def _evaluate_dev_command() -> Mapping[str, Any]:
-    panel, _banks, scenario = validate_definitions()
-    hashes = current_definition_hashes()
+def _evaluate_dev_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    panel, _banks, scenario, hashes, identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     _validate_clone_stage(CLONE_RUNS_PATH, hashes)
     _validate_gate_stage(CLONE_EVALUATION_PATH, hashes)
     matrix = build_training_matrix(panel)
@@ -3160,15 +3466,26 @@ def _evaluate_dev_command() -> Mapping[str, Any]:
     return run_atomic_stage(
         DEVELOPMENT_PATH,
         hashes,
+        stage_identity=identity,
         build=build,
         validate=lambda root: _validate_development_stage(root, hashes, scenario),
     )
 
 
-def _select_budget_command() -> Mapping[str, Any]:
-    panel, _banks, scenario = validate_definitions()
+def _select_budget_command(
+    *,
+    execution_identity_path: Path = EXECUTION_IDENTITY_PATH,
+    repository: Path = PROJECT_ROOT,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] | None = None,
+) -> Mapping[str, Any]:
+    panel, _banks, scenario, hashes, _identity = _full_execution_context(
+        execution_identity_path=execution_identity_path,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+    )
     del panel
-    hashes = current_definition_hashes()
     _validate_development_stage(DEVELOPMENT_PATH, hashes, scenario)
     return publish_selection(
         development_path=DEVELOPMENT_PATH / "development.json",

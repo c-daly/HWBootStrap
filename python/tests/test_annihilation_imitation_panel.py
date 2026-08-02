@@ -39,6 +39,82 @@ LOCKED_WEIGHTS = [
 ]
 
 
+FULL_GENERATED_PATHS = [
+    "python/datasets/annihilation-imitation-v1/",
+    "python/datasets/.annihilation-imitation-v1.staging/",
+    "python/panels/annihilation-imitation-v1/execution-identity.json",
+    "python/panels/annihilation-imitation-v1/bc-clones/",
+    "python/panels/annihilation-imitation-v1/.bc-clones.staging/",
+    "python/panels/annihilation-imitation-v1/bc-development-gate/",
+    "python/panels/annihilation-imitation-v1/.bc-development-gate.staging/",
+    "python/panels/annihilation-imitation-v1/ppo-runs/",
+    "python/panels/annihilation-imitation-v1/.ppo-runs.staging/",
+    "python/panels/annihilation-imitation-v1/development/",
+    "python/panels/annihilation-imitation-v1/.development.staging/",
+    "python/panels/annihilation-imitation-v1/selection.json",
+    "python/panels/annihilation-imitation-v1/final-seal.json",
+    "python/panels/annihilation-imitation-v1/final-evaluation.json",
+    "python/panels/annihilation-imitation-v1/.final-evaluation.pending/",
+    "python/panels/annihilation-imitation-v1/final-publication.json",
+    "python/panels/annihilation-imitation-v1/.final-generations/",
+    "python/panels/annihilation-imitation-v1/evidence/",
+]
+PUBLISHABLE_RESULT_PATHS = [
+    "python/panels/annihilation-imitation-v1/aggregate.json",
+    "python/panels/annihilation-imitation-v1/REPORT.md",
+]
+
+
+def _execution_identity(
+    module,
+    *,
+    commit: str = "a" * 40,
+    source_tree: str = "b" * 40,
+    dirty: bool = False,
+    definition_hashes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "commit": commit,
+        "source_tree": source_tree,
+        "dirty": dirty,
+        "policy": {
+            "required_clean": True,
+            "ignored_generated_paths": list(FULL_GENERATED_PATHS),
+            "publishable_result_paths": list(PUBLISHABLE_RESULT_PATHS),
+        },
+        "definition_hashes": (
+            dict(definition_hashes)
+            if definition_hashes is not None
+            else module.current_definition_hashes()
+        ),
+    }
+
+
+def _command_identity_kwargs(
+    tmp_path: Path,
+    module,
+    *,
+    commit: str = "a" * 40,
+    source_tree: str = "b" * 40,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    identity = _execution_identity(
+        module, commit=commit, source_tree=source_tree,
+    )
+    path = tmp_path / "execution-identity.json"
+    path.write_text(json.dumps(identity), encoding="utf-8")
+    kwargs = {
+        "execution_identity_path": path,
+        "repository": tmp_path,
+        "repository_identity_provider": lambda _repository: {
+            "commit": commit,
+            "source_tree": source_tree,
+            "dirty": False,
+        },
+    }
+    return identity, kwargs
+
+
 def _subject():
     specification = importlib.util.find_spec(MODULE_NAME)
     assert specification is not None, "Task 8 panel orchestrator is missing"
@@ -903,6 +979,7 @@ def test_collect_command_uses_immutable_stage_scenario_after_source_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _subject()
+    _identity, identity_kwargs = _command_identity_kwargs(tmp_path, module)
     original = module.SCENARIO_PATH.read_bytes()
     captured: list[bytes] = []
 
@@ -917,7 +994,7 @@ def test_collect_command_uses_immutable_stage_scenario_after_source_mutation(
         client = spec.client_factory(0)
         client.close()
 
-    def fake_atomic(destination, hashes, *, build, validate):
+    def fake_atomic(destination, hashes, *, stage_identity, build, validate):
         changed = _json(module.SCENARIO_PATH)
         changed["reward"]["points_weight"] = 0.25
         module.SCENARIO_PATH.write_text(json.dumps(changed), encoding="utf-8")
@@ -932,7 +1009,7 @@ def test_collect_command_uses_immutable_stage_scenario_after_source_mutation(
     monkeypatch.setattr(collect_annihilation_demonstrations, "collect_partition", fake_collect)
     monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
     try:
-        module._collect_command()
+        module._collect_command(**identity_kwargs)
     finally:
         module.SCENARIO_PATH.write_bytes(original)
     assert captured
@@ -946,6 +1023,17 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _subject()
+    identity, identity_kwargs = _command_identity_kwargs(tmp_path, module)
+    dataset_root = tmp_path / "source-dataset"
+    dataset_root.mkdir()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": identity["commit"],
+            "dirty": False,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DATASET_PATH", dataset_root)
     original = module.SCENARIO_PATH.read_bytes()
     captured: list[bytes] = []
     source = _bc_boundary_contract(
@@ -973,7 +1061,7 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
         def close(self) -> None:
             return None
 
-    def fake_atomic(destination, hashes, *, build, validate):
+    def fake_atomic(destination, hashes, *, stage_identity, build, validate):
         changed = _json(module.SCENARIO_PATH)
         changed["reward"]["points_weight"] = 0.25
         module.SCENARIO_PATH.write_text(json.dumps(changed), encoding="utf-8")
@@ -991,7 +1079,7 @@ def test_train_command_uses_immutable_stage_scenario_after_source_mutation(
     monkeypatch.setattr(module, "train_clone_runs", lambda **kwargs: [])
     monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
     try:
-        module._train_bc_command()
+        module._train_bc_command(**identity_kwargs)
     finally:
         module.SCENARIO_PATH.write_bytes(original)
     assert captured
@@ -1276,10 +1364,12 @@ def test_development_schedule_reuses_all_100_maps_and_both_seats_for_every_candi
 
 def test_train_ppo_command_refuses_to_start_before_clone_gate_passes(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Training before the clone gate passes would spend compute outside the protocol."""
 
     module = _subject()
+    _identity, identity_kwargs = _command_identity_kwargs(tmp_path, module)
     monkeypatch.setattr(module, "_validate_clone_stage", lambda *_args: {})
     monkeypatch.setattr(
         module,
@@ -1293,7 +1383,7 @@ def test_train_ppo_command_refuses_to_start_before_clone_gate_passes(
     )
 
     with pytest.raises(ValueError, match="clone gate did not pass"):
-        module._train_ppo_command()
+        module._train_ppo_command(**identity_kwargs)
 
 
 def test_selection_publication_is_atomic_restart_safe_and_hashes_every_input(
@@ -2605,7 +2695,7 @@ def test_final_commands_are_defined_before_the_script_entry_point(tmp_path: Path
     )
 
     assert completed.returncode != 0
-    assert "global checkpoint selection is not frozen" in completed.stderr
+    assert "execution identity is missing or invalid" in completed.stderr
 
 
 @pytest.mark.parametrize(
@@ -3490,6 +3580,17 @@ def test_train_bc_loads_and_records_exact_duel_source_contract_for_tactical_poli
     """Using the tactical hash for strict dataset loading would erase capture provenance."""
 
     module = _subject()
+    identity, identity_kwargs = _command_identity_kwargs(tmp_path, module)
+    dataset_root = tmp_path / "source-dataset"
+    dataset_root.mkdir()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": identity["commit"],
+            "dirty": False,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DATASET_PATH", dataset_root)
     source = _bc_boundary_contract(
         contract_hash="a" * 64, environment_kind="duel",
     )
@@ -3527,7 +3628,7 @@ def test_train_bc_loads_and_records_exact_duel_source_contract_for_tactical_poli
         events.append(("trained", kwargs))
         return []
 
-    def fake_atomic(_destination, _hashes, *, build, validate):
+    def fake_atomic(_destination, _hashes, *, stage_identity, build, validate):
         del validate
         staging = tmp_path / "clones-stage"
         staging.mkdir()
@@ -3544,7 +3645,7 @@ def test_train_bc_loads_and_records_exact_duel_source_contract_for_tactical_poli
     monkeypatch.setattr(module, "train_clone_runs", train_clones)
     monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
 
-    module._train_bc_command()
+    module._train_bc_command(**identity_kwargs)
 
     loaded = next(value for name, value in events if name == "loaded")
     trained = next(value for name, value in events if name == "trained")
@@ -3575,6 +3676,17 @@ def test_train_bc_rejects_incompatible_source_before_trainer_and_closes_resource
     """A source/target tensor mismatch must never enter behavioral-clone optimization."""
 
     module = _subject()
+    identity, identity_kwargs = _command_identity_kwargs(tmp_path, module)
+    dataset_root = tmp_path / "source-dataset"
+    dataset_root.mkdir()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": identity["commit"],
+            "dirty": False,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DATASET_PATH", dataset_root)
     source = _bc_boundary_contract(
         contract_hash="a" * 64, environment_kind="duel",
     )
@@ -3602,7 +3714,7 @@ def test_train_bc_rejects_incompatible_source_before_trainer_and_closes_resource
         def close(self) -> None:
             closed.append("tactical")
 
-    def fake_atomic(_destination, _hashes, *, build, validate):
+    def fake_atomic(_destination, _hashes, *, stage_identity, build, validate):
         del validate
         staging = tmp_path / "clones-stage"
         staging.mkdir()
@@ -3628,7 +3740,304 @@ def test_train_bc_rejects_incompatible_source_before_trainer_and_closes_resource
     monkeypatch.setattr(module, "run_atomic_stage", fake_atomic)
 
     with pytest.raises(ValueError, match="incompatible"):
-        module._train_bc_command()
+        module._train_bc_command(**identity_kwargs)
 
     assert trainer_calls == []
     assert closed == ["tactical", "duel"]
+
+def test_validate_command_requires_clean_source_and_atomically_persists_identity(
+    tmp_path: Path,
+) -> None:
+    """A dirty or unrecorded source must never authorize expensive experiment work."""
+
+    module = _subject()
+    path = tmp_path / "execution-identity.json"
+    dirty_provider = lambda _repository: {
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": True,
+    }
+    with pytest.raises(ValueError, match="clean"):
+        module._validate_command(
+            execution_identity_path=path,
+            repository=tmp_path,
+            repository_identity_provider=dirty_provider,
+        )
+    assert not path.exists()
+
+    clean_provider = lambda _repository: {
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": False,
+    }
+    result = module._validate_command(
+        execution_identity_path=path,
+        repository=tmp_path,
+        repository_identity_provider=clean_provider,
+    )
+    expected = _execution_identity(module)
+
+    assert result == {"state": "validated", "execution_identity": expected}
+    assert _json(path) == expected
+    assert not list(tmp_path.glob(".execution-identity.json.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["commit", "source-tree", "policy", "definitions"],
+)
+def test_execution_identity_reopen_rejects_every_changed_boundary(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """A later command must fail closed if code, policy, or definitions drift."""
+
+    module = _subject()
+    stored = _execution_identity(module)
+    path = tmp_path / "execution-identity.json"
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    current = {
+        "commit": stored["commit"],
+        "source_tree": stored["source_tree"],
+        "dirty": False,
+    }
+    hashes = dict(stored["definition_hashes"])
+    if mutation == "commit":
+        current["commit"] = "c" * 40
+    elif mutation == "source-tree":
+        current["source_tree"] = "d" * 40
+    elif mutation == "policy":
+        stored["policy"]["ignored_generated_paths"] = ["python/"]
+        path.write_text(json.dumps(stored), encoding="utf-8")
+    else:
+        hashes["panel_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError, match="execution identity"):
+        module._require_execution_identity(
+            execution_identity_path=path,
+            definition_hashes=hashes,
+            repository=tmp_path,
+            repository_identity_provider=lambda _repository: current,
+        )
+
+
+def test_full_generated_output_policy_is_narrow_and_keeps_results_visible() -> None:
+    """Ignoring too little dirties valid runs; ignoring result artifacts hides publication."""
+
+    module = _subject()
+    assert list(module._FULL_GENERATED_PATHS) == FULL_GENERATED_PATHS
+    assert list(module._PUBLISHABLE_RESULT_PATHS) == PUBLISHABLE_RESULT_PATHS
+
+    for relative in FULL_GENERATED_PATHS:
+        probe = relative + "__identity_probe__" if relative.endswith("/") else relative
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", probe],
+            cwd=module.PROJECT_ROOT,
+            check=False,
+        )
+        assert ignored.returncode == 0, relative
+    for relative in PUBLISHABLE_RESULT_PATHS:
+        visible = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", relative],
+            cwd=module.PROJECT_ROOT,
+            check=False,
+        )
+        assert visible.returncode == 1, relative
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "collect",
+        "train-bc",
+        "evaluate-bc",
+        "train-ppo",
+        "evaluate-dev",
+        "select-budget",
+        "freeze-final",
+        "evaluate-final",
+        "report",
+    ],
+)
+def test_every_full_command_rejects_changed_execution_identity_before_work(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """No downstream command may build, validate, reuse, freeze, evaluate, or report stale work."""
+
+    module = _subject()
+    stored = _execution_identity(module)
+    path = tmp_path / "execution-identity.json"
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    kwargs = {
+        "execution_identity_path": path,
+        "repository": tmp_path,
+        "repository_identity_provider": lambda _repository: {
+            "commit": "c" * 40,
+            "source_tree": stored["source_tree"],
+            "dirty": False,
+        },
+    }
+
+    with pytest.raises(ValueError, match="execution identity"):
+        if command == "collect":
+            module._collect_command(**kwargs)
+        elif command == "train-bc":
+            module._train_bc_command(**kwargs)
+        elif command == "evaluate-bc":
+            module._evaluate_bc_command(**kwargs)
+        elif command == "train-ppo":
+            module._train_ppo_command(**kwargs)
+        elif command == "evaluate-dev":
+            module._evaluate_dev_command(**kwargs)
+        elif command == "select-budget":
+            module._select_budget_command(**kwargs)
+        elif command == "freeze-final":
+            module._freeze_final_command(
+                incumbent_panel=tmp_path / "incumbent",
+                **kwargs,
+            )
+        elif command == "evaluate-final":
+            module._evaluate_final_command(**kwargs)
+        else:
+            module._report_command(**kwargs)
+
+@pytest.mark.parametrize(
+    "command",
+    ["collect", "train-bc", "evaluate-bc", "train-ppo", "evaluate-dev"],
+)
+def test_reusable_full_stages_receive_the_exact_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """Definitions alone must not authorize reuse of any long-running atomic stage."""
+
+    module = _subject()
+    identity, kwargs = _command_identity_kwargs(tmp_path, module)
+    captured: dict[str, Any] = {}
+
+    def atomic(destination, definitions, *, stage_identity, build, validate):
+        del build, validate
+        captured.update(
+            destination=Path(destination),
+            definitions=dict(definitions),
+            stage_identity=dict(stage_identity),
+        )
+        return {"state": "completed"}
+
+    monkeypatch.setattr(module, "run_atomic_stage", atomic)
+    if command == "collect":
+        import ml_lab.evaluation
+
+        class FakeClient:
+            def __init__(self, _command, *, environment):
+                assert environment == "tactical-v2"
+                self.contract = SimpleNamespace(
+                    contract_hash="c" * 64,
+                    encoding_hash="e" * 64,
+                )
+
+            def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(ml_lab.evaluation, "DuelClient", FakeClient)
+        expected = module.DATASET_PATH
+        module._collect_command(**kwargs)
+    elif command == "train-bc":
+        dataset = tmp_path / "dataset"
+        dataset.mkdir()
+        (dataset / "manifest.json").write_text(
+            json.dumps({
+                "code_revision": identity["commit"],
+                "dirty": False,
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(module, "DATASET_PATH", dataset)
+        expected = module.CLONE_RUNS_PATH
+        module._train_bc_command(**kwargs)
+    elif command == "evaluate-bc":
+        monkeypatch.setattr(module, "_validate_clone_stage", lambda *_args: {})
+        expected = module.CLONE_EVALUATION_PATH
+        module._evaluate_bc_command(**kwargs)
+    elif command == "train-ppo":
+        monkeypatch.setattr(module, "_validate_clone_stage", lambda *_args: {})
+        monkeypatch.setattr(module, "_validate_gate_stage", lambda *_args: {})
+        expected = module.PPO_RUNS_PATH
+        module._train_ppo_command(**kwargs)
+    else:
+        monkeypatch.setattr(module, "_validate_clone_stage", lambda *_args: {})
+        monkeypatch.setattr(module, "_validate_gate_stage", lambda *_args: {})
+        monkeypatch.setattr(module, "_validate_ppo_stage", lambda *_args: {})
+        monkeypatch.setattr(
+            module, "build_panel_development_candidates",
+            lambda *_args, **_kwargs: [],
+        )
+        expected = module.DEVELOPMENT_PATH
+        module._evaluate_dev_command(**kwargs)
+
+    assert captured == {
+        "destination": expected,
+        "definitions": identity["definition_hashes"],
+        "stage_identity": identity,
+    }
+
+
+@pytest.mark.parametrize(
+    ("code_revision", "dirty"),
+    [
+        ("c" * 40, False),
+        ("a" * 40, True),
+    ],
+)
+def test_dataset_execution_identity_requires_exact_clean_revision(
+    tmp_path: Path,
+    code_revision: str,
+    dirty: bool,
+) -> None:
+    """A valid imitation manifest from another or dirty source cannot enter this execution."""
+
+    module = _subject()
+    identity = _execution_identity(module)
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": code_revision,
+            "dirty": dirty,
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="dataset execution identity"):
+        module._validate_dataset_execution_identity(dataset, identity)
+
+
+def test_train_bc_rejects_wrong_dataset_identity_before_atomic_or_optimizer_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BC must reject stale demonstrations before entering a reusable stage or trainer."""
+
+    module = _subject()
+    _identity, kwargs = _command_identity_kwargs(tmp_path, module)
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "manifest.json").write_text(
+        json.dumps({
+            "code_revision": "c" * 40,
+            "dirty": False,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "DATASET_PATH", dataset)
+    monkeypatch.setattr(
+        module,
+        "run_atomic_stage",
+        lambda *_args, **_kwargs: pytest.fail(
+            "wrong-revision dataset reached atomic BC work"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="dataset execution identity"):
+        module._train_bc_command(**kwargs)
