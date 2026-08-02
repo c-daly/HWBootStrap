@@ -220,10 +220,8 @@ class MaskablePPOAdapter:
             source_run / "checkpoints" / "step_000000000.zip"
         ).resolve()
         resolved = ControllerResolver(expected_contract).resolve(f"run:{source_run}")
-        if resolved.contract != expected_contract:
-            raise ContractMismatch(
-                "actor initialization contract does not match the training contract"
-            )
+        if resolved.contract is None:
+            raise ContractMismatch("actor initialization source contract is missing")
         if (
             resolved.algorithm != self.name
             or resolved.model is None
@@ -341,8 +339,8 @@ class MaskablePPOAdapter:
                 "source_run_manifest_sha256": _sha256_file(source_run / "run.json"),
                 "source_bc_sha256": _sha256_file(bc_path),
                 "source_dataset_manifest_sha256": dataset_hash,
-                "source_contract_hash": expected_contract.contract_hash,
-                "source_encoding_hash": expected_contract.encoding_hash,
+                "source_contract_hash": resolved.contract.contract_hash,
+                "source_encoding_hash": resolved.contract.encoding_hash,
             }
         except BaseException as error:
             rollback_failures = []

@@ -602,6 +602,34 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV2GymServer_RoundCapDrawUsesIntegerMinusOneWinner()
+        {
+            string scenarioPath = WriteTacticalV2Scenario(
+                startingUnitCount: 3, roundCap: 1);
+            try
+            {
+                using var server = new ServerProcess(
+                    "--environment", "tactical-v2", "--scenario-file", scenarioPath);
+
+                using JsonDocument reset = server.Exchange(new
+                {
+                    cmd = "duel_reset", seed = 73,
+                    p0 = "greedy", p1 = "random", learner = 0,
+                });
+
+                Assert.That(reset.RootElement.GetProperty("terminated").GetBoolean(), Is.True);
+                Assert.That(reset.RootElement.GetProperty("truncated").GetBoolean(), Is.False);
+                JsonElement winner = reset.RootElement.GetProperty("winner");
+                Assert.That(winner.ValueKind, Is.EqualTo(JsonValueKind.Number));
+                Assert.That(winner.GetInt32(), Is.EqualTo(-1));
+            }
+            finally
+            {
+                File.Delete(scenarioPath);
+            }
+        }
+
+        [Test]
         public void TacticalV2GymServer_DefaultCatalogScenarioReportsInProcessEncodingHash()
         {
             // The checked-in "tactical-v2-standard" template is board/rules/reward/roster-identical
@@ -722,11 +750,11 @@ namespace HexWars.Engine.Tests
                 Assert.That(tracedReplay.Final.IsGameOver, Is.True);
                 Assert.That(tracedTransitionCount, Is.EqualTo(tracedData.Commands.Count));
                 JsonElement tracedWinner = tracedReset.RootElement.GetProperty("winner");
-                Assert.That(
-                    tracedWinner.ValueKind == JsonValueKind.Null
-                        ? (PlayerId?)null
-                        : (PlayerId)tracedWinner.GetInt32(),
-                    Is.EqualTo(tracedReplay.Final.Winner));
+                Assert.That(tracedWinner.ValueKind, Is.EqualTo(JsonValueKind.Number));
+                Assert.That(tracedWinner.GetInt32(), Is.EqualTo(
+                    tracedReplay.Final.Winner.HasValue
+                        ? (int)tracedReplay.Final.Winner.Value
+                        : -1));
 
                 using JsonDocument disabled = server.Exchange(new
                 {
@@ -751,11 +779,11 @@ namespace HexWars.Engine.Tests
                 var untracedReplay = new Replay(untracedData.Start, untracedData.Commands);
                 Assert.That(untracedReplay.Final.IsGameOver, Is.True);
                 JsonElement untracedWinner = untracedReset.RootElement.GetProperty("winner");
-                Assert.That(
-                    untracedWinner.ValueKind == JsonValueKind.Null
-                        ? (PlayerId?)null
-                        : (PlayerId)untracedWinner.GetInt32(),
-                    Is.EqualTo(untracedReplay.Final.Winner));
+                Assert.That(untracedWinner.ValueKind, Is.EqualTo(JsonValueKind.Number));
+                Assert.That(untracedWinner.GetInt32(), Is.EqualTo(
+                    untracedReplay.Final.Winner.HasValue
+                        ? (int)untracedReplay.Final.Winner.Value
+                        : -1));
 
                 Assert.That(untracedData.Commands, Is.EqualTo(tracedData.Commands),
                     "trace capture must not change accepted commands");
@@ -915,7 +943,8 @@ namespace HexWars.Engine.Tests
             bool includeUnknownField = false,
             int width = 24,
             int height = 16,
-            int zoneDepth = 4)
+            int zoneDepth = 4,
+            int roundCap = 100)
         {
             var scenario = new Dictionary<string, object?>
             {
@@ -938,7 +967,7 @@ namespace HexWars.Engine.Tests
                 ["rules"] = new
                 {
                     actions_per_turn = 0,
-                    round_cap = 100,
+                    round_cap = roundCap,
                     starting_points = 12,
                     fog_of_war = false,
                     biomes_enabled = false,

@@ -234,8 +234,15 @@ namespace HexWars.Engine.Rl
     /// build layout, observation/action coding, and the training environments on top of this.</summary>
     public sealed class TacticalV2Config
     {
+        private static GameConfig DefaultTacticalGame() => GameConfig.Default(
+            biomesEnabled: false,
+            captureCost: int.MaxValue,
+            generatorsEnabled: false,
+            fixedTemplateCount: BarracksCatalog.DefaultTemplates.Count,
+            templateSlotCount: BarracksCatalog.DefaultTemplates.Count);
+
         public BoardGenConfig BoardGen { get; set; } = BoardGenConfig.Default();
-        public GameConfig Game { get; set; } = GameConfig.Default(biomesEnabled: false);
+        public GameConfig Game { get; set; } = DefaultTacticalGame();
         public IReadOnlyList<TacticalV2Template> Templates { get; set; } = Array.Empty<TacticalV2Template>();
         public int StartingUnitCount { get; set; }
         public int MaxControllableUnits { get; set; }
@@ -256,7 +263,7 @@ namespace HexWars.Engine.Rl
         public static TacticalV2Config Default() => new TacticalV2Config
         {
             BoardGen = BoardGenConfig.Default(),
-            Game = GameConfig.Default(biomesEnabled: false),
+            Game = DefaultTacticalGame(),
             Templates = Array.AsReadOnly(BarracksCatalog.DefaultTemplates
                 .Select(template => new TacticalV2Template(TacticalV2TemplateIds.From(template), template))
                 .ToArray()),

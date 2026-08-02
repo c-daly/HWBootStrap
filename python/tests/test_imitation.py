@@ -371,6 +371,54 @@ def test_behavioral_clone_overfits_a_five_example_masked_dataset_and_publishes_a
         assert optimizer_state["state"] == {}
 
 
+def test_smoke_validation_view_reuses_training_rows_without_mutating_dataset(
+    clone_dataset: Path, clone_scenario, tmp_path: Path
+) -> None:
+    """Using held-out rows would hide that smoke validates plumbing, not generalization."""
+
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    validation_view = imitation_module.training_rows_as_validation(dataset)
+
+    result = train_behavioral_clone(
+        dataset=validation_view,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "smoke-bc",
+        config=BehavioralCloningConfig(
+            model_seed=211,
+            batch_size=5,
+            learning_rate=3e-4,
+            max_epochs=1,
+            patience=1,
+        ),
+    )
+
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    assert bc["training_decision_count"] == 5
+    assert bc["validation_decision_count"] == 5
+    assert bc["validation_game_count"] == 2
+    assert dataset.index["validation"] is not dataset.index["train"]
+    assert validation_view.index["validation"] is validation_view.index["train"]
+
+
+def test_dataset_audit_reopens_all_labels_masks_round_trips_and_replays(
+    clone_dataset: Path,
+) -> None:
+    """Manifest counts alone must not satisfy the smoke collection checks."""
+
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+
+    assert imitation_module.audit_imitation_dataset(dataset) == {
+        "games": 4,
+        "teacher_labels": 7,
+        "masked_labels": 0,
+        "round_trip_mismatches": 0,
+        "replay_mismatches": 0,
+    }
+
+
 def _batch_for_metrics(action_size: int = 2) -> ImitationBatch:
     return ImitationBatch(
         observations=np.asarray([[0.0, 1.0, 2.0], [1.0, 1.0, 2.0]], dtype=np.float32),

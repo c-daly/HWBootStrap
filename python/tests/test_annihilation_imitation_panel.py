@@ -2569,7 +2569,7 @@ def test_parser_exposes_final_seal_commands() -> None:
     parser = module.build_parser()
     actions = next(action for action in parser._actions if action.dest == "command")
     assert set(actions.choices) == {
-        "validate", "collect", "train-bc", "evaluate-bc", "train-ppo",
+        "validate", "collect", "train-bc", "evaluate-bc", "train-ppo", "smoke",
         "evaluate-dev", "select-budget", "freeze-final", "evaluate-final", "report",
     }
 
@@ -2646,3 +2646,465 @@ def test_final_gate_rejects_nonprotocol_counts(wins: dict[int, int], games: int)
     module = _subject()
     with pytest.raises(ValueError, match="500|wins"):
         module.apply_final_gate(wins=wins, games=games)
+
+
+def test_parser_exposes_end_to_end_smoke_command() -> None:
+    """Removing the isolated smoke entry point must break the documented gate."""
+
+    assert _subject().build_parser().parse_args(["smoke"]).command == "smoke"
+
+
+def test_smoke_schedule_is_exact_and_disjoint_from_full_experiment_artifacts() -> None:
+    """A changed teacher/profile/seed schedule could stop exercising a required boundary."""
+
+    module = _subject()
+
+    assert module.build_smoke_schedule() == {
+        "collection": {
+            "partition": "train",
+            "standard_pairs": 1,
+            "conversion_pairs": 6,
+            "reciprocal_pairs": 7,
+            "games": 14,
+            "profiles": [
+                "standard-3v3",
+                "conversion-3v1-near",
+                "conversion-3v1-far",
+                "conversion-2v1-near",
+                "conversion-2v1-far",
+                "conversion-1v1-near",
+                "conversion-1v1-far",
+            ],
+        },
+        "behavioral_cloning": {
+            "model_seed": 211,
+            "batch_size": 32,
+            "max_epochs": 1,
+            "patience": 1,
+            "validation_source": "training-rows-reused-not-held-out",
+        },
+        "ppo": {
+            "run_name": "initialized-ppo",
+            "model_seed": 211,
+            "episode_seed_base": 18_100_000,
+            "workers": 1,
+            "total_timesteps": 2,
+            "checkpoint_interval": 2,
+            "completed_rollout_size": 2,
+        },
+        "evaluation": {
+            "seed_start": 18_200_000,
+            "maps": 2,
+            "both_seats": True,
+            "games": 4,
+            "profile": "standard-3v3",
+        },
+    }
+    assert module.SMOKE_ROOT == module.PANEL_ROOT / "evidence" / "smoke"
+    assert module.SMOKE_ROOT not in {
+        module.DATASET_PATH,
+        module.CLONE_RUNS_PATH,
+        module.CLONE_EVALUATION_PATH,
+        module.PPO_RUNS_PATH,
+        module.DEVELOPMENT_PATH,
+    }
+
+
+def _smoke_checks() -> dict[str, Any]:
+    return {
+        "reciprocal_pairs": 7,
+        "games": 14,
+        "teacher_labels": 19,
+        "masked_labels": 0,
+        "round_trip_mismatches": 0,
+        "replay_mismatches": 0,
+        "actor_fixture_max_error": 0.0,
+        "actor_fixture_device": "cpu",
+        "ppo_timesteps": 2,
+        "ppo_completed_rollouts": 1,
+        "evaluation_games": 4,
+        "checkpoint_reloaded": True,
+    }
+
+
+def _smoke_artifacts() -> dict[str, str]:
+    return {
+        "dataset/manifest.json": "a" * 64,
+        "bc/run.json": "b" * 64,
+        "bc/metrics.json": "c" * 64,
+        "ppo/run.json": "d" * 64,
+        "ppo/initialization.json": "e" * 64,
+        "ppo/checkpoints/step_000000002.zip": "f" * 64,
+        "evaluation/evaluation.json": "1" * 64,
+        "evaluation/evidence/traces/match-000000.json": "2" * 64,
+        "evaluation/evidence/replays/match-000000.replay": "3" * 64,
+    }
+
+
+def test_smoke_manifest_has_exact_versioned_physical_evidence_contract() -> None:
+    """Missing checks or unbound artifact bytes could synthesize a passing smoke."""
+
+    module = _subject()
+    expected = {
+        "schema_version": 1,
+        "state": "completed",
+        "schedule": module.build_smoke_schedule(),
+        "checks": _smoke_checks(),
+        "artifacts": _smoke_artifacts(),
+    }
+
+    assert module.build_smoke_manifest(
+        checks=_smoke_checks(), artifacts=_smoke_artifacts()
+    ) == expected
+
+    invalid = _smoke_checks()
+    invalid["masked_labels"] = 1
+    with pytest.raises(ValueError, match="smoke checks"):
+        module.build_smoke_manifest(checks=invalid, artifacts=_smoke_artifacts())
+
+
+def test_smoke_stage_is_isolated_and_failure_cannot_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed smoke must not publish or mutate any full experiment artifact."""
+
+    module = _subject()
+    full_dataset = tmp_path / "full-dataset"
+    full_clones = tmp_path / "full-clones"
+    full_ppo = tmp_path / "full-ppo"
+    for root in (full_dataset, full_clones, full_ppo):
+        root.mkdir()
+        (root / "sentinel.txt").write_text(root.name, encoding="utf-8")
+    monkeypatch.setattr(module, "DATASET_PATH", full_dataset)
+    monkeypatch.setattr(module, "CLONE_RUNS_PATH", full_clones)
+    monkeypatch.setattr(module, "PPO_RUNS_PATH", full_ppo)
+    smoke_root = tmp_path / "evidence" / "smoke"
+
+    def fail(staging: Path) -> None:
+        assert staging.parent == smoke_root.parent
+        raise RuntimeError("injected smoke failure")
+
+    with pytest.raises(RuntimeError, match="injected smoke failure"):
+        module.run_smoke_stage(
+            smoke_root,
+            {"panel_sha256": "a" * 64},
+            build=fail,
+            validate=lambda _root: pytest.fail("failed build reached validation"),
+        )
+
+    assert not smoke_root.exists()
+    assert not (smoke_root / "smoke.json").exists()
+    assert (full_dataset / "sentinel.txt").read_text(encoding="utf-8") == "full-dataset"
+    assert (full_clones / "sentinel.txt").read_text(encoding="utf-8") == "full-clones"
+    assert (full_ppo / "sentinel.txt").read_text(encoding="utf-8") == "full-ppo"
+
+
+def test_smoke_command_reopens_hashes_and_atomically_publishes_only_smoke_root(
+    tmp_path: Path,
+) -> None:
+    """Publishing without reopening named bytes could accept stale or missing evidence."""
+
+    module = _subject()
+    smoke_root = tmp_path / "evidence" / "smoke"
+
+    def pipeline(staging: Path, _scenario, _hashes) -> None:
+        artifacts: dict[str, str] = {}
+        for relative in _smoke_artifacts():
+            path = staging / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(relative.encode("utf-8"))
+            artifacts[relative] = _sha256(path)
+        module._atomic_json(
+            staging / "smoke.json",
+            module.build_smoke_manifest(
+                checks=_smoke_checks(),
+                artifacts=artifacts,
+            ),
+        )
+
+    result = module._smoke_command(smoke_root=smoke_root, pipeline=pipeline)
+
+    manifest = _json(smoke_root / "smoke.json")
+    assert result["summary"] == _smoke_checks()
+    assert result["reused"] is False
+    assert manifest == module.build_smoke_manifest(
+        checks=_smoke_checks(),
+        artifacts={
+            relative: _sha256(smoke_root / relative)
+            for relative in _smoke_artifacts()
+        },
+    )
+    assert not smoke_root.with_name(".smoke.staging").exists()
+
+    changed = smoke_root / next(iter(manifest["artifacts"]))
+    changed.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="artifact hash"):
+        module._validate_smoke_stage(smoke_root)
+
+
+def test_main_dispatches_smoke_and_prints_completed_manifest(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A registered parser choice without main dispatch would remain unusable."""
+
+    module = _subject()
+    expected = module.build_smoke_manifest(
+        checks=_smoke_checks(), artifacts=_smoke_artifacts()
+    )
+    monkeypatch.setattr(module, "_smoke_command", lambda: expected)
+
+    module.main(["smoke"])
+
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_panel_server_command_uses_the_required_default_build_output(
+    tmp_path: Path,
+) -> None:
+    """Launching stale Release bytes would ignore the GymServer built by the smoke gate."""
+
+    module = _subject()
+    scenario = tmp_path / "scenario.json"
+    expected_server = (
+        module.PROJECT_ROOT / "engine" / "HexWars.GymServer"
+        / "bin" / "Debug" / "net8.0" / "HexWars.GymServer.dll"
+    )
+    assert module._server_command(scenario) == [
+        "dotnet", str(expected_server), "--scenario-file", str(scenario),
+    ]
+
+
+def test_smoke_restart_rotates_failed_ppo_outside_publish_root_and_reuses_completed(
+    tmp_path: Path,
+) -> None:
+    """A retry must preserve diagnostics without publishing failed-attempt artifacts."""
+
+    from ml_lab.contracts import RunConfig
+
+    module = _subject()
+    smoke_staging = tmp_path / "evidence" / ".smoke.staging"
+    runs_root = smoke_staging / "ppo"
+    recovery_root = smoke_staging.with_name(".smoke.recovery") / "ppo"
+    config = RunConfig(
+        backend="sb3",
+        algorithm="maskable_ppo",
+        policy="HexCNN",
+        run_name="initialized-ppo",
+        seed=211,
+        total_timesteps=2,
+        checkpoint_interval=2,
+        workers=1,
+        device="cpu",
+        learner_seat="alternating",
+        opponent={"kind": "scripted", "name": "random"},
+        trackers=[],
+        resume_source=None,
+        environment="tactical-v2",
+        actor_init_source=str((smoke_staging / "bc").resolve()),
+    )
+    failed = runs_root / config.run_name
+    failed.mkdir(parents=True)
+    (failed / "run.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "state": "failed",
+            "config": config.to_dict(),
+        }),
+        encoding="utf-8",
+    )
+    (failed / "failure.txt").write_text("actor init failed", encoding="utf-8")
+    calls: list[Path] = []
+
+    def trainer(_config, *, runs_root: Path, **_kwargs) -> Path:
+        calls.append(runs_root)
+        run = runs_root / _config.run_name
+        run.mkdir(parents=True)
+        (run / "run.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "state": "completed",
+                "config": _config.to_dict(),
+            }),
+            encoding="utf-8",
+        )
+        return run
+
+    completed = module._run_restart_safe_smoke_training(
+        config,
+        runs_root=runs_root,
+        recovery_root=recovery_root,
+        trainer=trainer,
+    )
+    reused = module._run_restart_safe_smoke_training(
+        config,
+        runs_root=runs_root,
+        recovery_root=recovery_root,
+        trainer=lambda *_args, **_kwargs: pytest.fail("completed PPO was retrained"),
+    )
+
+    assert completed == reused == failed
+    assert calls == [runs_root]
+    assert _json(failed / "run.json")["state"] == "completed"
+    assert (recovery_root / "initialized-ppo-attempt-0000" / "failure.txt").is_file()
+    assert recovery_root.parent.parent == smoke_staging.parent
+    assert recovery_root.parent not in smoke_staging.parents
+    assert not any("recovery" in path.parts for path in smoke_staging.rglob("*"))
+
+
+def test_smoke_evidence_reopens_dataset_with_exact_bc_source_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duel dataset is authoritative even when PPO uses a compatible tactical horizon."""
+
+    from ml_lab.contracts import EnvironmentContract
+    import ml_lab.imitation
+
+    module = _subject()
+    source = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="a" * 64,
+        encoding_hash="c" * 64,
+        observation_size=12,
+        action_size=8,
+        board={"environment_kind": "duel", "max_steps": 20},
+        roster=["unit"],
+        reward={"terminal_win": 1},
+    )
+    target = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="b" * 64,
+        encoding_hash=source.encoding_hash,
+        observation_size=source.observation_size,
+        action_size=source.action_size,
+        board={"environment_kind": "tactical", "max_steps": 10},
+        roster=list(source.roster),
+        reward=dict(source.reward),
+    )
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    (dataset_root / "manifest.json").write_text(
+        json.dumps({
+            "contract_hash": source.contract_hash,
+            "encoding_hash": source.encoding_hash,
+        }),
+        encoding="utf-8",
+    )
+    seen: list[EnvironmentContract] = []
+
+    def loader(root: Path, expected_contract: EnvironmentContract):
+        assert root == dataset_root
+        seen.append(expected_contract)
+        return SimpleNamespace(contract=expected_contract)
+
+    monkeypatch.setattr(ml_lab.imitation, "load_imitation_dataset", loader)
+    dataset, loaded_source = module._load_smoke_source_dataset(
+        dataset_root,
+        {"contract": source.to_dict()},
+    )
+    module._validate_smoke_actor_source(
+        source_contract=loaded_source,
+        target_contract=target,
+        resolved_contract=dataset.contract,
+        initialization={
+            "source_contract_hash": source.contract_hash,
+            "source_encoding_hash": source.encoding_hash,
+        },
+    )
+
+    assert seen == [source]
+    assert loaded_source.contract_hash != target.contract_hash
+    with pytest.raises(ValueError, match="source contract"):
+        module._validate_smoke_actor_source(
+            source_contract=loaded_source,
+            target_contract=target,
+            resolved_contract=dataset.contract,
+            initialization={
+                "source_contract_hash": target.contract_hash,
+                "source_encoding_hash": source.encoding_hash,
+            },
+        )
+
+
+def test_smoke_restart_validates_and_reuses_completed_bc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed clone may be reused only after exact physical and contract validation."""
+
+    from ml_lab.contracts import EnvironmentContract
+    from ml_lab.imitation import BehavioralCloningConfig
+
+    module = _subject()
+    source = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="a" * 64,
+        encoding_hash="c" * 64,
+        observation_size=12,
+        action_size=8,
+        board={},
+        roster=["unit"],
+        reward={},
+    )
+    config = BehavioralCloningConfig(
+        model_seed=211,
+        batch_size=32,
+        learning_rate=3e-4,
+        max_epochs=1,
+        patience=1,
+    )
+    run = tmp_path / "bc"
+    run.mkdir()
+    (run / "run.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "state": "completed",
+            "contract": source.to_dict(),
+            "bc_config": {
+                "model_seed": 211,
+                "batch_size": 32,
+                "learning_rate": 3e-4,
+                "max_epochs": 1,
+                "patience": 1,
+            },
+        }),
+        encoding="utf-8",
+    )
+    dataset_manifest = tmp_path / "dataset" / "manifest.json"
+    dataset_manifest.parent.mkdir()
+    dataset_manifest.write_text("{}", encoding="utf-8")
+    scenario = SimpleNamespace(canonical_json="{}")
+    calls: list[Path] = []
+
+    def validate(path, seed, hashes, **kwargs):
+        calls.append(path)
+        assert seed == 211
+        assert hashes == {"panel": "hash"}
+        assert kwargs == {
+            "expected_scenario": scenario,
+            "require_provenance": False,
+            "expected_dataset_manifest": dataset_manifest,
+        }
+        return {
+            "contract_hash": source.contract_hash,
+            "encoding_hash": source.encoding_hash,
+        }
+
+    monkeypatch.setattr(module, "_validate_clone_run", validate)
+    assert module._reuse_completed_smoke_bc(
+        run, dataset_manifest, scenario, {"panel": "hash"}, source, config,
+    ) is True
+    assert calls == [run]
+
+    manifest = _json(run / "run.json")
+    manifest["contract"]["contract_hash"] = "b" * 64
+    (run / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="contract"):
+        module._reuse_completed_smoke_bc(
+            run, dataset_manifest, scenario, {"panel": "hash"}, source, config,
+        )
+
+
+def test_smoke_evidence_collector_is_a_callable_module_boundary() -> None:
+    """An indented evidence body without its function header cannot seal a physical smoke."""
+
+    collector = getattr(_subject(), "_collect_smoke_evidence", None)
+    assert callable(collector)

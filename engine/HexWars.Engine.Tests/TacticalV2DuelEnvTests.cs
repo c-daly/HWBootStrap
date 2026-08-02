@@ -42,6 +42,17 @@ namespace HexWars.Engine.Tests
                 new TacticalV2StartWeight(profile.Id, profile.Id == "standard-3v3" ? 10000 : 0)));
             return config;
         }
+        private static TacticalV2Config ProductionProfiledConfig()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
+            scenario.TacticalV2.PlacementPolicy = "profiled-seeded-v1";
+            scenario.TacticalV2.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1().ToList();
+            scenario.TacticalV2.StartDistribution = scenario.TacticalV2.StartProfiles
+                .Select(profile => new TacticalV2StartWeight(
+                    profile.Id, profile.Id == "standard-3v3" ? 10000 : 0))
+                .ToList();
+            return scenario.BuildTacticalV2();
+        }
         /// <summary>Regression: an internal scripted controller (Greedy) decides purely from raw engine
         /// legality — board cells and points, never the RL registry's synthetic per-seat capacity — so
         /// nothing stops it from proposing a DeployUnit once every registry slot already holds a living
@@ -80,6 +91,28 @@ namespace HexWars.Engine.Tests
 
             Assert.That(view.Terminated, Is.True);
             Assert.That(view.Truncated, Is.False);
+        }
+
+        [Test]
+        public void FullyScriptedRoundCapDraw_UsesMinusOneWinnerSentinel()
+        {
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = new GameConfig(
+                new Dictionary<TerrainType, TerrainDef>(),
+                biomesEnabled: false,
+                roundCap: 1,
+                captureCost: int.MaxValue,
+                generatorsEnabled: false,
+                fixedTemplateCount: config.Templates.Count,
+                templateSlotCount: config.Templates.Count);
+            var env = new TacticalV2DuelEnv(config);
+
+            TacticalV2DuelEnv.View view = env.Reset(
+                73, new AlwaysEndTurnAgent(), new AlwaysEndTurnAgent());
+
+            Assert.That(view.Terminated, Is.True);
+            Assert.That(view.Truncated, Is.False);
+            Assert.That(view.Winner, Is.EqualTo(-1));
         }
 
         private sealed class AlwaysEndTurnAgent : IAgent
@@ -419,6 +452,74 @@ namespace HexWars.Engine.Tests
                         transition.Previous, transition.Resulting, deploy.Issuer, deploy.TemplateIndex);
                 }
             }
+        }
+        [Test]
+        public void ProductionScenario_ClosesUnencodedEngineCommandFamilies()
+        {
+            TacticalV2Config config = ProductionProfiledConfig();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(config.Game.CaptureCost, Is.EqualTo(int.MaxValue),
+                    "CaptureHex has no tactical-v2 action label");
+                Assert.That(config.Game.GeneratorsEnabled, Is.False,
+                    "BuildGenerator has no tactical-v2 action label");
+                Assert.That(config.Game.FixedTemplateCount, Is.EqualTo(config.Templates.Count),
+                    "the tactical-v2 catalog must be an immutable fixed prefix");
+                Assert.That(config.Game.TemplateSlotCount, Is.EqualTo(config.Templates.Count),
+                    "CreateUnit and dynamic-template deploys have no tactical-v2 action labels");
+            });
+        }
+
+        [Test]
+        public void ProductionScenario_SmokeSeedAcceptsOnlyEncodedScriptedCommands()
+        {
+            const int seed = 11_000_000;
+            TacticalV2Config config = ProductionProfiledConfig();
+            var transitions = new BufferedDuelTransitionSink { Enabled = true };
+            var env = new TacticalV2DuelEnv(config, transitions);
+            TacticalV2StartProfile profile = config.StartProfiles.Single(
+                item => item.Id == "standard-3v3");
+            TacticalV2Start tracker = env.Layout.NewGame(seed, profile, PlayerId.Player0);
+
+            TacticalV2DuelEnv.View view = env.Reset(
+                seed,
+                new GreedyAgent(seed * 2 + 1),
+                new RandomAgent(seed * 2 + 2),
+                profile.Id,
+                PlayerId.Player0,
+                PlayerId.Player0);
+            Assert.That(view.Terminated || view.Truncated, Is.True);
+
+            var unsupported = new List<string>();
+            int index = 0;
+            foreach (DuelTransition transition in transitions.Drain())
+            {
+                PlayerId seat = transition.Command.Issuer;
+                TacticalV2UnitRegistry own =
+                    seat == PlayerId.Player0 ? tracker.Slots0 : tracker.Slots1;
+                if (!TacticalV2Coding.TryEncode(
+                    transition.Command, transition.Previous, env.Layout, own, out _))
+                {
+                    unsupported.Add(
+                        $"{index}:{transition.Command.GetType().Name}:" +
+                        $"round={transition.Previous.Round}:seat={(int)seat}:" +
+                        $"points={transition.Previous.Player(seat).Points}");
+                }
+
+                tracker.Slots0.ReleaseDead(transition.Resulting, PlayerId.Player0);
+                tracker.Slots1.ReleaseDead(transition.Resulting, PlayerId.Player1);
+                if (transition.Command is DeployUnit deploy)
+                {
+                    own.RegisterDeployment(
+                        transition.Previous, transition.Resulting,
+                        deploy.Issuer, deploy.TemplateIndex);
+                }
+                index++;
+            }
+
+            Assert.That(unsupported, Is.Empty,
+                "scripted production episode accepted commands outside tactical-v2 encoding");
         }
 
         [Test]

@@ -245,13 +245,15 @@ namespace HexWars.Engine.Rl
             TacticalV2UnitRegistry foe = Registry(seat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0);
             bool terminated = _state.IsGameOver;
             bool truncated = !terminated && _steps >= _cfg.MaxSteps * 2;
+            int winner = terminated && _state.Winner != null
+                ? (int)_state.Winner.Value : -1;
             return new View
             {
                 Observation = TacticalV2Coding.Observe(_state, seat, _layout, own, foe),
                 ActionMask = TacticalV2Coding.Mask(_state, seat, _layout, own),
                 Seat = seat,
                 Reward = reward,
-                Winner = terminated ? _state.Winner : null,
+                Winner = winner,
                 Terminated = terminated,
                 Truncated = truncated,
                 StartProfileId = SelectedStartProfileId,
@@ -260,15 +262,15 @@ namespace HexWars.Engine.Rl
         }
 
         /// <summary>Per-step result: observation + mask are from <see cref="Seat"/>'s point of view;
-        /// <see cref="Reward"/> is from the learner seat's perspective; <see cref="Winner"/> is set only
-        /// at a terminal state (null = draw/none).</summary>
+        /// <see cref="Reward"/> is from the learner seat's perspective; <see cref="Winner"/> is 0/1 at a
+        /// terminal win, otherwise -1 for draw/nonterminal.</summary>
         public sealed class View
         {
             public float[] Observation = null!;
             public bool[] ActionMask = null!;
             public PlayerId Seat;
             public float Reward;
-            public PlayerId? Winner;
+            public int Winner;
             public bool Terminated;
             public bool Truncated;
             public string StartProfileId = "standard-3v3";

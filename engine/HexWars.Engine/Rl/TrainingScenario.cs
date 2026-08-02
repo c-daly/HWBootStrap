@@ -236,7 +236,11 @@ namespace HexWars.Engine.Rl
             return new TacticalV2Config
             {
                 BoardGen = BuildBoardGen(),
-                Game = BuildGameConfig(),
+                Game = BuildGameConfig(
+                    fixedTemplateCount: templates.Count,
+                    templateSlotCount: templates.Count,
+                    captureCost: int.MaxValue,
+                    generatorsEnabled: false),
                 Templates = templates.AsReadOnly(),
                 StartingUnitCount = tacticalV2.StartingUnitCount,
                 MaxControllableUnits = tacticalV2.MaxControllableUnits,
@@ -399,7 +403,9 @@ namespace HexWars.Engine.Rl
         private GameConfig BuildGameConfig(
             int maxDesignPointCost = 0,
             int fixedTemplateCount = 0,
-            int templateSlotCount = 0)
+            int templateSlotCount = 0,
+            int captureCost = 3,
+            bool generatorsEnabled = true)
         {
             ITurnPolicy turnPolicy = Rules.ActionsPerTurn == 0
                 ? (ITurnPolicy)new AllUnitsPolicy()
@@ -427,7 +433,7 @@ namespace HexWars.Engine.Rl
                 turnPolicy: turnPolicy,
                 biomesEnabled: Rules.BiomesEnabled,
                 winConditions: WinBy.Annihilation,
-                captureCost: 3,
+                captureCost: captureCost,
                 economyWinThreshold: 200,
                 scoreKills: 1,
                 scorePoints: 1,
@@ -440,7 +446,7 @@ namespace HexWars.Engine.Rl
                 claimEndsTurn: true,
                 buildAnywhere: false,
                 territoryIncome: 0,
-                generatorsEnabled: true,
+                generatorsEnabled: generatorsEnabled,
                 pointDecay: 0.0,
                 fogOfWar: Rules.FogOfWar,
                 maxDesignPointCost: maxDesignPointCost,

@@ -25,6 +25,41 @@ python python/run_annihilation_imitation_panel.py train-bc
 python python/run_annihilation_imitation_panel.py evaluate-bc
 ```
 
+## Isolated end-to-end smoke gate
+
+Build the Debug GymServer and run the smoke command with the repository's
+Windows Python environment:
+
+```powershell
+dotnet build engine\HexWars.GymServer\HexWars.GymServer.csproj --nologo
+$env:PYTHONPATH='python'
+C:\Users\cddal\HexWars\python\winenv\Scripts\python.exe python\run_annihilation_imitation_panel.py smoke
+```
+
+The smoke root is `evidence/smoke`. It is disjoint from the production dataset,
+clone, PPO, development, selection, and final-evaluation artifacts. The command
+collects one reciprocal Greedy standard pair and one reciprocal bounded-search
+pair for each of the six near/far conversion profiles: seven reciprocal pairs
+and 14 games. It then runs one BC epoch, transfers only the actor into fresh
+CPU MaskablePPO, completes one two-step rollout, saves and reloads its physical
+checkpoint, and evaluates two unused standard maps from both seats (four games).
+
+The one-epoch clone deliberately reuses its training rows as the validation
+view. This exercises batching, masking, checkpointing, and actor transfer; it
+is not held-out evidence and must not be interpreted as clone generalization.
+Demonstrations carry the duel capture contract, while PPO carries the tactical
+training horizon contract. Transfer remains fail-closed on environment,
+encoding version/hash, and observation/action geometry, and records the actual
+source contract and artifact hashes.
+
+Publication is atomic and occurs only after every shard, replay, label, mask,
+round trip, checkpoint, initialization source, evaluation trace, and evaluation
+replay is reopened and hashed into `smoke.json`. A completed BC or PPO stage is
+reused only after exact validation. A failed PPO attempt is preserved in the
+deterministic sibling `.smoke.recovery`, outside the publishable tree. Generated
+smoke and recovery artifacts are evidence for the local gate and are not
+committed.
+
 A clone passes only when each seed wins at least 60 of 200 games and the panel wins at least 240 of 600. Any missing/duplicate seed-seat record, contract mismatch, changed definition provenance, missing loss/draw trace, or missing loss/draw replay fails the stage regardless of rates.
 
 

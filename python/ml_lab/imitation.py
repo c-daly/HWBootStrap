@@ -420,6 +420,62 @@ class ImitationDataset:
         return {name: np.asarray(values) for name, values in selected.items()}
 
 
+def training_rows_as_validation(dataset: ImitationDataset) -> ImitationDataset:
+    """Return a smoke-only view whose validation index aliases physical training rows."""
+
+    if not isinstance(dataset, ImitationDataset):
+        raise TypeError("dataset must be a loaded ImitationDataset")
+    try:
+        training_index = dataset.index["train"]
+    except KeyError as exc:
+        raise ValueError("dataset has no training rows to reuse as validation") from exc
+    index = dict(dataset.index)
+    index["validation"] = training_index
+    return ImitationDataset(
+        dataset.root, dataset.contract, dataset.games, dataset.shards,
+        MappingProxyType(index), dataset._cache,
+    )
+
+
+def audit_imitation_dataset(dataset: ImitationDataset) -> dict[str, int]:
+    """Reopen every physical row and replay and return smoke-gate counts."""
+
+    if not isinstance(dataset, ImitationDataset):
+        raise TypeError("dataset must be a loaded ImitationDataset")
+    refs = [
+        (shard_index, row)
+        for shard_index, descriptor in enumerate(dataset.shards)
+        for row in range(descriptor.rows)
+    ]
+    if not refs:
+        raise ValueError("dataset audit requires teacher labels")
+    rows = dataset._row_data(refs)
+    legal_masks = np.unpackbits(
+        rows["packed_masks"],
+        axis=1,
+        count=dataset.contract.action_size,
+        bitorder="little",
+    ).astype(bool, copy=False)
+    repacked = np.packbits(legal_masks, axis=1, bitorder="little")
+    masked = int(np.count_nonzero(
+        ~legal_masks[np.arange(len(rows["actions"])), rows["actions"]]
+    ))
+    round_trip = int(np.count_nonzero(
+        np.any(repacked != rows["packed_masks"], axis=1)
+    ))
+    replay_mismatches = sum(
+        sha256_file(dataset.root / game["replay_path"]) != game["replay_hash"]
+        for game in dataset.games
+    )
+    return {
+        "games": len(dataset.games),
+        "teacher_labels": len(rows["actions"]),
+        "masked_labels": masked,
+        "round_trip_mismatches": round_trip,
+        "replay_mismatches": int(replay_mismatches),
+    }
+
+
 def _source_for_game(game: Mapping[str, Any]) -> Source:
     if game["teacher"] == "greedy" and game["profile"] == STANDARD_PROFILE:
         return Source.GREEDY_STANDARD

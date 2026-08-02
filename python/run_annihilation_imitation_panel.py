@@ -30,6 +30,7 @@ CLONE_EVALUATION_PATH = PANEL_ROOT / "bc-development-gate"
 PPO_RUNS_PATH = PANEL_ROOT / "ppo-runs"
 DEVELOPMENT_PATH = PANEL_ROOT / "development"
 SELECTION_PATH = PANEL_ROOT / "selection.json"
+SMOKE_ROOT = PANEL_ROOT / "evidence" / "smoke"
 
 _MODEL_SEEDS = [211, 223, 227]
 _SAMPLER_SEEDS = {"211": 211, "223": 223, "227": 227}
@@ -1006,9 +1007,11 @@ def _validate_gate_stage(root: Path, hashes: Mapping[str, str]) -> Mapping[str, 
 
 
 def _server_command(scenario_path: Path) -> list[str]:
-    from ml_lab.cli import DEFAULT_SERVER
-
-    return ["dotnet", str(DEFAULT_SERVER), "--scenario-file", str(scenario_path)]
+    server = (
+        PROJECT_ROOT / "engine" / "HexWars.GymServer"
+        / "bin" / "Debug" / "net8.0" / "HexWars.GymServer.dll"
+    )
+    return ["dotnet", str(server), "--scenario-file", str(scenario_path)]
 
 
 def _collect_command() -> Mapping[str, Any]:
@@ -1102,6 +1105,769 @@ def _evaluate_bc_command() -> Mapping[str, Any]:
     )
 
 
+def build_smoke_schedule() -> dict[str, Any]:
+    return {
+        "collection": {
+            "partition": "train",
+            "standard_pairs": 1,
+            "conversion_pairs": 6,
+            "reciprocal_pairs": 7,
+            "games": 14,
+            "profiles": [
+                "standard-3v3",
+                "conversion-3v1-near",
+                "conversion-3v1-far",
+                "conversion-2v1-near",
+                "conversion-2v1-far",
+                "conversion-1v1-near",
+                "conversion-1v1-far",
+            ],
+        },
+        "behavioral_cloning": {
+            "model_seed": 211,
+            "batch_size": 32,
+            "max_epochs": 1,
+            "patience": 1,
+            "validation_source": "training-rows-reused-not-held-out",
+        },
+        "ppo": {
+            "run_name": "initialized-ppo",
+            "model_seed": 211,
+            "episode_seed_base": 18_100_000,
+            "workers": 1,
+            "total_timesteps": 2,
+            "checkpoint_interval": 2,
+            "completed_rollout_size": 2,
+        },
+        "evaluation": {
+            "seed_start": 18_200_000,
+            "maps": 2,
+            "both_seats": True,
+            "games": 4,
+            "profile": "standard-3v3",
+        },
+    }
+
+
+def build_smoke_manifest(
+    *, checks: Mapping[str, Any], artifacts: Mapping[str, str]
+) -> dict[str, Any]:
+    schedule = build_smoke_schedule()
+    values = dict(checks)
+    required = {
+        "reciprocal_pairs",
+        "games",
+        "teacher_labels",
+        "masked_labels",
+        "round_trip_mismatches",
+        "replay_mismatches",
+        "actor_fixture_max_error",
+        "actor_fixture_device",
+        "ppo_timesteps",
+        "ppo_completed_rollouts",
+        "evaluation_games",
+        "checkpoint_reloaded",
+    }
+    ppo = schedule["ppo"]
+    if (
+        set(values) != required
+        or values["reciprocal_pairs"] != schedule["collection"]["reciprocal_pairs"]
+        or values["games"] != schedule["collection"]["games"]
+        or type(values["teacher_labels"]) is not int
+        or values["teacher_labels"] <= 0
+        or values["masked_labels"] != 0
+        or values["round_trip_mismatches"] != 0
+        or values["replay_mismatches"] != 0
+        or values["actor_fixture_max_error"] != 0
+        or values["actor_fixture_device"] != "cpu"
+        or type(values["ppo_timesteps"]) is not int
+        or values["ppo_timesteps"] < ppo["completed_rollout_size"]
+        or type(values["ppo_completed_rollouts"]) is not int
+        or values["ppo_completed_rollouts"] < 1
+        or values["evaluation_games"] != schedule["evaluation"]["games"]
+        or values["checkpoint_reloaded"] is not True
+    ):
+        raise ValueError("smoke checks do not satisfy the end-to-end gate")
+    physical = dict(artifacts)
+    if not physical:
+        raise ValueError("smoke artifacts are incomplete")
+    for raw, digest in physical.items():
+        path = Path(raw)
+        if (
+            not isinstance(raw, str)
+            or not raw
+            or path.is_absolute()
+            or ".." in path.parts
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("smoke artifacts are invalid")
+    return {
+        "schema_version": 1,
+        "state": "completed",
+        "schedule": schedule,
+        "checks": values,
+        "artifacts": physical,
+    }
+
+
+def run_smoke_stage(
+    destination: Path,
+    definition_hashes: Mapping[str, str],
+    *,
+    build: Callable[[Path], None],
+    validate: Callable[[Path], Mapping[str, Any]],
+) -> dict[str, Any]:
+    destination = Path(destination).resolve()
+    full_roots = (
+        DATASET_PATH, CLONE_RUNS_PATH, CLONE_EVALUATION_PATH,
+        PPO_RUNS_PATH, DEVELOPMENT_PATH,
+    )
+    for raw in full_roots:
+        full = Path(raw).resolve()
+        if destination == full or destination in full.parents or full in destination.parents:
+            raise ValueError("smoke root overlaps a full experiment artifact")
+    return run_atomic_stage(
+        destination, definition_hashes, build=build, validate=validate
+    )
+
+
+def _validate_smoke_stage(root: Path) -> Mapping[str, Any]:
+    root = Path(root)
+    manifest = _read_json(root / "smoke.json")
+    checks = manifest.get("checks")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(checks, Mapping) or not isinstance(artifacts, Mapping):
+        raise ValueError("smoke manifest evidence is incomplete")
+    expected = build_smoke_manifest(checks=checks, artifacts=artifacts)
+    if manifest != expected:
+        raise ValueError("smoke manifest schema or schedule is invalid")
+    for relative, digest in artifacts.items():
+        path = _safe_relative_file(root, relative, "smoke artifact")
+        if _sha256(path) != digest:
+            raise ValueError(f"smoke artifact hash changed: {relative}")
+    return dict(checks)
+
+
+def _published_smoke_root(root: Path) -> Path:
+    root = Path(root).resolve()
+    name = root.name
+    if name.startswith(".") and name.endswith(".staging"):
+        return root.with_name(name[1:-len(".staging")])
+    return root
+
+
+def _smoke_recorded_file(root: Path, raw: Any, label: str) -> Path:
+    root = Path(root).resolve()
+    published = _published_smoke_root(root)
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f"{label} path is invalid")
+    supplied = Path(raw)
+    if not supplied.is_absolute():
+        return _safe_relative_file(root, raw, label)
+    path = supplied.resolve()
+    try:
+        relative = path.relative_to(published)
+    except ValueError as exc:
+        raise ValueError(f"{label} path escapes the smoke root") from exc
+    return _safe_relative_file(root, relative.as_posix(), label)
+
+
+def _smoke_contract(raw: Any) -> Any:
+    from ml_lab.contracts import EnvironmentContract
+
+    if not isinstance(raw, Mapping):
+        raise ValueError("smoke PPO contract is missing")
+    value = dict(raw)
+    environment = value.pop("environment", None)
+    try:
+        contract = EnvironmentContract(**value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("smoke PPO contract is invalid") from exc
+    if environment != contract.environment:
+        raise ValueError("smoke PPO contract environment is invalid")
+    return contract
+
+
+
+def _load_smoke_source_dataset(
+    dataset_root: Path,
+    bc_manifest: Mapping[str, Any],
+) -> tuple[Any, Any]:
+    from ml_lab.imitation import load_imitation_dataset
+
+    dataset_root = Path(dataset_root)
+    source_contract = _smoke_contract(bc_manifest.get("contract"))
+    dataset_manifest = _read_json(dataset_root / "manifest.json")
+    if (
+        dataset_manifest.get("contract_hash") != source_contract.contract_hash
+        or dataset_manifest.get("encoding_hash") != source_contract.encoding_hash
+    ):
+        raise ValueError("smoke dataset manifest does not match the BC source contract")
+    dataset = load_imitation_dataset(
+        dataset_root, expected_contract=source_contract,
+    )
+    if dataset.contract != source_contract:
+        raise ValueError("smoke dataset did not reopen with the exact BC source contract")
+    return dataset, source_contract
+
+
+def _validate_smoke_actor_source(
+    *,
+    source_contract: Any,
+    target_contract: Any,
+    resolved_contract: Any,
+    initialization: Mapping[str, Any],
+) -> None:
+    if (
+        source_contract.environment != target_contract.environment
+        or source_contract.version != target_contract.version
+        or source_contract.encoding_hash != target_contract.encoding_hash
+        or source_contract.observation_size != target_contract.observation_size
+        or source_contract.action_size != target_contract.action_size
+    ):
+        raise ValueError("smoke BC source contract is incompatible with PPO")
+    if resolved_contract != source_contract:
+        raise ValueError("smoke actor resolver did not return the exact source contract")
+    if (
+        initialization.get("source_contract_hash") != source_contract.contract_hash
+        or initialization.get("source_encoding_hash") != source_contract.encoding_hash
+    ):
+        raise ValueError("smoke actor provenance does not match the source contract")
+
+
+def _reuse_completed_smoke_bc(
+    run: Path,
+    dataset_manifest: Path,
+    scenario: ResolvedScenario,
+    definition_hashes: Mapping[str, str],
+    contract: Any,
+    config: Any,
+) -> bool:
+    run = Path(run)
+    if not run.exists():
+        return False
+    manifest = _read_json(run / "run.json")
+    expected_config = {
+        "model_seed": config.model_seed,
+        "batch_size": config.batch_size,
+        "learning_rate": config.learning_rate,
+        "max_epochs": config.max_epochs,
+        "patience": config.patience,
+    }
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("state") != "completed"
+        or manifest.get("bc_config") != expected_config
+        or manifest.get("contract") != contract.to_dict()
+    ):
+        raise ValueError("completed smoke BC config or contract does not match")
+    identity = _validate_clone_run(
+        run,
+        config.model_seed,
+        definition_hashes,
+        expected_scenario=scenario,
+        require_provenance=False,
+        expected_dataset_manifest=dataset_manifest,
+    )
+    if identity != {
+        "contract_hash": contract.contract_hash,
+        "encoding_hash": contract.encoding_hash,
+    }:
+        raise ValueError("completed smoke BC contract identity does not match")
+    return True
+
+
+def _run_restart_safe_smoke_training(
+    config: Any,
+    *,
+    runs_root: Path,
+    recovery_root: Path,
+    trainer: Callable[..., Path],
+    allowed_actor_init_sources: Sequence[str] = (),
+    **trainer_kwargs: Any,
+) -> Path:
+    runs_root = Path(runs_root).resolve()
+    recovery_root = Path(recovery_root).resolve()
+    run = runs_root / config.run_name
+    try:
+        recovery_root.relative_to(runs_root.parent)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("smoke recovery root must be outside the publishable stage")
+
+    expected_config = config.to_dict()
+    if run.exists():
+        manifest = _read_json(run / "run.json")
+        actual_config = manifest.get("config")
+        matches = actual_config == expected_config
+        if not matches and isinstance(actual_config, Mapping):
+            actual_normalized = dict(actual_config)
+            expected_normalized = dict(expected_config)
+            actual_source = actual_normalized.pop("actor_init_source", None)
+            expected_source = expected_normalized.pop("actor_init_source", None)
+            matches = (
+                actual_normalized == expected_normalized
+                and actual_source in {expected_source, *allowed_actor_init_sources}
+            )
+        if (
+            manifest.get("schema_version") != 1
+            or not matches
+            or manifest.get("state") not in {"completed", "failed"}
+        ):
+            raise ValueError("existing smoke PPO attempt is not safely reusable")
+        if manifest["state"] == "completed":
+            return run
+
+        recovery_root.mkdir(parents=True, exist_ok=True)
+        attempt = 0
+        while True:
+            archived = recovery_root / f"{config.run_name}-attempt-{attempt:04d}"
+            if not archived.exists():
+                break
+            attempt += 1
+        os.replace(run, archived)
+
+    result = Path(trainer(
+        config, runs_root=runs_root, **trainer_kwargs,
+    )).resolve()
+    if result != run or _read_json(run / "run.json").get("state") != "completed":
+        raise ValueError("smoke PPO trainer did not publish the completed canonical run")
+    return run
+
+
+def _smoke_artifact_hashes(root: Path) -> dict[str, str]:
+    root = Path(root)
+    ignored = {"smoke.json", "stage.json", ".stage-definitions.json"}
+    artifacts = {
+        path.relative_to(root).as_posix(): _sha256(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+        and path.relative_to(root).as_posix() not in ignored
+        and ".publishing-" not in path.as_posix()
+    }
+    if not artifacts:
+        raise ValueError("smoke produced no physical artifacts")
+    return artifacts
+
+
+def _collect_smoke_evidence(root: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    from ml_lab.controllers import ControllerResolver
+    from ml_lab.imitation import audit_imitation_dataset
+
+    root = Path(root).resolve()
+    schedule = build_smoke_schedule()
+    ppo_run = root / "ppo" / schedule["ppo"]["run_name"]
+    ppo_manifest = _read_json(ppo_run / "run.json")
+    contract = _smoke_contract(ppo_manifest.get("contract"))
+
+    dataset_root = root / "dataset"
+    bc_root = root / "bc"
+    bc_manifest = _read_json(bc_root / "run.json")
+    dataset, source_contract = _load_smoke_source_dataset(
+        dataset_root, bc_manifest,
+    )
+    audit = audit_imitation_dataset(dataset)
+    pairs: dict[tuple[str, str, str, int], set[int]] = {}
+    for game in dataset.games:
+        key = (
+            game["partition"], game["teacher"], game["profile"], game["seed"],
+        )
+        pairs.setdefault(key, set()).add(game["teacher_seat"])
+    expected_pairs = {
+        ("train", "greedy", "standard-3v3", 11_000_000),
+        *{
+            ("train", "bounded-search", profile, 11_500_000 + index)
+            for index, profile in enumerate(schedule["collection"]["profiles"][1:])
+        },
+    }
+    if (
+        set(pairs) != expected_pairs
+        or any(seats != {0, 1} for seats in pairs.values())
+        or audit["games"] != schedule["collection"]["games"]
+    ):
+        raise ValueError("smoke collection schedule is incomplete")
+
+    dataset_digest = _sha256(dataset_root / "manifest.json")
+    bc = _read_json(bc_root / "bc.json")
+    _read_json(bc_root / "metrics.json")
+    if (
+        bc_manifest.get("state") != "completed"
+        or bc_manifest.get("latest_checkpoint_step") != 0
+        or bc_manifest.get("dataset_manifest_sha256") != dataset_digest
+        or bc.get("dataset_manifest_sha256") != dataset_digest
+        or bc.get("training_decision_count") != audit["teacher_labels"]
+        or bc.get("validation_decision_count") != audit["teacher_labels"]
+        or bc.get("validation_game_count") != audit["games"]
+    ):
+        raise ValueError("smoke behavioral clone evidence is invalid")
+
+    ppo_config = ppo_manifest.get("config")
+    ppo_schedule = schedule["ppo"]
+    if (
+        ppo_manifest.get("state") != "completed"
+        or not isinstance(ppo_config, Mapping)
+        or ppo_config.get("run_name") != ppo_schedule["run_name"]
+        or ppo_config.get("seed") != ppo_schedule["model_seed"]
+        or ppo_config.get("device") != "cpu"
+        or ppo_config.get("workers") != ppo_schedule["workers"]
+        or ppo_config.get("total_timesteps") != ppo_schedule["total_timesteps"]
+        or ppo_config.get("checkpoint_interval") != ppo_schedule["checkpoint_interval"]
+        or ppo_config.get("resume_source") is not None
+        or Path(str(ppo_config.get("actor_init_source", ""))).resolve()
+        != (_published_smoke_root(root) / "bc").resolve()
+    ):
+        raise ValueError("smoke PPO run evidence is invalid")
+    timesteps = ppo_manifest.get("timesteps")
+    rollout_size = ppo_schedule["completed_rollout_size"]
+    if (
+        type(timesteps) is not int
+        or timesteps < rollout_size
+        or timesteps % rollout_size
+        or ppo_manifest.get("latest_checkpoint_step") != timesteps
+    ):
+        raise ValueError("smoke PPO did not complete a physical rollout")
+    checkpoint = _safe_relative_file(
+        ppo_run, ppo_manifest.get("latest_checkpoint"), "smoke PPO checkpoint"
+    )
+    initialization = _read_json(ppo_run / "initialization.json")
+    maximum_error = initialization.get("maximum_absolute_logit_difference")
+    if (
+        initialization.get("kind") != "actor_only"
+        or initialization.get("device") != "cpu"
+        or maximum_error != 0
+    ):
+        raise ValueError("smoke actor transfer evidence is invalid")
+
+    resolved_source = ControllerResolver(contract).resolve(f"run:{bc_root}")
+    _validate_smoke_actor_source(
+        source_contract=source_contract,
+        target_contract=contract,
+        resolved_contract=resolved_source.contract,
+        initialization=initialization,
+    )
+    source_checkpoint = _safe_relative_file(
+        bc_root,
+        bc_manifest.get("latest_checkpoint"),
+        "smoke BC source checkpoint",
+    )
+    source_fixtures = _safe_relative_file(
+        bc_root, "actor-fixtures.npz", "smoke BC actor fixtures",
+    )
+    source_bc = _safe_relative_file(
+        bc_root, "bc.json", "smoke BC metadata",
+    )
+    if (
+        Path(str(initialization.get("source_run", ""))).resolve()
+        != (_published_smoke_root(root) / "bc").resolve()
+        or initialization.get("source_checkpoint")
+        != source_checkpoint.relative_to(bc_root).as_posix()
+        or initialization.get("source_checkpoint_sha256") != _sha256(source_checkpoint)
+        or initialization.get("source_actor_fixtures_sha256") != _sha256(source_fixtures)
+        or initialization.get("source_run_manifest_sha256")
+        != _sha256(bc_root / "run.json")
+        or initialization.get("source_bc_sha256") != _sha256(source_bc)
+        or initialization.get("source_dataset_manifest_sha256") != dataset_digest
+    ):
+        raise ValueError("smoke actor source artifact provenance is invalid")
+
+    resolved = ControllerResolver(contract).resolve(f"run:{ppo_run}")
+    if (
+        resolved.path is None
+        or resolved.path.resolve() != checkpoint.resolve()
+        or resolved.step != timesteps
+        or resolved.algorithm != "maskable_ppo"
+        or resolved.contract != contract
+    ):
+        raise ValueError("smoke PPO checkpoint reload is invalid")
+
+    evaluation_root = root / "evaluation"
+    evaluation = _read_json(evaluation_root / "evaluation.json")
+    candidate = evaluation.get("candidate")
+    opponent = evaluation.get("opponent")
+    evaluation_schedule = schedule["evaluation"]
+    if (
+        evaluation.get("games") != evaluation_schedule["games"]
+        or evaluation.get("seeds") != list(range(
+            evaluation_schedule["seed_start"],
+            evaluation_schedule["seed_start"] + evaluation_schedule["maps"],
+        ))
+        or evaluation.get("reciprocal") is not True
+        or evaluation.get("schedule") != {
+            "start_profile": evaluation_schedule["profile"],
+            "reference_seat_policy": "candidate-seat",
+        }
+        or not isinstance(candidate, Mapping)
+        or _smoke_recorded_file(root, candidate.get("path"), "evaluation checkpoint").resolve()
+        != checkpoint.resolve()
+        or candidate.get("source_run") != str(
+            (_published_smoke_root(root) / "ppo" / ppo_schedule["run_name"]).resolve()
+        )
+        or candidate.get("step") != timesteps
+        or candidate.get("algorithm") != "maskable_ppo"
+        or not isinstance(opponent, Mapping)
+        or opponent.get("name") != "random"
+    ):
+        raise ValueError("smoke reciprocal evaluation evidence is invalid")
+    matches = evaluation.get("matches")
+    expected_keys = {
+        (seed, seat)
+        for seed in range(
+            evaluation_schedule["seed_start"],
+            evaluation_schedule["seed_start"] + evaluation_schedule["maps"],
+        )
+        for seat in (0, 1)
+    }
+    if (
+        not isinstance(matches, list)
+        or {(row.get("seed"), row.get("candidate_seat")) for row in matches} != expected_keys
+    ):
+        raise ValueError("smoke reciprocal evaluation matches are incomplete")
+    declared: set[Path] = set()
+    for match in matches:
+        trace, replay = match.get("trace_path"), match.get("replay_path")
+        if (trace is None) != (replay is None):
+            raise ValueError("smoke evaluation trace/replay ownership is incomplete")
+        if trace is not None:
+            declared.add(_smoke_recorded_file(root, trace, "evaluation trace").resolve())
+            declared.add(_smoke_recorded_file(root, replay, "evaluation replay").resolve())
+    actual = {
+        path.resolve()
+        for pattern in ("traces/*.json", "replays/*.replay")
+        for path in (evaluation_root / "evidence").glob(pattern)
+    }
+    if not declared or actual != declared:
+        raise ValueError("smoke evaluation trace/replay artifacts are incomplete")
+
+    checks = {
+        "reciprocal_pairs": len(pairs),
+        "games": audit["games"],
+        "teacher_labels": audit["teacher_labels"],
+        "masked_labels": audit["masked_labels"],
+        "round_trip_mismatches": audit["round_trip_mismatches"],
+        "replay_mismatches": audit["replay_mismatches"],
+        "actor_fixture_max_error": maximum_error,
+        "actor_fixture_device": initialization["device"],
+        "ppo_timesteps": timesteps,
+        "ppo_completed_rollouts": timesteps // rollout_size,
+        "evaluation_games": evaluation["games"],
+        "checkpoint_reloaded": True,
+    }
+    return checks, _smoke_artifact_hashes(root)
+
+
+def _build_smoke_pipeline(
+    root: Path,
+    scenario: ResolvedScenario,
+    definition_hashes: Mapping[str, str],
+) -> None:
+    from collect_annihilation_demonstrations import CollectionSpec, collect_partition
+    from hexwars_gym import HexWarsEnv
+    from ml_lab.contracts import RunConfig
+    from ml_lab.evaluation import DuelClient
+    from ml_lab.imitation import (
+        BehavioralCloningConfig,
+        load_imitation_dataset,
+        train_behavioral_clone,
+        training_rows_as_validation,
+    )
+    from ml_lab.training import run_training
+
+    root = Path(root).resolve()
+    published = _published_smoke_root(root)
+    schedule = build_smoke_schedule()
+    stage_scenario = _materialize_runtime_scenario(
+        scenario, root, definition_hashes
+    )
+    duel_command = _server_command(stage_scenario)
+    probe = DuelClient(duel_command, environment="tactical-v2")
+    try:
+        contract = probe.contract
+    finally:
+        probe.close()
+
+    dataset_root = root / "dataset"
+    scenario_hash = hashlib.sha256(
+        scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    collection = schedule["collection"]
+    collect_partition(
+        CollectionSpec(
+            dataset=dataset_root,
+            partition=collection["partition"],
+            scenario_hash=scenario_hash,
+            contract=contract,
+            client_factory=lambda _worker: DuelClient(
+                duel_command, environment="tactical-v2"
+            ),
+            workers=1,
+            standard_pairs=collection["standard_pairs"],
+            conversion_pairs=collection["conversion_pairs"],
+        )
+    )
+    dataset = load_imitation_dataset(dataset_root, expected_contract=contract)
+
+    bc_schedule = schedule["behavioral_cloning"]
+    bc_config = BehavioralCloningConfig(
+        model_seed=bc_schedule["model_seed"],
+        batch_size=bc_schedule["batch_size"],
+        learning_rate=3e-4,
+        max_epochs=bc_schedule["max_epochs"],
+        patience=bc_schedule["patience"],
+    )
+    bc_root = root / "bc"
+    if not _reuse_completed_smoke_bc(
+        bc_root,
+        dataset_root / "manifest.json",
+        scenario,
+        definition_hashes,
+        contract,
+        bc_config,
+    ):
+        env = HexWarsEnv(
+            duel_command[:-2],
+            opponent="random",
+            seat=0,
+            base_seed=18_000_000,
+            environment="tactical-v2",
+            scenario_path=stage_scenario,
+        )
+        try:
+            train_behavioral_clone(
+                dataset=training_rows_as_validation(dataset),
+                scenario=scenario,
+                env=env,
+                contract=contract,
+                spaces_info=env.spaces_info,
+                run_dir=bc_root,
+                config=bc_config,
+            )
+        finally:
+            env.close()
+
+    ppo = schedule["ppo"]
+    config = RunConfig(
+        backend="sb3",
+        algorithm="maskable_ppo",
+        policy="HexCNN",
+        run_name=ppo["run_name"],
+        seed=ppo["model_seed"],
+        episode_seed_base=ppo["episode_seed_base"],
+        total_timesteps=ppo["total_timesteps"],
+        checkpoint_interval=ppo["checkpoint_interval"],
+        workers=ppo["workers"],
+        device="cpu",
+        learner_seat="alternating",
+        opponent={"kind": "scripted", "name": "random"},
+        trackers=[],
+        resume_source=None,
+        environment="tactical-v2",
+        algorithm_options={
+            "learning_rate": 3e-4,
+            "n_epochs": 1,
+            "target_kl": 0.02,
+        },
+        actor_init_source=str((root / "bc").resolve()),
+    )
+    ppo_run = _run_restart_safe_smoke_training(
+        config,
+        runs_root=root / "ppo",
+        recovery_root=root.with_name(".smoke.recovery") / "ppo",
+        trainer=run_training,
+        allowed_actor_init_sources=(str((published / "bc").resolve()),),
+        scenario=scenario,
+        server_cmd=duel_command[:-2],
+        console_output=False,
+    )
+    ppo_manifest = _read_json(ppo_run / "run.json")
+    checkpoint = _safe_relative_file(
+        ppo_run, ppo_manifest.get("latest_checkpoint"), "smoke PPO checkpoint"
+    )
+
+    evaluation = schedule["evaluation"]
+    evaluation_root = root / "evaluation"
+    evaluation_path = evaluation_root / "evaluation.json"
+    result = _evaluate_standard_controllers(
+        f"run:{ppo_run}",
+        "random",
+        games=evaluation["maps"],
+        seed_start=evaluation["seed_start"],
+        both_seats=evaluation["both_seats"],
+        workers=1,
+        server_cmd=duel_command,
+        output_path=evaluation_path,
+        environment="tactical-v2",
+        evidence_dir=evaluation_root / "evidence",
+        capture_trace=True,
+        start_profile=evaluation["profile"],
+    )
+    _relativize_evaluation(result, root, evaluation_path)
+
+    published_ppo = published / "ppo" / ppo["run_name"]
+    ppo_manifest = _read_json(ppo_run / "run.json")
+    recorded_config = dict(ppo_manifest["config"])
+    recorded_config["actor_init_source"] = str((published / "bc").resolve())
+    ppo_manifest["config"] = recorded_config
+    _atomic_json(ppo_run / "run.json", ppo_manifest)
+    initialization = _read_json(ppo_run / "initialization.json")
+    initialization["source_run"] = str((published / "bc").resolve())
+    _atomic_json(ppo_run / "initialization.json", initialization)
+    evaluation_manifest = _read_json(evaluation_path)
+    candidate = dict(evaluation_manifest["candidate"])
+    candidate["path"] = str(
+        (published_ppo / checkpoint.relative_to(ppo_run)).resolve()
+    )
+    candidate["source_run"] = str(published_ppo.resolve())
+    evaluation_manifest["candidate"] = candidate
+    _atomic_json(evaluation_path, evaluation_manifest)
+
+    checks, artifacts = _collect_smoke_evidence(root)
+    _atomic_json(
+        root / "smoke.json",
+        build_smoke_manifest(checks=checks, artifacts=artifacts),
+    )
+
+
+def _validate_real_smoke_stage(root: Path) -> Mapping[str, Any]:
+    root = Path(root)
+    checks = dict(_validate_smoke_stage(root))
+    recomputed_checks, recomputed_artifacts = _collect_smoke_evidence(root)
+    manifest = _read_json(root / "smoke.json")
+    if (
+        checks != recomputed_checks
+        or manifest.get("artifacts") != recomputed_artifacts
+    ):
+        raise ValueError("smoke manifest differs from reopened physical evidence")
+    return checks
+
+
+def _smoke_command(
+    *,
+    smoke_root: Path = SMOKE_ROOT,
+    pipeline: Callable[[Path, ResolvedScenario, Mapping[str, str]], None] | None = None,
+) -> Mapping[str, Any]:
+    _panel, _banks, scenario = validate_definitions()
+    hashes = current_definition_hashes()
+    selected = pipeline
+    if selected is None:
+        selected = _build_smoke_pipeline
+
+    def build(staging: Path) -> None:
+        selected(staging, scenario, hashes)
+
+    validator = (
+        _validate_smoke_stage if pipeline is not None else _validate_real_smoke_stage
+    )
+    return run_smoke_stage(
+        smoke_root,
+        hashes,
+        build=build,
+        validate=validator,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run_annihilation_imitation_panel.py")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1110,6 +1876,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("train-bc")
     commands.add_parser("evaluate-bc")
     commands.add_parser("train-ppo")
+    commands.add_parser("smoke")
     commands.add_parser("evaluate-dev")
     commands.add_parser("select-budget")
     freeze = commands.add_parser("freeze-final")
@@ -1132,6 +1899,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         result = _train_bc_command()
     elif args.command == "evaluate-bc":
         result = _evaluate_bc_command()
+    elif args.command == "smoke":
+        result = _smoke_command()
     elif args.command == "train-ppo":
         result = _train_ppo_command()
     elif args.command == "evaluate-dev":

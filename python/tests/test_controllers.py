@@ -519,9 +519,11 @@ def test_actor_transfer_rejects_bc_metadata_not_bound_to_run(
         target_env.close()
 
 
-def test_actor_transfer_rejects_exact_contract_hash_mismatch_before_copy(
+def test_actor_transfer_accepts_compatible_source_with_different_contract_hash(
     tmp_path: Path,
 ) -> None:
+    import torch
+
     contract = _actor_transfer_contract()
     source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
         tmp_path,
@@ -546,22 +548,25 @@ def test_actor_transfer_rejects_exact_contract_hash_mismatch_before_copy(
             for name, module in _actor_modules(target.policy).items()
         }
 
-        with pytest.raises(
-            ContractMismatch,
-            match="actor initialization contract",
-        ):
-            adapter.initialize_actor(
-                target,
-                source_run=source_run,
-                expected_contract=expected_contract,
-                device="cpu",
-            )
+        provenance = adapter.initialize_actor(
+            target,
+            source_run=source_run,
+            expected_contract=expected_contract,
+            device="cpu",
+        )
 
         actor_after = {
             name: _module_state(module)
             for name, module in _actor_modules(target.policy).items()
         }
-        _assert_state_equal(actor_after, actor_before)
+        assert any(
+            not torch.equal(actor_after[group][name], actor_before[group][name])
+            for group in actor_after
+            for name in actor_after[group]
+        )
+        assert provenance["source_contract_hash"] == contract.contract_hash
+        assert provenance["source_contract_hash"] != expected_contract.contract_hash
+        assert provenance["source_encoding_hash"] == expected_contract.encoding_hash
     finally:
         target_env.close()
 
