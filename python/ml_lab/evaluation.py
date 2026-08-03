@@ -562,9 +562,8 @@ def _copy_file_atomically_exclusive(source: Path, destination: Path) -> None:
     )
     try:
         _copy_file_exclusive(source, temporary_path)
-        if destination.exists():
-            raise FileExistsError(f"artifact destination already exists: {destination}")
-        os.replace(temporary_path, destination)
+        os.link(temporary_path, destination)
+        temporary_path.unlink()
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

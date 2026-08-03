@@ -922,7 +922,51 @@ def test_evaluation_preserves_preexisting_unretained_destinations(
     assert replay_path.read_bytes() == replay_sentinel
 
 
-def test_publish_artifact_pair_uses_atomic_replacement_and_rolls_back(
+def test_atomic_exclusive_copy_preserves_destination_created_at_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    staged = tmp_path / "staged.json"
+    destination = tmp_path / "evidence" / "traces" / "trace.json"
+    payload = b'{"schema_version":1}\n'
+    collision_payload = b'{"concurrent":"writer"}\n'
+    staged.write_bytes(payload)
+    real_replace = evaluation_module.os.replace
+    real_link = evaluation_module.os.link
+
+    def reveal_collision(source, target) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        assert source_path.parent == target_path.parent
+        assert source_path.read_bytes() == payload
+        assert not target_path.exists()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(collision_payload)
+
+    def replacing_after_collision(source, target) -> None:
+        reveal_collision(source, target)
+        real_replace(source, target)
+
+    def linking_after_collision(source, target) -> None:
+        reveal_collision(source, target)
+        return real_link(source, target)
+
+    monkeypatch.setattr(evaluation_module.os, "replace", replacing_after_collision)
+    monkeypatch.setattr(evaluation_module.os, "link", linking_after_collision)
+
+    with pytest.raises(FileExistsError):
+        evaluation_module._copy_file_atomically_exclusive(staged, destination)
+
+    assert destination.read_bytes() == collision_payload
+    assert not any(
+        path.name.startswith(".")
+        for path in (tmp_path / "evidence").rglob("*")
+    )
+
+
+def test_publish_artifact_pair_uses_atomic_no_clobber_publication_and_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -935,7 +979,7 @@ def test_publish_artifact_pair_uses_atomic_replacement_and_rolls_back(
     staged_trace.write_text('{"schema_version":1}\n', encoding="utf-8")
     staged_replay.write_text("replay\n", encoding="utf-8")
     real_copy = evaluation_module.shutil.copyfileobj
-    real_replace = evaluation_module.os.replace
+    real_link = evaluation_module.os.link
     replacements: list[tuple[Path, Path]] = []
 
     def copy_to_temporary(source, target, *args, **kwargs) -> None:
@@ -943,7 +987,7 @@ def test_publish_artifact_pair_uses_atomic_replacement_and_rolls_back(
         assert destination not in {trace_path, replay_path}
         real_copy(source, target, *args, **kwargs)
 
-    def fail_second_replace(source, destination) -> None:
+    def fail_second_link(source, destination) -> None:
         source_path = Path(source)
         destination_path = Path(destination)
         assert source_path.parent == destination_path.parent
@@ -951,13 +995,13 @@ def test_publish_artifact_pair_uses_atomic_replacement_and_rolls_back(
         assert not destination_path.exists()
         replacements.append((source_path, destination_path))
         if destination_path == replay_path:
-            raise OSError("injected replay replacement failure")
-        real_replace(source_path, destination_path)
+            raise OSError("injected replay publication failure")
+        real_link(source_path, destination_path)
 
     monkeypatch.setattr(evaluation_module.shutil, "copyfileobj", copy_to_temporary)
-    monkeypatch.setattr(evaluation_module.os, "replace", fail_second_replace)
+    monkeypatch.setattr(evaluation_module.os, "link", fail_second_link)
 
-    with pytest.raises(OSError, match="injected replay replacement failure"):
+    with pytest.raises(OSError, match="injected replay publication failure"):
         evaluation_module._publish_artifact_pair(
             staged_trace,
             staged_replay,
