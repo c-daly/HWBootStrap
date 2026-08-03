@@ -350,3 +350,17 @@ def test_discovery_never_names_manifest_only_51200_checkpoint(
 
     assert all(candidate.actual_step != 51_200 for candidate in candidates)
     assert all("000051200" not in candidate.candidate_id for candidate in candidates)
+
+def test_discovery_rejects_mutually_compatible_non_tactical_v2_sources(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    for source in (clone, ppo):
+        manifest = json.loads((source / "run.json").read_text(encoding="utf-8"))
+        manifest["config"]["environment"] = "tactical-v1"
+        manifest["contract"]["environment"] = "tactical-v1"
+        manifest["contract"]["version"] = "tactical-v1"
+        _write_json(source / "run.json", manifest)
+
+    with pytest.raises(ValueError, match="tactical-v2"):
+        discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)

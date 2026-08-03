@@ -169,8 +169,12 @@ def _load_source(path: Path, *, label: str, require_seed: bool = True) -> _Sourc
         raise ValueError(f"{label} scenario snapshot is missing: {scenario_path}") from error
     if not scenario_bytes:
         raise ValueError(f"{label} scenario snapshot is empty: {scenario_path}")
-    _require_string(contract.get("environment"), label=f"{label} contract environment")
-    _require_string(contract.get("version"), label=f"{label} contract version")
+    environment = _require_string(contract.get("environment"), label=f"{label} contract environment")
+    version = _require_string(contract.get("version"), label=f"{label} contract version")
+    if environment != "tactical-v2":
+        raise ValueError(f"{label} contract environment must be tactical-v2")
+    if version != "tactical-v2":
+        raise ValueError(f"{label} contract version must be tactical-v2")
     _require_string(contract.get("contract_hash"), label=f"{label} contract hash")
     _require_string(contract.get("encoding_hash"), label=f"{label} contract encoding hash")
     if _require_int(contract.get("observation_size"), label=f"{label} observation size") < 1:
