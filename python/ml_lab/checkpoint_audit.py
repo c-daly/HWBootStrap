@@ -8,7 +8,7 @@ import json
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
@@ -50,6 +50,8 @@ class AuditSchedule:
             "profile": self.profile,
             "opponent": self.opponent,
         }
+
+_PROGRAMMATIC_SMOKE_SCHEDULE = AuditSchedule(seed_start=16_000_000, maps=2)
 
 
 @dataclass(frozen=True)
@@ -201,13 +203,24 @@ def _load_source(path: Path, *, label: str, require_seed: bool = True) -> _Sourc
         raise ValueError(f"{label} observation size must be positive")
     if _require_int(contract.get("action_size"), label=f"{label} action size") < 1:
         raise ValueError(f"{label} action size must be positive")
-    if config.get("environment") != contract.get("environment"):
+    config_environment = config.get("environment")
+    if config_environment is not None and config_environment != environment:
         raise ValueError(f"{label} environment does not match its contract")
     if config.get("algorithm") != "maskable_ppo":
         raise ValueError(f"{label} algorithm must be maskable_ppo")
     if require_seed:
-        seeds = (manifest.get("model_seed"), config.get("model_seed"), config.get("seed"))
-        if any(seed != _EXPECTED_SEED or isinstance(seed, bool) for seed in seeds):
+        seeds = tuple(
+            seed
+            for seed in (
+                manifest.get("model_seed"),
+                config.get("model_seed"),
+                config.get("seed"),
+            )
+            if seed is not None
+        )
+        if not seeds or any(
+            seed != _EXPECTED_SEED or isinstance(seed, bool) for seed in seeds
+        ):
             raise ValueError(f"{label} model seed must be {_EXPECTED_SEED}")
     return _SourceRun(
         path=root,
@@ -560,9 +573,11 @@ def _source_material(
     )
 
 
-def validate_prepared_definition(definition: AuditDefinition) -> PreparedAuditInputs:
+def validate_prepared_definition(
+    definition: AuditDefinition, *, _smoke: bool = False
+) -> PreparedAuditInputs:
     """Reopen and validate every learned physical input frozen by prepare."""
-    _validate_global_audit_definition(definition)
+    _validate_global_audit_definition(definition, smoke=_smoke)
     scenario_bytes, scenario_sha256, source_contracts = _source_material(definition)
     for candidate in definition.candidates:
         if candidate.source_run is None:
@@ -597,9 +612,22 @@ def _validate_runtime_contract(
     if not source_contracts:
         raise ValueError("audit manifest is missing source contracts")
     source = _require_mapping(source_contracts[0].get("contract"), label="source contract")
-    for field in ("encoding_hash", "observation_size", "action_size", "board"):
+    for field in ("encoding_hash", "observation_size", "action_size"):
         if runtime.get(field) != source.get(field):
             raise ValueError(f"evaluation runtime contract {field} is incompatible")
+    runtime_board = _require_mapping(
+        runtime.get("board"), label="evaluation runtime board"
+    )
+    source_board = _require_mapping(source.get("board"), label="source board")
+    for dimension in ("width", "height"):
+        runtime_size = _require_int(
+            runtime_board.get(dimension), label=f"evaluation runtime board {dimension}"
+        )
+        source_size = _require_int(
+            source_board.get(dimension), label=f"source board {dimension}"
+        )
+        if runtime_size != source_size:
+            raise ValueError("evaluation runtime contract board geometry is incompatible")
 
 
 def _definition_identity(definition: AuditDefinition) -> tuple[Mapping[str, Any], str]:
@@ -614,10 +642,14 @@ def _initial_manifest(
     scenario_sha256: str,
     source_contracts: Sequence[Mapping[str, Any]],
     runtime_contract: Mapping[str, Any],
+    smoke: bool = False,
 ) -> Mapping[str, Any]:
     definition_payload, definition_sha256 = _definition_identity(definition)
     return {
         "schema_version": 1,
+        "smoke": smoke,
+        "exploratory": definition.exploratory,
+        "locked_panel_replacement": definition.locked_panel_replacement,
         "generated_at": utc_now(),
         "state": "in_progress",
         "definition": definition_payload,
@@ -637,6 +669,13 @@ def _load_audit_manifest(root: Path) -> Mapping[str, Any]:
     manifest, _raw = _read_json_bytes(root / "manifest.json", label="audit manifest")
     if manifest.get("schema_version") != 1:
         raise ValueError("audit manifest schema_version must be 1")
+    if not isinstance(manifest.get("smoke"), bool):
+        raise ValueError("audit manifest smoke flag must be boolean")
+    if manifest.get("exploratory") is not True:
+        raise ValueError("audit manifest must remain exploratory")
+    if manifest.get("locked_panel_replacement") is not False:
+        raise ValueError("audit manifest cannot replace the locked panel")
+
     _require_string(manifest.get("generated_at"), label="audit manifest generated_at")
     state = manifest.get("state")
     if state not in {"in_progress", "completed"}:
@@ -698,6 +737,7 @@ def _require_existing_manifest(
     scenario_sha256: str,
     source_contracts: Sequence[Mapping[str, Any]],
     runtime_contract: Mapping[str, Any],
+    smoke: bool = False,
 ) -> Mapping[str, Any]:
     manifest = _load_audit_manifest(root)
     definition_payload, definition_sha256 = _definition_identity(definition)
@@ -707,6 +747,14 @@ def _require_existing_manifest(
     ):
         raise ValueError("existing audit manifest has a different frozen definition")
     scenario = _require_mapping(manifest.get("scenario"), label="audit scenario")
+    if (
+        manifest.get("smoke") is not smoke
+        or manifest.get("exploratory") is not definition.exploratory
+        or manifest.get("locked_panel_replacement")
+        is not definition.locked_panel_replacement
+    ):
+        raise ValueError("existing audit manifest has different isolation flags")
+
     if (
         scenario.get("bytes_base64")
         != base64.b64encode(scenario_bytes).decode("ascii")
@@ -1145,8 +1193,10 @@ def _progress_line(
     )
 
 
-def _validate_global_audit_definition(definition: AuditDefinition) -> None:
-    expected_schedule = AuditSchedule()
+def _validate_global_audit_definition(
+    definition: AuditDefinition, *, smoke: bool = False
+) -> None:
+    expected_schedule = _PROGRAMMATIC_SMOKE_SCHEDULE if smoke else AuditSchedule()
     if (
         definition.schema_version != 1
         or definition.audit_id != "annihilation-checkpoint-audit-v1"
@@ -1168,15 +1218,16 @@ def evaluate_audit(
     workers: int,
     evaluator: Callable[..., Mapping[str, Any]] = evaluate_controllers,
     progress: Callable[[str], None] = print,
+    _smoke: bool = False,
 ) -> Mapping[str, Any]:
     """Evaluate every immutable candidate/map and reuse only validated physical evidence."""
     if workers < 1:
         raise ValueError("checkpoint audit workers must be positive")
-    _validate_global_audit_definition(definition)
+    _validate_global_audit_definition(definition, smoke=_smoke)
     schedule = definition.schedule
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    prepared = validate_prepared_definition(definition)
+    prepared = validate_prepared_definition(definition, _smoke=_smoke)
     scenario_bytes = prepared.scenario_bytes
     scenario_sha256 = prepared.scenario_sha256
     source_contracts = prepared.source_contracts
@@ -1191,6 +1242,7 @@ def evaluate_audit(
             scenario_sha256=scenario_sha256,
             source_contracts=source_contracts,
             runtime_contract=runtime_contract,
+            smoke=_smoke,
         )
     else:
         manifest = _initial_manifest(
@@ -1199,6 +1251,7 @@ def evaluate_audit(
             scenario_sha256=scenario_sha256,
             source_contracts=source_contracts,
             runtime_contract=runtime_contract,
+            smoke=_smoke,
         )
         atomic_write_json(manifest_path, manifest)
 
@@ -1333,11 +1386,15 @@ def _distribution(values: Sequence[float]) -> Mapping[str, float | None]:
     }
 
 
-def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
-    """Summarize one candidate's frozen 200-game reciprocal panel."""
-    if len(rows) != 200:
-        raise ValueError("candidate summary requires exactly 200 match rows")
-    counts = {"games": 200, "wins": 0, "losses": 0, "draws": 0}
+def summarize_candidate(
+    rows: Sequence[Mapping[str, Any]], _expected_games: int = 200
+) -> Mapping[str, Any]:
+    """Summarize one candidate's frozen reciprocal panel."""
+    if len(rows) != _expected_games:
+        raise ValueError(
+            f"candidate summary requires exactly {_expected_games} match rows"
+        )
+    counts = {"games": _expected_games, "wins": 0, "losses": 0, "draws": 0}
     seats: dict[str, dict[str, Any]] = {
         "candidate_as_p0": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
         "candidate_as_p1": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
@@ -1416,9 +1473,9 @@ def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
             draw_final_advantage.append(final_advantage)
 
     rates = {
-        "win": counts["wins"] / 200,
-        "loss": counts["losses"] / 200,
-        "draw": counts["draws"] / 200,
+        "win": counts["wins"] / _expected_games,
+        "loss": counts["losses"] / _expected_games,
+        "draw": counts["draws"] / _expected_games,
     }
     for seat_summary in seats.values():
         games = seat_summary["games"]
@@ -1436,7 +1493,7 @@ def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         "counts": counts,
         "rates": rates,
         "confidence_intervals": {
-            outcome: wilson_interval(counts[counter], 200, 0.95)
+            outcome: wilson_interval(counts[counter], _expected_games, 0.95)
             for outcome, counter in (
                 ("win", "wins"),
                 ("loss", "losses"),
@@ -1449,10 +1506,13 @@ def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
             - seats["candidate_as_p1"]["rates"]["win"]
         ),
         "draw_diagnostics": {
-            "cycling": {"count": cycling_draws, "incidence": cycling_draws / 200},
+            "cycling": {
+                "count": cycling_draws,
+                "incidence": cycling_draws / _expected_games,
+            },
             "action_waste": {
                 "count": action_waste_draws,
-                "incidence": action_waste_draws / 200,
+                "incidence": action_waste_draws / _expected_games,
             },
             "primary_categories": dict(sorted(primary_categories.items())),
         },
@@ -1462,8 +1522,8 @@ def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         },
         "normalized_advantage": {
             "all_games": {
-                "final": sum(all_final_advantage) / 200,
-                "peak": sum(all_peak_advantage) / 200,
+                "final": sum(all_final_advantage) / _expected_games,
+                "peak": sum(all_peak_advantage) / _expected_games,
             },
             "draws": {
                 "final": (
@@ -1491,9 +1551,12 @@ def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
 
 
 def _paired_index(
-    rows: Sequence[Mapping[str, Any]], *, label: str
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+    expected_games: int = 200,
 ) -> Mapping[tuple[int, int], str]:
-    if len(rows) != 200:
+    if len(rows) != expected_games:
         raise ValueError(f"{label} paired table has missing schedule keys")
     indexed: dict[tuple[int, int], str] = {}
     for row in rows:
@@ -1538,10 +1601,15 @@ def _exact_sign_test(left_only: int, right_only: int) -> float:
 def paired_change(
     earlier: Sequence[Mapping[str, Any]],
     later: Sequence[Mapping[str, Any]],
+    _expected_games: int = 200,
 ) -> Mapping[str, Any]:
     """Compare two candidate panels on identical reciprocal schedule keys."""
-    left = _paired_index(earlier, label="earlier")
-    right = _paired_index(later, label="later")
+    left = _paired_index(
+        earlier, label="earlier", expected_games=_expected_games
+    )
+    right = _paired_index(
+        later, label="later", expected_games=_expected_games
+    )
     if set(left) != set(right):
         raise ValueError("paired tables have missing schedule keys")
     outcomes = ("win", "draw", "loss")
@@ -1559,7 +1627,7 @@ def paired_change(
         "left_only_wins": left_only,
         "right_only_wins": right_only,
         "net_win_change": net_change,
-        "absolute_win_rate_change": net_change / 200,
+        "absolute_win_rate_change": net_change / _expected_games,
         "exact_sign_test_p_value": _exact_sign_test(left_only, right_only),
     }
 
@@ -1676,9 +1744,10 @@ def aggregate_audit(
     definition: AuditDefinition,
     *,
     output_root: Path,
+    _smoke: bool = False,
 ) -> Mapping[str, Any]:
     """Reopen every physical map, aggregate deterministically, then seal the audit."""
-    _validate_global_audit_definition(definition)
+    _validate_global_audit_definition(definition, smoke=_smoke)
     root = Path(output_root).resolve(strict=True)
     manifest = _load_audit_manifest(root)
     definition_payload, definition_sha256 = _definition_identity(definition)
@@ -1687,6 +1756,8 @@ def aggregate_audit(
         or manifest.get("definition_sha256") != definition_sha256
     ):
         raise ValueError("audit manifest does not match the requested frozen definition")
+    if manifest.get("smoke") is not _smoke:
+        raise ValueError("audit manifest smoke mode does not match aggregation mode")
 
     candidates: dict[str, Mapping[str, Any]] = {}
     physical_rows: dict[str, list[Mapping[str, Any]]] = {}
@@ -1701,11 +1772,16 @@ def aggregate_audit(
                 if match.get("candidate_seat") != candidate_seat:
                     raise ValueError("validated reciprocal matches are not ordered by candidate seat")
                 rows.append({**dict(match), "map_seed": map_seed})
-        if len(rows) != 200:
+        expected_rows = definition.schedule.maps * 2
+        if len(rows) != expected_rows:
             raise ValueError(
-                f"{candidate.candidate_id} must contain exactly 200 ordered match rows"
+                f"{candidate.candidate_id} must contain exactly {expected_rows} ordered match rows"
             )
-        summary = dict(summarize_candidate(rows))
+        summary = dict(
+            summarize_candidate(rows, _expected_games=expected_rows)
+            if _smoke
+            else summarize_candidate(rows)
+        )
         aggregate = {**candidate.to_dict(), "summary": summary}
         candidates[candidate.candidate_id] = aggregate
         physical_rows[candidate.candidate_id] = rows
@@ -1726,7 +1802,11 @@ def aggregate_audit(
             {
                 "earlier_candidate_id": earlier_id,
                 "later_candidate_id": later_id,
-                **paired_change(physical_rows[earlier_id], physical_rows[later_id]),
+                **paired_change(
+                    physical_rows[earlier_id],
+                    physical_rows[later_id],
+                    _expected_games=definition.schedule.maps * 2,
+                ),
             }
         )
     anchors = [
@@ -1737,6 +1817,7 @@ def aggregate_audit(
     total_maps = len(definition.candidates) * definition.schedule.maps
     aggregate_payload: Mapping[str, Any] = {
         "schema_version": 1,
+        "smoke": _smoke,
         "audit_id": definition.audit_id,
         "exploratory": definition.exploratory,
         "locked_panel_replacement": definition.locked_panel_replacement,
@@ -1753,7 +1834,14 @@ def aggregate_audit(
         "trajectory": trajectory,
         "paired_successive_changes": paired_changes,
         "anchors": anchors,
-        "decision": choose_next_experiment(trajectory),
+        "decision": (
+            {
+                "available": False,
+                "reason": "two-map programmatic smoke is not a decision panel",
+            }
+            if _smoke
+            else choose_next_experiment(trajectory)
+        ),
         "physical_evidence": {
             "maps": total_maps,
             "games": total_maps * 2,
@@ -1787,3 +1875,39 @@ def aggregate_audit(
     }
     atomic_write_json(root / "manifest.json", completed_manifest)
     return aggregate_payload
+
+
+def run_programmatic_smoke(
+    definition: AuditDefinition,
+    *,
+    output_root: Path,
+    server_cmd: Sequence[str],
+    workers: int,
+    evaluator: Callable[..., Mapping[str, Any]] = evaluate_controllers,
+    progress: Callable[[str], None] = print,
+) -> Mapping[str, Any]:
+    """Run the exact two-map preflight without exposing a CLI schedule override."""
+    _validate_global_audit_definition(definition)
+    smoke_definition = replace(
+        definition,
+        schedule=_PROGRAMMATIC_SMOKE_SCHEDULE,
+    )
+    evaluation = evaluate_audit(
+        smoke_definition,
+        output_root=output_root,
+        server_cmd=server_cmd,
+        workers=workers,
+        evaluator=evaluator,
+        progress=progress,
+        _smoke=True,
+    )
+    aggregate = aggregate_audit(
+        smoke_definition,
+        output_root=output_root,
+        _smoke=True,
+    )
+    return {
+        "definition": smoke_definition.to_dict(),
+        "evaluation": dict(evaluation),
+        "aggregate": dict(aggregate),
+    }

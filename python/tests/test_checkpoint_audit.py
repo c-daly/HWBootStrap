@@ -131,6 +131,51 @@ def test_candidate_discovery_uses_only_physical_checkpoint_trajectory(
     assert all("51200" not in row.candidate_id for row in candidates)
 
 
+def test_clone_discovery_accepts_contract_identity_without_redundant_config_environment(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    clone_manifest = json.loads((clone / "run.json").read_text(encoding="utf-8"))
+    clone_manifest["config"].pop("environment")
+    _write_json(clone / "run.json", clone_manifest)
+
+    candidates = discover_audit_candidates(
+        clone_run=clone,
+        ppo_run=ppo,
+        scratch_run=None,
+    )
+
+    assert candidates[0].candidate_id == "pure-bc-seed-227"
+    clone_manifest["config"]["environment"] = "tactical-v1"
+    _write_json(clone / "run.json", clone_manifest)
+    with pytest.raises(ValueError, match="environment does not match its contract"):
+        discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+
+def test_ppo_discovery_accepts_config_seed_without_redundant_model_seed_fields(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    ppo_manifest = json.loads((ppo / "run.json").read_text(encoding="utf-8"))
+    ppo_manifest.pop("model_seed")
+    ppo_manifest["config"].pop("model_seed")
+    _write_json(ppo / "run.json", ppo_manifest)
+
+    candidates = discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+    assert [row.model_seed for row in candidates if row.family == "bc_ppo"] == [227] * 3
+
+    ppo_manifest["config"]["seed"] = 211
+    _write_json(ppo / "run.json", ppo_manifest)
+    with pytest.raises(ValueError, match="model seed must be 227"):
+        discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+    ppo_manifest["config"].pop("seed")
+    _write_json(ppo / "run.json", ppo_manifest)
+    with pytest.raises(ValueError, match="model seed must be 227"):
+        discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+
 def test_learned_candidates_capture_canonical_physical_provenance(
     source_runs: tuple[Path, Path],
 ) -> None:
@@ -373,6 +418,8 @@ def test_discovery_rejects_mutually_compatible_non_tactical_v2_sources(
 
     with pytest.raises(ValueError, match="tactical-v2"):
         discover_audit_candidates(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+
 RUNTIME_CONTRACT = {
     **_contract(),
     "roster": ["command", "infantry", "armor"],
@@ -380,6 +427,46 @@ RUNTIME_CONTRACT = {
     "semantics": {"start_profiles": [{"id": "standard-3v3"}]},
 }
 REPOSITORY_IDENTITY = {"repository": "C:/repo", "commit": "a" * 40, "dirty": False}
+
+
+def test_runtime_contract_accepts_horizon_and_environment_kind_differences() -> None:
+    source_contract = _contract(
+        board={
+            "width": 13,
+            "height": 9,
+            "max_steps": 808,
+            "environment_kind": "tactical",
+        }
+    )
+    runtime_contract = {
+        **RUNTIME_CONTRACT,
+        "board": {
+            "width": 13,
+            "height": 9,
+            "max_steps": 1616,
+            "environment_kind": "duel",
+        },
+    }
+
+    audit_module._validate_runtime_contract(
+        runtime_contract,
+        [{"contract": source_contract}],
+    )
+
+
+def test_runtime_contract_rejects_board_geometry_mismatch() -> None:
+    runtime_contract = {
+        **RUNTIME_CONTRACT,
+        "board": {"width": 12, "height": 9},
+    }
+
+    with pytest.raises(ValueError, match="board geometry"):
+        audit_module._validate_runtime_contract(
+            runtime_contract,
+            [{"contract": _contract()}],
+        )
+
+
 HALF_WILSON = {
     "low": 0.09453120573423074,
     "high": 0.9054687942657693,
@@ -834,6 +921,95 @@ def test_evaluate_audit_rejects_non_frozen_development_schedule(
         )
 
 
+def test_programmatic_smoke_evaluates_aggregates_reopens_and_reuses(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone, ppo = source_runs
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+    output_root = tmp_path / "smoke"
+    _stub_audit_identity(monkeypatch)
+
+    def smoke_summary(
+        rows: list[dict[str, Any]], _expected_games: int = 200
+    ) -> dict[str, Any]:
+        assert _expected_games == 4
+        assert len(rows) == 4
+        return {
+            "counts": {"games": 4, "wins": 2, "losses": 0, "draws": 2},
+            "rates": {"win": 0.5, "loss": 0.0, "draw": 0.5},
+            "draw_diagnostics": {
+                "cycling": {"count": 0, "incidence": 0.0},
+            },
+        }
+
+    monkeypatch.setattr(audit_module, "summarize_candidate", smoke_summary)
+    first_evaluator = _FakeAuditEvaluator(definition)
+
+    first = audit_module.run_programmatic_smoke(
+        definition,
+        output_root=output_root,
+        server_cmd=["fake-gym-server"],
+        workers=2,
+        evaluator=first_evaluator,
+        progress=lambda _message: None,
+    )
+
+    assert first["definition"]["schedule"] == {
+        "seed_start": 16_000_000,
+        "maps": 2,
+        "both_seats": True,
+        "profile": "standard-3v3",
+        "opponent": "random",
+    }
+    assert first["evaluation"] == {
+        "state": "in_progress",
+        "manifest": str(output_root / "manifest.json"),
+        "maps": 12,
+        "games": 24,
+        "reused": 0,
+    }
+    assert len(first_evaluator.calls) == 12
+    manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["smoke"] is True
+    assert manifest["exploratory"] is True
+    assert manifest["locked_panel_replacement"] is False
+    assert first["aggregate"]["smoke"] is True
+    assert first["aggregate"]["decision"] == {
+        "available": False,
+        "reason": "two-map programmatic smoke is not a decision panel",
+    }
+    assert first["aggregate"]["physical_evidence"] == {
+        "maps": 12,
+        "games": 24,
+        "traces": 24,
+        "replays": 24,
+    }
+
+    smoke_schedule = AuditSchedule(seed_start=16_000_000, maps=2)
+    for candidate in definition.candidates:
+        for map_seed in (16_000_000, 16_000_001):
+            _evaluation, matches = audit_module.validate_physical_map(
+                output_root, candidate, smoke_schedule, map_seed
+            )
+            assert len(matches) == 2
+
+    second_evaluator = _FakeAuditEvaluator(definition)
+    second = audit_module.run_programmatic_smoke(
+        definition,
+        output_root=output_root,
+        server_cmd=["fake-gym-server"],
+        workers=2,
+        evaluator=second_evaluator,
+        progress=lambda _message: None,
+    )
+
+    assert second["evaluation"]["reused"] == 12
+    assert second["aggregate"] == first["aggregate"]
+    assert second_evaluator.calls == []
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["scenario", "source_contract", "runtime_geometry"],
@@ -971,6 +1147,19 @@ def _full_summary_rows() -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def test_summary_accepts_private_smoke_game_count_without_changing_default() -> None:
+    rows = _full_summary_rows()[:4]
+
+    summary = audit_module.summarize_candidate(rows, _expected_games=4)
+
+    assert summary["counts"] == {"games": 4, "wins": 4, "losses": 0, "draws": 0}
+    assert summary["rates"] == {"win": 1.0, "loss": 0.0, "draw": 0.0}
+    assert summary["normalized_advantage"]["all_games"] == {
+        "final": 0.2,
+        "peak": 0.4,
+    }
 
 
 def test_summary_maps_raw_trace_fields_to_complete_aggregate_metrics() -> None:

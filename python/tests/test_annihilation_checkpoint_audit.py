@@ -80,6 +80,21 @@ def test_parser_requires_exact_command_inputs(
     assert all(getattr(parsed, option.removeprefix("--").replace("-", "_")) for option in required)
 
 
+def test_cli_does_not_expose_programmatic_smoke_schedule() -> None:
+    parser = runner.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "evaluate",
+                "--output-root",
+                "smoke",
+                "--maps",
+                "2",
+            ]
+        )
+
+
 def test_prepare_freezes_physical_definition_without_opening_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
