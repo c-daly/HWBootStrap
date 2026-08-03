@@ -379,7 +379,7 @@ RUNTIME_CONTRACT = {
     "reward": {"terminal_win": 1.0, "terminal_loss": -1.0},
     "semantics": {"start_profiles": [{"id": "standard-3v3"}]},
 }
-REPOSITORY_IDENTITY = {"commit": "a" * 40, "dirty": False}
+REPOSITORY_IDENTITY = {"repository": "C:/repo", "commit": "a" * 40, "dirty": False}
 HALF_WILSON = {
     "low": 0.09453120573423074,
     "high": 0.9054687942657693,
@@ -896,3 +896,410 @@ def test_validator_rejects_winner_outside_engine_domain(
         audit_module.validate_physical_map(
             output_root, candidate, definition.schedule, 16_000_000
         )
+
+
+def test_summary_reports_candidate_outcomes_seats_and_unavailable_policy_diagnostic() -> None:
+    rows = [
+        {
+            "map_seed": 16_000_000 + index // 2,
+            "candidate_seat": index % 2,
+            "outcome": "win" if index < 50 else "loss" if index < 80 else "draw",
+            "summary": {
+                "rounds": 10,
+                "decisions": 20,
+                "end_turns_by_seat": [10, 10],
+                "wasted_end_turns_by_seat": [2, 2],
+                "peak_health_adjusted_advantage": 0.4,
+                "final_health_adjusted_advantage": 0.2,
+            },
+            "classification": (
+                {"primary": "cycling", "flags": ["cycling"], "evidence": {}}
+                if index >= 80
+                else None
+            ),
+        }
+        for index in range(200)
+    ]
+
+    summary = audit_module.summarize_candidate(rows)
+
+    assert summary["counts"] == {"games": 200, "wins": 50, "losses": 30, "draws": 120}
+    assert summary["rates"] == {"win": 0.25, "loss": 0.15, "draw": 0.6}
+    assert summary["seats"]["candidate_as_p0"]["games"] == 100
+    assert summary["seats"]["candidate_as_p1"]["games"] == 100
+    assert summary["end_turn_policy_diagnostics"] == {
+        "available": False,
+        "reason": "integer-action inference boundary does not expose action probabilities or ranks",
+    }
+
+def _full_summary_rows() -> list[dict[str, Any]]:
+    by_seat = {
+        0: ["win"] * 30 + ["loss"] * 10 + ["draw"] * 60,
+        1: ["win"] * 20 + ["loss"] * 20 + ["draw"] * 60,
+    }
+    rows: list[dict[str, Any]] = []
+    draw_index = {0: 0, 1: 0}
+    for offset in range(100):
+        for seat in (0, 1):
+            outcome = by_seat[seat][offset]
+            classification = None
+            if outcome == "draw":
+                position = draw_index[seat]
+                draw_index[seat] += 1
+                category = (
+                    "cycling"
+                    if position < 20
+                    else "action_waste"
+                    if position < 35
+                    else "balanced_attrition"
+                )
+                classification = {"primary": category, "flags": [category], "evidence": {}}
+            rows.append(
+                {
+                    "map_seed": 16_000_000 + offset,
+                    "candidate_seat": seat,
+                    "outcome": outcome,
+                    "summary": {
+                        "rounds": 10,
+                        "decisions": 20,
+                        "end_turns_by_seat": [10, 10],
+                        "wasted_end_turns_by_seat": [2, 2],
+                        "peak_health_adjusted_advantage": 0.4,
+                        "final_health_adjusted_advantage": 0.2,
+                    },
+                    "classification": classification,
+                }
+            )
+    return rows
+
+
+def test_summary_maps_raw_trace_fields_to_complete_aggregate_metrics() -> None:
+    summary = audit_module.summarize_candidate(_full_summary_rows())
+
+    assert summary["confidence_intervals"] == {
+        "win": {"low": 0.195081680068175, "high": 0.3143409831204583, "confidence": 0.95},
+        "loss": {"low": 0.10713593562241996, "high": 0.20605579284166659, "confidence": 0.95},
+        "draw": {"low": 0.53083672039262, "high": 0.6653942143319266, "confidence": 0.95},
+    }
+    assert summary["seats"] == {
+        "candidate_as_p0": {
+            "games": 100, "wins": 30, "losses": 10, "draws": 60,
+            "rates": {"win": 0.3, "loss": 0.1, "draw": 0.6},
+        },
+        "candidate_as_p1": {
+            "games": 100, "wins": 20, "losses": 20, "draws": 60,
+            "rates": {"win": 0.2, "loss": 0.2, "draw": 0.6},
+        },
+    }
+    assert summary["win_rate_p0_minus_p1"] == pytest.approx(0.1)
+    assert summary["draw_diagnostics"] == {
+        "cycling": {"count": 40, "incidence": 0.2},
+        "action_waste": {"count": 30, "incidence": 0.15},
+        "primary_categories": {
+            "action_waste": 30, "balanced_attrition": 50, "cycling": 40
+        },
+    }
+    assert summary["winning_games"] == {
+        "round_count": {"mean": 10.0, "median": 10.0, "p90": 10.0},
+        "command_count": {"mean": 20.0, "median": 20.0, "p90": 20.0},
+    }
+    assert summary["normalized_advantage"] == {
+        "all_games": {"final": 0.2, "peak": 0.4},
+        "draws": {"final": 0.2, "peak": 0.4},
+    }
+    assert summary["candidate_end_turns"] == {
+        "total": 2000, "wasted": 400, "wasted_ratio": 0.2
+    }
+
+def _paired_rows(outcomes: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "map_seed": 16_000_000 + index // 2,
+            "candidate_seat": index % 2,
+            "outcome": outcome,
+        }
+        for index, outcome in enumerate(outcomes)
+    ]
+
+
+def test_paired_change_reports_full_transitions_and_exact_sign_test() -> None:
+    transitions = (
+        [("win", "win")] * 60
+        + [("win", "draw")] * 15
+        + [("win", "loss")] * 5
+        + [("draw", "win")] * 25
+        + [("draw", "draw")] * 25
+        + [("draw", "loss")] * 10
+        + [("loss", "win")] * 15
+        + [("loss", "draw")] * 20
+        + [("loss", "loss")] * 25
+    )
+    change = audit_module.paired_change(
+        _paired_rows([left for left, _right in transitions]),
+        _paired_rows([right for _left, right in transitions]),
+    )
+
+    assert change["transition_table"] == {
+        "win": {"win": 60, "draw": 15, "loss": 5},
+        "draw": {"win": 25, "draw": 25, "loss": 10},
+        "loss": {"win": 15, "draw": 20, "loss": 25},
+    }
+    assert change["left_only_wins"] == 20
+    assert change["right_only_wins"] == 40
+    assert change["net_win_change"] == 20
+    assert change["absolute_win_rate_change"] == pytest.approx(0.1)
+    assert change["exact_sign_test_p_value"] == pytest.approx(0.01348929373119186)
+
+
+def test_paired_change_rejects_duplicate_or_missing_schedule_keys() -> None:
+    rows = _paired_rows(["draw"] * 200)
+    duplicate = list(rows)
+    duplicate[-1] = dict(duplicate[0])
+
+    with pytest.raises(ValueError, match="duplicate"):
+        audit_module.paired_change(rows, duplicate)
+    with pytest.raises(ValueError, match="missing"):
+        audit_module.paired_change(rows, rows[:-1])
+
+def _decision_row(
+    candidate_id: str,
+    family: str,
+    trajectory_order: int,
+    *,
+    wins: int,
+    losses: int,
+    draws: int,
+    cycling: int,
+) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "family": family,
+        "trajectory_order": trajectory_order,
+        "summary": {
+            "counts": {"games": 200, "wins": wins, "losses": losses, "draws": draws},
+            "rates": {
+                "win": wins / 200,
+                "loss": losses / 200,
+                "draw": draws / 200,
+            },
+            "draw_diagnostics": {
+                "cycling": {"count": cycling, "incidence": cycling / 200}
+            },
+        },
+    }
+
+
+def test_decision_reports_independent_clauses_and_applies_precedence() -> None:
+    clone = _decision_row(
+        "clone", "pure_bc", 0, wins=120, losses=20, draws=60, cycling=10
+    )
+    qualifying = _decision_row(
+        "ppo-1", "bc_ppo", 1, wins=140, losses=20, draws=40, cycling=10
+    )
+    regressed = _decision_row(
+        "ppo-2", "bc_ppo", 2, wins=110, losses=30, draws=60, cycling=20
+    )
+
+    mixed = audit_module.choose_next_experiment([clone, qualifying, regressed])
+
+    assert mixed == {
+        "clauses": {
+            "qualifying_ppo": ["ppo-1"],
+            "consistent_improvement": True,
+            "large_late_regression": True,
+            "cycling_dominant": False,
+            "all_ppo_below_half": False,
+        },
+        "recommended_next_step": "test_retained_imitation_constraint",
+    }
+    assert audit_module.choose_next_experiment([clone, qualifying])[
+        "recommended_next_step"
+    ] == "replicate_seeds_211_223"
+
+
+def test_decision_distinguishes_dagger_and_inconclusive_trajectories() -> None:
+    clone = _decision_row(
+        "clone", "pure_bc", 0, wins=120, losses=20, draws=60, cycling=10
+    )
+    cycling = _decision_row(
+        "ppo-low", "bc_ppo", 1, wins=60, losses=20, draws=120, cycling=80
+    )
+    middling = _decision_row(
+        "ppo-mid", "bc_ppo", 1, wins=110, losses=20, draws=70, cycling=10
+    )
+
+    dagger = audit_module.choose_next_experiment([clone, cycling])
+    assert dagger["clauses"]["all_ppo_below_half"] is True
+    assert dagger["clauses"]["cycling_dominant"] is True
+    assert dagger["recommended_next_step"] == "proceed_to_dagger"
+    assert audit_module.choose_next_experiment([clone, middling])[
+        "recommended_next_step"
+    ] == "inconclusive_review_trajectory"
+
+def test_aggregate_publication_marks_manifest_completed_and_revalidates_on_reopen(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone, ppo = source_runs
+    discovered = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+    definition = replace(
+        discovered,
+        candidates=(
+            discovered.candidates[0],
+            discovered.candidates[-2],
+            discovered.candidates[-1],
+        ),
+    )
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    summarized_keys: list[list[tuple[int, int]]] = []
+
+    def fake_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        summarized_keys.append(
+            [(row["map_seed"], row["candidate_seat"]) for row in rows]
+        )
+        return _decision_row(
+            "unused", "pure_bc", 0, wins=100, losses=0, draws=100, cycling=100
+        )["summary"]
+
+    monkeypatch.setattr(audit_module, "summarize_candidate", fake_summary)
+    aggregate = audit_module.aggregate_audit(definition, output_root=output_root)
+
+    assert aggregate["schema_version"] == 1
+    assert aggregate["audit_id"] == "annihilation-checkpoint-audit-v1"
+    assert aggregate["exploratory"] is True
+    assert aggregate["locked_panel_replacement"] is False
+    assert aggregate["anchors"] == ["random-anchor", "bounded-search-anchor"]
+    assert [row["candidate_id"] for row in aggregate["trajectory"]] == [
+        "pure-bc-seed-227"
+    ]
+    assert aggregate["paired_successive_changes"] == []
+    assert aggregate["decision"]["clauses"]["large_late_regression"] is False
+    assert aggregate["decision"]["recommended_next_step"] == (
+        "inconclusive_review_trajectory"
+    )
+    assert aggregate["physical_evidence"] == {
+        "maps": 300, "games": 600, "traces": 600, "replays": 600
+    }
+    assert summarized_keys[0][:4] == [
+        (16_000_000, 0),
+        (16_000_000, 1),
+        (16_000_001, 0),
+        (16_000_001, 1),
+    ]
+    manifest_path = output_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    audit_bytes = (output_root / "audit.json").read_bytes()
+    assert manifest["state"] == "completed"
+    assert manifest["aggregate_sha256"] == hashlib.sha256(audit_bytes).hexdigest()
+
+    original_validate = audit_module.validate_physical_map
+    reopened_maps: list[tuple[str, int]] = []
+
+    def recording_validate(root: Path, candidate: Any, schedule: Any, seed: int) -> Any:
+        reopened_maps.append((candidate.candidate_id, seed))
+        return original_validate(root, candidate, schedule, seed)
+
+    monkeypatch.setattr(audit_module, "validate_physical_map", recording_validate)
+    assert audit_module.aggregate_audit(definition, output_root=output_root) == aggregate
+    assert len(reopened_maps) == 300
+
+def test_validator_rejects_reciprocal_matches_that_share_artifacts(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    evaluation_path = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, 16_000_000
+    )
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    for field in ("trace_path", "replay_path", "trace_sha256", "replay_sha256"):
+        evaluation["matches"][1][field] = evaluation["matches"][0][field]
+    evaluation["audit_identity"]["artifacts"][1] = dict(
+        evaluation["audit_identity"]["artifacts"][0]
+    )
+    _write_json(evaluation_path, evaluation)
+
+    with pytest.raises(ValueError, match="distinct"):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["generated_at", "repository_identity", "state"]
+)
+def test_aggregate_rejects_malformed_root_manifest_shape(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    manifest_path = output_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "generated_at":
+        manifest["generated_at"] = 7
+    elif mutation == "repository_identity":
+        manifest["repository_identity"] = {"commit": "bad", "dirty": "no"}
+    else:
+        manifest["state"] = "paused"
+    _write_json(manifest_path, manifest)
+    monkeypatch.setattr(
+        audit_module,
+        "summarize_candidate",
+        lambda _rows: _decision_row(
+            "unused", "pure_bc", 0, wins=100, losses=0, draws=100, cycling=100
+        )["summary"],
+    )
+
+    with pytest.raises(ValueError, match="manifest"):
+        audit_module.aggregate_audit(definition, output_root=output_root)
+
+def test_aggregate_write_failure_leaves_root_manifest_in_progress(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    monkeypatch.setattr(
+        audit_module,
+        "summarize_candidate",
+        lambda _rows: _decision_row(
+            "unused", "pure_bc", 0, wins=100, losses=0, draws=100, cycling=100
+        )["summary"],
+    )
+    real_atomic_write = audit_module.atomic_write_json
+
+    def fail_aggregate_write(path: Path, value: object) -> None:
+        if Path(path).name == "audit.json":
+            raise OSError("simulated aggregate write failure")
+        real_atomic_write(path, value)
+
+    monkeypatch.setattr(audit_module, "atomic_write_json", fail_aggregate_write)
+    with pytest.raises(OSError, match="simulated aggregate write failure"):
+        audit_module.aggregate_audit(definition, output_root=output_root)
+
+    manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["state"] == "in_progress"
+    assert "aggregate_sha256" not in manifest
+    assert not (output_root / "audit.json").exists()
+
+def test_summary_handles_candidates_with_no_wins_or_draws() -> None:
+    rows = _full_summary_rows()
+    for row in rows:
+        row["outcome"] = "loss"
+        row["classification"] = None
+
+    summary = audit_module.summarize_candidate(rows)
+
+    assert summary["winning_games"] == {
+        "round_count": {"mean": None, "median": None, "p90": None},
+        "command_count": {"mean": None, "median": None, "p90": None},
+    }
+    assert summary["normalized_advantage"]["draws"] == {
+        "final": None, "peak": None
+    }

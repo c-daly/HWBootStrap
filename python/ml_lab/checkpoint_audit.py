@@ -26,6 +26,12 @@ _COMPATIBILITY_FIELDS = (
     ("observation_size", "observation"),
     ("action_size", "action"),
 )
+TRACE_FIELDS = {
+    "rounds": "round_count",
+    "decisions": "command_count",
+    "peak_health_adjusted_advantage": "peak_normalized_advantage",
+    "final_health_adjusted_advantage": "final_normalized_advantage",
+}
 
 
 @dataclass(frozen=True)
@@ -595,6 +601,32 @@ def _load_audit_manifest(root: Path) -> Mapping[str, Any]:
     manifest, _raw = _read_json_bytes(root / "manifest.json", label="audit manifest")
     if manifest.get("schema_version") != 1:
         raise ValueError("audit manifest schema_version must be 1")
+    _require_string(manifest.get("generated_at"), label="audit manifest generated_at")
+    state = manifest.get("state")
+    if state not in {"in_progress", "completed"}:
+        raise ValueError("audit manifest state must be in_progress or completed")
+    repository = _require_mapping(
+        manifest.get("repository_identity"), label="audit manifest repository identity"
+    )
+    if set(repository) != {"repository", "commit", "dirty"}:
+        raise ValueError("audit manifest repository identity fields are invalid")
+    _require_string(repository.get("repository"), label="audit manifest repository path")
+    commit = _require_string(
+        repository.get("commit"), label="audit manifest repository commit"
+    )
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("audit manifest repository commit must be a full lowercase SHA-1")
+    if not isinstance(repository.get("dirty"), bool):
+        raise ValueError("audit manifest repository dirty flag must be boolean")
+    if state == "completed":
+        _require_string(
+            manifest.get("completed_at"), label="audit manifest completed_at"
+        )
+        aggregate_sha256 = _require_string(
+            manifest.get("aggregate_sha256"), label="audit manifest aggregate SHA-256"
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", aggregate_sha256):
+            raise ValueError("audit manifest aggregate SHA-256 is invalid")
     definition = _require_mapping(manifest.get("definition"), label="audit definition")
     definition_sha256 = _require_string(
         manifest.get("definition_sha256"), label="audit definition SHA-256"
@@ -892,6 +924,7 @@ def validate_physical_map(
     artifacts = audit_identity.get("artifacts")
     if not isinstance(artifacts, list) or len(artifacts) != 2:
         raise ValueError("map audit identity must hash both retained artifact pairs")
+    artifact_pairs: set[tuple[Path, Path]] = set()
     for index, match in enumerate(matches):
         seat = index
         if match.get("seed") != map_seed:
@@ -931,6 +964,11 @@ def validate_physical_map(
         replay_path = _artifact_path(
             audit_root, map_root, match.get("replay_path"), label="replay path"
         )
+        artifact_pair = (trace_path, replay_path)
+        if artifact_pair in artifact_pairs:
+            raise ValueError("reciprocal matches must retain distinct trace/replay artifacts")
+        artifact_pairs.add(artifact_pair)
+
         artifact = _require_mapping(artifacts[index], label=f"match {index} artifact identity")
         if artifact.get("trace_sha256") != _sha256(trace_path.read_bytes()):
             raise ValueError("retained trace bytes changed")
@@ -1219,3 +1257,474 @@ def evaluate_audit(
         "games": completed * 2,
         "reused": reused_total,
     }
+
+
+def _trace_metric(summary: Mapping[str, Any], aggregate_field: str) -> float:
+    raw_field = next(
+        (raw for raw, mapped in TRACE_FIELDS.items() if mapped == aggregate_field),
+        aggregate_field,
+    )
+    value = summary.get(raw_field, summary.get(aggregate_field))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"match summary {raw_field} must be numeric")
+    return float(value)
+
+
+def _distribution(values: Sequence[float]) -> Mapping[str, float | None]:
+    if not values:
+        return {"mean": None, "median": None, "p90": None}
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    median = (
+        ordered[middle]
+        if len(ordered) % 2
+        else (ordered[middle - 1] + ordered[middle]) / 2
+    )
+    p90_index = (9 * len(ordered) + 9) // 10 - 1
+    return {
+        "mean": sum(ordered) / len(ordered),
+        "median": median,
+        "p90": ordered[p90_index],
+    }
+
+
+def summarize_candidate(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """Summarize one candidate's frozen 200-game reciprocal panel."""
+    if len(rows) != 200:
+        raise ValueError("candidate summary requires exactly 200 match rows")
+    counts = {"games": 200, "wins": 0, "losses": 0, "draws": 0}
+    seats: dict[str, dict[str, Any]] = {
+        "candidate_as_p0": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
+        "candidate_as_p1": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
+    }
+    primary_categories: dict[str, int] = {}
+    cycling_draws = 0
+    action_waste_draws = 0
+    win_rounds: list[float] = []
+    win_commands: list[float] = []
+    all_final_advantage: list[float] = []
+    all_peak_advantage: list[float] = []
+    draw_final_advantage: list[float] = []
+    draw_peak_advantage: list[float] = []
+    candidate_end_turns = 0
+    candidate_wasted_end_turns = 0
+
+    for row in rows:
+        outcome = row.get("outcome")
+        if outcome not in {"win", "loss", "draw"}:
+            raise ValueError("candidate match outcome must be win, loss, or draw")
+        seat = row.get("candidate_seat")
+        if isinstance(seat, bool) or seat not in {0, 1}:
+            raise ValueError("candidate match seat must be 0 or 1")
+        summary = _require_mapping(row.get("summary"), label="candidate match summary")
+        round_count = _trace_metric(summary, "round_count")
+        command_count = _trace_metric(summary, "command_count")
+        peak_advantage = _trace_metric(summary, "peak_normalized_advantage")
+        final_advantage = _trace_metric(summary, "final_normalized_advantage")
+        end_turns = summary.get("end_turns_by_seat")
+        wasted_end_turns = summary.get("wasted_end_turns_by_seat")
+        for values, label in (
+            (end_turns, "end_turns_by_seat"),
+            (wasted_end_turns, "wasted_end_turns_by_seat"),
+        ):
+            if (
+                not isinstance(values, (list, tuple))
+                or len(values) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    for value in values
+                )
+            ):
+                raise ValueError(f"match summary {label} must contain two nonnegative integers")
+
+        counter = "losses" if outcome == "loss" else f"{outcome}s"
+        counts[counter] += 1
+        seat_summary = seats["candidate_as_p0" if seat == 0 else "candidate_as_p1"]
+        seat_summary["games"] += 1
+        seat_summary[counter] += 1
+        all_peak_advantage.append(peak_advantage)
+        all_final_advantage.append(final_advantage)
+        candidate_end_turns += end_turns[seat]
+        candidate_wasted_end_turns += wasted_end_turns[seat]
+
+        if outcome == "win":
+            win_rounds.append(round_count)
+            win_commands.append(command_count)
+        if outcome == "draw":
+            classification = _require_mapping(
+                row.get("classification"), label="draw classification"
+            )
+            primary = _require_string(
+                classification.get("primary"), label="draw classification primary"
+            )
+            flags = classification.get("flags")
+            if not isinstance(flags, list) or any(
+                not isinstance(flag, str) or not flag for flag in flags
+            ):
+                raise ValueError("draw classification flags must be strings")
+            primary_categories[primary] = primary_categories.get(primary, 0) + 1
+            cycling_draws += int("cycling" in flags)
+            action_waste_draws += int("action_waste" in flags)
+            draw_peak_advantage.append(peak_advantage)
+            draw_final_advantage.append(final_advantage)
+
+    rates = {
+        "win": counts["wins"] / 200,
+        "loss": counts["losses"] / 200,
+        "draw": counts["draws"] / 200,
+    }
+    for seat_summary in seats.values():
+        games = seat_summary["games"]
+        seat_summary["rates"] = {
+            "win": seat_summary["wins"] / games if games else 0.0,
+            "loss": seat_summary["losses"] / games if games else 0.0,
+            "draw": seat_summary["draws"] / games if games else 0.0,
+        }
+    wasted_ratio = (
+        candidate_wasted_end_turns / candidate_end_turns
+        if candidate_end_turns
+        else 0.0
+    )
+    return {
+        "counts": counts,
+        "rates": rates,
+        "confidence_intervals": {
+            outcome: wilson_interval(counts[counter], 200, 0.95)
+            for outcome, counter in (
+                ("win", "wins"),
+                ("loss", "losses"),
+                ("draw", "draws"),
+            )
+        },
+        "seats": seats,
+        "win_rate_p0_minus_p1": (
+            seats["candidate_as_p0"]["rates"]["win"]
+            - seats["candidate_as_p1"]["rates"]["win"]
+        ),
+        "draw_diagnostics": {
+            "cycling": {"count": cycling_draws, "incidence": cycling_draws / 200},
+            "action_waste": {
+                "count": action_waste_draws,
+                "incidence": action_waste_draws / 200,
+            },
+            "primary_categories": dict(sorted(primary_categories.items())),
+        },
+        "winning_games": {
+            "round_count": _distribution(win_rounds),
+            "command_count": _distribution(win_commands),
+        },
+        "normalized_advantage": {
+            "all_games": {
+                "final": sum(all_final_advantage) / 200,
+                "peak": sum(all_peak_advantage) / 200,
+            },
+            "draws": {
+                "final": (
+                    sum(draw_final_advantage) / len(draw_final_advantage)
+                    if draw_final_advantage else None
+                ),
+                "peak": (
+                    sum(draw_peak_advantage) / len(draw_peak_advantage)
+                    if draw_peak_advantage else None
+                ),
+            },
+        },
+        "candidate_end_turns": {
+            "total": candidate_end_turns,
+            "wasted": candidate_wasted_end_turns,
+            "wasted_ratio": wasted_ratio,
+        },
+        "end_turn_policy_diagnostics": {
+            "available": False,
+            "reason": (
+                "integer-action inference boundary does not expose action probabilities or ranks"
+            ),
+        },
+    }
+
+
+def _paired_index(
+    rows: Sequence[Mapping[str, Any]], *, label: str
+) -> Mapping[tuple[int, int], str]:
+    if len(rows) != 200:
+        raise ValueError(f"{label} paired table has missing schedule keys")
+    indexed: dict[tuple[int, int], str] = {}
+    for row in rows:
+        map_seed = row.get("map_seed")
+        candidate_seat = row.get("candidate_seat")
+        if (
+            isinstance(map_seed, bool)
+            or not isinstance(map_seed, int)
+            or isinstance(candidate_seat, bool)
+            or candidate_seat not in {0, 1}
+        ):
+            raise ValueError(f"{label} paired table has an invalid schedule key")
+        key = (map_seed, candidate_seat)
+        if key in indexed:
+            raise ValueError(f"{label} paired table has a duplicate schedule key")
+        outcome = row.get("outcome")
+        if outcome not in {"win", "draw", "loss"}:
+            raise ValueError(f"{label} paired table has an invalid outcome")
+        indexed[key] = outcome
+    return indexed
+
+
+def _binomial(n: int, k: int) -> int:
+    k = min(k, n - k)
+    result = 1
+    for index in range(1, k + 1):
+        result = result * (n - k + index) // index
+    return result
+
+
+def _exact_sign_test(left_only: int, right_only: int) -> float:
+    discordant = left_only + right_only
+    if discordant == 0:
+        return 1.0
+    tail = sum(
+        _binomial(discordant, index)
+        for index in range(min(left_only, right_only) + 1)
+    )
+    return min(1.0, 2.0 * tail / (2**discordant))
+
+
+def paired_change(
+    earlier: Sequence[Mapping[str, Any]],
+    later: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Compare two candidate panels on identical reciprocal schedule keys."""
+    left = _paired_index(earlier, label="earlier")
+    right = _paired_index(later, label="later")
+    if set(left) != set(right):
+        raise ValueError("paired tables have missing schedule keys")
+    outcomes = ("win", "draw", "loss")
+    transitions = {
+        earlier_outcome: {later_outcome: 0 for later_outcome in outcomes}
+        for earlier_outcome in outcomes
+    }
+    for key in sorted(left):
+        transitions[left[key]][right[key]] += 1
+    left_only = sum(transitions["win"][outcome] for outcome in ("draw", "loss"))
+    right_only = sum(transitions[outcome]["win"] for outcome in ("draw", "loss"))
+    net_change = right_only - left_only
+    return {
+        "transition_table": transitions,
+        "left_only_wins": left_only,
+        "right_only_wins": right_only,
+        "net_win_change": net_change,
+        "absolute_win_rate_change": net_change / 200,
+        "exact_sign_test_p_value": _exact_sign_test(left_only, right_only),
+    }
+
+CandidateAggregate = Mapping[str, Any]
+
+
+def _aggregate_summary(candidate: CandidateAggregate) -> Mapping[str, Any]:
+    return _require_mapping(candidate.get("summary"), label="candidate aggregate summary")
+
+
+def _aggregate_win_rate(candidate: CandidateAggregate) -> float:
+    rates = _require_mapping(_aggregate_summary(candidate).get("rates"), label="candidate rates")
+    value = rates.get("win")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("candidate aggregate win rate must be numeric")
+    return float(value)
+
+
+def choose_next_experiment(
+    trajectory: Sequence[CandidateAggregate],
+) -> Mapping[str, Any]:
+    """Return every approved evidence clause and one precedence-selected next step."""
+    if not trajectory:
+        raise ValueError("checkpoint trajectory cannot be empty")
+    ordered = sorted(trajectory, key=lambda row: row.get("trajectory_order", -1))
+    if ordered[0].get("family") != "pure_bc" or any(
+        row.get("family") != "bc_ppo" for row in ordered[1:]
+    ):
+        raise ValueError("decision trajectory must contain only clone then BC-initialized PPO")
+    expected_orders = list(range(len(ordered)))
+    if [row.get("trajectory_order") for row in ordered] != expected_orders:
+        raise ValueError("decision trajectory orders must be unique and contiguous")
+
+    ppo = ordered[1:]
+    ppo_rates = [_aggregate_win_rate(row) for row in ppo]
+    qualifying_indexes = [index for index, rate in enumerate(ppo_rates) if rate >= 0.65]
+    qualifying_ids = [
+        _require_string(ppo[index].get("candidate_id"), label="candidate ID")
+        for index in qualifying_indexes
+    ]
+    consistent_improvement = False
+    if qualifying_indexes:
+        earliest = qualifying_indexes[0] + 1
+        rates_to_qualifier = [_aggregate_win_rate(row) for row in ordered[: earliest + 1]]
+        changes = [
+            later - earlier
+            for earlier, later in zip(rates_to_qualifier, rates_to_qualifier[1:])
+        ]
+        consistent_improvement = all(change >= 0 for change in changes) and any(
+            change > 0 for change in changes
+        )
+
+    large_late_regression = any(
+        earlier - later >= 0.10
+        for earlier_index, earlier in enumerate(ppo_rates)
+        for later in ppo_rates[earlier_index + 1 :]
+    )
+    cycling_dominant = False
+    if ppo:
+        latest_summary = _aggregate_summary(ppo[-1])
+        latest_counts = _require_mapping(
+            latest_summary.get("counts"), label="latest PPO outcome counts"
+        )
+        draw_diagnostics = _require_mapping(
+            latest_summary.get("draw_diagnostics"), label="latest PPO draw diagnostics"
+        )
+        cycling = _require_mapping(
+            draw_diagnostics.get("cycling"), label="latest PPO cycling draws"
+        ).get("count")
+        wins = latest_counts.get("wins")
+        losses = latest_counts.get("losses")
+        draws = latest_counts.get("draws")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (cycling, wins, losses, draws)
+        ):
+            raise ValueError("latest PPO counts must be nonnegative integers")
+        if cycling > draws:
+            raise ValueError("latest PPO cycling draws exceed all draws")
+        cycling_dominant = cycling > max(wins, losses, draws - cycling)
+
+    all_ppo_below_half = bool(ppo_rates) and all(rate < 0.50 for rate in ppo_rates)
+    clauses = {
+        "qualifying_ppo": qualifying_ids,
+        "consistent_improvement": consistent_improvement,
+        "large_late_regression": large_late_regression,
+        "cycling_dominant": cycling_dominant,
+        "all_ppo_below_half": all_ppo_below_half,
+    }
+    if large_late_regression:
+        recommendation = "test_retained_imitation_constraint"
+    elif qualifying_ids and consistent_improvement:
+        recommendation = "replicate_seeds_211_223"
+    elif all_ppo_below_half or cycling_dominant:
+        recommendation = "proceed_to_dagger"
+    else:
+        recommendation = "inconclusive_review_trajectory"
+    return {"clauses": clauses, "recommended_next_step": recommendation}
+
+def aggregate_audit(
+    definition: AuditDefinition,
+    *,
+    output_root: Path,
+) -> Mapping[str, Any]:
+    """Reopen every physical map, aggregate deterministically, then seal the audit."""
+    root = Path(output_root).resolve(strict=True)
+    manifest = _load_audit_manifest(root)
+    definition_payload, definition_sha256 = _definition_identity(definition)
+    if (
+        manifest.get("definition") != definition_payload
+        or manifest.get("definition_sha256") != definition_sha256
+    ):
+        raise ValueError("audit manifest does not match the requested frozen definition")
+
+    candidates: dict[str, Mapping[str, Any]] = {}
+    physical_rows: dict[str, list[Mapping[str, Any]]] = {}
+    for candidate in definition.candidates:
+        rows: list[Mapping[str, Any]] = []
+        for offset in range(definition.schedule.maps):
+            map_seed = definition.schedule.seed_start + offset
+            _evaluation, matches = validate_physical_map(
+                root, candidate, definition.schedule, map_seed
+            )
+            for candidate_seat, match in enumerate(matches):
+                if match.get("candidate_seat") != candidate_seat:
+                    raise ValueError("validated reciprocal matches are not ordered by candidate seat")
+                rows.append({**dict(match), "map_seed": map_seed})
+        if len(rows) != 200:
+            raise ValueError(
+                f"{candidate.candidate_id} must contain exactly 200 ordered match rows"
+            )
+        summary = dict(summarize_candidate(rows))
+        aggregate = {**candidate.to_dict(), "summary": summary}
+        candidates[candidate.candidate_id] = aggregate
+        physical_rows[candidate.candidate_id] = rows
+
+    trajectory = sorted(
+        (
+            aggregate
+            for aggregate in candidates.values()
+            if aggregate.get("trajectory_order") is not None
+        ),
+        key=lambda aggregate: aggregate["trajectory_order"],
+    )
+    paired_changes: list[Mapping[str, Any]] = []
+    for earlier, later in zip(trajectory, trajectory[1:]):
+        earlier_id = _require_string(earlier.get("candidate_id"), label="candidate ID")
+        later_id = _require_string(later.get("candidate_id"), label="candidate ID")
+        paired_changes.append(
+            {
+                "earlier_candidate_id": earlier_id,
+                "later_candidate_id": later_id,
+                **paired_change(physical_rows[earlier_id], physical_rows[later_id]),
+            }
+        )
+    anchors = [
+        candidate.candidate_id
+        for candidate in definition.candidates
+        if candidate.family == "control"
+    ]
+    total_maps = len(definition.candidates) * definition.schedule.maps
+    aggregate_payload: Mapping[str, Any] = {
+        "schema_version": 1,
+        "audit_id": definition.audit_id,
+        "exploratory": definition.exploratory,
+        "locked_panel_replacement": definition.locked_panel_replacement,
+        "schedule": definition.schedule.to_dict(),
+        "definition_sha256": definition_sha256,
+        "repository_identity": manifest["repository_identity"],
+        "scenario": manifest["scenario"],
+        "source_contracts": manifest["source_contracts"],
+        "runtime_contract": manifest["runtime_contract"],
+        "omitted_optional_candidates": [
+            dict(item) for item in definition.omitted_optional_candidates
+        ],
+        "candidates": candidates,
+        "trajectory": trajectory,
+        "paired_successive_changes": paired_changes,
+        "anchors": anchors,
+        "decision": choose_next_experiment(trajectory),
+        "physical_evidence": {
+            "maps": total_maps,
+            "games": total_maps * 2,
+            "traces": total_maps * 2,
+            "replays": total_maps * 2,
+        },
+    }
+
+    audit_path = root / "audit.json"
+    state = manifest.get("state")
+    if state == "completed":
+        expected_digest = _require_string(
+            manifest.get("aggregate_sha256"), label="completed aggregate SHA-256"
+        )
+        existing, existing_bytes = _read_json_bytes(audit_path, label="completed aggregate")
+        if _sha256(existing_bytes) != expected_digest:
+            raise ValueError("completed aggregate bytes do not match the root manifest")
+        if existing != aggregate_payload:
+            raise ValueError("completed aggregate does not match revalidated physical evidence")
+        return existing
+    if state != "in_progress":
+        raise ValueError("audit manifest state must be in_progress or completed")
+
+    atomic_write_json(audit_path, aggregate_payload)
+    aggregate_digest = _sha256(audit_path.read_bytes())
+    completed_manifest = {
+        **dict(manifest),
+        "state": "completed",
+        "completed_at": utc_now(),
+        "aggregate_sha256": aggregate_digest,
+    }
+    atomic_write_json(root / "manifest.json", completed_manifest)
+    return aggregate_payload
