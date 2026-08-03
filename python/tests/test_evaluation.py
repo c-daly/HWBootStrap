@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,6 +181,39 @@ def _episode_trace(winner: int) -> EpisodeTrace:
                 after=after,
             ),
         ),
+    )
+
+
+def _trace_evaluation_fixture(
+    tmp_path: Path, *, outcomes: tuple[str, ...]
+) -> tuple[ResolvedController, ResolvedController, Callable[[int], FakeDuelClient]]:
+    contract = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="d" * 64,
+        encoding_hash="e" * 64,
+        observation_size=3,
+        action_size=3,
+        board={"width": 1, "height": 1},
+        roster=["scout"],
+        reward={"terminal_win": 1.0},
+    )
+    winners = iter(
+        0 if outcome == "win" and index % 2 == 0 else
+        1 if outcome == "win" else
+        1 if outcome == "loss" and index % 2 == 0 else
+        0 if outcome == "loss" else
+        -1
+        for index, outcome in enumerate(outcomes)
+    )
+    candidate = _model_controller(tmp_path, contract, "candidate", 64)
+    opponent = _model_controller(tmp_path, contract, "opponent", 96)
+    for controller in (candidate, opponent):
+        assert controller.model is not None
+        controller.model.predict = lambda *_args, **_kwargs: (1, None)
+    return (
+        candidate,
+        opponent,
+        lambda worker_index: FakeDuelClient(winners, worker_index),
     )
 
 
@@ -766,6 +799,94 @@ def test_evaluation_writes_all_draws_and_first_controls_per_candidate_seat(
     assert sorted(path.name for path in evidence_dir.iterdir()) == ["replays", "traces"]
 
 
+def test_evaluate_matchup_all_retention_publishes_every_trace_and_replay(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    candidate, opponent, factory = _trace_evaluation_fixture(
+        tmp_path, outcomes=("win", "win", "win", "win")
+    )
+
+    result = evaluate_matchup(
+        candidate,
+        opponent,
+        games=2,
+        both_seats=True,
+        workers=1,
+        client_factory=factory,
+        capture_trace=True,
+        evidence_dir=tmp_path / "evidence",
+        evidence_retention="all",
+    )
+
+    assert result["evidence"] == {
+        "retention": "all",
+        "retained": 4,
+        "draw_traces": 0,
+        "control_traces": 4,
+        "draw_categories": {},
+    }
+    assert all(Path(row["trace_path"]).is_file() for row in result["matches"])
+    assert all(Path(row["replay_path"]).is_file() for row in result["matches"])
+
+    diagnostic_candidate, diagnostic_opponent, diagnostic_factory = (
+        _trace_evaluation_fixture(
+            tmp_path / "diagnostic", outcomes=("win", "win", "win", "win")
+        )
+    )
+    diagnostic = evaluate_matchup(
+        diagnostic_candidate,
+        diagnostic_opponent,
+        games=2,
+        both_seats=True,
+        workers=1,
+        client_factory=diagnostic_factory,
+        capture_trace=True,
+        evidence_dir=tmp_path / "diagnostic-evidence",
+    )
+
+    assert diagnostic["evidence"] == {
+        "retention": "diagnostic",
+        "retained": 2,
+        "draw_traces": 0,
+        "control_traces": 2,
+        "draw_categories": {},
+    }
+    assert sum(row["trace_path"] is not None for row in diagnostic["matches"]) == 2
+
+
+def test_evaluate_matchup_rejects_invalid_all_retention_before_creating_clients(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    candidate, opponent, factory = _trace_evaluation_fixture(tmp_path, outcomes=("win",))
+
+    with pytest.raises(ValueError, match="evidence_retention"):
+        evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            both_seats=False,
+            workers=1,
+            client_factory=factory,
+            evidence_retention="unknown",
+        )
+    with pytest.raises(
+        ValueError, match="requires trace capture and an evidence directory"
+    ):
+        evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            both_seats=False,
+            workers=1,
+            client_factory=factory,
+            evidence_retention="all",
+        )
+
+
 def test_evaluation_preserves_preexisting_unretained_destinations(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -1314,6 +1435,49 @@ def test_evaluate_controllers_rejects_unknown_environment_before_resolution(
             server_cmd=["server"],
             environment="tactical-v3",
         )
+
+
+def test_evaluate_controllers_propagates_profile_and_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    controller = ResolvedController(
+        spec=ControllerSpec(kind="scripted", name="random"),
+        server_controller="random",
+        model=None,
+        path=None,
+        algorithm=None,
+        step=None,
+        contract=None,
+        observation_size=None,
+        action_size=None,
+        legacy=False,
+        promotable=False,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        evaluation_module,
+        "ControllerResolver",
+        lambda: SimpleNamespace(resolve=lambda _raw: controller),
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "evaluate_matchup",
+        lambda *_args, **kwargs: captured.update(kwargs) or {},
+    )
+
+    evaluation_module.evaluate_controllers(
+        "random",
+        "random",
+        games=1,
+        server_cmd=["server"],
+        start_profile="standard-3v3",
+        evidence_retention="all",
+    )
+
+    assert captured["start_profile"] == "standard-3v3"
+    assert captured["evidence_retention"] == "all"
 
 
 def test_evaluate_controllers_rejects_explicit_model_contract_mismatch_before_server(

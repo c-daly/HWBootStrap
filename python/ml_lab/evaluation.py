@@ -16,7 +16,7 @@ from math import isfinite, sqrt
 from statistics import NormalDist
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -54,6 +54,7 @@ from .tactical_trace import EpisodeTrace
 DEFAULT_HELD_OUT_SEED = 1_000_000
 MAX_DECISIONS_PER_GAME = 10_000
 
+EvidenceRetention = Literal["diagnostic", "all"]
 
 def wilson_interval(
     successes: int, total: int, confidence: float = 0.95
@@ -624,8 +625,15 @@ def evaluate_matchup(
     confidence: float = 0.95,
     evidence_dir: Path | None = None,
     capture_trace: bool = False,
+    evidence_retention: EvidenceRetention = "diagnostic",
 ) -> dict[str, Any]:
     """Evaluate a fixed controller identity on deterministic held-out seeds."""
+    if evidence_retention not in {"diagnostic", "all"}:
+        raise ValueError("evidence_retention must be 'diagnostic' or 'all'")
+    if evidence_retention == "all" and (not capture_trace or evidence_dir is None):
+        raise ValueError(
+            "evidence_retention='all' requires trace capture and an evidence directory"
+        )
     if games <= 0:
         raise ValueError("evaluation games must be positive")
     if workers <= 0:
@@ -737,9 +745,12 @@ def evaluate_matchup(
         draw_trace_count = 0
         control_trace_count = 0
         for index, match, played in ordered_games:
-            retain = match["outcome"] == "draw"
-            if retain:
+            is_draw = match["outcome"] == "draw"
+            retain = evidence_retention == "all" or is_draw
+            if is_draw:
                 draw_trace_count += 1
+            elif evidence_retention == "all":
+                control_trace_count += 1
             else:
                 stratum = (match["candidate_seat"], match["outcome"])
                 if stratum not in selected_controls:
@@ -796,6 +807,8 @@ def evaluate_matchup(
 
         if capture_trace:
             evidence_summary = {
+                "retention": evidence_retention,
+                "retained": draw_trace_count + control_trace_count,
                 "draw_traces": draw_trace_count,
                 "control_traces": control_trace_count,
                 "draw_categories": dict(sorted(draw_categories.items())),
@@ -939,6 +952,8 @@ def evaluate_controllers(
     environment: str | None = None,
     evidence_dir: Path | None = None,
     capture_trace: bool = False,
+    start_profile: str | None = None,
+    evidence_retention: EvidenceRetention = "diagnostic",
 ) -> dict[str, Any]:
     """Resolve any two supported controller specs and evaluate them headlessly."""
     if environment is not None and environment not in SUPPORTED_ENVIRONMENTS:
@@ -984,8 +999,10 @@ def evaluate_controllers(
             environment=selected_environment,
         ),
         output_path=destination,
+        start_profile=start_profile,
         evidence_dir=evidence_dir,
         capture_trace=capture_trace,
+        evidence_retention=evidence_retention,
     )
 
 

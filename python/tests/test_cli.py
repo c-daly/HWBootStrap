@@ -1234,8 +1234,10 @@ def test_evaluate_json_supports_arbitrary_models_reciprocal_seats_and_output(
             "server_cmd": ["dotnet", "fake-server.dll"],
             "output_path": output,
             "environment": None,
+            "start_profile": None,
             "capture_trace": False,
             "evidence_dir": None,
+            "evidence_retention": "diagnostic",
         }
     ]
 
@@ -1270,6 +1272,43 @@ def test_evidence_directory_enables_trace(
     assert captured["capture_trace"] is True
     assert captured["evidence_dir"] == tmp_path / "evidence"
     assert captured["environment"] == "tactical-v2"
+
+
+def test_evaluate_cli_propagates_profile_and_evidence_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_controllers(*args, **kwargs):
+        captured.update(kwargs)
+        return {"wins": 0, "losses": 0, "draws": 1, "games": 1}
+
+    monkeypatch.setattr(cli_module, "evaluate_controllers", fake_evaluate_controllers)
+    assert cli_module.main(
+        [
+            "evaluate",
+            "--p0",
+            "random",
+            "--p1",
+            "random",
+            "--games",
+            "1",
+            "--both-seats",
+            "--environment",
+            "tactical-v2",
+            "--start-profile",
+            "standard-3v3",
+            "--capture-trace",
+            "--evidence-retention",
+            "all",
+            "--evidence-dir",
+            r"C:\temp\audit-evidence",
+        ],
+        stdout=StringIO(),
+    ) == 0
+
+    assert captured["start_profile"] == "standard-3v3"
+    assert captured["evidence_retention"] == "all"
 
 
 def test_explicit_trace_capture_does_not_require_evidence_directory(
