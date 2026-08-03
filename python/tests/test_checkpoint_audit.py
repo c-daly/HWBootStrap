@@ -11,6 +11,7 @@ import pytest
 import ml_lab.checkpoint_audit as audit_module
 from ml_lab.checkpoint_audit import (
     AuditDefinition,
+    AuditSchedule,
     discover_audit_candidates,
     build_audit_definition,
 )
@@ -388,7 +389,7 @@ ZERO_WILSON = {"low": 0.0, "high": 0.6576197724933468, "confidence": 0.95}
 
 
 def _audit_definition(
-    source_runs: tuple[Path, Path], *, maps: int = 1
+    source_runs: tuple[Path, Path], *, maps: int = 100
 ) -> AuditDefinition:
     clone, ppo = source_runs
     definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
@@ -619,7 +620,7 @@ def test_schedule_keys_are_exactly_candidate_map_and_reciprocal_seat(
 def test_evaluation_reuse_reopens_and_validates_every_physical_artifact(
     source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    definition = _audit_definition(source_runs, maps=2)
+    definition = _audit_definition(source_runs)
     output_root = tmp_path / "audit"
     first = _evaluate_fake_audit(definition, output_root, monkeypatch)
     second = _FakeAuditEvaluator(definition)
@@ -633,9 +634,9 @@ def test_evaluation_reuse_reopens_and_validates_every_physical_artifact(
         progress=lambda _message: None,
     )
 
-    assert len(first.calls) == 2
+    assert len(first.calls) == 100
     assert second.calls == []
-    for map_seed in range(16_000_000, 16_000_002):
+    for map_seed in range(16_000_000, 16_000_100):
         evaluation, matches = audit_module.validate_physical_map(
             output_root, definition.candidates[0], definition.schedule, map_seed
         )
@@ -798,6 +799,100 @@ def test_validator_rejects_self_consistent_root_definition_tamper(
     _write_json(evaluation_path, evaluation)
 
     with pytest.raises(ValueError):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        AuditSchedule(seed_start=16_000_000, maps=99),
+        AuditSchedule(seed_start=17_000_000, maps=100),
+    ],
+    ids=["short-development-panel", "reserved-final-namespace"],
+)
+def test_evaluate_audit_rejects_non_frozen_development_schedule(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schedule: AuditSchedule,
+) -> None:
+    definition = replace(_audit_definition(source_runs), schedule=schedule)
+    _stub_audit_identity(monkeypatch)
+
+    def unexpected_evaluator(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        raise AssertionError("invalid schedule reached evaluator")
+
+    with pytest.raises(ValueError, match="schedule"):
+        audit_module.evaluate_audit(
+            definition,
+            output_root=tmp_path / "audit",
+            server_cmd=["fake-gym-server"],
+            workers=1,
+            evaluator=unexpected_evaluator,
+            progress=lambda _message: None,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["scenario", "source_contract", "runtime_geometry"],
+)
+def test_validator_rejects_root_identity_transplant_without_definition_mutation(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    manifest_path = output_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    evaluation_path = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, 16_000_000
+    )
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+
+    if mutation == "scenario":
+        changed_scenario = b'{"template_id":"transplanted"}\n'
+        changed_digest = hashlib.sha256(changed_scenario).hexdigest()
+        manifest["scenario"]["bytes_base64"] = base64.b64encode(changed_scenario).decode("ascii")
+        manifest["scenario"]["sha256"] = changed_digest
+        evaluation["audit_identity"]["scenario_sha256"] = changed_digest
+    elif mutation == "source_contract":
+        manifest["source_contracts"][0]["contract"]["contract_hash"] = "d" * 64
+        evaluation["candidate"]["contract"]["contract_hash"] = "d" * 64
+    else:
+        manifest["source_contracts"][0]["contract"]["encoding_hash"] = "f" * 64
+        manifest["runtime_contract"]["encoding_hash"] = "f" * 64
+        evaluation["candidate"]["contract"]["encoding_hash"] = "f" * 64
+        evaluation["audit_identity"]["runtime_contract"]["encoding_hash"] = "f" * 64
+    _write_json(manifest_path, manifest)
+    _write_json(evaluation_path, evaluation)
+
+    with pytest.raises(ValueError):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+
+def test_validator_rejects_winner_outside_engine_domain(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    evaluation_path = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, 16_000_000
+    )
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    evaluation["matches"][1]["winner"] = 2
+    _write_json(evaluation_path, evaluation)
+
+    with pytest.raises(ValueError, match="winner"):
         audit_module.validate_physical_map(
             output_root, candidate, definition.schedule, 16_000_000
         )

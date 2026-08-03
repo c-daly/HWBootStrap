@@ -661,6 +661,22 @@ def _source_contract_for(
 ) -> Mapping[str, Any] | None:
     if candidate.source_run is None:
         return None
+    source = _canonical_run(Path(candidate.source_run), label=candidate.candidate_id)
+    physical_manifest, physical_manifest_bytes = _read_json_bytes(
+        source / "run.json", label=f"{candidate.candidate_id} physical run.json"
+    )
+    if _sha256(physical_manifest_bytes) != candidate.source_run_manifest_sha256:
+        raise ValueError(f"{candidate.candidate_id} physical source manifest changed")
+    try:
+        physical_scenario = (source / "scenario.json").read_bytes()
+    except OSError as error:
+        raise ValueError(f"{candidate.candidate_id} physical scenario is missing") from error
+    if _sha256(physical_scenario) != candidate.source_scenario_sha256:
+        raise ValueError(f"{candidate.candidate_id} physical scenario changed")
+    physical_contract = _require_mapping(
+        physical_manifest.get("contract"),
+        label=f"{candidate.candidate_id} physical source contract",
+    )
     for row in manifest["source_contracts"]:
         mapping = _require_mapping(row, label="source contract row")
         if mapping.get("source_run") == candidate.source_run:
@@ -673,7 +689,14 @@ def _source_contract_for(
                 raise ValueError(
                     f"audit source identity changed for {candidate.candidate_id}"
                 )
-            return _require_mapping(mapping.get("contract"), label="candidate source contract")
+            stored_contract = _require_mapping(
+                mapping.get("contract"), label="candidate source contract"
+            )
+            if stored_contract != physical_contract:
+                raise ValueError(
+                    f"audit source contract changed for {candidate.candidate_id}"
+                )
+            return physical_contract
     raise ValueError(f"audit manifest has no source contract for {candidate.candidate_id}")
 
 
@@ -832,6 +855,15 @@ def validate_physical_map(
     )
     scenario = _require_mapping(manifest.get("scenario"), label="audit scenario")
     runtime = _require_mapping(manifest.get("runtime_contract"), label="runtime contract")
+    frozen_scenario_hashes = {
+        row.get("source_scenario_sha256")
+        for row in frozen_candidates
+        if isinstance(row, Mapping) and row.get("source_scenario_sha256") is not None
+    }
+    if len(frozen_scenario_hashes) != 1 or scenario.get("sha256") not in frozen_scenario_hashes:
+        raise ValueError(
+            "audit scenario identity does not match frozen physical candidate provenance"
+        )
     if audit_identity.get("definition_sha256") != definition_sha256:
         raise ValueError("map audit definition identity changed")
     if audit_identity.get("scenario_sha256") != scenario.get("sha256"):
@@ -870,7 +902,7 @@ def validate_physical_map(
         ):
             raise ValueError("map match profile reference changed")
         winner = match.get("winner")
-        if isinstance(winner, bool) or not isinstance(winner, int):
+        if isinstance(winner, bool) or winner not in {-1, 0, 1}:
             raise ValueError("map match winner is invalid")
         outcome = "win" if winner == seat else "loss" if winner in {0, 1} else "draw"
         if match.get("outcome") != outcome:
@@ -1055,8 +1087,8 @@ def evaluate_audit(
         raise ValueError("checkpoint audit definition schema_version must be 1")
     schedule = definition.schedule
     if (
-        schedule.maps < 1
-        or schedule.seed_start < 0
+        schedule.maps != 100
+        or schedule.seed_start != 16_000_000
         or not schedule.both_seats
         or schedule.profile != "standard-3v3"
         or schedule.opponent != "random"
