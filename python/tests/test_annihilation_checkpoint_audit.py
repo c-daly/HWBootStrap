@@ -348,6 +348,24 @@ def test_render_report_covers_all_evidence_sections_and_nulls(
     assert "does not replace the locked panel" in report
     assert "None" not in report
 
+    scratch_checkpoint = tmp_path / "scratch-step-000051200.zip"
+    scratch_checkpoint.write_bytes(b"physical-scratch")
+    scratch = {
+        **candidate,
+        "candidate_id": "scratch-ppo-seed-227-step-000051200",
+        "family": "scratch_ppo",
+        "trajectory_order": None,
+        "actual_step": 51_200,
+        "checkpoint_path": str(scratch_checkpoint),
+        "checkpoint_sha256": "9" * 64,
+        "source_run": str(tmp_path / "scratch"),
+    }
+    aggregate["candidates"][scratch["candidate_id"]] = scratch
+    assert (
+        "51,036 was a stopped in-memory training count, not an evaluated checkpoint"
+        in runner.render_report(aggregate)
+    )
+
 
 def test_main_logs_to_stdout_and_audit_file_and_reraises_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -424,3 +442,79 @@ def test_definition_reuse_requires_canonical_bytes_and_loader_rejects_extra_fiel
     _write_json(definition_path, payload)
     with pytest.raises(ValueError, match="shape"):
         runner.load_definition(output_root)
+
+
+def test_validate_rejects_checkpoint_mutated_after_prepare_before_runtime_or_games(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone, ppo = _source_runs(tmp_path)
+    output_root = tmp_path / "audit"
+    logger = logging.getLogger("mutated-checkpoint-test")
+    definition = runner.run_prepare(
+        clone_run=clone,
+        ppo_run=ppo,
+        scratch_run=None,
+        output_root=output_root,
+        logger=logger,
+    )
+    Path(definition.candidates[1].checkpoint_path).write_bytes(b"mutated-after-prepare")
+    monkeypatch.setattr(
+        runner.audit,
+        "_runtime_contract",
+        lambda _command: pytest.fail("runtime/game path must not be reached"),
+    )
+    monkeypatch.setattr(
+        runner.audit,
+        "evaluate_audit",
+        lambda *_args, **_kwargs: pytest.fail("evaluator must not be reached"),
+    )
+
+    with pytest.raises(ValueError, match="checkpoint bytes changed"):
+        runner.run_validate(output_root=output_root, logger=logger)
+
+    assert not (output_root / "manifest.json").exists()
+
+
+def test_prepare_definition_publication_is_atomic_no_clobber_under_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    clone, ppo = _source_runs(tmp_path)
+    logger = logging.getLogger("definition-race-test")
+
+    def publish_identical(temp: object, destination: object) -> None:
+        Path(destination).write_bytes(Path(temp).read_bytes())
+        raise FileExistsError
+
+    monkeypatch.setattr(runner.os, "link", publish_identical)
+    identical_root = tmp_path / "identical"
+    with caplog.at_level(logging.INFO, logger="definition-race-test"):
+        runner.run_prepare(
+            clone_run=clone,
+            ppo_run=ppo,
+            scratch_run=None,
+            output_root=identical_root,
+            logger=logger,
+        )
+    assert "reused byte/hash-equivalent physical definition" in caplog.text
+    assert not list(identical_root.glob(".definition.json.*.tmp"))
+
+    caplog.clear()
+
+    def publish_different(_temp: object, destination: object) -> None:
+        Path(destination).write_bytes(b"{}\n")
+        raise FileExistsError
+
+    monkeypatch.setattr(runner.os, "link", publish_different)
+    different_root = tmp_path / "different"
+    with caplog.at_level(logging.INFO, logger="definition-race-test"):
+        with pytest.raises(ValueError, match="different serialized bytes"):
+            runner.run_prepare(
+                clone_run=clone,
+                ppo_run=ppo,
+                scratch_run=None,
+                output_root=different_root,
+                logger=logger,
+            )
+    assert (different_root / "definition.json").read_bytes() == b"{}\n"
+    assert "reused byte/hash-equivalent physical definition" not in caplog.text
+    assert not list(different_root.glob(".definition.json.*.tmp"))

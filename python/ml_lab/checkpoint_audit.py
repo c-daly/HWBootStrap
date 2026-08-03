@@ -113,6 +113,13 @@ class AuditDefinition:
 
 
 @dataclass(frozen=True)
+class PreparedAuditInputs:
+    scenario_bytes: bytes
+    scenario_sha256: str
+    source_contracts: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class _SourceRun:
     path: Path
     manifest: Mapping[str, Any]
@@ -550,6 +557,35 @@ def _source_material(
         raise ValueError("checkpoint audit requires at least one learned physical source")
     return scenario_bytes, _sha256(scenario_bytes), tuple(
         source_rows[path] for path in sorted(source_rows)
+    )
+
+
+def validate_prepared_definition(definition: AuditDefinition) -> PreparedAuditInputs:
+    """Reopen and validate every learned physical input frozen by prepare."""
+    _validate_global_audit_definition(definition)
+    scenario_bytes, scenario_sha256, source_contracts = _source_material(definition)
+    for candidate in definition.candidates:
+        if candidate.source_run is None:
+            continue
+        if candidate.checkpoint_path is None or candidate.checkpoint_sha256 is None:
+            raise ValueError(
+                f"{candidate.candidate_id} is missing frozen checkpoint provenance"
+            )
+        checkpoint, digest = _checkpoint_bytes(
+            Path(candidate.checkpoint_path), label=candidate.candidate_id
+        )
+        if str(checkpoint) != candidate.checkpoint_path:
+            raise ValueError(
+                f"{candidate.candidate_id} checkpoint path changed after prepare"
+            )
+        if digest != candidate.checkpoint_sha256:
+            raise ValueError(
+                f"{candidate.candidate_id} checkpoint bytes changed after prepare"
+            )
+    return PreparedAuditInputs(
+        scenario_bytes=scenario_bytes,
+        scenario_sha256=scenario_sha256,
+        source_contracts=source_contracts,
     )
 
 
@@ -1140,7 +1176,10 @@ def evaluate_audit(
     schedule = definition.schedule
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    scenario_bytes, scenario_sha256, source_contracts = _source_material(definition)
+    prepared = validate_prepared_definition(definition)
+    scenario_bytes = prepared.scenario_bytes
+    scenario_sha256 = prepared.scenario_sha256
+    source_contracts = prepared.source_contracts
     runtime_contract = dict(_runtime_contract(server_cmd))
     _validate_runtime_contract(runtime_contract, source_contracts)
     manifest_path = root / "manifest.json"

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -67,6 +69,54 @@ def _serialized_definition(payload: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
+def _require_definition_bytes(
+    path: Path, payload: dict[str, object], expected_bytes: bytes
+) -> None:
+    try:
+        existing_bytes = path.read_bytes()
+        existing = json.loads(existing_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"existing physical definition is unreadable: {path}") from error
+    if existing != payload:
+        raise ValueError("existing audit has a different physical definition")
+    if existing_bytes != expected_bytes:
+        raise ValueError("existing physical definition has different serialized bytes")
+
+
+def _publish_definition_once(path: Path, expected_bytes: bytes) -> bool:
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            stream.write(expected_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temp_path, path)
+        except FileExistsError:
+            try:
+                winner_bytes = path.read_bytes()
+            except OSError as error:
+                raise ValueError(
+                    f"winning physical definition is unreadable: {path}"
+                ) from error
+            if winner_bytes != expected_bytes:
+                raise ValueError(
+                    "existing physical definition has different serialized bytes"
+                )
+            return False
+        return True
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def run_prepare(
     *,
     clone_run: Path,
@@ -87,19 +137,13 @@ def run_prepare(
     root.mkdir(parents=True, exist_ok=True)
     path = root / "definition.json"
     if path.exists():
-        try:
-            existing_bytes = path.read_bytes()
-            existing = json.loads(existing_bytes.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(f"existing physical definition is unreadable: {path}") from error
-        if existing != payload:
-            raise ValueError("existing audit has a different physical definition")
+        _require_definition_bytes(path, payload, expected_bytes)
         logger.info("reused byte/hash-equivalent physical definition: %s", path)
-        if existing_bytes != expected_bytes:
-            raise ValueError("existing physical definition has different serialized bytes")
     else:
-        atomic_write_json(path, payload)
-        logger.info("wrote physical definition: %s", path)
+        if _publish_definition_once(path, expected_bytes):
+            logger.info("wrote physical definition: %s", path)
+        else:
+            logger.info("reused byte/hash-equivalent physical definition: %s", path)
     return definition
 
 
@@ -139,7 +183,10 @@ def run_validate(
     """Validate frozen physical sources against one evaluation runtime."""
     definition = load_definition(output_root)
     root = Path(output_root).resolve(strict=True)
-    scenario_bytes, scenario_sha256, source_contracts = audit._source_material(definition)
+    prepared = audit.validate_prepared_definition(definition)
+    scenario_bytes = prepared.scenario_bytes
+    scenario_sha256 = prepared.scenario_sha256
+    source_contracts = prepared.source_contracts
     runtime_contract = dict(audit._runtime_contract(server_command()))
     contracts_by_run = {row["source_run"]: row for row in source_contracts}
     for candidate in definition.candidates:
@@ -251,7 +298,9 @@ def _format_metric(value: object, *, percent: bool = False) -> str:
 
 def _stopped_count_explanation(candidates: dict[str, object]) -> str | None:
     if any(
-        isinstance(row, dict) and row.get("actual_step") == 51_200
+        isinstance(row, dict)
+        and row.get("family") == "bc_ppo"
+        and row.get("actual_step") == 51_200
         for row in candidates.values()
     ):
         return None

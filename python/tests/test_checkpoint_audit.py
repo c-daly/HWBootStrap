@@ -1400,3 +1400,19 @@ def test_aggregate_independently_rejects_self_consistent_identity_or_isolation_m
     monkeypatch.setattr(audit_module, "validate_physical_map", unexpected_validation)
     with pytest.raises(ValueError, match="global identity/isolation contract"):
         audit_module.aggregate_audit(definition, output_root=output_root)
+
+
+def test_validate_prepared_definition_rehashes_every_learned_checkpoint(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+    prepared = audit_module.validate_prepared_definition(definition)
+
+    assert prepared.scenario_sha256 == definition.candidates[0].source_scenario_sha256
+    assert len(prepared.source_contracts) == 2
+    changed = Path(definition.candidates[1].checkpoint_path)
+    changed.write_bytes(changed.read_bytes() + b"-mutated-after-prepare")
+    with pytest.raises(ValueError, match="checkpoint bytes changed"):
+        audit_module.validate_prepared_definition(definition)
