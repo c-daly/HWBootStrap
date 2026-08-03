@@ -5,18 +5,78 @@ from __future__ import annotations
 import csv
 import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterator, Mapping, Protocol, TextIO
 
 from .algorithms import AlgorithmAdapter, create_or_resume_model, get_algorithm_adapter
 from .callbacks import SB3RunCallback, TrainingLifecycle, TrainingStopRequested
-from .contracts import RunConfig, create_run, update_run_state
+from .contracts import ContractMismatch, EnvironmentContract, RunConfig, create_run, update_run_state
 from .envs import TrainingEnvironmentFactory
-from .io import read_json
+from .io import atomic_write_json, read_json
+from .scenarios import (
+    ResolvedScenario,
+    legacy_default_scenario,
+    resolve_scenario,
+)
 from .tracking import TrackerHub
 
 
-EnvironmentFactory = Callable[[RunConfig, Path], Any]
+class EnvironmentFactory(Protocol):
+    def probe(
+        self,
+        config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, Mapping[str, Any], Mapping[str, Any]]: ...
+
+    def __call__(
+        self,
+        config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: Mapping[str, Any],
+    ) -> Any: ...
+
+
+@contextmanager
+def materialized_scenario(
+    scenario: ResolvedScenario,
+    *,
+    parent: Path,
+) -> Iterator[Path]:
+    """Expose canonical scenario JSON at a temporary probe-only path."""
+    parent = Path(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".scenario-probe-", dir=parent) as directory:
+        path = Path(directory) / "scenario.json"
+        scenario.write(path)
+        yield path
+
+
+def _training_scenario(
+    config: RunConfig,
+    scenario: ResolvedScenario | None,
+) -> ResolvedScenario:
+    if scenario is not None:
+        return scenario
+    resume_run = _resume_run_dir(
+        Path(config.resume_source) if config.resume_source else None
+    )
+    if resume_run is not None:
+        source_path = resume_run / "scenario.json"
+        if source_path.is_file():
+            return resolve_scenario(
+                environment=config.environment,
+                scenario_file=source_path,
+                template_id=None,
+            )
+        return legacy_default_scenario(config.environment)
+    return resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id=None,
+    )
 
 
 def _default_summary_writer(log_dir: Path) -> Any | None:
@@ -108,6 +168,7 @@ def run_training(
     config: RunConfig,
     *,
     runs_root: Path,
+    scenario: ResolvedScenario | None = None,
     server_cmd: list[str] | None = None,
     environment_factory: EnvironmentFactory | None = None,
     algorithm_adapter: AlgorithmAdapter | None = None,
@@ -128,11 +189,17 @@ def run_training(
     if config.checkpoint_interval <= 0:
         raise ValueError("checkpoint interval must be positive")
 
-    run_dir = Path(runs_root) / config.run_name
+    runs_root = Path(runs_root)
+    resolved_scenario = _training_scenario(config, scenario)
+    if resolved_scenario.environment != config.environment:
+        raise ValueError("scenario environment does not match the run configuration")
+    run_dir = runs_root / config.run_name
     if environment_factory is None:
         if not server_cmd:
             raise ValueError("server command is required for real training")
         environment_factory = TrainingEnvironmentFactory(server_cmd)
+    if not callable(getattr(environment_factory, "probe", None)):
+        raise TypeError("training environment factory must implement probe(config, scenario_path)")
 
     env: Any | None = None
     trackers: TrackerHub | None = None
@@ -141,11 +208,30 @@ def run_training(
     run_created = False
     final_status = "failed"
     try:
-        env = environment_factory(config, run_dir)
-        contract = env.contract
-        spaces_info = dict(env.spaces_info)
-        create_run(Path(runs_root), config, contract)
+        with materialized_scenario(resolved_scenario, parent=runs_root) as probe_path:
+            contract, probe_spaces, opponent_snapshot = environment_factory.probe(
+                config,
+                probe_path,
+            )
+        create_run(
+            runs_root,
+            config,
+            contract,
+            resolved_scenario,
+            opponent_snapshot=opponent_snapshot,
+        )
         run_created = True
+        env = environment_factory(
+            config,
+            run_dir,
+            run_dir / "scenario.json",
+            opponent_snapshot,
+        )
+        if env.contract != contract:
+            env.close()
+            env = None
+            raise ContractMismatch("worker contract changed after scenario snapshot")
+        spaces_info = dict(probe_spaces)
         if any(str(spec.get("kind", "")) == "tensorboard" for spec in config.trackers):
             tensorboard_writer = summary_writer_factory(run_dir / "tensorboard")
         trackers = tracker_factory(
@@ -174,7 +260,20 @@ def run_training(
             checkpoint_interval=config.checkpoint_interval,
             resume_source=resume_source,
             allow_unsafe_legacy_resume=config.allow_unsafe_legacy_resume,
+            algorithm_options=config.algorithm_options,
         )
+        if config.actor_init_source is not None:
+            if resumed:
+                raise ValueError(
+                    "actor initialization cannot be combined with resume"
+                )
+            provenance = adapter.initialize_actor(
+                model,
+                source_run=Path(config.actor_init_source),
+                expected_contract=contract,
+                device=config.device,
+            )
+            atomic_write_json(run_dir / "initialization.json", provenance)
         sb3_logger = (
             build_sb3_logger(run_dir)
             if console_output

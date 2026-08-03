@@ -15,14 +15,28 @@ import numpy as np
 import pytest
 from gymnasium import spaces
 
+from ml_lab.algorithms import MaskablePPOAdapter
 from ml_lab.callbacks import TrainingLifecycle
 from ml_lab.cli import main as cli_main
-from ml_lab.contracts import EnvironmentContract, RunConfig, create_run, request_stop
+from ml_lab.contracts import (
+    ContractMismatch,
+    EnvironmentContract,
+    RunConfig,
+    create_run as create_durable_run,
+    request_stop,
+)
 import ml_lab.envs as env_module
 from ml_lab.envs import EpisodeMonitor, ScheduledEnvironment, WorkerSchedule, build_vector_env
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.scenarios import ResolvedScenario, resolve_scenario
 from ml_lab.tracking import TrackerHub
 from ml_lab.training import run_training
+
+
+ADAPTIVE_MONITOR_HEADER = [
+    "episode", "design_count", "distinct_custom_templates_deployed",
+    "deployment_completed", "invalid_sequences", "pregame_decisions",
+]
 
 
 @pytest.fixture
@@ -30,6 +44,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="b" * 64,
+        encoding_hash="c" * 64,
         observation_size=3,
         action_size=2,
         board={"width": 1, "height": 1},
@@ -53,6 +68,62 @@ def config(run_name: str = "training") -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
+    )
+
+
+def test_actor_initialization_is_distinct_from_resume() -> None:
+    run_config = replace(
+        config(),
+        actor_init_source="bc/run",
+        resume_source="ppo/run",
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        run_config.to_dict()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"actor_init_source": "bc/run"},
+        {"algorithm_options": {"learning_rate": 0.0003}},
+    ],
+)
+def test_masked_dqn_rejects_ppo_only_initialization_options(changes) -> None:
+    run_config = replace(
+        config(),
+        algorithm="masked_dqn",
+        policy="MlpPolicy",
+        **changes,
+    )
+
+    with pytest.raises(ValueError, match="require maskable_ppo"):
+        run_config.to_dict()
+
+
+def scenario(environment: str = "tactical-v1") -> ResolvedScenario:
+    template_id = (
+        "tactical-standard" if environment == "tactical-v1" else "adaptive-standard"
+    )
+    return resolve_scenario(
+        environment=environment,
+        scenario_file=None,
+        template_id=template_id,
+    )
+
+
+def create_run(
+    runs_root: Path,
+    run_config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    return create_durable_run(
+        runs_root,
+        run_config,
+        contract,
+        scenario(run_config.environment),
+        opponent_snapshot=run_config.opponent,
     )
 
 
@@ -60,8 +131,18 @@ def test_worker_seed_streams_are_deterministic_and_disjoint() -> None:
     worker0 = WorkerSchedule(base_seed=17, worker_index=0, worker_count=2)
     worker1 = WorkerSchedule(base_seed=17, worker_index=1, worker_count=2)
 
-    assert [worker0.next_episode(), worker0.next_episode()] == [(17, 0), (19, 1)]
-    assert [worker1.next_episode(), worker1.next_episode()] == [(18, 1), (20, 0)]
+    assignments0 = [worker0.next_episode(), worker0.next_episode()]
+    assignments1 = [worker1.next_episode(), worker1.next_episode()]
+
+    assert type(assignments0[0]).__name__ == "EpisodeAssignment"
+    assert [
+        (item.worker_id, item.episode_index, item.seed, item.learner_seat)
+        for item in assignments0
+    ] == [(0, 0, 17, 0), (0, 1, 19, 1)]
+    assert [
+        (item.worker_id, item.episode_index, item.seed, item.learner_seat)
+        for item in assignments1
+    ] == [(1, 0, 18, 1), (1, 1, 20, 0)]
 
 
 def test_fixed_learner_seat_is_available_for_diagnosis() -> None:
@@ -69,7 +150,96 @@ def test_fixed_learner_seat_is_available_for_diagnosis() -> None:
         base_seed=5, worker_index=0, worker_count=1, learner_seat="1"
     )
 
-    assert [schedule.next_episode(), schedule.next_episode()] == [(5, 1), (6, 1)]
+    assert [schedule.next_episode().learner_seat for _ in range(2)] == [1, 1]
+
+
+def test_four_workers_alternate_evenly_and_fixed_seats_never_change() -> None:
+    alternating = [
+        WorkerSchedule(base_seed=17, worker_index=worker_id, worker_count=4)
+        for worker_id in range(4)
+    ]
+
+    for worker_id, schedule in enumerate(alternating):
+        assignments = [schedule.next_episode() for _ in range(5)]
+        assert [assignment.worker_id for assignment in assignments] == [worker_id] * 5
+        seats = [assignment.learner_seat for assignment in assignments]
+        assert seats == [worker_id % 2, (worker_id + 1) % 2, worker_id % 2, (worker_id + 1) % 2, worker_id % 2]
+        assert abs(seats.count(0) - seats.count(1)) <= 1
+
+    fixed = WorkerSchedule(base_seed=17, worker_index=3, worker_count=4, learner_seat="1")
+    assert [fixed.next_episode().learner_seat for _ in range(5)] == [1, 1, 1, 1, 1]
+
+
+def test_maskable_ppo_uses_explicit_locked_algorithm_options() -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        model = MaskablePPOAdapter().create(
+            env,
+            spaces_info=env.spaces_info,
+            seed=17,
+            device="cpu",
+            checkpoint_interval=32,
+            algorithm_options={
+                "learning_rate": 0.0007,
+                "n_epochs": 4,
+                "target_kl": 0.03,
+            },
+        )
+    finally:
+        env.close()
+
+    assert model.learning_rate == 0.0007
+    assert model.n_epochs == 4
+    assert model.target_kl == 0.03
+
+
+def test_maskable_ppo_rejects_unknown_algorithm_options() -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        with pytest.raises(
+            ValueError,
+            match="unsupported MaskablePPO option 'batch_size'",
+        ):
+            MaskablePPOAdapter().create(
+                env,
+                spaces_info=env.spaces_info,
+                seed=17,
+                device="cpu",
+                checkpoint_interval=32,
+                algorithm_options={"batch_size": 32},
+            )
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize(
+    ("algorithm_options", "field"),
+    [
+        ({"learning_rate": 0.0}, "learning_rate"),
+        ({"learning_rate": float("nan")}, "learning_rate"),
+        ({"n_epochs": 0}, "n_epochs"),
+        ({"n_epochs": True}, "n_epochs"),
+        ({"target_kl": -0.01}, "target_kl"),
+        ({"target_kl": float("inf")}, "target_kl"),
+    ],
+)
+def test_maskable_ppo_rejects_invalid_algorithm_option_values(
+    algorithm_options,
+    field: str,
+) -> None:
+    env = build_vector_env(1, lambda worker: FakeGymEnv(worker))
+    try:
+        with pytest.raises(ValueError, match=field):
+            MaskablePPOAdapter().create(
+                env,
+                spaces_info=env.spaces_info,
+                seed=17,
+                device="cpu",
+                checkpoint_interval=32,
+                algorithm_options=algorithm_options,
+            )
+    finally:
+        env.close()
 
 
 class FakeGymEnv(gym.Env):
@@ -84,6 +254,7 @@ class FakeGymEnv(gym.Env):
         self.contract = EnvironmentContract(
             version="tactical-v1",
             contract_hash="b" * 64,
+            encoding_hash="c" * 64,
             observation_size=3,
             action_size=2,
             board={"width": 1, "height": 1},
@@ -110,6 +281,53 @@ class FakeGymEnv(gym.Env):
         self.closed = True
 
 
+def build_one_step_env(seat: int, seed: int) -> FakeGymEnv:
+    return FakeGymEnv(0, seat, seed)
+
+
+def test_training_environment_uses_episode_seed_base_independently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[FakeGymEnv] = []
+
+    def fake_server_env(
+        _server_cmd,
+        *,
+        opponent,
+        seat,
+        base_seed,
+        environment,
+        scenario_path,
+    ):
+        del opponent, environment, scenario_path
+        result = FakeGymEnv(0, seat, base_seed)
+        built.append(result)
+        return result
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_server_env)
+    run_config = replace(
+        config("episode-seeds"),
+        workers=1,
+        seed=999,
+        episode_seed_base=13_000_000,
+    )
+
+    scheduled = env_module.TrainingEnvironmentFactory(["fake-server"])._build_worker(
+        run_config,
+        tmp_path,
+        0,
+        tmp_path / "scenario.json",
+        {"kind": "scripted", "name": "greedy"},
+        monitor=False,
+    )
+    try:
+        assert scheduled.current_assignment.seed == 13_000_000
+        assert built[0].initial_seed == 13_000_000
+    finally:
+        scheduled.close()
+
+
 class SpawnCleanupProbeEnv(gym.Env):
     """Pickle-safe spawned worker probe that records lifecycle events to disk."""
 
@@ -123,6 +341,7 @@ class SpawnCleanupProbeEnv(gym.Env):
         self.contract = EnvironmentContract(
             version="tactical-v1",
             contract_hash="b" * 64,
+            encoding_hash="c" * 64,
             observation_size=3,
             action_size=2,
             board={"width": 1, "height": 1},
@@ -151,6 +370,17 @@ class SpawnCleanupProbeEnv(gym.Env):
 
     def close(self) -> None:
         self._record("closed")
+
+
+class AdaptiveVectorProbeEnv(FakeGymEnv):
+    def __init__(self, worker: int) -> None:
+        super().__init__(worker)
+        self.contract = replace(
+            self.contract,
+            version="adaptive-v1",
+            contract_hash="f" * 64,
+            semantics={"max_controllable_units": 24},
+        )
 
 
 def _spawn_cleanup_probe(marker_path: str, *, fail_step: bool = False) -> SpawnCleanupProbeEnv:
@@ -196,6 +426,12 @@ def test_scheduled_environment_alternates_seat_and_uses_worker_seed_stream() -> 
     assert created[0].reset_seeds == [23]
     assert created[0].closed is True
     assert created[1].reset_seeds == [24]
+    assert (
+        env.current_assignment.worker_id,
+        env.current_assignment.episode_index,
+        env.current_assignment.seed,
+        env.current_assignment.learner_seat,
+    ) == (0, 1, 24, 1)
 
 
 def test_vector_workers_expose_direct_action_masks_and_own_distinct_environments() -> None:
@@ -291,21 +527,283 @@ def test_spawned_runtime_failure_closes_worker_and_parent_reaps_it(tmp_path: Pat
     vector.close()
 
 
-def test_episode_monitor_emits_sb3_episode_info(tmp_path: Path) -> None:
-    monitor_path = tmp_path / "monitor.csv"
-    monitor_path.write_text(
-        "episode_reward,episode_length,elapsed_seconds\n", encoding="utf-8"
+def test_monitor_records_assignment_for_each_completed_episode(tmp_path: Path) -> None:
+    schedule = WorkerSchedule(base_seed=17, worker_index=1, worker_count=2)
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(schedule, build_one_step_env),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
     )
-    monitored = EpisodeMonitor(FakeGymEnv(0), monitor_path, threading.Lock(), worker_id=3)
 
-    monitored.reset(seed=7)
+    monitored.reset()
     _, _, terminated, _, info = monitored.step(0)
-
     assert terminated is True
-    assert info["episode"]["r"] == 0.0
-    assert info["episode"]["l"] == 1
-    assert info["episode"]["worker_id"] == 3
-    assert info["episode"]["episode_number"] == 1
+    assert info["episode"] == {
+        "r": 0.0,
+        "l": 1,
+        "t": info["episode"]["t"],
+        "worker_id": 1,
+        "episode_number": 1,
+        "episode_index": 0,
+        "episode_seed": 18,
+        "learner_seat": 1,
+    }
+
+    monitored.reset()
+    monitored.step(0)
+
+    rows = list(csv.DictReader(monitor_path.open(newline="", encoding="utf-8")))
+    assert [
+        (row["worker_id"], row["episode_index"], row["episode_seed"], row["learner_seat"])
+        for row in rows
+    ] == [
+        ("1", "0", "18", "1"),
+        ("1", "1", "20", "0"),
+    ]
+
+
+def test_monitor_migrates_legacy_rows_before_appending_assignment_data(tmp_path: Path) -> None:
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    monitor_path.write_text(
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "1.5,7,0.25\n"
+        "-2.0,3,0.75\n",
+        encoding="utf-8",
+    )
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(
+            WorkerSchedule(base_seed=17, worker_index=1, worker_count=2), build_one_step_env
+        ),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
+    )
+
+    monitored.reset()
+    monitored.step(0)
+
+    with monitor_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.reader(stream))
+    assert rows == [
+        [
+            "worker_id",
+            "episode_index",
+            "episode_seed",
+            "learner_seat",
+            "episode_reward",
+            "episode_length",
+            "elapsed_seconds",
+        ],
+        ["", "", "", "", "1.5", "7", "0.25"],
+        ["", "", "", "", "-2.0", "3", "0.75"],
+        ["1", "0", "18", "1", "0.0", "1", rows[3][6]],
+    ]
+
+
+def test_monitor_rejects_unknown_existing_header_without_appending(tmp_path: Path) -> None:
+    monitor_path = tmp_path / "monitor.worker_1.csv"
+    original = "unexpected,columns\nold,data\n"
+    monitor_path.write_text(original, encoding="utf-8")
+    monitored = EpisodeMonitor(
+        ScheduledEnvironment(
+            WorkerSchedule(base_seed=17, worker_index=1, worker_count=2), build_one_step_env
+        ),
+        monitor_path,
+        threading.Lock(),
+        worker_id=1,
+    )
+
+    monitored.reset()
+    with pytest.raises(ValueError, match="unexpected monitor CSV header"):
+        monitored.step(0)
+
+    assert monitor_path.read_text(encoding="utf-8") == original
+
+
+class AdaptiveEpisodeEnv(FakeGymEnv):
+    def __init__(self) -> None:
+        super().__init__(0)
+        self.contract = replace(
+            self.contract,
+            version="adaptive-v1",
+            contract_hash="e" * 64,
+            semantics={"max_controllable_units": 24},
+        )
+
+    def step(self, action):
+        observation, reward, terminated, truncated, _ = super().step(action)
+        return observation, reward, terminated, truncated, {
+            "diagnostics": {
+                "design_count": 2,
+                "distinct_custom_templates_deployed": 1,
+                "deployment_completed": True,
+                "invalid_sequences": 3,
+                "pregame_decisions": 12,
+            }
+        }
+
+
+def test_adaptive_episode_monitor_writes_exactly_one_diagnostic_row(tmp_path: Path) -> None:
+    monitored = EpisodeMonitor(
+        AdaptiveEpisodeEnv(), tmp_path / "monitor.csv", threading.Lock()
+    )
+
+    monitored.reset(seed=1)
+    monitored.step(0)
+
+    with (tmp_path / "adaptive_episodes.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.reader(stream))
+    assert rows == [ADAPTIVE_MONITOR_HEADER, ["0:1", "2", "1", "True", "3", "12"]]
+
+
+def test_tactical_episode_monitor_does_not_create_adaptive_sidecar(tmp_path: Path) -> None:
+    monitored = EpisodeMonitor(FakeGymEnv(0), tmp_path / "monitor.csv", threading.Lock())
+
+    monitored.reset(seed=1)
+    monitored.step(0)
+
+    assert not (tmp_path / "adaptive_episodes.csv").exists()
+
+
+def test_training_factory_forwards_environment_to_worker_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[tuple[str, Path]] = []
+
+    def fake_client(
+        server_cmd,
+        *,
+        opponent,
+        seat,
+        base_seed,
+        environment,
+        scenario_path,
+    ):
+        del server_cmd, opponent
+        captured.append((environment, scenario_path))
+        return FakeGymEnv(0, seat, base_seed)
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_client)
+    adaptive = replace(config("adaptive-worker"), workers=1, environment="adaptive-v1")
+    scenario_path = tmp_path / "scenario.json"
+    vector = env_module.TrainingEnvironmentFactory(["fake-server"])(
+        adaptive,
+        tmp_path,
+        scenario_path,
+        {"kind": "scripted", "name": "greedy"},
+    )
+    try:
+        assert captured == [("adaptive-v1", scenario_path)]
+        assert vector.action_masks().shape == (1, adaptive.workers + 1)
+    finally:
+        vector.close()
+
+
+def test_training_factory_probe_rejects_authoritative_scenario_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = scenario()
+    scenario_path = tmp_path / "scenario.json"
+    requested.write(scenario_path)
+    document = requested.document
+    spaces_info = {
+        "scenario_id": "wrong-id",
+        "scenario_schema_version": requested.schema_version,
+        "contract_version": requested.environment,
+        "board_w": document["board"]["width"],
+        "board_h": document["board"]["height"],
+        "round_cap": document["rules"]["round_cap"],
+        "biomes": document["rules"]["biomes_enabled"],
+        "board": {**document["board"], **document["rules"]},
+        "max_steps": document["episode"]["max_steps"],
+        "reward": dict(document["reward"]),
+    }
+
+    def fake_client(*_args, **_kwargs):
+        env = FakeGymEnv(0)
+        env.spaces_info = spaces_info
+        return env
+
+    monkeypatch.setattr(env_module, "HexWarsEnv", fake_client)
+
+    with pytest.raises(
+        ValueError,
+        match=r"scenario 'tactical-standard' field id requested 'tactical-standard'.*'wrong-id'",
+    ):
+        env_module.TrainingEnvironmentFactory(["fake-server"]).probe(
+            config("probe-mismatch"),
+            scenario_path,
+        )
+
+
+@pytest.mark.parametrize("worker_count,subprocess_workers", [(1, False), (2, True)])
+def test_adaptive_vector_workers_keep_identical_contract_and_boolean_masks(
+    worker_count: int, subprocess_workers: bool
+) -> None:
+    vector = build_vector_env(
+        worker_count,
+        lambda worker_index: AdaptiveVectorProbeEnv(worker_index),
+        subprocess_workers=subprocess_workers,
+    )
+    try:
+        masks = vector.action_masks()
+        assert vector.contract.version == "adaptive-v1"
+        assert masks.shape == (worker_count, 2)
+        assert masks.dtype == np.bool_
+        assert all(contract == vector.contract for contract in vector.get_attr("contract"))
+    finally:
+        vector.close()
+
+
+def _write_adaptive_diagnostics(worker_index: int, root: str, episode_count: int) -> None:
+    path = Path(root)
+    monitored = EpisodeMonitor(
+        AdaptiveEpisodeEnv(),
+        path / f"monitor.worker_{worker_index}.csv",
+        threading.Lock(),
+        worker_id=worker_index,
+        adaptive_path=path / f"adaptive_episodes.worker_{worker_index}.csv",
+    )
+    for episode in range(episode_count):
+        monitored.reset(seed=worker_index * episode_count + episode)
+        monitored.step(0)
+    monitored.close()
+
+
+def test_four_spawned_workers_write_unambiguous_diagnostics_without_contention(
+    tmp_path: Path,
+) -> None:
+    context = mp.get_context("spawn")
+    processes = [
+        context.Process(target=_write_adaptive_diagnostics, args=(worker, str(tmp_path), 25))
+        for worker in range(4)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15.0)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            if process.pid is not None:
+                process.join(timeout=2.0)
+
+    identities: list[str] = []
+    for worker_index in range(4):
+        path = tmp_path / f"adaptive_episodes.worker_{worker_index}.csv"
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 25
+        identities.extend(row["episode"] for row in rows)
+    assert len(identities) == len(set(identities)) == 100
 
 
 class FakeCheckpointAdapter:
@@ -328,7 +826,10 @@ class FakeCheckpointAdapter:
         self.inspected.append(path)
         assert path.read_bytes().startswith(b"model-")
         return {
+            "environment": expected_contract.environment,
+            "contract_version": expected_contract.version,
             "contract_hash": expected_contract.contract_hash,
+            "encoding_hash": expected_contract.encoding_hash,
             "observation_size": expected_contract.observation_size,
             "action_size": expected_contract.action_size,
         }
@@ -643,6 +1144,29 @@ class FakeVectorEnv:
         self.closed = True
 
 
+class StaticTrainingEnvironmentFactory:
+    def __init__(self, env: FakeVectorEnv) -> None:
+        self.env = env
+
+    def probe(
+        self,
+        run_config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, dict[str, object], dict[str, object]]:
+        del scenario_path
+        return self.env.contract, dict(self.env.spaces_info), dict(run_config.opponent)
+
+    def __call__(
+        self,
+        run_config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: dict[str, object],
+    ) -> FakeVectorEnv:
+        del run_config, run_dir, scenario_path, opponent_snapshot
+        return self.env
+
+
 class OrderedCloseVectorEnv(FakeVectorEnv):
     def __init__(self, contract: EnvironmentContract, order: list[str]) -> None:
         super().__init__(contract)
@@ -726,6 +1250,97 @@ class FakeTrainingAdapter(FakeCheckpointAdapter):
         assert expected_contract == self.contract
 
 
+class CapturingTrainingEnvironmentFactory:
+    def __init__(
+        self,
+        contract: EnvironmentContract,
+        *,
+        worker_contract: EnvironmentContract | None = None,
+    ) -> None:
+        self.contract = contract
+        self.worker_contract = worker_contract or contract
+        self.probe_scenario_paths: list[Path] = []
+        self.worker_scenario_paths: list[Path] = []
+        self.worker_opponent_snapshots: list[dict[str, object]] = []
+        self.probed_opponent_snapshot = {"kind": "scripted", "name": "greedy"}
+        self.worker_env: FakeVectorEnv | None = None
+
+    def probe(
+        self,
+        run_config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, dict[str, object], dict[str, object]]:
+        del run_config
+        self.probe_scenario_paths.append(Path(scenario_path))
+        return (
+            self.contract,
+            {"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+            dict(self.probed_opponent_snapshot),
+        )
+
+    def __call__(
+        self,
+        run_config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: dict[str, object],
+    ) -> FakeVectorEnv:
+        del run_dir
+        self.worker_scenario_paths.extend([Path(scenario_path)] * run_config.workers)
+        self.worker_opponent_snapshots.extend(
+            [dict(opponent_snapshot) for _ in range(run_config.workers)]
+        )
+        self.worker_env = FakeVectorEnv(self.worker_contract)
+        return self.worker_env
+
+
+def test_every_real_worker_receives_run_local_scenario(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_config = config("scenario-workers")
+    factory = CapturingTrainingEnvironmentFactory(contract)
+
+    run_training(
+        run_config,
+        runs_root=tmp_path,
+        scenario=scenario(),
+        environment_factory=factory,
+        algorithm_adapter=FakeTrainingAdapter(contract, FakeTrainingModel()),
+    )
+
+    expected = tmp_path / run_config.run_name / "scenario.json"
+    assert factory.worker_scenario_paths == [expected] * run_config.workers
+    assert all(
+        value == factory.probed_opponent_snapshot
+        for value in factory.worker_opponent_snapshots
+    )
+    assert factory.probe_scenario_paths[0].parent.parent == tmp_path
+    assert not factory.probe_scenario_paths[0].exists()
+
+
+def test_training_rejects_probe_actual_contract_mismatch(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    changed = replace(contract, contract_hash="d" * 64)
+    run_config = config("contract-changed")
+    factory = CapturingTrainingEnvironmentFactory(contract, worker_contract=changed)
+
+    with pytest.raises(
+        ContractMismatch, match="worker contract changed after scenario snapshot"
+    ):
+        run_training(
+            run_config,
+            runs_root=tmp_path,
+            scenario=scenario(),
+            environment_factory=factory,
+            algorithm_adapter=FakeTrainingAdapter(contract, FakeTrainingModel()),
+        )
+
+    assert factory.worker_env is not None
+    assert factory.worker_env.closed is True
+    assert read_json(tmp_path / run_config.run_name / "run.json")["state"] == "failed"
+
+
 def _resume_source(
     tmp_path: Path, contract: EnvironmentContract, *, algorithm: str = "maskable_ppo"
 ) -> Path:
@@ -744,6 +1359,21 @@ def _resume_source(
     return source_run
 
 
+def test_legacy_resume_resolution_is_in_memory_and_visibly_labeled(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.cli import _source_scenario
+
+    source = tmp_path / "legacy-source"
+    source.mkdir()
+
+    resolved = _source_scenario(source, "tactical-v1")
+
+    assert resolved.template_id == "legacy-default"
+    assert resolved.name == "Standard"
+    assert not (source / "scenario.json").exists()
+
+
 def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -754,7 +1384,7 @@ def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     run_dir = run_training(
         config("complete"),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -764,6 +1394,112 @@ def test_training_runner_completes_publishes_final_checkpoint_and_closes_env(
     assert manifest["latest_checkpoint_step"] == 64
     assert env.closed is True
     assert model.learn_calls[0]["reset_num_timesteps"] is True
+
+
+def test_training_passes_and_records_locked_ppo_options(
+    tmp_path: Path,
+) -> None:
+    env = build_vector_env(
+        1,
+        lambda worker: ScheduledEnvironment(
+            WorkerSchedule(
+                base_seed=1,
+                worker_index=worker,
+                worker_count=1,
+            ),
+            build_one_step_env,
+        ),
+    )
+    run_config = replace(
+        config("locked-options"),
+        total_timesteps=2,
+        workers=1,
+        algorithm_options={
+            "learning_rate": 0.0007,
+            "n_epochs": 4,
+            "target_kl": 0.03,
+        },
+    )
+
+    run_dir = run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
+        algorithm_adapter=MaskablePPOAdapter(),
+        console_output=False,
+    )
+
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["config"]["algorithm_options"] == {
+        "learning_rate": 0.0007,
+        "n_epochs": 4,
+        "target_kl": 0.03,
+    }
+    reloaded = MaskablePPOAdapter().load(
+        run_dir / manifest["latest_checkpoint"],
+        env=None,
+        device="cpu",
+    )
+    assert reloaded.learning_rate == 0.0007
+    assert reloaded.n_epochs == 4
+    assert reloaded.target_kl == 0.03
+
+
+def test_training_initializes_actor_before_logger_and_first_rollout(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    class ActorInitRequiredModel(FakeTrainingModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actor_initialized = False
+
+        def learn(self, **kwargs):
+            if not self.actor_initialized:
+                raise RuntimeError("actor was not initialized before learn")
+            return super().learn(**kwargs)
+
+    class ActorInitRecordingAdapter(FakeTrainingAdapter):
+        def initialize_actor(
+            self,
+            model,
+            source_run: Path,
+            expected_contract: EnvironmentContract,
+            device: str,
+        ):
+            assert model.configured_logger is None
+            assert model.learn_calls == []
+            assert source_run == tmp_path / "clone-source"
+            assert expected_contract == contract
+            assert device == "cpu"
+            model.actor_initialized = True
+            return {
+                "schema_version": 1,
+                "kind": "actor_only",
+                "source_run": str(source_run),
+            }
+
+    env = FakeVectorEnv(contract)
+    model = ActorInitRequiredModel()
+    run_config = replace(
+        config("actor-init-run"),
+        actor_init_source=str(tmp_path / "clone-source"),
+    )
+
+    run_dir = run_training(
+        run_config,
+        runs_root=tmp_path,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
+        algorithm_adapter=ActorInitRecordingAdapter(contract, model),
+        console_output=False,
+    )
+
+    assert model.actor_initialized is True
+    assert read_json(run_dir / "initialization.json") == {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_run": str(tmp_path / "clone-source"),
+    }
 
 
 def test_training_runner_marks_failure_and_closes_env(
@@ -776,7 +1512,7 @@ def test_training_runner_marks_failure_and_closes_env(
         run_training(
             config("failed"),
             runs_root=tmp_path,
-            environment_factory=lambda _config, _run_dir: env,
+            environment_factory=StaticTrainingEnvironmentFactory(env),
             algorithm_adapter=adapter,
         )
 
@@ -839,7 +1575,7 @@ def test_training_cleanup_closes_env_first_and_preserves_primary_error(
         run_training(
             run_config,
             runs_root=tmp_path,
-            environment_factory=lambda _config, _run_dir: env,
+            environment_factory=StaticTrainingEnvironmentFactory(env),
             algorithm_adapter=adapter,
             tracker_factory=lambda *_args, **_kwargs: CleanupTracker(),
             summary_writer_factory=lambda _log_dir: writer,
@@ -865,15 +1601,18 @@ def test_absolute_resume_treats_timesteps_as_final_target(
         timestep_mode="absolute",
     )
 
-    run_training(
+    run_dir = run_training(
         run_config,
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
     assert model.learn_calls[0]["total_timesteps"] == 32
     assert model.num_timesteps == 96
+    assert (run_dir / "scenario.json").read_text(encoding="utf-8") == (
+        source / "scenario.json"
+    ).read_text(encoding="utf-8")
 
 
 def test_legacy_additional_resume_trains_requested_extra_steps(
@@ -893,7 +1632,7 @@ def test_legacy_additional_resume_trains_requested_extra_steps(
     run_dir = run_training(
         run_config,
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -920,7 +1659,7 @@ def test_resume_clears_loaded_episode_buffers_before_applying_source_offset(
             total_timesteps=96,
         ),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -962,7 +1701,7 @@ def test_training_wires_functional_tensorboard_writer_when_requested(
     run_training(
         replace(config("tensorboard-run"), trackers=[{"kind": "tensorboard"}]),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
         tracker_factory=tracker_factory,
         summary_writer_factory=lambda _log_dir: writer,
@@ -1015,7 +1754,15 @@ def test_multiworker_run_manifest_exposes_monitor_shards_as_authoritative(
     ]
     with (run_dir / "monitor.csv").open(newline="", encoding="utf-8") as stream:
         assert list(csv.reader(stream)) == [
-            ["episode_reward", "episode_length", "elapsed_seconds"]
+            [
+                "worker_id",
+                "episode_index",
+                "episode_seed",
+                "learner_seat",
+                "episode_reward",
+                "episode_length",
+                "elapsed_seconds",
+            ]
         ]
 
 
@@ -1029,7 +1776,7 @@ def test_stop_after_checkpoint_on_final_rollout_publishes_update_and_marks_stopp
     run_dir = run_training(
         config("final-stop"),
         runs_root=tmp_path,
-        environment_factory=lambda _config, _run_dir: env,
+        environment_factory=StaticTrainingEnvironmentFactory(env),
         algorithm_adapter=adapter,
     )
 
@@ -1041,10 +1788,16 @@ def test_stop_after_checkpoint_on_final_rollout_publishes_update_and_marks_stopp
 
 
 def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) -> None:
-    received: list[tuple[RunConfig, Path, list[str]]] = []
+    received: list[tuple[RunConfig, ResolvedScenario, Path, list[str]]] = []
 
-    def runner(run_config: RunConfig, *, runs_root: Path, server_cmd: list[str]):
-        received.append((run_config, runs_root, server_cmd))
+    def runner(
+        run_config: RunConfig,
+        *,
+        scenario: ResolvedScenario,
+        runs_root: Path,
+        server_cmd: list[str],
+    ):
+        received.append((run_config, scenario, runs_root, server_cmd))
         return runs_root / run_config.run_name
 
     exit_code = cli_main(
@@ -1073,11 +1826,42 @@ def test_train_cli_builds_run_config_and_invokes_unified_runner(tmp_path: Path) 
     )
 
     assert exit_code == 0
-    run_config, runs_root, server_cmd = received[0]
+    run_config, resolved_scenario, runs_root, server_cmd = received[0]
     assert run_config.run_name == "cli-smoke"
+    assert resolved_scenario.template_id == "tactical-v2-standard"
     assert run_config.learner_seat == "alternating"
     assert run_config.opponent == {"kind": "scripted", "name": "greedy"}
     assert runs_root == tmp_path
     assert server_cmd == ["dotnet", "fake-server.dll"]
     assert run_config.timestep_mode == "absolute"
     assert run_config.allow_unsafe_legacy_resume is False
+
+def test_profiled_tactical_v2_monitor_surfaces_selected_start_profile(tmp_path: Path) -> None:
+    class ProfiledEpisode(FakeGymEnv):
+        def __init__(self) -> None:
+            super().__init__(0)
+            self.contract = replace(
+                self.contract,
+                version="tactical-v2",
+                semantics={"placement_policy": "profiled-seeded-v1"},
+            )
+
+        def reset(self, *, seed=None, options=None):
+            observation, _ = super().reset(seed=seed, options=options)
+            return observation, {"start_profile": "conversion-2v1-near"}
+
+        def step(self, action):
+            observation, reward, terminated, truncated, _ = super().step(action)
+            return observation, reward, terminated, truncated, {}
+
+    monitored = EpisodeMonitor(
+        ProfiledEpisode(),
+        tmp_path / "monitor.csv",
+        threading.Lock(),
+    )
+
+    monitored.reset(seed=0)
+    _, _, terminated, _, info = monitored.step(0)
+
+    assert terminated is True
+    assert info["episode"]["start_profile"] == "conversion-2v1-near"

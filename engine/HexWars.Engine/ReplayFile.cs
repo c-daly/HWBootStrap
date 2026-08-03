@@ -129,6 +129,10 @@ namespace HexWars.Engine
             sb.Append(" genOutput=").Append(c.GeneratorOutput);
             sb.Append(" startingPoints=").Append(c.StartingPoints);
             sb.Append(" damageFloor=").Append(c.DamageFloor);
+            sb.Append(" designFee=").Append(c.DesignFee);
+            sb.Append(" maxDesignCost=").Append(c.MaxDesignPointCost);
+            sb.Append(" fixedTemplates=").Append(c.FixedTemplateCount);
+            sb.Append(" templateSlots=").Append(c.TemplateSlotCount);
             sb.Append(" territory=").Append(c.TerritoryMode ? 1 : 0);
             sb.Append(" claimEndsTurn=").Append(c.ClaimEndsTurn ? 1 : 0);
             sb.Append(" buildAnywhere=").Append(c.BuildAnywhere ? 1 : 0);
@@ -171,6 +175,10 @@ namespace HexWars.Engine
                 generatorOutput: Gi("genOutput", 1),
                 startingPoints: Gi("startingPoints", 12),
                 damageFloor: Gi("damageFloor", 0),
+                designFee: Gi("designFee", 0),
+                maxDesignPointCost: Gi("maxDesignCost", 0),
+                fixedTemplateCount: Gi("fixedTemplates", 0),
+                templateSlotCount: Gi("templateSlots", 0),
                 territoryMode: Gb("territory", false),
                 claimEndsTurn: Gb("claimEndsTurn", true),
                 buildAnywhere: Gb("buildAnywhere", false),

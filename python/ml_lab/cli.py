@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 import time
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import traceback
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterator, TextIO
 
 from .benchmark import benchmark_gymserver
 from .contracts import RunConfig, request_stop
@@ -18,6 +20,11 @@ from .controllers import ControllerResolver, ControllerSpec, normalize_controlle
 from .doctor import doctor_environment
 from .evaluation import DEFAULT_HELD_OUT_SEED, evaluate_controllers, publish_candidate
 from .io import read_json
+from .scenarios import (
+    ResolvedScenario,
+    legacy_default_scenario,
+    resolve_scenario,
+)
 from .training import run_training
 
 
@@ -67,11 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subcommands.add_parser("doctor", help="check headless ML dependencies")
     doctor.add_argument("--tracker", action="append", default=[])
+    doctor.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
+    )
     _add_runtime_arguments(doctor)
     _add_json_argument(doctor)
 
     train = subcommands.add_parser("train", help="run headless SB3 training")
     train.add_argument("--run", required=True)
+    train.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default=None,
+    )
     train.add_argument(
         "--algorithm", choices=["maskable_ppo", "masked_dqn"], default="maskable_ppo"
     )
@@ -85,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
     )
     train.add_argument("--resume")
+    train.add_argument("--actor-init")
+    train.add_argument("--learning-rate", type=float)
+    train.add_argument("--ppo-epochs", type=int)
+    train.add_argument("--target-kl", type=float)
+    train.add_argument("--episode-seed-base", type=int)
+    scenario = train.add_mutually_exclusive_group()
+    scenario.add_argument("--scenario-file", type=Path)
+    scenario.add_argument("--template")
     train.add_argument(
         "--tracker",
         action="append",
@@ -147,6 +172,21 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--workers", type=int, default=1)
     evaluate.add_argument("--server", default=str(DEFAULT_SERVER))
     evaluate.add_argument("--output", type=Path)
+    evaluate.add_argument(
+        "--capture-trace",
+        action="store_true",
+        help="capture evaluation-only tactical transition evidence",
+    )
+    evaluate.add_argument(
+        "--evidence-dir",
+        type=Path,
+        help="write per-match traces and replays; implies --capture-trace",
+    )
+    evaluate.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        help="explicit environment; required to select tactical-v2 for scripted-only matchups",
+    )
     _add_json_argument(evaluate)
 
     benchmark = subcommands.add_parser(
@@ -155,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--games", type=int, default=10)
     benchmark.add_argument("--seed-start", type=int, default=DEFAULT_HELD_OUT_SEED)
     benchmark.add_argument("--workers", type=int, default=1)
+    benchmark.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
+    )
     benchmark.add_argument("--server", default=str(DEFAULT_SERVER))
     _add_json_argument(benchmark)
     return parser
@@ -201,6 +246,37 @@ def _tracker_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _training_config(args: argparse.Namespace) -> RunConfig:
     policy = "HexCNN" if args.algorithm == "maskable_ppo" else "MlpPolicy"
+    environment = args.environment or "tactical-v2"
+    requested_algorithm_options = {
+        key: value
+        for key, value in {
+            "learning_rate": args.learning_rate,
+            "n_epochs": args.ppo_epochs,
+            "target_kl": args.target_kl,
+        }.items()
+        if value is not None
+    }
+    algorithm_options = requested_algorithm_options
+    episode_seed_base = args.episode_seed_base
+    if args.resume:
+        source_manifest = read_json(_source_run_dir(Path(args.resume)) / "run.json")
+        source_config = source_manifest.get("config")
+        if not isinstance(source_config, dict):
+            raise ValueError("resume source run is missing configuration metadata")
+        source_environment = source_config.get("environment")
+        if source_environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+            raise ValueError("resume source run is missing valid environment metadata")
+        if args.environment is not None and args.environment != source_environment:
+            raise ValueError("resume environment does not match the source run")
+        environment = source_environment
+        if requested_algorithm_options:
+            raise ValueError("PPO options cannot be overridden during resume")
+        source_options = source_config.get("algorithm_options", {})
+        if not isinstance(source_options, dict):
+            raise ValueError("resume source run has invalid algorithm options")
+        algorithm_options = dict(source_options)
+        if episode_seed_base is None:
+            episode_seed_base = source_config.get("episode_seed_base")
     return RunConfig(
         backend="sb3",
         algorithm=args.algorithm,
@@ -215,6 +291,10 @@ def _training_config(args: argparse.Namespace) -> RunConfig:
         opponent=controller_config(args.opponent),
         trackers=_tracker_configs(args),
         resume_source=args.resume,
+        algorithm_options=algorithm_options,
+        actor_init_source=args.actor_init,
+        episode_seed_base=episode_seed_base,
+        environment=environment,
     )
 
 
@@ -227,19 +307,138 @@ def _source_run_dir(source: Path) -> Path:
     raise ValueError("resume source must belong to a metadata-backed run")
 
 
+def _source_environment(source_run: Path) -> str:
+    manifest = read_json(Path(source_run) / "run.json")
+    raw_config = manifest.get("config")
+    if not isinstance(raw_config, dict):
+        raise ValueError("resume source run is missing configuration metadata")
+    environment = raw_config.get("environment")
+    if environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+        raise ValueError("resume source run is missing valid environment metadata")
+    return environment
+
+
+def _source_scenario(source_run: Path, environment: str) -> ResolvedScenario:
+    scenario_path = Path(source_run) / "scenario.json"
+    if scenario_path.is_file():
+        return resolve_scenario(
+            environment=environment,
+            scenario_file=scenario_path,
+            template_id=None,
+        )
+    return legacy_default_scenario(environment)
+
+
+def _training_scenario(args: argparse.Namespace) -> ResolvedScenario:
+    if args.resume:
+        source_run = _source_run_dir(Path(args.resume))
+        environment = _source_environment(source_run)
+        return _source_scenario(source_run, environment)
+    environment = args.environment or "tactical-v2"
+    return resolve_scenario(
+        environment=environment,
+        scenario_file=args.scenario_file,
+        template_id=args.template,
+        enforce_round_cap_minimum=True,
+    )
+
+
+def _resume_scenario(args: argparse.Namespace) -> ResolvedScenario:
+    source_run = _source_run_dir(args.source)
+    return _source_scenario(source_run, _source_environment(source_run))
+
+
 def _resume_config(args: argparse.Namespace) -> RunConfig:
     source_run = _source_run_dir(args.source)
     source = read_json(source_run / "run.json")
     raw_config = source.get("config")
     if not isinstance(raw_config, dict):
         raise ValueError("resume source run is missing configuration metadata")
+    if raw_config.get("environment") not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+        raise ValueError("resume source run is missing valid environment metadata")
     config = RunConfig(**raw_config)
     return replace(
         config,
         run_name=args.run,
         total_timesteps=args.timesteps,
         resume_source=str(source_run),
+        actor_init_source=None,
     )
+
+
+def read_seat_audit(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate learner-seat episode counts from the manifest's monitor shards."""
+    run_dir = Path(run_dir).resolve()
+    unreadable = {
+        "seat_0_episodes": 0,
+        "seat_1_episodes": 0,
+        "readable": False,
+        "balanced": False,
+        "warning": "",
+    }
+    monitor_files = manifest.get("monitor_files")
+    if (
+        not isinstance(monitor_files, list)
+        or not monitor_files
+        or any(not isinstance(relative, str) or not relative for relative in monitor_files)
+    ):
+        unreadable["warning"] = (
+            f"{run_dir / 'run.json'}: monitor_files must be a non-empty list of paths"
+        )
+        return unreadable
+
+    seat_counts = {0: 0, 1: 0}
+    for relative in monitor_files:
+        monitor_path = run_dir / relative
+        try:
+            with monitor_path.open(newline="", encoding="utf-8") as stream:
+                reader = csv.DictReader(stream, strict=True)
+                if reader.fieldnames is None or "learner_seat" not in reader.fieldnames:
+                    unreadable["warning"] = (
+                        f"{monitor_path}: missing learner_seat header"
+                    )
+                    return unreadable
+                for line_number, row in enumerate(reader, start=2):
+                    raw_seat = row.get("learner_seat")
+                    if raw_seat not in {"0", "1"}:
+                        unreadable["warning"] = (
+                            f"{monitor_path}:{line_number}: invalid learner_seat "
+                            f"{raw_seat!r}"
+                        )
+                        return unreadable
+                    seat_counts[int(raw_seat)] += 1
+        except (OSError, UnicodeError, csv.Error) as error:
+            unreadable["warning"] = f"{monitor_path}: {error}"
+            return unreadable
+
+    config = manifest.get("config")
+    if not isinstance(config, dict):
+        config = {}
+    try:
+        tolerance = max(1, int(config.get("workers", 1)))
+    except (TypeError, ValueError) as error:
+        unreadable["warning"] = f"{run_dir / 'run.json'}: invalid config.workers: {error}"
+        return unreadable
+    balanced = abs(seat_counts[0] - seat_counts[1]) <= tolerance
+    warning = ""
+    if (
+        config.get("learner_seat") == "alternating"
+        and manifest.get("state") in TERMINAL_STATES
+        and not balanced
+    ):
+        warning = (
+            "Learner seat audit is materially imbalanced: "
+            f"Seat 0 has {seat_counts[0]} episodes and "
+            f"Seat 1 has {seat_counts[1]} episodes "
+            f"(worker tolerance {tolerance})."
+        )
+    return {
+        "seat_0_episodes": seat_counts[0],
+        "seat_1_episodes": seat_counts[1],
+        "readable": True,
+        "balanced": balanced,
+        "warning": warning,
+    }
 
 
 def _run_result(run_dir: Path, *, require_manifest: bool = False) -> dict[str, Any]:
@@ -247,7 +446,9 @@ def _run_result(run_dir: Path, *, require_manifest: bool = False) -> dict[str, A
     manifest_path = run_dir / "run.json"
     result: dict[str, Any] = {"run_dir": str(run_dir)}
     if manifest_path.is_file():
-        result["run"] = read_json(manifest_path)
+        manifest = read_json(manifest_path)
+        result["run"] = manifest
+        result["seat_audit"] = read_seat_audit(run_dir, manifest)
     elif require_manifest:
         raise FileNotFoundError(manifest_path)
     return result
@@ -348,10 +549,12 @@ def _dispatch(
     if args.command == "doctor":
         return doctor_environment(
             server_cmd=["dotnet", args.server],
+            environment=args.environment,
             runs_root=args.runs_root,
             trackers=args.tracker,
         )
     if args.command == "train":
+        scenario = _training_scenario(args)
         config = _training_config(args)
         runner_options = {
             "runs_root": Path(args.runs_root),
@@ -362,10 +565,12 @@ def _dispatch(
         return _run_result(
             runner(
                 config,
+                scenario=scenario,
                 **runner_options,
             )
         )
     if args.command == "resume":
+        scenario = _resume_scenario(args)
         config = _resume_config(args)
         runner_options = {
             "runs_root": Path(args.runs_root),
@@ -376,6 +581,7 @@ def _dispatch(
         return _run_result(
             runner(
                 config,
+                scenario=scenario,
                 **runner_options,
             )
         )
@@ -410,6 +616,9 @@ def _dispatch(
             workers=args.workers,
             server_cmd=["dotnet", args.server],
             output_path=args.output,
+            environment=args.environment,
+            capture_trace=args.capture_trace or args.evidence_dir is not None,
+            evidence_dir=args.evidence_dir,
         )
     if args.command == "benchmark":
         return benchmark_gymserver(
@@ -417,8 +626,52 @@ def _dispatch(
             seed_start=args.seed_start,
             workers=args.workers,
             server_cmd=["dotnet", args.server],
+            environment=args.environment,
         )
     raise AssertionError(f"unhandled command {args.command!r}")
+
+
+def _training_run_dir(args: argparse.Namespace) -> Path:
+    return Path(args.runs_root) / args.run
+
+
+@contextmanager
+def _capture_stderr_to_file(path: Path) -> Iterator[TextIO]:
+    """Duplicate the process's stderr onto ``path`` for the lifetime of the context.
+
+    Trainers launched detached by the Unity ML Lab have their console discarded, so an
+    uncaught traceback, a CUDA/native fault, or worker/SB3 noise written to stderr was
+    previously unrecoverable. The file is opened line-buffered and created unconditionally
+    (it may legitimately stay empty on a clean run). Both ``sys.stderr`` and the raw OS
+    file descriptor are redirected so writes land in the file whether they come from
+    Python, a native extension, or a child process inheriting this process's stderr handle.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(path, "w", buffering=1, encoding="utf-8", errors="replace")
+    original_stderr = sys.stderr
+    target_fd: int | None = None
+    saved_fd: int | None = None
+    try:
+        target_fd = original_stderr.fileno()
+    except (OSError, ValueError, AttributeError):
+        target_fd = None
+    if target_fd is not None:
+        try:
+            saved_fd = os.dup(target_fd)
+            os.dup2(log_file.fileno(), target_fd)
+        except OSError:
+            saved_fd = None
+    sys.stderr = log_file
+    try:
+        yield log_file
+    finally:
+        sys.stderr = original_stderr
+        if target_fd is not None and saved_fd is not None:
+            try:
+                os.dup2(saved_fd, target_fd)
+            finally:
+                os.close(saved_fd)
+        log_file.close()
 
 
 def main(
@@ -433,6 +686,11 @@ def main(
     human_follow = args.command == "status" and args.follow and not args.json
     no_console_output = getattr(args, "no_console_output", False)
     with ExitStack() as console_stack:
+        stderr_log: TextIO | None = None
+        if args.command in {"train", "resume"}:
+            stderr_log = console_stack.enter_context(
+                _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
+            )
         if no_console_output:
             sink = console_stack.enter_context(
                 open(os.devnull, "w", encoding="utf-8")
@@ -451,6 +709,9 @@ def main(
                 ),
             )
         except Exception as error:
+            if stderr_log is not None:
+                traceback.print_exc(file=stderr_log)
+                stderr_log.flush()
             if no_console_output:
                 return 1
             if args.json:
@@ -469,3 +730,7 @@ def main(
     elif not human_follow:
         _emit_human(output, args.command, result)
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

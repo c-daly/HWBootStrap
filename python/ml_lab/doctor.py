@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from hexwars_gym.env import no_window_creationflags, parse_contract
 
 
 PackageVersion = Callable[[str], str]
@@ -38,6 +41,7 @@ def _dotnet_version() -> str:
         capture_output=True,
         text=True,
         timeout=15,
+        creationflags=no_window_creationflags(),
     )
     return completed.stdout.strip()
 
@@ -53,6 +57,7 @@ def _gymserver_handshake(command: Sequence[str]) -> dict[str, Any]:
         capture_output=True,
         text=True,
         timeout=30,
+        creationflags=no_window_creationflags(),
     )
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     if not lines:
@@ -60,10 +65,19 @@ def _gymserver_handshake(command: Sequence[str]) -> dict[str, Any]:
     response = json.loads(lines[0])
     version = response.get("contract_version")
     contract_hash = response.get("contract_hash")
+    encoding_hash = response.get("encoding_hash")
     if not isinstance(version, str) or not version:
         raise RuntimeError("GymServer handshake omitted contract_version")
     if not isinstance(contract_hash, str) or not contract_hash:
         raise RuntimeError("GymServer handshake omitted contract_hash")
+    if not isinstance(encoding_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", encoding_hash):
+        raise RuntimeError("GymServer handshake omitted a valid lowercase encoding_hash")
+    return response
+
+
+def _validate_selected_contract(response: dict[str, Any], environment: str) -> dict[str, Any]:
+    required_kind = "adaptive_tactical" if environment == "adaptive-v1" else "tactical"
+    parse_contract(response, environment=environment, required_kind=required_kind)
     return response
 
 
@@ -120,6 +134,7 @@ def _attempt(
 def doctor_environment(
     *,
     server_cmd: Sequence[str],
+    environment: str = "tactical-v1",
     runs_root: Path,
     trackers: Sequence[str] = (),
     package_version: PackageVersion = _package_version,
@@ -143,7 +158,9 @@ def doctor_environment(
         _attempt(
             "gymserver_handshake",
             True,
-            lambda: handshake(tuple(server_cmd)),
+            lambda: _validate_selected_contract(
+                handshake((*server_cmd, "--environment", environment)), environment
+            ),
             lambda value: (
                 f"{value.get('contract_version')} {value.get('contract_hash')}"
             ),

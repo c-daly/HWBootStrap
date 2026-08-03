@@ -1,13 +1,52 @@
+using System;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.UI;
+using HexWars.Engine.Rl;
 using HexWars.Presentation;
 using HexWars.Presentation.EditorTools.MlLab;
 
 namespace HexWars.Presentation.EditorTools
 {
+    public readonly struct MlViewerLaunchResult
+    {
+        MlViewerLaunchResult(
+            bool success, string error, string scenario,
+            string seatSchedule, int learnerSeat, string opponent)
+        {
+            Success = success;
+            Error = error ?? string.Empty;
+            Scenario = scenario ?? string.Empty;
+            SeatSchedule = seatSchedule ?? string.Empty;
+            LearnerSeat = learnerSeat;
+            Opponent = opponent ?? string.Empty;
+        }
+
+        public readonly bool Success;
+        public readonly string Error;
+        public readonly string Scenario;
+        public readonly string SeatSchedule;
+        public readonly int LearnerSeat;
+        public readonly string Opponent;
+
+        public static MlViewerLaunchResult Succeeded(
+            string scenario, int learnerSeat, string opponent,
+            string seatSchedule = "unknown") =>
+            new MlViewerLaunchResult(
+                true, string.Empty, scenario, seatSchedule,
+                learnerSeat, opponent);
+
+        public static MlViewerLaunchResult Failed(string error) =>
+            new MlViewerLaunchResult(
+                false,
+                string.IsNullOrWhiteSpace(error)
+                    ? "Start & Watch failed."
+                    : error,
+                string.Empty, string.Empty, -1, string.Empty);
+    }
+
     /// <summary>Editor entry point for the replay viewer: pick a recorded match file (written headless
     /// in WSL2 or by HexWars.Sim) and watch it play back, with speed + scrub controls.</summary>
     public static class ReplayViewerMenu
@@ -65,18 +104,21 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
-        // Watch two *trained models* (or a model vs greedy/random) fight once, via the Windows-venv
-        // policy_server.py bridge. Pick a .zip per seat (Cancel = greedy).
+        // Watch two metadata-backed runs (or a run vs greedy) fight once via policy_server.py.
+        // Cancel either folder picker to use greedy for that seat.
         [MenuItem("HexWars/Watch Model Duel...")]
         public static void WatchModelDuel()
         {
             string pyDir = PyDir();
             if (!PyReady(pyDir)) return;
-            string p0 = PickSpec("Seat 0 (Player 1) model — Cancel for greedy", pyDir);
+            string p0 = PickRunSpec("Seat 0 (Player 1) run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string run0);
             if (p0 == null) return;
-            string p1 = PickSpec("Seat 1 (Player 2) model — Cancel for greedy", pyDir);
+            string p1 = PickRunSpec("Seat 1 (Player 2) run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string run1);
             if (p1 == null) return;
-            LaunchDuel(pyDir, p0, p1, loop: false);
+            if (!TryResolveDuelEnvironment(run0, run1, out MlEnvironmentContract environment)) return;
+            LaunchDuel(pyDir, p0, p1, loop: false, environment: environment);
         }
 
         // Watch LIVE training: seat 0 = the newest checkpoint in a run's folder, reloaded between games as
@@ -91,45 +133,79 @@ namespace HexWars.Presentation.EditorTools
                 "Pick the learner's checkpoint folder (runs/<run>/checkpoints)",
                 System.IO.Path.Combine(pyDir, "runs"), "");
             if (string.IsNullOrEmpty(dir)) return;
-            string p1 = PickSpec("Opponent model — Cancel for greedy", pyDir);
+            string learnerRun = NormalizeRunDirectory(dir);
+            if (learnerRun == null) return;
+            string p1 = PickRunSpec("Opponent run — Cancel for greedy", pyDir,
+                ModelControllerKind.FixedRun, out string opponentRun);
             if (p1 == null) return;
-            string learner = ResolveLiveRunSpec(dir);
-            if (learner == null) return;
-            LaunchDuel(pyDir, learner, p1, loop: true);
+            if (!TryResolveDuelEnvironment(learnerRun, opponentRun,
+                    out MlEnvironmentContract environment)) return;
+            string learner = BuildLiveTrainingSpec(learnerRun);
+            LaunchDuel(pyDir, learner, p1, loop: true, environment: environment);
         }
 
         /// <summary>Open a live run from ML Lab, resolving its algorithm from run metadata.</summary>
-        public static void WatchLiveRun(string runDirectory)
+        public static MlViewerLaunchResult WatchLiveRun(string runDirectory)
         {
-            if (string.IsNullOrWhiteSpace(runDirectory)) return;
-            string pyDir = PyDir();
-            if (!PyReady(pyDir)) return;
-            string learner = new ModelSeatConfiguration
+            try
+            {
+                MlRunPresentationPlan plan = MlRunPresentationPlan.Load(runDirectory);
+                MlPresentationGame firstGame = plan.PlanGame(0);
+                LaunchDuel(PyDir(), plan);
+                return MlViewerLaunchResult.Succeeded(
+                    firstGame.Scenario.Id,
+                    firstGame.LearnerSeat,
+                    firstGame.OpponentLabel,
+                    plan.LearnerSeatSchedule);
+            }
+            catch (Exception error)
+            {
+                Debug.LogError("HexWars Start & Watch: " + error.Message);
+                return MlViewerLaunchResult.Failed(error.Message);
+            }
+        }
+
+        public static string BuildLiveTrainingSpec(string runDirectory) =>
+            new ModelSeatConfiguration
             {
                 Kind = ModelControllerKind.LiveRun,
                 Path = runDirectory,
+                InferenceMode = ModelInferenceMode.Stochastic,
             }.BuildSpec();
-            if (learner != null) LaunchDuel(pyDir, learner, "greedy", loop: true);
-        }
-
-        [System.Serializable] sealed class RunManifest { public RunConfig config; }
-        [System.Serializable] sealed class RunConfig { public string algorithm; }
 
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
 
+        public static string ResolvePythonExecutable(string pythonDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(pythonDirectory))
+                throw new ArgumentException(
+                    "Python directory is required.", nameof(pythonDirectory));
+            System.IO.DirectoryInfo project =
+                System.IO.Directory.GetParent(
+                    System.IO.Path.GetFullPath(pythonDirectory));
+            if (project == null)
+                throw new InvalidOperationException(
+                    "Python directory does not have a project parent: " +
+                    pythonDirectory);
+            return MlLabPaths.ResolvePythonExecutable(project.FullName);
+        }
+
         static bool PyReady(string pyDir)
         {
-            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string pyExe = ResolvePythonExecutable(pyDir);
             if (System.IO.File.Exists(pyExe)) return true;
             EditorUtility.DisplayDialog("HexWars", "Windows venv Python not found at:\n" + pyExe, "OK");
             return false;
         }
 
         public static void LaunchDuel(
-            string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f)
+            string pyDir, string p0, string p1, bool loop, int seed = 0, float secondsPerAction = 0.4f,
+            MlEnvironmentContract environment = MlEnvironmentContract.TacticalV1,
+            TrainingScenario scenario = null,
+            MlPresentationSchedule presentationPlan = null)
         {
-            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string pyExe = ResolvePythonExecutable(pyDir);
             string server = System.IO.Path.Combine(pyDir, "policy_server.py");
 
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
@@ -140,12 +216,16 @@ namespace HexWars.Presentation.EditorTools
             cam.clearFlags = CameraClearFlags.SolidColor;
             cam.backgroundColor = new Color(0.02f, 0.02f, 0.05f);
             camGo.AddComponent<CameraRig>();
+            EnsureSingleAudioListener(cam);
 
             var go = new GameObject("ModelDuel");
             go.AddComponent<BoardRenderer>();
             var d = go.AddComponent<ModelDuelDriver>();
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
+            d.Environment = environment;
+            d.Scenario = scenario;
+            d.PresentationPlan = presentationPlan;
             d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 
@@ -156,45 +236,53 @@ namespace HexWars.Presentation.EditorTools
             EditorApplication.EnterPlaymode();
         }
 
-        static string PickSpec(string title, string pyDir)
+        /// <summary>Root cause of the "There are no audio listeners in the scene" spam during arena
+        /// playback: <see cref="LaunchDuel"/> always starts from a brand-new, empty scene
+        /// (<see cref="EditorSceneManager.NewScene"/>), which never carries the one listener a normal
+        /// game scene owns — so battle SFX (<see cref="SoundManager"/>) played into it are both
+        /// inaudible and log every frame. Adds exactly one <see cref="AudioListener"/>, on the arena's
+        /// own camera, and only when the scene doesn't already carry one anywhere — adding a second
+        /// listener just flips that same warning into "There are 2 audio listeners" instead of curing
+        /// it. Thin: the caller passes the already-created arena camera; this only decides whether to
+        /// add the component.</summary>
+        public static void EnsureSingleAudioListener(Camera camera)
         {
-            string path = EditorUtility.OpenFilePanel(title, pyDir, "zip");
-            if (string.IsNullOrEmpty(path)) return "greedy";
-            return ResolveModelSpec(path);
+            if (camera == null) return;
+            if (UnityEngine.Object.FindObjectsByType<AudioListener>(FindObjectsSortMode.None).Length > 0) return;
+            camera.gameObject.AddComponent<AudioListener>();
         }
 
-        internal static string ResolveModelSpec(string modelPath)
+        public static void LaunchDuel(string pyDir, MlRunPresentationPlan plan)
         {
-            string manifest = FindRunManifest(modelPath);
-            if (manifest == null)
-            {
-                UnityEngine.Debug.LogError(
-                    "HexWars: model is not backed by run metadata. Choose its algorithm explicitly in " +
-                    "the ML Lab Arena; filenames are never used to infer algorithms.");
-                return null;
-            }
-            string prefix;
-            try { prefix = AlgorithmPrefixFromManifest(System.IO.File.ReadAllText(manifest)); }
-            catch (System.Exception error)
-            {
-                UnityEngine.Debug.LogError("HexWars: could not read model run metadata: " + error.Message);
-                return null;
-            }
-            if (prefix == null)
-            {
-                UnityEngine.Debug.LogError("HexWars: model run metadata has no supported algorithm.");
-                return null;
-            }
-            return prefix + modelPath;
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (!PyReady(pyDir))
+                throw new InvalidOperationException(
+                    "Windows venv Python is unavailable for Start & Watch.");
+            MlPresentationGame game = plan.PlanGame(0);
+            MlEnvironmentContract environment = EnvironmentFromScenario(game.Scenario);
+            LaunchDuel(
+                pyDir,
+                game.P0Spec,
+                game.P1Spec,
+                loop: true,
+                environment: environment,
+                scenario: game.Scenario,
+                presentationPlan: plan.BuildRuntimeSchedule());
         }
 
-        public static string AlgorithmPrefixFromManifest(string json)
+        static string PickRunSpec(string title, string pyDir, ModelControllerKind kind,
+            out string runDirectory)
         {
-            var data = JsonUtility.FromJson<RunManifest>(json);
-            string algorithm = data?.config?.algorithm;
-            if (algorithm == "maskable_ppo") return "ppo:";
-            if (algorithm == "masked_dqn") return "dqn:";
-            return null;
+            string path = EditorUtility.OpenFolderPanel(title,
+                System.IO.Path.Combine(pyDir, "runs"), "");
+            if (string.IsNullOrEmpty(path))
+            {
+                runDirectory = null;
+                return "greedy";
+            }
+            runDirectory = NormalizeRunDirectory(path);
+            if (runDirectory == null) return null;
+            return new ModelSeatConfiguration { Kind = kind, Path = runDirectory }.BuildSpec();
         }
 
         static string FindRunManifest(string modelPath)
@@ -210,7 +298,7 @@ namespace HexWars.Presentation.EditorTools
             return null;
         }
 
-        static string ResolveLiveRunSpec(string modelPath)
+        static string NormalizeRunDirectory(string modelPath)
         {
             string manifest = FindRunManifest(modelPath);
             if (manifest == null)
@@ -218,11 +306,36 @@ namespace HexWars.Presentation.EditorTools
                 UnityEngine.Debug.LogError("HexWars: live training requires a metadata-backed run.");
                 return null;
             }
-            return new ModelSeatConfiguration
-            {
-                Kind = ModelControllerKind.LiveRun,
-                Path = System.IO.Path.GetDirectoryName(manifest),
-            }.BuildSpec();
+            return System.IO.Path.GetDirectoryName(manifest);
+        }
+
+        static MlEnvironmentContract EnvironmentFromRun(string runDirectory)
+        {
+            string json = System.IO.File.ReadAllText(
+                System.IO.Path.Combine(runDirectory, "run.json"));
+            return EnvironmentFromRunManifest(json);
+        }
+
+        public static MlEnvironmentContract EnvironmentFromRunManifest(string json) =>
+            MlEnvironmentContracts.Parse(MlEnvironmentSummary.FromRunManifest(json).ContractVersion);
+
+        public static MlEnvironmentContract EnvironmentFromScenario(TrainingScenario scenario)
+        {
+            if (scenario == null)
+                throw new ArgumentNullException(nameof(scenario));
+            return MlEnvironmentContracts.Parse(scenario.Environment);
+        }
+
+        static bool TryResolveDuelEnvironment(string run0, string run1,
+            out MlEnvironmentContract environment)
+        {
+            environment = run0 != null ? EnvironmentFromRun(run0)
+                : run1 != null ? EnvironmentFromRun(run1)
+                : MlEnvironmentContract.TacticalV1;
+            if (run0 == null || run1 == null || EnvironmentFromRun(run1) == environment) return true;
+            EditorUtility.DisplayDialog("HexWars",
+                "The selected runs use different environment contracts.", "OK");
+            return false;
         }
     }
 }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from io import StringIO
@@ -10,8 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 import ml_lab.cli as cli_module
-from ml_lab.contracts import EnvironmentContract, RunConfig, create_run
+from ml_lab.contracts import EnvironmentContract, RunConfig, create_run as create_durable_run
 from ml_lab.io import atomic_write_json, read_json
+from ml_lab.scenarios import ResolvedScenario
 
 
 @pytest.fixture
@@ -19,6 +22,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="c" * 64,
+        encoding_hash="d" * 64,
         observation_size=12,
         action_size=7,
         board={"width": 2, "height": 2},
@@ -42,12 +46,243 @@ def _config(run_name: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
     )
+
+
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    template_id = (
+        "tactical-standard"
+        if config.environment == "tactical-v1"
+        else "adaptive-standard"
+    )
+    scenario = cli_module.resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id=template_id,
+    )
+    return create_durable_run(
+        runs_root,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
+    )
+
+
+def parse_train(*options: str):
+    return cli_module.build_parser().parse_args(["train", "--run", "locked-ppo", *options])
+
+
+def test_cli_records_locked_ppo_options() -> None:
+    args = parse_train(
+        "--actor-init", "bc/run",
+        "--learning-rate", "0.0003",
+        "--ppo-epochs", "10",
+        "--target-kl", "0.02",
+        "--episode-seed-base", "13000000",
+    )
+
+    config = cli_module._training_config(args)
+
+    assert config.algorithm_options == {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02,
+    }
+    assert config.actor_init_source == "bc/run"
+    assert config.episode_seed_base == 13_000_000
+
+
+def test_cli_records_explicit_adaptive_environment(tmp_path: Path) -> None:
+    received: list[RunConfig] = []
+
+    def runner(config: RunConfig, *, scenario: ResolvedScenario, **_kwargs) -> Path:
+        received.append(config)
+        assert scenario.template_id == "adaptive-standard"
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "adaptive-one", "--environment", "adaptive-v1",
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].environment == "adaptive-v1"
+
+
+def test_resume_manifest_without_explicit_environment_fails_closed(tmp_path: Path) -> None:
+    source = create_run(tmp_path, _config("old-source"), EnvironmentContract(
+        version="tactical-v1", contract_hash="c" * 64, encoding_hash="d" * 64, observation_size=12,
+        action_size=7, board={"width": 2, "height": 2}, roster=["scout"],
+        reward={"terminal_win": 1.0},
+    ))
+    manifest = read_json(source / "run.json")
+    del manifest["config"]["environment"]
+    atomic_write_json(source / "run.json", manifest)
+    output = StringIO()
+    assert cli_module.main([
+        "resume", str(source), "--run", "old-resumed", "--timesteps", "128",
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=lambda *_args, **_kwargs: source, stdout=output) == 1
+    assert "environment" in output.getvalue()
+
+
+def test_train_resume_inherits_adaptive_source_environment(tmp_path: Path) -> None:
+    adaptive_contract = replace(
+        EnvironmentContract(
+            version="tactical-v1", contract_hash="c" * 64, encoding_hash="d" * 64, observation_size=12,
+            action_size=7, board={"width": 2, "height": 2}, roster=["scout"],
+            reward={"terminal_win": 1.0},
+        ),
+        version="adaptive-v1",
+        semantics={"environment_kind": "adaptive_tactical"},
+    )
+    source = create_run(
+        tmp_path,
+        replace(_config("adaptive-source"), environment="adaptive-v1"),
+        adaptive_contract,
+    )
+    (source / "scenario.json").unlink()
+    received: list[RunConfig] = []
+
+    def runner(config: RunConfig, *, scenario: ResolvedScenario, **_kwargs) -> Path:
+        received.append(config)
+        assert scenario.template_id == "legacy-default"
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "adaptive-resumed", "--resume", str(source),
+        "--runs-root", str(tmp_path), "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].environment == "adaptive-v1"
+
+
+def test_train_resume_inherits_locked_ppo_options(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(
+        tmp_path,
+        replace(
+            _config("locked-source"),
+            algorithm_options={
+                "learning_rate": 0.0007,
+                "n_epochs": 4,
+                "target_kl": 0.03,
+            },
+            episode_seed_base=13_000_000,
+        ),
+        contract,
+    )
+    args = cli_module.build_parser().parse_args(
+        ["train", "--run", "locked-resume", "--resume", str(source)]
+    )
+
+    resumed = cli_module._training_config(args)
+
+    assert resumed.algorithm_options == {
+        "learning_rate": 0.0007,
+        "n_epochs": 4,
+        "target_kl": 0.03,
+    }
+    assert resumed.episode_seed_base == 13_000_000
+
+
+def test_train_resume_rejects_ignored_ppo_option_override(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(tmp_path, _config("override-source"), contract)
+    args = cli_module.build_parser().parse_args(
+        [
+            "train",
+            "--run",
+            "override-resume",
+            "--resume",
+            str(source),
+            "--learning-rate",
+            "0.0007",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot be overridden during resume"):
+        cli_module._training_config(args)
+
+
+def test_train_cli_rejects_template_and_file_together() -> None:
+    with pytest.raises(SystemExit):
+        cli_module.build_parser().parse_args([
+            "train", "--run", "x", "--template", "tactical-standard",
+            "--scenario-file", "custom.json",
+        ])
+
+
+def test_train_cli_passes_selected_template_to_runner(tmp_path: Path) -> None:
+    received: list[ResolvedScenario] = []
+
+    def runner(
+        config: RunConfig, *, scenario: ResolvedScenario, **_kwargs
+    ) -> Path:
+        received.append(scenario)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "large", "--environment", "tactical-v1",
+        "--template", "tactical-large-battle", "--runs-root", str(tmp_path),
+        "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].template_id == "tactical-large-battle"
+
+
+def test_train_resume_uses_source_scenario_instead_of_new_selection(
+    tmp_path: Path,
+) -> None:
+    source = create_run(
+        tmp_path,
+        _config("scenario-source"),
+        EnvironmentContract(
+            version="tactical-v1",
+            contract_hash="c" * 64,
+            encoding_hash="d" * 64,
+            observation_size=12,
+            action_size=7,
+            board={"width": 2, "height": 2},
+            roster=["scout"],
+            reward={"terminal_win": 1.0},
+        ),
+    )
+    source_scenario = cli_module.resolve_scenario(
+        environment="tactical-v1",
+        scenario_file=None,
+        template_id="tactical-long-battle",
+    )
+    source_scenario.write(source / "scenario.json")
+    received: list[ResolvedScenario] = []
+
+    def runner(
+        config: RunConfig, *, scenario: ResolvedScenario, **_kwargs
+    ) -> Path:
+        received.append(scenario)
+        return _complete_fake_run(tmp_path, config)
+
+    assert cli_module.main([
+        "train", "--run", "scenario-resumed", "--resume", str(source),
+        "--template", "tactical-large-battle", "--runs-root", str(tmp_path),
+        "--json",
+    ], runner=runner, stdout=StringIO()) == 0
+
+    assert received[0].template_id == "tactical-long-battle"
 
 
 def _complete_fake_run(runs_root: Path, config: RunConfig) -> Path:
     run_dir = runs_root / config.run_name
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(
         run_dir / "run.json",
         {
@@ -91,21 +326,24 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
     }
     handshakes: list[tuple[str, ...]] = []
 
+    from .test_gym_client import _valid_adaptive_spaces
+
     result = doctor_environment(
         server_cmd=["dotnet", "fake-server.dll"],
+        environment="adaptive-v1",
         runs_root=tmp_path,
         trackers=["wandb"],
         package_version=lambda name: package_versions[name],
         dotnet_version=lambda: "8.0.18",
         handshake=lambda command: handshakes.append(tuple(command))
-        or {"contract_version": "tactical-v1", "contract_hash": "c" * 64},
+        or _valid_adaptive_spaces(),
         cuda_info=lambda: {"available": False, "detail": "CPU-only host"},
         tracker_available=lambda name: False,
         write_probe=lambda path: path == tmp_path,
     )
 
     assert result["ok"] is True
-    assert handshakes == [("dotnet", "fake-server.dll")]
+    assert handshakes == [("dotnet", "fake-server.dll", "--environment", "adaptive-v1")]
     checks = {check["name"]: check for check in result["checks"]}
     assert checks["python:gymnasium"]["detail"] == "1.2.3"
     assert checks["dotnet"]["required"] is True
@@ -118,6 +356,47 @@ def test_doctor_checks_required_headless_dependencies_and_optional_capabilities(
         "detail": "CPU-only host",
     }
     assert checks["tracker:wandb"]["required"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (lambda value: value.update(contract_version="tactical-v1"), "contract_version"),
+        (
+            lambda value: (
+                value.update(environment_kind="adaptive_duel"),
+                value["board"].update(environment_kind="adaptive_duel"),
+                value["adaptive"].update(environment_kind="adaptive_duel"),
+            ),
+            "environment_kind",
+        ),
+        (lambda value: value["adaptive"].pop("phases"), "phases"),
+    ],
+)
+def test_doctor_rejects_wrong_or_malformed_selected_contract(
+    tmp_path: Path, mutation, expected: str
+) -> None:
+    from .test_gym_client import _valid_adaptive_spaces
+    from ml_lab.doctor import doctor_environment
+
+    response = copy.deepcopy(_valid_adaptive_spaces())
+    mutation(response)
+    result = doctor_environment(
+        server_cmd=["dotnet", "fake-server.dll"],
+        environment="adaptive-v1",
+        runs_root=tmp_path,
+        package_version=lambda _name: "1.0",
+        dotnet_version=lambda: "8.0",
+        handshake=lambda _command: response,
+        cuda_info=lambda: {"available": False, "detail": "CPU"},
+        tracker_available=lambda _name: True,
+        write_probe=lambda _path: True,
+    )
+
+    check = next(item for item in result["checks"] if item["name"] == "gymserver_handshake")
+    assert check["ok"] is False
+    assert expected in check["detail"]
+    assert result["ok"] is False
 
 
 def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
@@ -134,6 +413,8 @@ def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
     exit_code, payload = _invoke_json(
         [
             "doctor",
+            "--environment",
+            "adaptive-v1",
             "--server",
             "fake-server.dll",
             "--runs-root",
@@ -152,6 +433,7 @@ def test_doctor_json_is_one_stable_object_and_forwards_requested_trackers(
     assert received == [
         {
             "server_cmd": ["dotnet", "fake-server.dll"],
+            "environment": "adaptive-v1",
             "runs_root": tmp_path,
             "trackers": ["wandb"],
         }
@@ -163,9 +445,16 @@ def test_train_json_reports_the_durable_completed_run(
 ) -> None:
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
+        assert scenario.template_id == "tactical-v2-standard"
         return _complete_fake_run(runs_root, config)
 
     exit_code, payload = _invoke_json(
@@ -203,8 +492,9 @@ def test_train_no_console_output_suppresses_envelope_and_requests_file_only_logg
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
-        del server_cmd
+        del server_cmd, scenario
         received.append(console_output)
         return _complete_fake_run(runs_root, config)
 
@@ -241,8 +531,9 @@ def test_train_no_console_output_sinks_incidental_runner_stream_writes(
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
-        del server_cmd, console_output
+        del server_cmd, console_output, scenario
         print("tracker wrote to stdout")
         print("tracker wrote to stderr", file=sys.stderr)
         return _complete_fake_run(runs_root, config)
@@ -270,12 +561,99 @@ def test_train_no_console_output_sinks_incidental_runner_stream_writes(
     assert captured.err == ""
 
 
+def test_train_clean_run_creates_empty_stderr_log_file(tmp_path: Path) -> None:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del server_cmd, scenario
+        return _complete_fake_run(runs_root, config)
+
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "clean-stderr-log",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--json",
+        ],
+        runner=runner,
+        stdout=StringIO(),
+    )
+
+    assert exit_code == 0
+    log_path = tmp_path / "clean-stderr-log" / "train-err.log"
+    assert log_path.is_file()
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_train_child_exception_traceback_lands_in_stderr_log(tmp_path: Path) -> None:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del server_cmd, scenario
+        # Simulate a trainer that gets partway through startup before crashing.
+        run_dir = runs_root / config.run_name
+        (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        raise RuntimeError("simulated trainer crash after startup")
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "train",
+            "--run",
+            "crash-stderr-log",
+            "--timesteps",
+            "64",
+            "--runs-root",
+            str(tmp_path),
+            "--server",
+            "fake-server.dll",
+            "--json",
+        ],
+        runner=runner,
+        stdout=output,
+    )
+
+    assert exit_code == 1
+    log_path = tmp_path / "crash-stderr-log" / "train-err.log"
+    assert log_path.is_file()
+    contents = log_path.read_text(encoding="utf-8")
+    assert "Traceback (most recent call last)" in contents
+    assert "RuntimeError" in contents
+    assert "simulated trainer crash after startup" in contents
+
+    # The --json stdout error protocol must stay untouched by the new stderr capture.
+    payload = json.loads(output.getvalue())
+    assert payload["ok"] is False
+    assert payload["result"]["error"] == "RuntimeError"
+
+
 def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets(
     tmp_path: Path,
 ) -> None:
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        del scenario
         received.append(config)
         return _complete_fake_run(runs_root, config)
 
@@ -349,7 +727,14 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
     atomic_write_json(source / "run.json", source_manifest)
     received: list[RunConfig] = []
 
-    def runner(config: RunConfig, *, runs_root: Path, server_cmd: list[str]) -> Path:
+    def runner(
+        config: RunConfig,
+        *,
+        runs_root: Path,
+        server_cmd: list[str],
+        scenario: ResolvedScenario,
+    ) -> Path:
+        assert scenario.template_id == "tactical-standard"
         received.append(config)
         assert server_cmd == ["dotnet", "fake-server.dll"]
         return _complete_fake_run(runs_root, config)
@@ -383,6 +768,35 @@ def test_resume_builds_a_new_run_from_authoritative_source_metadata(
     )
 
 
+def test_resume_does_not_reapply_actor_initialization(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+) -> None:
+    source = create_run(
+        tmp_path,
+        replace(
+            _config("actor-initialized-source"),
+            actor_init_source="clone/source",
+        ),
+        contract,
+    )
+    args = cli_module.build_parser().parse_args(
+        [
+            "resume",
+            str(source),
+            "--run",
+            "resumed-ppo",
+            "--timesteps",
+            "128",
+        ]
+    )
+
+    resumed = cli_module._resume_config(args)
+
+    assert resumed.resume_source == str(source.resolve())
+    assert resumed.actor_init_source is None
+
+
 def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_logging(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -395,8 +809,10 @@ def test_resume_no_console_output_suppresses_envelope_and_requests_file_only_log
         runs_root: Path,
         server_cmd: list[str],
         console_output: bool,
+        scenario: ResolvedScenario,
     ) -> Path:
         del server_cmd
+        assert scenario.template_id == "tactical-standard"
         received.append(console_output)
         return _complete_fake_run(runs_root, config)
 
@@ -441,6 +857,119 @@ def test_status_reads_local_truth_without_unity_or_remote_services(
     assert result["run"]["state"] == "running"
     assert result["run"]["pid"] == 1234
     assert result["run"]["timesteps"] == 48
+
+
+def test_run_result_aggregates_learner_seats_from_manifest_monitor_shards(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(
+        tmp_path, replace(_config("seat-audit"), workers=2), contract
+    )
+    manifest = read_json(run_dir / "run.json")
+    first, second = [run_dir / relative for relative in manifest["monitor_files"]]
+    first.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,0,1.0,10,0.1\n"
+        "0,1,19,1,-1.0,11,0.2\n"
+        "0,2,21,0,1.0,12,0.3\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "1,0,18,1,1.0,9,0.1\n"
+        "1,1,20,0,-1.0,8,0.2\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit == {
+        "seat_0_episodes": 3,
+        "seat_1_episodes": 2,
+        "readable": True,
+        "balanced": True,
+        "warning": "",
+    }
+
+
+def test_run_result_reports_path_for_malformed_monitor_seat(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, _config("malformed-seat-audit"), contract)
+    manifest = read_json(run_dir / "run.json")
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,sideways,1.0,10,0.1\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["readable"] is False
+    assert str(monitor_path) in audit["warning"]
+    assert "learner_seat" in audit["warning"]
+
+
+def test_run_result_reports_path_for_monitor_missing_learner_seat_header(
+    tmp_path: Path, contract: EnvironmentContract
+) -> None:
+    run_dir = create_run(tmp_path, _config("missing-header-audit"), contract)
+    manifest = read_json(run_dir / "run.json")
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_reward\n0,1.0\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["readable"] is False
+    assert str(monitor_path) in audit["warning"]
+    assert "learner_seat" in audit["warning"]
+    assert "header" in audit["warning"].lower()
+
+
+@pytest.mark.parametrize(
+    ("state", "learner_seat", "expect_warning"),
+    [
+        ("running", "alternating", False),
+        ("completed", "alternating", True),
+        ("completed", "0", False),
+    ],
+)
+def test_run_result_only_warns_for_terminal_alternating_imbalance(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    state: str,
+    learner_seat: str,
+    expect_warning: bool,
+) -> None:
+    run_dir = create_run(
+        tmp_path,
+        replace(_config("seat-warning"), learner_seat=learner_seat),
+        contract,
+    )
+    manifest = read_json(run_dir / "run.json")
+    manifest["state"] = state
+    atomic_write_json(run_dir / "run.json", manifest)
+    monitor_path = run_dir / manifest["monitor_files"][0]
+    monitor_path.write_text(
+        "worker_id,episode_index,episode_seed,learner_seat,"
+        "episode_reward,episode_length,elapsed_seconds\n"
+        "0,0,17,0,1.0,10,0.1\n"
+        "0,1,18,0,1.0,10,0.2\n"
+        "0,2,19,0,1.0,10,0.3\n",
+        encoding="utf-8",
+    )
+
+    audit = cli_module._run_result(run_dir)["seat_audit"]
+
+    assert audit["balanced"] is False
+    assert bool(audit["warning"]) is expect_warning
 
 
 def test_status_follow_waits_for_terminal_local_state_without_streaming_json(
@@ -704,8 +1233,93 @@ def test_evaluate_json_supports_arbitrary_models_reciprocal_seats_and_output(
             "workers": 2,
             "server_cmd": ["dotnet", "fake-server.dll"],
             "output_path": output,
+            "environment": None,
+            "capture_trace": False,
+            "evidence_dir": None,
         }
     ]
+
+
+def test_evidence_directory_enables_trace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_controllers(*args, **kwargs):
+        captured.update(kwargs)
+        return {"wins": 0, "losses": 0, "draws": 1, "games": 1}
+
+    monkeypatch.setattr(cli_module, "evaluate_controllers", fake_evaluate_controllers)
+    assert cli_module.main(
+        [
+            "evaluate",
+            "--p0",
+            "greedy",
+            "--p1",
+            "random",
+            "--games",
+            "1",
+            "--environment",
+            "tactical-v2",
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+        ],
+        stdout=StringIO(),
+    ) == 0
+
+    assert captured["capture_trace"] is True
+    assert captured["evidence_dir"] == tmp_path / "evidence"
+    assert captured["environment"] == "tactical-v2"
+
+
+def test_explicit_trace_capture_does_not_require_evidence_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_controllers(*args, **kwargs):
+        captured.update(kwargs)
+        return {"wins": 1, "losses": 0, "draws": 0, "games": 1}
+
+    monkeypatch.setattr(cli_module, "evaluate_controllers", fake_evaluate_controllers)
+    assert cli_module.main(
+        [
+            "evaluate",
+            "--p0",
+            "greedy",
+            "--p1",
+            "random",
+            "--games",
+            "1",
+            "--capture-trace",
+        ],
+        stdout=StringIO(),
+    ) == 0
+
+    assert captured["capture_trace"] is True
+    assert captured["evidence_dir"] is None
+    assert captured["environment"] is None
+
+
+def test_module_entrypoint_renders_evaluate_help() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ml_lab.cli",
+            "evaluate",
+            "--help",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--capture-trace" in completed.stdout
+    assert "--evidence-dir" in completed.stdout
+    assert "{tactical-v1,tactical-v2,adaptive-v1}" in completed.stdout
 
 
 def test_benchmark_json_reports_headless_protocol_metrics(
@@ -735,6 +1349,8 @@ def test_benchmark_json_reports_headless_protocol_metrics(
     exit_code, payload = _invoke_json(
         [
             "benchmark",
+            "--environment",
+            "adaptive-v1",
             "--games",
             "4",
             "--seed-start",
@@ -755,6 +1371,7 @@ def test_benchmark_json_reports_headless_protocol_metrics(
             "seed_start": 50_000,
             "workers": 2,
             "server_cmd": ["dotnet", "fake-server.dll"],
+            "environment": "adaptive-v1",
         }
     ]
 

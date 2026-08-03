@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "greedy_demonstrations": {"start": 11000000, "stop": 11499999, "assigned": true},
+  "search_demonstrations": {"start": 11500000, "stop": 11999999, "assigned": true},
+  "bc_validation": {"start": 12000000, "stop": 12099999, "assigned": true},
+  "ppo_replicates": {"start": 13000000, "stop": 15999999, "assigned": true},
+  "development": {"start": 16000000, "stop": 16000099, "assigned": true},
+  "final": {"start": 17000000, "stop": 17000249, "assigned": false}
+}

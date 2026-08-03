@@ -38,6 +38,7 @@ namespace HexWars.Engine
             switch (command)
             {
                 case CreateUnit c: return ApplyCreateUnit(state, c);
+                case ReplaceTemplate c: return ApplyReplaceTemplate(state, c);
                 case DeleteTemplate c: return ApplyDeleteTemplate(state, c);
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
@@ -85,13 +86,17 @@ namespace HexWars.Engine
 
         private static Result ApplyCreateUnit(GameState state, CreateUnit c)
         {
-            if (c.Stats.Health < 1) return Result.Reject(state, RejectionReason.InvalidStats);
+            if (!ValidDesign(c.Stats, state.Config.MaxDesignPointCost))
+                return Result.Reject(state, RejectionReason.InvalidStats);
 
             var player = state.Player(c.Issuer);
             int fee = state.Config.DesignFee;
             if (player.Points < fee) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
             var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            if (state.Config.TemplateSlotCount > 0
+                && player.Barracks.Count >= state.Config.TemplateSlotCount)
+                return Result.Reject(state, RejectionReason.BarracksFull);
             if (player.Barracks.Count >= BarracksCatalog.ProtocolMaximumTemplates)
                 return Result.Reject(state, RejectionReason.BarracksFull);
             if (player.Barracks.Any(x => BarracksCatalog.Same(x, template)))
@@ -103,10 +108,50 @@ namespace HexWars.Engine
             return Result.Ok(WithPlayer(state, updated));
         }
 
+        private static Result ApplyReplaceTemplate(GameState state, ReplaceTemplate c)
+        {
+            var player = state.Player(c.Issuer);
+            if (c.TemplateIndex < state.Config.FixedTemplateCount
+                || c.TemplateIndex < 0
+                || (state.Config.TemplateSlotCount > 0
+                    && c.TemplateIndex >= state.Config.TemplateSlotCount)
+                || c.TemplateIndex >= player.Barracks.Count)
+                return Result.Reject(state, RejectionReason.TemplateNotFound);
+            if (!ValidDesign(c.Stats, state.Config.MaxDesignPointCost))
+                return Result.Reject(state, RejectionReason.InvalidStats);
+
+            int fee = state.Config.DesignFee;
+            if (player.Points < fee)
+                return Result.Reject(state, RejectionReason.InsufficientPoints);
+
+            var barracks = new List<UnitTemplate>(player.Barracks);
+            barracks[c.TemplateIndex] = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            var updated = new PlayerState(player.Id, player.Points - fee, barracks,
+                                          player.UnitsOnBoard, player.Generators, player.DestroyedValue);
+            return Result.Ok(WithPlayer(state, updated));
+        }
+
+        private static bool ValidDesign(UnitStats stats, int maxPointCost)
+        {
+            if (stats.Health < 1 || stats.Damage < 0 || stats.Defense < 0
+                || stats.Movement < 0 || stats.VerticalMovement < 0
+                || stats.Range < 0 || stats.RangeArc < 0
+                || stats.Vision < 0 || stats.VisionArc < 0)
+                return false;
+
+            long pointCost = (long)stats.Health + stats.Damage + stats.Defense
+                + stats.Movement + stats.VerticalMovement + stats.Range + stats.RangeArc
+                + stats.Vision + stats.VisionArc;
+            if (pointCost > int.MaxValue) return false;
+            return maxPointCost <= 0 || pointCost <= maxPointCost;
+        }
+
         private static Result ApplyDeleteTemplate(GameState state, DeleteTemplate c)
         {
             var player = state.Player(c.Issuer);
             if (c.TemplateIndex < 0 || c.TemplateIndex >= player.Barracks.Count)
+                return Result.Reject(state, RejectionReason.TemplateNotFound);
+            if (state.Config.TemplateSlotCount > 0)
                 return Result.Reject(state, RejectionReason.TemplateNotFound);
 
             var barracks = new List<UnitTemplate>(player.Barracks);

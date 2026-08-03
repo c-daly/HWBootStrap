@@ -81,7 +81,7 @@ namespace HexWars.Presentation
             float dt = Time.unscaledDeltaTime;
             bool userMoved = false;
 
-            var kb = Keyboard.current;
+            var kb = DeviceInput.Allowed ? Keyboard.current : null;
             if (kb != null)
             {
                 Vector3 fwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
@@ -94,7 +94,7 @@ namespace HexWars.Presentation
                 if (kb.eKey.isPressed) { Yaw += RotateSpeed * dt; userMoved = true; }
             }
 
-            var mouse = Mouse.current;
+            var mouse = DeviceInput.Allowed ? Mouse.current : null;
             if (mouse != null)
             {
                 float scroll = mouse.scroll.ReadValue().y;
@@ -106,7 +106,7 @@ namespace HexWars.Presentation
             }
 
             // touch: one-finger drag pans, two-finger pinch zooms
-            var ts = Touchscreen.current;
+            var ts = DeviceInput.Allowed ? Touchscreen.current : null;
             if (ts != null)
             {
                 var touches = ts.touches;

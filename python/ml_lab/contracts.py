@@ -7,19 +7,36 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .io import atomic_write_json, read_json
+from .scenarios import ResolvedScenario
 
 
 RUN_SCHEMA_VERSION = 1
 RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_STATES = {"created", "running", "stopping", "stopped", "completed", "failed"}
 PROGRESS_HEADER = ["timestamp", "timesteps", "episodes", "mean_reward", "steps_per_second"]
-MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
+MONITOR_HEADER = [
+    "worker_id",
+    "episode_index",
+    "episode_seed",
+    "learner_seat",
+    "episode_reward",
+    "episode_length",
+    "elapsed_seconds",
+]
+ADAPTIVE_MONITOR_HEADER = [
+    "episode",
+    "design_count",
+    "distinct_custom_templates_deployed",
+    "deployment_completed",
+    "invalid_sequences",
+    "pregame_decisions",
+]
 TRACKER_CREDENTIAL_PARTS = {"token", "secret", "password"}
 
 
@@ -31,14 +48,24 @@ class ContractMismatch(ValueError):
 class EnvironmentContract:
     version: str
     contract_hash: str
+    encoding_hash: str
     observation_size: int
     action_size: int
     board: Mapping[str, Any]
     roster: list[str]
     reward: Mapping[str, Any]
+    semantics: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", self.encoding_hash):
+            raise ValueError("encoding_hash must be a lowercase SHA-256 hex digest")
+
+    @property
+    def environment(self) -> str:
+        return self.version
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {"environment": self.environment, **asdict(self)}
 
 
 @dataclass(frozen=True)
@@ -56,13 +83,25 @@ class RunConfig:
     opponent: Mapping[str, Any]
     trackers: list[Mapping[str, Any]]
     resume_source: str | None
+    algorithm_options: Mapping[str, Any] = field(default_factory=dict)
+    actor_init_source: str | None = None
+    episode_seed_base: int | None = None
     timestep_mode: str = "absolute"
     allow_unsafe_legacy_resume: bool = False
+    environment: str = "tactical-v2"
 
     def to_dict(self) -> dict[str, Any]:
+        if self.actor_init_source is not None and self.resume_source is not None:
+            raise ValueError("actor initialization and resume are mutually exclusive")
+        if self.algorithm != "maskable_ppo" and (
+            self.actor_init_source is not None or self.algorithm_options
+        ):
+            raise ValueError("actor initialization and algorithm options require maskable_ppo")
         validate_tracker_specs(self.trackers)
         if self.timestep_mode not in {"absolute", "additional"}:
             raise ValueError("timestep mode must be 'absolute' or 'additional'")
+        if self.environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+            raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
         return asdict(self)
 
 
@@ -112,17 +151,34 @@ def _write_csv_header(path: Path, header: list[str]) -> None:
         csv.writer(stream).writerow(header)
 
 
-def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract) -> Path:
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+    scenario: ResolvedScenario,
+    *,
+    opponent_snapshot: Mapping[str, Any],
+) -> Path:
     """Create a new experiment directory; existing runs are never overwritten."""
     validate_run_name(config.run_name)
     config_data = config.to_dict()
+    if config.environment != contract.environment:
+        raise ContractMismatch("run environment does not match the environment contract")
+    if scenario.environment != config.environment:
+        raise ContractMismatch("scenario environment does not match the run configuration")
     contract_data = contract.to_dict()
     runs_root = Path(runs_root)
     runs_root.mkdir(parents=True, exist_ok=True)
     run_dir = runs_root / config.run_name
-    run_dir.mkdir()
+    # The CLI may have already created an empty run directory (e.g. to host a
+    # stderr capture file opened before this manifest exists). A run is only
+    # "existing" once it has a manifest, so that is the overwrite guard.
+    if (run_dir / "run.json").exists():
+        raise FileExistsError(run_dir / "run.json")
+    run_dir.mkdir(exist_ok=True)
     (run_dir / "checkpoints").mkdir()
     (run_dir / "replays").mkdir()
+    scenario.write(run_dir / "scenario.json")
 
     created_at = utc_now()
     monitor_files = (
@@ -143,6 +199,12 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
         "monitor_files": monitor_files,
         "config": config_data,
         "contract": contract_data,
+        "scenario": {
+            "path": "scenario.json",
+            "template_id": scenario.template_id,
+            "schema_version": scenario.schema_version,
+        },
+        "opponent_snapshot": dict(opponent_snapshot),
     }
     atomic_write_json(run_dir / "run.json", manifest)
     atomic_write_json(run_dir / "params.json", {"config": config_data, "contract": contract_data})
@@ -153,6 +215,14 @@ def create_run(runs_root: Path, config: RunConfig, contract: EnvironmentContract
     for monitor_file in monitor_files:
         if monitor_file != "monitor.csv":
             _write_csv_header(run_dir / monitor_file, MONITOR_HEADER)
+    if config.environment == "adaptive-v1":
+        adaptive_monitor_files = (
+            ["adaptive_episodes.csv"]
+            if config.workers == 1
+            else [f"adaptive_episodes.worker_{index}.csv" for index in range(config.workers)]
+        )
+        for monitor_file in adaptive_monitor_files:
+            _write_csv_header(run_dir / monitor_file, ADAPTIVE_MONITOR_HEADER)
     (run_dir / "train.log").touch(exist_ok=False)
     return run_dir
 
@@ -161,7 +231,14 @@ def update_run_state(run_dir: Path, state: str, **fields: Any) -> dict[str, Any]
     """Update mutable status while preserving the run's config and contract."""
     if state not in RUN_STATES:
         raise ValueError(f"unknown run state: {state}")
-    forbidden = {"config", "contract", "schema_version", "created_at"}.intersection(fields)
+    forbidden = {
+        "config",
+        "contract",
+        "scenario",
+        "opponent_snapshot",
+        "schema_version",
+        "created_at",
+    }.intersection(fields)
     if forbidden:
         raise ValueError(f"immutable run fields cannot be updated: {', '.join(sorted(forbidden))}")
     manifest_path = Path(run_dir) / "run.json"
@@ -183,10 +260,14 @@ def request_stop(run_dir: Path, *, after_checkpoint: bool) -> dict[str, Any]:
 
 
 def _validate_model_contract(model_info: Mapping[str, Any], expected: EnvironmentContract) -> None:
-    if model_info.get("contract_hash") != expected.contract_hash:
+    if model_info.get("environment") != expected.environment:
+        raise ContractMismatch("model environment does not match the environment contract")
+    if model_info.get("contract_version") != expected.version:
+        raise ContractMismatch("model contract version does not match the environment contract")
+    if model_info.get("encoding_hash") != expected.encoding_hash:
         raise ContractMismatch(
-            f"model contract hash {model_info.get('contract_hash')!r} does not match "
-            f"environment contract hash {expected.contract_hash!r}"
+            f"model encoding hash {model_info.get('encoding_hash')!r} does not match "
+            f"environment encoding hash {expected.encoding_hash!r}"
         )
     if model_info.get("observation_size") != expected.observation_size:
         raise ContractMismatch("model observation size does not match the environment")

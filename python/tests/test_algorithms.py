@@ -11,7 +11,13 @@ from ml_lab.algorithms import (
     get_algorithm_adapter,
     resolve_resume_checkpoint,
 )
-from ml_lab.contracts import ContractMismatch, EnvironmentContract, RunConfig, create_run
+from ml_lab.contracts import (
+    ContractMismatch,
+    EnvironmentContract,
+    RunConfig,
+    create_run as create_durable_run,
+)
+from ml_lab.scenarios import resolve_scenario
 
 
 @pytest.fixture
@@ -19,6 +25,7 @@ def contract() -> EnvironmentContract:
     return EnvironmentContract(
         version="tactical-v1",
         contract_hash="a" * 64,
+        encoding_hash="b" * 64,
         observation_size=12,
         action_size=7,
         board={"width": 3, "height": 2},
@@ -42,6 +49,26 @@ def run_config(run_name: str, algorithm: str) -> RunConfig:
         opponent={"kind": "scripted", "name": "greedy"},
         trackers=[{"kind": "local"}],
         resume_source=None,
+        environment="tactical-v1",
+    )
+
+
+def create_run(
+    runs_root: Path,
+    config: RunConfig,
+    contract: EnvironmentContract,
+) -> Path:
+    scenario = resolve_scenario(
+        environment=config.environment,
+        scenario_file=None,
+        template_id="tactical-standard",
+    )
+    return create_durable_run(
+        runs_root,
+        config,
+        contract,
+        scenario,
+        opponent_snapshot=config.opponent,
     )
 
 
@@ -244,7 +271,7 @@ def test_unified_resume_rejects_raw_checkpoint_without_authoritative_metadata(
     checkpoint.write_bytes(b"model")
     adapter = FakeAdapter()
 
-    with pytest.raises(ValueError, match="authoritative run metadata"):
+    with pytest.raises(ValueError, match="metadata-backed run directory"):
         create_or_resume_model(
             adapter,
             env=object(),
@@ -257,27 +284,25 @@ def test_unified_resume_rejects_raw_checkpoint_without_authoritative_metadata(
         )
 
 
-def test_explicit_unsafe_legacy_resume_preserves_wrapper_compatibility(
+def test_explicit_unsafe_legacy_resume_is_no_longer_supported(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
     checkpoint = tmp_path / "standalone.zip"
     checkpoint.write_bytes(b"model")
     adapter = FakeAdapter()
 
-    model, resumed = create_or_resume_model(
-        adapter,
-        env=object(),
-        expected_contract=contract,
-        spaces_info={},
-        seed=1,
-        device="cpu",
-        checkpoint_interval=32,
-        resume_source=checkpoint,
-        allow_unsafe_legacy_resume=True,
-    )
-
-    assert model == "resumed-model"
-    assert resumed is True
+    with pytest.raises(ValueError, match="standalone checkpoint resume is unsupported"):
+        create_or_resume_model(
+            adapter,
+            env=object(),
+            expected_contract=contract,
+            spaces_info={},
+            seed=1,
+            device="cpu",
+            checkpoint_interval=32,
+            resume_source=checkpoint,
+            allow_unsafe_legacy_resume=True,
+        )
 
 
 def test_masked_dqn_resume_is_rejected_until_replay_buffer_sidecars_exist(

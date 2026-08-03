@@ -9,6 +9,7 @@ import json
 import random
 import subprocess
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 import gymnasium as gym
@@ -19,9 +20,18 @@ from ml_lab.controllers import (
     ControllerResolutionError,
     ControllerResolver,
     ResolvedController,
+    _validate_contract_compatibility,
     predict as predict_resolved,
     validate_inference_input,
 )
+from hexwars_gym.env import (
+    SUPPORTED_ENVIRONMENTS,
+    _response_arrays,
+    _response_info,
+    no_window_creationflags,
+    parse_contract,
+)
+from ml_lab.protocol import validate_json_object, validate_step_payload
 
 
 def bind_opponents(opponents, resolver: ControllerResolver) -> list[ControllerBinding]:
@@ -43,10 +53,25 @@ def bind_opponents(opponents, resolver: ControllerResolver) -> list[ControllerBi
 class SelfPlayEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, server_cmd, opponent_models, learner_seat: int = 0, base_seed: int = 0):
+    def __init__(
+        self,
+        server_cmd,
+        opponent_models,
+        learner_seat: int = 0,
+        base_seed: int = 0,
+        environment: str = "tactical-v1",
+        scenario_path: Path | None = None,
+    ):
         super().__init__()
-        self.proc = subprocess.Popen(list(server_cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     text=True, bufsize=1)
+        if environment not in SUPPORTED_ENVIRONMENTS:
+            raise ValueError(f"unsupported environment {environment!r}")
+        cmd = list(server_cmd) + ["--environment", environment]
+        if scenario_path is not None:
+            cmd.extend(["--scenario-file", str(scenario_path)])
+        self.proc = subprocess.Popen(cmd,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     text=True, bufsize=1,
+                                     creationflags=no_window_creationflags())
         try:
             self.learner = learner_seat
             self.opp_seat = 1 - learner_seat
@@ -57,6 +82,14 @@ class SelfPlayEnv(gym.Env):
             self.spaces_info = sp  # full handshake: shapes + env config (for params)
             self.n_actions = int(sp["n_actions"])
             self.obs_len = int(sp["obs_len"])
+            expected_kind = (
+                "duel" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_duel"
+            )
+            self.contract = parse_contract(
+                sp, environment=environment, required_kind=expected_kind
+            )
+            self.n_actions = self.contract.action_size
+            self.obs_len = self.contract.observation_size
             self.action_space = spaces.Discrete(self.n_actions)
             self.observation_space = spaces.Box(0.0, 1.0, shape=(self.obs_len,), dtype=np.float32)
             self._mask = np.ones(self.n_actions, dtype=bool)
@@ -77,7 +110,7 @@ class SelfPlayEnv(gym.Env):
             line = self.proc.stdout.readline()
             if not line:
                 raise RuntimeError("server closed unexpectedly")
-            return json.loads(line)
+            return dict(validate_json_object(json.loads(line), "GymServer response"))
         except BaseException:
             self._shutdown()
             raise
@@ -137,16 +170,19 @@ class SelfPlayEnv(gym.Env):
 
     def _validate_opponent_geometry(self) -> None:
         for binding in self.opp_pool:
-            resolved = binding.resolved
-            if resolved.model is None:
-                continue
-            if resolved.observation_size != self.obs_len or resolved.action_size != self.n_actions:
-                raise ControllerResolutionError("self-play opponent geometry does not match duel spaces")
+            self._validate_opponent_candidate(binding.resolved)
+
+    def _validate_opponent_candidate(self, resolved: ResolvedController) -> None:
+        if resolved.model is None:
+            return
+        _validate_contract_compatibility(resolved.contract, self.contract)
+        if resolved.observation_size != self.obs_len or resolved.action_size != self.n_actions:
+            raise ControllerResolutionError("self-play opponent geometry does not match duel spaces")
 
     def _reload_live_opponents(self) -> None:
         """Refresh live sources only between episodes, before the next duel reset."""
         for binding in self.opp_pool:
-            binding.reload()
+            binding.reload(self._validate_opponent_candidate)
         self._validate_opponent_geometry()
 
     def _play_opponent(self, v):
@@ -154,8 +190,9 @@ class SelfPlayEnv(gym.Env):
         Scripted opponents are played server-side, so this is only used for model opponents."""
         acc = 0.0
         while not v["terminated"] and not v["truncated"] and int(v["seat"]) == self.opp_seat:
-            observation = np.asarray(v["obs"], dtype=np.float32)
-            mask = np.asarray(v["mask"], dtype=bool)
+            observation, mask = validate_step_payload(
+                v, observation_size=self.obs_len, action_size=self.n_actions
+            )
             resolved = self.opp.resolved
             assert resolved.model is not None and resolved.algorithm is not None
             validate_inference_input(resolved, observation, mask)
@@ -180,8 +217,10 @@ class SelfPlayEnv(gym.Env):
         v = self._rpc(msg)
         if not self._scripted():
             v, _ = self._play_opponent(v)  # model opponent: Python drives it (incl. if it moves first)
-        self._mask = np.asarray(v["mask"], dtype=bool)
-        return np.asarray(v["obs"], dtype=np.float32), {}
+        observation, self._mask = validate_step_payload(
+            v, observation_size=self.obs_len, action_size=self.n_actions
+        )
+        return observation, _response_info(v)
 
     def step(self, action):
         # one duel_step covers the learner's move; for a scripted opponent the server also plays its reply
@@ -191,9 +230,11 @@ class SelfPlayEnv(gym.Env):
         if not self._scripted():
             v, acc = self._play_opponent(v)
             reward += acc
-        self._mask = np.asarray(v["mask"], dtype=bool)
-        return (np.asarray(v["obs"], dtype=np.float32), reward,
-                bool(v["terminated"]), bool(v["truncated"]), {})
+        observation, self._mask = validate_step_payload(
+            v, observation_size=self.obs_len, action_size=self.n_actions
+        )
+        return (observation, reward,
+                bool(v["terminated"]), bool(v["truncated"]), _response_info(v))
 
     def action_masks(self):
         return self._mask

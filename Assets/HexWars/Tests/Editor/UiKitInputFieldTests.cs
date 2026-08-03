@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -19,6 +20,8 @@ namespace HexWars.Presentation.Tests
         public void TearDown()
         {
             Object.DestroyImmediate(_canvas);
+            foreach (var hub in Object.FindObjectsByType<WebGlInputHub>(FindObjectsSortMode.None))
+                Object.DestroyImmediate(hub.gameObject);
             foreach (var eventSystem in Object.FindObjectsByType<EventSystem>(FindObjectsSortMode.None))
                 Object.DestroyImmediate(eventSystem.gameObject);
         }
@@ -79,10 +82,25 @@ namespace HexWars.Presentation.Tests
             binding.Restore(); // screen-level Escape handling calls this before focus changes
             Assert.That(binding.Field.text, Is.EqualTo("24"));
 
+            binding.Field.text = "63";
+            var bridge = binding.Field.GetComponent<WebGlInputBridge>();
+            bridge.OnSelect(null);
+            InvokePrivate(bridge, "Receive", "cancel", binding.Field.text);
+            Assert.That(binding.Field.text, Is.EqualTo("24"),
+                "native Escape must restore the binding's committed value");
+
             binding.Field.text = "36";
             binding.Field.onEndEdit.Invoke(binding.Field.text);
             Assert.That(setterCalls, Is.EqualTo(1),
                 "restoring an unfocused field must not suppress the next real end-edit");
+        }
+
+        static void InvokePrivate(object target, string method, params object[] args)
+        {
+            var found = target.GetType().GetMethod(
+                method, BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(found, Is.Not.Null, method);
+            found.Invoke(target, args);
         }
     }
 }

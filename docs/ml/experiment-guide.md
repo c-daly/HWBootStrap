@@ -16,6 +16,57 @@ This guide is written for an intern who can use a terminal and the Unity Editor 
 
 A useful name includes the algorithm, opponent or hypothesis, and seed, for example `ppo_counter_run1_s1701`. Never reuse a run name: the tool refuses to overwrite an existing directory. Keep experiment and held-out seeds disjoint; the default evaluation range begins at `1000000`.
 
+## Choose and freeze the training game
+
+For a full run based on a checked-in library entry, use the exact template ID:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run adaptive_large_seed31 `
+  --environment adaptive-v1 `
+  --template adaptive-large-battle `
+  --algorithm maskable_ppo `
+  --opponent greedy `
+  --learner-seat alternating `
+  --workers 4 `
+  --timesteps 300000
+```
+
+For a one-off game configuration, use a standalone scenario document:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train `
+  --run custom_scenario_seed32 `
+  --environment adaptive-v1 `
+  --scenario-file .\experiments\counter-artillery.json `
+  --algorithm maskable_ppo `
+  --opponent random `
+  --learner-seat 1 `
+  --workers 2 `
+  --timesteps 100000
+```
+
+Use this intern workflow:
+
+1. Open `python/config/training-game-templates.json`, copy one complete object from its `templates` array, and save that object alone as `experiments/counter-artillery.json`. Do not wrap it in another `templates` array.
+2. Change its `id` and `name`, retaining `schema_version: 1` and the selected environment. Change the hypothesis variables—for example `adaptive.starting_army_budget` and the horizon at `episode.max_steps`—while preserving all required fields. The adaptive budget must still fund `starting_unit_count` copies of the cheapest unit.
+3. Validate with a cheap real run: use a unique smoke name, the same `--environment` and `--scenario-file`, and `--timesteps 1000 --checkpoint-every 500 --workers 1 --tracker local`. A smoke is for launch, checkpoint, and contract validation, not policy-quality evidence.
+4. Inspect `python/runs/SMOKE/run.json` and `python/runs/SMOKE/scenario.json`. Confirm `run.json.state` is `completed`, `run.json.scenario.path` is `scenario.json`, its template ID/schema version match the snapshot, checkpoints were published, and the manifest contract's observation/action sizes match the GymServer handshake validated for that snapshot.
+5. In **HexWars > ML Lab > Train**, select the same environment/template. Expand **Advanced game settings** to review or edit **Starting army budget** and **Max steps**, assign a new template name and ID, and **Save as template** if this configuration belongs in the shared library. Set the smoke run fields, read **Training preflight**, choose **Doctor**, and then **Start & Watch**. Use **Open run folder** for the snapshot. The Arena watches separate games from complete checkpoints; it does not render training episodes.
+6. Record the smoke result, review the diff and hypothesis with the experiment owner, then start the full-budget command under a new run name. Promote only reviewed, pinned checkpoint artifacts with their unmodified manifest and scenario snapshot.
+
+`scenario.json` is immutable provenance, not a convenient settings file. Never modify it after launch, copy a different document over it, or redirect the manifest. If a smoke reveals a bad budget or horizon, fix the source experiment file or template and create a new run. A later edit to the library cannot change what an existing run means because each run retains its canonical snapshot.
+
+### Choosing a tactical-v2 roster
+
+An unqualified `--environment` on `train` resolves to `tactical-v2`; it is the default for a new tactical experiment. `tactical-v1` is a frozen legacy contract kept for its own checkpoints only — never mix tactical-v1 and tactical-v2 artifacts. `doctor` and `benchmark` deliberately default to `--environment tactical-v1` instead, since they diagnose an environment rather than launch a run; pass `--environment tactical-v2` explicitly when you want to check the new contract.
+
+tactical-v2 has no design/budget economy — its roster *is* the hypothesis surface. In **HexWars > ML Lab > Train**, select the tactical-v2 environment to reveal the **Tactical setup** box: pick **Roster source** (local player 1 or 2), press **Refresh saved roster** to snapshot that seat's five canonical defaults plus its saved custom designs into the working scenario, and set **Starting unit count** with the 1–12 slider (`max_controllable_units` tracks it automatically). To test a hypothesis about a specific unit design, design and save it as a barracks template for the chosen local player first, then refresh the roster so it is included.
+
+Whatever roster/count is current when you choose **Start & Watch** (or a CLI `train` with a hand-authored `--scenario-file`) is snapshotted into that run's `scenario.json` and never re-read afterward: a resume, or the Arena/Start & Watch presentation, always reads the run's own snapshot, not a live saved-roster cache. Each episode then samples `starting_unit_count` templates **with replacement** from that frozen roster, seeded from the episode seed — both seats draw the identical, symmetric starting army for a given seed, and a small roster will legitimately repeat a template within one army. After a smoke run, confirm a custom template actually reached play by sampling a handful of seeds (via a short GymServer reset script, or by inspecting `scenario.json`'s template list directly) rather than assuming the ML Lab snapshot step worked.
+
+Because roster identity (each template's id, name, and stats) and count are baked into `encoding_hash`, changing either is a semantic contract change, not a cosmetic one: a checkpoint trained on one roster cannot resume or duel against a differently rostered run, even at the same starting-unit count. Give a roster or count change a new run name rather than editing an in-progress or completed one.
+
 ## Local headless benchmark record
 
 The following Task 11 verification was recorded on 2026-07-22 on the Windows development host reported by `benchmark` as 16 logical CPUs. Each command used 20 games and held the seed range and engine build constant:
@@ -88,7 +139,11 @@ Open **HexWars > ML Lab > Train** and enter the equivalent settings:
 - Learner seat: `alternating`; workers: the benchmarked count
 - Trackers: local plus TensorBoard (and W&B if desired)
 
-Choose **Doctor**, then **Start & Watch**. Training remains headless; Start & Watch separately opens rendered Arena games after a complete checkpoint exists. In the Arena, verify the learner run and exact checkpoint step shown for each seat. Checkpoints reload only between games. You may pause, change pacing, or stop watching without changing the trainer.
+Choose **Doctor**, then **Start & Watch**. Training remains headless; Start & Watch waits for a complete checkpoint and then builds a strict presentation plan from the selected run directory. The plan uses that run's immutable `scenario.json`, recorded learner-seat schedule, and recorded opponent snapshot. It does not use unsaved Train-tab values and does not fall back to Greedy if reconstruction fails.
+
+In the Arena, verify the scenario, current learner seat, opponent label, and exact checkpoint step. With `alternating`, the first displayed game places the learner in P0 and the next places it in P1; the observer and learner/opponent labels follow the swap. A configured opponent pool cycles deterministically between presentation games. Checkpoints reload, and changed controller seats restart their policy bridge, only between games. You may pause, change pacing, or stop watching without changing the trainer.
+
+These are newly simulated presentation games with the same scenario and controller schedules. They are not replays of hidden training episodes: their seed, actions, sampled pool member, and stochastic draws need not match any worker episode. Use the Train status's Seat 0/Seat 1 episode counts to audit the actual training schedule, and use the Arena to inspect representative behavior.
 
 ### 4. Monitor headless progress
 
@@ -133,7 +188,7 @@ In **ML Lab > Arena**, configure each seat independently. To diagnose this exper
 - Seat 0: **Live Run**, `python/runs/ppo_counter_run1`
 - Seat 1: **Fixed Run**, `python/runs/run1`
 
-Live Run resolves the newest complete checkpoint at each game boundary. Fixed Run resolves one exact checkpoint and stays frozen. Reverse the seat assignments for the reciprocal visual comparison. The panel shows the resolved algorithm, exact checkpoint path/step, and contract identity; it also shows current seat/seed and rolling W/L/D. Hidden training episodes are never revealed—the Arena is generating separate presentation matches.
+Live Run resolves the newest complete checkpoint at each game boundary. Fixed Run resolves one exact checkpoint and stays frozen. Reverse the seat assignments for the reciprocal visual comparison. The panel shows the resolved algorithm, exact checkpoint path/step, and contract identity; it also shows current seat/seed and rolling W/L/D. Manual Arena assignments are independent of a training schedule. By contrast, Start & Watch derives its scenario, learner seat, and opponent from the selected run. In both modes, the Arena generates separate presentation matches; it never reveals or replays hidden training episodes.
 
 For two concurrently training policies, choose **Live Run** for both seats. Each side may advance independently between games. This watches two arbitrary published model streams; it does not couple their optimizers or let either read half-written weights.
 

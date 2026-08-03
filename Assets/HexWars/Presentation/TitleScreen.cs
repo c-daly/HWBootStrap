@@ -42,7 +42,7 @@ namespace HexWars.Presentation
         {
             if (_dead || _game == null) return;
 
-            if (UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
+            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {
@@ -121,6 +121,8 @@ namespace HexWars.Presentation
             _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 245f, bh,
                                                "Room code");
             _roomCodeField.gameObject.name = "Room code";
+            _roomCodeField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreRoomCodeEdit;
+            _roomCodeField.onSubmit.AddListener(_ => OnJoinByCode());
             _roomCodeError = UiKit.Label(col.transform, "", -65f, y - 39f, 245f, 18f,
                                          UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.Danger);
             UiKit.Button(col.transform, "Join", 135f, y, 125f, bh, OnJoinByCode,
@@ -144,6 +146,7 @@ namespace HexWars.Presentation
 
         void OnJoinByCode()
         {
+            if (_dead) return; // InputField.onSubmit and the keyboard fallback may share one frame.
             string code = NormalizeRoomCode(_roomCodeField != null ? _roomCodeField.text : "");
             if (code.Length == 0)
             {

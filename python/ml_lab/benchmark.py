@@ -10,27 +10,37 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from hexwars_gym.env import no_window_creationflags, parse_contract
+from .protocol import validate_json_object, validate_step_payload, validate_view_payload
+
 
 MAX_DECISIONS_PER_EPISODE = 10_000
 
 
 class BenchmarkClient:
-    """Reusable tactical GymServer process with wire-size accounting."""
+    """Reusable GymServer process with wire-size accounting."""
 
-    def __init__(self, server_cmd: Sequence[str]) -> None:
+    def __init__(
+        self, server_cmd: Sequence[str], *, environment: str = "tactical-v1"
+    ) -> None:
         self.bytes_sent = 0
         self.bytes_received = 0
         self.request_count = 0
         self.response_count = 0
         self.proc = subprocess.Popen(
-            list(server_cmd),
+            list(server_cmd) + ["--environment", environment],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            creationflags=no_window_creationflags(),
         )
         try:
-            self._rpc({"cmd": "spaces"})
+            spaces = self._rpc({"cmd": "spaces"})
+            kind = (
+                "tactical" if environment in {"tactical-v1", "tactical-v2"} else "adaptive_tactical"
+            )
+            self.contract = parse_contract(spaces, environment=environment, required_kind=kind)
         except BaseException:
             self.close()
             raise
@@ -48,23 +58,24 @@ class BenchmarkClient:
             raise RuntimeError("GymServer closed unexpectedly")
         self.bytes_received += len(line.encode("utf-8"))
         self.response_count += 1
-        response = json.loads(line)
-        if not isinstance(response, dict):
-            raise RuntimeError("GymServer response must be an object")
-        return response
+        return dict(validate_json_object(json.loads(line), "GymServer response"))
 
     def run_episode(self, seed: int) -> int:
         state = self._rpc({"cmd": "reset", "seed": seed})
+        _, mask_array = validate_view_payload(
+            state,
+            observation_size=self.contract.observation_size,
+            action_size=self.contract.action_size,
+        )
         decisions = 0
         while decisions < MAX_DECISIONS_PER_EPISODE:
-            mask = state.get("mask")
-            if not isinstance(mask, list):
-                raise RuntimeError("GymServer response omitted the action mask")
-            try:
-                action = next(index for index, legal in enumerate(mask) if legal)
-            except StopIteration as error:
-                raise RuntimeError("GymServer returned no legal action") from error
+            action = int(mask_array.nonzero()[0][0])
             state = self._rpc({"cmd": "step", "action": action})
+            _, mask_array = validate_step_payload(
+                state,
+                observation_size=self.contract.observation_size,
+                action_size=self.contract.action_size,
+            )
             decisions += 1
             if bool(state.get("terminated")) or bool(state.get("truncated")):
                 return decisions
@@ -102,6 +113,7 @@ def benchmark_gymserver(
     seed_start: int,
     workers: int,
     server_cmd: Sequence[str] | None = None,
+    environment: str = "tactical-v1",
     client_factory: Callable[[int], Any] | None = None,
     clock: Callable[[], float] = time.perf_counter,
     cpu_count: Callable[[], int | None] = os.cpu_count,
@@ -114,7 +126,7 @@ def benchmark_gymserver(
     if client_factory is None:
         if not server_cmd:
             raise ValueError("server command is required")
-        client_factory = lambda _index: BenchmarkClient(server_cmd)
+        client_factory = lambda _index: BenchmarkClient(server_cmd, environment=environment)
 
     def run_partition(worker_index: int) -> dict[str, int]:
         client = client_factory(worker_index)

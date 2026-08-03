@@ -11,8 +11,33 @@ namespace HexWars.Presentation
     /// </summary>
     public sealed class PauseToggle : MonoBehaviour
     {
+        public const float MinSpeed = 0.25f;
+        public const float MaxSpeed = 16f;
+        const float FineStepCeiling = 4f; // at/below this, snap to 0.25x steps; above it, whole numbers
+
         bool _paused;
         float _speed = 1f;
+
+        /// <summary>Pure snap rule for the speed slider, extracted for testability: quarter-steps up to
+        /// (and including) <see cref="FineStepCeiling"/>, whole-number steps above it — fine control
+        /// matters most near 1x, coarse control is all that's useful once you're already at multiples of
+        /// the base speed. Always clamped to <see cref="MinSpeed"/>/<see cref="MaxSpeed"/> first, so an
+        /// out-of-range input (e.g. from a slider drag) can never snap outside the slider's own bounds.</summary>
+        public static float SnapSpeed(float value)
+        {
+            value = Mathf.Clamp(value, MinSpeed, MaxSpeed);
+            return value <= FineStepCeiling ? Mathf.Round(value * 4f) / 4f : Mathf.Round(value);
+        }
+
+        /// <summary>Pure extraction of "would this frame toggle pause", mirroring <see cref="SnapSpeed"/>'s
+        /// testable-extraction idiom — simulating an actual Input System keyboard device in a test is
+        /// heavy scaffolding this repo doesn't otherwise use, so the space-bar read
+        /// (<paramref name="spacePressedThisFrame"/>, standing in for
+        /// <c>Keyboard.current.spaceKey.wasPressedThisFrame</c>) and the focus gate
+        /// (<paramref name="deviceInputAllowed"/>, standing in for <see cref="DeviceInput.Allowed"/>)
+        /// are passed in rather than read directly.</summary>
+        public static bool ShouldTogglePause(bool deviceInputAllowed, bool spacePressedThisFrame) =>
+            deviceInputAllowed && spacePressedThisFrame;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoCreate()
@@ -43,7 +68,11 @@ namespace HexWars.Presentation
             if (!_show) return;
 
             var kb = Keyboard.current;
-            if (kb != null && kb.spaceKey.wasPressedThisFrame) { _paused = !_paused; Apply(); }
+            if (kb != null && ShouldTogglePause(DeviceInput.Allowed, kb.spaceKey.wasPressedThisFrame))
+            {
+                _paused = !_paused;
+                Apply();
+            }
         }
 
         void Apply() => Time.timeScale = _paused ? 0f : _speed;
@@ -65,8 +94,8 @@ namespace HexWars.Presentation
             var slabel = new GUIStyle(GUI.skin.label) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
             slabel.normal.textColor = Color.white;
             GUI.Label(new Rect(x - 70f, y - 2f, 70f, 32f), "Speed", slabel);
-            float v = GUI.HorizontalSlider(new Rect(x, y + 9f, w, 22f), _speed, 0.25f, 4f);
-            v = Mathf.Round(v * 4f) / 4f; // snap to 0.25x steps
+            float v = GUI.HorizontalSlider(new Rect(x, y + 9f, w, 22f), _speed, MinSpeed, MaxSpeed);
+            v = SnapSpeed(v);
             if (!Mathf.Approximately(v, _speed)) { _speed = v; Apply(); }
             GUI.Label(new Rect(x + w + 8f, y - 2f, 70f, 32f), $"{_speed:0.00}x", slabel);
 

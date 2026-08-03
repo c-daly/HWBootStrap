@@ -19,6 +19,7 @@ namespace HexWars.Engine
                 case AttackUnit a:      return $"A {(int)a.Issuer} {a.AttackerId} {a.TargetId}";
                 case EndTurn e:         return $"E {(int)e.Issuer}";
                 case CreateUnit cu:     return $"C {(int)cu.Issuer} {WriteStats(cu.Stats)} {EncodeName(cu.Name)}";
+                case ReplaceTemplate r: return $"REPLACE {(int)r.Issuer} {r.TemplateIndex} {WriteStats(r.Stats)} {EncodeName(r.Name)}";
                 case DeleteTemplate x:  return $"X {(int)x.Issuer} {x.TemplateIndex}";
                 case DeployUnit d:      return $"D {(int)d.Issuer} {d.TemplateIndex} {d.Cell.Q} {d.Cell.R}";
                 case DeployGenerator g: return $"N {(int)g.Issuer} {g.Cell.Q} {g.Cell.R}";
@@ -38,6 +39,8 @@ namespace HexWars.Engine
                 case "A": return new AttackUnit(issuer, I(p[2]), I(p[3]));
                 case "E": return new EndTurn(issuer);
                 case "C": return new CreateUnit(issuer, ReadStats(p, 2), p.Length > 11 ? DecodeName(p[11]) : "");
+                case "REPLACE": return new ReplaceTemplate(issuer, I(p[2]), ReadStats(p, 3),
+                    p.Length > 12 ? DecodeName(p[12]) : "");
                 case "X": return new DeleteTemplate(issuer, I(p[2]));
                 case "D": return new DeployUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
                 case "N": return new DeployGenerator(issuer, new HexCoord(I(p[2]), I(p[3])));

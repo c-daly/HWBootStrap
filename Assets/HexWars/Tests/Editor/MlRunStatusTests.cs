@@ -34,6 +34,94 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void ParseJson_ReadsSeatAudit()
+        {
+            const string json = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"," +
+                "\"config\":{\"learner_seat\":\"alternating\"}}," +
+                "\"seat_audit\":{\"seat_0_episodes\":12,\"seat_1_episodes\":11," +
+                "\"readable\":true,\"balanced\":true,\"warning\":\"\"}}}";
+
+            MlRunStatus status = MlRunStatus.Parse(json);
+
+            Assert.That(status.LearnerSeat, Is.EqualTo("alternating"));
+            Assert.That(status.SeatAuditBalanceApplicable, Is.True);
+            Assert.That(status.Seat0Episodes, Is.EqualTo(12));
+            Assert.That(status.Seat1Episodes, Is.EqualTo(11));
+            Assert.That(status.SeatAuditReadable, Is.True);
+            Assert.That(status.SeatAuditBalanced, Is.True);
+        }
+
+        [Test]
+        public void SeatAuditDisplay_UsesInfoForUnreadableOrNonterminalImbalance()
+        {
+            const string unreadable = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"}," +
+                "\"seat_audit\":{\"readable\":false,\"balanced\":false,\"warning\":\"monitor.csv: missing header\"}}}";
+            const string inProgress = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"," +
+                "\"config\":{\"learner_seat\":\"alternating\"}}," +
+                "\"seat_audit\":{\"seat_0_episodes\":9,\"seat_1_episodes\":1,\"readable\":true," +
+                "\"balanced\":false,\"warning\":\"\"}}}";
+
+            Assert.That(MlRunStatus.Parse(unreadable).SeatAuditShowsInfo, Is.True);
+            Assert.That(MlRunStatus.Parse(unreadable).SeatAuditShowsWarning, Is.False);
+            Assert.That(MlRunStatus.Parse(inProgress).SeatAuditBalanceApplicable, Is.True);
+            Assert.That(MlRunStatus.Parse(inProgress).SeatAuditShowsInfo, Is.True);
+            Assert.That(MlRunStatus.Parse(inProgress).SeatAuditShowsWarning, Is.False);
+        }
+
+        [Test]
+        public void SeatAuditDisplay_UsesWarningOnlyForTerminalMaterialImbalance()
+        {
+            const string running = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"," +
+                "\"config\":{\"learner_seat\":\"alternating\"}}," +
+                "\"seat_audit\":{\"readable\":true,\"balanced\":false,\"warning\":\"imbalanced\"}}}";
+            const string completed = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"completed\"," +
+                "\"config\":{\"learner_seat\":\"alternating\"}}," +
+                "\"seat_audit\":{\"readable\":true,\"balanced\":false,\"warning\":\"imbalanced\"}}}";
+            const string fixedCompleted = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"completed\"," +
+                "\"config\":{\"learner_seat\":\"0\"}}," +
+                "\"seat_audit\":{\"readable\":true,\"balanced\":false,\"warning\":\"\"}}}";
+
+            Assert.That(MlRunStatus.Parse(running).SeatAuditShowsWarning, Is.False);
+            Assert.That(MlRunStatus.Parse(completed).SeatAuditShowsWarning, Is.True);
+            Assert.That(MlRunStatus.Parse(completed).SeatAuditShowsInfo, Is.False);
+            Assert.That(MlRunStatus.Parse(fixedCompleted).SeatAuditShowsWarning, Is.False);
+            Assert.That(MlRunStatus.Parse(fixedCompleted).SeatAuditShowsInfo, Is.False);
+        }
+
+        [Test]
+        public void SeatAuditDisplay_RunningFixedSeatShowsCountsWithoutBalanceBox()
+        {
+            const string json = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"," +
+                "\"config\":{\"learner_seat\":\"1\"}}," +
+                "\"seat_audit\":{\"seat_0_episodes\":1,\"seat_1_episodes\":9,\"readable\":true," +
+                "\"balanced\":false,\"warning\":\"\"}}}";
+
+            MlRunStatus status = MlRunStatus.Parse(json);
+
+            Assert.That(status.LearnerSeat, Is.EqualTo("1"));
+            Assert.That(status.SeatAuditBalanceApplicable, Is.False);
+            Assert.That(status.Seat0Episodes, Is.EqualTo(1));
+            Assert.That(status.Seat1Episodes, Is.EqualTo(9));
+            Assert.That(status.SeatAuditShowsInfo, Is.False);
+            Assert.That(status.SeatAuditShowsWarning, Is.False);
+        }
+
+        [Test]
+        public void SeatAuditDisplay_MissingLearnerSeatConfigDefaultsToNotApplicable()
+        {
+            const string json = "{\"ok\":true,\"result\":{\"run\":{\"state\":\"running\"}," +
+                "\"seat_audit\":{\"seat_0_episodes\":9,\"seat_1_episodes\":1,\"readable\":true," +
+                "\"balanced\":false,\"warning\":\"\"}}}";
+
+            MlRunStatus status = MlRunStatus.Parse(json);
+
+            Assert.That(status.LearnerSeat, Is.Empty);
+            Assert.That(status.SeatAuditBalanceApplicable, Is.False);
+            Assert.That(status.SeatAuditShowsInfo, Is.False);
+            Assert.That(status.SeatAuditShowsWarning, Is.False);
+        }
+
+        [Test]
         public void LogBuffer_RetainsOnlyNewestBoundedLines()
         {
             var log = new MlLogBuffer(3);

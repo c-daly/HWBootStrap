@@ -9,6 +9,32 @@ from pathlib import Path
 from typing import Any
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text by replacing a flushed and synced temporary sibling file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     """Write JSON by replacing a temporary sibling file atomically."""
     path = Path(path)

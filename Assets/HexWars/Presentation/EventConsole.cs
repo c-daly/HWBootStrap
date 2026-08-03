@@ -17,6 +17,7 @@ namespace HexWars.Presentation
 
         readonly Queue<string> _lines = new Queue<string>();
         GameState _state;
+        PlayerId? _viewer;
         bool _collapsed;
 
         // cached rendering data, rebuilt only when Report/Clear touch it — never per-OnGUI-frame (OnGUI
@@ -38,10 +39,11 @@ namespace HexWars.Presentation
         /// <summary>Update the scoreboard to <paramref name="cur"/> and append any event lines. The
         /// header strings and the joined log text are rebuilt HERE (on a state/event change) instead of
         /// every OnGUI frame — Report fires on game turns/actions, not 60 times a second.</summary>
-        public static void Report(GameState cur, IEnumerable<string> events)
+        public static void Report(GameState cur, IEnumerable<string> events, PlayerId? viewer = null)
         {
             if (_inst == null) return;
             _inst._state = cur;
+            _inst._viewer = viewer;
             if (events != null)
             {
                 bool changed = false;
@@ -62,22 +64,20 @@ namespace HexWars.Presentation
             if (_inst == null) return;
             _inst._lines.Clear();
             _inst._state = null;
+            _inst._viewer = null;
             _inst._joinedLog = "";
             _inst._headerRound = _inst._headerArmies = _inst._headerSettings = "";
         }
 
         void RebuildHeader()
         {
-            int u0 = AliveUnits(PlayerId.Player0), u1 = AliveUnits(PlayerId.Player1);
-            int v0 = WinCheck.Evaluate(_state, PlayerId.Player0), v1 = WinCheck.Evaluate(_state, PlayerId.Player1);
-
             string result = "";
             if (_state.IsGameOver)
                 result = _state.Winner == null ? "  ·  DRAW"
                        : (_state.Winner == PlayerId.Player0 ? "  ·  P1 WINS" : "  ·  P2 WINS");
 
             _headerRound = $"Round {_state.Round}{result}";
-            _headerArmies = $"<color=#6FB1FF>P1</color>  {u0}u · {v0}v       <color=#FF7B6B>P2</color>  {u1}u · {v1}v";
+            _headerArmies = FormatArmySummary(_state, _viewer);
             string mode = _state.Config.TerritoryMode ? "Territory" : "Annihilation";
             _headerSettings = $"{mode} · {_state.Board.Tiles.Count} tiles · {_state.Config.StartingPoints} start pts";
         }
@@ -89,7 +89,11 @@ namespace HexWars.Presentation
             if (Screen.width < Screen.height) return;
 
             var e = Event.current;
-            if (e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.BackQuote) { _collapsed = !_collapsed; e.Use(); }
+            if (DeviceInput.Allowed && e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.BackQuote)
+            {
+                _collapsed = !_collapsed;
+                e.Use();
+            }
 
             EnsureStyles();
 
@@ -158,11 +162,18 @@ namespace HexWars.Presentation
             GUI.Label(new Rect(x, y, w, h), _joinedLog, _logStyle);
         }
 
-        int AliveUnits(PlayerId p)
+        public static string FormatArmySummary(GameState state, PlayerId? viewer = null)
         {
-            int n = 0;
-            foreach (var u in _state.Player(p).UnitsOnBoard) if (u.IsAlive) n++;
-            return n;
+            string Totals(PlayerId player)
+            {
+                if (viewer.HasValue && state.Config.FogOfWar && viewer.Value != player)
+                    return "?u · ?v";
+                int units = 0;
+                foreach (var unit in state.Player(player).UnitsOnBoard) if (unit.IsAlive) units++;
+                return $"{units}u · {WinCheck.Evaluate(state, player)}v";
+            }
+            return $"<color=#6FB1FF>P1</color>  {Totals(PlayerId.Player0)}       " +
+                   $"<color=#FF7B6B>P2</color>  {Totals(PlayerId.Player1)}";
         }
     }
 }

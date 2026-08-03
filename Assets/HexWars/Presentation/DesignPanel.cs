@@ -45,7 +45,7 @@ namespace HexWars.Presentation
         {
             if (_game == null || _canvasGo == null) return;
             var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
-            if (UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
+            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {
@@ -136,6 +136,7 @@ namespace HexWars.Presentation
             _nameField = UiKit.InputField(panel, _name, 46f, nameY, w - 150f, rowH, PlaceholderText());
             _nameField.gameObject.name = "Unit name";
             _nameField.textComponent.fontSize = 14;
+            _nameField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreNameEdit;
             _nameField.onEndEdit.AddListener(_ => CommitName());
             ApplyNameDisplay();
 

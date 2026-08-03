@@ -22,6 +22,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public string LatestEvaluation { get; private set; }
         public double Throughput { get; private set; }
         public bool TrackerDegraded { get; private set; }
+        public string LearnerSeat { get; private set; }
+        public int Seat0Episodes { get; private set; }
+        public int Seat1Episodes { get; private set; }
+        public bool SeatAuditReadable { get; private set; }
+        public bool SeatAuditBalanced { get; private set; }
+        public string SeatAuditWarning { get; private set; }
+        public bool SeatAuditBalanceApplicable => string.Equals(
+            LearnerSeat, "alternating", StringComparison.OrdinalIgnoreCase);
+        public bool SeatAuditShowsWarning => SeatAuditBalanceApplicable && IsTerminal(State) &&
+            SeatAuditReadable && !SeatAuditBalanced &&
+            !string.IsNullOrWhiteSpace(SeatAuditWarning);
+        public bool SeatAuditShowsInfo => !SeatAuditShowsWarning &&
+            (!SeatAuditReadable || (SeatAuditBalanceApplicable &&
+             !IsTerminal(State) && !SeatAuditBalanced));
         public string Error { get; private set; }
 
         public static MlRunStatus Parse(string json)
@@ -32,6 +46,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             var result = envelope.result ?? new Result();
             var run = result.run ?? envelope.run ?? new Run();
             var config = run.config ?? new Config();
+            var seatAudit = result.seat_audit ?? new SeatAudit();
             return new MlRunStatus
             {
                 Ok = envelope.ok,
@@ -45,6 +60,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 LatestEvaluation = run.latest_evaluation ?? string.Empty,
                 Throughput = run.throughput,
                 TrackerDegraded = run.tracker_degraded || HasTrackerFailure(run.tracker_status),
+                LearnerSeat = config.learner_seat ?? string.Empty,
+                Seat0Episodes = seatAudit.seat_0_episodes,
+                Seat1Episodes = seatAudit.seat_1_episodes,
+                SeatAuditReadable = seatAudit.readable,
+                SeatAuditBalanced = seatAudit.balanced,
+                SeatAuditWarning = seatAudit.warning ?? string.Empty,
                 Error = result.message ?? string.Empty,
             };
         }
@@ -65,6 +86,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         static string First(string first, string second) => !string.IsNullOrEmpty(first) ? first : second ?? string.Empty;
 
+        static bool IsTerminal(MlRunState state) =>
+            state == MlRunState.Stopped ||
+            state == MlRunState.Completed ||
+            state == MlRunState.Failed;
+
         static bool HasTrackerFailure(Tracker[] trackers)
         {
             if (trackers == null) return false;
@@ -75,8 +101,27 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
 
         [Serializable] sealed class Envelope { public bool ok; public Result result; public Run run; }
-        [Serializable] sealed class Result { public string run_dir; public Run run; public string message; }
-        [Serializable] sealed class Config { public string run_name; public long total_timesteps; }
+        [Serializable] sealed class Result
+        {
+            public string run_dir;
+            public Run run;
+            public SeatAudit seat_audit;
+            public string message;
+        }
+        [Serializable] sealed class Config
+        {
+            public string run_name;
+            public long total_timesteps;
+            public string learner_seat;
+        }
+        [Serializable] sealed class SeatAudit
+        {
+            public int seat_0_episodes;
+            public int seat_1_episodes;
+            public bool readable;
+            public bool balanced;
+            public string warning;
+        }
         [Serializable] sealed class Tracker { public bool ok = true; public string status; }
         [Serializable] sealed class Run
         {
@@ -128,23 +173,52 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const string PidKey = "HexWars.MlLab.ActivePid";
 
         public readonly string RunDirectory;
+        public readonly int Pid;
         public bool Exists => !string.IsNullOrWhiteSpace(RunDirectory);
+        // True only when Pid was actually recorded by RememberProcess for this run directory --
+        // Remember(runDirectory) alone (the once-a-second status poll, manual run selection) never
+        // sets it, so re-selecting or re-polling a run never fabricates a pid for a process the Lab
+        // did not itself launch.
+        public bool HasPid => Pid > 0;
 
-        MlRunAttachment(string runDirectory)
+        MlRunAttachment(string runDirectory, int pid)
         {
             RunDirectory = runDirectory ?? string.Empty;
+            Pid = pid;
         }
 
+        /// <summary>Remembers which run directory is the Lab's active attachment without touching any
+        /// persisted PID. Switching to a different run directory clears any previously-recorded PID,
+        /// since that PID belonged to the run being left, not the one now selected; re-remembering the
+        /// same run directory (as the once-a-second status poll does) leaves a launch-time PID alone.</summary>
         public static void Remember(string runDirectory)
         {
             if (string.IsNullOrWhiteSpace(runDirectory)) throw new ArgumentException(
                 "Active run directory is required.", nameof(runDirectory));
+            string current = SessionState.GetString(RunKey, string.Empty);
+            if (!string.Equals(current, runDirectory, StringComparison.Ordinal))
+                SessionState.EraseInt(PidKey);
             SessionState.SetString(RunKey, runDirectory);
-            SessionState.EraseInt(PidKey);
+        }
+
+        /// <summary>Records the trainer's own PID alongside its run directory at the moment
+        /// <see cref="MlCliProcess.Start"/> launches it -- the fact D1 ("Lab stops lying about
+        /// trainers") needs that <see cref="Remember"/> never had a source for. Persisted via
+        /// SessionState (survives domain reloads, same mechanism MlLabWindow already uses for its
+        /// pending-watch state), so <c>MlLabWindow</c> can reattach to it after a reload without ever
+        /// having redirected the detached process' own stdio.</summary>
+        public static void RememberProcess(string runDirectory, int pid)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) throw new ArgumentException(
+                "Active run directory is required.", nameof(runDirectory));
+            SessionState.SetString(RunKey, runDirectory);
+            if (pid > 0) SessionState.SetInt(PidKey, pid);
+            else SessionState.EraseInt(PidKey);
         }
 
         public static MlRunAttachment Restore() => new MlRunAttachment(
-            SessionState.GetString(RunKey, string.Empty));
+            SessionState.GetString(RunKey, string.Empty),
+            SessionState.GetInt(PidKey, 0));
 
         public static void Forget()
         {

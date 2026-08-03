@@ -128,7 +128,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 throw;
             }
             if (!string.IsNullOrWhiteSpace(activeRunDirectory))
-                MlRunAttachment.Remember(activeRunDirectory);
+                MlRunAttachment.RememberProcess(activeRunDirectory, _process.Id);
             NotifyChanged();
         }
 

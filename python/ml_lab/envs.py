@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import csv
 import multiprocessing as mp
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import gymnasium as gym
@@ -19,8 +22,22 @@ from stable_baselines3.common.vec_env.patch_gym import _patch_env
 from hexwars_gym import HexWarsEnv
 from selfplay_env import SelfPlayEnv
 
-from .contracts import EnvironmentContract, MONITOR_HEADER, RunConfig
-from .controllers import ControllerBinding, ControllerResolver
+from .contracts import ADAPTIVE_MONITOR_HEADER, EnvironmentContract, MONITOR_HEADER, RunConfig
+from .controllers import ControllerBinding, ControllerResolver, snapshot_opponents
+from .scenarios import resolve_scenario, validate_handshake
+
+
+LEGACY_MONITOR_HEADER = ["episode_reward", "episode_length", "elapsed_seconds"]
+
+
+@dataclass(frozen=True)
+class EpisodeAssignment:
+    """The deterministic identity and learner seat of one worker episode."""
+
+    worker_id: int
+    episode_index: int
+    seed: int
+    learner_seat: int
 
 
 class WorkerSchedule:
@@ -44,7 +61,7 @@ class WorkerSchedule:
         self.learner_seat = learner_seat
         self.episode_index = 0
 
-    def next_episode(self) -> tuple[int, int]:
+    def next_episode(self) -> EpisodeAssignment:
         episode = self.episode_index
         self.episode_index += 1
         seed = self.base_seed + self.worker_index + episode * self.worker_count
@@ -52,7 +69,12 @@ class WorkerSchedule:
             seat = (self.worker_index + episode) % 2
         else:
             seat = int(self.learner_seat)
-        return seed, seat
+        return EpisodeAssignment(
+            worker_id=self.worker_index,
+            episode_index=episode,
+            seed=seed,
+            learner_seat=seat,
+        )
 
 
 class ScheduledEnvironment(gym.Env):
@@ -69,9 +91,9 @@ class ScheduledEnvironment(gym.Env):
         self._schedule = schedule
         self._builder = builder
         self._pending = schedule.next_episode()
-        seed, seat = self._pending
-        self._env = builder(seat, seed)
-        self._seat = seat
+        self.current_assignment = self._pending
+        self._env = builder(self._pending.learner_seat, self._pending.seed)
+        self._seat = self._pending.learner_seat
         self.observation_space = self._env.observation_space
         self.action_space = self._env.action_space
         self.contract = _environment_contract(self._env)
@@ -97,9 +119,9 @@ class ScheduledEnvironment(gym.Env):
         else:
             assignment = self._pending
             self._pending = None
-        episode_seed, seat = assignment
-        self._ensure_seat(seat, episode_seed)
-        return self._env.reset(seed=episode_seed, options=options)
+        self._ensure_seat(assignment.learner_seat, assignment.seed)
+        self.current_assignment = assignment
+        return self._env.reset(seed=assignment.seed, options=options)
 
     def step(self, action):
         return self._env.step(action)
@@ -121,6 +143,7 @@ class EpisodeMonitor(gym.Wrapper):
         lock: threading.Lock,
         *,
         worker_id: int = 0,
+        adaptive_path: Path | None = None,
     ) -> None:
         super().__init__(env)
         self.contract = _environment_contract(env)
@@ -128,32 +151,62 @@ class EpisodeMonitor(gym.Wrapper):
         self._path = Path(path)
         self._lock = lock
         self._worker_id = worker_id
+        self._adaptive_path = (
+            Path(adaptive_path) if adaptive_path is not None
+            else self._path.parent / "adaptive_episodes.csv"
+        )
         self._episode_number = 0
         self._started = time.monotonic()
         self._reward = 0.0
         self._length = 0
+        self._diagnostics: dict[str, Any] = {}
+        self._assignment: EpisodeAssignment | None = None
+        self._start_profile: str | None = None
 
     def reset(self, **kwargs):
         self._reward = 0.0
         self._length = 0
-        return self.env.reset(**kwargs)
+        self._diagnostics = {}
+        observation, info = self.env.reset(**kwargs)
+        start_profile = info.get("start_profile") if isinstance(info, Mapping) else None
+        self._start_profile = start_profile if isinstance(start_profile, str) else None
+        assignment = getattr(self.env, "current_assignment", None)
+        self._assignment = assignment if isinstance(assignment, EpisodeAssignment) else None
+        return observation, info
 
     def step(self, action):
         observation, reward, terminated, truncated, info = self.env.step(action)
         self._reward += float(reward)
         self._length += 1
+        diagnostics = info.get("diagnostics") if isinstance(info, Mapping) else None
+        if isinstance(diagnostics, Mapping):
+            self._diagnostics = dict(diagnostics)
         if terminated or truncated:
             self._episode_number += 1
             elapsed = time.monotonic() - self._started
             self._append_episode(elapsed)
+            if self.contract.version == "adaptive-v1":
+                self._append_adaptive_episode()
             info = dict(info)
-            info["episode"] = {
+            episode_info = {
                 "r": self._reward,
                 "l": self._length,
                 "t": elapsed,
                 "worker_id": self._worker_id,
                 "episode_number": self._episode_number,
             }
+            if self._assignment is not None:
+                episode_info.update(
+                    {
+                        "worker_id": self._assignment.worker_id,
+                        "episode_index": self._assignment.episode_index,
+                        "episode_seed": self._assignment.seed,
+                        "learner_seat": self._assignment.learner_seat,
+                    }
+                )
+            if self._start_profile is not None:
+                episode_info["start_profile"] = self._start_profile
+            info["episode"] = episode_info
         return observation, reward, terminated, truncated, info
 
     def action_masks(self) -> np.ndarray:
@@ -161,15 +214,91 @@ class EpisodeMonitor(gym.Wrapper):
 
     def _append_episode(self, elapsed: float) -> None:
         with self._lock:
-            if not self._path.exists():
-                self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._prepare_monitor_file()
+            with self._path.open("a", newline="", encoding="utf-8") as stream:
+                assignment = self._assignment
+                csv.writer(stream).writerow(
+                    [
+                        assignment.worker_id if assignment is not None else self._worker_id,
+                        assignment.episode_index if assignment is not None else self._episode_number - 1,
+                        assignment.seed if assignment is not None else "",
+                        assignment.learner_seat if assignment is not None else "",
+                        self._reward,
+                        self._length,
+                        elapsed,
+                    ]
+                )
+
+    def _prepare_monitor_file(self) -> None:
+        if not self._path.exists():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with self._path.open("x", newline="", encoding="utf-8") as stream:
+                    csv.writer(stream).writerow(MONITOR_HEADER)
+                return
+            except FileExistsError:
+                pass
+
+        with self._path.open(newline="", encoding="utf-8") as stream:
+            rows = csv.reader(stream)
+            try:
+                header = next(rows)
+            except StopIteration as error:
+                raise ValueError(f"unexpected monitor CSV header in {self._path}: file is empty") from error
+            if header == MONITOR_HEADER:
+                return
+            if header != LEGACY_MONITOR_HEADER:
+                raise ValueError(f"unexpected monitor CSV header in {self._path}: {header!r}")
+            legacy_rows = list(rows)
+
+        if any(len(row) != len(LEGACY_MONITOR_HEADER) for row in legacy_rows):
+            raise ValueError(f"unexpected monitor CSV row shape in {self._path}")
+
+        staged_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                newline="",
+                encoding="utf-8",
+                prefix=f".{self._path.name}.",
+                suffix=".tmp",
+                dir=self._path.parent,
+                delete=False,
+            ) as stream:
+                staged_path = Path(stream.name)
+                writer = csv.writer(stream)
+                writer.writerow(MONITOR_HEADER)
+                for row in legacy_rows:
+                    writer.writerow(["", "", "", "", *row])
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(staged_path, self._path)
+            staged_path = None
+        finally:
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
+
+    def _append_adaptive_episode(self) -> None:
+        path = self._adaptive_path
+        values = self._diagnostics
+        row = [
+            f"{self._worker_id}:{self._episode_number}",
+            int(values.get("design_count", 0)),
+            int(values.get("distinct_custom_templates_deployed", 0)),
+            bool(values.get("deployment_completed", False)),
+            int(values.get("invalid_sequences", 0)),
+            int(values.get("pregame_decisions", 0)),
+        ]
+        with self._lock:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    with self._path.open("x", newline="", encoding="utf-8") as stream:
-                        csv.writer(stream).writerow(MONITOR_HEADER)
+                    with path.open("x", newline="", encoding="utf-8") as stream:
+                        csv.writer(stream).writerow(ADAPTIVE_MONITOR_HEADER)
                 except FileExistsError:
                     pass
-            with self._path.open("a", newline="", encoding="utf-8") as stream:
-                csv.writer(stream).writerow([self._reward, self._length, elapsed])
+            with path.open("a", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerow(row)
 
 
 class MaskingDummyVecEnv(DummyVecEnv):
@@ -419,6 +548,7 @@ def _environment_contract(env: Any) -> EnvironmentContract:
     required = (
         "contract_version",
         "contract_hash",
+        "encoding_hash",
         "obs_len",
         "n_actions",
         "board",
@@ -431,11 +561,13 @@ def _environment_contract(env: Any) -> EnvironmentContract:
     return EnvironmentContract(
         version=str(spaces_info["contract_version"]),
         contract_hash=str(spaces_info["contract_hash"]),
+        encoding_hash=str(spaces_info["encoding_hash"]),
         observation_size=int(spaces_info["obs_len"]),
         action_size=int(spaces_info["n_actions"]),
         board=dict(spaces_info["board"]),
         roster=list(spaces_info["contract_roster"]),
         reward=dict(spaces_info["reward"]),
+        semantics=dict(spaces_info.get("adaptive", {})),
     )
 
 
@@ -454,21 +586,66 @@ class TrainingEnvironmentFactory:
     def __init__(self, server_cmd: list[str]) -> None:
         self.server_cmd = list(server_cmd)
 
+    def probe(
+        self,
+        config: RunConfig,
+        scenario_path: Path,
+    ) -> tuple[EnvironmentContract, Mapping[str, Any], Mapping[str, Any]]:
+        scenario_path = Path(scenario_path)
+        scenario = resolve_scenario(
+            environment=config.environment,
+            scenario_file=scenario_path,
+            template_id=None,
+        )
+        opponent_snapshot = snapshot_opponents(config.opponent)
+        env = self._build_worker(
+            config,
+            scenario_path.parent,
+            0,
+            scenario_path,
+            opponent_snapshot,
+            monitor=False,
+        )
+        try:
+            spaces_info = dict(env.spaces_info)
+            validate_handshake(scenario, spaces_info)
+            return env.contract, spaces_info, opponent_snapshot
+        finally:
+            env.close()
+
     def __call__(
-        self, config: RunConfig, run_dir: Path
+        self,
+        config: RunConfig,
+        run_dir: Path,
+        scenario_path: Path,
+        opponent_snapshot: Mapping[str, Any],
     ) -> MaskingDummyVecEnv | MaskingSubprocVecEnv:
         return build_vector_env(
             config.workers,
-            lambda worker_index: self._build_worker(config, run_dir, worker_index),
+            lambda worker_index: self._build_worker(
+                config,
+                run_dir,
+                worker_index,
+                scenario_path,
+                opponent_snapshot,
+                monitor=True,
+            ),
             subprocess_workers=config.workers > 1,
         )
 
     def _build_worker(
-        self, config: RunConfig, run_dir: Path, worker_index: int
+        self,
+        config: RunConfig,
+        run_dir: Path,
+        worker_index: int,
+        scenario_path: Path,
+        opponent_snapshot: Mapping[str, Any],
+        *,
+        monitor: bool,
     ) -> gym.Env:
         resolver = ControllerResolver()
-        pool = _pool_specs(config.opponent)
-        raw_specs = pool if pool is not None else [config.opponent]
+        pool = _pool_specs(opponent_snapshot)
+        raw_specs = pool if pool is not None else [opponent_snapshot]
         bindings = [resolver.bind(spec) for spec in raw_specs]
         single_scripted = (
             len(bindings) == 1 and bindings[0].resolved.model is None and pool is None
@@ -481,27 +658,39 @@ class TrainingEnvironmentFactory:
                     opponent=bindings[0].resolved.server_controller,
                     seat=seat,
                     base_seed=seed,
+                    environment=config.environment,
+                    scenario_path=scenario_path,
                 )
             return SelfPlayEnv(
                 self.server_cmd,
                 bindings,
                 learner_seat=seat,
                 base_seed=seed,
+                environment=config.environment,
+                scenario_path=scenario_path,
             )
 
         scheduled = ScheduledEnvironment(
             WorkerSchedule(
-                base_seed=config.seed,
+                base_seed=config.episode_seed_base if config.episode_seed_base is not None else config.seed,
                 worker_index=worker_index,
                 worker_count=config.workers,
                 learner_seat=config.learner_seat,
             ),
             build,
         )
+        if not monitor:
+            return scheduled
         monitor_name = "monitor.csv" if config.workers == 1 else f"monitor.worker_{worker_index}.csv"
+        adaptive_name = (
+            "adaptive_episodes.csv"
+            if config.workers == 1
+            else f"adaptive_episodes.worker_{worker_index}.csv"
+        )
         return EpisodeMonitor(
             scheduled,
             Path(run_dir) / monitor_name,
             threading.Lock(),
             worker_id=worker_index,
+            adaptive_path=Path(run_dir) / adaptive_name,
         )

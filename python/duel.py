@@ -1,99 +1,118 @@
-"""Play any two controllers head-to-head and write a .replay you can watch in Unity.
+"""Play two scripted or metadata-backed controllers and write a replay."""
 
-Each seat is one of: random | greedy | legacy ppo:PATH/dqn:PATH | a JSON controller spec | @spec.json.
-Scripted seats (random/greedy) are played by the server; model seats are driven here.
-
-    python duel.py --p0 ppo:ppo_a.zip --p1 greedy --out ../replays/ppo_vs_greedy.replay
-    python duel.py --p0 ppo:ppo_a.zip --p1 dqn:dqn_b.zip
-    python duel.py --p0 greedy --p1 random          # baselines, server plays both
-
-Then in Unity: HexWars -> Replay -> Open Replay File... -> pick the .replay.
-"""
 import argparse
 import json
 import subprocess
+from pathlib import Path
 
-import numpy as np
+from hexwars_gym.env import no_window_creationflags, parse_contract
+from ml_lab.controllers import ControllerResolver, predict, validate_inference_input
+from ml_lab.protocol import validate_json_object, validate_step_payload
 
-from ml_lab.controllers import ControllerResolver, predict as predict_resolved, validate_inference_input
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SERVER = (
+    PROJECT_ROOT / "engine" / "HexWars.GymServer" / "bin" / "Release" / "net8.0"
+    / "HexWars.GymServer.dll"
+)
 
 
-def rpc(proc, msg: dict) -> dict:
-    proc.stdin.write(json.dumps(msg) + "\n")
+def rpc(proc, message: dict) -> dict:
+    proc.stdin.write(json.dumps(message) + "\n")
     proc.stdin.flush()
     line = proc.stdout.readline()
     if not line:
         raise RuntimeError("server closed unexpectedly")
-    return json.loads(line)
+    return dict(validate_json_object(json.loads(line), "GymServer response"))
 
 
-def load_controller(spec: str):
-    """Backward-compatible boundary for callers which only need the server controller and model."""
-    resolved = ControllerResolver().resolve(spec)
-    return resolved.server_controller, resolved.model
-
-
-def predict(model, obs, mask) -> int:
-    """Compatibility helper for older callers that pass only a loaded model."""
-    from sb3_contrib import MaskablePPO
-    if isinstance(model, MaskablePPO):
-        action, _ = model.predict(obs, action_masks=mask, deterministic=True)
-        return int(action)
-    # value-based (DQN): mask illegal Q-values then take the argmax
-    import torch
-    with torch.no_grad():
-        obs_t = torch.as_tensor(obs[None]).float().to(model.device)  # match model's device (CPU/GPU)
-        q = model.q_net(obs_t).cpu().numpy()[0]
-    q[~mask] = -1e9
-    return int(np.argmax(q))
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--p0",
-        default="greedy",
-        help="random|greedy|ppo:PATH|dqn:PATH|run:PATH|JSON|@controller.json",
-    )
-    ap.add_argument(
-        "--p1",
-        default="random",
-        help="random|greedy|ppo:PATH|dqn:PATH|run:PATH|JSON|@controller.json",
-    )
-    ap.add_argument("--server",
-                    default="dotnet ../engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="../replays/duel.replay")
-    args = ap.parse_args()
-
-    resolver = ControllerResolver()
-    bindings = {0: resolver.bind(args.p0), 1: resolver.bind(args.p1)}
-    controllers = {seat: binding.resolved.server_controller for seat, binding in bindings.items()}
-
-    proc = subprocess.Popen(args.server.split(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            text=True, bufsize=1)
-    v = rpc(proc, {"cmd": "duel_reset", "seed": args.seed, "p0": controllers[0], "p1": controllers[1]})
-
-    steps = 0
-    while not v["terminated"] and not v["truncated"] and steps < 5000:
-        resolved = bindings[int(v["seat"])].resolved
-        if resolved.model is None:
-            break  # scripted seats are auto-played by the server; nothing to supply
-        obs = np.asarray(v["obs"], dtype=np.float32)
-        mask = np.asarray(v["mask"], dtype=bool)
-        validate_inference_input(resolved, obs, mask)
-        assert resolved.algorithm is not None
-        v = rpc(proc, {"cmd": "duel_step", "action": predict_resolved(resolved.model, resolved.algorithm, obs, mask)})
-        steps += 1
-
-    saved = rpc(proc, {"cmd": "duel_save", "path": args.out})
-    # the server's "close" just exits (no reply), so fire-and-forget — don't wait for a response
+def _close_process(proc) -> None:
     try:
-        proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
-        proc.stdin.flush()
+        if proc.poll() is None and proc.stdin is not None:
+            proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
+            proc.stdin.flush()
     except Exception:
         pass
-    print(f"duel finished in {steps} steps -> {saved.get('saved')}   (p0={args.p0} vs p1={args.p1})")
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--p0", default="greedy", help="random|greedy|run:PATH|JSON|@controller.json")
+    parser.add_argument("--p1", default="random", help="random|greedy|run:PATH|JSON|@controller.json")
+    parser.add_argument("--server", default=str(DEFAULT_SERVER))
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--out", default=str(PROJECT_ROOT / "replays" / "duel.replay"))
+    parser.add_argument(
+        "--environment",
+        choices=["tactical-v1", "tactical-v2", "adaptive-v1"],
+        default="tactical-v1",
+    )
+    args = parser.parse_args()
+
+    proc = subprocess.Popen(
+        ["dotnet", args.server, "--environment", args.environment],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        creationflags=no_window_creationflags(),
+    )
+    try:
+        spaces = rpc(proc, {"cmd": "duel_spaces"})
+        contract = parse_contract(
+            spaces,
+            environment=args.environment,
+            required_kind=(
+                "duel" if args.environment in {"tactical-v1", "tactical-v2"} else "adaptive_duel"
+            ),
+        )
+        resolver = ControllerResolver(contract)
+        bindings = {0: resolver.bind(args.p0), 1: resolver.bind(args.p1)}
+        controllers = {seat: binding.resolved.server_controller for seat, binding in bindings.items()}
+        state = rpc(
+            proc,
+            {"cmd": "duel_reset", "seed": args.seed, "p0": controllers[0], "p1": controllers[1]},
+        )
+        observation, mask = validate_step_payload(
+            state, observation_size=contract.observation_size, action_size=contract.action_size
+        )
+
+        steps = 0
+        while not state["terminated"] and not state["truncated"] and steps < 5000:
+            resolved = bindings[state["seat"]].resolved
+            if resolved.model is None:
+                break
+            validate_inference_input(resolved, observation, mask)
+            assert resolved.algorithm is not None
+            state = rpc(proc, {"cmd": "duel_step", "action": predict(
+                resolved.model, resolved.algorithm, observation, mask
+            )})
+            observation, mask = validate_step_payload(
+                state, observation_size=contract.observation_size, action_size=contract.action_size
+            )
+            steps += 1
+
+        saved = rpc(proc, {"cmd": "duel_save", "path": args.out})
+        print(
+            f"duel finished in {steps} steps -> {saved.get('saved')}   "
+            f"(p0={args.p0} vs p1={args.p1})"
+        )
+    finally:
+        _close_process(proc)
 
 
 if __name__ == "__main__":
