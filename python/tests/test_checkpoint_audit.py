@@ -1303,3 +1303,100 @@ def test_summary_handles_candidates_with_no_wins_or_draws() -> None:
     assert summary["normalized_advantage"]["draws"] == {
         "final": None, "peak": None
     }
+
+
+def test_large_late_regression_uses_exact_ten_point_boundary() -> None:
+    clone = _decision_row(
+        "clone", "pure_bc", 0, wins=130, losses=20, draws=50, cycling=10
+    )
+    earlier = _decision_row(
+        "ppo-140", "bc_ppo", 1, wins=140, losses=20, draws=40, cycling=10
+    )
+    later = _decision_row(
+        "ppo-120", "bc_ppo", 2, wins=120, losses=20, draws=60, cycling=10
+    )
+
+    decision = audit_module.choose_next_experiment([clone, earlier, later])
+
+    assert decision["clauses"]["large_late_regression"] is True
+    assert decision["recommended_next_step"] == "test_retained_imitation_constraint"
+
+
+def _write_self_consistent_audit_root(
+    definition: AuditDefinition,
+    output_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root.mkdir()
+    _stub_audit_identity(monkeypatch)
+    scenario_bytes, scenario_sha256, source_contracts = audit_module._source_material(
+        definition
+    )
+    manifest = audit_module._initial_manifest(
+        definition,
+        scenario_bytes=scenario_bytes,
+        scenario_sha256=scenario_sha256,
+        source_contracts=source_contracts,
+        runtime_contract=RUNTIME_CONTRACT,
+    )
+    _write_json(output_root / "manifest.json", manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "schema_version",
+        "audit_id",
+        "exploratory",
+        "locked_panel",
+        "final_seed_namespace",
+        "map_count",
+        "nonreciprocal",
+        "profile",
+        "opponent",
+    ],
+)
+def test_aggregate_independently_rejects_self_consistent_identity_or_isolation_mutation(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    definition = _audit_definition(source_runs)
+    if mutation == "schema_version":
+        definition = replace(definition, schema_version=2)
+    elif mutation == "audit_id":
+        definition = replace(definition, audit_id="other-audit")
+    elif mutation == "exploratory":
+        definition = replace(definition, exploratory=False)
+    elif mutation == "locked_panel":
+        definition = replace(definition, locked_panel_replacement=True)
+    elif mutation == "final_seed_namespace":
+        definition = replace(
+            definition, schedule=replace(definition.schedule, seed_start=17_000_000)
+        )
+    elif mutation == "map_count":
+        definition = replace(
+            definition, schedule=replace(definition.schedule, maps=99)
+        )
+    elif mutation == "nonreciprocal":
+        definition = replace(
+            definition, schedule=replace(definition.schedule, both_seats=False)
+        )
+    elif mutation == "profile":
+        definition = replace(
+            definition, schedule=replace(definition.schedule, profile="other-profile")
+        )
+    else:
+        definition = replace(
+            definition, schedule=replace(definition.schedule, opponent="greedy")
+        )
+    output_root = tmp_path / "audit"
+    _write_self_consistent_audit_root(definition, output_root, monkeypatch)
+
+    def unexpected_validation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("invalid global audit definition reached physical map validation")
+
+    monkeypatch.setattr(audit_module, "validate_physical_map", unexpected_validation)
+    with pytest.raises(ValueError, match="global identity/isolation contract"):
+        audit_module.aggregate_audit(definition, output_root=output_root)

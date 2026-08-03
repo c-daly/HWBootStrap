@@ -1109,6 +1109,21 @@ def _progress_line(
     )
 
 
+def _validate_global_audit_definition(definition: AuditDefinition) -> None:
+    expected_schedule = AuditSchedule()
+    if (
+        definition.schema_version != 1
+        or definition.audit_id != "annihilation-checkpoint-audit-v1"
+        or definition.exploratory is not True
+        or definition.locked_panel_replacement is not False
+        or definition.schedule != expected_schedule
+    ):
+        raise ValueError(
+            "checkpoint audit definition or schedule violates the frozen "
+            "global identity/isolation contract"
+        )
+
+
 def evaluate_audit(
     definition: AuditDefinition,
     *,
@@ -1121,17 +1136,8 @@ def evaluate_audit(
     """Evaluate every immutable candidate/map and reuse only validated physical evidence."""
     if workers < 1:
         raise ValueError("checkpoint audit workers must be positive")
-    if definition.schema_version != 1:
-        raise ValueError("checkpoint audit definition schema_version must be 1")
+    _validate_global_audit_definition(definition)
     schedule = definition.schedule
-    if (
-        schedule.maps != 100
-        or schedule.seed_start != 16_000_000
-        or not schedule.both_seats
-        or schedule.profile != "standard-3v3"
-        or schedule.opponent != "random"
-    ):
-        raise ValueError("checkpoint audit schedule must be reciprocal standard-3v3 versus random")
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     scenario_bytes, scenario_sha256, source_contracts = _source_material(definition)
@@ -1525,12 +1531,21 @@ def _aggregate_summary(candidate: CandidateAggregate) -> Mapping[str, Any]:
     return _require_mapping(candidate.get("summary"), label="candidate aggregate summary")
 
 
-def _aggregate_win_rate(candidate: CandidateAggregate) -> float:
-    rates = _require_mapping(_aggregate_summary(candidate).get("rates"), label="candidate rates")
-    value = rates.get("win")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("candidate aggregate win rate must be numeric")
-    return float(value)
+def _aggregate_win_count(candidate: CandidateAggregate) -> int:
+    counts = _require_mapping(
+        _aggregate_summary(candidate).get("counts"), label="candidate outcome counts"
+    )
+    games = counts.get("games")
+    wins = counts.get("wins")
+    if (
+        isinstance(games, bool)
+        or games != 200
+        or isinstance(wins, bool)
+        or not isinstance(wins, int)
+        or not 0 <= wins <= 200
+    ):
+        raise ValueError("candidate aggregate must contain a valid 200-game win count")
+    return wins
 
 
 def choose_next_experiment(
@@ -1549,8 +1564,10 @@ def choose_next_experiment(
         raise ValueError("decision trajectory orders must be unique and contiguous")
 
     ppo = ordered[1:]
-    ppo_rates = [_aggregate_win_rate(row) for row in ppo]
-    qualifying_indexes = [index for index, rate in enumerate(ppo_rates) if rate >= 0.65]
+    ppo_wins = [_aggregate_win_count(row) for row in ppo]
+    qualifying_indexes = [
+        index for index, wins in enumerate(ppo_wins) if wins >= 130
+    ]
     qualifying_ids = [
         _require_string(ppo[index].get("candidate_id"), label="candidate ID")
         for index in qualifying_indexes
@@ -1558,19 +1575,21 @@ def choose_next_experiment(
     consistent_improvement = False
     if qualifying_indexes:
         earliest = qualifying_indexes[0] + 1
-        rates_to_qualifier = [_aggregate_win_rate(row) for row in ordered[: earliest + 1]]
+        wins_to_qualifier = [
+            _aggregate_win_count(row) for row in ordered[: earliest + 1]
+        ]
         changes = [
             later - earlier
-            for earlier, later in zip(rates_to_qualifier, rates_to_qualifier[1:])
+            for earlier, later in zip(wins_to_qualifier, wins_to_qualifier[1:])
         ]
         consistent_improvement = all(change >= 0 for change in changes) and any(
             change > 0 for change in changes
         )
 
     large_late_regression = any(
-        earlier - later >= 0.10
-        for earlier_index, earlier in enumerate(ppo_rates)
-        for later in ppo_rates[earlier_index + 1 :]
+        earlier - later >= 20
+        for earlier_index, earlier in enumerate(ppo_wins)
+        for later in ppo_wins[earlier_index + 1 :]
     )
     cycling_dominant = False
     if ppo:
@@ -1596,7 +1615,7 @@ def choose_next_experiment(
             raise ValueError("latest PPO cycling draws exceed all draws")
         cycling_dominant = cycling > max(wins, losses, draws - cycling)
 
-    all_ppo_below_half = bool(ppo_rates) and all(rate < 0.50 for rate in ppo_rates)
+    all_ppo_below_half = bool(ppo_wins) and all(wins < 100 for wins in ppo_wins)
     clauses = {
         "qualifying_ppo": qualifying_ids,
         "consistent_improvement": consistent_improvement,
@@ -1620,6 +1639,7 @@ def aggregate_audit(
     output_root: Path,
 ) -> Mapping[str, Any]:
     """Reopen every physical map, aggregate deterministically, then seal the audit."""
+    _validate_global_audit_definition(definition)
     root = Path(output_root).resolve(strict=True)
     manifest = _load_audit_manifest(root)
     definition_payload, definition_sha256 = _definition_identity(definition)
