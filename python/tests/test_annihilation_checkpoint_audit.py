@@ -272,7 +272,9 @@ def _report_summary(*, wins: int, losses: int, draws: int) -> dict[str, object]:
     return {
         "counts": {"games": 200, "wins": wins, "losses": losses, "draws": draws},
         "rates": {"win": wins / 200, "loss": losses / 200, "draw": draws / 200},
-        "confidence_intervals": {"win": [0.42, 0.56]},
+        "confidence_intervals": {
+            "win": {"low": 0.42, "high": 0.56, "confidence": 0.95}
+        },
         "seats": {},
         "win_rate_p0_minus_p1": -0.05,
         "draw_diagnostics": {
@@ -380,6 +382,10 @@ def test_render_report_covers_all_evidence_sections_and_nulls(
         "51,036 was a stopped in-memory training count, not an evaluated checkpoint"
         in runner.render_report(aggregate)
     )
+
+    candidate["summary"]["confidence_intervals"]["win"] = {"low": 0.42}
+    with pytest.raises(ValueError, match="Wilson win interval"):
+        runner.render_report(aggregate)
 
 
 def test_main_logs_to_stdout_and_audit_file_and_reraises_failures(
@@ -533,3 +539,20 @@ def test_prepare_definition_publication_is_atomic_no_clobber_under_race(
     assert (different_root / "definition.json").read_bytes() == b"{}\n"
     assert "reused byte/hash-equivalent physical definition" not in caplog.text
     assert not list(different_root.glob(".definition.json.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "interval",
+    [
+        [0.42, 0.56],
+        {"low": 0.42},
+        {"low": True, "high": 0.56},
+        {"low": 0.60, "high": 0.50},
+        {"low": -0.01, "high": 0.56},
+    ],
+)
+def test_renderer_rejects_malformed_wilson_interval_mappings(
+    interval: object,
+) -> None:
+    with pytest.raises(ValueError, match="Wilson win interval"):
+        runner._wilson_interval_bounds(interval)

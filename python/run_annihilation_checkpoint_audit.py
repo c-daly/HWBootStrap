@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from ml_lab import checkpoint_audit as audit
@@ -296,6 +297,25 @@ def _format_metric(value: object, *, percent: bool = False) -> str:
     return f"{number * 100:.1f}%" if percent else f"{number:.3f}"
 
 
+def _wilson_interval_bounds(interval: object) -> tuple[float, float]:
+    if (
+        not isinstance(interval, Mapping)
+        or "low" not in interval
+        or "high" not in interval
+    ):
+        raise ValueError("Wilson win interval must be a low/high mapping")
+    low = interval["low"]
+    high = interval["high"]
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in (low, high)
+    ):
+        raise ValueError("Wilson win interval bounds must be numeric")
+    if not 0.0 <= low <= high <= 1.0:
+        raise ValueError("Wilson win interval bounds must satisfy 0 <= low <= high <= 1")
+    return float(low), float(high)
+
+
 def _stopped_count_explanation(candidates: dict[str, object]) -> str | None:
     if any(
         isinstance(row, dict)
@@ -354,7 +374,9 @@ def render_report(aggregate: dict[str, object]) -> str:
     for candidate_id, candidate in candidates.items():
         summary = candidate["summary"]
         counts = summary["counts"]
-        interval = summary["confidence_intervals"]["win"]
+        interval_low, interval_high = _wilson_interval_bounds(
+            summary["confidence_intervals"]["win"]
+        )
         draws = summary["draw_diagnostics"]
         winning = summary["winning_games"]
         advantage = summary["normalized_advantage"]
@@ -363,7 +385,7 @@ def render_report(aggregate: dict[str, object]) -> str:
             [
                 f"### {candidate_id}",
                 "",
-                f"- W/L/D {counts['wins']}/{counts['losses']}/{counts['draws']}; Wilson win interval [{float(interval[0]):.3f}, {float(interval[1]):.3f}].",
+                f"- W/L/D {counts['wins']}/{counts['losses']}/{counts['draws']}; Wilson win interval [{interval_low:.3f}, {interval_high:.3f}].",
                 f"- Draw pathology: cycling {draws['cycling']['count']} ({_format_metric(draws['cycling']['incidence'], percent=True)}); action waste {draws['action_waste']['count']} ({_format_metric(draws['action_waste']['incidence'], percent=True)}).",
                 f"- Winning speed: win rounds mean {_format_metric(winning['round_count']['mean'])}, median {_format_metric(winning['round_count']['median'])}, p90 {_format_metric(winning['round_count']['p90'])}; decisions mean {_format_metric(winning['command_count']['mean'])}, median {_format_metric(winning['command_count']['median'])}, p90 {_format_metric(winning['command_count']['p90'])}.",
                 f"- Advantage: all-game final {_format_metric(advantage['all_games']['final'])}, peak {_format_metric(advantage['all_games']['peak'])}; draw final advantage {_format_metric(advantage['draws']['final'])}, draw peak advantage {_format_metric(advantage['draws']['peak'])}.",
