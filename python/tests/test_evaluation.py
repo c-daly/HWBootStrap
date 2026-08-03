@@ -922,6 +922,58 @@ def test_evaluation_preserves_preexisting_unretained_destinations(
     assert replay_path.read_bytes() == replay_sentinel
 
 
+def test_publish_artifact_pair_uses_atomic_replacement_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    staged_trace = tmp_path / "staged-trace.json"
+    staged_replay = tmp_path / "staged-replay.replay"
+    trace_path = tmp_path / "evidence" / "traces" / "trace.json"
+    replay_path = tmp_path / "evidence" / "replays" / "trace.replay"
+    staged_trace.write_text('{"schema_version":1}\n', encoding="utf-8")
+    staged_replay.write_text("replay\n", encoding="utf-8")
+    real_copy = evaluation_module.shutil.copyfileobj
+    real_replace = evaluation_module.os.replace
+    replacements: list[tuple[Path, Path]] = []
+
+    def copy_to_temporary(source, target, *args, **kwargs) -> None:
+        destination = Path(target.name)
+        assert destination not in {trace_path, replay_path}
+        real_copy(source, target, *args, **kwargs)
+
+    def fail_second_replace(source, destination) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        assert source_path.parent == destination_path.parent
+        assert source_path != destination_path
+        assert not destination_path.exists()
+        replacements.append((source_path, destination_path))
+        if destination_path == replay_path:
+            raise OSError("injected replay replacement failure")
+        real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(evaluation_module.shutil, "copyfileobj", copy_to_temporary)
+    monkeypatch.setattr(evaluation_module.os, "replace", fail_second_replace)
+
+    with pytest.raises(OSError, match="injected replay replacement failure"):
+        evaluation_module._publish_artifact_pair(
+            staged_trace,
+            staged_replay,
+            trace_path,
+            replay_path,
+        )
+
+    assert [destination for _, destination in replacements] == [trace_path, replay_path]
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not any(
+        path.name.startswith(".")
+        for path in (tmp_path / "evidence").rglob("*")
+    )
+
+
 def test_retained_artifact_pair_reuses_identical_files_without_republication(
     tmp_path: Path,
     contract: EnvironmentContract,

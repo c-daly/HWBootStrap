@@ -17,6 +17,7 @@ from statistics import NormalDist
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
+from uuid import uuid4
 
 import numpy as np
 
@@ -555,6 +556,20 @@ def _copy_file_exclusive(source: Path, destination: Path) -> None:
         raise
 
 
+def _copy_file_atomically_exclusive(source: Path, destination: Path) -> None:
+    temporary_path = destination.with_name(
+        f".{destination.name}.{uuid4().hex}.tmp"
+    )
+    try:
+        _copy_file_exclusive(source, temporary_path)
+        if destination.exists():
+            raise FileExistsError(f"artifact destination already exists: {destination}")
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _rollback_artifacts(paths: Sequence[Path]) -> None:
     for path in reversed(paths):
         path.unlink(missing_ok=True)
@@ -583,9 +598,9 @@ def _publish_artifact_pair(
 
     created: list[Path] = []
     try:
-        _copy_file_exclusive(staged_trace, trace_path)
+        _copy_file_atomically_exclusive(staged_trace, trace_path)
         created.append(trace_path)
-        _copy_file_exclusive(staged_replay, replay_path)
+        _copy_file_atomically_exclusive(staged_replay, replay_path)
         created.append(replay_path)
     except BaseException:
         _rollback_artifacts(created)
