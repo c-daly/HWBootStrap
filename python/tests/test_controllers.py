@@ -871,7 +871,7 @@ def test_pool_snapshot_preserves_every_entry_in_input_order(
     ]
 
 
-@pytest.mark.parametrize("name", ["greedy", "random"])
+@pytest.mark.parametrize("name", ["greedy", "random", "bounded-search"])
 def test_normalize_scripted_controller(name: str) -> None:
     spec = normalize_controller_spec(name)
 
