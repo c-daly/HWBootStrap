@@ -20,6 +20,23 @@ namespace HexWars.Presentation
             }
         }
 
+        public static MlEnvironmentContract Parse(string contractVersion)
+        {
+            switch (contractVersion)
+            {
+                case "tactical-v1":
+                    return MlEnvironmentContract.TacticalV1;
+                case "adaptive-v1":
+                    return MlEnvironmentContract.AdaptiveV1;
+                case "tactical-v2":
+                    return MlEnvironmentContract.TacticalV2;
+                default:
+                    throw new System.ArgumentException(
+                        "Unknown ML environment contract: " + contractVersion,
+                        nameof(contractVersion));
+            }
+        }
+
         public static string ContractVersion(MlEnvironmentContract environment) => CliValue(environment);
     }
 

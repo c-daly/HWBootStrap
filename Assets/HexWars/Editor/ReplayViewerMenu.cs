@@ -176,9 +176,24 @@ namespace HexWars.Presentation.EditorTools
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");
 
+        public static string ResolvePythonExecutable(string pythonDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(pythonDirectory))
+                throw new ArgumentException(
+                    "Python directory is required.", nameof(pythonDirectory));
+            System.IO.DirectoryInfo project =
+                System.IO.Directory.GetParent(
+                    System.IO.Path.GetFullPath(pythonDirectory));
+            if (project == null)
+                throw new InvalidOperationException(
+                    "Python directory does not have a project parent: " +
+                    pythonDirectory);
+            return MlLabPaths.ResolvePythonExecutable(project.FullName);
+        }
+
         static bool PyReady(string pyDir)
         {
-            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string pyExe = ResolvePythonExecutable(pyDir);
             if (System.IO.File.Exists(pyExe)) return true;
             EditorUtility.DisplayDialog("HexWars", "Windows venv Python not found at:\n" + pyExe, "OK");
             return false;
@@ -190,7 +205,7 @@ namespace HexWars.Presentation.EditorTools
             TrainingScenario scenario = null,
             MlPresentationSchedule presentationPlan = null)
         {
-            string pyExe = System.IO.Path.Combine(pyDir, "winenv", "Scripts", "python.exe");
+            string pyExe = ResolvePythonExecutable(pyDir);
             string server = System.IO.Path.Combine(pyDir, "policy_server.py");
 
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
@@ -244,10 +259,7 @@ namespace HexWars.Presentation.EditorTools
                 throw new InvalidOperationException(
                     "Windows venv Python is unavailable for Start & Watch.");
             MlPresentationGame game = plan.PlanGame(0);
-            MlEnvironmentContract environment =
-                game.Scenario.Environment == "adaptive-v1"
-                    ? MlEnvironmentContract.AdaptiveV1
-                    : MlEnvironmentContract.TacticalV1;
+            MlEnvironmentContract environment = EnvironmentFromScenario(game.Scenario);
             LaunchDuel(
                 pyDir,
                 game.P0Spec,
@@ -299,18 +311,20 @@ namespace HexWars.Presentation.EditorTools
 
         static MlEnvironmentContract EnvironmentFromRun(string runDirectory)
         {
-            try
-            {
-                string json = System.IO.File.ReadAllText(System.IO.Path.Combine(runDirectory, "run.json"));
-                return EnvironmentFromRunManifest(json);
-            }
-            catch (System.Exception) { return MlEnvironmentContract.TacticalV1; }
+            string json = System.IO.File.ReadAllText(
+                System.IO.Path.Combine(runDirectory, "run.json"));
+            return EnvironmentFromRunManifest(json);
         }
 
         public static MlEnvironmentContract EnvironmentFromRunManifest(string json) =>
-            MlEnvironmentSummary.FromRunManifest(json).ContractVersion == "adaptive-v1"
-                ? MlEnvironmentContract.AdaptiveV1
-                : MlEnvironmentContract.TacticalV1;
+            MlEnvironmentContracts.Parse(MlEnvironmentSummary.FromRunManifest(json).ContractVersion);
+
+        public static MlEnvironmentContract EnvironmentFromScenario(TrainingScenario scenario)
+        {
+            if (scenario == null)
+                throw new ArgumentNullException(nameof(scenario));
+            return MlEnvironmentContracts.Parse(scenario.Environment);
+        }
 
         static bool TryResolveDuelEnvironment(string run0, string run1,
             out MlEnvironmentContract environment)

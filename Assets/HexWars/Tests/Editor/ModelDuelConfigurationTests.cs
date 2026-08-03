@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using HexWars.Presentation;
+using HexWars.Presentation.EditorTools;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
 using UnityEditor;
@@ -26,6 +27,68 @@ namespace HexWars.Presentation.Tests
             var seat = new ModelSeatConfiguration { Kind = kind, Path = path };
 
             Assert.That(seat.BuildSpec(), Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void ReplayViewerPython_UsesCommonRepositoryEnvironmentForLinkedWorktree()
+        {
+            string scratch = Path.Combine(
+                Path.GetTempPath(),
+                "hexwars-viewer-python-" + Guid.NewGuid().ToString("N"));
+            string repository = Path.Combine(scratch, "repo");
+            string worktree = Path.Combine(scratch, "worktree");
+            string gitDirectory =
+                Path.Combine(repository, ".git", "worktrees", "feature");
+            string expected = Path.Combine(
+                repository, "python", "winenv", "Scripts", "python.exe");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(expected));
+                File.WriteAllText(expected, string.Empty);
+                Directory.CreateDirectory(gitDirectory);
+                Directory.CreateDirectory(Path.Combine(worktree, "python"));
+                File.WriteAllText(
+                    Path.Combine(worktree, ".git"), "gitdir: " + gitDirectory);
+                File.WriteAllText(
+                    Path.Combine(gitDirectory, "commondir"), "../..");
+                Assert.That(ReplayViewerMenu.ResolvePythonExecutable(
+                    Path.Combine(worktree, "python")), Is.EqualTo(expected));
+            }
+            finally
+            {
+                if (Directory.Exists(scratch))
+                    Directory.Delete(scratch, recursive: true);
+            }
+        }
+
+        [Test]
+        public void ReplayViewerManifest_PreservesTacticalV2Contract()
+        {
+            const string manifest =
+                "{\"contract\":{\"version\":\"tactical-v2\"}}";
+
+            MlEnvironmentContract environment =
+                ReplayViewerMenu.EnvironmentFromRunManifest(manifest);
+
+            Assert.That(environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.That(MlEnvironmentContracts.Parse("tactical-v2"),
+                Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.Throws<ArgumentException>(() =>
+                ReplayViewerMenu.EnvironmentFromRunManifest(
+                    "{\"contract\":{\"version\":\"future-v1\"}}"));
+            Assert.Throws<ArgumentException>(() =>
+                MlEnvironmentContracts.Parse("future-v1"));
+        }
+
+        [Test]
+        public void ReplayViewerScenario_PreservesTacticalV2Contract()
+        {
+            var scenario = TrainingScenario.CreateStandard("tactical-v2");
+
+            MlEnvironmentContract environment =
+                ReplayViewerMenu.EnvironmentFromScenario(scenario);
+
+            Assert.That(environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
         }
 
         [Test]
