@@ -611,23 +611,46 @@ def _validate_runtime_contract(
         raise ValueError("evaluation runtime contract must be tactical-v2")
     if not source_contracts:
         raise ValueError("audit manifest is missing source contracts")
-    source = _require_mapping(source_contracts[0].get("contract"), label="source contract")
-    for field in ("encoding_hash", "observation_size", "action_size"):
-        if runtime.get(field) != source.get(field):
-            raise ValueError(f"evaluation runtime contract {field} is incompatible")
     runtime_board = _require_mapping(
         runtime.get("board"), label="evaluation runtime board"
     )
-    source_board = _require_mapping(source.get("board"), label="source board")
-    for dimension in ("width", "height"):
-        runtime_size = _require_int(
-            runtime_board.get(dimension), label=f"evaluation runtime board {dimension}"
+    runtime_geometry = {
+        dimension: _require_int(
+            runtime_board.get(dimension),
+            label=f"evaluation runtime board {dimension}",
         )
-        source_size = _require_int(
-            source_board.get(dimension), label=f"source board {dimension}"
+        for dimension in ("width", "height")
+    }
+    for index, source_row in enumerate(source_contracts, start=1):
+        row = _require_mapping(source_row, label=f"source contract row {index}")
+        source = _require_mapping(
+            row.get("contract"), label=f"source contract {index}"
         )
-        if runtime_size != source_size:
-            raise ValueError("evaluation runtime contract board geometry is incompatible")
+        for field in (
+            "environment",
+            "version",
+            "encoding_hash",
+            "observation_size",
+            "action_size",
+        ):
+            if runtime.get(field) != source.get(field):
+                raise ValueError(
+                    f"evaluation runtime contract {field} is incompatible "
+                    f"with source contract {index}"
+                )
+        source_board = _require_mapping(
+            source.get("board"), label=f"source contract {index} board"
+        )
+        for dimension, runtime_size in runtime_geometry.items():
+            source_size = _require_int(
+                source_board.get(dimension),
+                label=f"source contract {index} board {dimension}",
+            )
+            if runtime_size != source_size:
+                raise ValueError(
+                    "evaluation runtime contract board geometry is incompatible "
+                    f"with source contract {index}"
+                )
 
 
 def _definition_identity(definition: AuditDefinition) -> tuple[Mapping[str, Any], str]:

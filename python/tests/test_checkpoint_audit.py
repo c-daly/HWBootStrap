@@ -454,6 +454,60 @@ def test_runtime_contract_accepts_horizon_and_environment_kind_differences() -> 
     )
 
 
+def test_runtime_contract_accepts_multiple_sources_with_allowed_full_details() -> None:
+    source_contracts = [
+        {
+            "contract": _contract(
+                contract_hash="c" * 64,
+                board={
+                    "width": 13,
+                    "height": 9,
+                    "max_steps": 808,
+                    "environment_kind": "tactical",
+                },
+            )
+        },
+        {
+            "contract": _contract(
+                contract_hash="d" * 64,
+                board={
+                    "width": 13,
+                    "height": 9,
+                    "max_steps": 4096,
+                    "environment_kind": "duel",
+                },
+            )
+        },
+    ]
+
+    audit_module._validate_runtime_contract(RUNTIME_CONTRACT, source_contracts)
+
+
+def test_runtime_contract_rejects_geometry_mismatch_only_in_second_source() -> None:
+    source_contracts = [
+        {
+            "contract": _contract(
+                contract_hash="c" * 64,
+                board={"width": 13, "height": 9},
+            )
+        },
+        {
+            "contract": _contract(
+                contract_hash="d" * 64,
+                board={
+                    "width": 12,
+                    "height": 9,
+                    "max_steps": 808,
+                    "environment_kind": "tactical",
+                },
+            )
+        },
+    ]
+
+    with pytest.raises(ValueError, match="board geometry"):
+        audit_module._validate_runtime_contract(RUNTIME_CONTRACT, source_contracts)
+
+
 def test_runtime_contract_rejects_board_geometry_mismatch() -> None:
     runtime_contract = {
         **RUNTIME_CONTRACT,
