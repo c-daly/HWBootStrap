@@ -126,7 +126,12 @@ holds before the learner action is applied:
 
 1. **Conversion:** the opponent has at most one living unit.
 2. **Favorable state:** the learner has positive health-and-point-adjusted
-   normalized advantage under the existing authoritative diagnostic.
+   normalized advantage. For each seat, material is the sum of every living
+   unit's `point_cost * current_hp / maximum_hp` plus scenario
+   `points_weight * banked_points`. Advantage is learner material minus
+   opponent material, divided by the initial total material of both seats
+   (floored at 1). This selection diagnostic is recorded separately from
+   reward and never contributes reward.
 3. **Cycle warning:** the existing canonical cycle key appears for the second
    time in the episode. The draw classifier declares cycling at three
    repetitions; collection intervenes one occurrence earlier.
