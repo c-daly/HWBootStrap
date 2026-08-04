@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from itertools import chain
 from dataclasses import asdict, dataclass
@@ -1146,6 +1147,25 @@ def resolve_behavioral_cloning_device(requested: str) -> dict[str, Any]:
         "device_name": None,
     }
 
+
+def _software_provenance() -> dict[str, str]:
+    import importlib.metadata
+    import platform
+    import sys
+
+    import torch
+
+    return {
+        "python_version": platform.python_version(),
+        "numpy_version": str(np.__version__),
+        "torch_version": str(torch.__version__),
+        "stable_baselines3_version": importlib.metadata.version(
+            "stable-baselines3"
+        ),
+        "sb3_contrib_version": importlib.metadata.version("sb3-contrib"),
+        "platform": platform.platform() or sys.platform,
+    }
+
 @dataclass(frozen=True)
 class CloneMetrics:
     nll: float
@@ -1408,26 +1428,39 @@ def _assert_no_bc_optimizer_state(checkpoint: Path) -> None:
                 raise RuntimeError("saved PPO optimizer unexpectedly contains training state")
 
 
-def _verify_reload_identity(run_dir: Path, contract: EnvironmentContract, expected_logits: Any) -> None:
+def _verify_reload_identity(
+    checkpoint: Path,
+    adapter: Any,
+    contract: EnvironmentContract,
+    fixtures: ImitationBatch,
+    expected_logits: Any,
+) -> Mapping[str, Any]:
     import torch
-    from .controllers import ControllerResolver
 
-    with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as loaded:
-        fixtures = ImitationBatch(
-            observations=loaded["observations"],
-            legal_masks=loaded["legal_masks"],
-            actions=np.zeros(len(loaded["observations"]), dtype=np.int64),
-            game_ids=np.zeros(len(loaded["observations"]), dtype=np.int64),
-            decision_indices=np.arange(len(loaded["observations"]), dtype=np.int32),
-            sources=np.full(len(loaded["observations"]), Source.GREEDY_STANDARD, dtype=object),
-            profiles=np.full(len(loaded["observations"]), "fixture", dtype=object),
-            seats=np.zeros(len(loaded["observations"]), dtype=np.uint8),
-            action_kinds=np.ones(len(loaded["observations"]), dtype=np.uint8),
-            partitions=np.full(len(loaded["observations"]), "validation", dtype=object),
-        )
-    resolved = ControllerResolver(contract).resolve(f"run:{run_dir}")
-    actual_logits = _masked_logits(resolved.model, fixtures)
+    from .algorithms import actor_state_sha256
+
+    checkpoint = Path(checkpoint)
+    reloaded = adapter.load(checkpoint, env=None, device="cpu")
+    adapter.validate_model(reloaded, contract)
+    if {parameter.device.type for parameter in reloaded.policy.parameters()} != {
+        "cpu"
+    }:
+        raise RuntimeError("reloaded actor publication is not canonical CPU")
+    actual_logits = _masked_logits(reloaded, fixtures)
     torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+    return {
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "actor_sha256": actor_state_sha256(reloaded),
+        "contract_hash": contract.contract_hash,
+        "encoding_hash": contract.encoding_hash,
+        "observation_size": contract.observation_size,
+        "action_size": contract.action_size,
+        "comparison_rtol": 0.0,
+        "comparison_atol": 0.0,
+        "maximum_absolute_logit_difference": float(
+            torch.max(torch.abs(actual_logits - expected_logits)).item()
+        ),
+    }
 
 
 def canonicalize_behavioral_clone_for_publication(model: Any) -> None:
@@ -1507,10 +1540,17 @@ def train_actor_supervision(
         [MaterializedImitationPartition, int, int], Any
     ] | None = None,
     _prepared_request: tuple[Path, dict[str, Any]] | None = None,
+    warm_start: Any | None = None,
+    distillation_mode: str | None = None,
 ) -> BehavioralCloningResult:
     """Train the production actor from generic immutable supervision partitions."""
     import torch
-    from .algorithms import MaskablePPOAdapter
+    from .algorithms import (
+        ActorTransferSource,
+        MaskablePPOAdapter,
+        actor_state_sha256,
+    )
+    from .controllers import ControllerResolver
 
     if not isinstance(corpus, ActorSupervisionCorpus):
         raise TypeError("corpus must be an ActorSupervisionCorpus")
@@ -1529,6 +1569,19 @@ def train_actor_supervision(
     dataset_manifest_sha256 = corpus.identity.get("base_manifest_sha256")
     if not _is_hash(dataset_manifest_sha256):
         raise ValueError("actor-supervision base manifest identity is invalid")
+    if (warm_start is None) != (distillation_mode is None):
+        raise ValueError(
+            "actor-supervision warm start and distillation mode are inseparable"
+        )
+    if warm_start is not None:
+        if not isinstance(warm_start, ActorTransferSource):
+            raise TypeError("warm_start must be an ActorTransferSource")
+        if distillation_mode not in {"production", "nonproduction_cpu"}:
+            raise ValueError("actor-supervision distillation mode is invalid")
+        if set(corpus.validation.batch.sources) != {Source.DAGGER_TARGETED}:
+            raise ValueError(
+                "DAgger distillation validation must contain targeted labels only"
+            )
 
     if _prepared_request is None:
         run_dir, training_device = _prepare_behavioral_cloning_request(
@@ -1553,21 +1606,40 @@ def train_actor_supervision(
     if parameter_devices != {config.device}:
         raise RuntimeError("behavioral-cloning model parameters are not on the requested device")
 
-    actor_named = _actor_named_parameters(model)
     value_named = _value_named_parameters(model)
+    value_parameters = tuple(parameter for _name, parameter in value_named)
+    if not value_parameters:
+        raise RuntimeError("production policy did not expose value parameters")
+    value_before = tuple(
+        parameter.detach().cpu().clone() for parameter in value_parameters
+    )
+    value_hash_before = _parameter_hash(value_named)
+    actor_initialization = None
+    if warm_start is not None:
+        resolved_source = ControllerResolver(contract).resolve(
+            dict(warm_start.controller)
+        )
+        actor_initialization = adapter.initialize_actor_from_resolved(
+            model,
+            resolved_source,
+            source=warm_start,
+            expected_contract=contract,
+            device=config.device,
+        )
+        if _parameter_hash(value_named) != value_hash_before:
+            raise RuntimeError("actor warm-start modified value-side parameters")
+    target_actor_sha256_initial = actor_state_sha256(model)
+    actor_named = _actor_named_parameters(model)
     actor_parameters = tuple(chain(
         model.policy.features_extractor.parameters(),
         model.policy.mlp_extractor.policy_net.parameters(),
         model.policy.action_net.parameters(),
     ))
     assert {id(parameter) for parameter in actor_parameters} == {id(parameter) for _name, parameter in actor_named}
-    value_parameters = tuple(parameter for _name, parameter in value_named)
     if not actor_parameters or not value_parameters:
         raise RuntimeError("production policy did not expose actor/value parameter groups")
     if {id(parameter) for parameter in actor_parameters} & {id(parameter) for parameter in value_parameters}:
         raise RuntimeError("behavioral-cloning actor and value parameter groups overlap")
-    value_before = tuple(parameter.detach().cpu().clone() for parameter in value_parameters)
-    value_hash_before = _parameter_hash(value_named)
     optimizer = torch.optim.Adam(actor_parameters, lr=float(config.learning_rate))
 
     sampler = (
@@ -1587,6 +1659,7 @@ def train_actor_supervision(
     best_actor_state: tuple[Any, ...] | None = None
     epochs_without_improvement = 0
     epochs_trained = 0
+    source_example_counts: Counter[str] = Counter()
 
     history: list[dict[str, Any]] = []
     training_started = time.perf_counter()
@@ -1598,12 +1671,18 @@ def train_actor_supervision(
         transfer_forward_seconds = 0.0
         optimization_seconds = 0.0
         validation_seconds = 0.0
+        epoch_source_counts: Counter[str] = Counter()
         for _step in range(steps_per_epoch):
             phase_started = time.perf_counter()
             batch = sampler.next_batch()
             sampling_seconds += time.perf_counter() - phase_started
             if set(batch.partitions) != {"train"}:
                 raise RuntimeError("validation rows entered behavioral-cloning optimization")
+            selected_sources = Counter(
+                source.value for source in batch.sources
+            )
+            source_example_counts.update(selected_sources)
+            epoch_source_counts.update(selected_sources)
 
             phase_started = time.perf_counter()
             distribution, actions, _legal_masks = _distribution_tensors(model, batch)
@@ -1614,6 +1693,10 @@ def train_actor_supervision(
             phase_started = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if any(parameter.grad is not None for parameter in value_parameters):
+                raise RuntimeError(
+                    "actor supervision produced a value-side gradient"
+                )
             torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
             optimizer.step()
             optimization_seconds += time.perf_counter() - phase_started
@@ -1668,6 +1751,11 @@ def train_actor_supervision(
             "validation_seconds": float(validation_seconds),
             "unclassified_seconds": float(unclassified_seconds),
         }
+        if warm_start is not None:
+            event["source_example_counts"] = {
+                source.value: int(epoch_source_counts[source.value])
+                for source in corpus.source_fractions
+            }
         _validate_behavioral_cloning_progress_event(event)
         history.append(event)
         if progress is not None:
@@ -1687,6 +1775,7 @@ def train_actor_supervision(
     value_hash_after = _parameter_hash(value_named)
     if value_hash_after != value_hash_before:
         raise RuntimeError("behavioral cloning modified value-side parameters")
+    target_actor_sha256_final = actor_state_sha256(model)
     validation_metrics = _clone_metrics(model, validation.batch)
     expected_logits = _masked_logits(model, fixtures)
 
@@ -1706,6 +1795,23 @@ def train_actor_supervision(
         checkpoint = adapter.save(model, checkpoint)
         _assert_no_bc_optimizer_state(checkpoint)
         _atomic_actor_fixtures(temporary / "actor-fixtures.npz", fixtures)
+        publication_verification = dict(_verify_reload_identity(
+            checkpoint,
+            adapter,
+            contract,
+            fixtures,
+            expected_logits,
+        ))
+        if publication_verification["actor_sha256"] != target_actor_sha256_final:
+            raise RuntimeError(
+                "reloaded actor hash differs from the canonical training actor"
+            )
+        checkpoint_sha256 = publication_verification["checkpoint_sha256"]
+        software_provenance = _software_provenance()
+        total_source_counts = {
+            source.value: int(source_example_counts[source.value])
+            for source in corpus.source_fractions
+        }
         bc_data = {
             "schema_version": 1,
             "algorithm": adapter.name,
@@ -1719,21 +1825,42 @@ def train_actor_supervision(
             "epochs_trained": epochs_trained,
             "training_device": training_device,
             "publication_device": "cpu",
-            "best_validation_nll": validation_metrics.nll,
+            "best_validation_nll": best_nll,
             "actor_parameter_count": int(sum(parameter.numel() for parameter in actor_parameters)),
             "value_parameter_count": int(sum(parameter.numel() for parameter in value_parameters)),
             "value_parameters_sha256_before": value_hash_before,
             "value_parameters_sha256_after": value_hash_after,
+            "target_actor_sha256_initial": target_actor_sha256_initial,
+            "target_actor_sha256_final": target_actor_sha256_final,
+            "checkpoint_sha256": checkpoint_sha256,
+            "publication_verification": publication_verification,
+            "software_provenance": software_provenance,
+            "source_example_counts": total_source_counts,
+            "validation_partition": (
+                "held_out_targeted"
+                if warm_start is not None
+                else "held_out_demonstration"
+            ),
             "training_decision_count": int(len(training.batch.actions)),
             "validation_decision_count": int(len(validation.batch.actions)),
             "validation_game_count": int(len(np.unique(validation.batch.game_ids))),
         }
+        if warm_start is not None:
+            bc_data.update({
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": len(
+                    corpus.identity["train_overlays"]
+                ),
+                "production": distillation_mode == "production",
+                "actor_initialization": actor_initialization,
+            })
         manifest = {
             "schema_version": 1,
             "state": "completed",
             "timesteps": 0,
             "latest_checkpoint": "checkpoints/step_000000000.zip",
             "latest_checkpoint_step": 0,
+            "checkpoint_sha256": checkpoint_sha256,
             "config": {
                 "backend": "stable_baselines3",
                 "algorithm": adapter.name,
@@ -1751,7 +1878,23 @@ def train_actor_supervision(
             "bc_config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
+            "target_actor_sha256_initial": target_actor_sha256_initial,
+            "target_actor_sha256_final": target_actor_sha256_final,
+            "value_parameters_sha256_before": value_hash_before,
+            "value_parameters_sha256_after": value_hash_after,
+            "publication_verification": publication_verification,
+            "software_provenance": software_provenance,
+            "source_example_counts": total_source_counts,
         }
+        if warm_start is not None:
+            manifest.update({
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": len(
+                    corpus.identity["train_overlays"]
+                ),
+                "production": distillation_mode == "production",
+                "actor_initialization": actor_initialization,
+            })
         atomic_write_json(
             temporary / "training-history.json",
             {
@@ -1766,7 +1909,6 @@ def train_actor_supervision(
         atomic_write_json(temporary / "bc.json", bc_data)
         atomic_write_json(temporary / "metrics.json", metrics_data)
         atomic_write_json(temporary / "run.json", manifest)
-        _verify_reload_identity(temporary, contract, expected_logits)
         os.replace(temporary, run_dir)
     finally:
         if temporary.exists():

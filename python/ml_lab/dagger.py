@@ -19,23 +19,52 @@ from typing import Any
 import numpy as np
 
 from .contracts import EnvironmentContract
+from .algorithms import ActorTransferSource
 from .controllers import ResolvedController, predict, validate_inference_input
 from .evaluation import DuelClient, MAX_DECISIONS_PER_GAME, validate_dagger_payload
 from .io import atomic_write_json
 from .imitation import (
     ACTION_KINDS,
     ActorSupervisionCorpus,
+    BehavioralCloningConfig,
     ImitationBatch,
     ImitationDataset,
     MaterializedImitationPartition,
     Source,
     materialize_imitation_partition,
+    train_actor_supervision,
 )
 from .protocol import validate_step_payload
 from .tactical_trace import EpisodeTrace
 
 
 OVERLAY_SCHEMA_VERSION = 1
+DAGGER_DISTILLATION_CONFIG = BehavioralCloningConfig(
+    model_seed=227,
+    batch_size=256,
+    learning_rate=3e-4,
+    max_epochs=50,
+    patience=5,
+    device="cuda",
+)
+_ITERATION_ONE_CONTROLLER = {
+    "kind": "snapshot",
+    "path": (
+        "C:/Users/cddal/HexWars/python/runs/"
+        "bc227-ppo-random-s227-20260802-v2/checkpoints/"
+        "step_000038912.zip"
+    ),
+    "source_run": (
+        "C:/Users/cddal/HexWars/python/runs/"
+        "bc227-ppo-random-s227-20260802-v2"
+    ),
+    "algorithm": "maskable_ppo",
+    "step": 38_912,
+    "inference_mode": "deterministic",
+}
+_ITERATION_ONE_CHECKPOINT_SHA256 = (
+    "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+)
 _INT32_MAX = (1 << 31) - 1
 _HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _STATE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -1760,6 +1789,152 @@ _OVERLAY_FIELDS = frozenset({
     "schedule_hash", "original_dataset", "label_target", "game_ceiling",
     "game_count", "row_count", "games", "content_identity",
 })
+
+
+def dagger_actor_source(
+    iteration: int, *, preceding_run: Path | None = None,
+) -> ActorTransferSource:
+    """Resolve the immutable incoming actor for one DAgger iteration."""
+
+    if type(iteration) is not int or iteration not in {1, 2, 3}:
+        raise ValueError("DAgger actor source iteration is invalid")
+    if iteration == 1:
+        if preceding_run is not None:
+            raise ValueError("iteration one has no preceding DAgger actor")
+        source = ActorTransferSource(
+            source_kind="snapshot",
+            controller=_ITERATION_ONE_CONTROLLER,
+            checkpoint_sha256=_ITERATION_ONE_CHECKPOINT_SHA256,
+        )
+        checkpoint = Path(source.controller["path"])
+        if not checkpoint.is_file():
+            raise FileNotFoundError(checkpoint)
+        if _sha256_file(checkpoint) != source.checkpoint_sha256:
+            raise ValueError("iteration-one checkpoint SHA-256 does not match")
+        return source
+
+    if preceding_run is None:
+        raise ValueError("later DAgger iterations require the preceding actor run")
+    run = Path(preceding_run).resolve()
+    run_manifest_path = run / "run.json"
+    bc_path = run / "bc.json"
+    if not run_manifest_path.is_file():
+        raise FileNotFoundError(run_manifest_path)
+    if not bc_path.is_file():
+        raise FileNotFoundError(bc_path)
+    run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+    bc = json.loads(bc_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(run_manifest, Mapping)
+        or run_manifest.get("schema_version") != 1
+        or run_manifest.get("state") != "completed"
+        or run_manifest.get("latest_checkpoint")
+        != "checkpoints/step_000000000.zip"
+        or run_manifest.get("latest_checkpoint_step") != 0
+        or not isinstance(run_manifest.get("config"), Mapping)
+        or run_manifest["config"].get("algorithm") != "maskable_ppo"
+        or run_manifest["config"].get("policy") != "HexCNN"
+        or not isinstance(bc, Mapping)
+        or bc.get("schema_version") != 1
+        or bc.get("training_kind") != "selective-dagger-distillation-v1"
+        or bc.get("algorithm") != "maskable_ppo"
+        or bc.get("policy") != "HexCNN"
+    ):
+        raise ValueError("preceding DAgger actor publication is invalid")
+    if bc.get("distillation_iteration") != iteration - 1:
+        raise ValueError("preceding DAgger actor iteration does not match")
+    checkpoint = (run / run_manifest["latest_checkpoint"]).resolve()
+    if checkpoint.parent != (run / "checkpoints").resolve():
+        raise ValueError("preceding DAgger actor checkpoint is not contained")
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    digest = _sha256_file(checkpoint)
+    if (
+        run_manifest.get("checkpoint_sha256") != digest
+        or bc.get("checkpoint_sha256") != digest
+    ):
+        raise ValueError("preceding DAgger actor checkpoint SHA-256 does not match")
+    if not _HASH_PATTERN.fullmatch(str(bc.get("target_actor_sha256_final", ""))):
+        raise ValueError("preceding DAgger actor hash is invalid")
+    return ActorTransferSource(
+        source_kind="dagger_actor",
+        controller={
+            "kind": "snapshot",
+            "path": str(checkpoint),
+            "source_run": str(run),
+            "algorithm": "maskable_ppo",
+            "step": 0,
+            "inference_mode": "deterministic",
+        },
+        checkpoint_sha256=digest,
+    )
+
+
+def train_dagger_actor(
+    *,
+    corpus: ActorSupervisionCorpus,
+    scenario: Any,
+    env: Any,
+    contract: EnvironmentContract,
+    spaces_info: Mapping[str, Any],
+    run_dir: Path,
+    source: ActorTransferSource,
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
+    nonproduction_cpu_config: BehavioralCloningConfig | None = None,
+) -> Any:
+    """Train one actor with locked production settings or explicit CPU smoke settings."""
+
+    if not isinstance(corpus, ActorSupervisionCorpus):
+        raise TypeError("corpus must be an ActorSupervisionCorpus")
+    if not isinstance(source, ActorTransferSource):
+        raise TypeError("source must be an ActorTransferSource")
+    train_overlays = corpus.identity.get("train_overlays")
+    validation_overlays = corpus.identity.get("validation_overlays")
+    if (
+        corpus.identity.get("kind") != "selective-dagger-v1"
+        or not isinstance(train_overlays, (tuple, list))
+        or not isinstance(validation_overlays, (tuple, list))
+        or len(train_overlays) != len(validation_overlays)
+        or len(train_overlays) not in {1, 2, 3}
+    ):
+        raise ValueError("selective-DAgger distillation corpus identity is invalid")
+    iteration = len(train_overlays)
+    if nonproduction_cpu_config is None:
+        config = DAGGER_DISTILLATION_CONFIG
+        preceding_run = (
+            None
+            if iteration == 1
+            else Path(source.controller["source_run"])
+        )
+        if source.to_dict() != dagger_actor_source(
+            iteration, preceding_run=preceding_run,
+        ).to_dict():
+            raise ValueError("production DAgger actor source is not canonical")
+        mode = "production"
+    else:
+        if (
+            not isinstance(nonproduction_cpu_config, BehavioralCloningConfig)
+            or nonproduction_cpu_config.device != "cpu"
+        ):
+            raise ValueError(
+                "nonproduction DAgger distillation requires an explicit CPU config"
+            )
+        config = nonproduction_cpu_config
+        mode = "nonproduction_cpu"
+    return train_actor_supervision(
+        corpus=corpus,
+        scenario=scenario,
+        env=env,
+        contract=contract,
+        spaces_info=spaces_info,
+        run_dir=run_dir,
+        config=config,
+        progress=progress,
+        warm_start=source,
+        distillation_mode=mode,
+    )
+
+
 _DEFINITION_FIELDS = frozenset({
     "partition", "iteration", "observation_size", "action_size", "action_regions",
     "oracle", "learner", "original_dataset", "scenario_hash", "contract_hash",

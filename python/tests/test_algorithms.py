@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
 import pytest
+import torch
+from gymnasium import spaces
 
+import ml_lab.algorithms as algorithms_module
 from ml_lab.algorithms import (
+    MaskablePPOAdapter,
     create_or_resume_model,
     get_algorithm_adapter,
     resolve_resume_checkpoint,
@@ -18,6 +25,7 @@ from ml_lab.contracts import (
     create_run as create_durable_run,
 )
 from ml_lab.scenarios import resolve_scenario
+from ml_lab.controllers import ControllerSpec, ResolvedController
 
 
 @pytest.fixture
@@ -32,6 +40,137 @@ def contract() -> EnvironmentContract:
         roster=["1,2,3,4,5,6,7,8,9"],
         reward={"terminal_win": 1.0},
     )
+
+
+class _TinyActorEnv(gym.Env):
+    observation_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32,
+    )
+    action_space = spaces.Discrete(5)
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(3, dtype=np.float32), {}
+
+    def step(self, action):
+        return np.zeros(3, dtype=np.float32), 0.0, True, False, {}
+
+    def action_masks(self):
+        return np.asarray([True, False, True, False, False], dtype=bool)
+
+
+def _actor_contract() -> EnvironmentContract:
+    return EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="c" * 64,
+        encoding_hash="d" * 64,
+        observation_size=3,
+        action_size=5,
+        board={"width": 1, "height": 1},
+        roster=[],
+        reward={},
+    )
+
+
+def _actor_model(seed: int):
+    return MaskablePPOAdapter().create(
+        _TinyActorEnv(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        seed=seed,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+
+
+def _actor_modules(model):
+    return (
+        model.policy.features_extractor,
+        model.policy.mlp_extractor.policy_net,
+        model.policy.action_net,
+    )
+
+
+def _value_parameters(model):
+    return tuple(
+        parameter
+        for module in (
+            model.policy.mlp_extractor.value_net,
+            model.policy.value_net,
+        )
+        for parameter in module.parameters()
+    )
+
+
+def _resolved_actor_source(
+    tmp_path: Path,
+    model,
+    *,
+    source_kind: str,
+    step: int = 7,
+) -> tuple[object, ResolvedController]:
+    run = tmp_path / f"{source_kind}-source"
+    checkpoint = run / "checkpoints" / f"step_{step:09d}.zip"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(f"{source_kind}-{step}".encode("ascii"))
+    manifest = {
+        "schema_version": 1,
+        "state": "completed" if source_kind == "dagger_actor" else "stopped",
+        "latest_checkpoint": checkpoint.relative_to(run).as_posix(),
+        "latest_checkpoint_step": step,
+        "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
+        "contract": _actor_contract().to_dict(),
+    }
+    (run / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if source_kind == "dagger_actor":
+        (run / "bc.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": 1,
+                "algorithm": "maskable_ppo",
+                "policy": "HexCNN",
+                "checkpoint_sha256": hashlib.sha256(
+                    checkpoint.read_bytes()
+                ).hexdigest(),
+            }),
+            encoding="utf-8",
+        )
+    controller = {
+        "kind": "snapshot",
+        "path": str(checkpoint.resolve()),
+        "source_run": str(run.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": step,
+        "inference_mode": "deterministic",
+    }
+    source = algorithms_module.ActorTransferSource(
+        source_kind=source_kind,
+        controller=controller,
+        checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+    )
+    resolved = ResolvedController(
+        spec=ControllerSpec(
+            kind="snapshot",
+            path=checkpoint.resolve(),
+            source_run=run.resolve(),
+            algorithm="maskable_ppo",
+            step=step,
+            inference_mode="deterministic",
+        ),
+        server_controller="external",
+        model=model,
+        path=checkpoint.resolve(),
+        algorithm="maskable_ppo",
+        step=step,
+        contract=_actor_contract(),
+        observation_size=3,
+        action_size=5,
+        legacy=False,
+        promotable=True,
+    )
+    return source, resolved
 
 
 def run_config(run_name: str, algorithm: str) -> RunConfig:
@@ -330,3 +469,185 @@ def test_masked_dqn_resume_is_rejected_until_replay_buffer_sidecars_exist(
             checkpoint_interval=32,
             resume_source=source_run,
         )
+
+
+@pytest.mark.parametrize("source_kind", ["snapshot", "dagger_actor"])
+def test_actor_transfer_copies_only_actor_and_shared_features_from_both_source_kinds(
+    tmp_path: Path, source_kind: str,
+) -> None:
+    """Loading full policy state would overwrite the target's fresh value head."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    with torch.no_grad():
+        for parameter in (
+            parameter for module in _actor_modules(source_model)
+            for parameter in module.parameters()
+        ):
+            parameter.fill_(0.25)
+        for parameter in _value_parameters(source_model):
+            parameter.fill_(-0.75)
+        for parameter in _value_parameters(target_model):
+            parameter.fill_(0.875)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind=source_kind,
+    )
+    value_before = tuple(
+        parameter.detach().clone() for parameter in _value_parameters(target_model)
+    )
+    target_before = algorithms_module.actor_state_sha256(target_model)
+
+    provenance = MaskablePPOAdapter().initialize_actor_from_resolved(
+        target_model,
+        resolved,
+        source=source,
+        expected_contract=_actor_contract(),
+        device="cpu",
+    )
+
+    assert algorithms_module.actor_state_sha256(target_model) == (
+        algorithms_module.actor_state_sha256(source_model)
+    )
+    assert provenance["source_kind"] == source_kind
+    assert provenance["target_actor_sha256_before"] == target_before
+    assert provenance["source_actor_sha256"] == provenance[
+        "target_actor_sha256_after"
+    ]
+    assert all(
+        torch.equal(parameter.detach(), original)
+        for parameter, original in zip(
+            _value_parameters(target_model), value_before, strict=True,
+        )
+    )
+
+
+def test_actor_transfer_preflights_all_tensor_shapes_before_mutating_target(
+    tmp_path: Path,
+) -> None:
+    """Copying modules as they are checked would leave a half-copied actor."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source_model.policy.action_net = torch.nn.Linear(64, 6)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ContractMismatch, match="shape"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+def test_actor_transfer_restores_the_complete_target_after_a_copy_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after earlier modules copy must roll the target back transactionally."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    before = algorithms_module.actor_state_sha256(target_model)
+    original_load = target_model.policy.action_net.load_state_dict
+    attempts = 0
+
+    def fail_first_load(state_dict, *, strict=True, assign=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected actor-copy failure")
+        return original_load(state_dict, strict=strict, assign=assign)
+
+    monkeypatch.setattr(
+        target_model.policy.action_net, "load_state_dict", fail_first_load,
+    )
+    with pytest.raises(RuntimeError, match="injected actor-copy failure"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert attempts == 2
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("hash", "SHA-256"),
+        ("contract", "contract"),
+        ("policy", "policy class"),
+        ("algorithm", "algorithm"),
+        ("mode", "deterministic"),
+        ("step", "step"),
+        ("containment", "source run"),
+    ],
+)
+def test_malformed_actor_transfer_sources_leave_the_target_untouched(
+    tmp_path: Path, mutation: str, message: str,
+) -> None:
+    """Relaxing source identity checks must never permit a partial or wrong warm-start."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    if mutation == "hash":
+        source = replace(source, checkpoint_sha256="f" * 64)
+    elif mutation == "contract":
+        resolved = replace(
+            resolved,
+            contract=replace(_actor_contract(), contract_hash="e" * 64),
+        )
+    elif mutation == "policy":
+        source_model.policy = torch.nn.Identity()
+    elif mutation == "algorithm":
+        resolved = replace(resolved, algorithm="masked_dqn")
+    elif mutation == "mode":
+        resolved = replace(
+            resolved,
+            spec=replace(resolved.spec, inference_mode="stochastic"),
+        )
+    elif mutation == "step":
+        resolved = replace(resolved, step=8)
+    elif mutation == "containment":
+        outside = tmp_path / "outside" / resolved.path.name
+        outside.parent.mkdir()
+        outside.write_bytes(resolved.path.read_bytes())
+        source = replace(
+            source,
+            controller={**source.controller, "path": str(outside.resolve())},
+            checkpoint_sha256=hashlib.sha256(outside.read_bytes()).hexdigest(),
+        )
+        resolved = replace(
+            resolved,
+            path=outside.resolve(),
+            spec=replace(resolved.spec, path=outside.resolve()),
+        )
+    else:
+        raise AssertionError(mutation)
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises((ValueError, ContractMismatch), match=message):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before

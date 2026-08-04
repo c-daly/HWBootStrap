@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 from collections import Counter
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -2961,3 +2961,113 @@ def test_collection_reuse_and_invalid_schedule_fail_before_runtime_creation(
             progress=lambda _line: None,
         )
     assert calls == 0
+
+
+def test_iteration_one_warm_start_is_the_exact_immutable_seed_227_snapshot() -> None:
+    """Changing the first warm-start silently changes the entire causal experiment."""
+
+    source = dagger_module.dagger_actor_source(1)
+    expected = {
+        "schema_version": 1,
+        "source_kind": "snapshot",
+        "controller": {
+            "kind": "snapshot",
+            "path": (
+                "C:/Users/cddal/HexWars/python/runs/"
+                "bc227-ppo-random-s227-20260802-v2/checkpoints/"
+                "step_000038912.zip"
+            ),
+            "source_run": (
+                "C:/Users/cddal/HexWars/python/runs/"
+                "bc227-ppo-random-s227-20260802-v2"
+            ),
+            "algorithm": "maskable_ppo",
+            "step": 38_912,
+            "inference_mode": "deterministic",
+        },
+        "checkpoint_sha256": (
+            "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+        ),
+    }
+    assert source.to_dict() == expected
+    checkpoint = Path(expected["controller"]["path"])
+    assert checkpoint.is_file()
+    assert hashlib.sha256(checkpoint.read_bytes()).hexdigest() == expected[
+        "checkpoint_sha256"
+    ]
+    with pytest.raises(TypeError):
+        source.controller["step"] = 1
+
+
+def _write_published_dagger_actor(root: Path, iteration: int) -> Path:
+    checkpoint = root / "checkpoints" / "step_000000000.zip"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(f"dagger-actor-{iteration}".encode("ascii"))
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    run = {
+        "schema_version": 1,
+        "state": "completed",
+        "latest_checkpoint": "checkpoints/step_000000000.zip",
+        "latest_checkpoint_step": 0,
+        "checkpoint_sha256": digest,
+        "config": {
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "device": "cpu",
+        },
+    }
+    bc = {
+        "schema_version": 1,
+        "training_kind": "selective-dagger-distillation-v1",
+        "distillation_iteration": iteration,
+        "algorithm": "maskable_ppo",
+        "policy": "HexCNN",
+        "checkpoint_sha256": digest,
+        "target_actor_sha256_final": HASHES["a"],
+    }
+    (root / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    (root / "bc.json").write_text(json.dumps(bc), encoding="utf-8")
+    return checkpoint
+
+
+def test_later_actor_source_binds_the_preceding_completed_publication_and_sha(
+    tmp_path: Path,
+) -> None:
+    """Resolving a live run or the wrong prior iteration would break the DAgger chain."""
+
+    run = tmp_path / "iteration-1-actor"
+    checkpoint = _write_published_dagger_actor(run, 1)
+
+    source = dagger_module.dagger_actor_source(2, preceding_run=run)
+
+    assert source.source_kind == "dagger_actor"
+    assert source.controller == {
+        "kind": "snapshot",
+        "path": str(checkpoint.resolve()),
+        "source_run": str(run.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": 0,
+        "inference_mode": "deterministic",
+    }
+    assert source.checkpoint_sha256 == hashlib.sha256(
+        checkpoint.read_bytes()
+    ).hexdigest()
+
+    checkpoint.write_bytes(b"replaced")
+    with pytest.raises(ValueError, match="SHA-256"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
+    with pytest.raises(ValueError, match="preceding"):
+        dagger_module.dagger_actor_source(3, preceding_run=run)
+
+
+def test_production_dagger_distillation_configuration_is_locked() -> None:
+    """A caller-supplied production optimizer would invalidate cross-iteration results."""
+
+    assert asdict(dagger_module.DAGGER_DISTILLATION_CONFIG) == {
+        "model_seed": 227,
+        "batch_size": 256,
+        "learning_rate": 3e-4,
+        "max_epochs": 50,
+        "patience": 5,
+        "device": "cuda",
+    }

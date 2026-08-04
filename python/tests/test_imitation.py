@@ -16,6 +16,8 @@ import pytest
 import torch
 import gymnasium as gym
 from gymnasium import spaces
+import ml_lab.algorithms as algorithms_module
+import ml_lab.dagger as dagger_module
 import ml_lab.imitation as imitation_module
 
 from ml_lab.contracts import ContractMismatch, EnvironmentContract
@@ -924,12 +926,327 @@ class _TinyCloneEnv(gym.Env):
         return np.asarray([True, False, True, False, False], dtype=bool)
 
 
+def _distillation_corpus(clone_scenario) -> imitation_module.ActorSupervisionCorpus:
+    training = _three_source_partition()
+    selected = np.flatnonzero(
+        training.batch.sources == imitation_module.Source.DAGGER_TARGETED
+    )
+    values = {
+        name: getattr(training.batch, name)[selected].copy()
+        for name in ImitationBatch.__dataclass_fields__
+    }
+    values["partitions"][:] = "validation"
+    validation = MaterializedImitationPartition(
+        "validation",
+        ImitationBatch(**values),
+        MappingProxyType({
+            (f"validation-overlay-{index}", int(game_id), 0): index
+            for index, game_id in enumerate(values["game_ids"])
+        }),
+    )
+    scenario_hash = hashlib.sha256(
+        clone_scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    return imitation_module.ActorSupervisionCorpus(
+        training=training,
+        validation=validation,
+        source_fractions=_locked_dagger_mixture(),
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "selective-dagger-v1",
+            "base_manifest_sha256": "d" * 64,
+            "train_overlays": ("e" * 64,),
+            "validation_overlays": ("f" * 64,),
+            "contract_hash": contract().contract_hash,
+            "encoding_hash": contract().encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+
+
+def _write_actor_snapshot_source(root: Path):
+    adapter = MaskablePPOAdapter()
+    model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        seed=101,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    checkpoint = adapter.save(
+        model, root / "checkpoints" / "step_000000007.zip",
+    )
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    (root / "run.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "state": "stopped",
+            "latest_checkpoint": "checkpoints/step_000000007.zip",
+            "latest_checkpoint_step": 7,
+            "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
+            "contract": contract().to_dict(),
+        }),
+        encoding="utf-8",
+    )
+    source = algorithms_module.ActorTransferSource(
+        source_kind="snapshot",
+        controller={
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(root.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": 7,
+            "inference_mode": "deterministic",
+        },
+        checkpoint_sha256=digest,
+    )
+    return source, model
+
+
 def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> torch.Tensor:
     with torch.no_grad():
         observation_tensor = torch.as_tensor(observations, dtype=torch.float32, device=model.device)
         mask_tensor = torch.as_tensor(masks, dtype=torch.bool, device=model.device)
         distribution = model.policy.get_distribution(observation_tensor, action_masks=mask_tensor)
         return distribution.distribution.logits.detach().cpu()
+
+
+def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenance(
+    clone_scenario, tmp_path: Path,
+) -> None:
+    """Publishing only a zip cannot prove source, value isolation, or physical reload."""
+
+    source, source_model = _write_actor_snapshot_source(tmp_path / "source")
+    fresh_target = MaskablePPOAdapter().create(
+        _TinyCloneEnv(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    expected_fresh_value_hash = imitation_module._parameter_hash(
+        imitation_module._value_named_parameters(fresh_target)
+    )
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "distilled",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=1,
+            patience=1,
+            device="cpu",
+        ),
+    )
+
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (result.run_dir / "run.json").read_text(encoding="utf-8")
+    )
+    checkpoint = result.run_dir / "checkpoints" / "step_000000000.zip"
+    source_hash = algorithms_module.actor_state_sha256(source_model)
+    assert bc["training_kind"] == "selective-dagger-distillation-v1"
+    assert bc["distillation_iteration"] == 1
+    assert bc["production"] is False
+    assert bc["actor_initialization"]["source_checkpoint_sha256"] == (
+        source.checkpoint_sha256
+    )
+    assert bc["actor_initialization"]["source_actor_sha256"] == source_hash
+    assert bc["target_actor_sha256_initial"] == source_hash
+    assert bc["target_actor_sha256_final"] != ""
+    assert bc["value_parameters_sha256_before"] == expected_fresh_value_hash
+    assert bc["value_parameters_sha256_after"] == expected_fresh_value_hash
+    assert bc["checkpoint_sha256"] == hashlib.sha256(
+        checkpoint.read_bytes()
+    ).hexdigest()
+    assert bc["source_example_counts"] == {
+        "greedy_standard": 10,
+        "search_conversion": 4,
+        "dagger_targeted": 6,
+    }
+    assert bc["supervision_corpus"]["train_overlays"] == ["e" * 64]
+    assert bc["supervision_corpus"]["validation_overlays"] == ["f" * 64]
+    assert bc["validation_partition"] == "held_out_targeted"
+    assert {
+        "python_version",
+        "numpy_version",
+        "torch_version",
+        "stable_baselines3_version",
+        "sb3_contrib_version",
+        "platform",
+    } == set(bc["software_provenance"])
+    assert all(
+        isinstance(value, str) and value
+        for value in bc["software_provenance"].values()
+    )
+    for key in (
+        "actor_initialization",
+        "checkpoint_sha256",
+        "target_actor_sha256_initial",
+        "target_actor_sha256_final",
+        "value_parameters_sha256_before",
+        "value_parameters_sha256_after",
+        "source_example_counts",
+        "software_provenance",
+    ):
+        assert manifest[key] == bc[key]
+    history = json.loads(
+        (result.run_dir / "training-history.json").read_text(encoding="utf-8")
+    )
+    assert history["epochs"][0]["source_example_counts"] == (
+        bc["source_example_counts"]
+    )
+    assert history["epochs"][0]["validation_nll"] == pytest.approx(
+        result.validation.nll
+    )
+    with np.load(result.run_dir / "actor-fixtures.npz", allow_pickle=False) as data:
+        observations = data["observations"]
+        legal_masks = data["legal_masks"]
+    reloaded = ControllerResolver(contract()).resolve(f"run:{result.run_dir}").model
+    assert algorithms_module.actor_state_sha256(reloaded) == bc[
+        "target_actor_sha256_final"
+    ]
+    torch.testing.assert_close(
+        _test_masked_logits(reloaded, observations, legal_masks),
+        _test_masked_logits(
+            ControllerResolver(contract()).resolve(f"run:{result.run_dir}").model,
+            observations,
+            legal_masks,
+        ),
+        rtol=0,
+        atol=0,
+    )
+    with zipfile.ZipFile(checkpoint) as archive:
+        names = archive.namelist()
+        assert not any(
+            token in name.lower()
+            for name in names
+            for token in ("rollout", "replay", "scheduler", "bc_optimizer")
+        )
+        optimizer_state = torch.load(
+            io.BytesIO(archive.read("policy.optimizer.pth")),
+            map_location="cpu",
+            weights_only=True,
+        )
+        assert optimizer_state["state"] == {}
+
+
+def test_distillation_publication_reloads_before_manifests_and_fails_atomically(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest written before reload could bless corrupt or unreloadable bytes."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "failed-distillation"
+
+    def reject_reload(checkpoint, *_args, **_kwargs):
+        staging = Path(checkpoint).parent.parent
+        assert not (staging / "run.json").exists()
+        assert not (staging / "bc.json").exists()
+        raise RuntimeError("injected distillation reload failure")
+
+    monkeypatch.setattr(
+        imitation_module, "_verify_reload_identity", reject_reload,
+    )
+    with pytest.raises(RuntimeError, match="injected distillation reload failure"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".failed-distillation.publishing-*")) == []
+
+
+def test_distillation_malformed_source_never_publishes_output(
+    clone_scenario, tmp_path: Path,
+) -> None:
+    """A source changed after definition must fail before any output is published."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    source = replace(source, checkpoint_sha256="f" * 64)
+    destination = tmp_path / "bad-source-distillation"
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+
+
+def test_distillation_restores_the_best_validation_actor_before_publication(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving the last epoch instead of the best targeted NLL defeats patience."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    original_metrics = imitation_module._clone_metrics
+    observed_actor_hashes: list[str] = []
+
+    def staged_metrics(model, batch):
+        metrics = original_metrics(model, batch)
+        observed_actor_hashes.append(
+            algorithms_module.actor_state_sha256(model)
+        )
+        if len(observed_actor_hashes) == 1:
+            return replace(metrics, nll=0.1)
+        if len(observed_actor_hashes) == 2:
+            return replace(metrics, nll=10.0)
+        return metrics
+
+    monkeypatch.setattr(imitation_module, "_clone_metrics", staged_metrics)
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "best-restored",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=2,
+            patience=2,
+            device="cpu",
+        ),
+    )
+
+    assert result.best_epoch == 1
+    assert len(observed_actor_hashes) >= 3
+    assert observed_actor_hashes[0] != observed_actor_hashes[1]
+    assert observed_actor_hashes[-1] == observed_actor_hashes[0]
 
 
 def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
