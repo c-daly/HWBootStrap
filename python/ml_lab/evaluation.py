@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import json
+import re
 import csv
 import subprocess
 import tempfile
@@ -202,6 +203,194 @@ def validate_demonstration_payload(
     return result
 
 
+def _validate_dagger_command(
+    raw: Any, *, seat: int, index: int, role: str
+) -> dict[str, Any]:
+    descriptor = f"DAgger decision {index} {role} command"
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{descriptor} must be an object")
+    required = {"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"}
+    if set(raw) != required:
+        raise ValueError(f"{descriptor} fields are invalid")
+
+    kind = raw["Kind"]
+    issuer = raw["Issuer"]
+    if not isinstance(kind, str) or kind not in {
+        "end_turn", "move", "attack", "deploy",
+    }:
+        raise ValueError(f"{descriptor} kind is invalid")
+    if type(issuer) is not int or issuer not in {0, 1} or issuer != seat:
+        raise ValueError(f"{descriptor} issuer is invalid")
+
+    for field in ("ActorId", "TargetId", "Q", "R"):
+        value = raw[field]
+        if value is not None and type(value) is not int:
+            raise ValueError(f"{descriptor} {field} is invalid")
+
+    actor = raw["ActorId"]
+    target = raw["TargetId"]
+    q = raw["Q"]
+    r = raw["R"]
+    shape_is_valid = (
+        (kind == "end_turn" and actor is None and target is None and q is None and r is None)
+        or (kind == "move" and actor is not None and target is None and q is not None and r is not None)
+        or (kind == "attack" and actor is not None and target is not None and q is None and r is None)
+        or (kind == "deploy" and actor is None and target is None and q is not None and r is not None)
+    )
+    if not shape_is_valid:
+        raise ValueError(f"{descriptor} shape is invalid")
+    return dict(raw)
+
+
+def validate_dagger_payload(
+    payload: Any, contract: EnvironmentContract
+) -> list[dict[str, Any]]:
+    """Validate and return a version-1 tactical-v2 selective-DAgger batch."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("DAgger payload must be an object")
+    if set(payload) != {"schema_version", "decisions"}:
+        raise ValueError("DAgger payload fields are invalid")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError("unsupported DAgger schema version")
+    decisions = payload["decisions"]
+    if not isinstance(decisions, list):
+        raise ValueError("DAgger decisions must be a list")
+
+    required = {
+        "Observation",
+        "LegalMask",
+        "LearnerAction",
+        "LearnerCommand",
+        "TeacherAction",
+        "TeacherCommand",
+        "Reasons",
+        "StateHash",
+        "NormalizedAdvantage",
+        "OpponentLivingUnitCount",
+        "ProductiveLegalActionCount",
+        "Seat",
+        "Round",
+        "DecisionIndex",
+        "Disagreement",
+        "OracleDepth",
+        "OracleExpansionBudget",
+        "OracleHeuristicIdentity",
+        "OracleActualExpansionCount",
+    }
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(decisions):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"DAgger decision {index} must be an object")
+        if set(raw) != required:
+            raise ValueError(f"DAgger decision {index} fields are invalid")
+
+        observation = raw["Observation"]
+        if not isinstance(observation, list) or len(observation) != contract.observation_size:
+            raise ValueError(f"DAgger decision {index} observation length is invalid")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(float(value))
+            for value in observation
+        ):
+            raise ValueError(
+                f"DAgger decision {index} observation values must be finite"
+            )
+
+        legal_mask = raw["LegalMask"]
+        if (
+            not isinstance(legal_mask, list)
+            or len(legal_mask) != contract.action_size
+            or any(type(value) is not bool for value in legal_mask)
+        ):
+            raise ValueError(
+                f"DAgger decision {index} legal mask length or values are invalid"
+            )
+
+        actions: dict[str, int] = {}
+        for field, label in (
+            ("LearnerAction", "learner action"),
+            ("TeacherAction", "teacher action"),
+        ):
+            action = raw[field]
+            if type(action) is not int or action < 0 or action >= contract.action_size:
+                raise ValueError(f"DAgger decision {index} {label} is invalid")
+            if not legal_mask[action]:
+                raise ValueError(f"DAgger decision {index} {label} is masked off")
+            actions[field] = action
+
+        reasons = raw["Reasons"]
+        if type(reasons) is not int or reasons <= 0 or reasons & ~15:
+            raise ValueError(f"DAgger decision {index} reasons bitmask is invalid")
+
+        state_hash = raw["StateHash"]
+        if not isinstance(state_hash, str) or re.fullmatch(r"[0-9a-f]{64}", state_hash) is None:
+            raise ValueError(f"DAgger decision {index} state hash is invalid")
+
+        normalized_advantage = raw["NormalizedAdvantage"]
+        if (
+            isinstance(normalized_advantage, bool)
+            or not isinstance(normalized_advantage, (int, float))
+            or not isfinite(float(normalized_advantage))
+        ):
+            raise ValueError(
+                f"DAgger decision {index} normalized advantage must be finite"
+            )
+
+        for field, label in (
+            ("OpponentLivingUnitCount", "opponent living unit count"),
+            ("ProductiveLegalActionCount", "productive legal action count"),
+            ("Round", "round"),
+            ("DecisionIndex", "decision index"),
+        ):
+            value = raw[field]
+            if type(value) is not int or value < 0:
+                raise ValueError(f"DAgger decision {index} {label} is invalid")
+
+        seat = raw["Seat"]
+        if type(seat) is not int or seat not in {0, 1}:
+            raise ValueError(f"DAgger decision {index} seat is invalid")
+
+        disagreement = raw["Disagreement"]
+        if type(disagreement) is not bool or disagreement is not (
+            actions["LearnerAction"] != actions["TeacherAction"]
+        ):
+            raise ValueError(f"DAgger decision {index} disagreement is invalid")
+
+        oracle_depth = raw["OracleDepth"]
+        if type(oracle_depth) is not int or oracle_depth < 1:
+            raise ValueError(f"DAgger decision {index} oracle depth is invalid")
+        oracle_budget = raw["OracleExpansionBudget"]
+        if type(oracle_budget) is not int or oracle_budget < 1:
+            raise ValueError(
+                f"DAgger decision {index} oracle expansion budget is invalid"
+            )
+        if raw["OracleHeuristicIdentity"] != "material-plus-pursuit-v1":
+            raise ValueError(
+                f"DAgger decision {index} oracle heuristic identity is invalid"
+            )
+        actual_expansions = raw["OracleActualExpansionCount"]
+        if (
+            type(actual_expansions) is not int
+            or actual_expansions < 0
+            or actual_expansions > oracle_budget
+        ):
+            raise ValueError(
+                f"DAgger decision {index} actual expansion count is invalid"
+            )
+
+        decision = dict(raw)
+        decision["LearnerCommand"] = _validate_dagger_command(
+            raw["LearnerCommand"], seat=seat, index=index, role="learner"
+        )
+        decision["TeacherCommand"] = _validate_dagger_command(
+            raw["TeacherCommand"], seat=seat, index=index, role="teacher"
+        )
+        result.append(decision)
+    return result
+
+
+
 class DuelClient:
     """One reusable JSONL GymServer process for evaluation games."""
 
@@ -308,6 +497,45 @@ class DuelClient:
     def drain_demonstrations(self) -> list[dict[str, Any]]:
         payload = self._rpc({"cmd": "duel_demo_drain"})
         return validate_demonstration_payload(payload, self.contract)
+
+    def configure_dagger(
+        self,
+        *,
+        enabled: bool,
+        depth: int,
+        expansion_budget: int,
+        use_heuristic: bool,
+    ) -> None:
+        if type(enabled) is not bool:
+            raise ValueError("DAgger enabled flag must be boolean")
+        if type(depth) is not int or depth < 1:
+            raise ValueError("DAgger depth must be a positive integer")
+        if type(expansion_budget) is not int or expansion_budget < 1:
+            raise ValueError("DAgger expansion budget must be a positive integer")
+        if type(use_heuristic) is not bool or not use_heuristic:
+            raise ValueError("DAgger heuristic choice must be true")
+
+        expected = {
+            "enabled": enabled,
+            "depth": depth,
+            "expansion_budget": expansion_budget,
+            "use_heuristic": use_heuristic,
+        }
+        response = self._rpc({"cmd": "duel_dagger_configure", **expected})
+        if (
+            set(response) != set(expected)
+            or type(response.get("enabled")) is not bool
+            or type(response.get("depth")) is not int
+            or type(response.get("expansion_budget")) is not int
+            or type(response.get("use_heuristic")) is not bool
+            or response != expected
+        ):
+            raise ValueError("GymServer did not acknowledge DAgger configuration")
+
+    def drain_dagger(self) -> list[dict[str, Any]]:
+        payload = self._rpc({"cmd": "duel_dagger_drain"})
+        return validate_dagger_payload(payload, self.contract)
+
 
     def save_replay(self, path: Path) -> Path:
         path = Path(path)

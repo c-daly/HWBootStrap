@@ -1,6 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using NUnit.Framework;
@@ -319,6 +323,191 @@ namespace HexWars.Engine.Tests
             });
         }
 
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":1,"depth":4,"expansion_budget":512,"use_heuristic":true}""", "enabled flag")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":true,"expansion_budget":512,"use_heuristic":true}""", "depth")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":4,"expansion_budget":"512","use_heuristic":true}""", "expansion budget")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":0,"expansion_budget":512,"use_heuristic":true}""", "depth")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":4,"expansion_budget":512,"use_heuristic":false}""", "heuristic")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":4,"expansion_budget":512}""", "exactly")]
+        [TestCase("""{"cmd":"duel_dagger_configure","enabled":true,"depth":4,"expansion_budget":512,"use_heuristic":true,"extra":1}""", "exactly")]
+        public void GymServer_DaggerConfigureRejectsMalformedOrUnsupportedValues(
+            string request, string expectedError)
+        {
+            using var server = new DaggerServerProcess("--environment", "tactical-v2");
+
+            string error = server.ExchangeFailureRaw(request);
+
+            Assert.That(error, Does.Contain(expectedError));
+        }
+
+        [TestCase("duel_dagger_configure")]
+        [TestCase("duel_dagger_drain")]
+        public void GymServer_DaggerCommandsRejectNonTacticalV2(string command)
+        {
+            using var server = new DaggerServerProcess("--environment", "adaptive-v1");
+            object request = command == "duel_dagger_configure"
+                ? new
+                {
+                    cmd = command,
+                    enabled = true,
+                    depth = 4,
+                    expansion_budget = 512,
+                    use_heuristic = true,
+                }
+                : new { cmd = command };
+
+            string error = server.ExchangeFailure(request);
+
+            Assert.That(error, Does.Contain(
+                "duel DAgger is supported only for tactical-v2"));
+        }
+
+        [Test]
+        public void GymServer_DaggerConfigureRejectsFogBeforeEnabling()
+        {
+            string scenario = WriteProfiledScenario(fogOfWar: true);
+            try
+            {
+                using var server = new DaggerServerProcess(
+                    "--environment", "tactical-v2", "--scenario-file", scenario);
+
+                string error = server.ExchangeFailure(new
+                {
+                    cmd = "duel_dagger_configure",
+                    enabled = true,
+                    depth = 4,
+                    expansion_budget = 512,
+                    use_heuristic = true,
+                });
+
+                Assert.That(error, Does.Contain("requires fog_of_war=false"));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
+
+        [Test]
+        public void GymServer_DaggerJsonlKeepsLearnerTransitionAndBuffersIndependent()
+        {
+            using var server = DaggerServerProcess.Profiled();
+
+            using JsonDocument configured = server.Exchange(new
+            {
+                cmd = "duel_dagger_configure",
+                enabled = true,
+                depth = 4,
+                expansion_budget = 512,
+                use_heuristic = true,
+            });
+            Assert.That(
+                configured.RootElement.EnumerateObject().Select(item => item.Name).ToArray(),
+                Is.EquivalentTo(new[]
+                {
+                    "enabled", "depth", "expansion_budget", "use_heuristic",
+                }));
+            Assert.Multiple(() =>
+            {
+                Assert.That(configured.RootElement.GetProperty("enabled").GetBoolean(), Is.True);
+                Assert.That(configured.RootElement.GetProperty("depth").GetInt32(), Is.EqualTo(4));
+                Assert.That(configured.RootElement.GetProperty("expansion_budget").GetInt32(),
+                    Is.EqualTo(512));
+                Assert.That(configured.RootElement.GetProperty("use_heuristic").GetBoolean(), Is.True);
+            });
+
+            using JsonDocument traceEnabled = server.Exchange(
+                new { cmd = "duel_trace_enable", enabled = true });
+            using JsonDocument demoEnabled = server.Exchange(
+                new { cmd = "duel_demo_enable", enabled = true });
+            using JsonDocument reset = server.Exchange(new
+            {
+                cmd = "duel_reset",
+                seed = 91,
+                p0 = "external",
+                p1 = "external",
+                learner = 0,
+                start_profile = "conversion-3v1-near",
+                reference_seat = 0,
+            });
+            Assert.That(reset.RootElement.GetProperty("mask")[0].GetBoolean(), Is.True);
+
+            using JsonDocument step = server.Exchange(new { cmd = "duel_step", action = 0 });
+            using JsonDocument dagger = server.Exchange(new { cmd = "duel_dagger_drain" });
+            Assert.That(
+                dagger.RootElement.EnumerateObject().Select(item => item.Name).ToArray(),
+                Is.EquivalentTo(new[] { "schema_version", "decisions" }));
+            Assert.That(dagger.RootElement.GetProperty("schema_version").GetInt32(), Is.EqualTo(1));
+            JsonElement decisions = dagger.RootElement.GetProperty("decisions");
+            Assert.That(decisions.GetArrayLength(), Is.EqualTo(1));
+            JsonElement row = decisions[0];
+            Assert.That(
+                row.EnumerateObject().Select(item => item.Name).ToArray(),
+                Is.EquivalentTo(new[]
+                {
+                    "Observation", "LegalMask", "LearnerAction", "LearnerCommand",
+                    "TeacherAction", "TeacherCommand", "Reasons", "StateHash",
+                    "NormalizedAdvantage", "OpponentLivingUnitCount",
+                    "ProductiveLegalActionCount", "Seat", "Round", "DecisionIndex",
+                    "Disagreement", "OracleDepth", "OracleExpansionBudget",
+                    "OracleHeuristicIdentity", "OracleActualExpansionCount",
+                }));
+
+            using JsonDocument trace = server.Exchange(new { cmd = "duel_trace_drain" });
+            JsonElement transitions = trace.RootElement.GetProperty("transitions");
+            Assert.That(transitions.GetArrayLength(), Is.EqualTo(1));
+            JsonElement applied = transitions[0].GetProperty("Command");
+            JsonElement learnerCommand = row.GetProperty("LearnerCommand");
+            JsonElement teacherCommand = row.GetProperty("TeacherCommand");
+            Assert.Multiple(() =>
+            {
+                Assert.That(row.GetProperty("LearnerAction").GetInt32(), Is.Zero);
+                Assert.That(row.GetProperty("TeacherAction").GetInt32(), Is.Not.Zero);
+                Assert.That(learnerCommand.GetRawText(), Is.EqualTo(applied.GetRawText()),
+                    "the external learner command must own the transition");
+                Assert.That(teacherCommand.GetRawText(), Is.Not.EqualTo(applied.GetRawText()),
+                    "the teacher command must remain evidence only");
+            });
+
+            using JsonDocument demoAfterDaggerDrain =
+                server.Exchange(new { cmd = "duel_demo_drain" });
+            Assert.That(
+                demoAfterDaggerDrain.RootElement.GetProperty("decisions").GetArrayLength(),
+                Is.EqualTo(1), "draining DAgger must not clear demonstrations");
+            using JsonDocument emptyDagger = server.Exchange(new { cmd = "duel_dagger_drain" });
+            Assert.That(emptyDagger.RootElement.GetProperty("decisions").GetArrayLength(), Is.Zero);
+
+            using JsonDocument disabled = server.Exchange(new
+            {
+                cmd = "duel_dagger_configure",
+                enabled = false,
+                depth = 4,
+                expansion_budget = 512,
+                use_heuristic = true,
+            });
+            Assert.That(disabled.RootElement.GetProperty("enabled").GetBoolean(), Is.False);
+            using JsonDocument resetAfterDisable = server.Exchange(new
+            {
+                cmd = "duel_reset",
+                seed = 91,
+                p0 = "external",
+                p1 = "external",
+                learner = 0,
+                start_profile = "conversion-3v1-near",
+                reference_seat = 0,
+            });
+            using JsonDocument stepAfterDisable =
+                server.Exchange(new { cmd = "duel_step", action = 0 });
+            using JsonDocument stillEmpty = server.Exchange(new { cmd = "duel_dagger_drain" });
+            Assert.That(stillEmpty.RootElement.GetProperty("decisions").GetArrayLength(), Is.Zero);
+            using JsonDocument demoStillIndependent =
+                server.Exchange(new { cmd = "duel_demo_drain" });
+            Assert.That(
+                demoStillIndependent.RootElement.GetProperty("decisions").GetArrayLength(),
+                Is.EqualTo(1), "disabling DAgger must not disable demonstrations");
+        }
+
+
         private static TacticalV2DaggerDecision ObserveOnce(Fixture fixture, int learnerAction)
         {
             var sink = new BufferedTacticalV2DaggerSink { Enabled = true };
@@ -392,6 +581,108 @@ namespace HexWars.Engine.Tests
                 return _decide(context);
             }
         }
+
+        private static string WriteProfiledScenario(bool fogOfWar)
+        {
+            string source = Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "..", "python", "config",
+                "annihilation-imitation-v1.json"));
+            JsonNode scenario = JsonNode.Parse(File.ReadAllText(source))!;
+            scenario["rules"]!["fog_of_war"] = fogOfWar;
+            string path = Path.Combine(
+                TestContext.CurrentContext.WorkDirectory,
+                "dagger-profile-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(path, scenario.ToJsonString());
+            return path;
+        }
+
+        private sealed class DaggerServerProcess : IDisposable
+        {
+            private readonly Process _process;
+            private readonly string? _ownedScenario;
+            private static string ServerDll => Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "HexWars.GymServer", "bin", "Debug", "net8.0",
+                "HexWars.GymServer.dll"));
+
+            public static DaggerServerProcess Profiled(bool fogOfWar = false)
+            {
+                string scenario = WriteProfiledScenario(fogOfWar);
+                return new DaggerServerProcess(
+                    scenario,
+                    "--environment", "tactical-v2", "--scenario-file", scenario);
+            }
+
+            private DaggerServerProcess(string ownedScenario, params string[] args)
+                : this(args)
+            {
+                _ownedScenario = ownedScenario;
+            }
+
+
+            public DaggerServerProcess(params string[] args)
+            {
+                Assert.That(File.Exists(ServerDll), Is.True,
+                    $"GymServer was not built at {ServerDll}");
+                string arguments = $"\"{ServerDll}\" " +
+                    string.Join(" ", args.Select(value => $"\"{value}\""));
+                _process = Process.Start(new ProcessStartInfo("dotnet", arguments)
+                {
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                })!;
+            }
+
+            public JsonDocument Exchange(object request) =>
+                ExchangeRaw(JsonSerializer.Serialize(request));
+
+            public JsonDocument ExchangeRaw(string request)
+            {
+                _process.StandardInput.WriteLine(request);
+                _process.StandardInput.Flush();
+                var pending = _process.StandardOutput.ReadLineAsync();
+                if (!pending.Wait(TimeSpan.FromSeconds(5)))
+                    Assert.Fail("GymServer did not reply to the DAgger request");
+                string? line = pending.Result;
+                if (line == null)
+                    Assert.Fail(
+                        $"GymServer exited without a reply: {_process.StandardError.ReadToEnd()}");
+                return JsonDocument.Parse(line!);
+            }
+
+            public string ExchangeFailure(object request) =>
+                ExchangeFailureRaw(JsonSerializer.Serialize(request));
+
+            public string ExchangeFailureRaw(string request)
+            {
+                _process.StandardInput.WriteLine(request);
+                _process.StandardInput.Flush();
+                Assert.That(_process.WaitForExit(10000), Is.True,
+                    "GymServer did not reject the DAgger request");
+                Assert.That(_process.StandardOutput.ReadLine(), Is.Null);
+                return _process.StandardError.ReadToEnd();
+            }
+
+            public void Dispose()
+            {
+                if (_process.HasExited)
+                {
+                    _process.Dispose();
+                    if (_ownedScenario != null) File.Delete(_ownedScenario);
+                    return;
+                }
+                _process.StandardInput.WriteLine("{\"cmd\":\"close\"}");
+                _process.StandardInput.Flush();
+                if (!_process.WaitForExit(5000)) _process.Kill(entireProcessTree: true);
+                _process.Dispose();
+                if (_ownedScenario != null) File.Delete(_ownedScenario);
+            }
+        }
+
 
         private readonly struct UnitSpec
         {

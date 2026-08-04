@@ -64,6 +64,7 @@ TacticalV2Env? tacticalV2Env = environment == "tactical-v2"
     : null;
 var tacticalV2Trace = new BufferedDuelTransitionSink();
 var tacticalV2Demonstrations = new BufferedTacticalV2DemonstrationSink();
+var tacticalV2Dagger = new BufferedTacticalV2DaggerSink();
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
 TacticalV2DuelEnv? tacticalV2Duel = null;
@@ -74,6 +75,41 @@ void Send(object payload)
     output.WriteLine(JsonSerializer.Serialize(payload));
     output.Flush();
 }
+
+void RequireExactDaggerConfigureFields(JsonElement element)
+{
+    string[] expected =
+    {
+        "cmd", "enabled", "depth", "expansion_budget", "use_heuristic",
+    };
+    string[] actual = element.EnumerateObject()
+        .Select(property => property.Name)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    if (!actual.SequenceEqual(expected.OrderBy(name => name, StringComparer.Ordinal)))
+        throw new InvalidDataException(
+            "duel DAgger configure must contain exactly cmd, enabled, depth, " +
+            "expansion_budget, and use_heuristic");
+}
+
+bool RequireDaggerBoolean(JsonElement element, string field, string label)
+{
+    JsonElement value = element.GetProperty(field);
+    if (value.ValueKind != JsonValueKind.True && value.ValueKind != JsonValueKind.False)
+        throw new InvalidDataException($"duel DAgger {label} must be boolean");
+    return value.GetBoolean();
+}
+
+int RequirePositiveDaggerInteger(JsonElement element, string field, string label)
+{
+    JsonElement value = element.GetProperty(field);
+    if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out int parsed)
+        || parsed < 1)
+        throw new InvalidDataException(
+            $"duel DAgger {label} must be a positive integer");
+    return parsed;
+}
+
 
 IAgent? MakeController(string? spec, int agentSeed)
 {
@@ -453,6 +489,65 @@ while ((line = Console.ReadLine()) != null)
             Send(new { schema_version = 1, decisions = tacticalV2Demonstrations.Drain() });
             break;
         }
+
+        case "duel_dagger_configure":
+        {
+            if (environment != "tactical-v2")
+                throw new InvalidDataException(
+                    "duel DAgger is supported only for tactical-v2");
+            RequireExactDaggerConfigureFields(root);
+            bool enabled = RequireDaggerBoolean(root, "enabled", "enabled flag");
+            int depth = RequirePositiveDaggerInteger(root, "depth", "depth");
+            int expansionBudget = RequirePositiveDaggerInteger(
+                root, "expansion_budget", "expansion budget");
+            bool useHeuristic = RequireDaggerBoolean(
+                root, "use_heuristic", "heuristic choice");
+            if (!useHeuristic)
+                throw new InvalidDataException(
+                    "duel DAgger heuristic choice must be true");
+
+            tacticalV2Duel ??= new TacticalV2DuelEnv(
+                tacticalV2Config!, tacticalV2Trace, tacticalV2Demonstrations);
+            if (enabled)
+            {
+                if (tacticalV2Config!.Game.FogOfWar)
+                    throw new InvalidDataException(
+                        "duel DAgger requires fog_of_war=false");
+                tacticalV2Dagger.Enabled = true;
+                tacticalV2Duel.DecisionObserver = new SelectiveDaggerObserver(
+                    new BoundedSearchActionOracle(
+                        tacticalV2Config.Game,
+                        expansionBudget,
+                        depth,
+                        BoundedSearchAgent.HeuristicIdentity),
+                    tacticalV2Dagger);
+            }
+            else
+            {
+                tacticalV2Dagger.Enabled = false;
+                tacticalV2Dagger.Drain();
+                tacticalV2Duel.DecisionObserver = null;
+            }
+
+            Send(new
+            {
+                enabled,
+                depth,
+                expansion_budget = expansionBudget,
+                use_heuristic = useHeuristic,
+            });
+            break;
+        }
+
+        case "duel_dagger_drain":
+        {
+            if (environment != "tactical-v2")
+                throw new InvalidDataException(
+                    "duel DAgger is supported only for tactical-v2");
+            Send(new { schema_version = 1, decisions = tacticalV2Dagger.Drain() });
+            break;
+        }
+
 
         case "duel_save":
         {

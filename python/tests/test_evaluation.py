@@ -1795,6 +1795,252 @@ def test_validate_demonstration_payload_rejects_extra_fields(
         )
 
 
+def _valid_dagger_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "decisions": [
+            {
+                "Observation": [0.0, 0.25, 1.0],
+                "LegalMask": [True, False, True],
+                "LearnerAction": 0,
+                "LearnerCommand": {
+                    "Kind": "end_turn",
+                    "Issuer": 0,
+                    "ActorId": None,
+                    "TargetId": None,
+                    "Q": None,
+                    "R": None,
+                },
+                "TeacherAction": 2,
+                "TeacherCommand": {
+                    "Kind": "move",
+                    "Issuer": 0,
+                    "ActorId": 7,
+                    "TargetId": None,
+                    "Q": 2,
+                    "R": 3,
+                },
+                "Reasons": 11,
+                "StateHash": "a" * 64,
+                "NormalizedAdvantage": 0.125,
+                "OpponentLivingUnitCount": 1,
+                "ProductiveLegalActionCount": 1,
+                "Seat": 0,
+                "Round": 3,
+                "DecisionIndex": 0,
+                "Disagreement": True,
+                "OracleDepth": 4,
+                "OracleExpansionBudget": 512,
+                "OracleHeuristicIdentity": "material-plus-pursuit-v1",
+                "OracleActualExpansionCount": 17,
+            },
+        ],
+    }
+
+
+def test_duel_client_dagger_methods_send_exact_rpc_sequence(
+    contract: EnvironmentContract,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    responses = iter(
+        [
+            {
+                "enabled": True,
+                "depth": 4,
+                "expansion_budget": 512,
+                "use_heuristic": True,
+            },
+            _valid_dagger_payload(),
+        ]
+    )
+    requests: list[dict[str, object]] = []
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda request: (requests.append(request), next(responses))[1]
+
+    client.configure_dagger(
+        enabled=True,
+        depth=4,
+        expansion_budget=512,
+        use_heuristic=True,
+    )
+    decisions = client.drain_dagger()
+
+    assert requests == [
+        {
+            "cmd": "duel_dagger_configure",
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+        {"cmd": "duel_dagger_drain"},
+    ]
+    assert decisions == _valid_dagger_payload()["decisions"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enabled": 1}, "enabled"),
+        ({"depth": True}, "depth"),
+        ({"depth": "4"}, "depth"),
+        ({"depth": 0}, "depth"),
+        ({"expansion_budget": False}, "expansion budget"),
+        ({"expansion_budget": "512"}, "expansion budget"),
+        ({"expansion_budget": 0}, "expansion budget"),
+        ({"use_heuristic": 1}, "heuristic"),
+        ({"use_heuristic": False}, "heuristic"),
+    ],
+)
+def test_duel_client_dagger_configure_rejects_coercible_or_unsupported_values(
+    contract: EnvironmentContract,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda _request: pytest.fail("invalid request must not reach GymServer")
+    kwargs = {
+        "enabled": True,
+        "depth": 4,
+        "expansion_budget": 512,
+        "use_heuristic": True,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        client.configure_dagger(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"enabled": True, "depth": 4, "expansion_budget": 512},
+        {
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+            "extra": 1,
+        },
+        {
+            "enabled": True,
+            "depth": True,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+        {
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": "512",
+            "use_heuristic": True,
+        },
+        {
+            "enabled": False,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+    ],
+)
+def test_duel_client_dagger_configure_requires_exact_acknowledgment(
+    contract: EnvironmentContract,
+    response: dict[str, object],
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda _request: response
+
+    with pytest.raises(ValueError, match="acknowledge DAgger configuration"):
+        client.configure_dagger(
+            enabled=True,
+            depth=4,
+            expansion_budget=512,
+            use_heuristic=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload.update(schema_version=True), "schema version"),
+        (lambda payload: payload.update(schema_version=2), "schema version"),
+        (lambda payload: payload.update(decisions={}), "decisions"),
+        (lambda payload: payload["decisions"][0].pop("Reasons"), "fields"),
+        (lambda payload: payload["decisions"][0].update(Unexpected=True), "fields"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0]), "observation length"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0, True, 1.0]), "finite"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0, float("inf"), 1.0]), "finite"),
+        (lambda payload: payload["decisions"][0].update(LegalMask=[True]), "legal mask"),
+        (lambda payload: payload["decisions"][0].update(LegalMask=[True, 0, True]), "legal mask"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction=True), "learner action"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction="0"), "learner action"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction=1), "learner action.*masked"),
+        (lambda payload: payload["decisions"][0].update(TeacherAction=3), "teacher action"),
+        (lambda payload: payload["decisions"][0].update(TeacherAction=1), "teacher action.*masked"),
+        (lambda payload: payload["decisions"][0].update(Reasons=True), "reasons"),
+        (lambda payload: payload["decisions"][0].update(Reasons=0), "reasons"),
+        (lambda payload: payload["decisions"][0].update(Reasons=16), "reasons"),
+        (lambda payload: payload["decisions"][0].update(StateHash="A" * 64), "state hash"),
+        (lambda payload: payload["decisions"][0].update(StateHash="a" * 63), "state hash"),
+        (lambda payload: payload["decisions"][0].update(NormalizedAdvantage=float("nan")), "normalized advantage"),
+        (lambda payload: payload["decisions"][0].update(OpponentLivingUnitCount=True), "opponent living"),
+        (lambda payload: payload["decisions"][0].update(OpponentLivingUnitCount=-1), "opponent living"),
+        (lambda payload: payload["decisions"][0].update(ProductiveLegalActionCount="1"), "productive legal"),
+        (lambda payload: payload["decisions"][0].update(Seat=2), "seat"),
+        (lambda payload: payload["decisions"][0].update(Round=-1), "round"),
+        (lambda payload: payload["decisions"][0].update(DecisionIndex=False), "decision index"),
+        (lambda payload: payload["decisions"][0].update(Disagreement=1), "disagreement"),
+        (lambda payload: payload["decisions"][0].update(Disagreement=False), "disagreement"),
+        (lambda payload: payload["decisions"][0].update(OracleDepth=True), "oracle depth"),
+        (lambda payload: payload["decisions"][0].update(OracleExpansionBudget=0), "oracle expansion budget"),
+        (lambda payload: payload["decisions"][0].update(OracleHeuristicIdentity="unknown"), "oracle heuristic"),
+        (lambda payload: payload["decisions"][0].update(OracleActualExpansionCount=513), "actual expansion"),
+        (lambda payload: payload["decisions"][0].update(TeacherCommand=[]), "teacher command"),
+        (lambda payload: payload["decisions"][0]["TeacherCommand"].update(Issuer=1), "teacher command issuer"),
+        (lambda payload: payload["decisions"][0]["TeacherCommand"].update(TargetId=4), "teacher command shape"),
+        (lambda payload: payload["decisions"][0].update(LearnerCommand=[]), "learner command"),
+    ],
+)
+def test_validate_dagger_payload_rejects_malformed_evidence(
+    contract: EnvironmentContract,
+    mutate,
+    message: str,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    payload = _valid_dagger_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError, match=message):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"schema_version": 1},
+        {"schema_version": 1, "decisions": [], "extra": True},
+    ],
+)
+def test_validate_dagger_payload_rejects_non_exact_envelopes(
+    contract: EnvironmentContract,
+    payload: object,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    with pytest.raises(ValueError, match="payload|fields"):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
+
+
 def test_duel_client_sends_tactical_v2_and_requires_duel_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
