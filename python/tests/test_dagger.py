@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +16,14 @@ from ml_lab.contracts import EnvironmentContract
 from ml_lab.dagger import (
     DaggerGame,
     DaggerOverlay,
+    DaggerOverlayManifest,
     DaggerOverlayWriter,
     DaggerRow,
     LearnerIdentity,
+    OriginalDatasetIdentity,
+    OverlayDefinition,
     OracleSpec,
+    SEED_DEFINITIONS,
     open_dagger_overlay,
     publish_dagger_overlay,
     publish_dagger_overlays,
@@ -68,6 +72,16 @@ def _learner_payload(checkpoint: Path) -> dict[str, Any]:
         "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
         "source_run": "seed-227-step-38912",
         "source_manifest_sha256": HASHES["d"],
+    }
+
+
+def _dataset_payload() -> dict[str, Any]:
+    return {
+        "manifest_sha256": HASHES["5"],
+        "files": [
+            {"path": "shards/base-000.npz", "sha256": HASHES["6"]},
+            {"path": "games.jsonl", "sha256": HASHES["7"]},
+        ],
     }
 
 
@@ -127,6 +141,31 @@ def _game_payload(*, game_id: int = 0, partition: str = "train", seat: int = 0) 
         "transition_count": 1,
         "trace_path": f"evidence/game-{game_id}.trace.json",
         "replay_path": f"evidence/game-{game_id}.replay",
+    }
+
+
+def _definition_payload(checkpoint: Path, *, partition: str = "train") -> dict[str, Any]:
+    return {
+        "partition": partition,
+        "iteration": 1,
+        "observation_size": 2,
+        "action_size": 7,
+        "action_regions": {
+            "move": {"offset": 1, "count": 2},
+            "attack": {"offset": 3, "count": 2},
+            "deploy": {"offset": 5, "count": 2},
+        },
+        "oracle": _oracle_payload(),
+        "learner": _learner_payload(checkpoint),
+        "original_dataset": _dataset_payload(),
+        "scenario_hash": HASHES["1"],
+        "contract_hash": HASHES["a"],
+        "encoding_hash": HASHES["b"],
+        "repository_hash": HASHES["2"],
+        "panel_hash": HASHES["3"],
+        "schedule_hash": HASHES["4"],
+        "label_target": 20_000 if partition == "train" else 2_000,
+        "game_ceiling": 2_000 if partition == "train" else 200,
     }
 
 
@@ -208,6 +247,23 @@ def test_learner_identity_parser_is_exact(
         LearnerIdentity.from_dict(payload)
 
 
+def test_original_dataset_identity_is_strict_frozen_and_deeply_immutable() -> None:
+    """Mutable mappings or malformed file identities must not enter provenance."""
+
+    payload = _dataset_payload()
+    identity = OriginalDatasetIdentity.from_dict(payload)
+    payload["files"][0]["sha256"] = HASHES["8"]
+    assert identity.to_dict() == _dataset_payload()
+    assert isinstance(identity.files, tuple)
+    with pytest.raises(FrozenInstanceError):
+        identity.manifest_sha256 = HASHES["8"]  # type: ignore[misc]
+
+    malformed = _dataset_payload()
+    malformed["files"][0]["extra"] = True
+    with pytest.raises(ValueError, match="fields"):
+        OriginalDatasetIdentity.from_dict(malformed)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -227,6 +283,56 @@ def test_dagger_row_schema_rejects_malformed_policy_and_diagnostic_values(
     contract: EnvironmentContract, mutate, message: str
 ) -> None:
     """Removing any row-boundary check must accept one malformed live-protocol row."""
+
+    payload = _row_payload()
+    mutate(payload)
+    with pytest.raises(ValueError, match=message):
+        DaggerRow.from_dict(
+            payload, contract=contract, oracle=OracleSpec.from_dict(_oracle_payload())
+        )
+
+
+def test_overlay_definition_is_frozen_exact_and_deeply_immutable(
+    tmp_path: Path,
+) -> None:
+    """Reuse expectations must not retain mutable nested provenance inputs."""
+
+    checkpoint = tmp_path / "actor.zip"
+    checkpoint.write_bytes(b"actor")
+    payload = _definition_payload(checkpoint)
+    definition = OverlayDefinition.from_dict(payload)
+    payload["oracle"]["depth"] = 9
+    payload["action_regions"]["move"]["offset"] = 99
+    assert definition.oracle.depth == 4
+    assert definition.action_regions[0] == ("move", 1, 2)
+    assert definition.to_dict() == _definition_payload(checkpoint)
+    with pytest.raises(FrozenInstanceError):
+        definition.iteration = 2  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda row: row.update(observation=[1, -0.5]), "observation"),
+        (lambda row: row.update(observation=[3.5e38, -0.5]), "float32"),
+        (lambda row: row.update(normalized_advantage=1), "advantage"),
+        (lambda row: row.update(normalized_advantage="0.25"), "advantage"),
+        (lambda row: row.update(round=2**31), "round"),
+        (lambda row: row.update(decision_index=2**31), "decision index"),
+        (
+            lambda row: row["learner_command"].update(ActorId=-1),
+            "ActorId",
+        ),
+        (
+            lambda row: row["teacher_command"].update(TargetId=-1),
+            "TargetId",
+        ),
+    ],
+)
+def test_dagger_row_parser_rejects_inexact_float_int32_and_id_values(
+    contract: EnvironmentContract, mutate, message: str,
+) -> None:
+    """Strict storage DTOs must reject values that narrow or wrap on shard write."""
 
     payload = _row_payload()
     mutate(payload)
@@ -279,6 +385,24 @@ def test_schema_parsers_convert_unhashable_coercions_to_value_errors(
 
 
 @pytest.mark.parametrize(
+    "unsafe",
+    [
+        r"\root-relative.trace.json",
+        r"C:drive-relative.trace.json",
+        r"C:\absolute.trace.json",
+        "../escape.trace.json",
+    ],
+)
+def test_game_evidence_paths_reject_every_windows_escape_form(unsafe: str) -> None:
+    """Drive/root/anchor and traversal syntax must never name overlay evidence."""
+
+    payload = _game_payload()
+    payload["trace_path"] = unsafe
+    with pytest.raises(ValueError, match="contained relative"):
+        DaggerGame.from_dict(payload)
+
+
+@pytest.mark.parametrize(
     ("seed", "partition", "iteration"),
     [
         (18_900_000, "oracle_preflight", None),
@@ -299,6 +423,31 @@ def test_seed_definitions_accept_each_explicit_namespace(
     """Dropping a named range from the authoritative table must reject its lower bound."""
 
     require_seed_in_partition(seed, partition, iteration)
+
+
+def test_seed_definition_table_is_exact_and_every_range_is_inclusive() -> None:
+    """Range drift or an off-by-one partition check must fail this locked contract."""
+
+    expected = (
+        ("train", 1, 18_000_000, 18_099_999),
+        ("train", 2, 18_100_000, 18_199_999),
+        ("train", 3, 18_200_000, 18_299_999),
+        ("oracle_preflight", None, 18_900_000, 18_900_119),
+        ("smoke", None, 18_990_000, 18_990_009),
+        ("validation", 1, 19_000_000, 19_009_999),
+        ("validation", 2, 19_010_000, 19_019_999),
+        ("validation", 3, 19_020_000, 19_029_999),
+        ("reserved", None, 19_030_000, 19_099_999),
+        ("development_evaluation", None, 20_000_000, 20_000_099),
+    )
+    assert SEED_DEFINITIONS == expected
+    for partition, iteration, start, stop in expected:
+        require_seed_in_partition(start, partition, iteration)
+        require_seed_in_partition(stop, partition, iteration)
+        with pytest.raises(ValueError, match="outside"):
+            require_seed_in_partition(start - 1, partition, iteration)
+        with pytest.raises(ValueError, match="outside"):
+            require_seed_in_partition(stop + 1, partition, iteration)
 
 
 def test_seed_partition_is_never_inferred_from_a_numeric_prefix() -> None:
@@ -404,8 +553,10 @@ def _new_writer(
     contract: EnvironmentContract,
     *,
     partition: str = "train",
+    repository_hash: str = HASHES["2"],
+    original_dataset: OriginalDatasetIdentity | None = None,
 ) -> tuple[DaggerOverlayWriter, Path]:
-    checkpoint = root.parent / f"{partition}-actor.zip"
+    checkpoint = root.parent / "actor.zip"
     checkpoint.write_bytes(b"actor")
     writer = DaggerOverlayWriter.create(
         root,
@@ -414,10 +565,17 @@ def _new_writer(
         iteration=1,
         oracle=OracleSpec.from_dict(_oracle_payload()),
         learner=LearnerIdentity.from_dict(_learner_payload(checkpoint)),
+        original_dataset=(
+            original_dataset
+            if original_dataset is not None
+            else OriginalDatasetIdentity.from_dict(_dataset_payload())
+        ),
         scenario_hash=HASHES["1"],
-        repository_hash=HASHES["2"],
+        repository_hash=repository_hash,
         panel_hash=HASHES["3"],
         schedule_hash=HASHES["4"],
+        label_target=20_000 if partition == "train" else 2_000,
+        game_ceiling=2_000 if partition == "train" else 200,
     )
     return writer, checkpoint
 
@@ -427,8 +585,11 @@ def _seal_pair(
     contract: EnvironmentContract,
     *,
     partition: str = "train",
+    repository_hash: str = HASHES["2"],
 ) -> tuple[DaggerOverlay, Path]:
-    writer, checkpoint = _new_writer(root, contract, partition=partition)
+    writer, checkpoint = _new_writer(
+        root, contract, partition=partition, repository_hash=repository_hash,
+    )
     for game_id, seat in enumerate((0, 1)):
         game = _game(game_id=game_id, partition=partition, seat=seat)
         _write_evidence(root, game)
@@ -485,11 +646,15 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
         "schema_version", "status", "partition", "iteration", "observation_size",
         "action_size", "action_regions", "oracle", "learner", "scenario_hash",
         "contract_hash", "encoding_hash", "repository_hash", "panel_hash",
-        "schedule_hash", "game_count", "row_count", "games", "content_identity",
+        "schedule_hash", "original_dataset", "label_target", "game_ceiling",
+        "game_count", "row_count", "games", "content_identity",
     }
     assert manifest["status"] == "completed"
     assert manifest["game_count"] == 2
     assert manifest["row_count"] == 2
+    assert manifest["original_dataset"] == _dataset_payload()
+    assert manifest["label_target"] == 20_000
+    assert manifest["game_ceiling"] == 2_000
     assert overlay.content_identity == manifest["content_identity"]
 
     for descriptor in manifest["games"]:
@@ -505,6 +670,7 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
             "learner_seat", "profile", "outcome", "transition_count",
         }
         assert set(game_manifest["replay"]) == set(game_manifest["trace"])
+        assert game_manifest["original_dataset"] == _dataset_payload()
         shard = root / game_manifest["shard"]["path"]
         with np.load(shard, allow_pickle=False) as arrays:
             assert set(arrays.files) == {
@@ -530,6 +696,117 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
     assert reopened.games == overlay.games
 
 
+def test_overlay_writer_revalidates_direct_dataset_identity_instances(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Direct dataclass construction must not bypass strict dataset provenance."""
+
+    malformed = OriginalDatasetIdentity(manifest_sha256="bad", files=())
+    with pytest.raises(ValueError, match="original dataset"):
+        _new_writer(
+            tmp_path / "overlay", contract, original_dataset=malformed,
+        )
+
+
+@pytest.mark.parametrize("row_counts", [(0, 1), (0, 0)])
+def test_completed_reciprocal_games_allow_zero_label_shards(
+    tmp_path: Path, contract: EnvironmentContract, row_counts: tuple[int, int],
+) -> None:
+    """Selective observation may legitimately retain no labels for either seat."""
+
+    root = tmp_path / "overlay"
+    writer, _ = _new_writer(root, contract)
+    for game_id, (seat, row_count) in enumerate(zip((0, 1), row_counts, strict=True)):
+        game = _game(game_id=game_id, partition="train", seat=seat)
+        _write_evidence(root, game)
+        writer.append_game(game, [_row(contract, seat=seat)] if row_count else [])
+
+    overlay = writer.seal()
+    assert overlay.row_count == sum(row_counts)
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    for descriptor, expected_count in zip(manifest["games"], row_counts, strict=True):
+        game_manifest = json.loads(
+            (root / descriptor["path"]).read_text(encoding="utf-8")
+        )
+        with np.load(root / game_manifest["shard"]["path"], allow_pickle=False) as shard:
+            assert game_manifest["row_count"] == expected_count
+            assert shard["observations"].shape == (expected_count, 2)
+            assert shard["packed_masks"].shape == (expected_count, 1)
+            assert shard["actions"].shape == (expected_count,)
+
+
+def test_overlay_reopen_rejects_rehashed_original_dataset_tamper(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Per-game base-dataset drift must fail after child hashes are rebound."""
+
+    root = tmp_path / "overlay"
+    _seal_pair(root, contract)
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    game_path = root / manifest["games"][0]["path"]
+    game_manifest = json.loads(game_path.read_text(encoding="utf-8"))
+    game_manifest["original_dataset"]["manifest_sha256"] = HASHES["8"]
+    game_manifest["content_identity"] = _identity(game_manifest)
+    _rewrite_json(game_path, game_manifest)
+    manifest["games"][0]["sha256"] = hashlib.sha256(game_path.read_bytes()).hexdigest()
+    manifest["games"][0]["byte_size"] = game_path.stat().st_size
+    manifest["games"][0]["content_identity"] = game_manifest["content_identity"]
+    manifest["content_identity"] = _identity(manifest)
+    _rewrite_json(root / "manifest.json", manifest)
+
+    with pytest.raises(ValueError, match="original_dataset"):
+        open_dagger_overlay(root)
+
+
+def test_overlay_writer_rejects_evidence_symlink_escape_when_supported(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Resolved evidence targets must remain below the resolved overlay root."""
+
+    root = tmp_path / "overlay"
+    writer, _ = _new_writer(root, contract)
+    game_payload = _game_payload()
+    game_payload["replay_path"] = "evidence/escape.replay"
+    game = DaggerGame.from_dict(game_payload)
+    _write_evidence(root, game)
+    outside = tmp_path / "outside.replay"
+    outside.write_text("outside\n", encoding="utf-8")
+    link = root / game.replay_path
+    link.unlink()
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="contained"):
+        writer.append_game(game, [_row(contract, seat=0)])
+
+
+@pytest.mark.parametrize(
+    ("relative", "contents"),
+    [
+        ("games/nested/extra.json", "{}"),
+        ("games/wrong-extension.txt", "extra"),
+        ("evidence/extra.replay", "extra"),
+        ("shards/wrong-extension.bin", "extra"),
+    ],
+)
+def test_overlay_reopen_rejects_every_unowned_nested_file(
+    tmp_path: Path, contract: EnvironmentContract, relative: str, contents: str,
+) -> None:
+    """Recursive ownership validation must reject every undeclared physical file."""
+
+    root = tmp_path / "overlay"
+    _seal_pair(root, contract)
+    extra = root / relative
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unowned"):
+        open_dagger_overlay(root)
+    assert extra.exists()
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -539,7 +816,7 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
         ("game_descriptor", "row_count"),
     ],
 )
-def test_overlay_dto_parser_validates_every_nested_declared_field(
+def test_overlay_manifest_parser_validates_every_nested_declared_field(
     tmp_path: Path, contract: EnvironmentContract, mutation: str, message: str,
 ) -> None:
     """A strict public DTO parser must validate the complete declared schema."""
@@ -560,7 +837,28 @@ def test_overlay_dto_parser_validates_every_nested_declared_field(
     payload["content_identity"] = _identity(payload)
 
     with pytest.raises(ValueError, match=message):
-        DaggerOverlay.from_dict(payload, root=root)
+        DaggerOverlayManifest.from_dict(payload)
+
+
+def test_overlay_manifest_and_physical_overlay_keep_canonical_immutable_games(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Logical descriptors stay frozen and complete overlays expose matching games."""
+
+    root = tmp_path / "overlay"
+    opened, _ = _seal_pair(root, contract)
+    payload = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    logical = DaggerOverlayManifest.from_dict(payload)
+    payload["games"][0]["game_id"] = 99
+    assert logical.games[0].game_id == 0
+    assert isinstance(logical.games, tuple)
+    assert tuple(game.game_id for game in opened.games) == tuple(
+        descriptor.game_id for descriptor in opened.manifest.games
+    )
+    with pytest.raises(TypeError):
+        DaggerOverlay(root=root, manifest=logical, games=())  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        DaggerOverlay()  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(
@@ -862,8 +1160,9 @@ def test_overlay_publication_is_atomic_and_existing_reuse_physically_reopens(
     staging = tmp_path / "train.staging"
     destination = tmp_path / "train-overlay"
     expected, checkpoint = _seal_pair(staging, contract)
+    definition = expected.definition
 
-    published = publish_dagger_overlay(staging, destination)
+    published = publish_dagger_overlay(staging, destination, expected=definition)
 
     assert not staging.exists()
     assert destination.is_dir()
@@ -872,7 +1171,87 @@ def test_overlay_publication_is_atomic_and_existing_reuse_physically_reopens(
 
     checkpoint.write_bytes(b"tampered after publication")
     with pytest.raises(ValueError):
-        publish_dagger_overlay(staging, destination)
+        publish_dagger_overlay(staging, destination, expected=definition)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("partition", lambda d: replace(d, partition="validation")),
+        ("iteration", lambda d: replace(d, iteration=2)),
+        ("repository", lambda d: replace(d, repository_hash=HASHES["8"])),
+        ("panel", lambda d: replace(d, panel_hash=HASHES["8"])),
+        ("scenario", lambda d: replace(d, scenario_hash=HASHES["8"])),
+        ("contract", lambda d: replace(d, contract_hash=HASHES["8"])),
+        ("encoding", lambda d: replace(d, encoding_hash=HASHES["8"])),
+        ("schedule", lambda d: replace(d, schedule_hash=HASHES["8"])),
+        (
+            "dataset",
+            lambda d: replace(
+                d,
+                original_dataset=replace(
+                    d.original_dataset, manifest_sha256=HASHES["8"],
+                ),
+            ),
+        ),
+        (
+            "learner_path",
+            lambda d: replace(
+                d, learner=replace(d.learner, checkpoint_path="missing.zip"),
+            ),
+        ),
+        (
+            "learner_hash",
+            lambda d: replace(
+                d, learner=replace(d.learner, checkpoint_sha256=HASHES["8"]),
+            ),
+        ),
+        (
+            "learner_source",
+            lambda d: replace(
+                d, learner=replace(d.learner, source_run="different-run"),
+            ),
+        ),
+        (
+            "learner_manifest",
+            lambda d: replace(
+                d, learner=replace(d.learner, source_manifest_sha256=HASHES["8"]),
+            ),
+        ),
+        ("oracle", lambda d: replace(d, oracle=replace(d.oracle, depth=5))),
+        ("label_target", lambda d: replace(d, label_target=d.label_target + 1)),
+        ("game_ceiling", lambda d: replace(d, game_ceiling=d.game_ceiling + 1)),
+        (
+            "observation_size",
+            lambda d: replace(d, observation_size=d.observation_size + 1),
+        ),
+        ("action_size", lambda d: replace(d, action_size=d.action_size + 1)),
+        (
+            "action_regions",
+            lambda d: replace(
+                d,
+                action_regions=(
+                    ("move", 2, 2), ("attack", 3, 2), ("deploy", 5, 2),
+                ),
+            ),
+        ),
+    ],
+)
+def test_overlay_reuse_rejects_every_stale_expected_identity_without_staging(
+    tmp_path: Path, contract: EnvironmentContract, name: str, mutate,
+) -> None:
+    """Destination-only reuse must compare every immutable expected identity."""
+
+    staging = tmp_path / "train.staging"
+    destination = tmp_path / "train-overlay"
+    candidate, _ = _seal_pair(staging, contract)
+    publish_dagger_overlay(staging, destination, expected=candidate.definition)
+    assert not staging.exists()
+
+    with pytest.raises(ValueError, match="expected"):
+        publish_dagger_overlay(
+            staging, destination, expected=mutate(candidate.definition),
+        )
 
 
 def test_train_and_validation_overlays_publish_to_distinct_destinations(
@@ -882,16 +1261,111 @@ def test_train_and_validation_overlays_publish_to_distinct_destinations(
 
     train_staging = tmp_path / "train.staging"
     validation_staging = tmp_path / "validation.staging"
-    _seal_pair(train_staging, contract, partition="train")
-    _seal_pair(validation_staging, contract, partition="validation")
+    train_candidate, _ = _seal_pair(train_staging, contract, partition="train")
+    validation_candidate, _ = _seal_pair(
+        validation_staging, contract, partition="validation"
+    )
+    train_destination = tmp_path / "train-overlay"
+    validation_destination = tmp_path / "validation-overlay"
 
     train, validation = publish_dagger_overlays(
         train_staging,
         validation_staging,
-        tmp_path / "train-overlay",
-        tmp_path / "validation-overlay",
+        train_destination,
+        validation_destination,
+        train_expected=train_candidate.definition,
+        validation_expected=validation_candidate.definition,
     )
 
     assert train.partition == "train"
     assert validation.partition == "validation"
     assert train.root != validation.root
+    reused_train, reused_validation = publish_dagger_overlays(
+        train_staging,
+        validation_staging,
+        train_destination,
+        validation_destination,
+        train_expected=train_candidate.definition,
+        validation_expected=validation_candidate.definition,
+    )
+    assert reused_train.content_identity == train.content_identity
+    assert reused_validation.content_identity == validation.content_identity
+
+
+def test_paired_publication_preflights_shared_identities_before_any_rename(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A globally inconsistent pair must leave both complete staging trees intact."""
+
+    train_staging = tmp_path / "train.staging"
+    validation_staging = tmp_path / "validation.staging"
+    train, _ = _seal_pair(train_staging, contract, partition="train")
+    validation, _ = _seal_pair(
+        validation_staging,
+        contract,
+        partition="validation",
+        repository_hash=HASHES["8"],
+    )
+    train_destination = tmp_path / "train-overlay"
+    validation_destination = tmp_path / "validation-overlay"
+
+    with pytest.raises(ValueError, match="shared identities"):
+        publish_dagger_overlays(
+            train_staging,
+            validation_staging,
+            train_destination,
+            validation_destination,
+            train_expected=train.definition,
+            validation_expected=validation.definition,
+        )
+    assert train_staging.is_dir() and validation_staging.is_dir()
+    assert not train_destination.exists() and not validation_destination.exists()
+
+
+def test_paired_publication_preflights_existing_destination_conflicts(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A conflicting validation staging tree must be found before train rename."""
+
+    published_validation_staging = tmp_path / "published-validation.staging"
+    published_validation, _ = _seal_pair(
+        published_validation_staging, contract, partition="validation",
+    )
+    validation_destination = tmp_path / "validation-overlay"
+    publish_dagger_overlay(
+        published_validation_staging,
+        validation_destination,
+        expected=published_validation.definition,
+    )
+
+    train_staging = tmp_path / "train.staging"
+    train, _ = _seal_pair(train_staging, contract, partition="train")
+    conflicting_validation_staging = tmp_path / "conflicting-validation.staging"
+    conflicting_validation, _ = _seal_pair(
+        conflicting_validation_staging, contract, partition="validation",
+    )
+    manifest = json.loads(
+        (conflicting_validation_staging / "manifest.json").read_text(encoding="utf-8")
+    )
+    game_path = conflicting_validation_staging / manifest["games"][0]["path"]
+    game_manifest = json.loads(game_path.read_text(encoding="utf-8"))
+    shard_path = conflicting_validation_staging / game_manifest["shard"]["path"]
+    with np.load(shard_path, allow_pickle=False) as loaded:
+        arrays = {name: loaded[name] for name in loaded.files}
+    arrays["state_hashes"][0] = HASHES["f"]
+    np.savez_compressed(shard_path, **arrays)
+    _rebind_modified_game(conflicting_validation_staging, 0)
+    conflicting_validation = open_dagger_overlay(conflicting_validation_staging)
+    train_destination = tmp_path / "train-overlay"
+
+    with pytest.raises(ValueError, match="conflicts"):
+        publish_dagger_overlays(
+            train_staging,
+            conflicting_validation_staging,
+            train_destination,
+            validation_destination,
+            train_expected=train.definition,
+            validation_expected=conflicting_validation.definition,
+        )
+    assert train_staging.is_dir()
+    assert not train_destination.exists()

@@ -10,7 +10,7 @@ import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any
 
@@ -22,6 +22,7 @@ from .tactical_trace import EpisodeTrace
 
 
 OVERLAY_SCHEMA_VERSION = 1
+_INT32_MAX = (1 << 31) - 1
 _HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _STATE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _COMMAND_FIELDS = frozenset({"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"})
@@ -75,6 +76,23 @@ def _strict_int(value: Any, label: str, *, minimum: int | None = None) -> int:
     return value
 
 
+def _strict_int32(value: Any, label: str, *, minimum: int | None = None) -> int:
+    parsed = _strict_int(value, label, minimum=minimum)
+    if parsed > _INT32_MAX:
+        raise ValueError(f"{label} must fit int32")
+    return parsed
+
+
+def _strict_float32(value: Any, label: str) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise ValueError(f"{label} must be an exact finite float")
+    with np.errstate(over="ignore"):
+        narrowed = np.float32(value)
+    if not np.isfinite(narrowed):
+        raise ValueError(f"{label} must be representable as finite float32")
+    return value
+
+
 def _strict_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a non-empty string")
@@ -88,10 +106,32 @@ def _hash(value: Any, label: str) -> str:
 
 
 def _safe_relative(value: Any, label: str) -> str:
-    path = Path(_strict_string(value, label))
-    if path.is_absolute() or ".." in path.parts or path == Path("."):
+    text = _strict_string(value, label)
+    windows = PureWindowsPath(text)
+    posix = PurePosixPath(text.replace(chr(92), "/"))
+    if (
+        windows.drive
+        or windows.root
+        or windows.anchor
+        or posix.root
+        or ".." in windows.parts
+        or ".." in posix.parts
+        or posix == PurePosixPath(".")
+    ):
         raise ValueError(f"{label} must be a contained relative path")
-    return path.as_posix()
+    return posix.as_posix()
+
+
+def _contained_file(root: Path, relative: Any, label: str) -> Path:
+    canonical = _safe_relative(relative, label)
+    try:
+        resolved_root = Path(root).resolve(strict=True)
+        resolved = (resolved_root / canonical).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{label} is missing") from exc
+    if not resolved.is_relative_to(resolved_root) or not resolved.is_file():
+        raise ValueError(f"{label} must resolve to a contained file")
+    return resolved
 
 
 def validate_seed_definitions(
@@ -201,6 +241,52 @@ class LearnerIdentity:
         }
 
 
+@dataclass(frozen=True)
+class DatasetFileIdentity:
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "DatasetFileIdentity":
+        fields = _strict_fields(
+            value, frozenset({"path", "sha256"}), "original dataset file",
+        )
+        return cls(
+            _safe_relative(fields["path"], "original dataset file path"),
+            _hash(fields["sha256"], "original dataset file sha256"),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
+class OriginalDatasetIdentity:
+    manifest_sha256: str
+    files: tuple[DatasetFileIdentity, ...]
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "OriginalDatasetIdentity":
+        fields = _strict_fields(
+            value, frozenset({"manifest_sha256", "files"}), "original dataset",
+        )
+        if not isinstance(fields["files"], list) or not fields["files"]:
+            raise ValueError("original dataset files must be a non-empty list")
+        files = tuple(DatasetFileIdentity.from_dict(item) for item in fields["files"])
+        if len({item.path for item in files}) != len(files):
+            raise ValueError("original dataset file paths are duplicated")
+        return cls(
+            _hash(fields["manifest_sha256"], "original dataset manifest sha256"),
+            files,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "manifest_sha256": self.manifest_sha256,
+            "files": [item.to_dict() for item in self.files],
+        }
+
+
 def _action_regions(contract: EnvironmentContract) -> Mapping[str, tuple[int, int]]:
     semantics = contract.semantics
     raw = semantics.get("action_regions") if isinstance(semantics, Mapping) else None
@@ -234,6 +320,9 @@ def _command(value: Any, *, seat: int, action: int, contract: EnvironmentContrac
     for name in ("ActorId", "TargetId", "Q", "R"):
         if fields[name] is not None and type(fields[name]) is not int:
             raise ValueError(f"{label} command {name} is invalid")
+    for name in ("ActorId", "TargetId"):
+        if fields[name] is not None and fields[name] < 0:
+            raise ValueError(f"{label} command {name} must be nonnegative")
     shape = (
         (kind == "end_turn" and all(fields[name] is None for name in ("ActorId", "TargetId", "Q", "R")))
         or (kind == "move" and fields["ActorId"] is not None and fields["TargetId"] is None and fields["Q"] is not None and fields["R"] is not None)
@@ -282,11 +371,12 @@ class DaggerRow:
         raw_observation = fields["observation"]
         if not isinstance(raw_observation, list) or len(raw_observation) != contract.observation_size:
             raise ValueError("DAgger row observation shape is invalid")
-        if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in raw_observation):
+        if any(type(item) is not float for item in raw_observation):
             raise ValueError("DAgger row observation values are invalid")
-        observation = tuple(float(item) for item in raw_observation)
-        if not all(math.isfinite(item) for item in observation):
-            raise ValueError("DAgger row observation values must be finite")
+        observation = tuple(
+            _strict_float32(item, "DAgger row observation float32 value")
+            for item in raw_observation
+        )
         raw_mask = fields["legal_mask"]
         if (
             not isinstance(raw_mask, list)
@@ -295,12 +385,12 @@ class DaggerRow:
         ):
             raise ValueError("DAgger row legal mask shape or values are invalid")
         mask = tuple(raw_mask)
-        seat = _strict_int(fields["seat"], "DAgger row seat")
+        seat = _strict_int32(fields["seat"], "DAgger row seat")
         if seat not in {0, 1}:
             raise ValueError("DAgger row seat is invalid")
         actions: dict[str, int] = {}
         for name in ("learner_action", "teacher_action"):
-            action = _strict_int(fields[name], f"DAgger row {name}", minimum=0)
+            action = _strict_int32(fields[name], f"DAgger row {name}", minimum=0)
             if action >= contract.action_size or not mask[action]:
                 raise ValueError(f"DAgger row {name} is not legal")
             actions[name] = action
@@ -318,9 +408,9 @@ class DaggerRow:
         state_hash = fields["state_hash"]
         if not isinstance(state_hash, str) or _STATE_HASH_PATTERN.fullmatch(state_hash) is None:
             raise ValueError("DAgger row state hash is invalid")
-        advantage = fields["normalized_advantage"]
-        if isinstance(advantage, bool) or not isinstance(advantage, (int, float)) or not math.isfinite(float(advantage)):
-            raise ValueError("DAgger row normalized advantage must be finite")
+        advantage = _strict_float32(
+            fields["normalized_advantage"], "DAgger row normalized advantage",
+        )
         disagreement = fields["disagreement"]
         expected_disagreement = actions["learner_action"] != actions["teacher_action"]
         if type(disagreement) is not bool or disagreement is not expected_disagreement:
@@ -338,8 +428,10 @@ class DaggerRow:
             _strict_int(fields["opponent_living_unit_count"], "opponent living unit count", minimum=0),
             _strict_int(fields["productive_legal_action_count"], "productive legal action count", minimum=0),
             seat,
-            _strict_int(fields["round"], "DAgger row round", minimum=0),
-            _strict_int(fields["decision_index"], "DAgger row decision index", minimum=0),
+            _strict_int32(fields["round"], "DAgger row round", minimum=0),
+            _strict_int32(
+                fields["decision_index"], "DAgger row decision index", minimum=0,
+            ),
             disagreement,
             actual,
         )
@@ -442,48 +534,43 @@ class DaggerGame:
 
 
 @dataclass(frozen=True)
-class DaggerOverlay:
-    root: Path
+class OverlayDefinition:
     partition: str
     iteration: int
-    games: tuple[DaggerGame, ...]
-    row_count: int
-    content_identity: str
+    observation_size: int
+    action_size: int
+    action_regions: tuple[tuple[str, int, int], ...]
+    oracle: OracleSpec
+    learner: LearnerIdentity
+    original_dataset: OriginalDatasetIdentity
+    scenario_hash: str
+    contract_hash: str
+    encoding_hash: str
+    repository_hash: str
+    panel_hash: str
+    schedule_hash: str
+    label_target: int
+    game_ceiling: int
 
     @classmethod
-    def from_dict(
-        cls, value: Any, *, root: Path, games: Sequence[DaggerGame] = (),
-    ) -> "DaggerOverlay":
-        fields = _strict_fields(value, _OVERLAY_FIELDS, "DAgger overlay")
-        if _strict_int(fields["schema_version"], "overlay schema_version") != OVERLAY_SCHEMA_VERSION:
-            raise ValueError("DAgger overlay schema version is invalid")
-        if _strict_string(fields["status"], "overlay status") != "completed":
-            raise ValueError("DAgger overlay is not completed")
-        partition = _strict_string(fields["partition"], "DAgger overlay partition")
+    def from_dict(cls, value: Any) -> "OverlayDefinition":
+        fields = _strict_fields(value, _DEFINITION_FIELDS, "overlay definition")
+        partition = _strict_string(fields["partition"], "overlay partition")
         if partition not in {"train", "validation"}:
-            raise ValueError("DAgger overlay partition is invalid")
-        iteration = _strict_int(fields["iteration"], "DAgger overlay iteration", minimum=1)
+            raise ValueError("overlay partition is invalid")
+        iteration = _strict_int(fields["iteration"], "overlay iteration", minimum=1)
         if iteration not in {1, 2, 3}:
-            raise ValueError("DAgger overlay iteration is invalid")
-        game_count = _strict_int(fields["game_count"], "DAgger overlay game count", minimum=1)
-        row_count = _strict_int(fields["row_count"], "DAgger overlay row count", minimum=1)
+            raise ValueError("overlay iteration is invalid")
         observation_size = _strict_int(
             fields["observation_size"], "overlay observation_size", minimum=1,
         )
         action_size = _strict_int(
             fields["action_size"], "overlay action_size", minimum=1,
         )
-        for name in (
-            "scenario_hash", "contract_hash", "encoding_hash", "repository_hash",
-            "panel_hash", "schedule_hash",
-        ):
-            _hash(fields[name], name)
-        OracleSpec.from_dict(fields["oracle"])
-        LearnerIdentity.from_dict(fields["learner"])
         contract = EnvironmentContract(
             version="tactical-v2",
-            contract_hash=fields["contract_hash"],
-            encoding_hash=fields["encoding_hash"],
+            contract_hash=_hash(fields["contract_hash"], "contract_hash"),
+            encoding_hash=_hash(fields["encoding_hash"], "encoding_hash"),
             observation_size=observation_size,
             action_size=action_size,
             board={},
@@ -491,39 +578,164 @@ class DaggerOverlay:
             reward={},
             semantics={"action_regions": fields["action_regions"]},
         )
-        if _regions_to_dict(_action_regions(contract)) != fields["action_regions"]:
-            raise ValueError("overlay action regions are not canonical")
-        raw_descriptors = fields["games"]
-        if not isinstance(raw_descriptors, list) or len(raw_descriptors) != game_count:
-            raise ValueError("DAgger overlay game descriptors are invalid")
-        descriptor_rows = 0
-        for expected_game_id, raw in enumerate(raw_descriptors):
-            descriptor = _strict_fields(
-                raw, _GAME_DESCRIPTOR_FIELDS, "overlay game descriptor",
-            )
-            if _strict_int(
-                descriptor["game_id"], "game descriptor game_id", minimum=0,
-            ) != expected_game_id:
-                raise ValueError("overlay game descriptor game_id is invalid")
-            _safe_relative(descriptor["path"], "game descriptor path")
-            _hash(descriptor["sha256"], "game descriptor sha256")
-            _strict_int(
-                descriptor["byte_size"], "game descriptor byte_size", minimum=1,
-            )
-            descriptor_rows += _strict_int(
-                descriptor["row_count"], "game descriptor row_count", minimum=1,
-            )
-            _hash(
-                descriptor["content_identity"], "game descriptor content_identity",
-            )
-        if descriptor_rows != row_count:
-            raise ValueError("DAgger overlay descriptor row_count is inconsistent")
-        if games and len(games) != game_count:
-            raise ValueError("DAgger overlay game count is inconsistent")
+        regions = tuple(
+            (name, offset, count)
+            for name, (offset, count) in _action_regions(contract).items()
+        )
+        return cls(
+            partition, iteration, observation_size, action_size, regions,
+            OracleSpec.from_dict(fields["oracle"]),
+            LearnerIdentity.from_dict(fields["learner"]),
+            OriginalDatasetIdentity.from_dict(fields["original_dataset"]),
+            _hash(fields["scenario_hash"], "scenario_hash"),
+            contract.contract_hash,
+            contract.encoding_hash,
+            _hash(fields["repository_hash"], "repository_hash"),
+            _hash(fields["panel_hash"], "panel_hash"),
+            _hash(fields["schedule_hash"], "schedule_hash"),
+            _strict_int(fields["label_target"], "label_target", minimum=0),
+            _strict_int(fields["game_ceiling"], "game_ceiling", minimum=1),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "partition": self.partition,
+            "iteration": self.iteration,
+            "observation_size": self.observation_size,
+            "action_size": self.action_size,
+            "action_regions": {
+                name: {"offset": offset, "count": count}
+                for name, offset, count in self.action_regions
+            },
+            "oracle": self.oracle.to_dict(),
+            "learner": self.learner.to_dict(),
+            "original_dataset": self.original_dataset.to_dict(),
+            "scenario_hash": self.scenario_hash,
+            "contract_hash": self.contract_hash,
+            "encoding_hash": self.encoding_hash,
+            "repository_hash": self.repository_hash,
+            "panel_hash": self.panel_hash,
+            "schedule_hash": self.schedule_hash,
+            "label_target": self.label_target,
+            "game_ceiling": self.game_ceiling,
+        }
+
+
+@dataclass(frozen=True)
+class GameArtifactIdentity:
+    path: str
+    sha256: str
+    byte_size: int
+    game_id: int
+    row_count: int
+    content_identity: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "GameArtifactIdentity":
+        fields = _strict_fields(
+            value, _GAME_DESCRIPTOR_FIELDS, "overlay game descriptor",
+        )
+        return cls(
+            _safe_relative(fields["path"], "game descriptor path"),
+            _hash(fields["sha256"], "game descriptor sha256"),
+            _strict_int(fields["byte_size"], "game descriptor byte_size", minimum=1),
+            _strict_int(fields["game_id"], "game descriptor game_id", minimum=0),
+            _strict_int(fields["row_count"], "game descriptor row_count", minimum=0),
+            _hash(fields["content_identity"], "game descriptor content_identity"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path, "sha256": self.sha256, "byte_size": self.byte_size,
+            "game_id": self.game_id, "row_count": self.row_count,
+            "content_identity": self.content_identity,
+        }
+
+
+@dataclass(frozen=True)
+class DaggerOverlayManifest:
+    definition: OverlayDefinition
+    games: tuple[GameArtifactIdentity, ...]
+    row_count: int
+    content_identity: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "DaggerOverlayManifest":
+        fields = _strict_fields(value, _OVERLAY_FIELDS, "DAgger overlay")
+        if _strict_int(fields["schema_version"], "overlay schema_version") != OVERLAY_SCHEMA_VERSION:
+            raise ValueError("DAgger overlay schema version is invalid")
+        if _strict_string(fields["status"], "overlay status") != "completed":
+            raise ValueError("DAgger overlay is not completed")
+        definition = OverlayDefinition.from_dict({
+            key: fields[key] for key in _DEFINITION_FIELDS
+        })
+        game_count = _strict_int(fields["game_count"], "overlay game_count", minimum=1)
+        row_count = _strict_int(fields["row_count"], "overlay row_count", minimum=0)
+        if not isinstance(fields["games"], list) or len(fields["games"]) != game_count:
+            raise ValueError("overlay game descriptors are invalid")
+        games = tuple(GameArtifactIdentity.from_dict(item) for item in fields["games"])
+        if tuple(item.game_id for item in games) != tuple(range(game_count)):
+            raise ValueError("overlay game descriptor IDs are not canonical")
+        if sum(item.row_count for item in games) != row_count:
+            raise ValueError("overlay descriptor row_count is inconsistent")
         identity = _hash(fields["content_identity"], "overlay content_identity")
         if _content_identity(fields) != identity:
             raise ValueError("DAgger overlay content identity is invalid")
-        return cls(Path(root), partition, iteration, tuple(games), row_count, identity)
+        return cls(definition, games, row_count, identity)
+
+
+@dataclass(frozen=True, init=False)
+class DaggerOverlay:
+    root: Path
+    manifest: DaggerOverlayManifest
+    games: tuple[DaggerGame, ...]
+
+    def __new__(cls) -> "DaggerOverlay":
+        raise TypeError("DaggerOverlay instances require physical reopen validation")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        root: Path,
+        manifest: DaggerOverlayManifest,
+        games: Sequence[DaggerGame],
+    ) -> "DaggerOverlay":
+        canonical_games = tuple(games)
+        if len(canonical_games) != len(manifest.games):
+            raise ValueError("physical overlay game count is inconsistent")
+        for descriptor, game in zip(manifest.games, canonical_games, strict=True):
+            if (
+                descriptor.game_id != game.game_id
+                or game.partition != manifest.definition.partition
+                or game.iteration != manifest.definition.iteration
+            ):
+                raise ValueError("physical overlay game metadata is inconsistent")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "root", Path(root))
+        object.__setattr__(instance, "manifest", manifest)
+        object.__setattr__(instance, "games", canonical_games)
+        return instance
+
+    @property
+    def definition(self) -> OverlayDefinition:
+        return self.manifest.definition
+
+    @property
+    def partition(self) -> str:
+        return self.definition.partition
+
+    @property
+    def iteration(self) -> int:
+        return self.definition.iteration
+
+    @property
+    def row_count(self) -> int:
+        return self.manifest.row_count
+
+    @property
+    def content_identity(self) -> str:
+        return self.manifest.content_identity
 
 
 class DaggerOverlayWriter:
@@ -536,10 +748,13 @@ class DaggerOverlayWriter:
         iteration: int,
         oracle: OracleSpec,
         learner: LearnerIdentity,
+        original_dataset: OriginalDatasetIdentity,
         scenario_hash: str,
         repository_hash: str,
         panel_hash: str,
         schedule_hash: str,
+        label_target: int,
+        game_ceiling: int,
     ) -> None:
         self.root = root
         self.contract = contract
@@ -547,10 +762,13 @@ class DaggerOverlayWriter:
         self.iteration = iteration
         self.oracle = oracle
         self.learner = learner
+        self.original_dataset = original_dataset
         self.scenario_hash = scenario_hash
         self.repository_hash = repository_hash
         self.panel_hash = panel_hash
         self.schedule_hash = schedule_hash
+        self.label_target = label_target
+        self.game_ceiling = game_ceiling
         self._games: list[DaggerGame] = []
         self._descriptors: list[dict[str, Any]] = []
         self._row_count = 0
@@ -566,12 +784,20 @@ class DaggerOverlayWriter:
         iteration: int,
         oracle: OracleSpec,
         learner: LearnerIdentity,
+        original_dataset: OriginalDatasetIdentity,
         scenario_hash: str,
         repository_hash: str,
         panel_hash: str,
         schedule_hash: str,
+        label_target: int,
+        game_ceiling: int,
     ) -> "DaggerOverlayWriter":
         root = Path(root)
+        if not isinstance(original_dataset, OriginalDatasetIdentity):
+            raise ValueError("original dataset identity is invalid")
+        original_dataset = OriginalDatasetIdentity.from_dict(
+            original_dataset.to_dict()
+        )
         if contract.version != "tactical-v2":
             raise ValueError("DAgger overlays require a tactical-v2 contract")
         if partition not in {"train", "validation"}:
@@ -588,6 +814,8 @@ class DaggerOverlayWriter:
         ):
             _hash(value, label)
         _action_regions(contract)
+        _strict_int(label_target, "overlay label_target", minimum=0)
+        _strict_int(game_ceiling, "overlay game_ceiling", minimum=1)
         checkpoint = Path(learner.checkpoint_path)
         if not checkpoint.is_file() or _sha256_file(checkpoint) != learner.checkpoint_sha256:
             raise ValueError("learner checkpoint SHA-256 does not match identity")
@@ -600,9 +828,11 @@ class DaggerOverlayWriter:
             (root / child).mkdir(exist_ok=True)
         return cls(
             root, contract=contract, partition=partition, iteration=iteration,
-            oracle=oracle, learner=learner, scenario_hash=scenario_hash,
+            oracle=oracle, learner=learner, original_dataset=original_dataset,
+            scenario_hash=scenario_hash,
             repository_hash=repository_hash, panel_hash=panel_hash,
-            schedule_hash=schedule_hash,
+            schedule_hash=schedule_hash, label_target=label_target,
+            game_ceiling=game_ceiling,
         )
 
     def append_game(
@@ -616,8 +846,6 @@ class DaggerOverlayWriter:
             raise ValueError("game partition or iteration does not match overlay")
         if game.game_id != len(self._games):
             raise ValueError("game_id must be contiguous and unique")
-        if not rows:
-            raise ValueError("completed DAgger game must contain labels")
         parsed: list[DaggerRow] = []
         decision_indices: set[int] = set()
         state_hashes: set[str] = set()
@@ -636,8 +864,8 @@ class DaggerOverlayWriter:
             state_hashes.add(row.state_hash)
             parsed.append(row)
 
-        trace = self.root / _safe_relative(game.trace_path, "trace_path")
-        replay = self.root / _safe_relative(game.replay_path, "replay_path")
+        trace = _contained_file(self.root, game.trace_path, "trace_path")
+        replay = _contained_file(self.root, game.replay_path, "replay_path")
         _validate_trace_file(trace, game)
         if not replay.is_file() or replay.stat().st_size <= 0:
             raise ValueError("DAgger replay evidence is missing or empty")
@@ -646,9 +874,13 @@ class DaggerOverlayWriter:
         shard_path = self.root / shard_relative
         _atomic_npz(
             shard_path,
-            observations=np.asarray([row.observation for row in parsed], dtype=np.float32),
+            observations=np.asarray(
+                [row.observation for row in parsed], dtype=np.float32,
+            ).reshape(len(parsed), self.contract.observation_size),
             packed_masks=np.packbits(
-                np.asarray([row.legal_mask for row in parsed], dtype=np.uint8),
+                np.asarray(
+                    [row.legal_mask for row in parsed], dtype=np.uint8,
+                ).reshape(len(parsed), self.contract.action_size),
                 axis=1, bitorder="little",
             ),
             actions=np.asarray([row.teacher_action for row in parsed], dtype=np.int32),
@@ -704,12 +936,15 @@ class DaggerOverlayWriter:
             },
             "oracle": self.oracle.to_dict(),
             "learner": self.learner.to_dict(),
+            "original_dataset": self.original_dataset.to_dict(),
             "scenario_hash": self.scenario_hash,
             "contract_hash": self.contract.contract_hash,
             "encoding_hash": self.contract.encoding_hash,
             "repository_hash": self.repository_hash,
             "panel_hash": self.panel_hash,
             "schedule_hash": self.schedule_hash,
+            "label_target": self.label_target,
+            "game_ceiling": self.game_ceiling,
             "row_count": len(parsed),
             "shard": shard,
             "trace": trace_descriptor,
@@ -740,12 +975,15 @@ class DaggerOverlayWriter:
             "action_regions": _regions_to_dict(_action_regions(self.contract)),
             "oracle": self.oracle.to_dict(),
             "learner": self.learner.to_dict(),
+            "original_dataset": self.original_dataset.to_dict(),
             "scenario_hash": self.scenario_hash,
             "contract_hash": self.contract.contract_hash,
             "encoding_hash": self.contract.encoding_hash,
             "repository_hash": self.repository_hash,
             "panel_hash": self.panel_hash,
             "schedule_hash": self.schedule_hash,
+            "label_target": self.label_target,
+            "game_ceiling": self.game_ceiling,
             "game_count": len(self._games),
             "row_count": self._row_count,
             "games": self._descriptors,
@@ -758,7 +996,7 @@ class DaggerOverlayWriter:
 def open_dagger_overlay(root: Path) -> DaggerOverlay:
     root = Path(root)
     manifest = _read_json(root / "manifest.json")
-    logical = DaggerOverlay.from_dict(manifest, root=root)
+    logical = DaggerOverlayManifest.from_dict(manifest)
     _strict_int(manifest["observation_size"], "observation_size", minimum=1)
     _strict_int(manifest["action_size"], "action_size", minimum=1)
     for name in (
@@ -768,6 +1006,7 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
         _hash(manifest[name], name)
     oracle = OracleSpec.from_dict(manifest["oracle"])
     learner = LearnerIdentity.from_dict(manifest["learner"])
+    original_dataset = OriginalDatasetIdentity.from_dict(manifest["original_dataset"])
     checkpoint = Path(learner.checkpoint_path)
     if not checkpoint.is_file() or _sha256_file(checkpoint) != learner.checkpoint_sha256:
         raise ValueError("learner checkpoint SHA-256 changed")
@@ -819,33 +1058,40 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
         })
         if game.game_id != expected_game_id:
             raise ValueError("game manifest id is invalid")
-        if game.partition != logical.partition or game.iteration != logical.iteration:
+        if (
+            game.partition != logical.definition.partition
+            or game.iteration != logical.definition.iteration
+        ):
             raise ValueError("game manifest partition or iteration is invalid")
         for key, expected in (
             ("oracle", oracle.to_dict()),
             ("learner", learner.to_dict()),
+            ("original_dataset", original_dataset.to_dict()),
             ("scenario_hash", manifest["scenario_hash"]),
             ("contract_hash", manifest["contract_hash"]),
             ("encoding_hash", manifest["encoding_hash"]),
             ("repository_hash", manifest["repository_hash"]),
             ("panel_hash", manifest["panel_hash"]),
             ("schedule_hash", manifest["schedule_hash"]),
+            ("label_target", manifest["label_target"]),
+            ("game_ceiling", manifest["game_ceiling"]),
         ):
             if game_manifest[key] != expected:
                 raise ValueError(f"game manifest {key} does not match overlay")
-        row_count = _strict_int(game_manifest["row_count"], "game row_count", minimum=1)
-        if _strict_int(descriptor["row_count"], "game descriptor row_count", minimum=1) != row_count:
+        row_count = _strict_int(game_manifest["row_count"], "game row_count", minimum=0)
+        if _strict_int(descriptor["row_count"], "game descriptor row_count", minimum=0) != row_count:
             raise ValueError("game descriptor row count does not match")
         _validate_evidence(root, game_manifest["trace"], game, trace=True)
         _validate_evidence(root, game_manifest["replay"], game, trace=False)
         for item in (game_manifest["trace"], game_manifest["replay"]):
-            if item["path"] in evidence_paths:
+            evidence_relative = _safe_relative(item["path"], "evidence path")
+            if evidence_relative in evidence_paths:
                 raise ValueError("evidence path is duplicated")
-            evidence_paths.add(item["path"])
+            evidence_paths.add(evidence_relative)
         shard_raw = _strict_fields(
             game_manifest["shard"], _SHARD_DESCRIPTOR_FIELDS, "shard descriptor"
         )
-        if _strict_int(shard_raw["row_count"], "shard row_count", minimum=1) != row_count:
+        if _strict_int(shard_raw["row_count"], "shard row_count", minimum=0) != row_count:
             raise ValueError("shard row count does not match game")
         if _content_identity(shard_raw) != shard_raw["content_identity"]:
             raise ValueError("shard descriptor content identity is invalid")
@@ -872,29 +1118,57 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
     if len(games) != manifest["game_count"] or total_rows != manifest["row_count"]:
         raise ValueError("overlay physical counts do not match manifest")
     _validate_reciprocal_games(games)
-    actual_games = {
+    actual_files = {
         path.relative_to(root).as_posix()
-        for path in (root / "games").glob("*.json")
+        for path in root.rglob("*")
+        if path.is_file() or path.is_symlink()
     }
-    actual_shards = {
-        path.relative_to(root).as_posix()
-        for path in (root / "shards").glob("*.npz")
+    expected_files = {
+        "manifest.json", *seen_game_paths, *seen_shards, *evidence_paths,
     }
-    if actual_games != seen_game_paths or actual_shards != seen_shards:
-        raise ValueError("overlay owns missing or extra game/shard artifacts")
-    return DaggerOverlay.from_dict(manifest, root=root, games=games)
+    if actual_files != expected_files:
+        raise ValueError("overlay contains missing or unowned physical files")
+    return DaggerOverlay._create(root=root, manifest=logical, games=games)
 
 
-def publish_dagger_overlay(staging: Path, destination: Path) -> DaggerOverlay:
-    staging, destination = Path(staging), Path(destination)
+def _require_expected_definition(
+    overlay: DaggerOverlay, expected: OverlayDefinition,
+) -> None:
+    if not isinstance(expected, OverlayDefinition) or overlay.definition != expected:
+        raise ValueError("overlay does not match expected definition")
+
+
+def _preflight_overlay_publication(
+    staging: Path,
+    destination: Path,
+    expected: OverlayDefinition,
+) -> DaggerOverlay:
     if destination.exists():
         existing = open_dagger_overlay(destination)
+        _require_expected_definition(existing, expected)
         if staging.exists():
             candidate = open_dagger_overlay(staging)
+            _require_expected_definition(candidate, expected)
             if candidate.content_identity != existing.content_identity:
                 raise ValueError("published overlay conflicts with staging")
         return existing
+    if not staging.exists():
+        raise ValueError("overlay staging and destination are both missing")
     candidate = open_dagger_overlay(staging)
+    _require_expected_definition(candidate, expected)
+    return candidate
+
+
+def publish_dagger_overlay(
+    staging: Path,
+    destination: Path,
+    *,
+    expected: OverlayDefinition,
+) -> DaggerOverlay:
+    staging, destination = Path(staging), Path(destination)
+    if destination.exists():
+        return _preflight_overlay_publication(staging, destination, expected)
+    candidate = _preflight_overlay_publication(staging, destination, expected)
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(staging, destination)
     published = open_dagger_overlay(destination)
@@ -908,18 +1182,34 @@ def publish_dagger_overlays(
     validation_staging: Path,
     train_destination: Path,
     validation_destination: Path,
+    *,
+    train_expected: OverlayDefinition,
+    validation_expected: OverlayDefinition,
 ) -> tuple[DaggerOverlay, DaggerOverlay]:
     paths = tuple(map(Path, (
         train_staging, validation_staging, train_destination, validation_destination
     )))
     if len(set(paths)) != 4:
         raise ValueError("train and validation overlay paths must be distinct")
-    train_candidate = open_dagger_overlay(paths[0])
-    validation_candidate = open_dagger_overlay(paths[1])
+    train_candidate = _preflight_overlay_publication(
+        paths[0], paths[2], train_expected,
+    )
+    validation_candidate = _preflight_overlay_publication(
+        paths[1], paths[3], validation_expected,
+    )
     if train_candidate.partition != "train" or validation_candidate.partition != "validation":
         raise ValueError("paired overlay partitions are invalid")
-    train = publish_dagger_overlay(paths[0], paths[2])
-    validation = publish_dagger_overlay(paths[1], paths[3])
+    train_shared = train_candidate.definition.to_dict()
+    validation_shared = validation_candidate.definition.to_dict()
+    for fields in (train_shared, validation_shared):
+        for name in ("partition", "label_target", "game_ceiling"):
+            fields.pop(name)
+    if train_shared != validation_shared:
+        raise ValueError("paired overlays have inconsistent shared identities")
+    train = publish_dagger_overlay(paths[0], paths[2], expected=train_expected)
+    validation = publish_dagger_overlay(
+        paths[1], paths[3], expected=validation_expected,
+    )
     return train, validation
 
 
@@ -927,7 +1217,14 @@ _OVERLAY_FIELDS = frozenset({
     "schema_version", "status", "partition", "iteration", "observation_size",
     "action_size", "action_regions", "oracle", "learner", "scenario_hash",
     "contract_hash", "encoding_hash", "repository_hash", "panel_hash",
-    "schedule_hash", "game_count", "row_count", "games", "content_identity",
+    "schedule_hash", "original_dataset", "label_target", "game_ceiling",
+    "game_count", "row_count", "games", "content_identity",
+})
+_DEFINITION_FIELDS = frozenset({
+    "partition", "iteration", "observation_size", "action_size", "action_regions",
+    "oracle", "learner", "original_dataset", "scenario_hash", "contract_hash",
+    "encoding_hash", "repository_hash", "panel_hash", "schedule_hash",
+    "label_target", "game_ceiling",
 })
 _GAME_DESCRIPTOR_FIELDS = frozenset({
     "path", "sha256", "byte_size", "game_id", "row_count", "content_identity",
@@ -949,7 +1246,8 @@ _GAME_MANIFEST_FIELDS = frozenset({
     "episode_seed", "schedule_index", "profile", "reference_seat",
     "learner_seat", "opponent", "outcome", "transition_count", "oracle",
     "learner", "scenario_hash", "contract_hash", "encoding_hash",
-    "repository_hash", "panel_hash", "schedule_hash", "row_count", "shard",
+    "repository_hash", "panel_hash", "schedule_hash", "original_dataset",
+    "label_target", "game_ceiling", "row_count", "shard",
     "trace", "replay", "row_metadata", "content_identity",
 })
 
@@ -1060,7 +1358,7 @@ def _verified_artifact(
     relative = _safe_relative(descriptor["path"], "artifact path")
     if relative in seen:
         raise ValueError("artifact path is duplicated")
-    path = root / relative
+    path = _contained_file(root, relative, "artifact path")
     if (
         not path.is_file()
         or type(descriptor["byte_size"]) is not int
@@ -1091,7 +1389,7 @@ def _validate_evidence(
     }
     if any(descriptor[key] != value for key, value in expected.items()):
         raise ValueError("evidence metadata does not match game")
-    path = root / _safe_relative(descriptor["path"], "evidence path")
+    path = _contained_file(root, descriptor["path"], "evidence path")
     if (
         not path.is_file()
         or type(descriptor["byte_size"]) is not int
