@@ -25,7 +25,7 @@ from ml_lab.controllers import (
     predict,
     snapshot_opponents,
 )
-from ml_lab.algorithms import MaskablePPOAdapter
+from ml_lab.algorithms import ActorTransferSource, MaskablePPOAdapter
 from ml_lab.contracts import ContractMismatch, EnvironmentContract
 from ml_lab.envs import build_vector_env
 from ml_lab.io import atomic_write_json, read_json
@@ -297,6 +297,27 @@ def _write_actor_source_run(root: Path, contract: EnvironmentContract):
     return run, source, observations, legal_masks, checkpoint
 
 
+def _authenticated_actor_source(
+    adapter: MaskablePPOAdapter,
+    source_run: Path,
+    checkpoint: Path,
+    contract: EnvironmentContract,
+):
+    source = ActorTransferSource(
+        source_kind="snapshot",
+        controller={
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(source_run.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": 0,
+            "inference_mode": "deterministic",
+        },
+        checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+    )
+    return source, adapter.authenticate_actor_transfer(source, contract)
+
+
 def test_actor_transfer_preserves_masked_logits_but_not_value_parameters(
     tmp_path: Path,
 ) -> None:
@@ -383,16 +404,19 @@ def test_actor_transfer_preserves_masked_logits_but_not_value_parameters(
         target_env.close()
 
 
-def test_actor_transfer_restores_target_actor_when_provenance_hashing_fails(
+def test_actor_transfer_restores_target_actor_when_copy_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     contract = _actor_transfer_contract()
-    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+    source_run, _source, _observations, _masks, checkpoint = _write_actor_source_run(
         tmp_path,
         contract,
     )
     adapter = MaskablePPOAdapter()
+    transfer_source, authenticated = _authenticated_actor_source(
+        adapter, source_run, checkpoint, contract,
+    )
     target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
     try:
         target = adapter.create(
@@ -407,19 +431,30 @@ def test_actor_transfer_restores_target_actor_when_provenance_hashing_fails(
             for name, module in _actor_modules(target.policy).items()
         }
 
-        def fail_hash(_path: Path) -> str:
-            raise RuntimeError("post-copy provenance failure")
+        original_load = target.policy.action_net.load_state_dict
+        attempts = 0
 
-        monkeypatch.setattr("ml_lab.algorithms._sha256_file", fail_hash)
+        def fail_first_copy(state_dict, *, strict=True, assign=False):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("injected actor-copy failure")
+            return original_load(state_dict, strict=strict, assign=assign)
 
-        with pytest.raises(RuntimeError, match="post-copy provenance failure"):
-            adapter.initialize_actor(
+        monkeypatch.setattr(
+            target.policy.action_net, "load_state_dict", fail_first_copy,
+        )
+
+        with pytest.raises(RuntimeError, match="injected actor-copy failure"):
+            adapter.initialize_actor_from_resolved(
                 target,
-                source_run=source_run,
+                authenticated,
+                source=transfer_source,
                 expected_contract=contract,
                 device="cpu",
             )
 
+        assert attempts == 2
         actor_after = {
             name: _module_state(module)
             for name, module in _actor_modules(target.policy).items()
@@ -573,25 +608,19 @@ def test_actor_transfer_accepts_compatible_source_with_different_contract_hash(
 
 def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import torch
 
     contract = _actor_transfer_contract()
-    source_run, _source, _observations, _masks, _checkpoint = _write_actor_source_run(
+    source_run, _source, _observations, _masks, checkpoint = _write_actor_source_run(
         tmp_path,
         contract,
     )
-    resolved = ControllerResolver(contract).resolve(f"run:{source_run}")
-    assert resolved.model is not None
-    resolved.model.policy.action_net.to(dtype=torch.float64)
-    monkeypatch.setattr(
-        ControllerResolver,
-        "resolve",
-        lambda _resolver, _raw: resolved,
-    )
-
     adapter = MaskablePPOAdapter()
+    transfer_source, authenticated = _authenticated_actor_source(
+        adapter, source_run, checkpoint, contract,
+    )
+    authenticated.model.policy.action_net.to(dtype=torch.float64)
     target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
     try:
         target = adapter.create(
@@ -607,9 +636,10 @@ def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
         }
 
         with pytest.raises(ContractMismatch, match="dtype"):
-            adapter.initialize_actor(
+            adapter.initialize_actor_from_resolved(
                 target,
-                source_run=source_run,
+                authenticated,
+                source=transfer_source,
                 expected_contract=contract,
                 device="cpu",
             )

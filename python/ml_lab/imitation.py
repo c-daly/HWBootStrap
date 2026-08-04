@@ -1458,12 +1458,23 @@ def _contained_publication_file(root: Path, relative: str) -> Path:
     return candidate
 
 
+@dataclass(frozen=True)
+class _PublicationSnapshot:
+    root: Path
+    metadata: Mapping[str, Any]
+    checkpoint_bytes: bytes
+    checkpoint_sha256: str
+    fixtures_bytes: bytes
+    fixtures_sha256: str
+    metadata_sha256: str
+
+
 def _publication_artifact(
     root: Path,
     descriptor: object,
     *,
     canonical_path: str,
-) -> Path:
+) -> tuple[bytes, str]:
     if (
         not isinstance(descriptor, Mapping)
         or set(descriptor) != {"path", "sha256"}
@@ -1472,20 +1483,28 @@ def _publication_artifact(
     ):
         raise ValueError("publication artifact descriptor is invalid")
     path = _contained_publication_file(root, canonical_path)
-    if sha256_file(path) != descriptor["sha256"]:
+    with path.open("rb") as stream:
+        payload = stream.read()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != descriptor["sha256"]:
         raise ValueError("publication artifact SHA-256 does not match physical bytes")
-    return path
+    return payload, digest
 
 
 def _read_publication_metadata(
     root: Path,
     expected_contract: EnvironmentContract,
-) -> tuple[Path, Mapping[str, Any], Path, Path, str]:
+) -> _PublicationSnapshot:
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
         raise ValueError("actor publication root must be a directory")
     metadata_path = _contained_publication_file(root, "publication.json")
-    metadata = read_json(metadata_path)
+    with metadata_path.open("rb") as stream:
+        metadata_bytes = stream.read()
+    try:
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("publication metadata is unreadable") from exc
     if (
         not isinstance(metadata, Mapping)
         or set(metadata) != {
@@ -1503,17 +1522,25 @@ def _read_publication_metadata(
         raise ValueError("publication metadata is invalid")
     if metadata.get("contract") != expected_contract.to_dict():
         raise ContractMismatch("publication contract does not match expected contract")
-    checkpoint = _publication_artifact(
+    checkpoint_bytes, checkpoint_sha256 = _publication_artifact(
         root,
         metadata.get("checkpoint"),
         canonical_path="checkpoints/step_000000000.zip",
     )
-    fixtures = _publication_artifact(
+    fixtures_bytes, fixtures_sha256 = _publication_artifact(
         root,
         metadata.get("actor_fixtures"),
         canonical_path="actor-fixtures.npz",
     )
-    return root, metadata, checkpoint, fixtures, sha256_file(metadata_path)
+    return _PublicationSnapshot(
+        root=root,
+        metadata=metadata,
+        checkpoint_bytes=checkpoint_bytes,
+        checkpoint_sha256=checkpoint_sha256,
+        fixtures_bytes=fixtures_bytes,
+        fixtures_sha256=fixtures_sha256,
+        metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
+    )
 
 
 def _verify_reload_identity(
@@ -1525,23 +1552,22 @@ def _verify_reload_identity(
 
     from .algorithms import actor_state_sha256
 
-    (
-        _root,
-        metadata,
-        checkpoint,
-        fixtures_path,
-        publication_metadata_sha256,
-    ) = _read_publication_metadata(publication_root, contract)
-    with np.load(fixtures_path, allow_pickle=False) as loaded:
-        if set(loaded.files) != {
-            "observations", "legal_masks", "expected_logits",
-        }:
-            raise ValueError(
-                "actor fixtures must contain observations, legal_masks, and expected_logits"
-            )
-        observations = loaded["observations"].copy()
-        legal_masks = loaded["legal_masks"].copy()
-        expected_logits_array = loaded["expected_logits"].copy()
+    snapshot = _read_publication_metadata(publication_root, contract)
+    metadata = snapshot.metadata
+    fixtures_buffer = io.BytesIO(snapshot.fixtures_bytes)
+    try:
+        with np.load(fixtures_buffer, allow_pickle=False) as loaded:
+            if set(loaded.files) != {
+                "observations", "legal_masks", "expected_logits",
+            }:
+                raise ValueError(
+                    "actor fixtures must contain observations, legal_masks, and expected_logits"
+                )
+            observations = loaded["observations"].copy()
+            legal_masks = loaded["legal_masks"].copy()
+            expected_logits_array = loaded["expected_logits"].copy()
+    finally:
+        fixtures_buffer.close()
     if (
         observations.dtype != np.float32
         or legal_masks.dtype != np.bool_
@@ -1560,7 +1586,13 @@ def _verify_reload_identity(
     ):
         raise ValueError("actor fixtures have incompatible shape, dtype, or values")
 
-    reloaded = adapter.load(checkpoint, env=None, device="cpu")
+    checkpoint_buffer = io.BytesIO(snapshot.checkpoint_bytes)
+    try:
+        if checkpoint_buffer.tell() != 0:
+            raise AssertionError("publication checkpoint buffer is not rewound")
+        reloaded = adapter.load(checkpoint_buffer, env=None, device="cpu")
+    finally:
+        checkpoint_buffer.close()
     adapter.validate_model(reloaded, contract)
     if {parameter.device.type for parameter in reloaded.policy.parameters()} != {
         "cpu"
@@ -1590,11 +1622,11 @@ def _verify_reload_identity(
             "reloaded value parameter hash differs from publication metadata"
         )
     return {
-        "checkpoint_sha256": sha256_file(checkpoint),
+        "checkpoint_sha256": snapshot.checkpoint_sha256,
         "actor_sha256": actor_sha256,
         "value_parameters_sha256": value_parameters_sha256,
-        "actor_fixtures_sha256": sha256_file(fixtures_path),
-        "publication_metadata_sha256": publication_metadata_sha256,
+        "actor_fixtures_sha256": snapshot.fixtures_sha256,
+        "publication_metadata_sha256": snapshot.metadata_sha256,
         "contract_hash": contract.contract_hash,
         "encoding_hash": contract.encoding_hash,
         "observation_size": contract.observation_size,
@@ -1794,54 +1826,9 @@ def _resolve_authenticated_actor_transfer_source(
     expected_contract: EnvironmentContract,
     adapter: Any,
 ) -> Any:
-    """Load exactly the checkpoint bytes authenticated by the transfer source."""
+    """Return the adapter's immutable, metadata-first transfer record."""
 
-    from .algorithms import preflight_actor_transfer_source
-    from .controllers import ResolvedController, normalize_controller_spec
-
-    source_run, checkpoint, _preflight_sha256 = (
-        preflight_actor_transfer_source(source)
-    )
-    manifest = read_json(source_run / "run.json")
-    config = manifest.get("config") if isinstance(manifest, Mapping) else None
-    if (
-        not isinstance(manifest, Mapping)
-        or manifest.get("schema_version") != 1
-        or manifest.get("contract") != expected_contract.to_dict()
-        or not isinstance(config, Mapping)
-        or config.get("algorithm") != adapter.name
-        or config.get("policy") != adapter.policy_name
-    ):
-        raise ValueError(
-            "actor transfer source manifest does not match the expected contract"
-        )
-
-    with checkpoint.open("rb") as stream:
-        checkpoint_bytes = stream.read()
-    authenticated_sha256 = hashlib.sha256(checkpoint_bytes).hexdigest()
-    if authenticated_sha256 != source.checkpoint_sha256:
-        raise ValueError(
-            "actor transfer checkpoint SHA-256 changed before deserialization"
-        )
-    with io.BytesIO(checkpoint_bytes) as authenticated_checkpoint:
-        model = adapter.load(
-            authenticated_checkpoint, env=None, device="cpu",
-        )
-    adapter.validate_model(model, expected_contract)
-    spec = normalize_controller_spec(source.controller)
-    return ResolvedController(
-        spec=spec,
-        server_controller="external",
-        model=model,
-        path=checkpoint,
-        algorithm=adapter.name,
-        step=spec.step,
-        contract=expected_contract,
-        observation_size=expected_contract.observation_size,
-        action_size=expected_contract.action_size,
-        legacy=False,
-        promotable=True,
-    )
+    return adapter.authenticate_actor_transfer(source, expected_contract)
 
 
 def _prepare_behavioral_cloning_request(

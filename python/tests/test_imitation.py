@@ -964,7 +964,11 @@ def _distillation_corpus(clone_scenario) -> imitation_module.ActorSupervisionCor
     )
 
 
-def _write_actor_snapshot_source(root: Path):
+def _write_actor_snapshot_source(
+    root: Path, *, source_kind: str = "snapshot",
+):
+    if source_kind not in {"snapshot", "dagger_actor"}:
+        raise ValueError(source_kind)
     adapter = MaskablePPOAdapter()
     model = adapter.create(
         _TinyCloneEnv(),
@@ -973,32 +977,76 @@ def _write_actor_snapshot_source(root: Path):
         device="cpu",
         checkpoint_interval=2,
     )
+    step = 0 if source_kind == "dagger_actor" else 7
     checkpoint = adapter.save(
-        model, root / "checkpoints" / "step_000000007.zip",
+        model, root / "checkpoints" / f"step_{step:09d}.zip",
     )
     digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    published_actor_sha256 = (
+        algorithms_module.actor_state_sha256(model)
+        if source_kind == "dagger_actor"
+        else None
+    )
+    actor_initialization = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_kind": "snapshot",
+        "source_checkpoint_sha256": "e" * 64,
+    }
+    publication_verification = {
+        "checkpoint_sha256": digest,
+        "actor_sha256": published_actor_sha256,
+    }
+    manifest = {
+        "schema_version": 1,
+        "state": "completed" if source_kind == "dagger_actor" else "stopped",
+        "latest_checkpoint": f"checkpoints/step_{step:09d}.zip",
+        "latest_checkpoint_step": step,
+        "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
+        "contract": contract().to_dict(),
+    }
+    if source_kind == "dagger_actor":
+        manifest.update({
+            "training_kind": "selective-dagger-distillation-v1",
+            "distillation_iteration": 1,
+            "checkpoint_sha256": digest,
+            "target_actor_sha256_final": published_actor_sha256,
+            "actor_initialization": actor_initialization,
+            "publication_verification": publication_verification,
+            "production": True,
+        })
     (root / "run.json").write_text(
-        json.dumps({
-            "schema_version": 1,
-            "state": "stopped",
-            "latest_checkpoint": "checkpoints/step_000000007.zip",
-            "latest_checkpoint_step": 7,
-            "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
-            "contract": contract().to_dict(),
-        }),
+        json.dumps(manifest),
         encoding="utf-8",
     )
+    if source_kind == "dagger_actor":
+        (root / "bc.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": 1,
+                "algorithm": "maskable_ppo",
+                "policy": "HexCNN",
+                "checkpoint_sha256": digest,
+                "target_actor_sha256_final": published_actor_sha256,
+                "actor_initialization": actor_initialization,
+                "publication_verification": publication_verification,
+                "production": True,
+            }),
+            encoding="utf-8",
+        )
     source = algorithms_module.ActorTransferSource(
-        source_kind="snapshot",
+        source_kind=source_kind,
         controller={
             "kind": "snapshot",
             "path": str(checkpoint.resolve()),
             "source_run": str(root.resolve()),
             "algorithm": "maskable_ppo",
-            "step": 7,
+            "step": step,
             "inference_mode": "deterministic",
         },
         checkpoint_sha256=digest,
+        published_actor_sha256=published_actor_sha256,
     )
     return source, model
 
@@ -1251,6 +1299,54 @@ def test_distillation_publication_reloads_before_manifests_and_fails_atomically(
     assert list(tmp_path.glob(".failed-distillation.publishing-*")) == []
 
 
+def test_publication_reload_uses_the_checkpoint_bytes_authenticated_before_a_swap(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path reopened after hashing can deserialize bytes the descriptor never named."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "publication-checkpoint-swap"
+    original_read = imitation_module._read_publication_metadata
+    original_load = MaskablePPOAdapter.load
+    load_buffers: list[io.BytesIO] = []
+    swapped = False
+
+    def read_then_swap(root, expected_contract):
+        nonlocal swapped
+        snapshot = original_read(root, expected_contract)
+        if not swapped:
+            checkpoint = (
+                Path(root) / "checkpoints" / "step_000000000.zip"
+            )
+            checkpoint.write_bytes(
+                checkpoint.read_bytes() + b"swapped-after-authentication"
+            )
+            swapped = True
+        return snapshot
+
+    def load_owned_bytes(self, checkpoint, *, env, device):
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        load_buffers.append(checkpoint)
+        return original_load(self, checkpoint, env=env, device=device)
+
+    monkeypatch.setattr(
+        imitation_module, "_read_publication_metadata", read_then_swap,
+    )
+    monkeypatch.setattr(MaskablePPOAdapter, "load", load_owned_bytes)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert swapped is True
+    assert len(load_buffers) == 2
+    assert all(buffer.closed for buffer in load_buffers)
+    assert not destination.exists()
+    assert list(tmp_path.glob(
+        f".{destination.name}.publishing-*"
+    )) == []
+
+
 def test_distillation_publication_rejects_reloaded_value_state_mismatch(
     clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1259,12 +1355,15 @@ def test_distillation_publication_rejects_reloaded_value_state_mismatch(
     source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
     destination = tmp_path / "bad-value-publication"
     original_load = MaskablePPOAdapter.load
+    load_calls = 0
 
-    def load_with_changed_value(self, path, *, env, device):
-        model = original_load(self, path, env=env, device=device)
-        if isinstance(path, (str, Path)) and Path(path).name == (
-            "step_000000000.zip"
-        ):
+    def load_with_changed_value(self, checkpoint, *, env, device):
+        nonlocal load_calls
+        load_calls += 1
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        model = original_load(self, checkpoint, env=env, device=device)
+        if load_calls == 2:
             with torch.no_grad():
                 next(model.policy.value_net.parameters()).add_(1.0)
         return model
@@ -1530,6 +1629,61 @@ def test_distillation_malformed_source_never_publishes_output(
     assert resolve_calls == 0
 
 
+@pytest.mark.parametrize(
+    ("source_kind", "manifest_name", "field", "value"),
+    [
+        (
+            "snapshot",
+            "run.json",
+            "latest_checkpoint",
+            "checkpoints/step_000000008.zip",
+        ),
+        ("snapshot", "run.json", "latest_checkpoint_step", 8),
+        ("snapshot", "run.json", "schema_version", 2),
+        (
+            "snapshot",
+            "run.json",
+            "contract",
+            {**contract().to_dict(), "contract_hash": "f" * 64},
+        ),
+        ("dagger_actor", "bc.json", "production", False),
+    ],
+)
+def test_actor_transfer_rejects_all_metadata_before_checkpoint_deserialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    manifest_name: str,
+    field: str,
+    value: object,
+) -> None:
+    """Metadata-only rejection must not invoke any SB3 deserializer."""
+
+    source, _source_model = _write_actor_snapshot_source(
+        tmp_path / source_kind, source_kind=source_kind,
+    )
+    manifest_path = Path(source.controller["source_run"]) / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original_load = MaskablePPOAdapter.load
+    load_calls = 0
+
+    def counted_load(self, checkpoint, *, env, device):
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(self, checkpoint, env=env, device=device)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", counted_load)
+
+    with pytest.raises(ValueError, match="metadata|provenance|contract"):
+        imitation_module._resolve_authenticated_actor_transfer_source(
+            source, contract(), MaskablePPOAdapter(),
+        )
+
+    assert load_calls == 0
+
+
 def test_distillation_loads_only_the_exact_checkpoint_bytes_it_authenticated(
     clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1573,6 +1727,109 @@ def test_distillation_loads_only_the_exact_checkpoint_bytes_it_authenticated(
     assert resolver_calls == 0
     assert adapter_load_calls == 0
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("source_kind", ["snapshot", "dagger_actor"])
+def test_actor_transfer_hashes_and_loads_one_checkpoint_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str,
+) -> None:
+    """The bytes supplied to SB3 must be the sole physical checkpoint read."""
+
+    source, _source_model = _write_actor_snapshot_source(
+        tmp_path / "source", source_kind=source_kind,
+    )
+    checkpoint = Path(source.controller["path"])
+    expected_bytes = checkpoint.read_bytes()
+    original_path_open = Path.open
+    original_load = MaskablePPOAdapter.load
+    checkpoint_opens = 0
+    load_buffers: list[io.BytesIO] = []
+
+    def counted_open(path, *args, **kwargs):
+        nonlocal checkpoint_opens
+        if Path(path) == checkpoint:
+            checkpoint_opens += 1
+        return original_path_open(path, *args, **kwargs)
+
+    def inspect_load(self, checkpoint_buffer, *, env, device):
+        assert isinstance(checkpoint_buffer, io.BytesIO)
+        assert checkpoint_buffer.tell() == 0
+        assert checkpoint_buffer.getvalue() == expected_bytes
+        load_buffers.append(checkpoint_buffer)
+        return original_load(self, checkpoint_buffer, env=env, device=device)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    monkeypatch.setattr(MaskablePPOAdapter, "load", inspect_load)
+
+    MaskablePPOAdapter().authenticate_actor_transfer(source, contract())
+
+    assert checkpoint_opens == 1
+    assert len(load_buffers) == 1
+    assert load_buffers[0].closed is True
+
+
+@pytest.mark.parametrize("source_kind", ["snapshot", "dagger_actor"])
+def test_authenticated_actor_transfer_owns_its_buffer_and_never_reopens_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str,
+) -> None:
+    """Initialization may consume authenticated state, never a mutable source path."""
+
+    source, source_model = _write_actor_snapshot_source(
+        tmp_path / "source", source_kind=source_kind,
+    )
+    adapter = MaskablePPOAdapter()
+    original_load = MaskablePPOAdapter.load
+    buffers: list[io.BytesIO] = []
+
+    def inspect_load(self, checkpoint, *, env, device):
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        buffers.append(checkpoint)
+        return original_load(self, checkpoint, env=env, device=device)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", inspect_load)
+    authenticated = imitation_module._resolve_authenticated_actor_transfer_source(
+        source, contract(), adapter,
+    )
+    assert len(buffers) == 1
+    assert buffers[0].closed is True
+
+    source_run = Path(source.controller["source_run"])
+    guarded_paths = {
+        Path(source.controller["path"]),
+        source_run / "run.json",
+    }
+    if source_kind == "dagger_actor":
+        guarded_paths.add(source_run / "bc.json")
+    original_path_open = Path.open
+
+    def reject_source_reopen(path, *args, **kwargs):
+        if Path(path) in guarded_paths:
+            raise AssertionError("authenticated source path was reopened")
+        return original_path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_source_reopen)
+    target_model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+
+    adapter.initialize_actor_from_resolved(
+        target_model,
+        authenticated,
+        source=source,
+        expected_contract=contract(),
+        device="cpu",
+    )
+
+    assert algorithms_module.actor_state_sha256(target_model) == (
+        algorithms_module.actor_state_sha256(source_model)
+    )
 
 
 def test_distillation_restores_the_best_validation_actor_before_publication(
