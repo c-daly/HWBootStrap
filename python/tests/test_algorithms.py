@@ -532,20 +532,16 @@ def test_actor_transfer_copies_only_actor_and_shared_features_from_both_source_k
         tmp_path, source_model, source_kind=source_kind,
     )
     adapter = MaskablePPOAdapter()
-    authenticated = adapter.authenticate_actor_transfer(
-        source, _actor_contract(),
-    )
     value_before = tuple(
         parameter.detach().clone() for parameter in _value_parameters(target_model)
     )
     target_before = algorithms_module.actor_state_sha256(target_model)
 
-    provenance = adapter.initialize_actor_from_resolved(
+    provenance = adapter.initialize_actor_from_source(
         target_model,
-        authenticated,
-        source=source,
-        expected_contract=_actor_contract(),
-        device="cpu",
+        source,
+        _actor_contract(),
+        "cpu",
     )
 
     assert algorithms_module.actor_state_sha256(target_model) == (
@@ -565,7 +561,7 @@ def test_actor_transfer_copies_only_actor_and_shared_features_from_both_source_k
 
 
 def test_actor_transfer_preflights_all_tensor_shapes_before_mutating_target(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Copying modules as they are checked would leave a half-copied actor."""
 
@@ -575,19 +571,24 @@ def test_actor_transfer_preflights_all_tensor_shapes_before_mutating_target(
         tmp_path, source_model, source_kind="snapshot",
     )
     adapter = MaskablePPOAdapter()
-    authenticated = adapter.authenticate_actor_transfer(
-        source, _actor_contract(),
+    original_load = MaskablePPOAdapter.load
+
+    def load_with_mismatched_actor(self, checkpoint, *, env, device):
+        loaded = original_load(self, checkpoint, env=env, device=device)
+        loaded.policy.action_net = torch.nn.Linear(64, 6)
+        return loaded
+
+    monkeypatch.setattr(
+        MaskablePPOAdapter, "load", load_with_mismatched_actor,
     )
-    authenticated.model.policy.action_net = torch.nn.Linear(64, 6)
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ContractMismatch, match="shape"):
-        adapter.initialize_actor_from_resolved(
+        adapter.initialize_actor_from_source(
             target_model,
-            authenticated,
-            source=source,
-            expected_contract=_actor_contract(),
-            device="cpu",
+            source,
+            _actor_contract(),
+            "cpu",
         )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
@@ -604,9 +605,6 @@ def test_actor_transfer_restores_the_complete_target_after_a_copy_failure(
         tmp_path, source_model, source_kind="snapshot",
     )
     adapter = MaskablePPOAdapter()
-    authenticated = adapter.authenticate_actor_transfer(
-        source, _actor_contract(),
-    )
     before = algorithms_module.actor_state_sha256(target_model)
     original_load = target_model.policy.action_net.load_state_dict
     attempts = 0
@@ -622,28 +620,84 @@ def test_actor_transfer_restores_the_complete_target_after_a_copy_failure(
         target_model.policy.action_net, "load_state_dict", fail_first_load,
     )
     with pytest.raises(RuntimeError, match="injected actor-copy failure"):
-        adapter.initialize_actor_from_resolved(
+        adapter.initialize_actor_from_source(
             target_model,
-            authenticated,
-            source=source,
-            expected_contract=_actor_contract(),
-            device="cpu",
+            source,
+            _actor_contract(),
+            "cpu",
         )
 
     assert attempts == 2
     assert algorithms_module.actor_state_sha256(target_model) == before
 
 
+def test_actor_transfer_public_api_cannot_accept_a_substitute_model_or_hash(
+    tmp_path: Path,
+) -> None:
+    """The caller supplies a pinned source, never a replaceable trusted record."""
+
+    pinned_model = _actor_model(101)
+    unrelated_model = _actor_model(919)
+    target_model = _actor_model(227)
+    source = _actor_source(
+        tmp_path, pinned_model, source_kind="snapshot",
+    )
+    adapter = MaskablePPOAdapter()
+    assert not hasattr(algorithms_module, "AuthenticatedActorTransfer")
+    for boundary in (algorithms_module.AlgorithmAdapter, adapter):
+        assert not hasattr(boundary, "authenticate_actor_transfer")
+        assert not hasattr(boundary, "initialize_actor_from_resolved")
+    assert algorithms_module.actor_state_sha256(unrelated_model) != (
+        algorithms_module.actor_state_sha256(pinned_model)
+    )
+
+    provenance = adapter.initialize_actor_from_source(
+        target_model,
+        source,
+        _actor_contract(),
+        "cpu",
+    )
+
+    pinned_actor_sha256 = algorithms_module.actor_state_sha256(pinned_model)
+    assert algorithms_module.actor_state_sha256(target_model) == pinned_actor_sha256
+    assert provenance["source_actor_sha256"] == pinned_actor_sha256
+
+
+def test_actor_transfer_provenance_is_derived_internally_and_immutable(
+    tmp_path: Path,
+) -> None:
+    """Returned provenance derives from captured files and cannot be replaced."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source = _actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    adapter = MaskablePPOAdapter()
+    provenance = adapter.initialize_actor_from_source(
+        target_model,
+        source,
+        _actor_contract(),
+        "cpu",
+    )
+
+    source_run = Path(source.controller["source_run"])
+    assert provenance["source_run"] == str(source_run.resolve())
+    assert provenance["source_checkpoint"] == (
+        Path(source.controller["path"]).relative_to(source_run).as_posix()
+    )
+    assert provenance["source_run_manifest_sha256"] == hashlib.sha256(
+        (source_run / "run.json").read_bytes()
+    ).hexdigest()
+    assert provenance["source_policy_class"] != "forged.Policy"
+    with pytest.raises(TypeError):
+        provenance["source_run"] = "forged-run"  # type: ignore[index]
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
         ("hash", "SHA-256"),
-        ("checkpoint_binding", "SHA-256"),
-        ("contract", "contract"),
-        ("policy", "policy class"),
-        ("algorithm", "algorithm"),
-        ("mode", "deterministic"),
-        ("step", "step"),
         ("containment", "source run"),
     ],
 )
@@ -658,7 +712,6 @@ def test_malformed_actor_transfer_sources_leave_the_target_untouched(
         tmp_path, source_model, source_kind="snapshot",
     )
     adapter = MaskablePPOAdapter()
-    authenticated = None
     if mutation == "hash":
         source = replace(source, checkpoint_sha256="f" * 64)
     elif mutation == "containment":
@@ -671,45 +724,17 @@ def test_malformed_actor_transfer_sources_leave_the_target_untouched(
             controller={**source.controller, "path": str(outside.resolve())},
             checkpoint_sha256=hashlib.sha256(outside.read_bytes()).hexdigest(),
         )
-    else:
-        authenticated = adapter.authenticate_actor_transfer(
-            source, _actor_contract(),
-        )
-    if mutation == "contract":
-        authenticated = replace(
-            authenticated,
-            contract=replace(_actor_contract(), contract_hash="e" * 64),
-        )
-    elif mutation == "policy":
-        authenticated.model.policy = torch.nn.Identity()
-    elif mutation == "checkpoint_binding":
-        forged_bytes = authenticated.checkpoint_bytes + b"forged"
-        authenticated = replace(
-            authenticated,
-            checkpoint_bytes=forged_bytes,
-            checkpoint_sha256=hashlib.sha256(forged_bytes).hexdigest(),
-        )
-    elif mutation == "algorithm":
-        authenticated = replace(authenticated, algorithm="masked_dqn")
-    elif mutation == "mode":
-        authenticated = replace(authenticated, inference_mode="stochastic")
-    elif mutation == "step":
-        authenticated = replace(authenticated, step=8)
-    elif mutation not in {"hash", "containment"}:
+    elif mutation != "containment":
         raise AssertionError(mutation)
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises((ValueError, ContractMismatch), match=message):
-        if authenticated is None:
-            adapter.authenticate_actor_transfer(source, _actor_contract())
-        else:
-            adapter.initialize_actor_from_resolved(
-                target_model,
-                authenticated,
-                source=source,
-                expected_contract=_actor_contract(),
-                device="cpu",
-            )
+        adapter.initialize_actor_from_source(
+            target_model,
+            source,
+            _actor_contract(),
+            "cpu",
+        )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
 
@@ -739,8 +764,8 @@ def test_actor_transfer_rejects_checkpoint_symlink_escape_before_mutation(
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ValueError, match="contained"):
-        MaskablePPOAdapter().authenticate_actor_transfer(
-            source, _actor_contract(),
+        MaskablePPOAdapter().initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
@@ -763,8 +788,8 @@ def test_actor_transfer_rejects_checkpoint_file_symlink_escape_before_mutation(
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ValueError, match="contained"):
-        MaskablePPOAdapter().authenticate_actor_transfer(
-            source, _actor_contract(),
+        MaskablePPOAdapter().initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
@@ -784,6 +809,7 @@ def test_actor_transfer_rejects_metadata_symlink_escape_before_deserialization(
     source_kind: str,
     metadata_name: str,
 ) -> None:
+    target_model = _actor_model(227)
     source = _actor_source(
         tmp_path, _actor_model(101), source_kind=source_kind,
     )
@@ -800,13 +826,15 @@ def test_actor_transfer_rejects_metadata_symlink_escape_before_deserialization(
         raise AssertionError("metadata rejection reached SB3 deserialization")
 
     monkeypatch.setattr(MaskablePPOAdapter, "load", forbidden_load)
+    before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ValueError, match="contained"):
-        MaskablePPOAdapter().authenticate_actor_transfer(
-            source, _actor_contract(),
+        MaskablePPOAdapter().initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert load_calls == 0
+    assert algorithms_module.actor_state_sha256(target_model) == before
 
 
 def test_actor_transfer_rejects_checkpoint_directory_junction_escape(
@@ -832,8 +860,8 @@ def test_actor_transfer_rejects_checkpoint_directory_junction_escape(
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ValueError, match="contained"):
-        MaskablePPOAdapter().authenticate_actor_transfer(
-            source, _actor_contract(),
+        MaskablePPOAdapter().initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
@@ -852,8 +880,8 @@ def test_actor_transfer_rejects_noncanonical_dagger_checkpoint_before_mutation(
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises(ValueError, match="canonical"):
-        MaskablePPOAdapter().authenticate_actor_transfer(
-            source, _actor_contract(),
+        MaskablePPOAdapter().initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert algorithms_module.actor_state_sha256(target_model) == before
@@ -1014,8 +1042,8 @@ def test_dagger_actor_transfer_authenticates_both_completed_manifests_and_model(
         (ValueError, FileNotFoundError),
         match="published|actor hash|provenance|metadata|bc.json",
     ):
-        adapter.authenticate_actor_transfer(
-            source, _actor_contract(),
+        adapter.initialize_actor_from_source(
+            target_model, source, _actor_contract(), "cpu",
         )
 
     assert load_calls == (1 if mutation == "physical_actor_hash" else 0)

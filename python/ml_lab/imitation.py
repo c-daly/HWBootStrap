@@ -1821,16 +1821,6 @@ def validate_actor_supervision_publication(
     return verification
 
 
-def _resolve_authenticated_actor_transfer_source(
-    source: Any,
-    expected_contract: EnvironmentContract,
-    adapter: Any,
-) -> Any:
-    """Return the adapter's immutable, metadata-first transfer record."""
-
-    return adapter.authenticate_actor_transfer(source, expected_contract)
-
-
 def _prepare_behavioral_cloning_request(
     config: BehavioralCloningConfig, run_dir: Path,
 ) -> tuple[Path, dict[str, Any]]:
@@ -1940,17 +1930,13 @@ def train_actor_supervision(
     value_hash_before = _parameter_hash(value_named)
     actor_initialization = None
     if warm_start is not None:
-        resolved_source = _resolve_authenticated_actor_transfer_source(
-            warm_start,
-            contract,
-            adapter,
-        )
-        actor_initialization = adapter.initialize_actor_from_resolved(
-            model,
-            resolved_source,
-            source=warm_start,
-            expected_contract=contract,
-            device=config.device,
+        actor_initialization = dict(
+            adapter.initialize_actor_from_source(
+                model,
+                warm_start,
+                contract,
+                config.device,
+            )
         )
         if _parameter_hash(value_named) != value_hash_before:
             raise RuntimeError("actor warm-start modified value-side parameters")

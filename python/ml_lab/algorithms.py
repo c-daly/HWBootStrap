@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 import numpy as np
 
@@ -113,7 +113,7 @@ class ActorTransferSource:
 
 
 @dataclass(frozen=True)
-class AuthenticatedActorTransfer:
+class _AuthenticatedActorTransfer:
     """A loaded actor bound to one immutable, authenticated checkpoint snapshot."""
 
     source: ActorTransferSource
@@ -299,17 +299,9 @@ class AlgorithmAdapter(Protocol):
         device: str,
     ) -> Mapping[str, Any]: ...
 
-    def authenticate_actor_transfer(
-        self,
-        source: ActorTransferSource,
-        expected_contract: EnvironmentContract,
-    ) -> AuthenticatedActorTransfer: ...
-
-    def initialize_actor_from_resolved(
+    def initialize_actor_from_source(
         self,
         model: Any,
-        authenticated: AuthenticatedActorTransfer,
-        *,
         source: ActorTransferSource,
         expected_contract: EnvironmentContract,
         device: str,
@@ -417,19 +409,24 @@ class MaskablePPOAdapter:
             **options,
         )
 
-    def authenticate_actor_transfer(
+    def initialize_actor_from_source(
         self,
+        model: Any,
         source: ActorTransferSource,
         expected_contract: EnvironmentContract,
-    ) -> AuthenticatedActorTransfer:
-        """Validate all metadata, then hash and load one owned checkpoint snapshot."""
+        device: str,
+    ) -> Mapping[str, Any]:
+        """Authenticate one checkpoint snapshot and transactionally copy its actor."""
 
-        return self._authenticate_actor_transfer(
+        return self._initialize_actor_from_source(
+            model,
             source,
             expected_contract,
+            device,
             checkpoint_bytes=None,
             run_snapshot=None,
             require_exact_contract=True,
+            authenticated_source_callback=None,
         )
 
     def _authenticate_actor_transfer(
@@ -440,7 +437,7 @@ class MaskablePPOAdapter:
         checkpoint_bytes: bytes | None,
         run_snapshot: tuple[Mapping[str, Any], str] | None,
         require_exact_contract: bool,
-    ) -> AuthenticatedActorTransfer:
+    ) -> _AuthenticatedActorTransfer:
         import torch
         from sb3_contrib import MaskablePPO
         from sb3_contrib.common.maskable.policies import (
@@ -567,7 +564,7 @@ class MaskablePPOAdapter:
             f"{type(source_model.policy).__module__}."
             f"{type(source_model.policy).__qualname__}"
         )
-        return AuthenticatedActorTransfer(
+        return _AuthenticatedActorTransfer(
             source=source,
             model=source_model,
             checkpoint_bytes=checkpoint_bytes,
@@ -587,16 +584,19 @@ class MaskablePPOAdapter:
             source_actor_sha256=source_actor_sha256,
         )
 
-    def initialize_actor_from_resolved(
+    def _initialize_actor_from_source(
         self,
         model: Any,
-        authenticated: AuthenticatedActorTransfer,
-        *,
         source: ActorTransferSource,
         expected_contract: EnvironmentContract,
         device: str,
+        *,
+        checkpoint_bytes: bytes | None,
+        run_snapshot: tuple[Mapping[str, Any], str] | None,
+        require_exact_contract: bool,
+        authenticated_source_callback: Callable[[Any], None] | None,
     ) -> Mapping[str, Any]:
-        """Transactionally copy actor state from an authenticated in-memory source."""
+        """Authenticate and copy without exposing the intermediate trusted record."""
 
         import torch
         from sb3_contrib import MaskablePPO
@@ -605,12 +605,13 @@ class MaskablePPOAdapter:
         )
         from stable_baselines3.common.utils import get_device
 
-        if not isinstance(authenticated, AuthenticatedActorTransfer):
-            raise TypeError(
-                "resolved source must be an AuthenticatedActorTransfer"
-            )
-        if source != authenticated.source:
-            raise ValueError("actor transfer source differs from authenticated source")
+        authenticated = self._authenticate_actor_transfer(
+            source,
+            expected_contract,
+            checkpoint_bytes=checkpoint_bytes,
+            run_snapshot=run_snapshot,
+            require_exact_contract=require_exact_contract,
+        )
         if authenticated.exact_contract:
             if authenticated.contract != expected_contract:
                 raise ContractMismatch(
@@ -659,6 +660,8 @@ class MaskablePPOAdapter:
                 f"actor transfer device {requested_device} does not match "
                 f"model device {model_device}"
             )
+        if authenticated_source_callback is not None:
+            authenticated_source_callback(source_model)
         source_modules = _actor_modules(source_model)
         target_modules = _actor_modules(model)
         source_states: dict[str, Mapping[str, Any]] = {}
@@ -737,7 +740,7 @@ class MaskablePPOAdapter:
         }
         if authenticated.source_bc_sha256 is not None:
             provenance["source_bc_sha256"] = authenticated.source_bc_sha256
-        return provenance
+        return MappingProxyType(provenance)
 
     def initialize_actor(
         self,
@@ -828,16 +831,6 @@ class MaskablePPOAdapter:
             },
             checkpoint_sha256=checkpoint_sha256,
         )
-        authenticated = self._authenticate_actor_transfer(
-            source,
-            expected_contract,
-            checkpoint_bytes=checkpoint_bytes,
-            run_snapshot=(manifest, manifest_sha256),
-            require_exact_contract=False,
-        )
-        source_model = authenticated.model
-        self.validate_model(source_model, expected_contract)
-        self.validate_model(model, expected_contract)
 
         fixtures_buffer = io.BytesIO(fixtures_bytes)
         try:
@@ -873,7 +866,6 @@ class MaskablePPOAdapter:
             raise ValueError(
                 f"actor initialization device {requested_device} does not match model device {model_device}"
             )
-        source_model.policy.to(requested_device)
 
         def masked_logits(policy: Any) -> Any:
             with torch.no_grad():
@@ -891,18 +883,29 @@ class MaskablePPOAdapter:
                 )
                 return distribution.distribution.logits.detach().cpu()
 
-        source_logits = masked_logits(source_model.policy)
+        source_logits: Any | None = None
+
+        def capture_source_logits(source_model: Any) -> None:
+            nonlocal source_logits
+            source_model.policy.to(requested_device)
+            source_logits = masked_logits(source_model.policy)
+
         target_states = _actor_states(model, copy_states=True)
         try:
             provenance = dict(
-                self.initialize_actor_from_resolved(
+                self._initialize_actor_from_source(
                     model,
-                    authenticated,
-                    source=source,
-                    expected_contract=expected_contract,
-                    device=device,
+                    source,
+                    expected_contract,
+                    device,
+                    checkpoint_bytes=checkpoint_bytes,
+                    run_snapshot=(manifest, manifest_sha256),
+                    require_exact_contract=False,
+                    authenticated_source_callback=capture_source_logits,
                 )
             )
+            if source_logits is None:
+                raise AssertionError("authenticated source logits were not captured")
             target_logits = masked_logits(model.policy)
             rtol = 0.0 if requested_device.type == "cpu" else 1e-6
             atol = 0.0 if requested_device.type == "cpu" else 1e-7

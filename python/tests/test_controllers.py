@@ -297,12 +297,10 @@ def _write_actor_source_run(root: Path, contract: EnvironmentContract):
     return run, source, observations, legal_masks, checkpoint
 
 
-def _authenticated_actor_source(
-    adapter: MaskablePPOAdapter,
+def _actor_transfer_source(
     source_run: Path,
     checkpoint: Path,
-    contract: EnvironmentContract,
-):
+) -> ActorTransferSource:
     source = ActorTransferSource(
         source_kind="snapshot",
         controller={
@@ -315,7 +313,7 @@ def _authenticated_actor_source(
         },
         checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
     )
-    return source, adapter.authenticate_actor_transfer(source, contract)
+    return source
 
 
 def test_actor_transfer_preserves_masked_logits_but_not_value_parameters(
@@ -414,8 +412,8 @@ def test_actor_transfer_restores_target_actor_when_copy_fails(
         contract,
     )
     adapter = MaskablePPOAdapter()
-    transfer_source, authenticated = _authenticated_actor_source(
-        adapter, source_run, checkpoint, contract,
+    transfer_source = _actor_transfer_source(
+        source_run, checkpoint,
     )
     target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
     try:
@@ -446,12 +444,11 @@ def test_actor_transfer_restores_target_actor_when_copy_fails(
         )
 
         with pytest.raises(RuntimeError, match="injected actor-copy failure"):
-            adapter.initialize_actor_from_resolved(
+            adapter.initialize_actor_from_source(
                 target,
-                authenticated,
-                source=transfer_source,
-                expected_contract=contract,
-                device="cpu",
+                transfer_source,
+                contract,
+                "cpu",
             )
 
         assert attempts == 2
@@ -608,6 +605,7 @@ def test_actor_transfer_accepts_compatible_source_with_different_contract_hash(
 
 def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import torch
 
@@ -617,10 +615,21 @@ def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
         contract,
     )
     adapter = MaskablePPOAdapter()
-    transfer_source, authenticated = _authenticated_actor_source(
-        adapter, source_run, checkpoint, contract,
+    transfer_source = _actor_transfer_source(
+        source_run, checkpoint,
     )
-    authenticated.model.policy.action_net.to(dtype=torch.float64)
+    original_load = MaskablePPOAdapter.load
+
+    def load_with_dtype_mismatch(self, checkpoint_buffer, *, env, device):
+        source_model = original_load(
+            self, checkpoint_buffer, env=env, device=device,
+        )
+        source_model.policy.action_net.to(dtype=torch.float64)
+        return source_model
+
+    monkeypatch.setattr(
+        MaskablePPOAdapter, "load", load_with_dtype_mismatch,
+    )
     target_env = build_vector_env(1, lambda _worker: _ActorTransferEnv(contract))
     try:
         target = adapter.create(
@@ -636,12 +645,11 @@ def test_actor_transfer_rejects_dtype_mismatch_before_any_module_copy(
         }
 
         with pytest.raises(ContractMismatch, match="dtype"):
-            adapter.initialize_actor_from_resolved(
+            adapter.initialize_actor_from_source(
                 target,
-                authenticated,
-                source=transfer_source,
-                expected_contract=contract,
-                device="cpu",
+                transfer_source,
+                contract,
+                "cpu",
             )
 
         actor_after = {
