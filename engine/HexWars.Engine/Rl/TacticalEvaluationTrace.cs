@@ -13,7 +13,7 @@ namespace HexWars.Engine.Rl
             After = ProjectState(transition.Resulting),
         };
 
-        private static TacticalTraceState ProjectState(GameState state) => new TacticalTraceState
+        internal static TacticalTraceState ProjectState(GameState state) => new TacticalTraceState
         {
             Round = state.Round,
             ActiveSeat = (int)state.ActivePlayer,

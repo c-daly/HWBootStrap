@@ -12,6 +12,7 @@ namespace HexWars.Engine
     {
         public const int DefaultExpansionBudget = 512;
         public const int DefaultDepth = 4;
+        public const string HeuristicIdentity = "material-plus-pursuit-v1";
 
         private const double NonterminalLimit = 0.999;
         private readonly int _expansionBudget;
@@ -20,6 +21,9 @@ namespace HexWars.Engine
 
         /// <summary>The number of authoritative transitions expanded by the most recent decision.</summary>
         public int LastExpansionCount { get; private set; }
+        public int ExpansionBudget => _expansionBudget;
+        public int Depth => _depth;
+        public bool UseHeuristic => _useHeuristic;
 
         public BoundedSearchAgent(int expansionBudget = DefaultExpansionBudget, int depth = DefaultDepth, bool useHeuristic = true)
         {
