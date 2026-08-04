@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,17 @@ from ml_lab.dagger import (
 
 
 HASHES = {letter: letter * 64 for letter in "abcdef1234567890"}
+
+
+def _symlink_or_skip_windows_privilege(link: Path, target: Path) -> None:
+    """Skip only when Windows explicitly denies symbolic-link privilege."""
+
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip(f"Windows symbolic-link privilege is unavailable: {exc}")
+        raise
 
 
 @pytest.fixture
@@ -314,6 +326,7 @@ def test_overlay_definition_is_frozen_exact_and_deeply_immutable(
     ("mutate", "message"),
     [
         (lambda row: row.update(observation=[1, -0.5]), "observation"),
+        (lambda row: row.update(observation=[True, -0.5]), "observation"),
         (lambda row: row.update(observation=[3.5e38, -0.5]), "float32"),
         (lambda row: row.update(normalized_advantage=1), "advantage"),
         (lambda row: row.update(normalized_advantage="0.25"), "advantage"),
@@ -329,10 +342,10 @@ def test_overlay_definition_is_frozen_exact_and_deeply_immutable(
         ),
     ],
 )
-def test_dagger_row_parser_rejects_inexact_float_int32_and_id_values(
+def test_dagger_row_parser_rejects_invalid_float_int32_and_id_values(
     contract: EnvironmentContract, mutate, message: str,
 ) -> None:
-    """Strict storage DTOs must reject values that narrow or wrap on shard write."""
+    """Storage DTOs reject wrong JSON types, nonfinite narrowing, and integer wrap."""
 
     payload = _row_payload()
     mutate(payload)
@@ -696,6 +709,36 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
     assert reopened.games == overlay.games
 
 
+def test_normal_json_float_narrows_to_float32_bits_and_physically_reopens(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A normal JSON double need not equal its deterministic finite float32 storage."""
+
+    json_float = json.loads("0.1")
+    assert type(json_float) is float
+    assert float(np.float32(json_float)) != json_float
+    root = tmp_path / "overlay"
+    writer, _ = _new_writer(root, contract)
+    first = _game(game_id=0, partition="train", seat=0)
+    second = _game(game_id=1, partition="train", seat=1)
+    for game in (first, second):
+        _write_evidence(root, game)
+    payload = _row_payload()
+    payload["observation"] = [json_float, -0.5]
+    payload["normalized_advantage"] = json_float
+    writer.append_game(first, [payload])
+    writer.append_game(second, [_row(contract, seat=1)])
+
+    sealed = writer.seal()
+    game_manifest = json.loads(
+        (root / "games/game-00000000.json").read_text(encoding="utf-8")
+    )
+    with np.load(root / game_manifest["shard"]["path"], allow_pickle=False) as shard:
+        stored = shard["observations"][0, 0]
+        assert stored.view(np.uint32).item() == 0x3DCCCCCD
+    assert open_dagger_overlay(root).content_identity == sealed.content_identity
+
+
 def test_overlay_writer_revalidates_direct_dataset_identity_instances(
     tmp_path: Path, contract: EnvironmentContract,
 ) -> None:
@@ -773,13 +816,40 @@ def test_overlay_writer_rejects_evidence_symlink_escape_when_supported(
     outside.write_text("outside\n", encoding="utf-8")
     link = root / game.replay_path
     link.unlink()
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlink creation unavailable: {exc}")
+    _symlink_or_skip_windows_privilege(link, outside)
 
     with pytest.raises(ValueError, match="contained"):
         writer.append_game(game, [_row(contract, seat=0)])
+
+
+def test_overlay_reopen_rejects_outer_manifest_symlink_escape_when_supported(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """The expected manifest name must not bless an outside resolved target."""
+
+    root = tmp_path / "overlay"
+    _seal_pair(root, contract)
+    manifest = root / "manifest.json"
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    _symlink_or_skip_windows_privilege(manifest, outside)
+
+    with pytest.raises(ValueError, match="contained"):
+        open_dagger_overlay(root)
+
+
+def test_overlay_reopen_rejects_outer_manifest_directory(
+    tmp_path: Path,
+) -> None:
+    """The outer manifest must cross the contained-file boundary before parsing."""
+
+    root = tmp_path / "overlay"
+    root.mkdir()
+    (root / "manifest.json").mkdir()
+
+    with pytest.raises(ValueError, match="contained file"):
+        open_dagger_overlay(root)
 
 
 @pytest.mark.parametrize(

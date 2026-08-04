@@ -83,7 +83,12 @@ def _strict_int32(value: Any, label: str, *, minimum: int | None = None) -> int:
     return parsed
 
 
-def _strict_float32(value: Any, label: str) -> float:
+def _strict_json_float_for_float32(value: Any, label: str) -> float:
+    """Validate a JSON float can be deterministically narrowed to finite float32.
+
+    The binary64 JSON value need not equal the widened float32 storage value.
+    """
+
     if type(value) is not float or not math.isfinite(value):
         raise ValueError(f"{label} must be an exact finite float")
     with np.errstate(over="ignore"):
@@ -374,7 +379,9 @@ class DaggerRow:
         if any(type(item) is not float for item in raw_observation):
             raise ValueError("DAgger row observation values are invalid")
         observation = tuple(
-            _strict_float32(item, "DAgger row observation float32 value")
+            _strict_json_float_for_float32(
+                item, "DAgger row observation float32 value",
+            )
             for item in raw_observation
         )
         raw_mask = fields["legal_mask"]
@@ -408,7 +415,7 @@ class DaggerRow:
         state_hash = fields["state_hash"]
         if not isinstance(state_hash, str) or _STATE_HASH_PATTERN.fullmatch(state_hash) is None:
             raise ValueError("DAgger row state hash is invalid")
-        advantage = _strict_float32(
+        advantage = _strict_json_float_for_float32(
             fields["normalized_advantage"], "DAgger row normalized advantage",
         )
         disagreement = fields["disagreement"]
@@ -995,7 +1002,8 @@ class DaggerOverlayWriter:
 
 def open_dagger_overlay(root: Path) -> DaggerOverlay:
     root = Path(root)
-    manifest = _read_json(root / "manifest.json")
+    manifest_path = _contained_file(root, "manifest.json", "outer manifest")
+    manifest = _read_json(manifest_path)
     logical = DaggerOverlayManifest.from_dict(manifest)
     _strict_int(manifest["observation_size"], "observation_size", minimum=1)
     _strict_int(manifest["action_size"], "action_size", minimum=1)
