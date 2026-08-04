@@ -13,8 +13,11 @@ from typing import Any
 import numpy as np
 import pytest
 
+import ml_lab.dagger as dagger_module
 from ml_lab.contracts import EnvironmentContract
+from ml_lab.controllers import ControllerSpec, ResolvedController
 from ml_lab.dagger import (
+    CollectionDefinition,
     DaggerGame,
     DaggerOverlay,
     DaggerOverlayManifest,
@@ -25,6 +28,8 @@ from ml_lab.dagger import (
     OverlayDefinition,
     OracleSpec,
     SEED_DEFINITIONS,
+    ScheduledDuel,
+    collect_selective_dagger,
     open_dagger_overlay,
     publish_dagger_overlay,
     publish_dagger_overlays,
@@ -63,7 +68,16 @@ def contract() -> EnvironmentContract:
                 "move": {"offset": 1, "count": 2},
                 "attack": {"offset": 3, "count": 2},
                 "deploy": {"offset": 5, "count": 2},
-            }
+            },
+            "start_profiles": [
+                {"id": "standard-3v3"},
+                {"id": "conversion-3v1-near"},
+                {"id": "conversion-3v1-far"},
+                {"id": "conversion-2v1-near"},
+                {"id": "conversion-2v1-far"},
+                {"id": "conversion-1v1-near"},
+                {"id": "conversion-1v1-far"},
+            ],
         },
     )
 
@@ -1439,3 +1453,687 @@ def test_paired_publication_preflights_existing_destination_conflicts(
         )
     assert train_staging.is_dir()
     assert not train_destination.exists()
+
+
+class _DeterministicModel:
+    def __init__(self, events: list[tuple[str, Any]]) -> None:
+        self.events = events
+
+    def predict(
+        self, observation: np.ndarray, *, action_masks: np.ndarray,
+        deterministic: bool,
+    ) -> tuple[np.ndarray, None]:
+        self.events.append(("predict", {
+            "observation": observation.tolist(),
+            "mask": action_masks.tolist(),
+            "deterministic": deterministic,
+        }))
+        return np.asarray(1), None
+
+
+def _collection_inputs(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    *,
+    partition: str = "train",
+) -> tuple[CollectionDefinition, ResolvedController, OracleSpec]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    checkpoint = tmp_path / f"{partition}-actor.zip"
+    checkpoint.write_bytes(b"frozen actor")
+    source_run = tmp_path / f"{partition}-source-run"
+    source_run.mkdir()
+    source_manifest = source_run / "run.json"
+    source_manifest.write_text('{"status":"completed"}\n', encoding="utf-8")
+    identity = LearnerIdentity.from_dict({
+        "checkpoint_path": str(checkpoint.resolve()),
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "source_run": str(source_run.resolve()),
+        "source_manifest_sha256": hashlib.sha256(
+            source_manifest.read_bytes()
+        ).hexdigest(),
+    })
+    oracle = OracleSpec.from_dict(_oracle_payload())
+    definition = CollectionDefinition.create(
+        contract=contract,
+        partition=partition,
+        iteration=1,
+        oracle=oracle,
+        learner=identity,
+        original_dataset=OriginalDatasetIdentity.from_dict(_dataset_payload()),
+        scenario_hash=HASHES["1"],
+        repository_hash=HASHES["2"],
+        panel_hash=HASHES["3"],
+    )
+    resolved = ResolvedController(
+        spec=ControllerSpec(
+            kind="run", path=source_run,
+            algorithm="maskable_ppo", inference_mode="deterministic",
+        ),
+        server_controller="external",
+        model=_DeterministicModel([]),
+        path=checkpoint,
+        algorithm="maskable_ppo",
+        step=38_912,
+        contract=contract,
+        observation_size=contract.observation_size,
+        action_size=contract.action_size,
+        legacy=False,
+        promotable=True,
+    )
+    return definition, resolved, oracle
+
+
+def _engine_dagger_row(
+    *,
+    game_index: int,
+    decision_index: int,
+    seat: int,
+    teacher_action: int,
+    expansion_count: int,
+    state_hash: str | None = None,
+) -> dict[str, Any]:
+    teacher_kind = "move" if teacher_action == 1 else "attack"
+    return {
+        "Observation": [0.25, -0.5],
+        "LegalMask": [True, True, False, True, False, True, False],
+        "LearnerAction": 1,
+        "LearnerCommand": _command("move", seat),
+        "TeacherAction": teacher_action,
+        "TeacherCommand": _command(teacher_kind, seat),
+        "Reasons": 15,
+        "StateHash": state_hash or f"{game_index * 100_000 + decision_index + 1:064x}",
+        "NormalizedAdvantage": 0.25,
+        "OpponentLivingUnitCount": 1,
+        "ProductiveLegalActionCount": 2,
+        "Seat": seat,
+        "Round": 4,
+        "DecisionIndex": decision_index,
+        "Disagreement": teacher_action != 1,
+        "OracleDepth": 4,
+        "OracleExpansionBudget": 512,
+        "OracleHeuristicIdentity": "material-plus-pursuit-v1",
+        "OracleActualExpansionCount": expansion_count,
+    }
+
+
+class _CollectionClient:
+    def __init__(
+        self,
+        contract: EnvironmentContract,
+        *,
+        rows_per_game: int = 0,
+        duplicate_states: bool = False,
+        terminal_on_reset: bool = False,
+        write_replay: bool = True,
+    ) -> None:
+        self.contract = contract
+        self.rows_per_game = rows_per_game
+        self.duplicate_states = duplicate_states
+        self.terminal_on_reset = terminal_on_reset
+        self.write_replay = write_replay
+        self.events: list[tuple[str, Any]] = []
+        self.game_index = -1
+        self.learner_seat = 0
+
+    def configure_dagger(self, **kwargs: Any) -> None:
+        self.events.append(("configure_dagger", kwargs))
+
+    def enable_trace(self, enabled: bool) -> None:
+        self.events.append(("enable_trace", enabled))
+
+    def reset(self, **kwargs: Any) -> dict[str, Any]:
+        self.game_index += 1
+        self.learner_seat = kwargs["learner"]
+        assert self.learner_seat in {0, 1}
+        assert (kwargs["p0"], kwargs["p1"])[self.learner_seat] == "external"
+        self.events.append(("reset", kwargs))
+        return {
+            "obs": [0.25, -0.5],
+            "mask": [True, True, False, True, False, True, False],
+            "seat": self.learner_seat,
+            "winner": self.learner_seat if self.terminal_on_reset else -1,
+            "terminated": self.terminal_on_reset,
+            "truncated": False,
+            "start_profile": kwargs["start_profile"],
+            "reference_seat": kwargs["reference_seat"],
+        }
+
+    def step(self, action: int) -> dict[str, Any]:
+        self.events.append(("step", action))
+        return {
+            "obs": [0.25, -0.5],
+            "mask": [True, True, False, True, False, True, False],
+            "seat": self.learner_seat,
+            "winner": self.learner_seat,
+            "terminated": True,
+            "truncated": False,
+        }
+
+    def drain_trace(self):
+        from ml_lab.tactical_trace import EpisodeTrace
+
+        self.events.append(("drain_trace", None))
+        return EpisodeTrace.from_payload(
+            _terminal_trace(winner=self.learner_seat)
+        )
+
+    def save_replay(self, path: Path) -> Path:
+        self.events.append(("save_replay", path))
+        if self.write_replay:
+            path.write_text("HEXWARS-REPLAY 1\n", encoding="utf-8")
+        return path
+
+    def drain_dagger(self) -> list[dict[str, Any]]:
+        self.events.append(("drain_dagger", None))
+        if self.duplicate_states:
+            duplicate = HASHES["e"]
+            return [
+                _engine_dagger_row(
+                    game_index=self.game_index, decision_index=index,
+                    seat=self.learner_seat, teacher_action=3,
+                    expansion_count=17, state_hash=duplicate,
+                )
+                for index in range(2)
+            ]
+        teacher_action = 1 if self.game_index % 2 == 0 else 3
+        expansion_count = 5 if teacher_action == 1 else 10
+        return [
+            _engine_dagger_row(
+                game_index=self.game_index, decision_index=index,
+                seat=self.learner_seat, teacher_action=teacher_action,
+                expansion_count=expansion_count,
+            )
+            for index in range(self.rows_per_game)
+        ]
+
+    def close(self) -> None:
+        self.events.append(("close", None))
+
+
+def _progress_payloads(lines: list[str]) -> list[dict[str, Any]]:
+    assert all(line.endswith("\n") for line in lines)
+    return [json.loads(line) for line in lines]
+
+
+def test_collection_schedule_is_frozen_reciprocal_residual_and_seed_bound(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A yield-driven or independently rounded schedule would change this literal prefix."""
+
+    definition, _, _ = _collection_inputs(tmp_path, contract)
+    assert isinstance(definition.schedule[0], ScheduledDuel)
+    assert len(definition.schedule) == 2_000
+    assert [duel.profile for duel in definition.schedule[::2][:10]] == [
+        "conversion-3v1-near",
+        "standard-3v3",
+        "standard-3v3",
+        "conversion-3v1-far",
+        "standard-3v3",
+        "standard-3v3",
+        "conversion-2v1-near",
+        "standard-3v3",
+        "standard-3v3",
+        "standard-3v3",
+    ]
+    for offset in range(0, len(definition.schedule), 20):
+        profiles = [duel.profile for duel in definition.schedule[offset:offset + 20:2]]
+        assert profiles.count("standard-3v3") == 7
+        assert sum(profile != "standard-3v3" for profile in profiles) == 3
+    for pair_index in range(1_000):
+        first, second = definition.schedule[2 * pair_index:2 * pair_index + 2]
+        assert (first.learner_seat, second.learner_seat) == (0, 1)
+        assert (first.reference_seat, second.reference_seat) == (0, 1)
+        assert first.map_seed == second.map_seed == 18_000_000 + pair_index
+        assert first.episode_seed == second.episode_seed == first.map_seed
+        assert first.schedule_index == second.schedule_index == pair_index
+        assert first.profile == second.profile
+    with pytest.raises(FrozenInstanceError):
+        definition.schedule[0].profile = "standard-3v3"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        definition.partition = "validation"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="seats"):
+        ScheduledDuel(
+            schedule_index=0,
+            map_seed=18_000_000,
+            episode_seed=18_000_000,
+            profile="standard-3v3",
+            reference_seat=True,  # type: ignore[arg-type]
+            learner_seat=1,
+        )
+
+
+def test_train_collection_runs_both_seats_executes_only_learner_and_reports_progress(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Executing the teacher action or dropping agreements changes physical rows and steps."""
+
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    model_events: list[tuple[str, Any]] = []
+    object.__setattr__(learner, "model", _DeterministicModel(model_events))
+    client = _CollectionClient(contract, rows_per_game=10_000)
+    lines: list[str] = []
+    destination = tmp_path / "train-overlay"
+
+    overlay = collect_selective_dagger(
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        output_root=destination,
+        client_factory=lambda: client,
+        progress=lines.append,
+    )
+
+    assert overlay.row_count == 20_000
+    assert [game.learner_seat for game in overlay.games] == [0, 1]
+    assert [event for event in client.events if event[0] == "step"] == [
+        ("step", 1), ("step", 1),
+    ]
+    assert [event[1]["deterministic"] for event in model_events] == [True, True]
+    assert sum(
+        descriptor.row_count for descriptor in overlay.manifest.games
+    ) == 20_000
+    with np.load(
+        destination / json.loads((destination / "games/game-00000000.json").read_text(
+            encoding="utf-8"
+        ))["shard"]["path"],
+        allow_pickle=False,
+    ) as first_shard:
+        assert np.count_nonzero(
+            first_shard["actions"] == first_shard["learner_actions"]
+        ) == 10_000
+    names = [name for name, _ in client.events]
+    assert names == [
+        "configure_dagger", "enable_trace", "reset", "step", "drain_trace",
+        "save_replay", "drain_dagger",
+        "configure_dagger", "enable_trace", "reset", "step", "drain_trace",
+        "save_replay", "drain_dagger", "close",
+    ]
+    resets = [payload for name, payload in client.events if name == "reset"]
+    assert [(call["p0"], call["p1"], call["reference_seat"]) for call in resets] == [
+        ("external", "random", 0),
+        ("random", "external", 1),
+    ]
+    assert [call["learner"] for call in resets] == [0, 1]
+    configured = [payload for name, payload in client.events if name == "configure_dagger"]
+    assert configured == [{
+        "enabled": True, "depth": 4, "expansion_budget": 512,
+        "use_heuristic": True,
+    }] * 2
+
+    progress = _progress_payloads(lines)
+    assert [item["event"] for item in progress] == ["game", "game", "pair"]
+    assert [item["games"] for item in progress] == [1, 2, 2]
+    assert [item["labels"] for item in progress] == [10_000, 20_000, 20_000]
+    assert [item["new_games"] for item in progress] == [1, 2, 2]
+    assert progress[-1]["pair_complete"] is True
+    assert progress[-1]["disagreements"] == 10_000
+    assert progress[-1]["reason_counts"] == {
+        "conversion": 20_000,
+        "favorable": 20_000,
+        "cycle_warning": 20_000,
+        "action_waste": 20_000,
+    }
+    assert progress[-1]["mean_expansions"] == 7.5
+    assert progress[-1]["max_expansions"] == 10
+    assert set(progress[-1]) == {
+        "event", "partition", "iteration", "games", "labels",
+        "reason_counts", "disagreements", "mean_expansions",
+        "max_expansions", "labels_per_second", "elapsed_seconds",
+        "eta_seconds", "pair_index", "pair_complete", "new_games",
+    }
+    assert all(
+        earlier["elapsed_seconds"] <= later["elapsed_seconds"]
+        for earlier, later in zip(progress, progress[1:])
+    )
+    for field in ("games", "labels", "disagreements", "new_games"):
+        assert [item[field] for item in progress] == sorted(
+            item[field] for item in progress
+        )
+    for reason in (
+        "conversion", "favorable", "cycle_warning", "action_waste",
+    ):
+        assert [item["reason_counts"][reason] for item in progress] == sorted(
+            item["reason_counts"][reason] for item in progress
+        )
+    assert progress[-1]["labels_per_second"] >= 0.0
+    assert progress[-1]["eta_seconds"] == 0.0
+
+    reuse_lines: list[str] = []
+    reused = collect_selective_dagger(
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        output_root=destination,
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("runtime was opened during exact reuse")
+        ),
+        progress=reuse_lines.append,
+    )
+    assert reused.content_identity == overlay.content_identity
+    assert _progress_payloads(reuse_lines)[0]["new_games"] == 0
+
+    mismatched = CollectionDefinition.create(
+        contract=contract,
+        partition="train",
+        iteration=1,
+        oracle=oracle,
+        learner=definition.learner,
+        original_dataset=definition.original_dataset,
+        scenario_hash=definition.scenario_hash,
+        repository_hash=HASHES["9"],
+        panel_hash=definition.panel_hash,
+    )
+    with pytest.raises(ValueError, match="existing collection destination"):
+        collect_selective_dagger(
+            definition=mismatched,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("identity mismatch opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+
+    crashed_destination = tmp_path / "crashed-overlay"
+    crashed_staging = tmp_path / "crashed-overlay.staging"
+    destination.rename(crashed_staging)
+    resumed_lines: list[str] = []
+    resumed = collect_selective_dagger(
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        output_root=crashed_destination,
+        client_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("completed staging opened a runtime")
+        ),
+        progress=resumed_lines.append,
+    )
+    assert resumed.root == crashed_destination.resolve()
+    assert not crashed_staging.exists()
+    assert _progress_payloads(resumed_lines)[0]["new_games"] == 0
+
+
+def test_validation_collection_stops_at_target_only_after_complete_pair(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Stopping at the first 1,000-label game would publish an incomplete reciprocal pair."""
+
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition="validation",
+    )
+    client = _CollectionClient(contract, rows_per_game=1_000)
+    overlay = collect_selective_dagger(
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        output_root=tmp_path / "validation-overlay",
+        client_factory=lambda: client,
+        progress=lambda _line: None,
+    )
+    assert overlay.row_count == 2_000
+    assert len(overlay.games) == 2
+    assert {game.map_seed for game in overlay.games} == {19_000_000}
+
+
+def test_collection_reset_rpc_sets_authoritative_observer_learner_seat(
+    contract: EnvironmentContract,
+) -> None:
+    """Controller placement alone cannot replace the engine learner-seat request."""
+
+    client = object.__new__(dagger_module.DuelClient)
+    client.contract = contract
+    requests: list[dict[str, Any]] = []
+
+    def rpc(request: dict[str, Any]) -> dict[str, Any]:
+        requests.append(request)
+        return {
+            "obs": [0.25, 0.5],
+            "mask": [True, True, False, True, False, True, False],
+            "reward": 0.0,
+            "terminated": False,
+            "truncated": False,
+            "seat": 1,
+            "winner": -1,
+            "start_profile": "conversion-3v1-near",
+            "reference_seat": 1,
+        }
+
+    client._rpc = rpc  # type: ignore[method-assign]
+    state = dagger_module._reset_collection_duel(
+        client,
+        seed=18_000_000,
+        p0="random",
+        p1="external",
+        learner=1,
+        start_profile="conversion-3v1-near",
+        reference_seat=1,
+    )
+    assert state["seat"] == 1
+    assert requests == [{
+        "cmd": "duel_reset",
+        "seed": 18_000_000,
+        "p0": "random",
+        "p1": "external",
+        "learner": 1,
+        "start_profile": "conversion-3v1-near",
+        "reference_seat": 1,
+    }]
+
+
+@pytest.mark.parametrize(
+    ("partition", "expected_games"),
+    [("train", 2_000), ("validation", 200)],
+)
+def test_collection_fails_at_exact_game_ceiling_when_target_is_unmet(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+    partition: str,
+    expected_games: int,
+) -> None:
+    """An off-by-one ceiling or early zero-yield abort changes the frozen experiment."""
+
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition=partition,
+    )
+    client = _CollectionClient(
+        contract, terminal_on_reset=True, write_replay=False,
+    )
+
+    class NullWriter:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+
+        def append_game(self, _game: DaggerGame, _rows: list[DaggerRow]) -> None:
+            return None
+
+        def seal(self) -> None:
+            raise AssertionError("an unmet target was sealed")
+
+    def create_writer(root: Path, **_kwargs: Any) -> NullWriter:
+        root.mkdir(parents=True)
+        return NullWriter(root)
+
+    real_atomic_write = dagger_module.atomic_write_json
+
+    def diagnostic_only(path: Path, payload: Any) -> None:
+        if path.name == "diagnostic.json":
+            real_atomic_write(path, payload)
+
+    monkeypatch.setattr(dagger_module.DaggerOverlayWriter, "create", create_writer)
+    monkeypatch.setattr(dagger_module, "atomic_write_json", diagnostic_only)
+    with pytest.raises(RuntimeError, match="label target.*game ceiling"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=tmp_path / f"{partition}-ceiling",
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert sum(name == "reset" for name, _ in client.events) == expected_games
+    assert sum(name == "drain_dagger" for name, _ in client.events) == expected_games
+
+
+def test_collection_rejects_duplicate_episode_hash_and_retains_failure_diagnostics(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Deduplicating silently would hide invalid engine evidence and make the stage reusable."""
+
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    client = _CollectionClient(contract, duplicate_states=True)
+    destination = tmp_path / "duplicate-overlay"
+    staging = tmp_path / "duplicate-overlay.staging"
+    with pytest.raises(ValueError, match="duplicate canonical state hash"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert not destination.exists()
+    assert not (staging / "manifest.json").exists()
+    diagnostic = json.loads((staging / "diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["status"] == "failed"
+    assert diagnostic["exception"]["type"] == "ValueError"
+    assert diagnostic["last_complete_pair"] is None
+    assert sorted(diagnostic["physical_files"]) == [
+        "diagnostic.json",
+        "evidence/game-00000000.replay",
+        "evidence/game-00000000.trace.json",
+    ]
+    assert sum(name == "drain_dagger" for name, _ in client.events) == 1
+    before = (staging / "diagnostic.json").read_bytes()
+    with pytest.raises(ValueError, match="staging"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("partial staging opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+    assert (staging / "diagnostic.json").read_bytes() == before
+
+
+def test_collection_failure_after_second_game_records_last_complete_pair(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A game-progress failure after seat 1 must not hide the physical complete pair."""
+
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    client = _CollectionClient(contract, rows_per_game=1)
+    destination = tmp_path / "progress-failure-overlay"
+
+    def fail_after_second_game(line: str) -> None:
+        payload = json.loads(line)
+        if payload["event"] == "game" and payload["games"] == 2:
+            raise RuntimeError("progress sink failed")
+
+    with pytest.raises(RuntimeError, match="progress sink failed"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=fail_after_second_game,
+        )
+    diagnostic = json.loads(
+        (tmp_path / "progress-failure-overlay.staging" / "diagnostic.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert diagnostic["games"] == 2
+    assert diagnostic["last_complete_pair"] == 0
+    assert not (
+        tmp_path / "progress-failure-overlay.staging" / "manifest.json"
+    ).exists()
+
+
+def test_collection_writer_creation_failure_retains_diagnostic_staging(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-directory writer failure must not leave an unexplained partial stage."""
+
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    original_create = DaggerOverlayWriter.create
+
+    def fail_after_creation(
+        cls: type[DaggerOverlayWriter], root: Path, **kwargs: Any,
+    ) -> DaggerOverlayWriter:
+        original_create(root, **kwargs)
+        raise RuntimeError("writer creation failed")
+
+    monkeypatch.setattr(
+        DaggerOverlayWriter, "create", classmethod(fail_after_creation),
+    )
+    destination = tmp_path / "writer-failure-overlay"
+    with pytest.raises(RuntimeError, match="writer creation failed"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("writer failure opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+    staging = tmp_path / "writer-failure-overlay.staging"
+    diagnostic = json.loads((staging / "diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["exception"] == {
+        "type": "RuntimeError", "message": "writer creation failed",
+    }
+    assert diagnostic["physical_files"] == ["diagnostic.json"]
+    assert not (staging / "manifest.json").exists()
+
+
+def test_collection_reuse_and_invalid_schedule_fail_before_runtime_creation(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Trusting a partial destination or a mutated schedule would launch or append games."""
+
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    partial = tmp_path / "partial-destination"
+    partial.mkdir()
+    (partial / "junk.txt").write_text("partial\n", encoding="utf-8")
+    calls = 0
+
+    def factory() -> _CollectionClient:
+        nonlocal calls
+        calls += 1
+        return _CollectionClient(contract)
+
+    with pytest.raises(ValueError, match="existing collection destination"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=partial,
+            client_factory=factory,
+            progress=lambda _line: None,
+        )
+    assert calls == 0
+
+    corrupted, other_learner, other_oracle = _collection_inputs(
+        tmp_path / "corrupted", contract,
+    )
+    object.__setattr__(corrupted, "schedule", corrupted.schedule[1:])
+    with pytest.raises(ValueError, match="collection schedule"):
+        collect_selective_dagger(
+            definition=corrupted,
+            learner=other_learner,
+            oracle=other_oracle,
+            output_root=tmp_path / "corrupt-schedule-output",
+            client_factory=factory,
+            progress=lambda _line: None,
+        )
+    assert calls == 0

@@ -8,7 +8,9 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Mapping, Sequence
+import time
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
@@ -17,7 +19,10 @@ from typing import Any
 import numpy as np
 
 from .contracts import EnvironmentContract
+from .controllers import ResolvedController, predict, validate_inference_input
+from .evaluation import DuelClient, MAX_DECISIONS_PER_GAME, validate_dagger_payload
 from .io import atomic_write_json
+from .protocol import validate_step_payload
 from .tactical_trace import EpisodeTrace
 
 
@@ -626,6 +631,253 @@ class OverlayDefinition:
             "label_target": self.label_target,
             "game_ceiling": self.game_ceiling,
         }
+
+
+@dataclass(frozen=True)
+class ScheduledDuel:
+    schedule_index: int
+    map_seed: int
+    episode_seed: int
+    profile: str
+    reference_seat: int
+    learner_seat: int
+
+    def __post_init__(self) -> None:
+        _strict_int(self.schedule_index, "scheduled duel index", minimum=0)
+        _strict_int(self.map_seed, "scheduled duel map seed", minimum=0)
+        _strict_int(self.episode_seed, "scheduled duel episode seed", minimum=0)
+        if self.profile not in _PROFILES:
+            raise ValueError("scheduled duel profile is invalid")
+        if (
+            type(self.reference_seat) is not int
+            or type(self.learner_seat) is not int
+            or self.reference_seat not in {0, 1}
+            or self.learner_seat not in {0, 1}
+        ):
+            raise ValueError("scheduled duel seats are invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schedule_index": self.schedule_index,
+            "map_seed": self.map_seed,
+            "episode_seed": self.episode_seed,
+            "profile": self.profile,
+            "reference_seat": self.reference_seat,
+            "learner_seat": self.learner_seat,
+        }
+
+
+def _freeze_contract_value(value: Any, label: str) -> Any:
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{label} keys must be strings")
+            frozen[key] = _freeze_contract_value(item, label)
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_contract_value(item, label) for item in value)
+    if value is None or type(value) in {bool, int, float, str}:
+        return value
+    raise ValueError(f"{label} contains an unsupported value")
+
+
+def _frozen_collection_contract(contract: EnvironmentContract) -> EnvironmentContract:
+    if not isinstance(contract, EnvironmentContract) or contract.version != "tactical-v2":
+        raise ValueError("collection requires a tactical-v2 contract")
+    _hash(contract.contract_hash, "collection contract hash")
+    _hash(contract.encoding_hash, "collection encoding hash")
+    _strict_int(contract.observation_size, "collection observation size", minimum=1)
+    _strict_int(contract.action_size, "collection action size", minimum=1)
+    frozen = EnvironmentContract(
+        version=contract.version,
+        contract_hash=contract.contract_hash,
+        encoding_hash=contract.encoding_hash,
+        observation_size=contract.observation_size,
+        action_size=contract.action_size,
+        board=_freeze_contract_value(contract.board, "collection board"),
+        roster=tuple(contract.roster),  # type: ignore[arg-type]
+        reward=_freeze_contract_value(contract.reward, "collection reward"),
+        semantics=_freeze_contract_value(contract.semantics, "collection semantics"),
+    )
+    _action_regions(frozen)
+    return frozen
+
+
+def _declared_collection_profiles(contract: EnvironmentContract) -> tuple[str, ...]:
+    raw = contract.semantics.get("start_profiles")
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError("collection contract has no declared start profiles")
+    profiles: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"collection start profile {index} is invalid")
+        profile = item.get("id")
+        if not isinstance(profile, str) or profile not in _PROFILES:
+            raise ValueError(f"collection start profile {index} is invalid")
+        profiles.append(profile)
+    if (
+        profiles[0] != "standard-3v3"
+        or len(profiles) != len(set(profiles))
+        or set(profiles) != set(_PROFILES)
+    ):
+        raise ValueError("collection start profile catalog is incomplete or duplicated")
+    return tuple(profiles)
+
+
+def _seed_range(partition: str, iteration: int) -> tuple[int, int]:
+    matches = [
+        (start, stop)
+        for candidate, candidate_iteration, start, stop in SEED_DEFINITIONS
+        if (candidate, candidate_iteration) == (partition, iteration)
+    ]
+    if len(matches) != 1:
+        raise ValueError("collection seed partition or iteration is unknown")
+    return matches[0]
+
+
+def _collection_schedule(
+    *,
+    partition: str,
+    iteration: int,
+    game_ceiling: int,
+    conversion_profiles: tuple[str, ...],
+) -> tuple[ScheduledDuel, ...]:
+    if game_ceiling % 2:
+        raise ValueError("collection game ceiling must contain complete reciprocal pairs")
+    start, stop = _seed_range(partition, iteration)
+    pair_count = game_ceiling // 2
+    if start + pair_count - 1 > stop:
+        raise ValueError("collection seed range is too small for the complete schedule")
+    scheduled: list[ScheduledDuel] = []
+    standard_residual = 0
+    conversion_index = 0
+    for pair_index in range(pair_count):
+        standard_residual += 7
+        standard_count = standard_residual // 10
+        standard_residual -= standard_count * 10
+        if standard_count:
+            profile = "standard-3v3"
+        else:
+            profile = conversion_profiles[conversion_index % len(conversion_profiles)]
+            conversion_index += 1
+        seed = start + pair_index
+        for learner_seat in (0, 1):
+            scheduled.append(ScheduledDuel(
+                schedule_index=pair_index,
+                map_seed=seed,
+                episode_seed=seed,
+                profile=profile,
+                reference_seat=learner_seat,
+                learner_seat=learner_seat,
+            ))
+    return tuple(scheduled)
+
+
+def _schedule_identity(schedule: Sequence[ScheduledDuel]) -> str:
+    payload = json.dumps(
+        [duel.to_dict() for duel in schedule],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True)
+class CollectionDefinition:
+    contract: EnvironmentContract
+    partition: str
+    iteration: int
+    oracle: OracleSpec
+    learner: LearnerIdentity
+    original_dataset: OriginalDatasetIdentity
+    scenario_hash: str
+    repository_hash: str
+    panel_hash: str
+    conversion_profiles: tuple[str, ...]
+    schedule: tuple[ScheduledDuel, ...]
+    schedule_hash: str
+    label_target: int
+    game_ceiling: int
+    overlay_definition: OverlayDefinition
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        contract: EnvironmentContract,
+        partition: str,
+        iteration: int,
+        oracle: OracleSpec,
+        learner: LearnerIdentity,
+        original_dataset: OriginalDatasetIdentity,
+        scenario_hash: str,
+        repository_hash: str,
+        panel_hash: str,
+    ) -> "CollectionDefinition":
+        if partition not in {"train", "validation"}:
+            raise ValueError("collection partition is invalid")
+        if type(iteration) is not int or iteration not in {1, 2, 3}:
+            raise ValueError("collection iteration is invalid")
+        frozen_contract = _frozen_collection_contract(contract)
+        canonical_oracle = OracleSpec.from_dict(oracle.to_dict())
+        canonical_learner = LearnerIdentity.from_dict(learner.to_dict())
+        canonical_dataset = OriginalDatasetIdentity.from_dict(
+            original_dataset.to_dict()
+        )
+        declared = _declared_collection_profiles(frozen_contract)
+        conversions = tuple(
+            profile for profile in declared if profile != "standard-3v3"
+        )
+        label_target, game_ceiling = (
+            (20_000, 2_000) if partition == "train" else (2_000, 200)
+        )
+        schedule = _collection_schedule(
+            partition=partition,
+            iteration=iteration,
+            game_ceiling=game_ceiling,
+            conversion_profiles=conversions,
+        )
+        schedule_hash = _schedule_identity(schedule)
+        overlay = OverlayDefinition.from_dict({
+            "partition": partition,
+            "iteration": iteration,
+            "observation_size": frozen_contract.observation_size,
+            "action_size": frozen_contract.action_size,
+            "action_regions": _regions_to_dict(_action_regions(frozen_contract)),
+            "oracle": canonical_oracle.to_dict(),
+            "learner": canonical_learner.to_dict(),
+            "original_dataset": canonical_dataset.to_dict(),
+            "scenario_hash": _hash(scenario_hash, "collection scenario hash"),
+            "contract_hash": frozen_contract.contract_hash,
+            "encoding_hash": frozen_contract.encoding_hash,
+            "repository_hash": _hash(
+                repository_hash, "collection repository hash"
+            ),
+            "panel_hash": _hash(panel_hash, "collection panel hash"),
+            "schedule_hash": schedule_hash,
+            "label_target": label_target,
+            "game_ceiling": game_ceiling,
+        })
+        return cls(
+            frozen_contract,
+            partition,
+            iteration,
+            canonical_oracle,
+            canonical_learner,
+            canonical_dataset,
+            overlay.scenario_hash,
+            overlay.repository_hash,
+            overlay.panel_hash,
+            conversions,
+            schedule,
+            schedule_hash,
+            label_target,
+            game_ceiling,
+            overlay,
+        )
 
 
 @dataclass(frozen=True)
@@ -1510,3 +1762,616 @@ def _read_and_validate_shard(
         if row.seat != game.learner_seat:
             raise ValueError("physical row seat does not match game")
     return arrays
+
+
+_REASON_NAMES: tuple[tuple[int, str], ...] = (
+    (1, "conversion"),
+    (2, "favorable"),
+    (4, "cycle_warning"),
+    (8, "action_waste"),
+)
+
+
+def _validate_collection_definition(definition: CollectionDefinition) -> None:
+    if not isinstance(definition, CollectionDefinition):
+        raise ValueError("collection definition is invalid")
+    try:
+        expected = CollectionDefinition.create(
+            contract=definition.contract,
+            partition=definition.partition,
+            iteration=definition.iteration,
+            oracle=definition.oracle,
+            learner=definition.learner,
+            original_dataset=definition.original_dataset,
+            scenario_hash=definition.scenario_hash,
+            repository_hash=definition.repository_hash,
+            panel_hash=definition.panel_hash,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("collection schedule or immutable definition is invalid") from exc
+    if definition != expected:
+        raise ValueError("collection schedule or immutable definition is invalid")
+
+
+def _validate_collection_learner(
+    definition: CollectionDefinition, learner: ResolvedController,
+) -> None:
+    if not isinstance(learner, ResolvedController):
+        raise ValueError("collection learner is not a resolved controller")
+    if (
+        learner.spec.inference_mode != "deterministic"
+        or learner.model is None
+        or learner.algorithm is None
+        or learner.path is None
+        or learner.server_controller != "external"
+    ):
+        raise ValueError("collection learner must be deterministic external inference")
+    try:
+        checkpoint = Path(learner.path).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("collection learner checkpoint is missing") from exc
+    identity = definition.learner
+    if (
+        checkpoint != Path(identity.checkpoint_path).resolve()
+        or _sha256_file(checkpoint) != identity.checkpoint_sha256
+    ):
+        raise ValueError("collection learner checkpoint identity changed")
+    source_run = (
+        learner.spec.path
+        if learner.spec.kind == "run"
+        else learner.spec.source_run
+    )
+    if source_run is None:
+        raise ValueError("collection learner source run is missing")
+    try:
+        resolved_source = Path(source_run).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("collection learner source run is missing") from exc
+    source_manifest = resolved_source / "run.json"
+    if (
+        str(resolved_source) != identity.source_run
+        or not source_manifest.is_file()
+        or _sha256_file(source_manifest) != identity.source_manifest_sha256
+    ):
+        raise ValueError("collection learner source manifest identity changed")
+    contract = learner.contract
+    expected = definition.contract
+    if (
+        not isinstance(contract, EnvironmentContract)
+        or contract.version != expected.version
+        or contract.contract_hash != expected.contract_hash
+        or contract.encoding_hash != expected.encoding_hash
+        or learner.observation_size != expected.observation_size
+        or learner.action_size != expected.action_size
+    ):
+        raise ValueError("collection learner contract identity changed")
+
+
+def _validate_collection_client(
+    definition: CollectionDefinition, client: DuelClient,
+) -> None:
+    contract = getattr(client, "contract", None)
+    expected = definition.contract
+    if (
+        not isinstance(contract, EnvironmentContract)
+        or contract.version != expected.version
+        or contract.contract_hash != expected.contract_hash
+        or contract.encoding_hash != expected.encoding_hash
+        or contract.observation_size != expected.observation_size
+        or contract.action_size != expected.action_size
+        or _action_regions(contract) != _action_regions(expected)
+        or _declared_collection_profiles(contract)
+        != ("standard-3v3", *definition.conversion_profiles)
+    ):
+        raise ValueError("collection runtime contract identity changed")
+
+
+def _require_collection_overlay(
+    overlay: DaggerOverlay, definition: CollectionDefinition,
+) -> None:
+    _require_expected_definition(overlay, definition.overlay_definition)
+    if (
+        overlay.row_count < definition.label_target
+        or not overlay.games
+        or len(overlay.games) % 2
+        or len(overlay.games) > definition.game_ceiling
+    ):
+        raise ValueError("completed collection overlay did not reach its target")
+    for game_id, (game, scheduled) in enumerate(zip(
+        overlay.games, definition.schedule[:len(overlay.games)], strict=True,
+    )):
+        if (
+            game.game_id != game_id
+            or game.map_seed != scheduled.map_seed
+            or game.episode_seed != scheduled.episode_seed
+            or game.schedule_index != scheduled.schedule_index
+            or game.profile != scheduled.profile
+            or game.reference_seat != scheduled.reference_seat
+            or game.learner_seat != scheduled.learner_seat
+            or game.opponent != "random"
+        ):
+            raise ValueError("completed collection overlay schedule changed")
+
+
+def _empty_collection_stats() -> dict[str, Any]:
+    return {
+        "games": 0,
+        "labels": 0,
+        "reason_counts": Counter(),
+        "disagreements": 0,
+        "expansion_total": 0,
+        "max_expansions": 0,
+        "completed_pairs": 0,
+    }
+
+
+def _update_collection_stats(
+    stats: dict[str, Any], rows: Sequence[DaggerRow],
+) -> None:
+    stats["games"] += 1
+    stats["labels"] += len(rows)
+    for row in rows:
+        for bit, name in _REASON_NAMES:
+            if row.reason_bits & bit:
+                stats["reason_counts"][name] += 1
+        stats["disagreements"] += int(row.disagreement)
+        stats["expansion_total"] += row.oracle_actual_expansion_count
+        stats["max_expansions"] = max(
+            stats["max_expansions"], row.oracle_actual_expansion_count,
+        )
+
+
+def _overlay_collection_stats(overlay: DaggerOverlay) -> dict[str, Any]:
+    stats = _empty_collection_stats()
+    for descriptor in overlay.manifest.games:
+        game_manifest = _read_json(
+            _contained_file(overlay.root, descriptor.path, "collection game manifest")
+        )
+        shard_descriptor = _strict_fields(
+            game_manifest["shard"], _SHARD_DESCRIPTOR_FIELDS,
+            "collection shard descriptor",
+        )
+        shard_path = _contained_file(
+            overlay.root, shard_descriptor["path"], "collection shard",
+        )
+        with np.load(shard_path, allow_pickle=False) as shard:
+            reason_bits = shard["reason_bits"].tolist()
+        metadata = game_manifest["row_metadata"]
+        if not isinstance(metadata, list) or len(metadata) != len(reason_bits):
+            raise ValueError("collection progress metadata is invalid")
+        stats["games"] += 1
+        stats["labels"] += len(reason_bits)
+        for bits, row_metadata in zip(reason_bits, metadata, strict=True):
+            for bit, name in _REASON_NAMES:
+                if int(bits) & bit:
+                    stats["reason_counts"][name] += 1
+            stats["disagreements"] += int(row_metadata["disagreement"])
+            expansions = row_metadata["oracle_actual_expansion_count"]
+            stats["expansion_total"] += expansions
+            stats["max_expansions"] = max(stats["max_expansions"], expansions)
+    stats["completed_pairs"] = stats["games"] // 2
+    return stats
+
+
+def _emit_collection_progress(
+    progress: Callable[[str], None],
+    *,
+    definition: CollectionDefinition,
+    stats: Mapping[str, Any],
+    event: str,
+    pair_index: int | None,
+    pair_complete: bool,
+    new_games: int,
+    started: float,
+) -> None:
+    elapsed = max(0.0, time.monotonic() - started)
+    labels = int(stats["labels"])
+    rate = labels / elapsed if elapsed > 0.0 else 0.0
+    remaining = max(0, definition.label_target - labels)
+    eta = remaining / rate if rate > 0.0 else (0.0 if remaining == 0 else None)
+    payload = {
+        "event": event,
+        "partition": definition.partition,
+        "iteration": definition.iteration,
+        "games": int(stats["games"]),
+        "labels": labels,
+        "reason_counts": {
+            name: int(stats["reason_counts"].get(name, 0))
+            for _, name in _REASON_NAMES
+        },
+        "disagreements": int(stats["disagreements"]),
+        "mean_expansions": (
+            float(stats["expansion_total"]) / labels if labels else 0.0
+        ),
+        "max_expansions": int(stats["max_expansions"]),
+        "labels_per_second": rate,
+        "elapsed_seconds": elapsed,
+        "eta_seconds": eta,
+        "pair_index": pair_index,
+        "pair_complete": pair_complete,
+        "new_games": new_games,
+    }
+    progress(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _normalized_dagger_rows(
+    raw_rows: Any,
+    *,
+    contract: EnvironmentContract,
+    oracle: OracleSpec,
+) -> list[DaggerRow]:
+    validated = validate_dagger_payload(
+        {"schema_version": 1, "decisions": raw_rows}, contract,
+    )
+    rows: list[DaggerRow] = []
+    seen_hashes: set[str] = set()
+    for raw in validated:
+        if (
+            raw["OracleDepth"] != oracle.depth
+            or raw["OracleExpansionBudget"] != oracle.expansion_budget
+            or raw["OracleHeuristicIdentity"] != oracle.heuristic_identity
+        ):
+            raise ValueError("DAgger decision oracle identity changed")
+        state_hash = raw["StateHash"]
+        if state_hash in seen_hashes:
+            raise ValueError("duplicate canonical state hash in episode")
+        seen_hashes.add(state_hash)
+        rows.append(DaggerRow.from_dict({
+            "observation": [float(value) for value in raw["Observation"]],
+            "legal_mask": list(raw["LegalMask"]),
+            "learner_action": raw["LearnerAction"],
+            "learner_command": raw["LearnerCommand"],
+            "teacher_action": raw["TeacherAction"],
+            "teacher_command": raw["TeacherCommand"],
+            "reason_bits": raw["Reasons"],
+            "state_hash": state_hash,
+            "normalized_advantage": float(raw["NormalizedAdvantage"]),
+            "opponent_living_unit_count": raw["OpponentLivingUnitCount"],
+            "productive_legal_action_count": raw["ProductiveLegalActionCount"],
+            "seat": raw["Seat"],
+            "round": raw["Round"],
+            "decision_index": raw["DecisionIndex"],
+            "disagreement": raw["Disagreement"],
+            "oracle_actual_expansion_count": raw["OracleActualExpansionCount"],
+        }, contract=contract, oracle=oracle))
+    return rows
+
+
+def _reset_collection_duel(
+    client: DuelClient,
+    *,
+    seed: int,
+    p0: str,
+    p1: str,
+    learner: int,
+    start_profile: str,
+    reference_seat: int,
+) -> dict[str, Any]:
+    """Reset with an explicit observer/reward learner seat.
+
+    The general evaluation client predates reciprocal DAgger and fixes its wire
+    learner to seat 0. Collection must set this engine field independently of
+    which controller slot is external, so the production path uses the same
+    validated RPC boundary with the authoritative scheduled seat.
+    """
+
+    if type(learner) is not int or learner not in {0, 1}:
+        raise ValueError("collection learner seat must be 0 or 1")
+    if type(reference_seat) is not int or reference_seat not in {0, 1}:
+        raise ValueError("collection reference seat must be 0 or 1")
+    if start_profile not in _declared_collection_profiles(client.contract):
+        raise ValueError("collection start profile is not declared by the runtime")
+    if isinstance(client, DuelClient):
+        request = {
+            "cmd": "duel_reset",
+            "seed": seed,
+            "p0": p0,
+            "p1": p1,
+            "learner": learner,
+            "start_profile": start_profile,
+            "reference_seat": reference_seat,
+        }
+        response = client._rpc(request)
+        validate_step_payload(
+            response,
+            observation_size=client.contract.observation_size,
+            action_size=client.contract.action_size,
+        )
+        if (
+            response.get("start_profile") != start_profile
+            or response.get("reference_seat") != reference_seat
+        ):
+            raise ValueError("collection reset did not acknowledge its schedule")
+        return response
+    return client.reset(
+        seed=seed,
+        p0=p0,
+        p1=p1,
+        learner=learner,
+        start_profile=start_profile,
+        reference_seat=reference_seat,
+    )
+
+
+def _collect_scheduled_game(
+    *,
+    client: DuelClient,
+    learner: ResolvedController,
+    oracle: OracleSpec,
+    writer: DaggerOverlayWriter,
+    definition: CollectionDefinition,
+    scheduled: ScheduledDuel,
+    game_id: int,
+) -> list[DaggerRow]:
+    client.configure_dagger(
+        enabled=True,
+        depth=oracle.depth,
+        expansion_budget=oracle.expansion_budget,
+        use_heuristic=True,
+    )
+    client.enable_trace(True)
+    seats = (
+        (learner.server_controller, "random")
+        if scheduled.learner_seat == 0 else ("random", learner.server_controller)
+    )
+    state = _reset_collection_duel(
+        client,
+        seed=scheduled.map_seed,
+        p0=seats[0],
+        p1=seats[1],
+        learner=scheduled.learner_seat,
+        start_profile=scheduled.profile,
+        reference_seat=scheduled.reference_seat,
+    )
+    if (
+        not isinstance(state, Mapping)
+        or state.get("start_profile") != scheduled.profile
+        or state.get("reference_seat") != scheduled.reference_seat
+    ):
+        raise ValueError("collection reset schedule acknowledgement changed")
+    decisions = 0
+    while not bool(state.get("terminated")) and not bool(state.get("truncated")):
+        if decisions >= MAX_DECISIONS_PER_GAME:
+            raise RuntimeError("collection game exceeded the decision ceiling")
+        if state.get("seat") != scheduled.learner_seat:
+            raise RuntimeError("collection runtime surfaced a non-learner external seat")
+        observation = np.asarray(state.get("obs"), dtype=np.float32)
+        mask = np.asarray(state.get("mask"), dtype=bool)
+        validate_inference_input(learner, observation, mask)
+        action = predict(
+            learner.model,
+            learner.algorithm,
+            observation,
+            mask,
+            deterministic=True,
+        )
+        if action < 0 or action >= mask.size or not bool(mask[action]):
+            raise RuntimeError("collection learner selected a masked action")
+        state = client.step(action)
+        decisions += 1
+    if not bool(state.get("terminated")) or bool(state.get("truncated")):
+        raise RuntimeError("collection game did not terminate authoritatively")
+    trace = client.drain_trace()
+    if (
+        not isinstance(trace, EpisodeTrace)
+        or not trace.transitions
+        or not trace.transitions[-1].after.is_game_over
+    ):
+        raise ValueError("collection trace is missing a terminal transition")
+    terminal_winner = trace.transitions[-1].after.winner
+    state_winner = state.get("winner")
+    normalized_state_winner = (
+        state_winner
+        if type(state_winner) is int and state_winner in {0, 1}
+        else None
+    )
+    if terminal_winner != normalized_state_winner:
+        raise ValueError("collection trace winner does not match runtime state")
+    trace_relative = f"evidence/game-{game_id:08d}.trace.json"
+    replay_relative = f"evidence/game-{game_id:08d}.replay"
+    atomic_write_json(writer.root / trace_relative, trace.to_dict())
+    client.save_replay(writer.root / replay_relative)
+    rows = _normalized_dagger_rows(
+        client.drain_dagger(), contract=definition.contract, oracle=oracle,
+    )
+    outcome = (
+        "draw" if terminal_winner is None
+        else "win" if terminal_winner == scheduled.learner_seat
+        else "loss"
+    )
+    game = DaggerGame.from_dict({
+        "game_id": game_id,
+        "partition": definition.partition,
+        "iteration": definition.iteration,
+        "map_seed": scheduled.map_seed,
+        "episode_seed": scheduled.episode_seed,
+        "schedule_index": scheduled.schedule_index,
+        "profile": scheduled.profile,
+        "reference_seat": scheduled.reference_seat,
+        "learner_seat": scheduled.learner_seat,
+        "opponent": "random",
+        "outcome": outcome,
+        "transition_count": len(trace.transitions),
+        "trace_path": trace_relative,
+        "replay_path": replay_relative,
+    })
+    writer.append_game(game, rows)
+    return rows
+
+
+def _write_collection_failure(
+    staging: Path,
+    *,
+    error: BaseException,
+    definition: CollectionDefinition,
+    stats: Mapping[str, Any],
+) -> None:
+    if not staging.exists():
+        return
+    (staging / "manifest.json").unlink(missing_ok=True)
+    files = sorted(
+        path.relative_to(staging).as_posix()
+        for path in staging.rglob("*")
+        if path.is_file() and path.name != "diagnostic.json"
+    )
+    files.append("diagnostic.json")
+    atomic_write_json(staging / "diagnostic.json", {
+        "schema_version": 1,
+        "status": "failed",
+        "partition": definition.partition,
+        "iteration": definition.iteration,
+        "exception": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "games": int(stats["games"]),
+        "labels": int(stats["labels"]),
+        "last_complete_pair": (
+            int(stats["completed_pairs"]) - 1
+            if stats["completed_pairs"] else None
+        ),
+        "physical_files": sorted(files),
+    })
+
+
+def collect_selective_dagger(
+    *,
+    definition: CollectionDefinition,
+    learner: ResolvedController,
+    oracle: OracleSpec,
+    output_root: Path,
+    client_factory: Callable[[], DuelClient],
+    progress: Callable[[str], None],
+) -> DaggerOverlay:
+    """Collect one deterministic, reciprocal, immutable selective-DAgger overlay."""
+
+    started = time.monotonic()
+    _validate_collection_definition(definition)
+    if oracle != definition.oracle:
+        raise ValueError("collection oracle identity changed")
+    _validate_collection_learner(definition, learner)
+    if not callable(client_factory) or not callable(progress):
+        raise ValueError("collection runtime callbacks are invalid")
+    destination = Path(output_root).resolve()
+    if destination.exists():
+        try:
+            existing = open_dagger_overlay(destination)
+            _require_collection_overlay(existing, definition)
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "existing collection destination is not exactly reusable"
+            ) from exc
+        stats = _overlay_collection_stats(existing)
+        _emit_collection_progress(
+            progress,
+            definition=definition,
+            stats=stats,
+            event="reuse",
+            pair_index=len(existing.games) // 2 - 1,
+            pair_complete=True,
+            new_games=0,
+            started=started,
+        )
+        return existing
+
+    staging = destination.with_name(destination.name + ".staging")
+    if staging.exists():
+        try:
+            candidate = open_dagger_overlay(staging)
+            _require_collection_overlay(candidate, definition)
+            resumed = publish_dagger_overlay(
+                staging, destination, expected=definition.overlay_definition,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "collection staging exists but is not exactly reusable"
+            ) from exc
+        stats = _overlay_collection_stats(resumed)
+        _emit_collection_progress(
+            progress,
+            definition=definition,
+            stats=stats,
+            event="reuse",
+            pair_index=len(resumed.games) // 2 - 1,
+            pair_complete=True,
+            new_games=0,
+            started=started,
+        )
+        return resumed
+    stats = _empty_collection_stats()
+    writer: DaggerOverlayWriter | None = None
+    client: DuelClient | None = None
+    try:
+        writer = DaggerOverlayWriter.create(
+            staging,
+            contract=definition.contract,
+            partition=definition.partition,
+            iteration=definition.iteration,
+            oracle=definition.oracle,
+            learner=definition.learner,
+            original_dataset=definition.original_dataset,
+            scenario_hash=definition.scenario_hash,
+            repository_hash=definition.repository_hash,
+            panel_hash=definition.panel_hash,
+            schedule_hash=definition.schedule_hash,
+            label_target=definition.label_target,
+            game_ceiling=definition.game_ceiling,
+        )
+        client = client_factory()
+        _validate_collection_client(definition, client)
+        for game_id, scheduled in enumerate(definition.schedule):
+            rows = _collect_scheduled_game(
+                client=client,
+                learner=learner,
+                oracle=oracle,
+                writer=writer,
+                definition=definition,
+                scheduled=scheduled,
+                game_id=game_id,
+            )
+            _update_collection_stats(stats, rows)
+            if scheduled.learner_seat == 1:
+                stats["completed_pairs"] += 1
+            _emit_collection_progress(
+                progress,
+                definition=definition,
+                stats=stats,
+                event="game",
+                pair_index=scheduled.schedule_index,
+                pair_complete=scheduled.learner_seat == 1,
+                new_games=stats["games"],
+                started=started,
+            )
+            if scheduled.learner_seat == 1:
+                _emit_collection_progress(
+                    progress,
+                    definition=definition,
+                    stats=stats,
+                    event="pair",
+                    pair_index=scheduled.schedule_index,
+                    pair_complete=True,
+                    new_games=stats["games"],
+                    started=started,
+                )
+                if stats["labels"] >= definition.label_target:
+                    break
+        if stats["labels"] < definition.label_target:
+            raise RuntimeError(
+                "collection label target was not reached at the game ceiling"
+            )
+        client.close()
+        client = None
+        writer.seal()
+        return publish_dagger_overlay(
+            staging, destination, expected=definition.overlay_definition,
+        )
+    except BaseException as exc:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        _write_collection_failure(
+            staging, error=exc, definition=definition, stats=stats,
+        )
+        raise
