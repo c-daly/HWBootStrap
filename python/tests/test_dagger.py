@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
@@ -1562,18 +1563,21 @@ class _CollectionClient:
         contract: EnvironmentContract,
         *,
         rows_per_game: int = 0,
+        rows_by_game: tuple[int, ...] | None = None,
         duplicate_states: bool = False,
         terminal_on_reset: bool = False,
         write_replay: bool = True,
     ) -> None:
         self.contract = contract
         self.rows_per_game = rows_per_game
+        self.rows_by_game = rows_by_game
         self.duplicate_states = duplicate_states
         self.terminal_on_reset = terminal_on_reset
         self.write_replay = write_replay
         self.events: list[tuple[str, Any]] = []
         self.game_index = -1
         self.learner_seat = 0
+        self.close_attempts = 0
 
     def configure_dagger(self, **kwargs: Any) -> None:
         self.events.append(("configure_dagger", kwargs))
@@ -1637,22 +1641,117 @@ class _CollectionClient:
             ]
         teacher_action = 1 if self.game_index % 2 == 0 else 3
         expansion_count = 5 if teacher_action == 1 else 10
+        row_count = (
+            self.rows_by_game[self.game_index]
+            if self.rows_by_game is not None
+            else self.rows_per_game
+        )
         return [
             _engine_dagger_row(
                 game_index=self.game_index, decision_index=index,
                 seat=self.learner_seat, teacher_action=teacher_action,
                 expansion_count=expansion_count,
             )
-            for index in range(self.rows_per_game)
+            for index in range(row_count)
         ]
 
     def close(self) -> None:
+        self.close_attempts += 1
         self.events.append(("close", None))
+
+
+class _RuntimeFailureClient(_CollectionClient):
+    def __init__(
+        self,
+        contract: EnvironmentContract,
+        *,
+        fail_configure_at: int | None = None,
+        fail_drain_at: int | None = None,
+        close_error: bool = False,
+        rows_per_game: int = 0,
+    ) -> None:
+        super().__init__(contract, rows_per_game=rows_per_game)
+        self.fail_configure_at = fail_configure_at
+        self.fail_drain_at = fail_drain_at
+        self.close_error = close_error
+        self.configure_calls = 0
+        self.drain_calls = 0
+
+    def configure_dagger(self, **kwargs: Any) -> None:
+        call = self.configure_calls
+        self.configure_calls += 1
+        if call == self.fail_configure_at:
+            raise RuntimeError(f"configure failed at call {call}")
+        super().configure_dagger(**kwargs)
+
+    def drain_dagger(self) -> list[dict[str, Any]]:
+        call = self.drain_calls
+        self.drain_calls += 1
+        if call == self.fail_drain_at:
+            raise RuntimeError(f"drain failed at call {call}")
+        return super().drain_dagger()
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        self.events.append(("close", None))
+        if self.close_error:
+            raise RuntimeError("close failed")
 
 
 def _progress_payloads(lines: list[str]) -> list[dict[str, Any]]:
     assert all(line.endswith("\n") for line in lines)
     return [json.loads(line) for line in lines]
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _assert_failed_collection_stage(
+    *,
+    destination: Path,
+    definition: CollectionDefinition,
+    learner: ResolvedController,
+    oracle: OracleSpec,
+    expected_type: str,
+    expected_message: str,
+    expected_last_pair: int | None,
+    expected_file_count: int,
+) -> dict[str, Any]:
+    staging = destination.with_name(destination.name + ".staging")
+    assert not destination.exists()
+    assert not (staging / "manifest.json").exists()
+    diagnostic = json.loads((staging / "diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["exception"] == {
+        "type": expected_type,
+        "message": expected_message,
+    }
+    assert diagnostic["last_complete_pair"] == expected_last_pair
+    actual_files = sorted(
+        path.relative_to(staging).as_posix()
+        for path in staging.rglob("*")
+        if path.is_file()
+    )
+    assert diagnostic["physical_files"] == actual_files
+    assert len(actual_files) == expected_file_count
+    before = _tree_bytes(staging)
+    with pytest.raises(ValueError, match="staging"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("failed staging opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+    assert _tree_bytes(staging) == before
+    return diagnostic
 
 
 def test_collection_schedule_is_frozen_reciprocal_residual_and_seed_bound(
@@ -1675,6 +1774,20 @@ def test_collection_schedule_is_frozen_reciprocal_residual_and_seed_bound(
         "standard-3v3",
         "standard-3v3",
     ]
+    conversion_cycle = [
+        "conversion-3v1-near",
+        "conversion-3v1-far",
+        "conversion-2v1-near",
+        "conversion-2v1-far",
+        "conversion-1v1-near",
+        "conversion-1v1-far",
+    ]
+    scheduled_conversions = [
+        duel.profile
+        for duel in definition.schedule[::2]
+        if duel.profile != "standard-3v3"
+    ]
+    assert scheduled_conversions[:7] == [*conversion_cycle, conversion_cycle[0]]
     for offset in range(0, len(definition.schedule), 20):
         profiles = [duel.profile for duel in definition.schedule[offset:offset + 20:2]]
         assert profiles.count("standard-3v3") == 7
@@ -1835,6 +1948,39 @@ def test_train_collection_runs_both_seats_executes_only_learner_and_reports_prog
             progress=lambda _line: None,
         )
 
+    staging = destination.with_name(destination.name + ".staging")
+    for staging_kind in ("partial", "stale", "sealed"):
+        if staging_kind == "partial":
+            staging.mkdir()
+            (staging / "junk.txt").write_text("partial\n", encoding="utf-8")
+        else:
+            shutil.copytree(destination, staging)
+            if staging_kind == "stale":
+                manifest_path = staging / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["repository_hash"] = HASHES["8"]
+                manifest["content_identity"] = _identity(manifest)
+                manifest_path.write_text(
+                    json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+        destination_before = _tree_bytes(destination)
+        staging_before = _tree_bytes(staging)
+        with pytest.raises(ValueError, match="destination.*staging.*coexist"):
+            collect_selective_dagger(
+                definition=definition,
+                learner=learner,
+                oracle=oracle,
+                output_root=destination,
+                client_factory=lambda: (_ for _ in ()).throw(
+                    AssertionError("coexisting stage opened a runtime")
+                ),
+                progress=lambda _line: None,
+            )
+        assert _tree_bytes(destination) == destination_before
+        assert _tree_bytes(staging) == staging_before
+        shutil.rmtree(staging)
+
     crashed_destination = tmp_path / "crashed-overlay"
     crashed_staging = tmp_path / "crashed-overlay.staging"
     destination.rename(crashed_staging)
@@ -1874,6 +2020,143 @@ def test_validation_collection_stops_at_target_only_after_complete_pair(
     assert overlay.row_count == 2_000
     assert len(overlay.games) == 2
     assert {game.map_seed for game in overlay.games} == {19_000_000}
+
+
+def test_validation_collection_finishes_seat_one_when_seat_zero_crosses_target(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """The target crossing in seat 0 cannot publish a half reciprocal pair."""
+
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition="validation",
+    )
+    client = _CollectionClient(contract, rows_by_game=(2_001, 0))
+    overlay = collect_selective_dagger(
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        output_root=tmp_path / "seat-zero-crossing-overlay",
+        client_factory=lambda: client,
+        progress=lambda _line: None,
+    )
+    assert overlay.row_count == 2_001
+    assert [game.learner_seat for game in overlay.games] == [0, 1]
+    assert [game.row_count for game in overlay.manifest.games] == [2_001, 0]
+    assert sum(name == "reset" for name, _ in client.events) == 2
+    assert sum(name == "drain_dagger" for name, _ in client.events) == 2
+
+
+def _delay_collection_target_until_second_pair(
+    real_update: Any,
+) -> Any:
+    def update(stats: dict[str, Any], rows: list[DaggerRow]) -> None:
+        real_update(stats, rows)
+        if stats["games"] <= 2:
+            stats["labels"] = 0
+
+    return update
+
+
+def test_collection_rejects_newly_sealed_output_that_passed_target_one_pair_early(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publication must independently verify the deterministic first crossing pair."""
+
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition="validation",
+    )
+    client = _CollectionClient(contract, rows_per_game=1_000)
+    destination = tmp_path / "newly-sealed-overrun"
+    monkeypatch.setattr(
+        dagger_module,
+        "_update_collection_stats",
+        _delay_collection_target_until_second_pair(
+            dagger_module._update_collection_stats,
+        ),
+    )
+    with pytest.raises(ValueError, match="first.*pair|pair.*boundary"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    staging = destination.with_name(destination.name + ".staging")
+    assert not destination.exists()
+    assert not (staging / "manifest.json").exists()
+    diagnostic = json.loads((staging / "diagnostic.json").read_text(encoding="utf-8"))
+    assert diagnostic["exception"]["type"] == "ValueError"
+    assert diagnostic["last_complete_pair"] == 1
+
+
+def test_collection_reuse_rejects_rehashed_extra_pair_destination_and_staging(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A physically valid extra pair is corruption even when all hashes are consistent."""
+
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition="validation",
+    )
+    corrupt_destination = tmp_path / "extra-pair-destination"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            dagger_module,
+            "_update_collection_stats",
+            _delay_collection_target_until_second_pair(
+                dagger_module._update_collection_stats,
+            ),
+        )
+        patch.setattr(
+            dagger_module,
+            "_require_collection_overlay",
+            lambda _overlay, _definition: None,
+        )
+        corrupt = collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=corrupt_destination,
+            client_factory=lambda: _CollectionClient(contract, rows_per_game=1_000),
+            progress=lambda _line: None,
+        )
+    assert len(corrupt.games) == 4
+    destination_before = _tree_bytes(corrupt_destination)
+    with pytest.raises(ValueError, match="existing collection destination"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=corrupt_destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("extra-pair destination opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+    assert _tree_bytes(corrupt_destination) == destination_before
+
+    staging_destination = tmp_path / "extra-pair-staging"
+    staging = staging_destination.with_name(staging_destination.name + ".staging")
+    shutil.copytree(corrupt_destination, staging)
+    staging_before = _tree_bytes(staging)
+    with pytest.raises(ValueError, match="staging"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=staging_destination,
+            client_factory=lambda: (_ for _ in ()).throw(
+                AssertionError("extra-pair staging opened a runtime")
+            ),
+            progress=lambda _line: None,
+        )
+    assert not staging_destination.exists()
+    assert _tree_bytes(staging) == staging_before
 
 
 def test_collection_reset_rpc_sets_authoritative_observer_learner_seat(
@@ -2094,6 +2377,158 @@ def test_collection_writer_creation_failure_retains_diagnostic_staging(
     }
     assert diagnostic["physical_files"] == ["diagnostic.json"]
     assert not (staging / "manifest.json").exists()
+
+
+def test_collection_client_factory_failure_is_diagnostic_and_nonreusable(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    destination = tmp_path / "client-factory-failure"
+
+    def fail_factory() -> _CollectionClient:
+        raise RuntimeError("client factory failed")
+
+    with pytest.raises(RuntimeError, match="client factory failed"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=fail_factory,
+            progress=lambda _line: None,
+        )
+    _assert_failed_collection_stage(
+        destination=destination,
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        expected_type="RuntimeError",
+        expected_message="client factory failed",
+        expected_last_pair=None,
+        expected_file_count=1,
+    )
+
+
+def test_collection_client_contract_failure_closes_once_and_is_nonreusable(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    client = _CollectionClient(replace(contract, contract_hash=HASHES["f"]))
+    destination = tmp_path / "client-contract-failure"
+    with pytest.raises(ValueError, match="runtime contract identity"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert client.close_attempts == 1
+    _assert_failed_collection_stage(
+        destination=destination,
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        expected_type="ValueError",
+        expected_message="collection runtime contract identity changed",
+        expected_last_pair=None,
+        expected_file_count=1,
+    )
+
+
+def test_collection_runtime_failure_before_pair_preserves_error_when_close_fails(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    client = _RuntimeFailureClient(
+        contract, fail_configure_at=0, close_error=True,
+    )
+    destination = tmp_path / "runtime-before-pair-failure"
+    with pytest.raises(RuntimeError, match="configure failed at call 0"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert client.close_attempts == 1
+    _assert_failed_collection_stage(
+        destination=destination,
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        expected_type="RuntimeError",
+        expected_message="configure failed at call 0",
+        expected_last_pair=None,
+        expected_file_count=1,
+    )
+
+
+def test_collection_runtime_failure_after_pair_records_inventory_and_closes_once(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    definition, learner, oracle = _collection_inputs(tmp_path, contract)
+    client = _RuntimeFailureClient(
+        contract, fail_drain_at=2, rows_per_game=1,
+    )
+    destination = tmp_path / "runtime-after-pair-failure"
+    with pytest.raises(RuntimeError, match="drain failed at call 2"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert client.close_attempts == 1
+    diagnostic = _assert_failed_collection_stage(
+        destination=destination,
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        expected_type="RuntimeError",
+        expected_message="drain failed at call 2",
+        expected_last_pair=0,
+        expected_file_count=11,
+    )
+    assert diagnostic["games"] == 2
+    assert diagnostic["labels"] == 2
+
+
+def test_collection_close_failure_is_attempted_once_and_cannot_leave_sealed_stage(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    definition, learner, oracle = _collection_inputs(
+        tmp_path, contract, partition="validation",
+    )
+    client = _RuntimeFailureClient(
+        contract, close_error=True, rows_per_game=1_000,
+    )
+    destination = tmp_path / "client-close-failure"
+    with pytest.raises(RuntimeError, match="close failed"):
+        collect_selective_dagger(
+            definition=definition,
+            learner=learner,
+            oracle=oracle,
+            output_root=destination,
+            client_factory=lambda: client,
+            progress=lambda _line: None,
+        )
+    assert client.close_attempts == 1
+    _assert_failed_collection_stage(
+        destination=destination,
+        definition=definition,
+        learner=learner,
+        oracle=oracle,
+        expected_type="RuntimeError",
+        expected_message="close failed",
+        expected_last_pair=0,
+        expected_file_count=9,
+    )
 
 
 def test_collection_reuse_and_invalid_schedule_fail_before_runtime_creation(

@@ -1870,6 +1870,9 @@ def _require_collection_overlay(
     overlay: DaggerOverlay, definition: CollectionDefinition,
 ) -> None:
     _require_expected_definition(overlay, definition.overlay_definition)
+    labels_before_final_pair = sum(
+        descriptor.row_count for descriptor in overlay.manifest.games[:-2]
+    )
     if (
         overlay.row_count < definition.label_target
         or not overlay.games
@@ -1877,6 +1880,10 @@ def _require_collection_overlay(
         or len(overlay.games) > definition.game_ceiling
     ):
         raise ValueError("completed collection overlay did not reach its target")
+    if labels_before_final_pair >= definition.label_target:
+        raise ValueError(
+            "completed collection overlay did not stop at the first pair boundary"
+        )
     for game_id, (game, scheduled) in enumerate(zip(
         overlay.games, definition.schedule[:len(overlay.games)], strict=True,
     )):
@@ -2253,6 +2260,11 @@ def collect_selective_dagger(
     if not callable(client_factory) or not callable(progress):
         raise ValueError("collection runtime callbacks are invalid")
     destination = Path(output_root).resolve()
+    staging = destination.with_name(destination.name + ".staging")
+    if destination.exists() and staging.exists():
+        raise ValueError(
+            "collection destination and staging coexist ambiguously"
+        )
     if destination.exists():
         try:
             existing = open_dagger_overlay(destination)
@@ -2274,7 +2286,6 @@ def collect_selective_dagger(
         )
         return existing
 
-    staging = destination.with_name(destination.name + ".staging")
     if staging.exists():
         try:
             candidate = open_dagger_overlay(staging)
@@ -2301,6 +2312,7 @@ def collect_selective_dagger(
     stats = _empty_collection_stats()
     writer: DaggerOverlayWriter | None = None
     client: DuelClient | None = None
+    close_attempted = False
     try:
         writer = DaggerOverlayWriter.create(
             staging,
@@ -2359,18 +2371,24 @@ def collect_selective_dagger(
             raise RuntimeError(
                 "collection label target was not reached at the game ceiling"
             )
+        close_attempted = True
         client.close()
         client = None
-        writer.seal()
+        candidate = writer.seal()
+        _require_collection_overlay(candidate, definition)
         return publish_dagger_overlay(
             staging, destination, expected=definition.overlay_definition,
         )
     except BaseException as exc:
-        if client is not None:
+        if client is not None and not close_attempted:
+            close_attempted = True
             try:
                 client.close()
-            except Exception:
-                pass
+            except BaseException as close_error:
+                exc.add_note(
+                    "collection client close also failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
         _write_collection_failure(
             staging, error=exc, definition=definition, stats=stats,
         )
