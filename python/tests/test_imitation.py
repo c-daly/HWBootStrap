@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from types import MappingProxyType
 import zipfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
@@ -354,6 +354,57 @@ def test_source_mixture_sampler_residual_accounts_nonintegral_256_batches() -> N
     assert not np.array_equal(different.observations, batches[0].observations)
 
 
+@pytest.mark.parametrize(
+    ("fractions", "batches", "expected"),
+    [
+        ((0.01, 0.495, 0.495), 1_000, (10, 495, 495)),
+        ((0.001, 0.009, 0.99), 10_000, (10, 90, 9_900)),
+    ],
+)
+def test_source_mixture_sampler_repairs_negative_floors_for_small_batches(
+    fractions: tuple[float, float, float],
+    batches: int,
+    expected: tuple[int, int, int],
+) -> None:
+    """Allocation stays exact when residual carry makes a source target negative."""
+
+    mixture = MappingProxyType(OrderedDict(zip(
+        (
+            Source.GREEDY_STANDARD,
+            Source.SEARCH_CONVERSION,
+            imitation_module.Source.DAGGER_TARGETED,
+        ),
+        fractions,
+        strict=True,
+    )))
+    first = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=mixture,
+        batch_size=1,
+        seed=227,
+    )
+    second = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=mixture,
+        batch_size=1,
+        seed=227,
+    )
+    totals = Counter()
+    first_sequence: list[Source] = []
+    second_sequence: list[Source] = []
+    for _ in range(batches):
+        first_batch = first.next_batch()
+        second_batch = second.next_batch()
+        assert len(first_batch.actions) == len(second_batch.actions) == 1
+        first_source = first_batch.sources[0]
+        second_source = second_batch.sources[0]
+        totals[first_source] += 1
+        first_sequence.append(first_source)
+        second_sequence.append(second_source)
+    assert tuple(totals[source] for source in mixture) == expected
+    assert first_sequence == second_sequence
+
+
 def test_targeted_sampler_is_uniform_before_repeat_and_ignores_row_metadata() -> None:
     """Stratifying targeted labels by profile, seat, or action kind must bias exposure."""
 
@@ -412,6 +463,45 @@ def test_legacy_sampler_default_sequence_remains_byte_for_byte_stable(
         [(1, 2, "greedy_standard"), (1, 0, "greedy_standard"), (1, 1, "greedy_standard"), (2, 2, "search_conversion"), (3, 2, "search_conversion"), (0, 1, "greedy_standard"), (0, 2, "greedy_standard")],
         [(3, 0, "search_conversion"), (2, 1, "search_conversion"), (0, 1, "greedy_standard"), (0, 0, "greedy_standard"), (0, 2, "greedy_standard"), (1, 2, "greedy_standard"), (1, 0, "greedy_standard")],
     ]
+
+
+@pytest.mark.parametrize("seed", [np.int64(211), np.uint32(211)])
+def test_legacy_sampler_accepts_numpy_integral_seeds_with_the_locked_sequence(
+    sampled_dataset: Path, seed,
+) -> None:
+    """Legacy NumPy integer seeds reproduce the exact Python-int sequence."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    expected = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=211,
+    ).next_batch()
+    actual = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"batch_size": 0, "partition": "train"},
+        {"batch_size": 1, "standard_fraction": 1.0, "partition": "train"},
+        {"batch_size": 1, "partition": "unknown"},
+    ],
+)
+def test_legacy_sampler_configuration_errors_precede_materialization_errors(
+    sampled_dataset: Path, kwargs: dict[str, Any],
+) -> None:
+    """Configuration failures retain precedence over materialization failures."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    validation = materialize_imitation_partition(dataset, "validation")
+    with pytest.raises(ValueError, match="configuration"):
+        StratifiedDecisionSampler(dataset, validation, seed=211, **kwargs)
 
 
 @pytest.mark.filterwarnings("error:The given NumPy array is not writable")
@@ -498,11 +588,70 @@ def test_actor_supervision_corpus_never_optimizes_validation_sentinel(
     assert observed["validation"] and set(observed["validation"]) == {4}
     assert result.validation.strata["teacher/dagger-targeted"]["count"] == 2
     bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
-    assert bc["source_fractions"] == {
-        "greedy_standard": 0.49,
-        "search_conversion": 0.21,
-        "dagger_targeted": 0.30,
+    run = json.loads((result.run_dir / "run.json").read_text(encoding="utf-8"))
+    expected_mixture = [
+        {"source": "greedy_standard", "fraction": 0.49},
+        {"source": "search_conversion", "fraction": 0.21},
+        {"source": "dagger_targeted", "fraction": 0.30},
+    ]
+    assert bc["source_mixture"] == expected_mixture
+    assert run["source_mixture"] == expected_mixture
+    assert bc["supervision_corpus"]["source_mixture"] == [
+        ["greedy_standard", 0.49],
+        ["search_conversion", 0.21],
+        ["dagger_targeted", 0.30],
+    ]
+    assert run["supervision_corpus"] == bc["supervision_corpus"]
+
+
+def test_actor_corpus_identity_binds_source_order_and_fractions() -> None:
+    """Order and fractions are part of the reproducible corpus identity."""
+
+    training = _three_source_partition()
+    selected = np.asarray([11], dtype=np.int64)
+    values = {
+        name: getattr(training.batch, name)[selected].copy()
+        for name in ImitationBatch.__dataclass_fields__
     }
+    values["partitions"][:] = "validation"
+    validation = MaterializedImitationPartition(
+        "validation",
+        ImitationBatch(**values),
+        MappingProxyType({("v" * 64, 0, 0): 0}),
+    )
+    base_identity = MappingProxyType({
+        "schema_version": 1,
+        "kind": "identity-test",
+        "base_manifest_sha256": "d" * 64,
+        "contract_hash": "a" * 64,
+        "encoding_hash": "b" * 64,
+        "scenario_hash": "c" * 64,
+    })
+    reordered = MappingProxyType(OrderedDict((
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+    )))
+    changed_fraction = MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.48),
+        (Source.SEARCH_CONVERSION, 0.22),
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+    )))
+    corpora = [
+        imitation_module.ActorSupervisionCorpus(
+            training=training,
+            validation=validation,
+            source_fractions=fractions,
+            identity=base_identity,
+        )
+        for fractions in (_locked_dagger_mixture(), reordered, changed_fraction)
+    ]
+    assert corpora[0].identity["source_mixture"] == (
+        ("greedy_standard", 0.49),
+        ("search_conversion", 0.21),
+        ("dagger_targeted", 0.30),
+    )
+    assert len({tuple(corpus.identity["source_mixture"]) for corpus in corpora}) == 3
 
 
 def test_sampler_benchmark_runs_exact_batches_and_reports_checksum(
@@ -968,6 +1117,49 @@ def test_behavioral_cloning_defaults_are_the_reviewed_production_limits() -> Non
     assert (config.batch_size, config.learning_rate, config.max_epochs, config.patience) == (256, 3e-4, 50, 5)
     with pytest.raises(ValueError, match="finite"):
         BehavioralCloningConfig(learning_rate=float("nan"), device="cpu")
+
+def test_legacy_clone_request_errors_precede_partition_materialization(
+    clone_dataset: Path, clone_scenario, tmp_path: Path,
+) -> None:
+    """Request failures retain precedence over partition materialization failures."""
+
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    without_validation = replace(
+        dataset,
+        index=MappingProxyType({"train": dataset.index["train"]}),
+    )
+    common = {
+        "dataset": without_validation,
+        "scenario": clone_scenario,
+        "env": _TinyCloneEnv(),
+        "contract": contract(),
+        "spaces_info": {
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+    }
+    with pytest.raises(TypeError, match="config"):
+        train_behavioral_clone(
+            **common,
+            run_dir=tmp_path / "invalid-config",
+            config=object(),
+        )
+
+    existing = tmp_path / "existing-run"
+    existing.mkdir()
+    with pytest.raises(FileExistsError) as error:
+        train_behavioral_clone(
+            **common,
+            run_dir=existing,
+            config=BehavioralCloningConfig(
+                model_seed=211,
+                batch_size=5,
+                max_epochs=1,
+                patience=1,
+                device="cpu",
+            ),
+        )
+    assert error.value.args == (existing,)
+
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_behavioral_cloning_config_accepts_explicit_supported_device(device: str) -> None:

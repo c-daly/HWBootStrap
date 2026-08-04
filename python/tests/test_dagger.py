@@ -845,6 +845,33 @@ def test_build_dagger_corpus_is_cumulative_teacher_labeled_and_validation_isolat
         and len(identity[0]) == 64
         for identity in (*cumulative.training.offsets, *cumulative.validation.offsets)
     )
+    assert tuple(
+        identity[0] for identity in cumulative.training.offsets
+    ) == (
+        base_identity.manifest_sha256,
+        base_identity.manifest_sha256,
+        train_one.content_identity,
+        train_one.content_identity,
+        train_two.content_identity,
+        train_two.content_identity,
+    )
+    assert tuple(
+        identity[0] for identity in cumulative.validation.offsets
+    ) == (
+        validation_one.content_identity,
+        validation_one.content_identity,
+        validation_two.content_identity,
+        validation_two.content_identity,
+    )
+    for partition in (cumulative.training, cumulative.validation):
+        assert all(
+            not getattr(partition.batch, field).flags.writeable
+            for field in partition.batch.__dataclass_fields__
+        )
+        with pytest.raises(TypeError):
+            partition.offsets[next(iter(partition.offsets))] = 0
+        with pytest.raises(ValueError, match="read-only"):
+            partition.batch.actions[0] = partition.batch.actions[0]
     suffixes = [(identity[1], identity[2]) for identity in cumulative.training.offsets]
     assert len(suffixes) > len(set(suffixes))
     assert tuple((item.path, item.sha256) for item in base.shards) == original_shards
@@ -905,6 +932,122 @@ def _rebind_modified_game(root: Path, game_id: int) -> None:
     game_descriptor["content_identity"] = game_manifest["content_identity"]
     manifest["content_identity"] = _identity(manifest)
     _rewrite_json(manifest_path, manifest)
+
+
+def _single_iteration_corpus_inputs(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> tuple[Any, OriginalDatasetIdentity, DaggerOverlay, DaggerOverlay]:
+    base, base_identity = _write_base_corpus_dataset(tmp_path / "base", contract)
+    train = _seal_corpus_overlay(
+        tmp_path / "train-1", contract,
+        original_dataset=base_identity, partition="train", iteration=1,
+        teacher_action=3, profile="standard-3v3",
+    )
+    validation = _seal_corpus_overlay(
+        tmp_path / "validation-1", contract,
+        original_dataset=base_identity, partition="validation", iteration=1,
+        teacher_action=5, profile="standard-3v3",
+    )
+    return base, base_identity, train, validation
+
+
+def test_build_dagger_corpus_physically_reopens_each_overlay(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """A still-valid in-memory overlay must not hide changed physical evidence."""
+
+    base, _base_identity, train, validation = _single_iteration_corpus_inputs(
+        tmp_path, contract,
+    )
+    replay = next((train.root / "evidence").glob("*.replay"))
+    replay.write_bytes(replay.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError, match="physical evidence"):
+        dagger_module.build_dagger_corpus(base, [train], [validation])
+
+
+def test_build_dagger_corpus_rejects_changed_physical_base_identity(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Overlay provenance must bind the physical base corpus at build time."""
+
+    base, _base_identity, train, validation = _single_iteration_corpus_inputs(
+        tmp_path, contract,
+    )
+    replay = next((base.root / "replays").glob("*.replay"))
+    replay.write_bytes(replay.read_bytes() + b"tampered")
+
+    with pytest.raises(ValueError, match="incompatible with the base corpus"):
+        dagger_module.build_dagger_corpus(base, [train], [validation])
+
+
+@pytest.mark.parametrize("ordering", ["duplicate", "reversed"])
+def test_build_dagger_corpus_rejects_duplicate_or_noncanonical_iterations(
+    tmp_path: Path, contract: EnvironmentContract, ordering: str,
+) -> None:
+    """Cumulative input is an ordered prefix, never a set or multiset."""
+
+    base, base_identity = _write_base_corpus_dataset(tmp_path / "base", contract)
+    train_one = _seal_corpus_overlay(
+        tmp_path / "train-1", contract,
+        original_dataset=base_identity, partition="train", iteration=1,
+        teacher_action=3, profile="standard-3v3",
+    )
+    train_two = _seal_corpus_overlay(
+        tmp_path / "train-2", contract,
+        original_dataset=base_identity, partition="train", iteration=2,
+        teacher_action=4, profile="conversion-1v1-far",
+    )
+    validation = _seal_corpus_overlay(
+        tmp_path / "validation-1", contract,
+        original_dataset=base_identity, partition="validation", iteration=1,
+        teacher_action=5, profile="standard-3v3",
+    )
+    training = (
+        [train_one, train_one]
+        if ordering == "duplicate"
+        else [train_two, train_one]
+    )
+
+    with pytest.raises(ValueError, match="iterations are not canonical"):
+        dagger_module.build_dagger_corpus(base, training, [validation])
+
+
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    [
+        ("shape", "shard shape or dtype"),
+        ("teacher_mask", "teacher_action is not legal"),
+    ],
+)
+def test_build_dagger_corpus_reopens_and_rejects_corrupted_shards(
+    tmp_path: Path, contract: EnvironmentContract,
+    corruption: str, message: str,
+) -> None:
+    """Rebound hashes must not let malformed physical training rows enter a corpus."""
+
+    base, _base_identity, train, validation = _single_iteration_corpus_inputs(
+        tmp_path, contract,
+    )
+    manifest = json.loads(
+        (train.root / "manifest.json").read_text(encoding="utf-8")
+    )
+    game_path = train.root / manifest["games"][0]["path"]
+    game_manifest = json.loads(game_path.read_text(encoding="utf-8"))
+    shard_path = train.root / game_manifest["shard"]["path"]
+    with np.load(shard_path, allow_pickle=False) as loaded:
+        arrays = {name: loaded[name].copy() for name in loaded.files}
+    if corruption == "shape":
+        arrays["observations"] = arrays["observations"][:, :1]
+    elif corruption == "teacher_mask":
+        arrays["packed_masks"][0, 0] &= np.uint8(~(1 << 3) & 0xFF)
+    else:
+        raise AssertionError(corruption)
+    np.savez_compressed(shard_path, **arrays)
+    _rebind_modified_game(train.root, 0)
+
+    with pytest.raises(ValueError, match=message):
+        dagger_module.build_dagger_corpus(base, [train], [validation])
 
 
 def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(

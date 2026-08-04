@@ -524,8 +524,21 @@ class ActorSupervisionCorpus:
             or any(not isinstance(key, str) for key in self.identity)
         ):
             raise ValueError("actor supervision corpus identity is invalid")
+        source_mixture = tuple(
+            (source.value, fraction) for source, fraction in fractions.items()
+        )
+        identity = dict(self.identity)
+        if (
+            "source_mixture" in identity
+            and tuple(tuple(item) for item in identity["source_mixture"])
+            != source_mixture
+        ):
+            raise ValueError(
+                "actor supervision corpus identity source mixture differs"
+            )
+        identity["source_mixture"] = source_mixture
         object.__setattr__(self, "source_fractions", fractions)
-        object.__setattr__(self, "identity", MappingProxyType(dict(self.identity)))
+        object.__setattr__(self, "identity", MappingProxyType(identity))
 
 
 def training_rows_as_validation(dataset: ImitationDataset) -> ImitationDataset:
@@ -796,8 +809,6 @@ class SourceMixtureSampler:
             not isinstance(materialized, MaterializedImitationPartition)
             or type(batch_size) is not int
             or batch_size < 1
-            or type(seed) is not int
-            or seed < 0
         ):
             raise ValueError("sampler configuration is invalid")
         expected_partition = materialized.partition if partition is None else partition
@@ -853,11 +864,25 @@ class SourceMixtureSampler:
             source: self.batch_size * fraction + self._carry[source]
             for source, fraction in self.source_fractions.items()
         }
+        source_order = tuple(self.source_fractions)
+        # Reconciliation preserves the per-batch invariant: every count is
+        # nonnegative, counts sum to batch_size, and source order breaks ties.
         counts = {
-            source: int(np.floor(target + 1e-12))
+            source: max(0, int(np.floor(target + 1e-12)))
             for source, target in targets.items()
         }
-        source_order = tuple(self.source_fractions)
+        while sum(counts.values()) > self.batch_size:
+            loser = min(
+                (
+                    index for index, source in enumerate(source_order)
+                    if counts[source] > 0
+                ),
+                key=lambda index: (
+                    targets[source_order[index]] - counts[source_order[index]],
+                    index,
+                ),
+            )
+            counts[source_order[loser]] -= 1
         while sum(counts.values()) < self.batch_size:
             winner = max(
                 range(len(source_order)),
@@ -921,7 +946,9 @@ class StratifiedDecisionSampler(SourceMixtureSampler):
         partition: str = "train",
     ) -> None:
         if (
-            not isinstance(dataset, ImitationDataset)
+            type(batch_size) is not int
+            or batch_size < 1
+            or partition not in {"train", "validation"}
             or not isinstance(standard_fraction, (int, float))
             or isinstance(standard_fraction, bool)
             or not 0.0 < float(standard_fraction) < 1.0
@@ -1425,6 +1452,20 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
     ):
         raise ValueError("behavioral-cloning phase timing differs from epoch duration")
 
+
+def _prepare_behavioral_cloning_request(
+    config: BehavioralCloningConfig, run_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    if not isinstance(config, BehavioralCloningConfig):
+        raise TypeError("config must be BehavioralCloningConfig")
+    prepared_run_dir = Path(run_dir)
+    training_device = resolve_behavioral_cloning_device(config.device)
+    prepared_run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if prepared_run_dir.exists():
+        raise FileExistsError(prepared_run_dir)
+    return prepared_run_dir, training_device
+
+
 def train_actor_supervision(
     *,
     corpus: ActorSupervisionCorpus,
@@ -1438,6 +1479,7 @@ def train_actor_supervision(
     _sampler_factory: Callable[
         [MaterializedImitationPartition, int, int], Any
     ] | None = None,
+    _prepared_request: tuple[Path, dict[str, Any]] | None = None,
 ) -> BehavioralCloningResult:
     """Train the production actor from generic immutable supervision partitions."""
     import torch
@@ -1461,13 +1503,12 @@ def train_actor_supervision(
     if not _is_hash(dataset_manifest_sha256):
         raise ValueError("actor-supervision base manifest identity is invalid")
 
-    if not isinstance(config, BehavioralCloningConfig):
-        raise TypeError("config must be BehavioralCloningConfig")
-    run_dir = Path(run_dir)
-    training_device = resolve_behavioral_cloning_device(config.device)
-    run_dir.parent.mkdir(parents=True, exist_ok=True)
-    if run_dir.exists():
-        raise FileExistsError(run_dir)
+    if _prepared_request is None:
+        run_dir, training_device = _prepare_behavioral_cloning_request(
+            config, run_dir,
+        )
+    else:
+        run_dir, training_device = _prepared_request
 
     training = corpus.training
     validation = corpus.validation
@@ -1625,10 +1666,10 @@ def train_actor_supervision(
     config_data = asdict(config)
     metrics_data = asdict(validation_metrics)
     corpus_identity = dict(corpus.identity)
-    source_fractions_data = {
-        source.value: fraction
+    source_mixture_data = [
+        {"source": source.value, "fraction": fraction}
         for source, fraction in corpus.source_fractions.items()
-    }
+    ]
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{run_dir.name}.publishing-", dir=run_dir.parent)
     )
@@ -1644,7 +1685,7 @@ def train_actor_supervision(
             "policy": adapter.policy_name,
             "dataset_manifest_sha256": dataset_manifest_sha256,
             "supervision_corpus": corpus_identity,
-            "source_fractions": source_fractions_data,
+            "source_mixture": source_mixture_data,
             "config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
@@ -1679,7 +1720,7 @@ def train_actor_supervision(
             "scenario": {"path": "scenario.json", "template_id": scenario.template_id, "schema_version": scenario.schema_version},
             "dataset_manifest_sha256": dataset_manifest_sha256,
             "supervision_corpus": corpus_identity,
-            "source_fractions": source_fractions_data,
+            "source_mixture": source_mixture_data,
             "bc_config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
@@ -1755,6 +1796,7 @@ def train_behavioral_clone(
             "behavioral-cloning scenario hash does not match the dataset"
         )
 
+    prepared_request = _prepare_behavioral_cloning_request(config, run_dir)
     training = materialize_imitation_partition(dataset, "train")
     validation = materialize_imitation_partition(dataset, "validation")
     if set(training.offsets) & set(validation.offsets):
@@ -1809,4 +1851,5 @@ def train_behavioral_clone(
         config=config,
         progress=progress,
         _sampler_factory=legacy_sampler,
+        _prepared_request=prepared_request,
     )
