@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "id": "annihilation-selective-dagger-v1",
+  "environment": "tactical-v2",
+  "scenario": {
+    "path": "python/config/annihilation-imitation-v1.json",
+    "sha256": "4f085b8a80f7ba8e450a85dbcceb73e05723ce7b37045f1ddd1ef91d67a95632",
+    "runtime_snapshot_sha256": "00684a8623f3f1deadd8d31cb71a0492441508c34a42d6f5ac6a1f8e662aaaa4"
+  },
+  "contract": {
+    "version": "tactical-v2",
+    "contract_hash": "7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6",
+    "encoding_hash": "2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a",
+    "observation_size": 1292,
+    "action_size": 1288,
+    "action_regions": {
+      "move": {"offset": 1, "count": 351},
+      "attack": {"offset": 352, "count": 351},
+      "deploy": {"offset": 703, "count": 585}
+    }
+  },
+  "repository": {
+    "required_clean": true,
+    "identity_fields": ["commit", "source_tree", "dirty"],
+    "ignored_generated_root": "python/panels/annihilation-selective-dagger-v1/evidence/"
+  },
+  "starting_learner": {
+    "source_kind": "snapshot",
+    "controller": {
+      "kind": "snapshot",
+      "path": "C:/Users/cddal/HexWars/python/runs/bc227-ppo-random-s227-20260802-v2/checkpoints/step_000038912.zip",
+      "source_run": "C:/Users/cddal/HexWars/python/runs/bc227-ppo-random-s227-20260802-v2",
+      "algorithm": "maskable_ppo",
+      "step": 38912,
+      "inference_mode": "deterministic"
+    },
+    "checkpoint_sha256": "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561",
+    "source_manifest_sha256": "7f02152c2ea39a08e5e203c0b0ba13928b2ad1847e276cc1b19f53331151ba46",
+    "source_scenario_sha256": "00684a8623f3f1deadd8d31cb71a0492441508c34a42d6f5ac6a1f8e662aaaa4",
+    "contract_hash": "7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6",
+    "encoding_hash": "2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a"
+  },
+  "original_dataset": {
+    "path": "C:/Users/cddal/HexWars/.worktrees/tactical-baseline-evidence/python/datasets/annihilation-imitation-v1",
+    "manifest_sha256": "6c9f1fd43cded0691080dd12c390aee086d49b144ebc0207d2f80e6b5a9422c4",
+    "contract_hash": "2d6984089aa151cee59e10bb37b0d2239e7a0668f34d90e1af64216aaf713edf",
+    "encoding_hash": "2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a",
+    "scenario_hash": "3236e528f9f3c41a1c696834d48f24db4ffae48cf96c174b5aaafa862c3a589f"
+  },
+  "profiles": [
+    "conversion-3v1-near",
+    "conversion-3v1-far",
+    "conversion-2v1-near",
+    "conversion-2v1-far",
+    "conversion-1v1-near",
+    "conversion-1v1-far"
+  ],
+  "oracle": {
+    "oracle_type": "bounded-search",
+    "heuristic_identity": "material-plus-pursuit-v1",
+    "code_sha256": "5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061",
+    "candidates": [
+      {"depth": 4, "expansion_budget": 512, "use_heuristic": true},
+      {"depth": 4, "expansion_budget": 2048, "use_heuristic": true}
+    ],
+    "preflight": {
+      "maps_per_profile": 20,
+      "games_per_candidate": 240,
+      "queries_per_sample": 2,
+      "pooled_win_rate_minimum_basis_points": 8500,
+      "labels_per_second_minimum": 10.0,
+      "tie_break": [
+        "higher_win_rate",
+        "fewer_cycling_draws",
+        "higher_throughput",
+        "smaller_expansion_budget"
+      ]
+    }
+  },
+  "collection": {
+    "iterations": 3,
+    "train_label_target": 20000,
+    "train_game_ceiling": 2000,
+    "validation_label_target": 2000,
+    "validation_game_ceiling": 200,
+    "standard_basis_points": 7000,
+    "conversion_basis_points": 3000,
+    "opponent": "random",
+    "both_seats": true
+  },
+  "training": {
+    "source_mixture_basis_points": {
+      "greedy_standard": 4900,
+      "search_conversion": 2100,
+      "dagger_targeted": 3000
+    },
+    "batch_size": 256,
+    "learning_rate": 0.0003,
+    "max_epochs": 50,
+    "patience": 5,
+    "model_seed": 227,
+    "sampler_seed": 227,
+    "device": "cuda",
+    "publication_device": "cpu",
+    "objective": "actor_only_masked_cross_entropy",
+    "validation_metric": "targeted_negative_log_likelihood"
+  },
+  "evaluation": {
+    "maps": 100,
+    "games_per_candidate": 200,
+    "profile": "standard-3v3",
+    "opponent": "random",
+    "both_seats": true,
+    "draws_are_non_wins": true,
+    "tie_break": [
+      "higher_win_rate",
+      "lower_cycling_incidence",
+      "lower_action_waste_incidence",
+      "earlier_iteration"
+    ]
+  },
+  "smoke": {
+    "collection": [
+      {"seed": 18990000, "profile": "standard-3v3", "seats": [0, 1]},
+      {"seed": 18990001, "profile": "conversion-3v1-near", "seats": [0, 1]}
+    ],
+    "training_epochs": 1,
+    "training_device": "cpu",
+    "evaluation": [
+      {"seed": 18990002, "profile": "standard-3v3", "seats": [0, 1]},
+      {"seed": 18990003, "profile": "standard-3v3", "seats": [0, 1]}
+    ],
+    "required_collection_games": 4,
+    "required_evaluation_games": 4,
+    "require_reuse_new_games": 0
+  },
+  "success": {
+    "win_rate_gain_minimum_basis_points": 2000,
+    "absolute_win_rate_minimum_basis_points": 6500,
+    "cycling_relative_reduction_minimum_basis_points": 5000,
+    "replicate_win_rate_minimum_basis_points": 6500,
+    "pooled_replication_win_rate_minimum_basis_points": 7000
+  },
+  "seed_banks": {
+    "path": "seed-banks.json",
+    "sha256": "eb04b7dbf81553217c291c7451ebc8dbd7f047101f3c1d90d373efd0fd2717ec"
+  }
+}

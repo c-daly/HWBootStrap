@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "banks": [
+    {
+      "partition": "train",
+      "iteration": 1,
+      "start": 18000000,
+      "stop": 18099999,
+      "assigned": true
+    },
+    {
+      "partition": "train",
+      "iteration": 2,
+      "start": 18100000,
+      "stop": 18199999,
+      "assigned": true
+    },
+    {
+      "partition": "train",
+      "iteration": 3,
+      "start": 18200000,
+      "stop": 18299999,
+      "assigned": true
+    },
+    {
+      "partition": "oracle_preflight",
+      "iteration": null,
+      "start": 18900000,
+      "stop": 18900119,
+      "assigned": true
+    },
+    {
+      "partition": "smoke",
+      "iteration": null,
+      "start": 18990000,
+      "stop": 18990009,
+      "assigned": true
+    },
+    {
+      "partition": "validation",
+      "iteration": 1,
+      "start": 19000000,
+      "stop": 19009999,
+      "assigned": true
+    },
+    {
+      "partition": "validation",
+      "iteration": 2,
+      "start": 19010000,
+      "stop": 19019999,
+      "assigned": true
+    },
+    {
+      "partition": "validation",
+      "iteration": 3,
+      "start": 19020000,
+      "stop": 19029999,
+      "assigned": true
+    },
+    {
+      "partition": "reserved",
+      "iteration": null,
+      "start": 19030000,
+      "stop": 19099999,
+      "assigned": false
+    },
+    {
+      "partition": "development_evaluation",
+      "iteration": null,
+      "start": 20000000,
+      "stop": 20000099,
+      "assigned": true
+    }
+  ],
+  "oracle_preflight_profiles": [
+    {
+      "profile": "conversion-3v1-near",
+      "start": 18900000,
+      "stop": 18900019,
+      "maps": 20,
+      "both_seats": true
+    },
+    {
+      "profile": "conversion-3v1-far",
+      "start": 18900020,
+      "stop": 18900039,
+      "maps": 20,
+      "both_seats": true
+    },
+    {
+      "profile": "conversion-2v1-near",
+      "start": 18900040,
+      "stop": 18900059,
+      "maps": 20,
+      "both_seats": true
+    },
+    {
+      "profile": "conversion-2v1-far",
+      "start": 18900060,
+      "stop": 18900079,
+      "maps": 20,
+      "both_seats": true
+    },
+    {
+      "profile": "conversion-1v1-near",
+      "start": 18900080,
+      "stop": 18900099,
+      "maps": 20,
+      "both_seats": true
+    },
+    {
+      "profile": "conversion-1v1-far",
+      "start": 18900100,
+      "stop": 18900119,
+      "maps": 20,
+      "both_seats": true
+    }
+  ],
+  "reciprocal": {
+    "seat_order": [0, 1],
+    "episode_seed": "map_seed",
+    "reference_seat": "learner_seat"
+  }
+}

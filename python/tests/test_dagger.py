@@ -35,16 +35,21 @@ from ml_lab.dagger import (
     DaggerRow,
     LearnerIdentity,
     OriginalDatasetIdentity,
+    OracleBenchmarkDecision,
+    OraclePreflightGameResult,
     OverlayDefinition,
     OracleSpec,
     SEED_DEFINITIONS,
     ScheduledDuel,
     collect_selective_dagger,
+    load_panel_definition,
     open_dagger_overlay,
     publish_dagger_overlay,
     publish_dagger_overlays,
     require_seed_in_partition,
+    run_oracle_preflight,
     validate_seed_definitions,
+    validate_panel_definition,
 )
 
 
@@ -246,6 +251,11 @@ def test_dagger_schema_api_is_importable() -> None:
             publish_dagger_overlays,
             require_seed_in_partition,
             validate_seed_definitions,
+            load_panel_definition,
+            validate_panel_definition,
+            OracleBenchmarkDecision,
+            OraclePreflightGameResult,
+            run_oracle_preflight,
         )
     )
 
