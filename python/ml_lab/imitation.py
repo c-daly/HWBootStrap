@@ -1856,6 +1856,7 @@ def train_actor_supervision(
     from .algorithms import (
         ActorTransferSource,
         MaskablePPOAdapter,
+        actor_transfer_provenance_to_json,
         actor_state_sha256,
     )
 
@@ -1930,7 +1931,7 @@ def train_actor_supervision(
     value_hash_before = _parameter_hash(value_named)
     actor_initialization = None
     if warm_start is not None:
-        actor_initialization = dict(
+        actor_initialization = actor_transfer_provenance_to_json(
             adapter.initialize_actor_from_source(
                 model,
                 warm_start,

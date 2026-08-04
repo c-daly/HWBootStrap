@@ -1097,6 +1097,17 @@ def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenan
     expected_fresh_value_hash = imitation_module._parameter_hash(
         imitation_module._value_named_parameters(fresh_target)
     )
+    frozen_initialization = MaskablePPOAdapter().initialize_actor_from_source(
+        fresh_target, source, contract(), "cpu",
+    )
+    expected_actor_initialization = (
+        algorithms_module.actor_transfer_provenance_to_json(
+            frozen_initialization,
+        )
+    )
+    assert json.loads(json.dumps(expected_actor_initialization)) == (
+        expected_actor_initialization
+    )
     result = dagger_module.train_dagger_actor(
         corpus=_distillation_corpus(clone_scenario),
         scenario=clone_scenario,
@@ -1130,6 +1141,8 @@ def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenan
         source.checkpoint_sha256
     )
     assert bc["actor_initialization"]["source_actor_sha256"] == source_hash
+    assert bc["actor_initialization"] == expected_actor_initialization
+    assert manifest["actor_initialization"] == expected_actor_initialization
     assert bc["target_actor_sha256_initial"] == source_hash
     assert bc["target_actor_sha256_final"] != ""
     assert bc["value_parameters_sha256_before"] == expected_fresh_value_hash

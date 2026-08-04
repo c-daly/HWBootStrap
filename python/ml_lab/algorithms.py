@@ -35,6 +35,40 @@ def _is_sha256(value: object) -> bool:
     )
 
 
+def _freeze_plain_data(value: Any) -> Any:
+    """Recursively freeze a JSON-compatible value tree."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            key: _freeze_plain_data(item) for key, item in value.items()
+        })
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_plain_data(item) for item in value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError("actor transfer provenance must be JSON-compatible")
+
+
+def actor_transfer_provenance_to_json(
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recursively thaw certified provenance at a JSON persistence boundary."""
+
+    if not isinstance(provenance, Mapping):
+        raise TypeError("actor transfer provenance must be a mapping")
+
+    def thaw(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: thaw(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [thaw(item) for item in value]
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        raise TypeError("actor transfer provenance must be JSON-compatible")
+
+    return {key: thaw(value) for key, value in provenance.items()}
+
+
 @dataclass(frozen=True)
 class ActorTransferSource:
     """Immutable physical identity for one controller-resolved actor source."""
@@ -740,7 +774,7 @@ class MaskablePPOAdapter:
         }
         if authenticated.source_bc_sha256 is not None:
             provenance["source_bc_sha256"] = authenticated.source_bc_sha256
-        return MappingProxyType(provenance)
+        return _freeze_plain_data(provenance)
 
     def initialize_actor(
         self,
@@ -892,7 +926,7 @@ class MaskablePPOAdapter:
 
         target_states = _actor_states(model, copy_states=True)
         try:
-            provenance = dict(
+            provenance = actor_transfer_provenance_to_json(
                 self._initialize_actor_from_source(
                     model,
                     source,

@@ -663,8 +663,12 @@ def test_actor_transfer_public_api_cannot_accept_a_substitute_model_or_hash(
     assert provenance["source_actor_sha256"] == pinned_actor_sha256
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["top_level", "controller", "modules", "module_replacement"],
+)
 def test_actor_transfer_provenance_is_derived_internally_and_immutable(
-    tmp_path: Path,
+    tmp_path: Path, mutation: str,
 ) -> None:
     """Returned provenance derives from captured files and cannot be replaced."""
 
@@ -690,8 +694,28 @@ def test_actor_transfer_provenance_is_derived_internally_and_immutable(
         (source_run / "run.json").read_bytes()
     ).hexdigest()
     assert provenance["source_policy_class"] != "forged.Policy"
-    with pytest.raises(TypeError):
-        provenance["source_run"] = "forged-run"  # type: ignore[index]
+    if mutation == "top_level":
+        with pytest.raises(TypeError):
+            provenance["source_run"] = "forged-run"  # type: ignore[index]
+    elif mutation == "controller":
+        with pytest.raises(TypeError):
+            provenance["source_controller"]["path"] = "forged.zip"
+    elif mutation == "modules":
+        with pytest.raises(AttributeError):
+            provenance["actor_modules"].append("value_net")
+    elif mutation == "module_replacement":
+        with pytest.raises(TypeError):
+            provenance["actor_modules"][0] = "value_net"
+    else:
+        raise AssertionError(mutation)
+    assert provenance["source_controller"] == source.controller
+    assert provenance["actor_modules"] == (
+        "features_extractor", "policy_net", "action_net",
+    )
+    plain = algorithms_module.actor_transfer_provenance_to_json(provenance)
+    assert json.loads(json.dumps(plain)) == plain
+    assert isinstance(plain["source_controller"], dict)
+    assert isinstance(plain["actor_modules"], list)
 
 
 @pytest.mark.parametrize(
