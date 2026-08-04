@@ -314,3 +314,9 @@ def test_episode_trace_records_are_immutable_tuples() -> None:
     with pytest.raises(FrozenInstanceError):
         parsed.transitions[0].command.kind = "attack"  # type: ignore[misc]
     assert isinstance(parsed.transitions[0].before.controlled_hexes, tuple)
+
+
+def test_episode_trace_reopens_its_canonical_retained_payload() -> None:
+    trace = EpisodeTrace.from_payload(transport_payload())
+
+    assert EpisodeTrace.from_payload(trace.to_dict()) == trace

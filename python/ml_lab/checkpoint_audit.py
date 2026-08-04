@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from .contracts import utc_now
+from .draw_classification import classify_draw, summarize_episode
 from .evaluation import DuelClient, evaluate_controllers, wilson_interval
+from .tactical_trace import EpisodeTrace
 from .io import atomic_write_json
 
 
@@ -524,6 +526,105 @@ def _repository_identity() -> Mapping[str, Any]:
     return {"repository": str(repository), "commit": commit, "dirty": bool(status.strip())}
 
 
+def _inspect_replays(paths: Sequence[Path]) -> Mapping[Path, int]:
+    """Reconstruct retained replays through the authoritative engine reader in batches."""
+    resolved = tuple(Path(path).resolve(strict=True) for path in paths)
+    if not resolved:
+        return {}
+    repository = Path(__file__).resolve().parents[2]
+    dll = repository / "engine" / "HexWars.Sim" / "bin" / "Debug" / "net8.0" / "HexWars.Sim.dll"
+    project = repository / "engine" / "HexWars.Sim" / "HexWars.Sim.csproj"
+    base = (
+        ["dotnet", str(dll), "inspect"]
+        if dll.is_file()
+        else ["dotnet", "run", "--project", str(project), "--configuration", "Debug", "--", "inspect"]
+    )
+    chunks: list[list[Path]] = []
+    current: list[Path] = []
+    length = sum(len(part) + 3 for part in base)
+    for path in resolved:
+        addition = len(str(path)) + 3
+        if current and length + addition > 24_000:
+            chunks.append(current)
+            current = []
+            length = sum(len(part) + 3 for part in base)
+        current.append(path)
+        length += addition
+    if current:
+        chunks.append(current)
+
+    winners: dict[Path, int] = {}
+    winner_values = {"DRAW": -1, "P0": 0, "P1": 1}
+    for chunk in chunks:
+        try:
+            result = subprocess.run(
+                [*base, *(str(path) for path in chunk)],
+                cwd=repository,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError("retained replay failed authoritative engine reconstruction") from error
+        summaries = [
+            match
+            for line in result.stdout.splitlines()
+            if (match := re.search(r": round=\d+ winner=(DRAW|P0|P1)$", line))
+        ]
+        if len(summaries) != len(chunk):
+            raise ValueError("authoritative replay inspector returned incomplete results")
+        for path, match in zip(chunk, summaries):
+            winners[path] = winner_values[match.group(1)]
+    return winners
+
+
+def _evaluation_source_identity() -> Mapping[str, Any]:
+    """Bind evaluation to one commit and its relevant tracked source diff."""
+    cwd = Path(__file__).resolve().parent
+    try:
+        repository = Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=cwd,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        ).resolve()
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        tracked_diff = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "HEAD",
+                "--",
+                ".",
+                ":(exclude)**/__pycache__/**",
+                ":(exclude)**/*.pyc",
+            ],
+            cwd=repository,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("checkpoint audit requires a readable evaluation source identity") from error
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("evaluation source Git commit must be a full lowercase SHA-1")
+    return {
+        "repository": str(repository),
+        "commit": commit,
+        "tracked_diff_sha256": _sha256(tracked_diff),
+    }
+
+
 def _source_material(
     definition: AuditDefinition,
 ) -> tuple[bytes, str, tuple[Mapping[str, Any], ...]]:
@@ -666,6 +767,7 @@ def _initial_manifest(
     source_contracts: Sequence[Mapping[str, Any]],
     runtime_contract: Mapping[str, Any],
     smoke: bool = False,
+    evaluation_source_identity: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     definition_payload, definition_sha256 = _definition_identity(definition)
     return {
@@ -678,6 +780,11 @@ def _initial_manifest(
         "definition": definition_payload,
         "definition_sha256": definition_sha256,
         "repository_identity": dict(_repository_identity()),
+        "evaluation_source_identity": dict(
+            _evaluation_source_identity()
+            if evaluation_source_identity is None
+            else evaluation_source_identity
+        ),
         "scenario": {
             "encoding": "base64",
             "bytes_base64": base64.b64encode(scenario_bytes).decode("ascii"),
@@ -716,6 +823,36 @@ def _load_audit_manifest(root: Path) -> Mapping[str, Any]:
         raise ValueError("audit manifest repository commit must be a full lowercase SHA-1")
     if not isinstance(repository.get("dirty"), bool):
         raise ValueError("audit manifest repository dirty flag must be boolean")
+    evaluation_source = manifest.get("evaluation_source_identity")
+    if evaluation_source is None:
+        if state != "completed":
+            raise ValueError("in-progress audit manifest is missing evaluation source identity")
+    else:
+        evaluation_source = _require_mapping(
+            evaluation_source, label="audit manifest evaluation source identity"
+        )
+        if set(evaluation_source) != {
+            "repository",
+            "commit",
+            "tracked_diff_sha256",
+        }:
+            raise ValueError("audit manifest evaluation source identity fields are invalid")
+        _require_string(
+            evaluation_source.get("repository"),
+            label="audit manifest evaluation source repository",
+        )
+        source_commit = _require_string(
+            evaluation_source.get("commit"),
+            label="audit manifest evaluation source commit",
+        )
+        source_diff = _require_string(
+            evaluation_source.get("tracked_diff_sha256"),
+            label="audit manifest tracked source diff SHA-256",
+        )
+        if not re.fullmatch(r"[0-9a-f]{40}", source_commit) or not re.fullmatch(
+            r"[0-9a-f]{64}", source_diff
+        ):
+            raise ValueError("audit manifest evaluation source identity is invalid")
     if state == "completed":
         _require_string(
             manifest.get("completed_at"), label="audit manifest completed_at"
@@ -909,6 +1046,30 @@ def _artifact_path(root: Path, map_root: Path, raw_path: object, *, label: str) 
     return resolved
 
 
+def _require_exact_map_inventory(
+    map_root: Path,
+    evaluation_path: Path,
+    artifact_pairs: set[tuple[Path, Path]],
+) -> None:
+    expected = {
+        evaluation_path.relative_to(map_root).as_posix(),
+        "evidence",
+        "evidence/traces",
+        "evidence/replays",
+    }
+    expected.update(
+        path.relative_to(map_root).as_posix()
+        for pair in artifact_pairs
+        for path in pair
+    )
+    actual = {
+        path.relative_to(map_root).as_posix()
+        for path in map_root.rglob("*")
+    }
+    if actual != expected:
+        raise ValueError("completed map directory contains an unexpected evidence inventory")
+
+
 def _checkpoint_digest(candidate: AuditCandidate) -> str | None:
     if candidate.checkpoint_path is None:
         if candidate.checkpoint_sha256 is not None:
@@ -931,11 +1092,113 @@ def _require_exact_counts(value: object, expected: Mapping[str, int], *, label: 
             raise ValueError(f"{label} does not reconcile")
 
 
+def _replay_paths_for_definition(
+    root: Path,
+    definition: AuditDefinition,
+    *,
+    existing_only: bool,
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for candidate in definition.candidates:
+        for offset in range(definition.schedule.maps):
+            map_seed = definition.schedule.seed_start + offset
+            evaluation_path = audit_map_path(root, candidate.candidate_id, map_seed)
+            if existing_only and not evaluation_path.exists():
+                continue
+            evaluation, _raw = _read_json_bytes(
+                evaluation_path, label="map evaluation for replay inspection"
+            )
+            matches = evaluation.get("matches")
+            if not isinstance(matches, list) or len(matches) != 2:
+                raise ValueError("map evaluation must contain two replays for inspection")
+            map_root = evaluation_path.parent.resolve(strict=True)
+            for match in matches:
+                mapping = _require_mapping(match, label="map match for replay inspection")
+                paths.append(
+                    _artifact_path(
+                        root,
+                        map_root,
+                        mapping.get("replay_path"),
+                        label="replay path",
+                    )
+                )
+    return tuple(paths)
+
+
+def _trace_summary_payload(trace: EpisodeTrace, candidate_seat: int) -> Mapping[str, Any]:
+    summary = summarize_episode(trace, candidate_seat)
+    return {
+        "command_count": summary.command_count,
+        "round_count": summary.round_count,
+        "damage_by_seat": list(summary.damage_by_seat),
+        "kills_by_seat": list(summary.kills_by_seat),
+        "end_turns_by_seat": list(summary.end_turns_by_seat),
+        "wasted_end_turns_by_seat": list(summary.wasted_end_turns_by_seat),
+        "peak_normalized_advantage": summary.peak_normalized_advantage,
+        "final_normalized_advantage": summary.final_normalized_advantage,
+        "maximum_state_repetition": summary.maximum_state_repetition,
+    }
+
+
+def _trace_classification_payload(
+    trace: EpisodeTrace,
+    *,
+    candidate_seat: int,
+    terminated: bool,
+    truncated: bool,
+) -> Mapping[str, Any]:
+    classification = classify_draw(
+        trace,
+        candidate_seat=candidate_seat,
+        terminated=terminated,
+        truncated=truncated,
+        winner=None,
+    )
+    return {
+        "primary": classification.primary.value,
+        "flags": [flag.value for flag in classification.flags],
+        "evidence": dict(classification.evidence),
+    }
+
+
+def _validated_trace(path: Path, *, candidate_seat: int) -> tuple[int, bool, bool, Mapping[str, Any], Mapping[str, Any] | None]:
+    payload, _raw = _read_json_bytes(path, label="retained trace")
+    try:
+        trace = EpisodeTrace.from_payload(payload)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("retained trace payload is invalid") from error
+    if not trace.transitions:
+        raise ValueError("retained trace is empty")
+    final = trace.transitions[-1].after
+    terminated = final.is_game_over
+    truncated = not terminated
+    winner = final.winner if terminated and final.winner is not None else -1
+    classification = (
+        _trace_classification_payload(
+            trace,
+            candidate_seat=candidate_seat,
+            terminated=terminated,
+            truncated=truncated,
+        )
+        if winner == -1
+        else None
+    )
+    return (
+        winner,
+        terminated,
+        truncated,
+        _trace_summary_payload(trace, candidate_seat),
+        classification,
+    )
+
+
 def validate_physical_map(
     root: Path,
     candidate: AuditCandidate,
     schedule: AuditSchedule,
     map_seed: int,
+    *,
+    _replay_winners: Mapping[Path, int] | None = None,
 ) -> tuple[Mapping[str, Any], tuple[Mapping[str, Any], Mapping[str, Any]]]:
     """Reopen and validate one reciprocal map and every retained physical byte."""
     try:
@@ -1009,6 +1272,12 @@ def validate_physical_map(
         raise ValueError("map audit scenario identity changed")
     if audit_identity.get("runtime_contract") != runtime:
         raise ValueError("map evaluation runtime contract changed")
+    frozen_evaluation_source = manifest.get("evaluation_source_identity")
+    if (
+        frozen_evaluation_source is not None
+        and audit_identity.get("evaluation_source_identity") != frozen_evaluation_source
+    ):
+        raise ValueError("map evaluation source identity changed")
     if audit_identity.get("checkpoint_sha256") != _checkpoint_digest(candidate):
         raise ValueError("map audit checkpoint identity changed")
 
@@ -1032,6 +1301,7 @@ def validate_physical_map(
     if not isinstance(artifacts, list) or len(artifacts) != 2:
         raise ValueError("map audit identity must hash both retained artifact pairs")
     artifact_pairs: set[tuple[Path, Path]] = set()
+    replay_rows: list[tuple[int, Path]] = []
     for index, match in enumerate(matches):
         seat = index
         if match.get("seed") != map_seed:
@@ -1086,12 +1356,40 @@ def validate_physical_map(
             or match.get("replay_sha256") != artifact.get("replay_sha256")
         ):
             raise ValueError("map match artifact SHA-256 fields changed")
+        (
+            trace_winner,
+            trace_terminated,
+            trace_truncated,
+            trace_summary,
+            trace_classification,
+        ) = _validated_trace(trace_path, candidate_seat=seat)
+        if winner != trace_winner:
+            raise ValueError("map match winner does not reconcile with retained trace")
+        if (
+            match.get("terminated") is not trace_terminated
+            or match.get("truncated") is not trace_truncated
+        ):
+            raise ValueError("map match termination does not reconcile with retained trace")
+        if match.get("summary") != trace_summary:
+            raise ValueError("map match summary does not reconcile with retained trace")
+        if match.get("classification") != trace_classification:
+            raise ValueError("map match classification does not reconcile with retained trace")
+        replay_rows.append((winner, replay_path))
 
         counter = f"{outcome}s" if outcome != "loss" else "losses"
         totals[counter] += 1
         seat_key = "candidate_as_p0" if seat == 0 else "candidate_as_p1"
         seats[seat_key][counter] += 1
 
+    replay_winners = (
+        _inspect_replays(tuple(path for _winner, path in replay_rows))
+        if _replay_winners is None
+        else _replay_winners
+    )
+    for winner, replay_path in replay_rows:
+        if replay_winners.get(replay_path) != winner:
+            raise ValueError("map match winner does not reconcile with retained replay")
+    _require_exact_map_inventory(map_root, evaluation_path, artifact_pairs)
     _require_exact_counts(
         {key: evaluation.get(key) for key in totals}, totals, label="map outcome totals"
     )
@@ -1183,6 +1481,7 @@ def _enrich_evaluation(
         "definition_sha256": manifest["definition_sha256"],
         "scenario_sha256": manifest["scenario"]["sha256"],
         "runtime_contract": manifest["runtime_contract"],
+        "evaluation_source_identity": manifest["evaluation_source_identity"],
         "checkpoint_sha256": _checkpoint_digest(candidate),
         "artifacts": artifacts,
     }
@@ -1250,13 +1549,18 @@ def evaluate_audit(
     schedule = definition.schedule
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / "manifest.json"
+    evaluation_source_identity = dict(_evaluation_source_identity())
+    if manifest_path.exists():
+        frozen_manifest = _load_audit_manifest(root)
+        if frozen_manifest.get("evaluation_source_identity") != evaluation_source_identity:
+            raise ValueError("current evaluation source identity differs from the frozen audit")
     prepared = validate_prepared_definition(definition, _smoke=_smoke)
     scenario_bytes = prepared.scenario_bytes
     scenario_sha256 = prepared.scenario_sha256
     source_contracts = prepared.source_contracts
     runtime_contract = dict(_runtime_contract(server_cmd))
     _validate_runtime_contract(runtime_contract, source_contracts)
-    manifest_path = root / "manifest.json"
     if manifest_path.exists():
         manifest = _require_existing_manifest(
             root,
@@ -1275,9 +1579,13 @@ def evaluate_audit(
             source_contracts=source_contracts,
             runtime_contract=runtime_contract,
             smoke=_smoke,
+            evaluation_source_identity=evaluation_source_identity,
         )
         atomic_write_json(manifest_path, manifest)
 
+    existing_replay_winners = _inspect_replays(
+        _replay_paths_for_definition(root, definition, existing_only=True)
+    )
     started = time.monotonic()
     completed = 0
     reused_total = 0
@@ -1301,7 +1609,13 @@ def evaluate_audit(
             map_seed = schedule.seed_start + map_offset
             evaluation_path = audit_map_path(root, candidate.candidate_id, map_seed)
             if evaluation_path.exists():
-                validate_physical_map(root, candidate, schedule, map_seed)
+                validate_physical_map(
+                    root,
+                    candidate,
+                    schedule,
+                    map_seed,
+                    _replay_winners=existing_replay_winners,
+                )
                 candidate_reused += 1
                 reused_total += 1
                 completed += 1
@@ -1782,6 +2096,9 @@ def aggregate_audit(
     if manifest.get("smoke") is not _smoke:
         raise ValueError("audit manifest smoke mode does not match aggregation mode")
 
+    replay_winners = _inspect_replays(
+        _replay_paths_for_definition(root, definition, existing_only=False)
+    )
     candidates: dict[str, Mapping[str, Any]] = {}
     physical_rows: dict[str, list[Mapping[str, Any]]] = {}
     for candidate in definition.candidates:
@@ -1789,7 +2106,11 @@ def aggregate_audit(
         for offset in range(definition.schedule.maps):
             map_seed = definition.schedule.seed_start + offset
             _evaluation, matches = validate_physical_map(
-                root, candidate, definition.schedule, map_seed
+                root,
+                candidate,
+                definition.schedule,
+                map_seed,
+                _replay_winners=replay_winners,
             )
             for candidate_seat, match in enumerate(matches):
                 if match.get("candidate_seat") != candidate_seat:

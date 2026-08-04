@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from ml_lab.checkpoint_audit import (
     discover_audit_candidates,
     build_audit_definition,
 )
+from ml_lab.draw_classification import classify_draw, summarize_episode
+from ml_lab.tactical_trace import CommandFrame, EpisodeTrace, SeatFrame, StateFrame, TransitionFrame
 
 
 ENCODING_HASH = "e" * 64
@@ -427,6 +430,118 @@ RUNTIME_CONTRACT = {
     "semantics": {"start_profiles": [{"id": "standard-3v3"}]},
 }
 REPOSITORY_IDENTITY = {"repository": "C:/repo", "commit": "a" * 40, "dirty": False}
+EVALUATION_SOURCE_IDENTITY = {
+    "repository": "C:/repo",
+    "commit": "a" * 40,
+    "tracked_diff_sha256": hashlib.sha256(b"").hexdigest(),
+}
+
+
+def _artifact_trace(winner: int) -> EpisodeTrace:
+    alive = (1, 0) if winner == 0 else (0, 0)
+    seats = tuple(
+        SeatFrame(
+            seat=seat,
+            points=0,
+            destroyed_value=0,
+            alive_units=alive[seat],
+            current_hit_points=10 * alive[seat],
+            maximum_hit_points=10 * alive[seat],
+            health_adjusted_material=float(10 * alive[seat]),
+            can_damage_enemy=bool(alive[seat]),
+            can_currently_attack_enemy=False,
+            can_move=bool(alive[seat]),
+            units=(),
+        )
+        for seat in (0, 1)
+    )
+    before = StateFrame(
+        round=1,
+        active_seat=1,
+        is_game_over=False,
+        winner=None,
+        productive_legal_actions=0,
+        seats=seats,
+    )
+    after = replace(
+        before,
+        round=2,
+        active_seat=0,
+        is_game_over=True,
+        winner=None if winner == -1 else winner,
+    )
+    return EpisodeTrace(
+        schema_version=1,
+        transitions=(
+            TransitionFrame(
+                before=before,
+                command=CommandFrame(
+                    kind="end_turn",
+                    issuer=1,
+                    actor_id=None,
+                    target_id=None,
+                    q=None,
+                    r=None,
+                ),
+                after=after,
+            ),
+        ),
+    )
+
+
+def _artifact_summary(trace: EpisodeTrace, candidate_seat: int) -> dict[str, Any]:
+    summary = summarize_episode(trace, candidate_seat)
+    return {
+        "command_count": summary.command_count,
+        "round_count": summary.round_count,
+        "damage_by_seat": list(summary.damage_by_seat),
+        "kills_by_seat": list(summary.kills_by_seat),
+        "end_turns_by_seat": list(summary.end_turns_by_seat),
+        "wasted_end_turns_by_seat": list(summary.wasted_end_turns_by_seat),
+        "peak_normalized_advantage": summary.peak_normalized_advantage,
+        "final_normalized_advantage": summary.final_normalized_advantage,
+        "maximum_state_repetition": summary.maximum_state_repetition,
+    }
+
+
+def _artifact_classification(trace: EpisodeTrace, candidate_seat: int) -> dict[str, Any]:
+    classification = classify_draw(
+        trace,
+        candidate_seat=candidate_seat,
+        terminated=True,
+        truncated=False,
+        winner=None,
+    )
+    return {
+        "primary": classification.primary.value,
+        "flags": [flag.value for flag in classification.flags],
+        "evidence": dict(classification.evidence),
+    }
+
+
+def _artifact_replay(winner: int) -> str:
+    unit = "U 1 0 10 1 0 1 0 1 360 1 360 0 0 0\n" if winner == 0 else ""
+    return (
+        "HEXWARS-REPLAY 1\n"
+        "META 2 1 1 0 0\n"
+        "CONFIG win=1 fixedTemplates=0 templateSlots=0 generators=0\n"
+        "TILES 1\n"
+        "0 0 0 0\n"
+        "ZONE0 1 0 0\n"
+        "ZONE1 0\n"
+        f"PLAYER 0 0 {1 if winner == 0 else 0} 0 0\n"
+        f"{unit}"
+        "PLAYER 1 0 0 0 0\n"
+        "CMDS 1\n"
+        "E 1\n"
+    )
+
+
+def _fake_replay_inspection(paths: Any) -> dict[Path, int]:
+    return {
+        Path(path).resolve(): 0 if "candidate-seat-0" in Path(path).name else -1
+        for path in paths
+    }
 
 
 def test_runtime_contract_accepts_horizon_and_environment_kind_differences() -> None:
@@ -607,9 +722,13 @@ class _FakeAuditEvaluator:
             stem = f"match-{index:06d}-seed-{seed}-candidate-seat-{seat}"
             trace_path = trace_dir / f"{stem}.json"
             replay_path = replay_dir / f"{stem}.replay"
-            trace_path.write_bytes(f"trace-{seed}-{seat}\n".encode("ascii"))
-            replay_path.write_bytes(f"replay-{seed}-{seat}\n".encode("ascii"))
             is_draw = seat == 1
+            winner = -1 if is_draw else 0
+            replay_path.write_text(_artifact_replay(winner), encoding="utf-8")
+            trace = _artifact_trace(winner)
+            _write_json(trace_path, trace.to_dict())
+            summary = _artifact_summary(trace, seat)
+            classification = _artifact_classification(trace, seat) if is_draw else None
             matches.append(
                 {
                     "seed": seed,
@@ -618,10 +737,10 @@ class _FakeAuditEvaluator:
                     "outcome": "draw" if is_draw else "win",
                     "start_profile": "standard-3v3",
                     "reference_seat": seat,
-                    "terminated": not is_draw,
-                    "truncated": is_draw,
-                    "summary": {"turns": 8 + seat, "final_state_hash": f"state-{seat}"},
-                    "classification": {"primary": "turn-limit"} if is_draw else None,
+                    "terminated": True,
+                    "truncated": False,
+                    "summary": summary,
+                    "classification": classification,
                     "trace_path": str(trace_path),
                     "replay_path": str(replay_path),
                 }
@@ -658,7 +777,7 @@ class _FakeAuditEvaluator:
                 "retained": 2,
                 "draw_traces": 1,
                 "control_traces": 1,
-                "draw_categories": {"turn-limit": 1},
+                "draw_categories": {"invalid_scenario": 1},
             },
         }
         _write_json(Path(kwargs["output_path"]), result)
@@ -676,6 +795,18 @@ def _stub_audit_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         audit_module,
         "_repository_identity",
         lambda: dict(REPOSITORY_IDENTITY),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "_evaluation_source_identity",
+        lambda: dict(EVALUATION_SOURCE_IDENTITY),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "_inspect_replays",
+        _fake_replay_inspection,
         raising=False,
     )
 
@@ -797,6 +928,7 @@ def test_evaluation_reuse_reopens_and_validates_every_physical_artifact(
         "seat",
         "profile",
         "runtime_contract",
+        "evaluation_source_identity",
         "outcome_totals",
         "summary",
         "trace_path",
@@ -835,6 +967,10 @@ def test_evaluation_tamper_fails_closed_without_overwriting_existing_map(
         evaluation["schedule"]["start_profile"] = "other-profile"
     elif mutation == "runtime_contract":
         evaluation["audit_identity"]["runtime_contract"]["encoding_hash"] = "f" * 64
+    elif mutation == "evaluation_source_identity":
+        evaluation["audit_identity"]["evaluation_source_identity"][
+            "tracked_diff_sha256"
+        ] = "f" * 64
     elif mutation == "outcome_totals":
         evaluation["wins"] = 2
     elif mutation == "summary":
@@ -1438,9 +1574,11 @@ def test_aggregate_publication_marks_manifest_completed_and_revalidates_on_reope
     original_validate = audit_module.validate_physical_map
     reopened_maps: list[tuple[str, int]] = []
 
-    def recording_validate(root: Path, candidate: Any, schedule: Any, seed: int) -> Any:
+    def recording_validate(
+        root: Path, candidate: Any, schedule: Any, seed: int, **kwargs: Any
+    ) -> Any:
         reopened_maps.append((candidate.candidate_id, seed))
-        return original_validate(root, candidate, schedule, seed)
+        return original_validate(root, candidate, schedule, seed, **kwargs)
 
     monkeypatch.setattr(audit_module, "validate_physical_map", recording_validate)
     assert audit_module.aggregate_audit(definition, output_root=output_root) == aggregate
@@ -1659,3 +1797,224 @@ def test_validate_prepared_definition_rehashes_every_learned_checkpoint(
     changed.write_bytes(changed.read_bytes() + b"-mutated-after-prepare")
     with pytest.raises(ValueError, match="checkpoint bytes changed"):
         audit_module.validate_prepared_definition(definition)
+
+
+def test_validator_rejects_coherent_metric_tamper_with_unchanged_artifacts(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    evaluation_path = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, 16_000_000
+    )
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    draw_match = evaluation["matches"][1]
+    evaluation["matches"][0].update(
+        winner=-1,
+        outcome="draw",
+        terminated=True,
+        truncated=False,
+        summary=json.loads(json.dumps(draw_match["summary"])),
+        classification=json.loads(json.dumps(draw_match["classification"])),
+    )
+    evaluation.update(
+        wins=0,
+        losses=0,
+        draws=2,
+        rates={"win": 0.0, "loss": 0.0, "draw": 1.0},
+        confidence_intervals={
+            "win": ZERO_WILSON,
+            "loss": ZERO_WILSON,
+            "draw": {"low": 0.3423802275066532, "high": 1.0, "confidence": 0.95},
+        },
+        seat_results={
+            "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 1},
+            "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 1},
+        },
+        evidence={
+            "retention": "all",
+            "retained": 2,
+            "draw_traces": 2,
+            "control_traces": 0,
+            "draw_categories": {"invalid_scenario": 2},
+        },
+    )
+    _write_json(evaluation_path, evaluation)
+    with pytest.raises(ValueError, match="trace|artifact|winner|summary|classification"):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+
+def test_validator_rejects_unreferenced_map_evidence_file(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    map_root = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, 16_000_000
+    ).parent
+    (map_root / "evidence" / "unexpected.bin").write_bytes(b"unreferenced\n")
+
+    with pytest.raises(ValueError, match="unexpected|inventory|unreferenced"):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+
+def test_replay_inspector_uses_authoritative_engine_reconstruction(tmp_path: Path) -> None:
+    p0 = tmp_path / "p0.replay"
+    draw = tmp_path / "draw.replay"
+    p0.write_text(_artifact_replay(0), encoding="utf-8")
+    draw.write_text(_artifact_replay(-1), encoding="utf-8")
+
+    assert audit_module._inspect_replays((p0, draw)) == {
+        p0.resolve(): 0,
+        draw.resolve(): -1,
+    }
+
+
+def test_validator_rejects_replay_terminal_winner_disagreement(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    candidate = definition.candidates[0]
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    monkeypatch.setattr(
+        audit_module,
+        "_inspect_replays",
+        lambda paths: {Path(path).resolve(): -1 for path in paths},
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="replay.*winner|winner.*replay"):
+        audit_module.validate_physical_map(
+            output_root, candidate, definition.schedule, 16_000_000
+        )
+
+
+def test_aggregate_batches_authoritative_replay_inspection(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    calls: list[tuple[Path, ...]] = []
+
+    def inspect(paths: Any) -> dict[Path, int]:
+        batch = tuple(Path(path).resolve() for path in paths)
+        calls.append(batch)
+        return _fake_replay_inspection(batch)
+
+    monkeypatch.setattr(audit_module, "_inspect_replays", inspect)
+    audit_module.aggregate_audit(definition, output_root=output_root)
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 200
+
+
+@pytest.mark.parametrize("mutation", ["commit", "tracked_diff"])
+def test_resume_rejects_changed_evaluation_source_before_runtime_or_evaluator(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    changed = dict(EVALUATION_SOURCE_IDENTITY)
+    if mutation == "commit":
+        changed["commit"] = "b" * 40
+    else:
+        changed["tracked_diff_sha256"] = "c" * 64
+    monkeypatch.setattr(audit_module, "_evaluation_source_identity", lambda: changed)
+
+    def unexpected_runtime(_server_cmd: Any) -> dict[str, Any]:
+        raise AssertionError("changed source identity reached runtime server")
+
+    monkeypatch.setattr(audit_module, "_runtime_contract", unexpected_runtime)
+    evaluator = _FakeAuditEvaluator(definition)
+    with pytest.raises(ValueError, match="evaluation source identity"):
+        audit_module.evaluate_audit(
+            definition,
+            output_root=output_root,
+            server_cmd=["fake-gym-server"],
+            workers=1,
+            evaluator=evaluator,
+            progress=lambda _message: None,
+        )
+    assert evaluator.calls == []
+
+
+def test_resume_reuses_maps_with_unchanged_evaluation_source_identity(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    evaluator = _FakeAuditEvaluator(definition)
+    replay_calls: list[tuple[Path, ...]] = []
+
+    def inspect(paths: Any) -> dict[Path, int]:
+        batch = tuple(Path(path).resolve() for path in paths)
+        replay_calls.append(batch)
+        return _fake_replay_inspection(batch)
+
+    monkeypatch.setattr(audit_module, "_inspect_replays", inspect)
+    audit_module.evaluate_audit(
+        definition,
+        output_root=output_root,
+        server_cmd=["fake-gym-server"],
+        workers=1,
+        evaluator=evaluator,
+        progress=lambda _message: None,
+    )
+
+    assert evaluator.calls == []
+    assert len(replay_calls) == 1
+    assert len(replay_calls[0]) == 200
+
+
+def test_evaluation_source_identity_ignores_tracked_generated_bytecode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "python" / "ml_lab" / "checkpoint_audit.py"
+    bytecode = repository / "python" / "hexwars_gym" / "__pycache__" / "env.pyc"
+    source.parent.mkdir(parents=True)
+    bytecode.parent.mkdir(parents=True)
+    source.write_text("SOURCE = 1\n", encoding="utf-8")
+    bytecode.write_bytes(b"generated-v1")
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=repository, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Checkpoint Audit Test",
+            "-c",
+            "user.email=checkpoint-audit@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(audit_module, "__file__", str(source))
+    clean = audit_module._evaluation_source_identity()
+
+    bytecode.write_bytes(b"generated-v2")
+    assert audit_module._evaluation_source_identity() == clean
+
+    source.write_text("SOURCE = 2\n", encoding="utf-8")
+    changed = audit_module._evaluation_source_identity()
+    assert changed["commit"] == clean["commit"]
+    assert changed["tracked_diff_sha256"] != clean["tracked_diff_sha256"]
