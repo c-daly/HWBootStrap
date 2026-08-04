@@ -258,7 +258,7 @@ def test_definition_explicitly_records_omitted_scratch_and_serializes_without_da
         {"family": "scratch_ppo", "reason": "no physical compatible run supplied"},
     )
     assert definition.to_dict() == {
-        "schema_version": 1,
+        "schema_version": 2,
         "audit_id": "annihilation-checkpoint-audit-v1",
         "exploratory": True,
         "locked_panel_replacement": False,
@@ -272,6 +272,10 @@ def test_definition_explicitly_records_omitted_scratch_and_serializes_without_da
         "candidates": [candidate.to_dict() for candidate in definition.candidates],
         "omitted_optional_candidates": [
             {"family": "scratch_ppo", "reason": "no physical compatible run supplied"}
+        ],
+        "source_roots": [
+            {"role": "clone", "source_run": str(clone.resolve())},
+            {"role": "ppo", "source_run": str(ppo.resolve())},
         ],
     }
     json.dumps(definition.to_dict(), sort_keys=True)
@@ -809,6 +813,11 @@ def _stub_audit_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_replay_inspection,
         raising=False,
     )
+    # Physical-artifact tests intentionally use a reduced synthetic roster;
+    # exact rediscovery is exercised independently against real source roots below.
+    monkeypatch.setattr(
+        audit_module, "_validate_exact_candidate_set", lambda _definition: None
+    )
 
 
 def _evaluate_fake_audit(
@@ -833,12 +842,12 @@ def test_schedule_keys_are_exactly_candidate_map_and_reciprocal_seat(
     source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     definition = _audit_definition(source_runs, maps=100)
+    output_root = tmp_path / "audit"
     clone, ppo = source_runs
     discovered = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
     definition = replace(
         definition, candidates=(definition.candidates[0], discovered.candidates[-1])
     )
-    output_root = tmp_path / "audit"
 
     evaluator = _evaluate_fake_audit(definition, output_root, monkeypatch)
     assert [(p0, p1) for p0, p1, _kwargs in evaluator.calls] == [
@@ -1745,7 +1754,7 @@ def test_aggregate_independently_rejects_self_consistent_identity_or_isolation_m
 ) -> None:
     definition = _audit_definition(source_runs)
     if mutation == "schema_version":
-        definition = replace(definition, schema_version=2)
+        definition = replace(definition, schema_version=3)
     elif mutation == "audit_id":
         definition = replace(definition, audit_id="other-audit")
     elif mutation == "exploratory":
@@ -1797,6 +1806,194 @@ def test_validate_prepared_definition_rehashes_every_learned_checkpoint(
     changed.write_bytes(changed.read_bytes() + b"-mutated-after-prepare")
     with pytest.raises(ValueError, match="checkpoint bytes changed"):
         audit_module.validate_prepared_definition(definition)
+
+
+def test_validate_prepared_definition_rejects_dropped_final_physical_ppo_candidate(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+    assert [(source.role, source.source_run) for source in definition.source_roots] == [
+        ("clone", str(clone.resolve())),
+        ("ppo", str(ppo.resolve())),
+    ]
+    final_ppo = max(
+        (candidate for candidate in definition.candidates if candidate.family == "bc_ppo"),
+        key=lambda candidate: candidate.actual_step,
+    )
+    tampered = replace(
+        definition,
+        candidates=tuple(
+            candidate for candidate in definition.candidates if candidate != final_ppo
+        ),
+    )
+
+    with pytest.raises(ValueError, match="candidate set"):
+        audit_module.validate_prepared_definition(tampered)
+
+
+@pytest.mark.parametrize("entrypoint", ["evaluate", "aggregate"])
+def test_reopen_entrypoints_reject_dropped_physical_candidate_before_games(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    clone, ppo = source_runs
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+    final_ppo = max(
+        (candidate for candidate in definition.candidates if candidate.family == "bc_ppo"),
+        key=lambda candidate: candidate.actual_step,
+    )
+    tampered = replace(
+        definition,
+        candidates=tuple(
+            candidate
+            for candidate in definition.candidates
+            if candidate != final_ppo
+        ),
+    )
+    output_root = tmp_path / entrypoint
+    output_root.mkdir()
+
+    with pytest.raises(ValueError, match="candidate set"):
+        if entrypoint == "evaluate":
+            audit_module.evaluate_audit(
+                tampered,
+                output_root=output_root,
+                server_cmd=["must-not-start"],
+                workers=1,
+            )
+        else:
+            audit_module.aggregate_audit(tampered, output_root=output_root)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "drop_random_anchor",
+        "drop_bounded_anchor",
+        "duplicate_id",
+        "unsafe_id",
+        "reorder_trajectory",
+        "noncontiguous_trajectory",
+        "noncanonical_controller",
+        "drop_ppo_family",
+        "duplicate_checkpoint_membership",
+        "missing_scratch_omission",
+        "control_checkpoint_provenance",
+    ],
+)
+def test_validate_prepared_definition_rejects_noncanonical_candidate_set_mutations(
+    source_runs: tuple[Path, Path],
+    mutation: str,
+) -> None:
+    clone, ppo = source_runs
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+    candidates = list(definition.candidates)
+    if mutation == "drop_random_anchor":
+        candidates = [
+            candidate for candidate in candidates if candidate.candidate_id != "random-anchor"
+        ]
+    elif mutation == "drop_bounded_anchor":
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.candidate_id != "bounded-search-anchor"
+        ]
+    elif mutation == "duplicate_id":
+        candidates[1] = replace(candidates[1], candidate_id=candidates[0].candidate_id)
+    elif mutation == "unsafe_id":
+        candidates[1] = replace(candidates[1], candidate_id="../escaped-candidate")
+    elif mutation == "reorder_trajectory":
+        candidates[1], candidates[2] = candidates[2], candidates[1]
+    elif mutation == "noncontiguous_trajectory":
+        candidates[2] = replace(candidates[2], trajectory_order=99)
+    elif mutation == "noncanonical_controller":
+        candidates[1] = replace(
+            candidates[1],
+            controller=json.dumps(json.loads(candidates[1].controller), indent=2),
+        )
+    elif mutation == "drop_ppo_family":
+        candidates = [candidate for candidate in candidates if candidate.family != "bc_ppo"]
+    elif mutation == "duplicate_checkpoint_membership":
+        candidates[2] = replace(
+            candidates[2],
+            checkpoint_path=candidates[1].checkpoint_path,
+            checkpoint_sha256=candidates[1].checkpoint_sha256,
+        )
+    elif mutation == "control_checkpoint_provenance":
+        control_index = next(
+            index
+            for index, candidate in enumerate(candidates)
+            if candidate.family == "control"
+        )
+        candidates[control_index] = replace(
+            candidates[control_index], checkpoint_sha256="a" * 64
+        )
+    tampered = replace(definition, candidates=tuple(candidates))
+    if mutation == "missing_scratch_omission":
+        tampered = replace(tampered, omitted_optional_candidates=())
+
+    with pytest.raises(ValueError, match="candidate|source"):
+        audit_module.validate_prepared_definition(tampered)
+
+
+@pytest.mark.parametrize("mutation", ["drop_scratch_family", "claim_scratch_omitted"])
+def test_validate_prepared_definition_rejects_inconsistent_supplied_scratch_set(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    clone, ppo = source_runs
+    scratch = _write_run(
+        tmp_path / "scratch-completeness",
+        kind="scratch",
+        checkpoints=(20_480, 40_960),
+    )
+    definition = build_audit_definition(
+        clone_run=clone,
+        ppo_run=ppo,
+        scratch_run=scratch,
+    )
+    if mutation == "drop_scratch_family":
+        tampered = replace(
+            definition,
+            candidates=tuple(
+                candidate
+                for candidate in definition.candidates
+                if candidate.family != "scratch_ppo"
+            ),
+        )
+    else:
+        tampered = replace(
+            definition,
+            omitted_optional_candidates=(
+                {
+                    "family": "scratch_ppo",
+                    "reason": "no physical compatible run supplied",
+                },
+            ),
+        )
+
+    with pytest.raises(ValueError, match="candidate"):
+        audit_module.validate_prepared_definition(tampered)
+
+
+def test_exact_candidate_validation_is_general_over_physical_ppo_steps(
+    source_runs: tuple[Path, Path],
+) -> None:
+    clone, ppo = source_runs
+    extra_step = 44_000
+    (ppo / "checkpoints" / f"step_{extra_step:09d}.zip").write_bytes(b"extra-physical-ppo")
+    definition = build_audit_definition(clone_run=clone, ppo_run=ppo, scratch_run=None)
+
+    audit_module.validate_prepared_definition(definition)
+
+    assert [
+        candidate.actual_step
+        for candidate in definition.candidates
+        if candidate.family == "bc_ppo"
+    ] == [14_336, 26_624, 38_912, extra_step]
 
 
 def test_validator_rejects_coherent_metric_tamper_with_unchanged_artifacts(

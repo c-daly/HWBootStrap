@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -463,6 +464,98 @@ def test_definition_reuse_requires_canonical_bytes_and_loader_rejects_extra_fiel
     _write_json(definition_path, payload)
     with pytest.raises(ValueError, match="shape"):
         runner.load_definition(output_root)
+
+
+def test_completed_legacy_definition_is_read_only_reopenable_but_cannot_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clone, ppo = _source_runs(tmp_path)
+    output_root = tmp_path / "legacy-completed"
+    output_root.mkdir()
+    current = runner.audit.build_audit_definition(
+        clone_run=clone,
+        ppo_run=ppo,
+        scratch_run=None,
+    )
+    legacy = replace(current, schema_version=1, source_roots=())
+    payload = legacy.to_dict()
+    _write_json(output_root / "definition.json", payload)
+    scenario_bytes, scenario_sha256, source_contracts = runner.audit._source_material(legacy)
+    runtime = {
+        "environment": "tactical-v2",
+        "version": "tactical-v2",
+        "contract_hash": "r" * 64,
+        "encoding_hash": "e" * 64,
+        "observation_size": 761,
+        "action_size": 379,
+        "board": {"width": 13, "height": 9},
+    }
+    monkeypatch.setattr(
+        runner.audit,
+        "_repository_identity",
+        lambda: {"repository": str(tmp_path), "commit": "a" * 40, "dirty": False},
+    )
+    manifest = dict(
+        runner.audit._initial_manifest(
+            legacy,
+            scenario_bytes=scenario_bytes,
+            scenario_sha256=scenario_sha256,
+            source_contracts=source_contracts,
+            runtime_contract=runtime,
+            evaluation_source_identity={
+                "repository": str(tmp_path),
+                "commit": "a" * 40,
+                "tracked_diff_sha256": "b" * 64,
+            },
+        )
+    )
+    aggregate_bytes = b"{}\n"
+    (output_root / "audit.json").write_bytes(aggregate_bytes)
+    manifest.update(
+        {
+            "state": "completed",
+            "completed_at": "2026-08-03T23:00:00Z",
+            "aggregate_sha256": runner.audit._sha256(aggregate_bytes),
+        }
+    )
+    _write_json(output_root / "manifest.json", manifest)
+    before = {
+        path.relative_to(output_root).as_posix(): path.read_bytes()
+        for path in output_root.iterdir()
+        if path.is_file()
+    }
+    monkeypatch.setattr(runner.audit, "_runtime_contract", lambda _command: runtime)
+
+    loaded = runner.load_definition(output_root)
+    reopened = runner.run_validate(
+        output_root=output_root,
+        logger=logging.getLogger("legacy-read-only-test"),
+    )
+
+    assert loaded.to_dict() == payload
+    assert reopened["state"] == "completed"
+    assert {
+        path.relative_to(output_root).as_posix(): path.read_bytes()
+        for path in output_root.iterdir()
+        if path.is_file()
+    } == before
+    with pytest.raises(ValueError, match="schema|legacy|global identity"):
+        runner.audit.evaluate_audit(
+            loaded,
+            output_root=output_root,
+            server_cmd=["must-not-start"],
+            workers=1,
+            evaluator=lambda *_args, **_kwargs: pytest.fail("legacy evaluation must not run"),
+        )
+    with pytest.raises(ValueError, match="different physical definition"):
+        runner.run_prepare(
+            clone_run=clone,
+            ppo_run=ppo,
+            scratch_run=None,
+            output_root=output_root,
+            logger=logging.getLogger("legacy-prepare-test"),
+        )
 
 
 def test_validate_rejects_checkpoint_mutated_after_prepare_before_runtime_or_games(

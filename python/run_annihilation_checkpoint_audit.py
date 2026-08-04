@@ -158,10 +158,19 @@ def load_definition(output_root: Path) -> audit.AuditDefinition:
         schedule_payload = payload["schedule"]
         candidate_payloads = payload["candidates"]
         omitted_payloads = payload["omitted_optional_candidates"]
+        schema_version = payload["schema_version"]
+        if schema_version == 2:
+            source_payloads = payload["source_roots"]
+        elif schema_version == 1 and "source_roots" not in payload:
+            source_payloads = []
+        else:
+            raise ValueError("unsupported frozen audit definition schema")
         if not isinstance(schedule_payload, dict) or not isinstance(candidate_payloads, list):
             raise TypeError("definition members have invalid shapes")
-        if not isinstance(omitted_payloads, list):
-            raise TypeError("omitted candidates must be a list")
+        if not isinstance(omitted_payloads, list) or not isinstance(
+            source_payloads, list
+        ):
+            raise TypeError("omitted candidates and source roots must be lists")
         definition = audit.AuditDefinition(
             schema_version=payload["schema_version"],
             audit_id=payload["audit_id"],
@@ -170,9 +179,12 @@ def load_definition(output_root: Path) -> audit.AuditDefinition:
             schedule=audit.AuditSchedule(**schedule_payload),
             candidates=tuple(audit.AuditCandidate(**row) for row in candidate_payloads),
             omitted_optional_candidates=tuple(dict(row) for row in omitted_payloads),
+            source_roots=tuple(audit.AuditSourceRoot(**row) for row in source_payloads),
         )
         if definition.to_dict() != payload:
             raise ValueError("frozen audit definition shape does not round-trip")
+        if definition.schema_version == 1:
+            audit.validate_completed_legacy_definition(path.parent, definition)
         return definition
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         raise ValueError(f"frozen audit definition is unreadable: {path}") from error
@@ -184,7 +196,9 @@ def run_validate(
     """Validate frozen physical sources against one evaluation runtime."""
     definition = load_definition(output_root)
     root = Path(output_root).resolve(strict=True)
-    prepared = audit.validate_prepared_definition(definition)
+    prepared = audit.validate_prepared_definition(
+        definition, _allow_completed_legacy=definition.schema_version == 1
+    )
     scenario_bytes = prepared.scenario_bytes
     scenario_sha256 = prepared.scenario_sha256
     source_contracts = prepared.source_contracts

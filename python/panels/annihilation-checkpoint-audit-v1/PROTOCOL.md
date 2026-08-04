@@ -8,6 +8,14 @@ Does the physically retained seed-227 behavioral-cloning-to-PPO checkpoint traje
 
 The `prepare` command discovers candidates only from supplied physical files and freezes their byte identities. The required trajectory is the pure behavioral clone at step 0 followed by every physically present BC-initialized PPO checkpoint in increasing step order. Random and bounded-search are scripted anchors. A compatible scratch-PPO run is optional; when it is not supplied, the omission is explicit. Manifest-only, partial, or inferred checkpoints are never candidates. In particular, an in-memory stop count does not create a 51,200-step checkpoint.
 
+## Frozen candidate-set integrity
+
+New definitions use schema 2. They freeze canonical source roots in role order: clone, BC-initialized PPO, and optional scratch PPO. Candidate discovery is general over the physical checkpoint steps and count present under those roots; it does not encode a fixed number of PPO checkpoints.
+
+Every validate, evaluate, aggregate, and report reopen independently rediscovers the complete candidate set from the frozen roots. The rediscovered tuple must exactly match the frozen tuple, including membership, order, trajectory ordinals, safe unique IDs, canonical controllers, checkpoint provenance, both scripted anchors, and the optional-scratch inclusion or omission record. Duplicate checkpoint membership, a dropped family or final PPO checkpoint, changed controls, reordering, or a self-consistent definition/manifest deletion fails closed before any game can run or aggregate can be trusted.
+
+Schema-1 definitions predate frozen source roots and are legacy evidence only. A schema-1 definition may be loaded, validated, aggregated, and reported read-only only when its manifest is already completed, its frozen definition identity matches, and its sealed `audit.json` bytes match the manifest digest. It cannot be prepared, evaluated, resumed, or used to generate new games. This preserves completed historical evidence without treating the weaker schema as a valid new run contract.
+
 ## Schedule
 
 Each candidate plays 100 maps, seeds 16,000,000 through 16,000,099, against Random under `standard-3v3`. Each map is reciprocal: the candidate plays once as player 0 and once as player 1, for exactly 200 ordered games per candidate. The environment and version are `tactical-v2`. This published schedule has no CLI override.

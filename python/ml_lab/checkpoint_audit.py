@@ -20,6 +20,7 @@ from .io import atomic_write_json
 
 
 _CHECKPOINT_NAME = re.compile(r"step_(?P<step>\d{9})\.zip\Z")
+_CANDIDATE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")
 _EXPECTED_SEED = 227
 _COMPATIBILITY_FIELDS = (
     ("environment", "environment"),
@@ -95,6 +96,15 @@ class AuditCandidate:
 
 
 @dataclass(frozen=True)
+class AuditSourceRoot:
+    role: Literal["clone", "ppo", "scratch"]
+    source_run: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"role": self.role, "source_run": self.source_run}
+
+
+@dataclass(frozen=True)
 class AuditDefinition:
     schema_version: int
     audit_id: str
@@ -103,9 +113,10 @@ class AuditDefinition:
     schedule: AuditSchedule
     candidates: tuple[AuditCandidate, ...]
     omitted_optional_candidates: tuple[Mapping[str, str], ...]
+    source_roots: tuple[AuditSourceRoot, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "audit_id": self.audit_id,
             "exploratory": self.exploratory,
@@ -114,6 +125,9 @@ class AuditDefinition:
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "omitted_optional_candidates": [dict(item) for item in self.omitted_optional_candidates],
         }
+        if self.schema_version >= 2:
+            payload["source_roots"] = [source.to_dict() for source in self.source_roots]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -465,23 +479,94 @@ def build_audit_definition(
     omitted: tuple[Mapping[str, str], ...] = ()
     if scratch_run is None:
         omitted = ({"family": "scratch_ppo", "reason": "no physical compatible run supplied"},)
+    candidates = discover_audit_candidates(
+        clone_run=clone_run,
+        ppo_run=ppo_run,
+        scratch_run=scratch_run,
+    )
+    source_roots = [
+        AuditSourceRoot("clone", str(_canonical_run(clone_run, label="clone"))),
+        AuditSourceRoot("ppo", str(_canonical_run(ppo_run, label="PPO"))),
+    ]
+    if scratch_run is not None:
+        source_roots.append(
+            AuditSourceRoot("scratch", str(_canonical_run(scratch_run, label="scratch")))
+        )
     return AuditDefinition(
-        schema_version=1,
+        schema_version=2,
         audit_id="annihilation-checkpoint-audit-v1",
         exploratory=True,
         locked_panel_replacement=False,
         schedule=AuditSchedule(),
-        candidates=discover_audit_candidates(
-            clone_run=clone_run,
-            ppo_run=ppo_run,
-            scratch_run=scratch_run,
-        ),
+        candidates=candidates,
         omitted_optional_candidates=omitted,
+        source_roots=tuple(source_roots),
     )
 
 
 def _canonical_json_bytes(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _validate_exact_candidate_set(definition: AuditDefinition) -> None:
+    roles = tuple(source.role for source in definition.source_roots)
+    if roles not in {("clone", "ppo"), ("clone", "ppo", "scratch")}:
+        raise ValueError(
+            "audit source roots must contain canonical clone/PPO roles and optional scratch"
+        )
+    canonical_paths: list[str] = []
+    for source in definition.source_roots:
+        canonical = str(
+            _canonical_run(Path(source.source_run), label=f"{source.role} source")
+        )
+        if canonical != source.source_run:
+            raise ValueError(f"{source.role} source root is not canonical")
+        canonical_paths.append(canonical)
+    if len(canonical_paths) != len(set(canonical_paths)):
+        raise ValueError("audit source roots must be unique")
+
+    expected_omission: tuple[Mapping[str, str], ...] = ()
+    if "scratch" not in roles:
+        expected_omission = (
+            {"family": "scratch_ppo", "reason": "no physical compatible run supplied"},
+        )
+    if definition.omitted_optional_candidates != expected_omission:
+        raise ValueError("audit candidate set has inconsistent optional scratch omission")
+
+    candidate_ids = tuple(candidate.candidate_id for candidate in definition.candidates)
+    if (
+        len(candidate_ids) != len(set(candidate_ids))
+        or any(_CANDIDATE_ID.fullmatch(candidate_id) is None for candidate_id in candidate_ids)
+    ):
+        raise ValueError("audit candidate set contains duplicate or unsafe candidate IDs")
+    physical_membership = tuple(
+        candidate.checkpoint_path
+        for candidate in definition.candidates
+        if candidate.family != "control"
+    )
+    if len(physical_membership) != len(set(physical_membership)):
+        raise ValueError("audit candidate set contains duplicate physical checkpoints")
+
+    by_role = {source.role: Path(source.source_run) for source in definition.source_roots}
+    expected_candidates = discover_audit_candidates(
+        clone_run=by_role["clone"],
+        ppo_run=by_role["ppo"],
+        scratch_run=by_role.get("scratch"),
+    )
+    if definition.candidates != expected_candidates and tuple(
+        replace(candidate, checkpoint_sha256=None)
+        if candidate.source_run is not None
+        else candidate
+        for candidate in definition.candidates
+    ) != tuple(
+        replace(candidate, checkpoint_sha256=None)
+        if candidate.source_run is not None
+        else candidate
+        for candidate in expected_candidates
+    ):
+        raise ValueError(
+            "frozen audit candidate set does not exactly match rediscovered physical candidates"
+        )
 
 
 def _runtime_contract(server_cmd: Sequence[str]) -> Mapping[str, Any]:
@@ -675,10 +760,17 @@ def _source_material(
 
 
 def validate_prepared_definition(
-    definition: AuditDefinition, *, _smoke: bool = False
+    definition: AuditDefinition,
+    *,
+    _smoke: bool = False,
+    _allow_completed_legacy: bool = False,
 ) -> PreparedAuditInputs:
     """Reopen and validate every learned physical input frozen by prepare."""
-    _validate_global_audit_definition(definition, smoke=_smoke)
+    _validate_global_audit_definition(
+        definition,
+        smoke=_smoke,
+        allow_completed_legacy=_allow_completed_legacy,
+    )
     scenario_bytes, scenario_sha256, source_contracts = _source_material(definition)
     for candidate in definition.candidates:
         if candidate.source_run is None:
@@ -888,6 +980,29 @@ def _load_audit_manifest(root: Path) -> Mapping[str, Any]:
     _validate_runtime_contract(runtime, source_contracts)
     return manifest
 
+
+def validate_completed_legacy_definition(
+    root: Path, definition: AuditDefinition
+) -> Mapping[str, Any]:
+    """Accept schema-v1 definitions only as sealed, byte-identified evidence."""
+    if definition.schema_version != 1 or definition.source_roots:
+        raise ValueError("legacy audit validation requires a schema-v1 definition")
+    resolved_root = Path(root).resolve(strict=True)
+    manifest = _load_audit_manifest(resolved_root)
+    if manifest.get("state") != "completed":
+        raise ValueError("legacy audit evidence must already be completed")
+    definition_payload, definition_sha256 = _definition_identity(definition)
+    if (
+        manifest.get("definition") != definition_payload
+        or manifest.get("definition_sha256") != definition_sha256
+    ):
+        raise ValueError("legacy audit manifest does not match the frozen definition")
+    _aggregate, aggregate_bytes = _read_json_bytes(
+        resolved_root / "audit.json", label="legacy audit aggregate"
+    )
+    if _sha256(aggregate_bytes) != manifest.get("aggregate_sha256"):
+        raise ValueError("legacy audit aggregate bytes do not match the manifest")
+    return manifest
 
 def _require_existing_manifest(
     root: Path,
@@ -1516,11 +1631,17 @@ def _progress_line(
 
 
 def _validate_global_audit_definition(
-    definition: AuditDefinition, *, smoke: bool = False
+    definition: AuditDefinition,
+    *,
+    smoke: bool = False,
+    allow_completed_legacy: bool = False,
 ) -> None:
     expected_schedule = _PROGRAMMATIC_SMOKE_SCHEDULE if smoke else AuditSchedule()
+    valid_schema = definition.schema_version == 2 or (
+        allow_completed_legacy and definition.schema_version == 1 and not definition.source_roots
+    )
     if (
-        definition.schema_version != 1
+        not valid_schema
         or definition.audit_id != "annihilation-checkpoint-audit-v1"
         or definition.exploratory is not True
         or definition.locked_panel_replacement is not False
@@ -1530,6 +1651,8 @@ def _validate_global_audit_definition(
             "checkpoint audit definition or schedule violates the frozen "
             "global identity/isolation contract"
         )
+    if definition.schema_version == 2:
+        _validate_exact_candidate_set(definition)
 
 
 def evaluate_audit(
@@ -2084,9 +2207,15 @@ def aggregate_audit(
     _smoke: bool = False,
 ) -> Mapping[str, Any]:
     """Reopen every physical map, aggregate deterministically, then seal the audit."""
-    _validate_global_audit_definition(definition, smoke=_smoke)
     root = Path(output_root).resolve(strict=True)
-    manifest = _load_audit_manifest(root)
+    if definition.schema_version == 1:
+        manifest = validate_completed_legacy_definition(root, definition)
+        _validate_global_audit_definition(
+            definition, smoke=_smoke, allow_completed_legacy=True
+        )
+    else:
+        _validate_global_audit_definition(definition, smoke=_smoke)
+        manifest = _load_audit_manifest(root)
     definition_payload, definition_sha256 = _definition_identity(definition)
     if (
         manifest.get("definition") != definition_payload
