@@ -2022,6 +2022,36 @@ def test_validate_dagger_payload_rejects_malformed_evidence(
         validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
 
 
+@pytest.mark.parametrize("command_name", ["LearnerCommand", "TeacherCommand"])
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda command: command.pop("R"), "fields"),
+        (lambda command: command.update(Unexpected=None), "fields"),
+        (lambda command: command.update(Kind="retreat"), "kind"),
+        (lambda command: command.update(Kind=7), "kind"),
+        (lambda command: command.update(Issuer=True), "issuer"),
+        (lambda command: command.update(Issuer="0"), "issuer"),
+        (lambda command: command.update(ActorId=True), "ActorId"),
+        (lambda command: command.update(ActorId="7"), "ActorId"),
+    ],
+)
+def test_validate_dagger_payload_rejects_command_key_and_scalar_boundaries(
+    contract: EnvironmentContract,
+    command_name: str,
+    mutate,
+    message: str,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    payload = _valid_dagger_payload()
+    command = payload["decisions"][0][command_name]
+    mutate(command)
+
+    with pytest.raises(ValueError, match=message):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
+
 @pytest.mark.parametrize(
     "payload",
     [

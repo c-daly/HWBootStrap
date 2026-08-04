@@ -99,30 +99,30 @@ def controller_identity(resolved: ResolvedController) -> dict[str, Any]:
     return identity
 
 
-def _validate_demonstration_command(
-    raw: Any, *, seat: int, index: int
+def _validate_authoritative_command(
+    raw: Any, *, seat: int, descriptor: str
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
-        raise ValueError(f"demonstration decision {index} command must be an object")
+        raise ValueError(f"{descriptor} must be an object")
     required = {"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"}
     if set(raw) != required:
-        raise ValueError(f"demonstration decision {index} command fields are invalid")
+        raise ValueError(f"{descriptor} fields are invalid")
 
     kind = raw["Kind"]
     issuer = raw["Issuer"]
     if not isinstance(kind, str) or kind not in {
         "end_turn", "move", "attack", "deploy",
     }:
-        raise ValueError(f"demonstration decision {index} command kind is invalid")
+        raise ValueError(f"{descriptor} kind is invalid")
     if type(issuer) is not int or issuer not in {0, 1} or issuer != seat:
-        raise ValueError(f"demonstration decision {index} command issuer is invalid")
+        raise ValueError(f"{descriptor} issuer is invalid")
 
     nullable_fields = ("ActorId", "TargetId", "Q", "R")
     for field in nullable_fields:
         value = raw[field]
         if value is not None and type(value) is not int:
             raise ValueError(
-                f"demonstration decision {index} command {field} is invalid"
+                f"{descriptor} {field} is invalid"
             )
 
     actor = raw["ActorId"]
@@ -136,7 +136,7 @@ def _validate_demonstration_command(
         or (kind == "deploy" and actor is None and target is None and q is not None and r is not None)
     )
     if not shape_is_valid:
-        raise ValueError(f"demonstration decision {index} command shape is invalid")
+        raise ValueError(f"{descriptor} shape is invalid")
     return dict(raw)
 
 
@@ -196,50 +196,13 @@ def validate_demonstration_payload(
             raise ValueError(f"demonstration decision {index} seat is invalid")
 
         decision = dict(raw)
-        decision["Command"] = _validate_demonstration_command(
-            raw["Command"], seat=seat, index=index
+        decision["Command"] = _validate_authoritative_command(
+            raw["Command"],
+            seat=seat,
+            descriptor=f"demonstration decision {index} command",
         )
         result.append(decision)
     return result
-
-
-def _validate_dagger_command(
-    raw: Any, *, seat: int, index: int, role: str
-) -> dict[str, Any]:
-    descriptor = f"DAgger decision {index} {role} command"
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"{descriptor} must be an object")
-    required = {"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"}
-    if set(raw) != required:
-        raise ValueError(f"{descriptor} fields are invalid")
-
-    kind = raw["Kind"]
-    issuer = raw["Issuer"]
-    if not isinstance(kind, str) or kind not in {
-        "end_turn", "move", "attack", "deploy",
-    }:
-        raise ValueError(f"{descriptor} kind is invalid")
-    if type(issuer) is not int or issuer not in {0, 1} or issuer != seat:
-        raise ValueError(f"{descriptor} issuer is invalid")
-
-    for field in ("ActorId", "TargetId", "Q", "R"):
-        value = raw[field]
-        if value is not None and type(value) is not int:
-            raise ValueError(f"{descriptor} {field} is invalid")
-
-    actor = raw["ActorId"]
-    target = raw["TargetId"]
-    q = raw["Q"]
-    r = raw["R"]
-    shape_is_valid = (
-        (kind == "end_turn" and actor is None and target is None and q is None and r is None)
-        or (kind == "move" and actor is not None and target is None and q is not None and r is not None)
-        or (kind == "attack" and actor is not None and target is not None and q is None and r is None)
-        or (kind == "deploy" and actor is None and target is None and q is not None and r is not None)
-    )
-    if not shape_is_valid:
-        raise ValueError(f"{descriptor} shape is invalid")
-    return dict(raw)
 
 
 def validate_dagger_payload(
@@ -380,11 +343,15 @@ def validate_dagger_payload(
             )
 
         decision = dict(raw)
-        decision["LearnerCommand"] = _validate_dagger_command(
-            raw["LearnerCommand"], seat=seat, index=index, role="learner"
+        decision["LearnerCommand"] = _validate_authoritative_command(
+            raw["LearnerCommand"],
+            seat=seat,
+            descriptor=f"DAgger decision {index} learner command",
         )
-        decision["TeacherCommand"] = _validate_dagger_command(
-            raw["TeacherCommand"], seat=seat, index=index, role="teacher"
+        decision["TeacherCommand"] = _validate_authoritative_command(
+            raw["TeacherCommand"],
+            seat=seat,
+            descriptor=f"DAgger decision {index} teacher command",
         )
         result.append(decision)
     return result

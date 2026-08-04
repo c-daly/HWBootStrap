@@ -477,6 +477,21 @@ namespace HexWars.Engine.Tests
             using JsonDocument emptyDagger = server.Exchange(new { cmd = "duel_dagger_drain" });
             Assert.That(emptyDagger.RootElement.GetProperty("decisions").GetArrayLength(), Is.Zero);
 
+            using JsonDocument resetBeforeDisable = server.Exchange(new
+            {
+                cmd = "duel_reset",
+                seed = 92,
+                p0 = "external",
+                p1 = "external",
+                learner = 0,
+                start_profile = "conversion-3v1-near",
+                reference_seat = 0,
+            });
+            Assert.That(
+                resetBeforeDisable.RootElement.GetProperty("mask")[0].GetBoolean(), Is.True);
+            using JsonDocument stepBeforeDisable =
+                server.Exchange(new { cmd = "duel_step", action = 0 });
+
             using JsonDocument disabled = server.Exchange(new
             {
                 cmd = "duel_dagger_configure",
@@ -486,10 +501,21 @@ namespace HexWars.Engine.Tests
                 use_heuristic = true,
             });
             Assert.That(disabled.RootElement.GetProperty("enabled").GetBoolean(), Is.False);
+            using JsonDocument clearedByDisable =
+                server.Exchange(new { cmd = "duel_dagger_drain" });
+            Assert.That(
+                clearedByDisable.RootElement.GetProperty("decisions").GetArrayLength(),
+                Is.Zero, "disabling DAgger must clear evidence buffered before disable");
+            using JsonDocument demoSurvivesDisable =
+                server.Exchange(new { cmd = "duel_demo_drain" });
+            Assert.That(
+                demoSurvivesDisable.RootElement.GetProperty("decisions").GetArrayLength(),
+                Is.EqualTo(1), "disabling DAgger must not clear demonstrations");
+
             using JsonDocument resetAfterDisable = server.Exchange(new
             {
                 cmd = "duel_reset",
-                seed = 91,
+                seed = 93,
                 p0 = "external",
                 p1 = "external",
                 learner = 0,
