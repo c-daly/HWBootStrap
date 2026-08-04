@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +28,34 @@ from ml_lab.contracts import (
 )
 from ml_lab.scenarios import resolve_scenario
 from ml_lab.controllers import ControllerSpec, ResolvedController
+
+
+def _symlink_or_skip_windows_privilege(
+    link: Path, target: Path, *, target_is_directory: bool = False,
+) -> None:
+    """Skip only when Windows explicitly denies symbolic-link privilege."""
+
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip(f"Windows symbolic-link privilege is unavailable: {exc}")
+        raise
+
+
+def _windows_directory_junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction coverage runs only on Windows")
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise OSError(
+            f"could not create Windows junction: {completed.stderr}"
+        )
 
 
 @pytest.fixture
@@ -108,12 +138,26 @@ def _resolved_actor_source(
     model,
     *,
     source_kind: str,
-    step: int = 7,
+    step: int | None = None,
 ) -> tuple[object, ResolvedController]:
+    if step is None:
+        step = 0 if source_kind == "dagger_actor" else 7
     run = tmp_path / f"{source_kind}-source"
     checkpoint = run / "checkpoints" / f"step_{step:09d}.zip"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(f"{source_kind}-{step}".encode("ascii"))
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    published_actor_sha256 = (
+        algorithms_module.actor_state_sha256(model)
+        if source_kind == "dagger_actor"
+        else None
+    )
+    actor_initialization = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_kind": "snapshot",
+        "source_checkpoint_sha256": "e" * 64,
+    }
     manifest = {
         "schema_version": 1,
         "state": "completed" if source_kind == "dagger_actor" else "stopped",
@@ -122,6 +166,20 @@ def _resolved_actor_source(
         "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
         "contract": _actor_contract().to_dict(),
     }
+    if source_kind == "dagger_actor":
+        publication_verification = {
+            "checkpoint_sha256": checkpoint_sha256,
+            "actor_sha256": published_actor_sha256,
+        }
+        manifest.update({
+            "training_kind": "selective-dagger-distillation-v1",
+            "distillation_iteration": 1,
+            "checkpoint_sha256": checkpoint_sha256,
+            "target_actor_sha256_final": published_actor_sha256,
+            "actor_initialization": actor_initialization,
+            "publication_verification": publication_verification,
+            "production": True,
+        })
     (run / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     if source_kind == "dagger_actor":
         (run / "bc.json").write_text(
@@ -131,9 +189,11 @@ def _resolved_actor_source(
                 "distillation_iteration": 1,
                 "algorithm": "maskable_ppo",
                 "policy": "HexCNN",
-                "checkpoint_sha256": hashlib.sha256(
-                    checkpoint.read_bytes()
-                ).hexdigest(),
+                "checkpoint_sha256": checkpoint_sha256,
+                "target_actor_sha256_final": published_actor_sha256,
+                "actor_initialization": actor_initialization,
+                "publication_verification": publication_verification,
+                "production": True,
             }),
             encoding="utf-8",
         )
@@ -148,7 +208,8 @@ def _resolved_actor_source(
     source = algorithms_module.ActorTransferSource(
         source_kind=source_kind,
         controller=controller,
-        checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        checkpoint_sha256=checkpoint_sha256,
+        published_actor_sha256=published_actor_sha256,
     )
     resolved = ResolvedController(
         spec=ControllerSpec(
@@ -642,6 +703,229 @@ def test_malformed_actor_transfer_sources_leave_the_target_untouched(
     before = algorithms_module.actor_state_sha256(target_model)
 
     with pytest.raises((ValueError, ContractMismatch), match=message):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+def test_actor_transfer_rejects_checkpoint_symlink_escape_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """A resolved checkpoints directory link must not redefine the run boundary."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    run = Path(source.controller["source_run"])
+    checkpoints = run / "checkpoints"
+    outside = tmp_path / "outside-checkpoints"
+    checkpoints.rename(outside)
+    _symlink_or_skip_windows_privilege(
+        checkpoints, outside, target_is_directory=True,
+    )
+    escaped = checkpoints / Path(source.controller["path"]).name
+    source = replace(
+        source,
+        controller={**source.controller, "path": str(escaped)},
+    )
+    resolved = replace(
+        resolved,
+        path=escaped.resolve(),
+        spec=replace(resolved.spec, path=escaped),
+    )
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="contained"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+def test_actor_transfer_rejects_checkpoint_file_symlink_escape_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """The checkpoint file itself cannot redirect deserialization outside the run."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    checkpoint = Path(source.controller["path"])
+    outside = tmp_path / "outside-checkpoint.zip"
+    checkpoint.replace(outside)
+    _symlink_or_skip_windows_privilege(checkpoint, outside)
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="contained"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+def test_actor_transfer_rejects_checkpoint_directory_junction_escape(
+    tmp_path: Path,
+) -> None:
+    """An unprivileged Windows junction cannot redefine the source-run boundary."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="snapshot",
+    )
+    run = Path(source.controller["source_run"])
+    checkpoints = run / "checkpoints"
+    outside = tmp_path / "outside-junction-checkpoints"
+    checkpoints.rename(outside)
+    _windows_directory_junction(checkpoints, outside)
+    escaped = checkpoints / Path(source.controller["path"]).name
+    source = replace(
+        source,
+        controller={**source.controller, "path": str(escaped)},
+    )
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="contained"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+def test_actor_transfer_rejects_noncanonical_dagger_checkpoint_before_mutation(
+    tmp_path: Path,
+) -> None:
+    """Published DAgger actors have exactly one canonical step-zero checkpoint."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="dagger_actor", step=7,
+    )
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="canonical"):
+        MaskablePPOAdapter().initialize_actor_from_resolved(
+            target_model,
+            resolved,
+            source=source,
+            expected_contract=_actor_contract(),
+            device="cpu",
+        )
+
+    assert algorithms_module.actor_state_sha256(target_model) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "run_checkpoint_hash",
+        "bc_checkpoint_hash",
+        "run_actor_hash",
+        "bc_actor_hash",
+        "run_iteration",
+        "bc_iteration",
+        "run_training_kind",
+        "bc_training_kind",
+        "run_source_identity",
+        "bc_source_identity",
+        "run_publication_verification",
+        "bc_publication_verification",
+        "run_production",
+        "bc_production",
+        "declared_actor_hash",
+        "physical_actor_hash",
+    ],
+)
+def test_dagger_actor_transfer_authenticates_both_completed_manifests_and_model(
+    tmp_path: Path, mutation: str,
+) -> None:
+    """A syntactically valid prior-actor hash must still bind both manifests and bytes."""
+
+    source_model = _actor_model(101)
+    target_model = _actor_model(227)
+    source, resolved = _resolved_actor_source(
+        tmp_path, source_model, source_kind="dagger_actor",
+    )
+    run = Path(source.controller["source_run"])
+    run_path = run / "run.json"
+    bc_path = run / "bc.json"
+    run_manifest = json.loads(run_path.read_text(encoding="utf-8"))
+    bc = json.loads(bc_path.read_text(encoding="utf-8"))
+    replacement_hash = "f" * 64
+    if replacement_hash == source.published_actor_sha256:
+        replacement_hash = "a" * 64
+
+    if mutation == "run_checkpoint_hash":
+        run_manifest["checkpoint_sha256"] = "f" * 64
+    elif mutation == "bc_checkpoint_hash":
+        bc["checkpoint_sha256"] = "f" * 64
+    elif mutation == "run_actor_hash":
+        run_manifest["target_actor_sha256_final"] = replacement_hash
+    elif mutation == "bc_actor_hash":
+        bc["target_actor_sha256_final"] = replacement_hash
+    elif mutation == "run_iteration":
+        run_manifest["distillation_iteration"] = 2
+    elif mutation == "bc_iteration":
+        bc["distillation_iteration"] = 2
+    elif mutation == "run_training_kind":
+        run_manifest["training_kind"] = "forged"
+    elif mutation == "bc_training_kind":
+        bc["training_kind"] = "forged"
+    elif mutation == "run_source_identity":
+        run_manifest["actor_initialization"]["source_kind"] = "dagger_actor"
+    elif mutation == "bc_source_identity":
+        bc["actor_initialization"]["source_kind"] = "dagger_actor"
+    elif mutation == "run_publication_verification":
+        run_manifest["publication_verification"]["actor_sha256"] = replacement_hash
+    elif mutation == "bc_publication_verification":
+        bc["publication_verification"]["actor_sha256"] = replacement_hash
+    elif mutation == "run_production":
+        run_manifest["production"] = False
+    elif mutation == "bc_production":
+        bc["production"] = False
+    elif mutation == "declared_actor_hash":
+        source = replace(source, published_actor_sha256=replacement_hash)
+    elif mutation == "physical_actor_hash":
+        run_manifest["target_actor_sha256_final"] = replacement_hash
+        bc["target_actor_sha256_final"] = replacement_hash
+        run_manifest["publication_verification"][
+            "actor_sha256"
+        ] = replacement_hash
+        bc["publication_verification"]["actor_sha256"] = replacement_hash
+        source = replace(source, published_actor_sha256=replacement_hash)
+    else:
+        raise AssertionError(mutation)
+    run_path.write_text(json.dumps(run_manifest), encoding="utf-8")
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+    before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="published|actor hash|provenance"):
         MaskablePPOAdapter().initialize_actor_from_resolved(
             target_model,
             resolved,

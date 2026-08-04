@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 from collections import Counter
 from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
@@ -50,15 +51,32 @@ from ml_lab.dagger import (
 HASHES = {letter: letter * 64 for letter in "abcdef1234567890"}
 
 
-def _symlink_or_skip_windows_privilege(link: Path, target: Path) -> None:
+def _symlink_or_skip_windows_privilege(
+    link: Path, target: Path, *, target_is_directory: bool = False,
+) -> None:
     """Skip only when Windows explicitly denies symbolic-link privilege."""
 
     try:
-        link.symlink_to(target)
+        link.symlink_to(target, target_is_directory=target_is_directory)
     except OSError as exc:
         if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
             pytest.skip(f"Windows symbolic-link privilege is unavailable: {exc}")
         raise
+
+
+def _windows_directory_junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction coverage runs only on Windows")
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise OSError(
+            f"could not create Windows junction: {completed.stderr}"
+        )
 
 
 @pytest.fixture
@@ -3004,12 +3022,28 @@ def _write_published_dagger_actor(root: Path, iteration: int) -> Path:
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(f"dagger-actor-{iteration}".encode("ascii"))
     digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    actor_initialization = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_kind": "snapshot" if iteration == 1 else "dagger_actor",
+        "source_checkpoint_sha256": HASHES["e"],
+    }
+    publication_verification = {
+        "checkpoint_sha256": digest,
+        "actor_sha256": HASHES["a"],
+    }
     run = {
         "schema_version": 1,
         "state": "completed",
         "latest_checkpoint": "checkpoints/step_000000000.zip",
         "latest_checkpoint_step": 0,
         "checkpoint_sha256": digest,
+        "training_kind": "selective-dagger-distillation-v1",
+        "distillation_iteration": iteration,
+        "target_actor_sha256_final": HASHES["a"],
+        "actor_initialization": actor_initialization,
+        "publication_verification": publication_verification,
+        "production": True,
         "config": {
             "algorithm": "maskable_ppo",
             "policy": "HexCNN",
@@ -3024,6 +3058,9 @@ def _write_published_dagger_actor(root: Path, iteration: int) -> Path:
         "policy": "HexCNN",
         "checkpoint_sha256": digest,
         "target_actor_sha256_final": HASHES["a"],
+        "actor_initialization": actor_initialization,
+        "publication_verification": publication_verification,
+        "production": True,
     }
     (root / "run.json").write_text(json.dumps(run), encoding="utf-8")
     (root / "bc.json").write_text(json.dumps(bc), encoding="utf-8")
@@ -3052,12 +3089,147 @@ def test_later_actor_source_binds_the_preceding_completed_publication_and_sha(
     assert source.checkpoint_sha256 == hashlib.sha256(
         checkpoint.read_bytes()
     ).hexdigest()
+    assert source.published_actor_sha256 == HASHES["a"]
 
     checkpoint.write_bytes(b"replaced")
     with pytest.raises(ValueError, match="SHA-256"):
         dagger_module.dagger_actor_source(2, preceding_run=run)
     with pytest.raises(ValueError, match="preceding"):
         dagger_module.dagger_actor_source(3, preceding_run=run)
+
+
+def test_later_actor_source_rejects_checkpoint_directory_symlink_escape_when_supported(
+    tmp_path: Path,
+) -> None:
+    """Resolving checkpoints must not move a publication outside its source run."""
+
+    run = tmp_path / "iteration-1-actor"
+    checkpoint = _write_published_dagger_actor(run, 1)
+    outside = tmp_path / "outside-checkpoints"
+    checkpoint.parent.rename(outside)
+    _symlink_or_skip_windows_privilege(
+        run / "checkpoints", outside, target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="contained"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
+
+
+def test_later_actor_source_rejects_checkpoint_file_symlink_escape_when_supported(
+    tmp_path: Path,
+) -> None:
+    """A checkpoint file link cannot escape the preceding publication root."""
+
+    run = tmp_path / "iteration-1-actor"
+    checkpoint = _write_published_dagger_actor(run, 1)
+    outside = tmp_path / "outside-checkpoint.zip"
+    checkpoint.replace(outside)
+    _symlink_or_skip_windows_privilege(checkpoint, outside)
+
+    with pytest.raises(ValueError, match="contained"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
+
+
+def test_later_actor_source_rejects_checkpoint_directory_junction_escape(
+    tmp_path: Path,
+) -> None:
+    """A Windows junction cannot move the canonical checkpoint outside its run."""
+
+    run = tmp_path / "iteration-1-actor"
+    checkpoint = _write_published_dagger_actor(run, 1)
+    outside = tmp_path / "outside-junction-checkpoints"
+    checkpoint.parent.rename(outside)
+    _windows_directory_junction(run / "checkpoints", outside)
+
+    with pytest.raises(ValueError, match="contained"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
+
+
+def test_later_actor_source_rejects_ordinary_checkpoint_escape(
+    tmp_path: Path,
+) -> None:
+    """A lexical parent escape is rejected independently of symlink support."""
+
+    run = tmp_path / "iteration-1-actor"
+    checkpoint = _write_published_dagger_actor(run, 1)
+    outside = tmp_path / "outside-checkpoints"
+    checkpoint.parent.rename(outside)
+    manifest_path = run / "run.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["latest_checkpoint"] = (
+        "../outside-checkpoints/step_000000000.zip"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="contained"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "run_checkpoint_hash",
+        "bc_checkpoint_hash",
+        "run_actor_hash",
+        "bc_actor_hash",
+        "run_iteration",
+        "bc_iteration",
+        "run_training_kind",
+        "bc_training_kind",
+        "run_source_identity",
+        "bc_source_identity",
+        "run_publication_verification",
+        "bc_publication_verification",
+        "run_production",
+        "bc_production",
+    ],
+)
+def test_later_actor_source_authenticates_matching_completed_manifests(
+    tmp_path: Path, mutation: str,
+) -> None:
+    """The actor source object must carry only provenance agreed by both manifests."""
+
+    run = tmp_path / "iteration-1-actor"
+    _write_published_dagger_actor(run, 1)
+    run_path = run / "run.json"
+    bc_path = run / "bc.json"
+    manifest = json.loads(run_path.read_text(encoding="utf-8"))
+    bc = json.loads(bc_path.read_text(encoding="utf-8"))
+    if mutation == "run_checkpoint_hash":
+        manifest["checkpoint_sha256"] = HASHES["f"]
+    elif mutation == "bc_checkpoint_hash":
+        bc["checkpoint_sha256"] = HASHES["f"]
+    elif mutation == "run_actor_hash":
+        manifest["target_actor_sha256_final"] = HASHES["f"]
+    elif mutation == "bc_actor_hash":
+        bc["target_actor_sha256_final"] = HASHES["f"]
+    elif mutation == "run_iteration":
+        manifest["distillation_iteration"] = 2
+    elif mutation == "bc_iteration":
+        bc["distillation_iteration"] = 2
+    elif mutation == "run_training_kind":
+        manifest["training_kind"] = "forged"
+    elif mutation == "bc_training_kind":
+        bc["training_kind"] = "forged"
+    elif mutation == "run_source_identity":
+        manifest["actor_initialization"]["source_kind"] = "dagger_actor"
+    elif mutation == "bc_source_identity":
+        bc["actor_initialization"]["source_kind"] = "dagger_actor"
+    elif mutation == "run_publication_verification":
+        manifest["publication_verification"]["actor_sha256"] = HASHES["f"]
+    elif mutation == "bc_publication_verification":
+        bc["publication_verification"]["actor_sha256"] = HASHES["f"]
+    elif mutation == "run_production":
+        manifest["production"] = False
+    elif mutation == "bc_production":
+        bc["production"] = False
+    else:
+        raise AssertionError(mutation)
+    run_path.write_text(json.dumps(manifest), encoding="utf-8")
+    bc_path.write_text(json.dumps(bc), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="provenance|SHA-256"):
+        dagger_module.dagger_actor_source(2, preceding_run=run)
 
 
 def test_production_dagger_distillation_configuration_is_locked() -> None:

@@ -30,6 +30,7 @@ from .imitation import (
     ImitationBatch,
     ImitationDataset,
     MaterializedImitationPartition,
+    PRODUCTION_DAGGER_DISTILLATION_CONFIG,
     Source,
     materialize_imitation_partition,
     train_actor_supervision,
@@ -39,14 +40,7 @@ from .tactical_trace import EpisodeTrace
 
 
 OVERLAY_SCHEMA_VERSION = 1
-DAGGER_DISTILLATION_CONFIG = BehavioralCloningConfig(
-    model_seed=227,
-    batch_size=256,
-    learning_rate=3e-4,
-    max_epochs=50,
-    patience=5,
-    device="cuda",
-)
+DAGGER_DISTILLATION_CONFIG = PRODUCTION_DAGGER_DISTILLATION_CONFIG
 _ITERATION_ONE_CONTROLLER = {
     "kind": "snapshot",
     "path": (
@@ -1824,13 +1818,49 @@ def dagger_actor_source(
         raise FileNotFoundError(bc_path)
     run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
     bc = json.loads(bc_path.read_text(encoding="utf-8"))
+    latest_checkpoint = (
+        run_manifest.get("latest_checkpoint")
+        if isinstance(run_manifest, Mapping)
+        else None
+    )
+    if not isinstance(latest_checkpoint, str):
+        raise ValueError("preceding DAgger actor publication is invalid")
+    checkpoint = (run / latest_checkpoint).resolve()
+    if (
+        not checkpoint.is_relative_to(run)
+        or checkpoint.parent != (run / "checkpoints").resolve()
+    ):
+        raise ValueError(
+            "preceding DAgger actor checkpoint is not contained by its resolved run"
+        )
+    if (
+        latest_checkpoint != "checkpoints/step_000000000.zip"
+        or run_manifest.get("latest_checkpoint_step") != 0
+        or checkpoint.name != "step_000000000.zip"
+    ):
+        raise ValueError(
+            "preceding DAgger actor checkpoint is not the canonical step-zero publication"
+        )
+    distillation_iteration = run_manifest.get("distillation_iteration")
+    actor_initialization = run_manifest.get("actor_initialization")
+    published_actor_sha256 = run_manifest.get("target_actor_sha256_final")
+    publication_verification = run_manifest.get("publication_verification")
     if (
         not isinstance(run_manifest, Mapping)
         or run_manifest.get("schema_version") != 1
         or run_manifest.get("state") != "completed"
-        or run_manifest.get("latest_checkpoint")
-        != "checkpoints/step_000000000.zip"
-        or run_manifest.get("latest_checkpoint_step") != 0
+        or run_manifest.get("production") is not True
+        or run_manifest.get("training_kind")
+        != "selective-dagger-distillation-v1"
+        or type(distillation_iteration) is not int
+        or distillation_iteration not in {1, 2}
+        or not isinstance(actor_initialization, Mapping)
+        or not isinstance(publication_verification, Mapping)
+        or not _HASH_PATTERN.fullmatch(str(published_actor_sha256))
+        or publication_verification.get("actor_sha256")
+        != published_actor_sha256
+        or publication_verification.get("checkpoint_sha256")
+        != run_manifest.get("checkpoint_sha256")
         or not isinstance(run_manifest.get("config"), Mapping)
         or run_manifest["config"].get("algorithm") != "maskable_ppo"
         or run_manifest["config"].get("policy") != "HexCNN"
@@ -1839,13 +1869,17 @@ def dagger_actor_source(
         or bc.get("training_kind") != "selective-dagger-distillation-v1"
         or bc.get("algorithm") != "maskable_ppo"
         or bc.get("policy") != "HexCNN"
+        or bc.get("production") is not True
+        or bc.get("distillation_iteration") != distillation_iteration
+        or bc.get("checkpoint_sha256")
+        != run_manifest.get("checkpoint_sha256")
+        or bc.get("target_actor_sha256_final") != published_actor_sha256
+        or bc.get("actor_initialization") != actor_initialization
+        or bc.get("publication_verification") != publication_verification
     ):
-        raise ValueError("preceding DAgger actor publication is invalid")
-    if bc.get("distillation_iteration") != iteration - 1:
+        raise ValueError("preceding DAgger actor provenance does not agree")
+    if distillation_iteration != iteration - 1:
         raise ValueError("preceding DAgger actor iteration does not match")
-    checkpoint = (run / run_manifest["latest_checkpoint"]).resolve()
-    if checkpoint.parent != (run / "checkpoints").resolve():
-        raise ValueError("preceding DAgger actor checkpoint is not contained")
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
     digest = _sha256_file(checkpoint)
@@ -1854,8 +1888,6 @@ def dagger_actor_source(
         or bc.get("checkpoint_sha256") != digest
     ):
         raise ValueError("preceding DAgger actor checkpoint SHA-256 does not match")
-    if not _HASH_PATTERN.fullmatch(str(bc.get("target_actor_sha256_final", ""))):
-        raise ValueError("preceding DAgger actor hash is invalid")
     return ActorTransferSource(
         source_kind="dagger_actor",
         controller={
@@ -1867,6 +1899,7 @@ def dagger_actor_source(
             "inference_mode": "deterministic",
         },
         checkpoint_sha256=digest,
+        published_actor_sha256=published_actor_sha256,
     )
 
 

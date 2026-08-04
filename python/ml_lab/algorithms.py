@@ -32,6 +32,7 @@ class ActorTransferSource:
     source_kind: str
     controller: Mapping[str, Any]
     checkpoint_sha256: str
+    published_actor_sha256: str | None = None
 
     def __post_init__(self) -> None:
         from .controllers import normalize_controller_spec
@@ -69,17 +70,36 @@ class ActorTransferSource:
             raise ValueError(
                 "actor transfer checkpoint SHA-256 must be lowercase hexadecimal"
             )
+        if self.source_kind == "dagger_actor":
+            if (
+                not isinstance(self.published_actor_sha256, str)
+                or len(self.published_actor_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in self.published_actor_sha256
+                )
+            ):
+                raise ValueError(
+                    "published DAgger actor SHA-256 must be lowercase hexadecimal"
+                )
+        elif self.published_actor_sha256 is not None:
+            raise ValueError(
+                "snapshot actor source must not claim a published actor SHA-256"
+            )
         object.__setattr__(
             self, "controller", MappingProxyType(dict(self.controller)),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "schema_version": 1,
             "source_kind": self.source_kind,
             "controller": dict(self.controller),
             "checkpoint_sha256": self.checkpoint_sha256,
         }
+        if self.published_actor_sha256 is not None:
+            result["published_actor_sha256"] = self.published_actor_sha256
+        return result
 
 
 def _actor_modules(model: Any) -> dict[str, Any]:
@@ -127,6 +147,36 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def preflight_actor_transfer_source(
+    source: ActorTransferSource,
+) -> tuple[Path, Path, str]:
+    """Authenticate physical source location and bytes before model deserialization."""
+
+    if not isinstance(source, ActorTransferSource):
+        raise TypeError("source must be an ActorTransferSource")
+    source_run = Path(source.controller["source_run"]).resolve(strict=True)
+    checkpoint = Path(source.controller["path"]).resolve(strict=True)
+    step = source.controller["step"]
+    if (
+        not checkpoint.is_relative_to(source_run)
+        or checkpoint.parent != (source_run / "checkpoints").resolve(strict=True)
+        or checkpoint.name != f"step_{step:09d}.zip"
+    ):
+        raise ValueError(
+            "actor transfer checkpoint must be contained by the resolved source run"
+        )
+    if source.source_kind == "dagger_actor" and (
+        step != 0 or checkpoint.name != "step_000000000.zip"
+    ):
+        raise ValueError(
+            "published DAgger actor must use the canonical step-zero checkpoint"
+        )
+    checkpoint_sha256 = _sha256_file(checkpoint)
+    if checkpoint_sha256 != source.checkpoint_sha256:
+        raise ValueError("actor transfer checkpoint SHA-256 does not match")
+    return source_run, checkpoint, checkpoint_sha256
 
 
 class AlgorithmAdapter(Protocol):
@@ -278,13 +328,12 @@ class MaskablePPOAdapter:
 
         from .controllers import ResolvedController
 
-        if not isinstance(source, ActorTransferSource):
-            raise TypeError("source must be an ActorTransferSource")
+        source_run, checkpoint, _preflight_sha256 = (
+            preflight_actor_transfer_source(source)
+        )
         if not isinstance(resolved, ResolvedController):
             raise TypeError("resolved source must be a ResolvedController")
         controller = source.controller
-        source_run = Path(controller["source_run"]).resolve()
-        checkpoint = Path(controller["path"]).resolve()
         step = controller["step"]
         if (
             resolved.algorithm != self.name
@@ -310,14 +359,19 @@ class MaskablePPOAdapter:
         ):
             raise ValueError("actor transfer source checkpoint step or identity differs")
         if (
-            checkpoint.parent != (source_run / "checkpoints").resolve()
+            not checkpoint.is_relative_to(source_run)
+            or checkpoint.parent != (source_run / "checkpoints").resolve()
             or checkpoint.name != f"step_{step:09d}.zip"
         ):
             raise ValueError(
-                "actor transfer checkpoint must be contained by its source run"
+                "actor transfer checkpoint must be contained by the resolved source run"
             )
-        if not checkpoint.is_file():
-            raise FileNotFoundError(checkpoint)
+        if source.source_kind == "dagger_actor" and (
+            step != 0 or checkpoint.name != "step_000000000.zip"
+        ):
+            raise ValueError(
+                "published DAgger actor must use the canonical step-zero checkpoint"
+            )
         checkpoint_sha256 = _sha256_file(checkpoint)
         if checkpoint_sha256 != source.checkpoint_sha256:
             raise ValueError("actor transfer checkpoint SHA-256 does not match")
@@ -340,20 +394,45 @@ class MaskablePPOAdapter:
             raise ValueError("actor transfer source run metadata does not match")
         if source.source_kind == "dagger_actor":
             bc = read_json(source_run / "bc.json")
+            published_actor_sha256 = source.published_actor_sha256
+            distillation_iteration = manifest.get("distillation_iteration")
+            actor_initialization = manifest.get("actor_initialization")
+            publication_verification = manifest.get(
+                "publication_verification"
+            )
             if (
                 manifest.get("state") != "completed"
+                or manifest.get("production") is not True
+                or manifest.get("training_kind")
+                != "selective-dagger-distillation-v1"
+                or type(distillation_iteration) is not int
+                or distillation_iteration not in {1, 2}
+                or manifest.get("checkpoint_sha256") != checkpoint_sha256
+                or manifest.get("target_actor_sha256_final")
+                != published_actor_sha256
+                or not isinstance(actor_initialization, Mapping)
+                or not isinstance(publication_verification, Mapping)
+                or publication_verification.get("checkpoint_sha256")
+                != checkpoint_sha256
+                or publication_verification.get("actor_sha256")
+                != published_actor_sha256
                 or not isinstance(bc, Mapping)
                 or bc.get("schema_version") != 1
                 or bc.get("training_kind")
                 != "selective-dagger-distillation-v1"
                 or bc.get("algorithm") != self.name
                 or bc.get("policy") != self.policy_name
+                or bc.get("production") is not True
                 or bc.get("checkpoint_sha256") != checkpoint_sha256
-                or type(bc.get("distillation_iteration")) is not int
-                or bc["distillation_iteration"] not in {1, 2}
+                or bc.get("distillation_iteration") != distillation_iteration
+                or bc.get("target_actor_sha256_final")
+                != published_actor_sha256
+                or bc.get("actor_initialization") != actor_initialization
+                or bc.get("publication_verification")
+                != publication_verification
             ):
                 raise ValueError(
-                    "actor transfer source is not a completed preceding DAgger actor"
+                    "published DAgger actor provenance does not agree across manifests"
                 )
 
         if resolved.contract != expected_contract:
@@ -412,6 +491,13 @@ class MaskablePPOAdapter:
             target_states[name] = copy.deepcopy(target_state)
 
         source_actor_sha256 = _state_hash(source_states)
+        if (
+            source.source_kind == "dagger_actor"
+            and source_actor_sha256 != source.published_actor_sha256
+        ):
+            raise ValueError(
+                "published DAgger actor hash does not match the loaded physical actor"
+            )
         target_actor_before = _state_hash(target_states)
         try:
             for name in ACTOR_MODULES:
@@ -458,6 +544,7 @@ class MaskablePPOAdapter:
             "source_inference_mode": resolved.spec.inference_mode,
             "actor_modules": list(ACTOR_MODULES),
             "source_actor_sha256": source_actor_sha256,
+            "source_published_actor_sha256": source.published_actor_sha256,
             "target_actor_sha256_before": target_actor_before,
             "target_actor_sha256_after": target_actor_after,
             "device": str(requested_device),
@@ -545,6 +632,7 @@ class MaskablePPOAdapter:
             },
             checkpoint_sha256=_sha256_file(canonical_checkpoint),
         )
+        preflight_actor_transfer_source(source)
         resolved = ControllerResolver(expected_contract).resolve(source.controller)
         if resolved.contract is None:
             raise ContractMismatch("actor initialization source contract is missing")
@@ -561,7 +649,10 @@ class MaskablePPOAdapter:
         self.validate_model(model, expected_contract)
 
         with np.load(fixtures_path, allow_pickle=False) as loaded:
-            if set(loaded.files) != {"observations", "legal_masks"}:
+            if set(loaded.files) not in (
+                {"observations", "legal_masks"},
+                {"observations", "legal_masks", "expected_logits"},
+            ):
                 raise ValueError("actor fixtures must contain observations and legal_masks")
             observations = loaded["observations"].copy()
             legal_masks = loaded["legal_masks"].copy()

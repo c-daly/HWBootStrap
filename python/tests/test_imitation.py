@@ -1011,6 +1011,28 @@ def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> t
         return distribution.distribution.logits.detach().cpu()
 
 
+def _train_test_distillation(
+    clone_scenario,
+    source,
+    destination: Path,
+):
+    return dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        run_dir=destination,
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227, batch_size=10, max_epochs=1, patience=1,
+            device="cpu",
+        ),
+    )
+
+
 def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenance(
     clone_scenario, tmp_path: Path,
 ) -> None:
@@ -1050,6 +1072,8 @@ def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenan
         (result.run_dir / "run.json").read_text(encoding="utf-8")
     )
     checkpoint = result.run_dir / "checkpoints" / "step_000000000.zip"
+    fixtures_path = result.run_dir / "actor-fixtures.npz"
+    publication_path = result.run_dir / "publication.json"
     source_hash = algorithms_module.actor_state_sha256(source_model)
     assert bc["training_kind"] == "selective-dagger-distillation-v1"
     assert bc["distillation_iteration"] == 1
@@ -1065,6 +1089,32 @@ def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenan
     assert bc["checkpoint_sha256"] == hashlib.sha256(
         checkpoint.read_bytes()
     ).hexdigest()
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    assert publication == {
+        "schema_version": 1,
+        "contract": contract().to_dict(),
+        "checkpoint": {
+            "path": "checkpoints/step_000000000.zip",
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        },
+        "actor_fixtures": {
+            "path": "actor-fixtures.npz",
+            "sha256": hashlib.sha256(fixtures_path.read_bytes()).hexdigest(),
+        },
+        "target_actor_sha256_final": bc["target_actor_sha256_final"],
+        "value_parameters_sha256_before": bc[
+            "value_parameters_sha256_before"
+        ],
+    }
+    publication_sha256 = hashlib.sha256(publication_path.read_bytes()).hexdigest()
+    assert bc["publication_metadata_sha256"] == publication_sha256
+    assert manifest["publication_metadata_sha256"] == publication_sha256
+    assert bc["publication_verification"]["value_parameters_sha256"] == (
+        expected_fresh_value_hash
+    )
+    assert bc["publication_verification"]["actor_fixtures_sha256"] == (
+        publication["actor_fixtures"]["sha256"]
+    )
     assert bc["source_example_counts"] == {
         "greedy_standard": 10,
         "search_conversion": 4,
@@ -1099,29 +1149,55 @@ def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenan
     history = json.loads(
         (result.run_dir / "training-history.json").read_text(encoding="utf-8")
     )
+    history_path = result.run_dir / "training-history.json"
+    history_sha256 = hashlib.sha256(history_path.read_bytes()).hexdigest()
+    for document in (bc, manifest):
+        assert document["training_history"]["path"] == "training-history.json"
+        assert document["training_history"]["sha256"] == history_sha256
+        assert document["training_history"]["epoch_count"] == len(
+            history["epochs"]
+        )
+        assert document["training_history"]["timings"] == [
+            {
+                key: event[key]
+                for key in (
+                    "epoch", "epoch_seconds", "elapsed_seconds",
+                    "examples_per_second", "sampling_seconds",
+                    "transfer_forward_seconds", "optimization_seconds",
+                    "validation_seconds", "unclassified_seconds",
+                )
+            }
+            for event in history["epochs"]
+        ]
+    assert manifest["training_device"] == bc["training_device"]
+    assert manifest["publication_device"] == "cpu"
+    assert manifest["validation_partition"] == "held_out_targeted"
     assert history["epochs"][0]["source_example_counts"] == (
         bc["source_example_counts"]
     )
     assert history["epochs"][0]["validation_nll"] == pytest.approx(
         result.validation.nll
     )
-    with np.load(result.run_dir / "actor-fixtures.npz", allow_pickle=False) as data:
+    with np.load(fixtures_path, allow_pickle=False) as data:
+        assert set(data.files) == {
+            "observations", "legal_masks", "expected_logits",
+        }
         observations = data["observations"]
         legal_masks = data["legal_masks"]
+        expected_logits = torch.as_tensor(data["expected_logits"])
     reloaded = ControllerResolver(contract()).resolve(f"run:{result.run_dir}").model
     assert algorithms_module.actor_state_sha256(reloaded) == bc[
         "target_actor_sha256_final"
     ]
     torch.testing.assert_close(
         _test_masked_logits(reloaded, observations, legal_masks),
-        _test_masked_logits(
-            ControllerResolver(contract()).resolve(f"run:{result.run_dir}").model,
-            observations,
-            legal_masks,
-        ),
+        expected_logits,
         rtol=0,
         atol=0,
     )
+    assert imitation_module.validate_actor_supervision_publication(
+        result.run_dir, contract(),
+    )["publication_metadata_sha256"] == publication_sha256
     with zipfile.ZipFile(checkpoint) as archive:
         names = archive.namelist()
         assert not any(
@@ -1145,8 +1221,8 @@ def test_distillation_publication_reloads_before_manifests_and_fails_atomically(
     source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
     destination = tmp_path / "failed-distillation"
 
-    def reject_reload(checkpoint, *_args, **_kwargs):
-        staging = Path(checkpoint).parent.parent
+    def reject_reload(staging, *_args, **_kwargs):
+        staging = Path(staging)
         assert not (staging / "run.json").exists()
         assert not (staging / "bc.json").exists()
         raise RuntimeError("injected distillation reload failure")
@@ -1175,14 +1251,263 @@ def test_distillation_publication_reloads_before_manifests_and_fails_atomically(
     assert list(tmp_path.glob(".failed-distillation.publishing-*")) == []
 
 
-def test_distillation_malformed_source_never_publishes_output(
+def test_distillation_publication_rejects_reloaded_value_state_mismatch(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actor/logit equality cannot prove the fresh value head survived serialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-value-publication"
+    original_load = MaskablePPOAdapter.load
+
+    def load_with_changed_value(self, path, *, env, device):
+        model = original_load(self, path, env=env, device=device)
+        if isinstance(path, (str, Path)) and Path(path).name == (
+            "step_000000000.zip"
+        ):
+            with torch.no_grad():
+                next(model.policy.value_net.parameters()).add_(1.0)
+        return model
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", load_with_changed_value)
+    with pytest.raises(RuntimeError, match="value"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-value-publication.publishing-*")) == []
+
+
+def test_distillation_publication_rejects_tampered_physical_contract_sidecar(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied contract is not evidence unless staged bytes bind it."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-contract-publication"
+    original_write = imitation_module.atomic_write_json
+
+    def tamper_publication(path, payload):
+        if Path(path).name == "publication.json":
+            payload = json.loads(json.dumps(payload))
+            payload["contract"]["contract_hash"] = "f" * 64
+        return original_write(path, payload)
+
+    monkeypatch.setattr(
+        imitation_module, "atomic_write_json", tamper_publication,
+    )
+    with pytest.raises((ContractMismatch, ValueError), match="contract"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-contract-publication.publishing-*")) == []
+
+
+def test_distillation_publication_detects_real_presave_to_reload_logit_defect(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comparison oracle must be logits captured before serialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-logit-publication"
+    original_save = MaskablePPOAdapter.save
+
+    def save_changed_actor(self, model, path):
+        parameter = next(model.policy.action_net.parameters())
+        original = parameter.detach().clone()
+        try:
+            with torch.no_grad():
+                parameter.add_(0.5)
+            return original_save(self, model, path)
+        finally:
+            with torch.no_grad():
+                parameter.copy_(original)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "save", save_changed_actor)
+    with pytest.raises(AssertionError):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-logit-publication.publishing-*")) == []
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "training",
+        "save",
+        "publication.json",
+        "bc.json",
+        "run.json",
+        "final_rename",
+    ],
+)
+def test_distillation_failures_preserve_atomic_publication_boundary(
+    failure_point: str,
+    clone_scenario,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every expensive stage either publishes one complete directory or nothing."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / f"atomic-{failure_point.replace('.', '-')}"
+    preserved = tmp_path / f".{destination.name}.publishing-preserved"
+    preserved.mkdir()
+    sentinel = preserved / "sentinel.bin"
+    sentinel.write_bytes(b"preexisting-bytes")
+
+    if failure_point == "training":
+        monkeypatch.setattr(
+            imitation_module,
+            "_distribution_tensors",
+            lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(RuntimeError("injected training failure"))
+            ),
+        )
+    elif failure_point == "save":
+        monkeypatch.setattr(
+            MaskablePPOAdapter,
+            "save",
+            lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(RuntimeError("injected save failure"))
+            ),
+        )
+    elif failure_point.endswith(".json"):
+        original_write = imitation_module.atomic_write_json
+
+        def fail_serialization(path, payload):
+            if Path(path).name == failure_point:
+                raise RuntimeError("injected manifest serialization failure")
+            return original_write(path, payload)
+
+        monkeypatch.setattr(
+            imitation_module, "atomic_write_json", fail_serialization,
+        )
+    else:
+        original_replace = imitation_module.os.replace
+
+        def fail_final_rename(source_path, destination_path):
+            source_path = Path(source_path)
+            if (
+                source_path.name.startswith(
+                    f".{destination.name}.publishing-"
+                )
+                and Path(destination_path) == destination
+            ):
+                raise RuntimeError("injected final rename failure")
+            return original_replace(source_path, destination_path)
+
+        monkeypatch.setattr(
+            imitation_module.os, "replace", fail_final_rename,
+        )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(
+        f".{destination.name}.publishing-*"
+    )) == [preserved]
+    assert sentinel.read_bytes() == b"preexisting-bytes"
+
+
+def test_completed_distillation_reopen_rejects_training_history_tamper(
     clone_scenario, tmp_path: Path,
 ) -> None:
-    """A source changed after definition must fail before any output is published."""
+    """A completed manifest must bind the physical timing history it summarizes."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        run_dir=tmp_path / "history-tamper",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227, batch_size=10, max_epochs=1, patience=1,
+            device="cpu",
+        ),
+    )
+    history_path = result.run_dir / "training-history.json"
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history["epochs"][0]["elapsed_seconds"] += 1.0
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    rebound_sha256 = hashlib.sha256(history_path.read_bytes()).hexdigest()
+    for manifest_name in ("bc.json", "run.json"):
+        manifest_path = result.run_dir / manifest_name
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["training_history"]["sha256"] = rebound_sha256
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        imitation_module.validate_actor_supervision_publication(
+            result.run_dir, contract(),
+        )
+
+
+def test_distillation_malformed_source_never_publishes_output(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source changed after definition must fail before checkpoint deserialization."""
 
     source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
     source = replace(source, checkpoint_sha256="f" * 64)
     destination = tmp_path / "bad-source-distillation"
+    resolve_calls = 0
+    original_resolve = ControllerResolver.resolve
+
+    def counted_resolve(self, raw):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(self, raw)
+
+    monkeypatch.setattr(ControllerResolver, "resolve", counted_resolve)
 
     with pytest.raises(ValueError, match="SHA-256"):
         dagger_module.train_dagger_actor(
@@ -1201,6 +1526,52 @@ def test_distillation_malformed_source_never_publishes_output(
             ),
         )
 
+    assert not destination.exists()
+    assert resolve_calls == 0
+
+
+def test_distillation_loads_only_the_exact_checkpoint_bytes_it_authenticated(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint swap after path preflight must fail before deserialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "swapped-source-distillation"
+    original_preflight = algorithms_module.preflight_actor_transfer_source
+    resolver_calls = 0
+    adapter_load_calls = 0
+    original_resolve = ControllerResolver.resolve
+    original_load = MaskablePPOAdapter.load
+
+    def preflight_then_swap(candidate):
+        result = original_preflight(candidate)
+        checkpoint = result[1]
+        checkpoint.write_bytes(checkpoint.read_bytes() + b"swapped-after-hash")
+        return result
+
+    def counted_resolve(self, raw):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return original_resolve(self, raw)
+
+    def counted_load(self, path, *, env, device):
+        nonlocal adapter_load_calls
+        adapter_load_calls += 1
+        return original_load(self, path, env=env, device=device)
+
+    monkeypatch.setattr(
+        algorithms_module,
+        "preflight_actor_transfer_source",
+        preflight_then_swap,
+    )
+    monkeypatch.setattr(ControllerResolver, "resolve", counted_resolve)
+    monkeypatch.setattr(MaskablePPOAdapter, "load", counted_load)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert resolver_calls == 0
+    assert adapter_load_calls == 0
     assert not destination.exists()
 
 
@@ -1249,6 +1620,84 @@ def test_distillation_restores_the_best_validation_actor_before_publication(
     assert observed_actor_hashes[-1] == observed_actor_hashes[0]
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_seed", 228),
+        ("batch_size", 255),
+        ("learning_rate", 1e-3),
+        ("max_epochs", 49),
+        ("patience", 4),
+        ("device", "cpu"),
+    ],
+)
+def test_direct_production_distillation_rejects_each_unlocked_config_field_before_mutation(
+    field: str, value: object, clone_scenario, tmp_path: Path,
+) -> None:
+    """Every field in the production tuple is locked at the lower boundary."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = (
+        tmp_path / f"uncreated-{field}-parent" / "forged-production"
+    )
+    forged = replace(
+        imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG,
+        **{field: value},
+    )
+
+    with pytest.raises(ValueError, match="locked production"):
+        imitation_module.train_actor_supervision(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            config=forged,
+            warm_start=source,
+            distillation_mode="production",
+        )
+
+    assert not destination.parent.exists()
+
+
+def test_direct_production_distillation_accepts_only_the_exact_locked_config(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact production tuple reaches request preparation without relaxation."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+
+    class RequestPreparationReached(RuntimeError):
+        pass
+
+    def stop_after_validation(config, run_dir):
+        assert config is imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG
+        raise RequestPreparationReached
+
+    monkeypatch.setattr(
+        imitation_module,
+        "_prepare_behavioral_cloning_request",
+        stop_after_validation,
+    )
+    with pytest.raises(RequestPreparationReached):
+        imitation_module.train_actor_supervision(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=tmp_path / "exact-production",
+            config=imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG,
+            warm_start=source,
+            distillation_mode="production",
+        )
+
+
 def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
     dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
     run_dir = tmp_path / "bc"
@@ -1267,7 +1716,7 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
     assert result.best_epoch <= result.epochs_trained <= 200
     expected_files = {
         "run.json", "scenario.json", "bc.json", "metrics.json", "actor-fixtures.npz",
-        "training-history.json",
+        "training-history.json", "publication.json",
         "checkpoints/step_000000000.zip",
     }
     assert {path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()} == expected_files
@@ -1306,9 +1755,12 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
             "seat/0", "seat/1"} <= set(metrics["strata"])
 
     with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as fixtures:
-        assert set(fixtures.files) == {"observations", "legal_masks"}
+        assert set(fixtures.files) == {
+            "observations", "legal_masks", "expected_logits",
+        }
         observations = fixtures["observations"]
         masks = fixtures["legal_masks"]
+        expected_logits = torch.as_tensor(fixtures["expected_logits"])
         assert observations.dtype == np.float32 and masks.dtype == np.bool_
         assert observations.shape == (2, 3) and masks.shape == (2, 5)
         assert set(observations[:, 0]) == {5.0, 6.0}
@@ -1322,7 +1774,13 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
     assert isinstance(first.model.policy.features_extractor, HexCNN)
     torch.testing.assert_close(
         _test_masked_logits(first.model, observations, masks),
+        expected_logits,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
         _test_masked_logits(second.model, observations, masks),
+        expected_logits,
         rtol=0,
         atol=0,
     )
@@ -1542,6 +2000,8 @@ def test_legacy_clone_request_errors_precede_partition_materialization(
 
     existing = tmp_path / "existing-run"
     existing.mkdir()
+    existing_bytes = existing / "sentinel.bin"
+    existing_bytes.write_bytes(b"preserve-me")
     with pytest.raises(FileExistsError) as error:
         train_behavioral_clone(
             **common,
@@ -1555,6 +2015,7 @@ def test_legacy_clone_request_errors_precede_partition_materialization(
             ),
         )
     assert error.value.args == (existing,)
+    assert existing_bytes.read_bytes() == b"preserve-me"
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

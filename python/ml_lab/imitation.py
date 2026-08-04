@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from .contracts import ContractMismatch, EnvironmentContract
-from .io import atomic_write_json
+from .io import atomic_write_json, read_json
 from .scenarios import ResolvedScenario
 
 DATASET_SCHEMA_VERSION = 1
@@ -1120,6 +1120,15 @@ class BehavioralCloningConfig:
             )
 
 
+PRODUCTION_DAGGER_DISTILLATION_CONFIG = BehavioralCloningConfig(
+    model_seed=227,
+    batch_size=256,
+    learning_rate=3e-4,
+    max_epochs=50,
+    patience=5,
+    device="cuda",
+)
+
 
 def resolve_behavioral_cloning_device(requested: str) -> dict[str, Any]:
     import torch
@@ -1392,8 +1401,20 @@ def _clone_metrics(model: Any, batch: ImitationBatch) -> CloneMetrics:
     return metrics
 
 
-def _atomic_actor_fixtures(path: Path, fixtures: ImitationBatch) -> None:
+def _atomic_actor_fixtures(
+    path: Path,
+    fixtures: ImitationBatch,
+    expected_logits: Any,
+) -> None:
     path = Path(path)
+    logits = expected_logits.detach().cpu().contiguous().numpy()
+    if (
+        logits.dtype != np.float32
+        or logits.ndim != 2
+        or logits.shape != fixtures.legal_masks.shape
+        or not np.isfinite(logits).all()
+    ):
+        raise ValueError("actor fixture logits have incompatible shape, dtype, or values")
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
     os.close(descriptor)
@@ -1403,6 +1424,7 @@ def _atomic_actor_fixtures(path: Path, fixtures: ImitationBatch) -> None:
                 stream,
                 observations=fixtures.observations.astype(np.float32, copy=False),
                 legal_masks=fixtures.legal_masks.astype(bool, copy=False),
+                expected_logits=logits,
             )
             stream.flush()
             os.fsync(stream.fileno())
@@ -1428,29 +1450,151 @@ def _assert_no_bc_optimizer_state(checkpoint: Path) -> None:
                 raise RuntimeError("saved PPO optimizer unexpectedly contains training state")
 
 
+def _contained_publication_file(root: Path, relative: str) -> Path:
+    root = Path(root).resolve(strict=True)
+    candidate = (root / _safe_relative(relative)).resolve(strict=True)
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise ValueError("publication artifact must be a contained regular file")
+    return candidate
+
+
+def _publication_artifact(
+    root: Path,
+    descriptor: object,
+    *,
+    canonical_path: str,
+) -> Path:
+    if (
+        not isinstance(descriptor, Mapping)
+        or set(descriptor) != {"path", "sha256"}
+        or descriptor.get("path") != canonical_path
+        or not _is_hash(descriptor.get("sha256"))
+    ):
+        raise ValueError("publication artifact descriptor is invalid")
+    path = _contained_publication_file(root, canonical_path)
+    if sha256_file(path) != descriptor["sha256"]:
+        raise ValueError("publication artifact SHA-256 does not match physical bytes")
+    return path
+
+
+def _read_publication_metadata(
+    root: Path,
+    expected_contract: EnvironmentContract,
+) -> tuple[Path, Mapping[str, Any], Path, Path, str]:
+    root = Path(root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("actor publication root must be a directory")
+    metadata_path = _contained_publication_file(root, "publication.json")
+    metadata = read_json(metadata_path)
+    if (
+        not isinstance(metadata, Mapping)
+        or set(metadata) != {
+            "schema_version",
+            "contract",
+            "checkpoint",
+            "actor_fixtures",
+            "target_actor_sha256_final",
+            "value_parameters_sha256_before",
+        }
+        or metadata.get("schema_version") != 1
+        or not _is_hash(metadata.get("target_actor_sha256_final"))
+        or not _is_hash(metadata.get("value_parameters_sha256_before"))
+    ):
+        raise ValueError("publication metadata is invalid")
+    if metadata.get("contract") != expected_contract.to_dict():
+        raise ContractMismatch("publication contract does not match expected contract")
+    checkpoint = _publication_artifact(
+        root,
+        metadata.get("checkpoint"),
+        canonical_path="checkpoints/step_000000000.zip",
+    )
+    fixtures = _publication_artifact(
+        root,
+        metadata.get("actor_fixtures"),
+        canonical_path="actor-fixtures.npz",
+    )
+    return root, metadata, checkpoint, fixtures, sha256_file(metadata_path)
+
+
 def _verify_reload_identity(
-    checkpoint: Path,
+    publication_root: Path,
     adapter: Any,
     contract: EnvironmentContract,
-    fixtures: ImitationBatch,
-    expected_logits: Any,
 ) -> Mapping[str, Any]:
     import torch
 
     from .algorithms import actor_state_sha256
 
-    checkpoint = Path(checkpoint)
+    (
+        _root,
+        metadata,
+        checkpoint,
+        fixtures_path,
+        publication_metadata_sha256,
+    ) = _read_publication_metadata(publication_root, contract)
+    with np.load(fixtures_path, allow_pickle=False) as loaded:
+        if set(loaded.files) != {
+            "observations", "legal_masks", "expected_logits",
+        }:
+            raise ValueError(
+                "actor fixtures must contain observations, legal_masks, and expected_logits"
+            )
+        observations = loaded["observations"].copy()
+        legal_masks = loaded["legal_masks"].copy()
+        expected_logits_array = loaded["expected_logits"].copy()
+    if (
+        observations.dtype != np.float32
+        or legal_masks.dtype != np.bool_
+        or expected_logits_array.dtype != np.float32
+        or observations.ndim != 2
+        or legal_masks.ndim != 2
+        or expected_logits_array.ndim != 2
+        or observations.shape[0] == 0
+        or observations.shape
+        != (legal_masks.shape[0], contract.observation_size)
+        or legal_masks.shape != expected_logits_array.shape
+        or legal_masks.shape[1] != contract.action_size
+        or not np.isfinite(observations).all()
+        or not np.isfinite(expected_logits_array).all()
+        or not legal_masks.any(axis=1).all()
+    ):
+        raise ValueError("actor fixtures have incompatible shape, dtype, or values")
+
     reloaded = adapter.load(checkpoint, env=None, device="cpu")
     adapter.validate_model(reloaded, contract)
     if {parameter.device.type for parameter in reloaded.policy.parameters()} != {
         "cpu"
     }:
         raise RuntimeError("reloaded actor publication is not canonical CPU")
-    actual_logits = _masked_logits(reloaded, fixtures)
+    reloaded.policy.set_training_mode(False)
+    with torch.no_grad():
+        distribution = reloaded.policy.get_distribution(
+            torch.as_tensor(
+                observations, dtype=torch.float32, device=reloaded.device,
+            ),
+            action_masks=torch.as_tensor(
+                legal_masks, dtype=torch.bool, device=reloaded.device,
+            ),
+        )
+        actual_logits = distribution.distribution.logits.detach().cpu()
+    expected_logits = torch.as_tensor(expected_logits_array)
     torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+    actor_sha256 = actor_state_sha256(reloaded)
+    if actor_sha256 != metadata["target_actor_sha256_final"]:
+        raise RuntimeError("reloaded actor hash differs from publication metadata")
+    value_parameters_sha256 = _parameter_hash(
+        _value_named_parameters(reloaded)
+    )
+    if value_parameters_sha256 != metadata["value_parameters_sha256_before"]:
+        raise RuntimeError(
+            "reloaded value parameter hash differs from publication metadata"
+        )
     return {
         "checkpoint_sha256": sha256_file(checkpoint),
-        "actor_sha256": actor_state_sha256(reloaded),
+        "actor_sha256": actor_sha256,
+        "value_parameters_sha256": value_parameters_sha256,
+        "actor_fixtures_sha256": sha256_file(fixtures_path),
+        "publication_metadata_sha256": publication_metadata_sha256,
         "contract_hash": contract.contract_hash,
         "encoding_hash": contract.encoding_hash,
         "observation_size": contract.observation_size,
@@ -1460,6 +1604,54 @@ def _verify_reload_identity(
         "maximum_absolute_logit_difference": float(
             torch.max(torch.abs(actual_logits - expected_logits)).item()
         ),
+    }
+
+
+_TRAINING_HISTORY_TIMING_FIELDS = (
+    "epoch",
+    "epoch_seconds",
+    "elapsed_seconds",
+    "examples_per_second",
+    "sampling_seconds",
+    "transfer_forward_seconds",
+    "optimization_seconds",
+    "validation_seconds",
+    "unclassified_seconds",
+)
+
+
+def _read_training_history_identity(
+    root: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    history_path = _contained_publication_file(root, "training-history.json")
+    try:
+        history = read_json(history_path)
+        epochs = history["epochs"]
+        if (
+            not isinstance(history, Mapping)
+            or history.get("schema_version") != 1
+            or type(history.get("model_seed")) is not int
+            or not isinstance(history.get("training_device"), Mapping)
+            or history.get("publication_device") != "cpu"
+            or not isinstance(epochs, list)
+            or not epochs
+        ):
+            raise ValueError
+        timings = []
+        for event in epochs:
+            if not isinstance(event, Mapping):
+                raise ValueError
+            _validate_behavioral_cloning_progress_event(event)
+            timings.append({
+                key: event[key] for key in _TRAINING_HISTORY_TIMING_FIELDS
+            })
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("training history is invalid") from error
+    return history, {
+        "path": "training-history.json",
+        "sha256": sha256_file(history_path),
+        "epoch_count": len(epochs),
+        "timings": timings,
     }
 
 
@@ -1513,6 +1705,145 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
         raise ValueError("behavioral-cloning phase timing differs from epoch duration")
 
 
+def validate_actor_supervision_publication(
+    run_dir: Path,
+    expected_contract: EnvironmentContract,
+) -> Mapping[str, Any]:
+    """Reopen a completed actor-supervision run and authenticate its physical bytes."""
+
+    from .algorithms import MaskablePPOAdapter
+
+    root = Path(run_dir).resolve(strict=True)
+    bc_path = _contained_publication_file(root, "bc.json")
+    run_path = _contained_publication_file(root, "run.json")
+    bc = read_json(bc_path)
+    manifest = read_json(run_path)
+    if (
+        not isinstance(bc, Mapping)
+        or not isinstance(manifest, Mapping)
+        or bc.get("schema_version") != 1
+        or manifest.get("schema_version") != 1
+        or manifest.get("state") != "completed"
+        or manifest.get("timesteps") != 0
+        or manifest.get("latest_checkpoint")
+        != "checkpoints/step_000000000.zip"
+        or manifest.get("latest_checkpoint_step") != 0
+        or manifest.get("contract") != expected_contract.to_dict()
+    ):
+        raise ValueError("actor-supervision manifests are invalid")
+
+    history, training_history = _read_training_history_identity(root)
+    if (
+        bc.get("training_history") != training_history
+        or manifest.get("training_history") != training_history
+    ):
+        raise ValueError("training history does not match physical bytes")
+    for field in ("training_device", "publication_device"):
+        if (
+            bc.get(field) != manifest.get(field)
+            or history.get(field) != bc.get(field)
+        ):
+            raise ValueError(
+                f"actor-supervision {field} provenance does not agree"
+            )
+    if (
+        bc.get("validation_partition")
+        not in {"held_out_targeted", "held_out_demonstration"}
+        or manifest.get("validation_partition")
+        != bc.get("validation_partition")
+    ):
+        raise ValueError(
+            "actor-supervision validation_partition provenance does not agree"
+        )
+    if history.get("model_seed") != bc.get("model_seed"):
+        raise ValueError("training history model seed does not agree")
+
+    verification = dict(
+        _verify_reload_identity(root, MaskablePPOAdapter(), expected_contract)
+    )
+    if (
+        bc.get("publication_verification") != verification
+        or manifest.get("publication_verification") != verification
+    ):
+        raise ValueError(
+            "publication verification does not match physical bytes"
+        )
+    for field, expected in (
+        ("checkpoint_sha256", verification["checkpoint_sha256"]),
+        ("target_actor_sha256_final", verification["actor_sha256"]),
+        (
+            "value_parameters_sha256_before",
+            verification["value_parameters_sha256"],
+        ),
+        (
+            "value_parameters_sha256_after",
+            verification["value_parameters_sha256"],
+        ),
+        (
+            "publication_metadata_sha256",
+            verification["publication_metadata_sha256"],
+        ),
+    ):
+        if bc.get(field) != expected or manifest.get(field) != expected:
+            raise ValueError(f"actor-supervision {field} does not agree")
+    return verification
+
+
+def _resolve_authenticated_actor_transfer_source(
+    source: Any,
+    expected_contract: EnvironmentContract,
+    adapter: Any,
+) -> Any:
+    """Load exactly the checkpoint bytes authenticated by the transfer source."""
+
+    from .algorithms import preflight_actor_transfer_source
+    from .controllers import ResolvedController, normalize_controller_spec
+
+    source_run, checkpoint, _preflight_sha256 = (
+        preflight_actor_transfer_source(source)
+    )
+    manifest = read_json(source_run / "run.json")
+    config = manifest.get("config") if isinstance(manifest, Mapping) else None
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("schema_version") != 1
+        or manifest.get("contract") != expected_contract.to_dict()
+        or not isinstance(config, Mapping)
+        or config.get("algorithm") != adapter.name
+        or config.get("policy") != adapter.policy_name
+    ):
+        raise ValueError(
+            "actor transfer source manifest does not match the expected contract"
+        )
+
+    with checkpoint.open("rb") as stream:
+        checkpoint_bytes = stream.read()
+    authenticated_sha256 = hashlib.sha256(checkpoint_bytes).hexdigest()
+    if authenticated_sha256 != source.checkpoint_sha256:
+        raise ValueError(
+            "actor transfer checkpoint SHA-256 changed before deserialization"
+        )
+    with io.BytesIO(checkpoint_bytes) as authenticated_checkpoint:
+        model = adapter.load(
+            authenticated_checkpoint, env=None, device="cpu",
+        )
+    adapter.validate_model(model, expected_contract)
+    spec = normalize_controller_spec(source.controller)
+    return ResolvedController(
+        spec=spec,
+        server_controller="external",
+        model=model,
+        path=checkpoint,
+        algorithm=adapter.name,
+        step=spec.step,
+        contract=expected_contract,
+        observation_size=expected_contract.observation_size,
+        action_size=expected_contract.action_size,
+        legacy=False,
+        promotable=True,
+    )
+
+
 def _prepare_behavioral_cloning_request(
     config: BehavioralCloningConfig, run_dir: Path,
 ) -> tuple[Path, dict[str, Any]]:
@@ -1550,7 +1881,6 @@ def train_actor_supervision(
         MaskablePPOAdapter,
         actor_state_sha256,
     )
-    from .controllers import ControllerResolver
 
     if not isinstance(corpus, ActorSupervisionCorpus):
         raise TypeError("corpus must be an ActorSupervisionCorpus")
@@ -1578,6 +1908,13 @@ def train_actor_supervision(
             raise TypeError("warm_start must be an ActorTransferSource")
         if distillation_mode not in {"production", "nonproduction_cpu"}:
             raise ValueError("actor-supervision distillation mode is invalid")
+        if (
+            distillation_mode == "production"
+            and config != PRODUCTION_DAGGER_DISTILLATION_CONFIG
+        ):
+            raise ValueError(
+                "production DAgger distillation must use the exact locked production config"
+            )
         if set(corpus.validation.batch.sources) != {Source.DAGGER_TARGETED}:
             raise ValueError(
                 "DAgger distillation validation must contain targeted labels only"
@@ -1616,8 +1953,10 @@ def train_actor_supervision(
     value_hash_before = _parameter_hash(value_named)
     actor_initialization = None
     if warm_start is not None:
-        resolved_source = ControllerResolver(contract).resolve(
-            dict(warm_start.controller)
+        resolved_source = _resolve_authenticated_actor_transfer_source(
+            warm_start,
+            contract,
+            adapter,
         )
         actor_initialization = adapter.initialize_actor_from_resolved(
             model,
@@ -1786,6 +2125,11 @@ def train_actor_supervision(
         {"source": source.value, "fraction": fraction}
         for source, fraction in corpus.source_fractions.items()
     ]
+    validation_partition = (
+        "held_out_targeted"
+        if warm_start is not None
+        else "held_out_demonstration"
+    )
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{run_dir.name}.publishing-", dir=run_dir.parent)
     )
@@ -1794,24 +2138,58 @@ def train_actor_supervision(
         checkpoint.parent.mkdir(parents=True)
         checkpoint = adapter.save(model, checkpoint)
         _assert_no_bc_optimizer_state(checkpoint)
-        _atomic_actor_fixtures(temporary / "actor-fixtures.npz", fixtures)
+        fixtures_path = temporary / "actor-fixtures.npz"
+        _atomic_actor_fixtures(fixtures_path, fixtures, expected_logits)
+        checkpoint_sha256 = sha256_file(checkpoint)
+        actor_fixtures_sha256 = sha256_file(fixtures_path)
+        atomic_write_json(
+            temporary / "publication.json",
+            {
+                "schema_version": 1,
+                "contract": contract.to_dict(),
+                "checkpoint": {
+                    "path": "checkpoints/step_000000000.zip",
+                    "sha256": checkpoint_sha256,
+                },
+                "actor_fixtures": {
+                    "path": "actor-fixtures.npz",
+                    "sha256": actor_fixtures_sha256,
+                },
+                "target_actor_sha256_final": target_actor_sha256_final,
+                "value_parameters_sha256_before": value_hash_before,
+            },
+        )
         publication_verification = dict(_verify_reload_identity(
-            checkpoint,
+            temporary,
             adapter,
             contract,
-            fixtures,
-            expected_logits,
         ))
         if publication_verification["actor_sha256"] != target_actor_sha256_final:
             raise RuntimeError(
                 "reloaded actor hash differs from the canonical training actor"
             )
         checkpoint_sha256 = publication_verification["checkpoint_sha256"]
+        publication_metadata_sha256 = publication_verification[
+            "publication_metadata_sha256"
+        ]
         software_provenance = _software_provenance()
         total_source_counts = {
             source.value: int(source_example_counts[source.value])
             for source in corpus.source_fractions
         }
+        atomic_write_json(
+            temporary / "training-history.json",
+            {
+                "schema_version": 1,
+                "model_seed": config.model_seed,
+                "training_device": training_device,
+                "publication_device": "cpu",
+                "epochs": history,
+            },
+        )
+        _physical_history, training_history = (
+            _read_training_history_identity(temporary)
+        )
         bc_data = {
             "schema_version": 1,
             "algorithm": adapter.name,
@@ -1833,14 +2211,12 @@ def train_actor_supervision(
             "target_actor_sha256_initial": target_actor_sha256_initial,
             "target_actor_sha256_final": target_actor_sha256_final,
             "checkpoint_sha256": checkpoint_sha256,
+            "publication_metadata_sha256": publication_metadata_sha256,
             "publication_verification": publication_verification,
+            "training_history": training_history,
             "software_provenance": software_provenance,
             "source_example_counts": total_source_counts,
-            "validation_partition": (
-                "held_out_targeted"
-                if warm_start is not None
-                else "held_out_demonstration"
-            ),
+            "validation_partition": validation_partition,
             "training_decision_count": int(len(training.batch.actions)),
             "validation_decision_count": int(len(validation.batch.actions)),
             "validation_game_count": int(len(np.unique(validation.batch.game_ids))),
@@ -1882,7 +2258,12 @@ def train_actor_supervision(
             "target_actor_sha256_final": target_actor_sha256_final,
             "value_parameters_sha256_before": value_hash_before,
             "value_parameters_sha256_after": value_hash_after,
+            "publication_metadata_sha256": publication_metadata_sha256,
             "publication_verification": publication_verification,
+            "training_history": training_history,
+            "training_device": training_device,
+            "publication_device": "cpu",
+            "validation_partition": validation_partition,
             "software_provenance": software_provenance,
             "source_example_counts": total_source_counts,
         }
@@ -1895,20 +2276,11 @@ def train_actor_supervision(
                 "production": distillation_mode == "production",
                 "actor_initialization": actor_initialization,
             })
-        atomic_write_json(
-            temporary / "training-history.json",
-            {
-                "schema_version": 1,
-                "model_seed": config.model_seed,
-                "training_device": training_device,
-                "publication_device": "cpu",
-                "epochs": history,
-            },
-        )
         scenario.write(temporary / "scenario.json")
         atomic_write_json(temporary / "bc.json", bc_data)
         atomic_write_json(temporary / "metrics.json", metrics_data)
         atomic_write_json(temporary / "run.json", manifest)
+        validate_actor_supervision_publication(temporary, contract)
         os.replace(temporary, run_dir)
     finally:
         if temporary.exists():
