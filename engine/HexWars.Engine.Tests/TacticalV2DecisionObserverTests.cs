@@ -11,13 +11,15 @@ namespace HexWars.Engine.Tests
     public class TacticalV2DecisionObserverTests
     {
         [Test]
-        public void RegistrySnapshot_PreservesSlotIdentityAfterLiveRegistryReleasesAUnit()
+        public void RegistrySnapshot_PreservesEverySlotPairAfterLiveReleaseAndRegistration()
         {
             TacticalV2Start start = new TacticalV2Layout(TacticalV2Config.Default()).NewGame(17);
             TacticalV2UnitRegistry live = start.Slots0;
             TacticalV2UnitRegistry snapshot = live.Snapshot();
             int releasedId = live.UnitIdAt(0);
-            int template = live.TemplateIndexAt(0);
+            var expectedSlots = Enumerable.Range(0, snapshot.Capacity)
+                .Select(slot => (snapshot.UnitIdAt(slot), snapshot.TemplateIndexAt(slot)))
+                .ToArray();
 
             PlayerState original = start.State.Player(PlayerId.Player0);
             PlayerState foe = start.State.Player(PlayerId.Player1);
@@ -35,11 +37,32 @@ namespace HexWars.Engine.Tests
 
             live.ReleaseDead(withoutUnit, PlayerId.Player0);
 
+            PlayerState released = withoutUnit.Player(PlayerId.Player0);
+            Unit source = released.UnitsOnBoard[0];
+            var deployed = new Unit(start.State.NextEntityId, PlayerId.Player0, source.Stats,
+                source.Cell, source.Elevation);
+            var playersWithDeployment = new[]
+            {
+                new PlayerState(PlayerId.Player0, released.Points, released.Barracks,
+                    released.UnitsOnBoard.Concat(new[] { deployed }).ToArray(),
+                    released.Generators, released.DestroyedValue),
+                foe,
+            };
+            var withDeployment = new GameState(start.State.Board, start.State.Config, playersWithDeployment,
+                start.State.ActivePlayer, start.State.Round, start.State.NextEntityId + 1,
+                start.State.IsGameOver, start.State.Winner, start.State.MovedUnitIds,
+                start.State.AttackedUnitIds, start.State.MovementSpent);
+            live.RegisterDeployment(withoutUnit, withDeployment, PlayerId.Player0, templateIndex: 42);
+
             Assert.Multiple(() =>
             {
-                Assert.That(live.UnitIdAt(0), Is.EqualTo(-1));
-                Assert.That(snapshot.UnitIdAt(0), Is.EqualTo(releasedId));
-                Assert.That(snapshot.TemplateIndexAt(0), Is.EqualTo(template));
+                Assert.That(live.UnitIdAt(0), Is.EqualTo(deployed.Id));
+                Assert.That(live.TemplateIndexAt(0), Is.EqualTo(42));
+                for (int slot = 0; slot < snapshot.Capacity; slot++)
+                {
+                    Assert.That((snapshot.UnitIdAt(slot), snapshot.TemplateIndexAt(slot)),
+                        Is.EqualTo(expectedSlots[slot]));
+                }
             });
         }
 
