@@ -15,6 +15,7 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from itertools import chain
 from dataclasses import asdict, dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Callable
 from typing import Any
@@ -803,12 +804,37 @@ class SourceMixtureSampler:
         batch_size: int = 1,
         seed: int = 0,
         partition: str | None = None,
-        _legacy_standard_fraction: float | None = None,
+    ) -> None:
+        if (
+            isinstance(seed, (bool, np.bool_))
+            or not isinstance(seed, Integral)
+            or int(seed) < 0
+        ):
+            raise ValueError("sampler configuration is invalid")
+        self._initialize_with_rng(
+            materialized,
+            source_fractions=source_fractions,
+            batch_size=batch_size,
+            rng=np.random.default_rng(int(seed)),
+            partition=partition,
+            legacy_standard_fraction=None,
+        )
+
+    def _initialize_with_rng(
+        self,
+        materialized: MaterializedImitationPartition,
+        *,
+        source_fractions: Mapping[Source, float],
+        batch_size: int,
+        rng: np.random.Generator,
+        partition: str | None,
+        legacy_standard_fraction: float | None,
     ) -> None:
         if (
             not isinstance(materialized, MaterializedImitationPartition)
             or type(batch_size) is not int
             or batch_size < 1
+            or not isinstance(rng, np.random.Generator)
         ):
             raise ValueError("sampler configuration is invalid")
         expected_partition = materialized.partition if partition is None else partition
@@ -820,12 +846,12 @@ class SourceMixtureSampler:
         fractions = _freeze_source_fractions(source_fractions)
         if set(materialized.batch.sources) != set(fractions):
             raise ValueError("sampler materialized sources differ from mixture")
-        if _legacy_standard_fraction is not None and (
+        if legacy_standard_fraction is not None and (
             tuple(fractions) != (
                 Source.GREEDY_STANDARD, Source.SEARCH_CONVERSION,
             )
             or not math.isclose(
-                float(_legacy_standard_fraction),
+                float(legacy_standard_fraction),
                 fractions[Source.GREEDY_STANDARD],
                 rel_tol=0.0,
                 abs_tol=1e-12,
@@ -836,7 +862,7 @@ class SourceMixtureSampler:
         self.batch_size = batch_size
         self.partition = expected_partition
         self.source_fractions = fractions
-        self._rng = np.random.default_rng(seed)
+        self._rng = rng
         self._cyclers = {
             source: _StratumCycler(
                 _materialized_source_strata(materialized, source), self._rng,
@@ -844,7 +870,7 @@ class SourceMixtureSampler:
             for source in fractions
         }
         self._carry = {source: 0.0 for source in fractions}
-        self._legacy_standard_fraction = _legacy_standard_fraction
+        self._legacy_standard_fraction = legacy_standard_fraction
         self._legacy_residual = 0.0
 
     def _source_counts(self) -> Mapping[Source, int]:
@@ -970,13 +996,14 @@ class StratifiedDecisionSampler(SourceMixtureSampler):
             (Source.GREEDY_STANDARD, self.standard_fraction),
             (Source.SEARCH_CONVERSION, 1.0 - self.standard_fraction),
         )))
-        super().__init__(
+        legacy_rng = np.random.default_rng(seed)
+        self._initialize_with_rng(
             materialized,
             source_fractions=fractions,
             batch_size=batch_size,
-            seed=seed,
+            rng=legacy_rng,
             partition=partition,
-            _legacy_standard_fraction=self.standard_fraction,
+            legacy_standard_fraction=self.standard_fraction,
         )
 
     def _next_refs_and_sources(

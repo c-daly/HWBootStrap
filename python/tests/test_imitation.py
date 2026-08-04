@@ -304,6 +304,52 @@ def test_source_mixture_sampler_freezes_the_ordered_fraction_mapping() -> None:
         sampler.source_fractions[Source.GREEDY_STANDARD] = 0.10
 
 
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param(None, id="entropy"),
+        pytest.param(np.random.SeedSequence(227), id="seed-sequence"),
+        pytest.param(np.random.default_rng(227), id="external-generator"),
+        pytest.param(True, id="boolean"),
+        pytest.param(np.bool_(True), id="numpy-boolean"),
+        pytest.param(-1, id="negative"),
+        pytest.param(227.0, id="nonintegral"),
+    ],
+)
+def test_source_mixture_sampler_rejects_unowned_or_nonintegral_seeds(
+    seed,
+) -> None:
+    """The generic sampler owns deterministic state seeded by a nonnegative integer."""
+
+    with pytest.raises(ValueError, match="configuration"):
+        imitation_module.SourceMixtureSampler(
+            _three_source_partition(),
+            source_fractions=_locked_dagger_mixture(),
+            batch_size=1,
+            seed=seed,
+        )
+
+
+@pytest.mark.parametrize("seed", [np.int64(227), np.uint32(227)])
+def test_source_mixture_sampler_normalizes_numpy_integral_seeds(seed) -> None:
+    expected = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=10,
+        seed=227,
+    ).next_batch()
+    actual = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=10,
+        seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
 def test_source_mixture_sampler_residual_accounts_nonintegral_256_batches() -> None:
     """Allocating rounding remainder to a fixed source must drift from 49/21/30."""
 
@@ -483,6 +529,39 @@ def test_legacy_sampler_accepts_numpy_integral_seeds_with_the_locked_sequence(
         np.testing.assert_array_equal(
             getattr(actual, field), getattr(expected, field),
         )
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [np.random.SeedSequence(211), np.random.default_rng(211)],
+    ids=["seed-sequence", "generator"],
+)
+def test_legacy_sampler_preserves_default_rng_seed_inputs(
+    sampled_dataset: Path, seed,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    expected = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=211,
+    ).next_batch()
+    actual = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
+def test_legacy_sampler_preserves_default_rng_entropy_seed(
+    sampled_dataset: Path,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    batch = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=None,
+    ).next_batch()
+    assert len(batch.actions) == 7
 
 
 @pytest.mark.parametrize(
