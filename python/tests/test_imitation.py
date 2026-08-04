@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 from types import MappingProxyType
@@ -191,6 +192,317 @@ def test_sampler_keeps_70_30_ratio_is_seeded_and_excludes_validation_rows(sample
     assert set(first.partitions) == {"train"}
     assert first.observations.flags.owndata
     assert np.all(first.legal_masks[np.arange(len(first.actions)), first.actions])
+
+
+def _three_source_partition(
+    *, targeted_rows: int = 4, targeted_metadata_variant: bool = False,
+) -> MaterializedImitationPartition:
+    sources = [
+        *([Source.GREEDY_STANDARD] * 6),
+        *([Source.SEARCH_CONVERSION] * 5),
+        *([imitation_module.Source.DAGGER_TARGETED] * targeted_rows),
+    ]
+    count = len(sources)
+    profiles = [
+        *("standard-3v3" for _ in range(6)),
+        *("conversion-3v1-near" for _ in range(5)),
+        *(
+            ("conversion-1v1-far" if targeted_metadata_variant and index % 2 else "standard-3v3")
+            for index in range(targeted_rows)
+        ),
+    ]
+    seats = np.asarray(
+        [index % 2 for index in range(11)]
+        + [((index + 1) % 2 if targeted_metadata_variant else 0) for index in range(targeted_rows)],
+        dtype=np.int32,
+    )
+    action_kinds = np.asarray(
+        [index % 4 for index in range(11)]
+        + [((index + 2) % 4 if targeted_metadata_variant else 1) for index in range(targeted_rows)],
+        dtype=np.int32,
+    )
+    game_ids = np.arange(count, dtype=np.int64)
+    decision_indices = np.zeros(count, dtype=np.int32)
+    batch = ImitationBatch(
+        observations=np.asarray(
+            [[float(index), 1.0, 2.0] for index in range(count)], dtype=np.float32,
+        ),
+        legal_masks=np.ones((count, 5), dtype=bool),
+        actions=np.full(count, 2, dtype=np.int64),
+        game_ids=game_ids,
+        decision_indices=decision_indices,
+        sources=np.asarray(sources, dtype=object),
+        profiles=np.asarray(profiles, dtype=object),
+        seats=seats,
+        action_kinds=action_kinds,
+        partitions=np.full(count, "train", dtype=object),
+    )
+    identities = MappingProxyType({
+        (f"component-{index:02d}", int(game_ids[index]), 0): index
+        for index in range(count)
+    })
+    return MaterializedImitationPartition("train", batch, identities)
+
+
+def _locked_dagger_mixture() -> MappingProxyType:
+    return MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+    )))
+
+
+@pytest.mark.parametrize(
+    "fractions",
+    [
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.49),
+            (Source.SEARCH_CONVERSION, 0.21),
+            (imitation_module.Source.DAGGER_TARGETED, 0.0),
+        )),
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.49),
+            (Source.SEARCH_CONVERSION, float("nan")),
+            (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        )),
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.40),
+            (Source.SEARCH_CONVERSION, 0.20),
+            (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        )),
+    ],
+)
+def test_source_mixture_sampler_rejects_nonpositive_nonfinite_or_unbalanced_fractions(
+    fractions: OrderedDict,
+) -> None:
+    """Relaxing fraction validation must permit undefined long-run source exposure."""
+
+    with pytest.raises(ValueError, match="source fractions"):
+        imitation_module.SourceMixtureSampler(
+            _three_source_partition(),
+            source_fractions=fractions,
+            batch_size=256,
+            seed=227,
+        )
+
+
+def test_source_mixture_sampler_freezes_the_ordered_fraction_mapping() -> None:
+    """Retaining the caller's mutable mapping must let later mutation alter provenance."""
+
+    fractions = OrderedDict(_locked_dagger_mixture())
+    sampler = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=fractions,
+        batch_size=256,
+        seed=227,
+    )
+    fractions[Source.GREEDY_STANDARD] = 0.10
+    assert list(sampler.source_fractions.items()) == list(
+        _locked_dagger_mixture().items()
+    )
+    with pytest.raises(TypeError):
+        sampler.source_fractions[Source.GREEDY_STANDARD] = 0.10
+
+
+def test_source_mixture_sampler_residual_accounts_nonintegral_256_batches() -> None:
+    """Allocating rounding remainder to a fixed source must drift from 49/21/30."""
+
+    materialized = _three_source_partition()
+    sampler = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=227,
+    )
+    batches = [sampler.next_batch() for _ in range(40)]
+
+    first_counts = [
+        int(np.count_nonzero(batches[0].sources == source))
+        for source in _locked_dagger_mixture()
+    ]
+    second_counts = [
+        int(np.count_nonzero(batches[1].sources == source))
+        for source in _locked_dagger_mixture()
+    ]
+    totals = [
+        sum(int(np.count_nonzero(batch.sources == source)) for batch in batches)
+        for source in _locked_dagger_mixture()
+    ]
+    assert first_counts == [125, 54, 77]
+    assert second_counts == [126, 53, 77]
+    assert totals == [5_018, 2_150, 3_072]
+    assert sum(totals) == 10_240
+    assert list(batches[0].sources) != [
+        *([Source.GREEDY_STANDARD] * 125),
+        *([Source.SEARCH_CONVERSION] * 54),
+        *([imitation_module.Source.DAGGER_TARGETED] * 77),
+    ]
+
+    repeated = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=227,
+    ).next_batch()
+    different = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=228,
+    ).next_batch()
+    np.testing.assert_array_equal(repeated.observations, batches[0].observations)
+    assert not np.array_equal(different.observations, batches[0].observations)
+
+
+def test_targeted_sampler_is_uniform_before_repeat_and_ignores_row_metadata() -> None:
+    """Stratifying targeted labels by profile, seat, or action kind must bias exposure."""
+
+    def targeted_sequence(materialized: MaterializedImitationPartition) -> list[int]:
+        sampler = imitation_module.SourceMixtureSampler(
+            materialized,
+            source_fractions=_locked_dagger_mixture(),
+            batch_size=10,
+            seed=227,
+        )
+        selected: list[int] = []
+        while len(selected) < 404:
+            batch = sampler.next_batch()
+            selected.extend(
+                int(value)
+                for value in batch.observations[
+                    batch.sources == imitation_module.Source.DAGGER_TARGETED, 0
+                ]
+            )
+        return selected[:404]
+
+    ordinary = targeted_sequence(_three_source_partition(targeted_rows=3))
+    changed_metadata = targeted_sequence(
+        _three_source_partition(
+            targeted_rows=3, targeted_metadata_variant=True,
+        )
+    )
+    assert ordinary == changed_metadata
+    assert len(set(ordinary[:3])) == 3
+    assert ordinary[3] in set(ordinary[:3])
+    counts = Counter(ordinary[:300])
+    assert set(counts.values()) == {100}
+
+
+def test_legacy_sampler_default_sequence_remains_byte_for_byte_stable(
+    sampled_dataset: Path,
+) -> None:
+    """Routing the compatibility wrapper through new allocation must not alter old runs."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    sampler = StratifiedDecisionSampler(dataset, materialized, batch_size=7, seed=211)
+
+    actual = [
+        [
+            (int(game_id), int(decision_index), source.value)
+            for game_id, decision_index, source in zip(
+                batch.game_ids, batch.decision_indices, batch.sources, strict=True,
+            )
+        ]
+        for batch in (sampler.next_batch() for _ in range(4))
+    ]
+    assert actual == [
+        [(0, 0, "greedy_standard"), (1, 2, "greedy_standard"), (3, 0, "search_conversion"), (0, 2, "greedy_standard"), (2, 1, "search_conversion"), (3, 2, "search_conversion"), (1, 1, "greedy_standard")],
+        [(1, 0, "greedy_standard"), (3, 1, "search_conversion"), (0, 0, "greedy_standard"), (1, 1, "greedy_standard"), (0, 2, "greedy_standard"), (0, 1, "greedy_standard"), (2, 0, "search_conversion")],
+        [(1, 2, "greedy_standard"), (1, 0, "greedy_standard"), (1, 1, "greedy_standard"), (2, 2, "search_conversion"), (3, 2, "search_conversion"), (0, 1, "greedy_standard"), (0, 2, "greedy_standard")],
+        [(3, 0, "search_conversion"), (2, 1, "search_conversion"), (0, 1, "greedy_standard"), (0, 0, "greedy_standard"), (0, 2, "greedy_standard"), (1, 2, "greedy_standard"), (1, 0, "greedy_standard")],
+    ]
+
+
+@pytest.mark.filterwarnings("error:The given NumPy array is not writable")
+def test_actor_supervision_corpus_never_optimizes_validation_sentinel(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Using one combined partition for training and metrics must leak sentinel action 4."""
+
+    validation_batch = ImitationBatch(
+        observations=np.asarray(
+            [[40.0, 1.0, 2.0], [41.0, 1.0, 2.0]], dtype=np.float32,
+        ),
+        legal_masks=np.ones((2, 5), dtype=bool),
+        actions=np.asarray([4, 4], dtype=np.int64),
+        game_ids=np.asarray([0, 1], dtype=np.int64),
+        decision_indices=np.zeros(2, dtype=np.int32),
+        sources=np.asarray(
+            [imitation_module.Source.DAGGER_TARGETED] * 2, dtype=object,
+        ),
+        profiles=np.asarray(["standard-3v3", "conversion-1v1-far"], dtype=object),
+        seats=np.asarray([0, 1], dtype=np.int32),
+        action_kinds=np.asarray([3, 3], dtype=np.int32),
+        partitions=np.full(2, "validation", dtype=object),
+    )
+    validation = MaterializedImitationPartition(
+        "validation",
+        validation_batch,
+        MappingProxyType({
+            ("e" * 64, 0, 0): 0,
+            ("e" * 64, 1, 0): 1,
+        }),
+    )
+    scenario_hash = hashlib.sha256(
+        clone_scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    corpus = imitation_module.ActorSupervisionCorpus(
+        training=_three_source_partition(),
+        validation=validation,
+        source_fractions=_locked_dagger_mixture(),
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "test-corpus",
+            "base_manifest_sha256": "d" * 64,
+            "contract_hash": contract().contract_hash,
+            "encoding_hash": contract().encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+    observed: dict[str, list[int]] = {"train": [], "validation": []}
+    original_distribution = imitation_module._distribution_tensors
+    original_metrics = imitation_module._clone_metrics
+
+    def record_distribution(model, batch: ImitationBatch):
+        if set(batch.partitions) == {"train"}:
+            observed["train"].extend(int(action) for action in batch.actions)
+        return original_distribution(model, batch)
+
+    def record_metrics(model, batch: ImitationBatch):
+        observed["validation"].extend(int(action) for action in batch.actions)
+        return original_metrics(model, batch)
+
+    monkeypatch.setattr(
+        imitation_module, "_distribution_tensors", record_distribution,
+    )
+    monkeypatch.setattr(imitation_module, "_clone_metrics", record_metrics)
+    result = imitation_module.train_actor_supervision(
+        corpus=corpus,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "mixed-supervision",
+        config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=1,
+            patience=1,
+            device="cpu",
+        ),
+    )
+
+    assert observed["train"] and 4 not in observed["train"]
+    assert observed["validation"] and set(observed["validation"]) == {4}
+    assert result.validation.strata["teacher/dagger-targeted"]["count"] == 2
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    assert bc["source_fractions"] == {
+        "greedy_standard": 0.49,
+        "search_conversion": 0.21,
+        "dagger_targeted": 0.30,
+    }
 
 
 def test_sampler_benchmark_runs_exact_batches_and_reports_checksum(

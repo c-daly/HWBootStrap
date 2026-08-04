@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+from collections import Counter
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,13 @@ import pytest
 import ml_lab.dagger as dagger_module
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.controllers import ControllerSpec, ResolvedController
+from ml_lab.imitation import (
+    DemonstrationGame,
+    DemonstrationWriter,
+    Source,
+    SourceMixtureSampler,
+    load_imitation_dataset,
+)
 from ml_lab.dagger import (
     CollectionDefinition,
     DaggerGame,
@@ -151,16 +159,23 @@ def _row_payload(*, decision_index: int = 3, state_hash: str | None = None) -> d
     }
 
 
-def _game_payload(*, game_id: int = 0, partition: str = "train", seat: int = 0) -> dict[str, Any]:
-    seed = 18_000_000 if partition == "train" else 19_000_000
+def _game_payload(
+    *, game_id: int = 0, partition: str = "train", seat: int = 0,
+    iteration: int = 1, profile: str = "standard-3v3",
+) -> dict[str, Any]:
+    seed = (
+        18_000_000 + (iteration - 1) * 100_000
+        if partition == "train"
+        else 19_000_000 + (iteration - 1) * 10_000
+    )
     return {
         "game_id": game_id,
         "partition": partition,
-        "iteration": 1,
+        "iteration": iteration,
         "map_seed": seed,
         "episode_seed": seed,
         "schedule_index": 0,
-        "profile": "standard-3v3",
+        "profile": profile,
         "reference_seat": 0,
         "learner_seat": seat,
         "opponent": "random",
@@ -517,8 +532,12 @@ def _row(
 
 def _game(
     *, game_id: int, partition: str, seat: int, reference_seat: int = 0,
+    iteration: int = 1, profile: str = "standard-3v3",
 ) -> DaggerGame:
-    payload = _game_payload(game_id=game_id, partition=partition, seat=seat)
+    payload = _game_payload(
+        game_id=game_id, partition=partition, seat=seat,
+        iteration=iteration, profile=profile,
+    )
     payload["reference_seat"] = reference_seat
     return DaggerGame.from_dict(payload)
 
@@ -583,6 +602,8 @@ def _new_writer(
     partition: str = "train",
     repository_hash: str = HASHES["2"],
     original_dataset: OriginalDatasetIdentity | None = None,
+    iteration: int = 1,
+    scenario_hash: str = HASHES["1"],
 ) -> tuple[DaggerOverlayWriter, Path]:
     checkpoint = root.parent / "actor.zip"
     checkpoint.write_bytes(b"actor")
@@ -590,7 +611,7 @@ def _new_writer(
         root,
         contract=contract,
         partition=partition,
-        iteration=1,
+        iteration=iteration,
         oracle=OracleSpec.from_dict(_oracle_payload()),
         learner=LearnerIdentity.from_dict(_learner_payload(checkpoint)),
         original_dataset=(
@@ -598,7 +619,7 @@ def _new_writer(
             if original_dataset is not None
             else OriginalDatasetIdentity.from_dict(_dataset_payload())
         ),
-        scenario_hash=HASHES["1"],
+        scenario_hash=scenario_hash,
         repository_hash=repository_hash,
         panel_hash=HASHES["3"],
         schedule_hash=HASHES["4"],
@@ -623,6 +644,231 @@ def _seal_pair(
         _write_evidence(root, game)
         writer.append_game(game, [_row(contract, seat=seat)])
     return writer.seal(), checkpoint
+
+
+def _write_base_corpus_dataset(
+    root: Path, contract: EnvironmentContract,
+) -> tuple[Any, OriginalDatasetIdentity]:
+    writer = DemonstrationWriter.create(root, contract=contract, shard_rows=2)
+
+    def append(
+        *, partition: str, teacher: str, profile: str, seed: int,
+        seat: int, action: int, action_kind: int,
+    ) -> None:
+        relative = f"replays/{partition}-{teacher}-{seed}-{seat}.replay"
+        payload = relative.encode("utf-8")
+        replay = root / relative
+        replay.parent.mkdir(parents=True, exist_ok=True)
+        replay.write_bytes(payload)
+        writer.append_game(
+            DemonstrationGame(
+                partition=partition,
+                teacher=teacher,
+                teacher_parameters=(
+                    {} if teacher == "greedy"
+                    else {"depth": 4, "expansion_budget": 512, "use_heuristic": True}
+                ),
+                opponent="random",
+                profile=profile,
+                seed=seed,
+                teacher_seat=seat,
+                replay_path=relative,
+                replay_hash=hashlib.sha256(payload).hexdigest(),
+                outcome="win",
+                scenario_hash=HASHES["1"],
+                contract_hash=contract.contract_hash,
+                encoding_hash=contract.encoding_hash,
+            ),
+            [{
+                "observation": [float(action), float(seat)],
+                "legal_mask": [True] * contract.action_size,
+                "action": action,
+                "seat": seat,
+                "decision_index": 0,
+                "action_kind": action_kind,
+            }],
+        )
+
+    append(
+        partition="train", teacher="greedy", profile="standard-3v3",
+        seed=11_000_200, seat=0, action=1, action_kind=1,
+    )
+    append(
+        partition="train", teacher="bounded-search", profile="conversion-3v1-near",
+        seed=11_500_200, seat=1, action=3, action_kind=2,
+    )
+    append(
+        partition="validation", teacher="greedy", profile="standard-3v3",
+        seed=12_000_200, seat=0, action=0, action_kind=0,
+    )
+    writer.close()
+    dataset = load_imitation_dataset(root, expected_contract=contract)
+    manifest = root / "manifest.json"
+    files = [
+        {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path != manifest
+    ]
+    identity = OriginalDatasetIdentity.from_dict({
+        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "files": files,
+    })
+    return dataset, identity
+
+
+def _seal_corpus_overlay(
+    root: Path,
+    contract: EnvironmentContract,
+    *,
+    original_dataset: OriginalDatasetIdentity,
+    partition: str,
+    iteration: int,
+    teacher_action: int,
+    profile: str,
+) -> DaggerOverlay:
+    writer, _ = _new_writer(
+        root,
+        contract,
+        partition=partition,
+        original_dataset=original_dataset,
+        iteration=iteration,
+    )
+    command_kind = (
+        "end_turn" if teacher_action == 0
+        else "move" if teacher_action < 3
+        else "attack" if teacher_action < 5
+        else "deploy"
+    )
+    for game_id, seat in enumerate((0, 1)):
+        game = _game(
+            game_id=game_id,
+            partition=partition,
+            seat=seat,
+            iteration=iteration,
+            profile=profile,
+        )
+        _write_evidence(root, game)
+        payload = _row_payload(
+            decision_index=3,
+            state_hash=hashlib.sha256(
+                f"{partition}-{iteration}-{seat}".encode("ascii")
+            ).hexdigest(),
+        )
+        learner_action = 1 if seat == 0 else teacher_action
+        learner_kind = "move" if seat == 0 else command_kind
+        payload.update({
+            "observation": [float(iteration * 10 + teacher_action), float(seat)],
+            "legal_mask": [True] * contract.action_size,
+            "seat": seat,
+            "learner_action": learner_action,
+            "learner_command": _command(learner_kind, seat),
+            "teacher_action": teacher_action,
+            "teacher_command": _command(command_kind, seat),
+            "reason_bits": 1 << ((iteration + seat) % 4),
+            "disagreement": learner_action != teacher_action,
+        })
+        writer.append_game(
+            game,
+            [DaggerRow.from_dict(
+                payload,
+                contract=contract,
+                oracle=OracleSpec.from_dict(_oracle_payload()),
+            )],
+        )
+    return writer.seal()
+
+
+def test_build_dagger_corpus_is_cumulative_teacher_labeled_and_validation_isolated(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Replacing cumulative overlays, supervising learner actions, or adding base validation must fail."""
+
+    base_root = tmp_path / "base"
+    base, base_identity = _write_base_corpus_dataset(base_root, contract)
+    original_shards = tuple((item.path, item.sha256) for item in base.shards)
+    original_files = {
+        path.relative_to(base_root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in base_root.rglob("*") if path.is_file()
+    }
+    train_one = _seal_corpus_overlay(
+        tmp_path / "train-1", contract,
+        original_dataset=base_identity, partition="train", iteration=1,
+        teacher_action=3, profile="standard-3v3",
+    )
+    train_two = _seal_corpus_overlay(
+        tmp_path / "train-2", contract,
+        original_dataset=base_identity, partition="train", iteration=2,
+        teacher_action=4, profile="conversion-1v1-far",
+    )
+    validation_one = _seal_corpus_overlay(
+        tmp_path / "validation-1", contract,
+        original_dataset=base_identity, partition="validation", iteration=1,
+        teacher_action=5, profile="standard-3v3",
+    )
+    validation_two = _seal_corpus_overlay(
+        tmp_path / "validation-2", contract,
+        original_dataset=base_identity, partition="validation", iteration=2,
+        teacher_action=6, profile="conversion-1v1-far",
+    )
+
+    first = dagger_module.build_dagger_corpus(
+        base, [train_one], [validation_one],
+    )
+    cumulative = dagger_module.build_dagger_corpus(
+        base, [train_one, train_two], [validation_one, validation_two],
+    )
+
+    assert list(cumulative.source_fractions.items()) == [
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+        (Source.DAGGER_TARGETED, 0.30),
+    ]
+    assert len(first.training.batch.actions) == 4
+    assert len(cumulative.training.batch.actions) == 6
+    assert len(first.validation.batch.actions) == 2
+    assert len(cumulative.validation.batch.actions) == 4
+    assert set(cumulative.training.batch.actions) == {1, 3, 4}
+    assert set(cumulative.validation.batch.actions) == {5, 6}
+    targeted = cumulative.training.batch.sources == Source.DAGGER_TARGETED
+    assert cumulative.training.batch.actions[targeted].tolist() == [3, 3, 4, 4]
+    assert cumulative.training.batch.observations[targeted, 0].tolist() == [
+        13.0, 13.0, 24.0, 24.0,
+    ]
+    assert set(cumulative.validation.batch.sources) == {Source.DAGGER_TARGETED}
+    assert set(cumulative.training.offsets).isdisjoint(cumulative.validation.offsets)
+    assert all(
+        isinstance(identity, tuple)
+        and len(identity) == 3
+        and len(identity[0]) == 64
+        for identity in (*cumulative.training.offsets, *cumulative.validation.offsets)
+    )
+    suffixes = [(identity[1], identity[2]) for identity in cumulative.training.offsets]
+    assert len(suffixes) > len(set(suffixes))
+    assert tuple((item.path, item.sha256) for item in base.shards) == original_shards
+    assert {
+        path.relative_to(base_root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in base_root.rglob("*") if path.is_file()
+    } == original_files
+
+    sampler = SourceMixtureSampler(
+        cumulative.training,
+        source_fractions=cumulative.source_fractions,
+        batch_size=10,
+        seed=227,
+    )
+    targeted_rows: list[tuple[float, float]] = []
+    for _ in range(400):
+        batch = sampler.next_batch()
+        targeted_rows.extend(
+            tuple(float(item) for item in observation)
+            for observation in batch.observations[
+                batch.sources == Source.DAGGER_TARGETED
+            ]
+        )
+    assert set(Counter(targeted_rows).values()) == {300}
 
 
 def _identity(value: dict[str, Any]) -> str:

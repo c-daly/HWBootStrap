@@ -9,7 +9,7 @@ import os
 import re
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -22,6 +22,15 @@ from .contracts import EnvironmentContract
 from .controllers import ResolvedController, predict, validate_inference_input
 from .evaluation import DuelClient, MAX_DECISIONS_PER_GAME, validate_dagger_payload
 from .io import atomic_write_json
+from .imitation import (
+    ACTION_KINDS,
+    ActorSupervisionCorpus,
+    ImitationBatch,
+    ImitationDataset,
+    MaterializedImitationPartition,
+    Source,
+    materialize_imitation_partition,
+)
 from .protocol import validate_step_payload
 from .tactical_trace import EpisodeTrace
 
@@ -1389,6 +1398,277 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
     if actual_files != expected_files:
         raise ValueError("overlay contains missing or unowned physical files")
     return DaggerOverlay._create(root=root, manifest=logical, games=games)
+
+
+def _loaded_base_dataset_identity(base: ImitationDataset) -> OriginalDatasetIdentity:
+    manifest = base.root / "manifest.json"
+    if not manifest.is_file():
+        raise ValueError("base imitation manifest is missing")
+    files = tuple(
+        DatasetFileIdentity(
+            path.relative_to(base.root).as_posix(), _sha256_file(path),
+        )
+        for path in sorted(base.root.rglob("*"))
+        if path.is_file() and path != manifest
+    )
+    return OriginalDatasetIdentity(
+        manifest_sha256=_sha256_file(manifest),
+        files=files,
+    )
+
+
+def _action_kind_for_teacher_action(
+    action: int, contract: EnvironmentContract,
+) -> int:
+    if action == 0:
+        return ACTION_KINDS["end_turn"]
+    for name, (offset, count) in _action_regions(contract).items():
+        if offset <= action < offset + count:
+            return ACTION_KINDS[name]
+    raise ValueError("DAgger teacher action has no action-kind region")
+
+
+def _overlay_imitation_batch(
+    overlay: DaggerOverlay, contract: EnvironmentContract,
+) -> ImitationBatch:
+    observations: list[np.ndarray] = []
+    legal_masks: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    game_ids: list[np.ndarray] = []
+    decision_indices: list[np.ndarray] = []
+    profiles: list[np.ndarray] = []
+    seats: list[np.ndarray] = []
+    action_kinds: list[np.ndarray] = []
+    for descriptor, game in zip(
+        overlay.manifest.games, overlay.games, strict=True,
+    ):
+        game_manifest = _read_json(
+            _contained_file(overlay.root, descriptor.path, "overlay game manifest")
+        )
+        shard = _strict_fields(
+            game_manifest["shard"], _SHARD_DESCRIPTOR_FIELDS, "shard descriptor",
+        )
+        shard_path = _contained_file(
+            overlay.root, shard["path"], "overlay shard",
+        )
+        with np.load(shard_path, allow_pickle=False) as stored:
+            row_observations = stored["observations"].copy()
+            packed_masks = stored["packed_masks"].copy()
+            teacher_actions = stored["actions"].copy()
+            row_seats = stored["seats"].copy()
+            row_decisions = stored["decision_indices"].copy()
+        count = len(teacher_actions)
+        observations.append(row_observations)
+        legal_masks.append(np.unpackbits(
+            packed_masks,
+            axis=1,
+            count=contract.action_size,
+            bitorder="little",
+        ).astype(bool, copy=False))
+        actions.append(teacher_actions)
+        game_ids.append(np.full(count, game.game_id, dtype=np.int64))
+        decision_indices.append(row_decisions)
+        profiles.append(np.full(count, game.profile, dtype=object))
+        seats.append(row_seats)
+        action_kinds.append(np.asarray([
+            _action_kind_for_teacher_action(int(action), contract)
+            for action in teacher_actions
+        ], dtype=np.uint8))
+
+    count = sum(len(values) for values in actions)
+    if count != overlay.row_count:
+        raise ValueError("DAgger overlay row count changed during materialization")
+    return ImitationBatch(
+        observations=np.concatenate(observations, axis=0),
+        legal_masks=np.concatenate(legal_masks, axis=0),
+        actions=np.concatenate(actions, axis=0),
+        game_ids=np.concatenate(game_ids, axis=0),
+        decision_indices=np.concatenate(decision_indices, axis=0),
+        sources=np.full(count, Source.DAGGER_TARGETED, dtype=object),
+        profiles=np.concatenate(profiles, axis=0),
+        seats=np.concatenate(seats, axis=0),
+        action_kinds=np.concatenate(action_kinds, axis=0),
+        partitions=np.full(count, overlay.partition, dtype=object),
+    )
+
+
+def _combine_supervision_components(
+    partition: str,
+    components: Sequence[tuple[str, ImitationBatch]],
+) -> MaterializedImitationPartition:
+    fields: dict[str, list[np.ndarray]] = {
+        name: [] for name in ImitationBatch.__dataclass_fields__
+    }
+    offsets: dict[tuple[str, int, int], int] = {}
+    next_row = 0
+    next_game = 0
+    for component_hash, batch in components:
+        local_games = tuple(dict.fromkeys(int(value) for value in batch.game_ids))
+        remapped = {
+            game_id: next_game + index
+            for index, game_id in enumerate(local_games)
+        }
+        next_game += len(local_games)
+        fields["game_ids"].append(np.asarray(
+            [remapped[int(value)] for value in batch.game_ids], dtype=np.int64,
+        ))
+        for name in ImitationBatch.__dataclass_fields__:
+            if name != "game_ids":
+                fields[name].append(getattr(batch, name))
+        for game_id, decision_index in zip(
+            batch.game_ids, batch.decision_indices, strict=True,
+        ):
+            identity = (
+                component_hash, int(game_id), int(decision_index),
+            )
+            if identity in offsets:
+                raise ValueError("actor-supervision row identity is duplicated")
+            offsets[identity] = next_row
+            next_row += 1
+    if next_row < 1:
+        raise ValueError(f"actor-supervision {partition} partition is empty")
+    combined = ImitationBatch(**{
+        name: np.concatenate(values, axis=0) for name, values in fields.items()
+    })
+    return MaterializedImitationPartition(
+        partition=partition,
+        batch=combined,
+        offsets=MappingProxyType(offsets),
+    )
+
+
+def _validated_cumulative_overlays(
+    overlays: Sequence[DaggerOverlay],
+    *,
+    partition: str,
+    base: ImitationDataset,
+    original_dataset: OriginalDatasetIdentity,
+    scenario_hash: str,
+) -> tuple[DaggerOverlay, ...]:
+    if not isinstance(overlays, Sequence) or not overlays:
+        raise ValueError(f"cumulative {partition} overlays are required")
+    reopened: list[DaggerOverlay] = []
+    expected_regions = tuple(
+        (name, offset, count)
+        for name, (offset, count) in _action_regions(base.contract).items()
+    )
+    for overlay in overlays:
+        if not isinstance(overlay, DaggerOverlay):
+            raise TypeError("cumulative overlays must be physically reopened")
+        physical = open_dagger_overlay(overlay.root)
+        definition = physical.definition
+        if physical.content_identity != overlay.content_identity:
+            raise ValueError("DAgger overlay identity changed before materialization")
+        if (
+            definition.partition != partition
+            or definition.original_dataset != original_dataset
+            or definition.contract_hash != base.contract.contract_hash
+            or definition.encoding_hash != base.contract.encoding_hash
+            or definition.observation_size != base.contract.observation_size
+            or definition.action_size != base.contract.action_size
+            or definition.action_regions != expected_regions
+            or definition.scenario_hash != scenario_hash
+        ):
+            raise ValueError("DAgger overlay is incompatible with the base corpus")
+        reopened.append(physical)
+    if tuple(item.iteration for item in reopened) != tuple(
+        range(1, len(reopened) + 1)
+    ):
+        raise ValueError(f"cumulative {partition} overlay iterations are not canonical")
+    if len({item.content_identity for item in reopened}) != len(reopened):
+        raise ValueError(f"cumulative {partition} overlay identities are duplicated")
+    return tuple(reopened)
+
+
+def build_dagger_corpus(
+    base: ImitationDataset,
+    train_overlays: Sequence[DaggerOverlay],
+    validation_overlays: Sequence[DaggerOverlay],
+) -> ActorSupervisionCorpus:
+    """Materialize base plus cumulative train overlays and held-out overlays only."""
+
+    if not isinstance(base, ImitationDataset):
+        raise TypeError("base must be a loaded ImitationDataset")
+    original_dataset = _loaded_base_dataset_identity(base)
+    scenario_hashes = {str(game["scenario_hash"]) for game in base.games}
+    if len(scenario_hashes) != 1:
+        raise ValueError("base imitation dataset scenario identity is ambiguous")
+    scenario_hash = next(iter(scenario_hashes))
+    training_overlays = _validated_cumulative_overlays(
+        train_overlays,
+        partition="train",
+        base=base,
+        original_dataset=original_dataset,
+        scenario_hash=scenario_hash,
+    )
+    held_out_overlays = _validated_cumulative_overlays(
+        validation_overlays,
+        partition="validation",
+        base=base,
+        original_dataset=original_dataset,
+        scenario_hash=scenario_hash,
+    )
+    if tuple(item.iteration for item in training_overlays) != tuple(
+        item.iteration for item in held_out_overlays
+    ):
+        raise ValueError("training and validation overlay iterations differ")
+    all_overlay_hashes = [
+        *(item.content_identity for item in training_overlays),
+        *(item.content_identity for item in held_out_overlays),
+    ]
+    if len(set(all_overlay_hashes)) != len(all_overlay_hashes):
+        raise ValueError("training and validation overlay identities overlap")
+
+    base_training = materialize_imitation_partition(base, "train")
+    training = _combine_supervision_components(
+        "train",
+        [
+            (original_dataset.manifest_sha256, base_training.batch),
+            *(
+                (overlay.content_identity, _overlay_imitation_batch(
+                    overlay, base.contract,
+                ))
+                for overlay in training_overlays
+            ),
+        ],
+    )
+    validation = _combine_supervision_components(
+        "validation",
+        [
+            (overlay.content_identity, _overlay_imitation_batch(
+                overlay, base.contract,
+            ))
+            for overlay in held_out_overlays
+        ],
+    )
+    fractions = MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+        (Source.DAGGER_TARGETED, 0.30),
+    )))
+    identity = MappingProxyType({
+        "schema_version": 1,
+        "kind": "selective-dagger-v1",
+        "base_manifest_sha256": original_dataset.manifest_sha256,
+        "base_files": tuple(
+            (item.path, item.sha256) for item in original_dataset.files
+        ),
+        "train_overlays": tuple(
+            item.content_identity for item in training_overlays
+        ),
+        "validation_overlays": tuple(
+            item.content_identity for item in held_out_overlays
+        ),
+        "contract_hash": base.contract.contract_hash,
+        "encoding_hash": base.contract.encoding_hash,
+        "scenario_hash": scenario_hash,
+    })
+    return ActorSupervisionCorpus(
+        training=training,
+        validation=validation,
+        source_fractions=fractions,
+        identity=identity,
+    )
 
 
 def _require_expected_definition(

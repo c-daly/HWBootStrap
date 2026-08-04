@@ -336,6 +336,7 @@ from types import MappingProxyType
 class Source(Enum):
     GREEDY_STANDARD = "greedy_standard"
     SEARCH_CONVERSION = "search_conversion"
+    DAGGER_TARGETED = "dagger_targeted"
 
 
 @dataclass(frozen=True)
@@ -450,7 +451,7 @@ class ImitationDataset:
 class MaterializedImitationPartition:
     partition: str
     batch: ImitationBatch
-    offsets: Mapping[tuple[int, int], int]
+    offsets: Mapping[tuple[Any, ...], int]
 
     def __post_init__(self) -> None:
         if self.partition not in {"train", "validation"}:
@@ -462,6 +463,69 @@ class MaterializedImitationPartition:
             raise ValueError("materialized partition metadata differs")
         if set(self.offsets.values()) != set(range(count)):
             raise ValueError("materialized partition offsets are invalid")
+        if any(
+            not isinstance(values, np.ndarray) or len(values) != count
+            for values in (
+                getattr(self.batch, name)
+                for name in ImitationBatch.__dataclass_fields__
+            )
+        ):
+            raise ValueError("materialized partition batch fields are inconsistent")
+        frozen_offsets = MappingProxyType(dict(self.offsets))
+        object.__setattr__(self, "offsets", frozen_offsets)
+        for name in ImitationBatch.__dataclass_fields__:
+            getattr(self.batch, name).setflags(write=False)
+
+
+def _freeze_source_fractions(
+    value: Mapping[Source, float],
+) -> Mapping[Source, float]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("source fractions must be a non-empty ordered mapping")
+    frozen: OrderedDict[Source, float] = OrderedDict()
+    for source, fraction in value.items():
+        if (
+            not isinstance(source, Source)
+            or isinstance(fraction, bool)
+            or not isinstance(fraction, (int, float))
+            or not math.isfinite(float(fraction))
+            or float(fraction) <= 0.0
+        ):
+            raise ValueError("source fractions must contain finite positive values")
+        frozen[source] = float(fraction)
+    if not math.isclose(sum(frozen.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("source fractions must sum to 1.0")
+    return MappingProxyType(frozen)
+
+
+@dataclass(frozen=True)
+class ActorSupervisionCorpus:
+    training: MaterializedImitationPartition
+    validation: MaterializedImitationPartition
+    source_fractions: Mapping[Source, float]
+    identity: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.training, MaterializedImitationPartition)
+            or self.training.partition != "train"
+            or not isinstance(self.validation, MaterializedImitationPartition)
+            or self.validation.partition != "validation"
+        ):
+            raise ValueError("actor supervision corpus partitions are invalid")
+        fractions = _freeze_source_fractions(self.source_fractions)
+        if set(self.training.batch.sources) != set(fractions):
+            raise ValueError("actor supervision training sources differ from mixture")
+        if set(self.training.offsets) & set(self.validation.offsets):
+            raise ValueError("actor supervision train and validation identities overlap")
+        if (
+            not isinstance(self.identity, Mapping)
+            or not self.identity
+            or any(not isinstance(key, str) for key in self.identity)
+        ):
+            raise ValueError("actor supervision corpus identity is invalid")
+        object.__setattr__(self, "source_fractions", fractions)
+        object.__setattr__(self, "identity", MappingProxyType(dict(self.identity)))
 
 
 def training_rows_as_validation(dataset: ImitationDataset) -> ImitationDataset:
@@ -673,7 +737,7 @@ def load_imitation_dataset(root: Path, expected_contract: EnvironmentContract) -
 
 
 class _StratumCycler:
-    def __init__(self, strata: Sequence[Sequence[tuple[int, int]]], rng: np.random.Generator) -> None:
+    def __init__(self, strata: Sequence[Sequence[Any]], rng: np.random.Generator) -> None:
         if not strata or any(not rows for rows in strata):
             raise ValueError("sampler source contains an empty stratum")
         self._rows = [tuple(rows[index] for index in rng.permutation(len(rows))) for rows in strata]
@@ -681,8 +745,8 @@ class _StratumCycler:
         self._row_positions = [0] * len(self._rows)
         self._stratum_position = 0
 
-    def take(self, count: int) -> list[tuple[int, int]]:
-        result: list[tuple[int, int]] = []
+    def take(self, count: int) -> list[Any]:
+        result: list[Any] = []
         for _ in range(count):
             group = self._strata[self._stratum_position % len(self._strata)]
             self._stratum_position += 1
@@ -692,59 +756,209 @@ class _StratumCycler:
         return result
 
 
-def _source_strata(dataset: ImitationDataset, partition: str, source: Source) -> list[tuple[tuple[int, int], ...]]:
-    try:
-        profiles = dataset.index[partition][source]
-    except KeyError as exc:
-        raise ValueError(f"sampler has no {source.value} rows in {partition} partition") from exc
-    return [rows for profile in sorted(profiles) for seat in sorted(profiles[profile]) for kind in sorted(profiles[profile][seat]) for rows in (profiles[profile][seat][kind],)]
+def _materialized_source_strata(
+    materialized: MaterializedImitationPartition, source: Source,
+) -> list[tuple[int, ...]]:
+    batch = materialized.batch
+    selected = np.flatnonzero(batch.sources == source)
+    if not len(selected):
+        raise ValueError(
+            f"sampler has no {source.value} rows in {materialized.partition} partition"
+        )
+    if source is Source.DAGGER_TARGETED:
+        return [tuple(int(index) for index in selected)]
+    grouped: dict[tuple[str, int, int], list[int]] = {}
+    for raw_index in selected:
+        index = int(raw_index)
+        key = (
+            str(batch.profiles[index]),
+            int(batch.seats[index]),
+            int(batch.action_kinds[index]),
+        )
+        grouped.setdefault(key, []).append(index)
+    return [tuple(grouped[key]) for key in sorted(grouped)]
 
 
-class StratifiedDecisionSampler:
-    """Partition-scoped, seeded strata cycling; undersized strata cycle deterministically."""
+class SourceMixtureSampler:
+    """Seeded residual-accounted source exposure over one materialized partition."""
 
-    def __init__(self, dataset: ImitationDataset, materialized: MaterializedImitationPartition, batch_size: int = 1, standard_fraction: float = 0.70, seed: int = 0, partition: str = "train") -> None:
-        if type(batch_size) is not int or batch_size < 1 or partition not in {"train", "validation"} or not isinstance(standard_fraction, (int, float)) or not 0.0 < standard_fraction < 1.0:
+    def __init__(
+        self,
+        materialized: MaterializedImitationPartition,
+        *,
+        source_fractions: Mapping[Source, float],
+        batch_size: int = 1,
+        seed: int = 0,
+        partition: str | None = None,
+        _legacy_standard_fraction: float | None = None,
+    ) -> None:
+        if (
+            not isinstance(materialized, MaterializedImitationPartition)
+            or type(batch_size) is not int
+            or batch_size < 1
+            or type(seed) is not int
+            or seed < 0
+        ):
             raise ValueError("sampler configuration is invalid")
-        if not isinstance(materialized, MaterializedImitationPartition) or materialized.partition != partition:
+        expected_partition = materialized.partition if partition is None else partition
+        if (
+            expected_partition not in {"train", "validation"}
+            or materialized.partition != expected_partition
+        ):
             raise ValueError("sampler materialized partition differs")
-        if set(materialized.offsets) != set(_partition_refs(dataset, partition)):
-            raise ValueError("sampler materialized reference map differs")
-        self.dataset, self.materialized, self.batch_size, self.standard_fraction, self.partition = dataset, materialized, batch_size, float(standard_fraction), partition
+        fractions = _freeze_source_fractions(source_fractions)
+        if set(materialized.batch.sources) != set(fractions):
+            raise ValueError("sampler materialized sources differ from mixture")
+        if _legacy_standard_fraction is not None and (
+            tuple(fractions) != (
+                Source.GREEDY_STANDARD, Source.SEARCH_CONVERSION,
+            )
+            or not math.isclose(
+                float(_legacy_standard_fraction),
+                fractions[Source.GREEDY_STANDARD],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError("legacy sampler mixture is invalid")
+        self.materialized = materialized
+        self.batch_size = batch_size
+        self.partition = expected_partition
+        self.source_fractions = fractions
         self._rng = np.random.default_rng(seed)
-        self._cyclers = {Source.GREEDY_STANDARD: _StratumCycler(_source_strata(dataset, partition, Source.GREEDY_STANDARD), self._rng), Source.SEARCH_CONVERSION: _StratumCycler(_source_strata(dataset, partition, Source.SEARCH_CONVERSION), self._rng)}
-        self._residual = 0.0
+        self._cyclers = {
+            source: _StratumCycler(
+                _materialized_source_strata(materialized, source), self._rng,
+            )
+            for source in fractions
+        }
+        self._carry = {source: 0.0 for source in fractions}
+        self._legacy_standard_fraction = _legacy_standard_fraction
+        self._legacy_residual = 0.0
 
-    def _next_refs_and_sources(self) -> list[tuple[tuple[int, int], Source]]:
-        target = self.batch_size * self.standard_fraction + self._residual
-        standard_count = int(np.floor(target + 1e-12))
-        self._residual = target - standard_count
-        refs_and_sources = [(ref, Source.GREEDY_STANDARD) for ref in self._cyclers[Source.GREEDY_STANDARD].take(standard_count)]
-        refs_and_sources += [(ref, Source.SEARCH_CONVERSION) for ref in self._cyclers[Source.SEARCH_CONVERSION].take(self.batch_size - standard_count)]
-        order = self._rng.permutation(len(refs_and_sources))
-        return [refs_and_sources[int(index)] for index in order]
+    def _source_counts(self) -> Mapping[Source, int]:
+        if self._legacy_standard_fraction is not None:
+            target = (
+                self.batch_size * self._legacy_standard_fraction
+                + self._legacy_residual
+            )
+            standard_count = int(np.floor(target + 1e-12))
+            self._legacy_residual = target - standard_count
+            return {
+                Source.GREEDY_STANDARD: standard_count,
+                Source.SEARCH_CONVERSION: self.batch_size - standard_count,
+            }
+
+        targets = {
+            source: self.batch_size * fraction + self._carry[source]
+            for source, fraction in self.source_fractions.items()
+        }
+        counts = {
+            source: int(np.floor(target + 1e-12))
+            for source, target in targets.items()
+        }
+        source_order = tuple(self.source_fractions)
+        while sum(counts.values()) < self.batch_size:
+            winner = max(
+                range(len(source_order)),
+                key=lambda index: (
+                    targets[source_order[index]] - counts[source_order[index]],
+                    -index,
+                ),
+            )
+            counts[source_order[winner]] += 1
+        if sum(counts.values()) != self.batch_size or any(
+            count < 0 for count in counts.values()
+        ):
+            raise RuntimeError("source residual allocation is inconsistent")
+        self._carry = {
+            source: targets[source] - counts[source] for source in source_order
+        }
+        return counts
+
+    def _next_indices_and_sources(self) -> list[tuple[int, Source]]:
+        counts = self._source_counts()
+        indices_and_sources = [
+            (int(index), source)
+            for source in self.source_fractions
+            for index in self._cyclers[source].take(counts[source])
+        ]
+        order = self._rng.permutation(len(indices_and_sources))
+        return [indices_and_sources[int(index)] for index in order]
 
     def next_batch(self) -> ImitationBatch:
-        refs_and_sources = self._next_refs_and_sources()
-        try:
-            offsets = np.fromiter(
-                (self.materialized.offsets[ref] for ref, _source in refs_and_sources),
-                dtype=np.int64,
-                count=len(refs_and_sources),
-            )
-        except KeyError as exc:
-            raise RuntimeError("sampler selected a missing materialized reference") from exc
-        batch = _take_batch(self.materialized.batch, offsets)
+        indices_and_sources = self._next_indices_and_sources()
+        indices = np.fromiter(
+            (index for index, _source in indices_and_sources),
+            dtype=np.int64,
+            count=len(indices_and_sources),
+        )
+        batch = _take_batch(self.materialized.batch, indices)
         scheduled_sources = np.asarray(
-            [source for _ref, source in refs_and_sources], dtype=object,
+            [source for _index, source in indices_and_sources], dtype=object,
         )
         if not np.array_equal(batch.sources, scheduled_sources):
             raise RuntimeError("materialized source metadata differs from scheduler")
         if set(batch.partitions) != {self.partition}:
             raise RuntimeError("materialized sampler crossed a partition")
-        if not np.all(batch.legal_masks[np.arange(len(batch.actions)), batch.actions]):
+        if not np.all(
+            batch.legal_masks[np.arange(len(batch.actions)), batch.actions]
+        ):
             raise ValueError("selected teacher action is masked")
         return batch
+
+
+class StratifiedDecisionSampler(SourceMixtureSampler):
+    """Compatibility wrapper preserving the original two-source sequence."""
+
+    def __init__(
+        self,
+        dataset: ImitationDataset,
+        materialized: MaterializedImitationPartition,
+        batch_size: int = 1,
+        standard_fraction: float = 0.70,
+        seed: int = 0,
+        partition: str = "train",
+    ) -> None:
+        if (
+            not isinstance(dataset, ImitationDataset)
+            or not isinstance(standard_fraction, (int, float))
+            or isinstance(standard_fraction, bool)
+            or not 0.0 < float(standard_fraction) < 1.0
+        ):
+            raise ValueError("sampler configuration is invalid")
+        if (
+            not isinstance(materialized, MaterializedImitationPartition)
+            or materialized.partition != partition
+        ):
+            raise ValueError("sampler materialized partition differs")
+        if set(materialized.offsets) != set(_partition_refs(dataset, partition)):
+            raise ValueError("sampler materialized reference map differs")
+        self.dataset = dataset
+        self.standard_fraction = float(standard_fraction)
+        self._refs_by_index = {
+            index: ref for ref, index in materialized.offsets.items()
+        }
+        fractions = MappingProxyType(OrderedDict((
+            (Source.GREEDY_STANDARD, self.standard_fraction),
+            (Source.SEARCH_CONVERSION, 1.0 - self.standard_fraction),
+        )))
+        super().__init__(
+            materialized,
+            source_fractions=fractions,
+            batch_size=batch_size,
+            seed=seed,
+            partition=partition,
+            _legacy_standard_fraction=self.standard_fraction,
+        )
+
+    def _next_refs_and_sources(
+        self,
+    ) -> list[tuple[tuple[int, int], Source]]:
+        return [
+            (self._refs_by_index[index], source)
+            for index, source in self._next_indices_and_sources()
+        ]
 
 
 def benchmark_imitation_sampler(
@@ -1000,9 +1214,18 @@ def _parameter_hash(named_parameters: Sequence[tuple[str, Any]]) -> str:
 def _distribution_tensors(model: Any, batch: ImitationBatch) -> tuple[Any, Any, Any]:
     import torch
 
-    observations = torch.as_tensor(batch.observations, dtype=torch.float32, device=model.device)
-    legal_masks = torch.as_tensor(batch.legal_masks, dtype=torch.bool, device=model.device)
-    actions = torch.as_tensor(batch.actions, dtype=torch.int64, device=model.device)
+    def tensor_source(values: np.ndarray) -> np.ndarray:
+        return values if values.flags.writeable else values.copy()
+
+    observations = torch.as_tensor(
+        tensor_source(batch.observations), dtype=torch.float32, device=model.device,
+    )
+    legal_masks = torch.as_tensor(
+        tensor_source(batch.legal_masks), dtype=torch.bool, device=model.device,
+    )
+    actions = torch.as_tensor(
+        tensor_source(batch.actions), dtype=torch.int64, device=model.device,
+    )
     distribution = model.policy.get_distribution(observations, action_masks=legal_masks)
     return distribution, actions, legal_masks
 
@@ -1017,9 +1240,13 @@ def _masked_logits(model: Any, batch: ImitationBatch) -> Any:
 
 
 def _strata_metrics(predictions: np.ndarray, actions: np.ndarray, batch: ImitationBatch) -> Mapping[str, Mapping[str, float | int]]:
+    teacher_names = {
+        Source.GREEDY_STANDARD: "greedy",
+        Source.SEARCH_CONVERSION: "bounded-search",
+        Source.DAGGER_TARGETED: "dagger-targeted",
+    }
     teacher = np.asarray(
-        ["greedy" if source is Source.GREEDY_STANDARD else "bounded-search" for source in batch.sources],
-        dtype=object,
+        [teacher_names[source] for source in batch.sources], dtype=object,
     )
     kind_names = {value: name for name, value in ACTION_KINDS.items()}
     dimensions = {
@@ -1198,9 +1425,9 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
     ):
         raise ValueError("behavioral-cloning phase timing differs from epoch duration")
 
-def train_behavioral_clone(
+def train_actor_supervision(
     *,
-    dataset: ImitationDataset,
+    corpus: ActorSupervisionCorpus,
     scenario: ResolvedScenario,
     env: Any,
     contract: EnvironmentContract,
@@ -1208,22 +1435,31 @@ def train_behavioral_clone(
     run_dir: Path,
     config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
     progress: Callable[[Mapping[str, Any]], None] | None = None,
+    _sampler_factory: Callable[
+        [MaterializedImitationPartition, int, int], Any
+    ] | None = None,
 ) -> BehavioralCloningResult:
-    """Train only the production MaskablePPO actor and atomically publish a resolver-backed run."""
+    """Train the production actor from generic immutable supervision partitions."""
     import torch
     from .algorithms import MaskablePPOAdapter
 
-    if not isinstance(dataset, ImitationDataset):
-        raise TypeError("dataset must be a loaded ImitationDataset")
-    if dataset.contract != contract:
-        raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(corpus, ActorSupervisionCorpus):
+        raise TypeError("corpus must be an ActorSupervisionCorpus")
     if not isinstance(scenario, ResolvedScenario):
         raise TypeError("scenario must be a ResolvedScenario")
     if scenario.environment != contract.environment:
         raise ContractMismatch("behavioral-cloning scenario environment does not match the contract")
     scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
-    if any(game["scenario_hash"] != scenario_hash for game in dataset.games):
-        raise ContractMismatch("behavioral-cloning scenario hash does not match the dataset")
+    if (
+        corpus.identity.get("contract_hash") != contract.contract_hash
+        or corpus.identity.get("encoding_hash") != contract.encoding_hash
+    ):
+        raise ContractMismatch("actor-supervision corpus contract does not match")
+    if corpus.identity.get("scenario_hash") != scenario_hash:
+        raise ContractMismatch("behavioral-cloning scenario hash does not match the corpus")
+    dataset_manifest_sha256 = corpus.identity.get("base_manifest_sha256")
+    if not _is_hash(dataset_manifest_sha256):
+        raise ValueError("actor-supervision base manifest identity is invalid")
 
     if not isinstance(config, BehavioralCloningConfig):
         raise TypeError("config must be BehavioralCloningConfig")
@@ -1233,8 +1469,8 @@ def train_behavioral_clone(
     if run_dir.exists():
         raise FileExistsError(run_dir)
 
-    training = materialize_imitation_partition(dataset, "train")
-    validation = materialize_imitation_partition(dataset, "validation")
+    training = corpus.training
+    validation = corpus.validation
     fixtures = _fixture_batch(validation.batch)
     adapter = MaskablePPOAdapter()
     model = adapter.create(
@@ -1266,12 +1502,16 @@ def train_behavioral_clone(
     value_hash_before = _parameter_hash(value_named)
     optimizer = torch.optim.Adam(actor_parameters, lr=float(config.learning_rate))
 
-    sampler = StratifiedDecisionSampler(
-        dataset,
-        training,
-        batch_size=config.batch_size,
-        seed=config.model_seed,
-        partition="train",
+    sampler = (
+        SourceMixtureSampler(
+            training,
+            source_fractions=corpus.source_fractions,
+            batch_size=config.batch_size,
+            seed=config.model_seed,
+            partition="train",
+        )
+        if _sampler_factory is None
+        else _sampler_factory(training, config.batch_size, config.model_seed)
     )
     steps_per_epoch = max(1, int(np.ceil(len(training.batch.actions) / config.batch_size)))
     best_nll = float("inf")
@@ -1382,9 +1622,13 @@ def train_behavioral_clone(
     validation_metrics = _clone_metrics(model, validation.batch)
     expected_logits = _masked_logits(model, fixtures)
 
-    dataset_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
     config_data = asdict(config)
     metrics_data = asdict(validation_metrics)
+    corpus_identity = dict(corpus.identity)
+    source_fractions_data = {
+        source.value: fraction
+        for source, fraction in corpus.source_fractions.items()
+    }
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{run_dir.name}.publishing-", dir=run_dir.parent)
     )
@@ -1399,6 +1643,8 @@ def train_behavioral_clone(
             "algorithm": adapter.name,
             "policy": adapter.policy_name,
             "dataset_manifest_sha256": dataset_manifest_sha256,
+            "supervision_corpus": corpus_identity,
+            "source_fractions": source_fractions_data,
             "config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
@@ -1432,6 +1678,8 @@ def train_behavioral_clone(
             "contract": contract.to_dict(),
             "scenario": {"path": "scenario.json", "template_id": scenario.template_id, "schema_version": scenario.schema_version},
             "dataset_manifest_sha256": dataset_manifest_sha256,
+            "supervision_corpus": corpus_identity,
+            "source_fractions": source_fractions_data,
             "bc_config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
@@ -1473,4 +1721,92 @@ def train_behavioral_clone(
         validation=validation_metrics,
         best_epoch=best_epoch,
         epochs_trained=epochs_trained,
+    )
+
+
+def train_behavioral_clone(
+    *,
+    dataset: ImitationDataset,
+    scenario: ResolvedScenario,
+    env: Any,
+    contract: EnvironmentContract,
+    spaces_info: Mapping[str, Any],
+    run_dir: Path,
+    config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
+) -> BehavioralCloningResult:
+    """Behavior-preserving adapter for the original two-source imitation dataset."""
+
+    if not isinstance(dataset, ImitationDataset):
+        raise TypeError("dataset must be a loaded ImitationDataset")
+    if dataset.contract != contract:
+        raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(scenario, ResolvedScenario):
+        raise TypeError("scenario must be a ResolvedScenario")
+    if scenario.environment != contract.environment:
+        raise ContractMismatch(
+            "behavioral-cloning scenario environment does not match the contract"
+        )
+    scenario_hash = hashlib.sha256(
+        scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    if any(game["scenario_hash"] != scenario_hash for game in dataset.games):
+        raise ContractMismatch(
+            "behavioral-cloning scenario hash does not match the dataset"
+        )
+
+    training = materialize_imitation_partition(dataset, "train")
+    validation = materialize_imitation_partition(dataset, "validation")
+    if set(training.offsets) & set(validation.offsets):
+        validation = MaterializedImitationPartition(
+            partition="validation",
+            batch=validation.batch,
+            offsets=MappingProxyType({
+                ("validation-alias", *identity): index
+                for identity, index in validation.offsets.items()
+            }),
+        )
+    base_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
+    fractions = MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.70),
+        (Source.SEARCH_CONVERSION, 0.30),
+    )))
+    corpus = ActorSupervisionCorpus(
+        training=training,
+        validation=validation,
+        source_fractions=fractions,
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "behavioral-cloning-v1",
+            "base_manifest_sha256": base_manifest_sha256,
+            "contract_hash": contract.contract_hash,
+            "encoding_hash": contract.encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+
+    def legacy_sampler(
+        materialized: MaterializedImitationPartition,
+        batch_size: int,
+        seed: int,
+    ) -> StratifiedDecisionSampler:
+        return StratifiedDecisionSampler(
+            dataset,
+            materialized,
+            batch_size=batch_size,
+            standard_fraction=0.70,
+            seed=seed,
+            partition="train",
+        )
+
+    return train_actor_supervision(
+        corpus=corpus,
+        scenario=scenario,
+        env=env,
+        contract=contract,
+        spaces_info=spaces_info,
+        run_dir=run_dir,
+        config=config,
+        progress=progress,
+        _sampler_factory=legacy_sampler,
     )
