@@ -201,6 +201,87 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Observer_RejectsMaskedTeacherActionBeforeSinkEmission()
+        {
+            Fixture fixture = Fixture.Create(Units(1, weak: true), Units(1));
+            TacticalV2DecisionContext context = fixture.Context(fixture.FirstProductiveAction);
+            bool[] mask = context.LegalMask;
+            int maskedAction = Enumerable.Range(0, mask.Length).First(action => !mask[action]);
+            var oracle = new FixedOracle(decision => OracleDecision(
+                maskedAction, decision.LearnerCommand));
+            var sink = new BufferedTacticalV2DaggerSink { Enabled = true };
+            var observer = new SelectiveDaggerObserver(oracle, sink);
+            observer.Reset(fixture.Episode());
+
+            InvalidOperationException? error = Assert.Throws<InvalidOperationException>(
+                () => observer.Observe(context));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(error!.Message, Does.Contain("teacher action is masked"));
+                Assert.That(oracle.DecisionCount, Is.EqualTo(1));
+                Assert.That(sink.Drain(), Is.Empty);
+            });
+        }
+
+        [Test]
+        public void Observer_RejectsTeacherCommandActionMismatchBeforeSinkEmission()
+        {
+            Fixture fixture = Fixture.Create(Units(1, weak: true), Units(1));
+            TacticalV2DecisionContext context = fixture.Context(fixture.FirstProductiveAction);
+            var oracle = new FixedOracle(decision => OracleDecision(
+                decision.LearnerAction, new EndTurn(decision.Seat)));
+            var sink = new BufferedTacticalV2DaggerSink { Enabled = true };
+            var observer = new SelectiveDaggerObserver(oracle, sink);
+            observer.Reset(fixture.Episode());
+
+            InvalidOperationException? error = Assert.Throws<InvalidOperationException>(
+                () => observer.Observe(context));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(error!.Message,
+                    Does.Contain("teacher command does not encode to its recorded action"));
+                Assert.That(oracle.DecisionCount, Is.EqualTo(1));
+                Assert.That(sink.Drain(), Is.Empty);
+            });
+        }
+
+        [Test]
+        public void Observer_RejectsLearnerCommandActionMismatchBeforeSinkEmission()
+        {
+            Fixture fixture = Fixture.Create(Units(1, weak: true), Units(1));
+            TacticalV2DecisionContext valid = fixture.Context(fixture.FirstProductiveAction);
+            var context = new TacticalV2DecisionContext(
+                valid.State,
+                valid.Seat,
+                valid.DecisionIndex,
+                valid.Observation,
+                valid.LegalMask,
+                valid.LearnerAction,
+                new EndTurn(valid.Seat),
+                valid.OwnRegistry,
+                valid.FoeRegistry,
+                valid.Layout);
+            var oracle = new FixedOracle(decision =>
+                OracleDecision(action: 0, new EndTurn(decision.Seat)));
+            var sink = new BufferedTacticalV2DaggerSink { Enabled = true };
+            var observer = new SelectiveDaggerObserver(oracle, sink);
+            observer.Reset(fixture.Episode());
+
+            InvalidOperationException? error = Assert.Throws<InvalidOperationException>(
+                () => observer.Observe(context));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(error!.Message,
+                    Does.Contain("learner command does not encode to its recorded action"));
+                Assert.That(oracle.DecisionCount, Is.EqualTo(1));
+                Assert.That(sink.Drain(), Is.Empty);
+            });
+        }
+
+        [Test]
         public void EvidenceRows_CloneArraysAndTraceCommandsAndCarryEveryDiagnostic()
         {
             Fixture fixture = Fixture.Create(Units(1, weak: true), Units(1));
@@ -284,6 +365,31 @@ namespace HexWars.Engine.Tests
                     depth: 4, expansionBudget: 512,
                     heuristicIdentity: BoundedSearchAgent.HeuristicIdentity,
                     actualExpansionCount: 7);
+            }
+        }
+
+        private static TacticalV2OracleDecision OracleDecision(int action, Command command) =>
+            new TacticalV2OracleDecision(action, command,
+                depth: 4, expansionBudget: 512,
+                heuristicIdentity: BoundedSearchAgent.HeuristicIdentity,
+                actualExpansionCount: 7);
+
+        private sealed class FixedOracle : IActionOracle
+        {
+            private readonly Func<TacticalV2DecisionContext, TacticalV2OracleDecision> _decide;
+
+            public FixedOracle(
+                Func<TacticalV2DecisionContext, TacticalV2OracleDecision> decide)
+            {
+                _decide = decide;
+            }
+
+            public int DecisionCount { get; private set; }
+
+            public TacticalV2OracleDecision Decide(TacticalV2DecisionContext context)
+            {
+                DecisionCount++;
+                return _decide(context);
             }
         }
 
