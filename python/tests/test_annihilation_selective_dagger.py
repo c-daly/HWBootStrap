@@ -11,6 +11,7 @@ import subprocess
 from collections import Counter, defaultdict
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2560,3 +2561,2074 @@ def test_oracle_preflight_runtime_failure_remains_diagnostic_not_complete(
             "attempt-*/diagnostic.json"
         )
     )) == 2
+
+
+class _PhysicalIterationHarness:
+    """Small physical Task 9 pipeline used to authenticate the k1-k3 chain."""
+
+    def __init__(self, root: Path, runner: object) -> None:
+        self.root = root
+        self.runner = runner
+        self.events: list[str] = []
+        self.counts: Counter[str] = Counter()
+        self._published_events: set[int] = set()
+        self._clock_value = 0.0
+        self.drift_phase: str | None = None
+        self.repository = {
+            "root": str(root.parent.resolve()),
+            "commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "dirty": False,
+        }
+        self.oracle = {
+            "spec": {
+                "oracle_type": "bounded-search",
+                "depth": 4,
+                "expansion_budget": 512,
+                "use_heuristic": True,
+                "heuristic_identity": "material-plus-pursuit-v1",
+                "code_hash": "1" * 64,
+            },
+            "evidence_root": str((root.parent / "sealed-preflight").resolve()),
+            "evidence_content_identity": "2" * 64,
+            "evidence_class": "sealed-engine",
+        }
+
+        source = runner.dagger_domain.dagger_actor_source(1)
+        source_run = Path(source.controller["source_run"])
+        checkpoint = Path(source.controller["path"])
+        source_manifest = json.loads(
+            (source_run / "run.json").read_text(encoding="utf-8")
+        )
+        self.contract = dict(source_manifest["contract"])
+        checkpoint_sha256 = source.checkpoint_sha256
+        self.starting = {
+            "source": source.to_dict(),
+            "identity": {
+                "checkpoint_path": source.controller["path"],
+                "checkpoint_sha256": checkpoint_sha256,
+                "source_run": source.controller["source_run"],
+                "source_manifest_sha256": _sha256(source_run / "run.json"),
+            },
+            "published_actor_sha256": checkpoint_sha256,
+        }
+
+    def _drift_repository(self, phase: str) -> None:
+        if self.drift_phase == phase:
+            self.repository = {
+                **self.repository,
+                "commit": "c" * 40,
+                "source_tree": "d" * 40,
+            }
+
+    def clock(self) -> float:
+        self._clock_value += 1.0
+        return self._clock_value
+
+    def prepare(self, *, output_root: Path) -> dict[str, Any]:
+        assert output_root == self.root
+        self.events.append("prepare")
+        output_root.mkdir(parents=True, exist_ok=True)
+        _rewrite(output_root / "definition.json", {"status": "prepared"})
+        return {"root": str(output_root), "status": "prepared"}
+
+    def validate(
+        self, *, output_root: Path, prepared: object,
+    ) -> dict[str, Any]:
+        assert prepared == {"root": str(output_root), "status": "prepared"}
+        self.events.append("validate")
+        validated = {
+            "starting_learner": self.starting,
+            "physical": {
+                "starting_learner": self.starting["identity"],
+                "contract": {
+                    "version": self.contract["version"],
+                    "contract_hash": self.contract["contract_hash"],
+                    "encoding_hash": self.contract["encoding_hash"],
+                    "observation_size": self.contract["observation_size"],
+                    "action_size": self.contract["action_size"],
+                    "action_regions": self.contract["semantics"]["action_regions"],
+                },
+            },
+        }
+        _rewrite(output_root / "validated.json", validated)
+        return validated
+
+    def preflight(
+        self, *, output_root: Path, validated: object,
+    ) -> dict[str, Any]:
+        assert validated["starting_learner"] == self.starting
+        self.events.append("oracle-preflight")
+        preflight = {"selected_oracle": self.oracle}
+        _rewrite(output_root / "preflight.json", preflight)
+        return preflight
+
+    def baseline(
+        self, *, output_root: Path, validated: object, preflight: object,
+    ) -> dict[str, str]:
+        assert validated["starting_learner"] == self.starting
+        assert preflight["selected_oracle"] == self.oracle
+        self.events.append("starting-baseline")
+        _rewrite(output_root / "baseline.json", {"status": "completed"})
+        return {"status": "completed"}
+
+    def load_iteration_context(
+        self, *, index: int, output_root: Path,
+    ) -> dict[str, Any]:
+        assert output_root == self.root
+        train_overlays = tuple(
+            self.reopen_overlay(
+                partition="train",
+                index=prior,
+                output_root=(
+                    output_root / "iterations" / f"iteration-{prior}"
+                    / "train-overlay"
+                ),
+                expected=None,
+            )
+            for prior in range(1, index)
+        )
+        validation_overlays = tuple(
+            self.reopen_overlay(
+                partition="validation",
+                index=prior,
+                output_root=(
+                    output_root / "iterations" / f"iteration-{prior}"
+                    / "validation-overlay"
+                ),
+                expected=None,
+            )
+            for prior in range(1, index)
+        )
+        preceding_actor = (
+            None
+            if index == 1
+            else self.reopen_actor(
+                index=index - 1,
+                trained=(
+                    output_root / "iterations" / f"iteration-{index - 1}"
+                    / "actor"
+                ),
+            )
+        )
+        return {
+            "validated": json.loads(
+                (output_root / "validated.json").read_text(encoding="utf-8")
+            ),
+            "preflight": json.loads(
+                (output_root / "preflight.json").read_text(encoding="utf-8")
+            ),
+            "preceding_actor": preceding_actor,
+            "train_overlays": train_overlays,
+            "validation_overlays": validation_overlays,
+            "repository": dict(self.repository),
+        }
+
+    def repository_identity_provider(self, root: Path) -> dict[str, Any]:
+        assert root == Path(self.repository["root"])
+        return dict(self.repository)
+
+    def resolve_incoming(
+        self, *, index: int, validated: object, preceding_actor: object | None,
+    ) -> dict[str, Any]:
+        if index == 1:
+            assert preceding_actor is None
+            return validated["starting_learner"]
+        assert preceding_actor is not None
+        return preceding_actor["incoming"]
+
+    def collect(
+        self,
+        *,
+        partition: str,
+        index: int,
+        learner: object,
+        oracle: object,
+        output_root: Path,
+    ) -> dict[str, Any]:
+        assert oracle == self.oracle
+        source_kind = learner["source"]["source_kind"]
+        expected_kind = "snapshot" if index == 1 else "dagger_actor"
+        assert source_kind == expected_kind
+        self.counts[f"collect-{partition}"] += 1
+        self.events.append(f"{partition}-collection-{index}:{source_kind}")
+        output_root.mkdir(parents=True)
+        artifact = output_root / "artifact.bin"
+        artifact.write_bytes(f"{partition}-{index}\n".encode("ascii"))
+        self._drift_repository(f"{partition}_collection")
+        return {
+            "partition": partition,
+            "iteration": index,
+            "root": output_root,
+            "content_identity": _sha256(artifact),
+            "row_count": (
+                20_000 + index if partition == "train" else 2_000 + index
+            ),
+        }
+
+    def reopen_overlay(
+        self,
+        *,
+        partition: str,
+        index: int,
+        output_root: Path,
+        expected: object | None,
+    ) -> dict[str, Any]:
+        artifact = output_root / "artifact.bin"
+        try:
+            payload = artifact.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"{partition} physical overlay is missing") from exc
+        if payload != f"{partition}-{index}\n".encode("ascii"):
+            raise ValueError(f"{partition} physical overlay is corrupt")
+        reopened = {
+            "partition": partition,
+            "iteration": index,
+            "root": output_root,
+            "content_identity": _sha256(artifact),
+            "row_count": (
+                20_000 + index if partition == "train" else 2_000 + index
+            ),
+        }
+        if (
+            expected is not None
+            and expected["content_identity"] != reopened["content_identity"]
+        ):
+            raise ValueError(f"{partition} overlay identity changed")
+        return reopened
+
+    def build_corpus(
+        self,
+        *,
+        index: int,
+        train_overlays: tuple[object, ...],
+        validation_overlays: tuple[object, ...],
+    ) -> dict[str, Any]:
+        assert len(train_overlays) == len(validation_overlays) == index
+        assert all(item["partition"] == "train" for item in train_overlays)
+        assert all(
+            item["partition"] == "validation" for item in validation_overlays
+        )
+        self.counts["corpus"] += 1
+        self.events.append(f"cumulative-corpus-{index}")
+        self._drift_repository("corpus")
+        return {
+            "training": train_overlays,
+            "held_out": validation_overlays,
+        }
+
+    def train(
+        self,
+        *,
+        index: int,
+        learner: object,
+        corpus: object,
+        output_root: Path,
+    ) -> dict[str, Path]:
+        source_kind = learner["source"]["source_kind"]
+        assert len(corpus["training"]) == len(corpus["held_out"]) == index
+        assert all(row["partition"] == "train" for row in corpus["training"])
+        self.counts["train"] += 1
+        self.events.append(f"actor-distillation-{index}:{source_kind}")
+        checkpoint = output_root / "checkpoints" / "step_000000000.zip"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(f"checkpoint-{index}\n".encode("ascii"))
+        actor_path = output_root / "actor.bin"
+        actor_path.write_bytes(f"actor-{index}\n".encode("ascii"))
+        _rewrite(output_root / "publication.json", {"iteration": index})
+        checkpoint_sha256 = _sha256(checkpoint)
+        actor_sha256 = _sha256(actor_path)
+        publication_sha256 = _sha256(output_root / "publication.json")
+        verification = {
+            "checkpoint_sha256": checkpoint_sha256,
+            "actor_sha256": actor_sha256,
+            "value_parameters_sha256": str(index + 3) * 64,
+            "actor_fixtures_sha256": str(index + 4) * 64,
+            "publication_metadata_sha256": publication_sha256,
+            "contract_hash": self.contract["contract_hash"],
+            "encoding_hash": self.contract["encoding_hash"],
+            "observation_size": self.contract["observation_size"],
+            "action_size": self.contract["action_size"],
+            "comparison_rtol": 0.0,
+            "comparison_atol": 0.0,
+            "maximum_absolute_logit_difference": 0.0,
+        }
+        actor_initialization = learner["source"]
+        run_manifest = {
+            "schema_version": 1,
+            "state": "completed",
+            "production": True,
+            "training_kind": "selective-dagger-distillation-v1",
+            "distillation_iteration": index,
+            "timesteps": 0,
+            "latest_checkpoint": "checkpoints/step_000000000.zip",
+            "latest_checkpoint_step": 0,
+            "checkpoint_sha256": checkpoint_sha256,
+            "target_actor_sha256_final": actor_sha256,
+            "publication_metadata_sha256": publication_sha256,
+            "actor_initialization": actor_initialization,
+            "publication_verification": verification,
+            "config": {
+                "algorithm": "maskable_ppo",
+                "policy": "HexCNN",
+            },
+            "contract": self.contract,
+        }
+        bc_manifest = {
+            "schema_version": 1,
+            "production": True,
+            "training_kind": "selective-dagger-distillation-v1",
+            "distillation_iteration": index,
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "checkpoint_sha256": checkpoint_sha256,
+            "target_actor_sha256_final": actor_sha256,
+            "publication_metadata_sha256": publication_sha256,
+            "actor_initialization": actor_initialization,
+            "publication_verification": verification,
+        }
+        _rewrite(output_root / "run.json", run_manifest)
+        _rewrite(output_root / "bc.json", bc_manifest)
+        self._drift_repository("train")
+        return {"root": output_root}
+
+    def reopen_actor(
+        self, *, index: int, trained: object,
+    ) -> dict[str, Any]:
+        actor_root = (
+            Path(trained["root"]) if isinstance(trained, dict) else Path(trained)
+        )
+        checkpoint = actor_root / "checkpoints" / "step_000000000.zip"
+        actor_path = actor_root / "actor.bin"
+        publication_path = actor_root / "publication.json"
+        run_path = actor_root / "run.json"
+        bc_path = actor_root / "bc.json"
+        try:
+            checkpoint_payload = checkpoint.read_bytes()
+            actor_payload = actor_path.read_bytes()
+            publication = json.loads(
+                publication_path.read_text(encoding="utf-8")
+            )
+            run_manifest = json.loads(run_path.read_text(encoding="utf-8"))
+            bc_manifest = json.loads(bc_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("actor physical publication is missing") from exc
+        if (
+            checkpoint_payload != f"checkpoint-{index}\n".encode("ascii")
+            or actor_payload != f"actor-{index}\n".encode("ascii")
+            or publication != {"iteration": index}
+            or run_manifest["distillation_iteration"] != index
+            or bc_manifest["distillation_iteration"] != index
+            or run_manifest["contract"] != self.contract
+        ):
+            raise ValueError("actor physical publication is corrupt")
+
+        canonical_root = actor_root.resolve()
+        canonical_checkpoint = checkpoint.resolve()
+        checkpoint_sha256 = _sha256(checkpoint)
+        actor_sha256 = _sha256(actor_path)
+        publication_sha256 = _sha256(publication_path)
+        run_sha256 = _sha256(run_path)
+        bc_sha256 = _sha256(bc_path)
+        if (
+            run_manifest["checkpoint_sha256"] != checkpoint_sha256
+            or bc_manifest["checkpoint_sha256"] != checkpoint_sha256
+            or run_manifest["target_actor_sha256_final"] != actor_sha256
+            or bc_manifest["target_actor_sha256_final"] != actor_sha256
+            or run_manifest["publication_metadata_sha256"] != publication_sha256
+            or bc_manifest["publication_metadata_sha256"] != publication_sha256
+        ):
+            raise ValueError("actor physical publication hashes changed")
+        if (
+            actor_root.parent.name == f"iteration-{index}"
+            and index not in self._published_events
+        ):
+            self._published_events.add(index)
+            self.events.append(f"physical-publication-{index}")
+        incoming = {
+            "source": {
+                "schema_version": 1,
+                "source_kind": "dagger_actor",
+                "controller": {
+                    "kind": "snapshot",
+                    "path": str(canonical_checkpoint),
+                    "source_run": str(canonical_root),
+                    "algorithm": "maskable_ppo",
+                    "step": 0,
+                    "inference_mode": "deterministic",
+                },
+                "checkpoint_sha256": checkpoint_sha256,
+                "published_actor_sha256": actor_sha256,
+            },
+            "identity": {
+                "checkpoint_path": str(canonical_checkpoint),
+                "checkpoint_sha256": checkpoint_sha256,
+                "source_run": str(canonical_root),
+                "source_manifest_sha256": run_sha256,
+            },
+            "published_actor_sha256": actor_sha256,
+        }
+        return {
+            "root": canonical_root,
+            "checkpoint_sha256": checkpoint_sha256,
+            "actor_sha256": actor_sha256,
+            "publication_metadata_sha256": publication_sha256,
+            "run_manifest_sha256": run_sha256,
+            "bc_manifest_sha256": bc_sha256,
+            "incoming": incoming,
+        }
+
+    def validate_actor_supervision_publication(
+        self, run_dir: Path, expected_contract: object,
+    ) -> dict[str, Any]:
+        if expected_contract.to_dict() != self.contract:
+            raise ValueError("actor publication contract changed")
+        run = json.loads((Path(run_dir) / "run.json").read_text(encoding="utf-8"))
+        index = run["distillation_iteration"]
+        actor = self.reopen_actor(index=index, trained=run_dir)
+        verification = dict(run["publication_verification"])
+        if (
+            verification["checkpoint_sha256"] != actor["checkpoint_sha256"]
+            or verification["actor_sha256"] != actor["actor_sha256"]
+            or verification["publication_metadata_sha256"]
+            != actor["publication_metadata_sha256"]
+        ):
+            raise ValueError("actor publication verification changed")
+        return verification
+
+    def build_iteration_identity(
+        self,
+        *,
+        index: int,
+        context: object,
+        incoming: object,
+        train_overlays: tuple[object, ...],
+        validation_overlays: tuple[object, ...],
+    ) -> dict[str, Any]:
+        assert len(train_overlays) == len(validation_overlays) == index
+        encoding_hash = self.contract["encoding_hash"]
+        train_seed_start = 18_000_000 + (index - 1) * 100_000
+        validation_seed_start = 19_000_000 + (index - 1) * 10_000
+
+        def descriptors(overlays: tuple[object, ...]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "iteration": overlay["iteration"],
+                    "content_identity": overlay["content_identity"],
+                    "row_count": overlay["row_count"],
+                }
+                for overlay in overlays
+            ]
+
+        return {
+            "definition": {
+                "panel_sha256": "3" * 64,
+                "panel_byte_size": 101,
+                "seed_banks_sha256": "4" * 64,
+                "seed_banks_byte_size": 202,
+            },
+            "repository": dict(self.repository),
+            "scenario": {
+                "source_sha256": "5" * 64,
+                "runtime_sha256": "6" * 64,
+            },
+            "contract": {
+                "version": self.contract["version"],
+                "contract_hash": self.contract["contract_hash"],
+                "encoding_hash": encoding_hash,
+                "observation_size": self.contract["observation_size"],
+                "action_size": self.contract["action_size"],
+                "action_regions": self.contract["semantics"]["action_regions"],
+            },
+            "base_dataset": {
+                "root": str((self.root.parent / "base-dataset").resolve()),
+                "manifest_sha256": "7" * 64,
+                "content_sha256": "8" * 64,
+                "file_count": 3966,
+                "byte_size": 17_852_257,
+                "contract_hash": "d" * 64,
+                "encoding_hash": encoding_hash,
+                "scenario_hash": "9" * 64,
+            },
+            "selected_oracle": context["preflight"]["selected_oracle"],
+            "incoming_learner": incoming,
+            "cumulative_train_overlays": descriptors(train_overlays),
+            "cumulative_validation_overlays": descriptors(validation_overlays),
+            "schedules": {
+                "train": {
+                    "sha256": str(index + 1) * 64,
+                    "seed_start": train_seed_start,
+                    "seed_stop": train_seed_start + 99_999,
+                    "label_target": 20_000,
+                    "game_ceiling": 2_000,
+                },
+                "validation": {
+                    "sha256": str(index + 4) * 64,
+                    "seed_start": validation_seed_start,
+                    "seed_stop": validation_seed_start + 9_999,
+                    "label_target": 2_000,
+                    "game_ceiling": 200,
+                },
+            },
+            "optimizer": {
+                "source_mixture_basis_points": {
+                    "greedy_standard": 4_900,
+                    "search_conversion": 2_100,
+                    "dagger_targeted": 3_000,
+                },
+                "batch_size": 256,
+                "learning_rate": 3e-4,
+                "max_epochs": 50,
+                "patience": 5,
+                "model_seed": 227,
+                "sampler_seed": 227,
+                "device": "cuda",
+                "publication_device": "cpu",
+                "objective": "actor_only_masked_cross_entropy",
+                "validation_metric": "targeted_negative_log_likelihood",
+            },
+            "runtime": {
+                "hardware": {
+                    "training_device": "cuda:0",
+                    "publication_device": "cpu",
+                    "device_name": "test-gpu",
+                },
+                "software": {
+                    "python": "test",
+                    "torch": "test",
+                },
+            },
+        }
+
+    def build_iteration_manifest(
+        self,
+        *,
+        index: int,
+        identity: object,
+        train_overlay: object,
+        validation_overlay: object,
+        actor: object,
+        timings: object,
+    ) -> dict[str, Any]:
+        source_counts = {
+            1: {
+                "greedy_standard": 9_910,
+                "search_conversion": 4_247,
+                "dagger_targeted": 6_067,
+            },
+            2: {
+                "greedy_standard": 19_694,
+                "search_conversion": 8_440,
+                "dagger_targeted": 12_058,
+            },
+            3: {
+                "greedy_standard": 29_478,
+                "search_conversion": 12_634,
+                "dagger_targeted": 18_048,
+            },
+        }
+        training_rows = sum(
+            item["row_count"] for item in identity["cumulative_train_overlays"]
+        )
+        validation_rows = sum(
+            item["row_count"]
+            for item in identity["cumulative_validation_overlays"]
+        )
+
+        def collection(overlay: object) -> dict[str, Any]:
+            return {
+                "games": 2,
+                "labels": overlay["row_count"],
+                "reason_counts": {
+                    "conversion": overlay["row_count"],
+                    "favorable": 0,
+                    "cycle_warning": 0,
+                    "wasted_end_turn": 0,
+                },
+                "disagreements": 0,
+                "mean_expansions": 100.0,
+                "max_expansions": 512,
+            }
+
+        payload = {
+            "schema_version": 1,
+            "status": "completed",
+            "iteration": index,
+            "identity": identity,
+            "artifacts": {
+                "train_overlay": {
+                    "path": "train-overlay",
+                    "content_identity": train_overlay["content_identity"],
+                    "row_count": train_overlay["row_count"],
+                },
+                "validation_overlay": {
+                    "path": "validation-overlay",
+                    "content_identity": validation_overlay["content_identity"],
+                    "row_count": validation_overlay["row_count"],
+                },
+                "actor": {
+                    "path": "actor",
+                    "checkpoint_sha256": actor["checkpoint_sha256"],
+                    "actor_sha256": actor["actor_sha256"],
+                    "publication_metadata_sha256": (
+                        actor["publication_metadata_sha256"]
+                    ),
+                    "run_manifest_sha256": actor["run_manifest_sha256"],
+                    "bc_manifest_sha256": actor["bc_manifest_sha256"],
+                },
+            },
+            "metrics": {
+                "train_collection": collection(train_overlay),
+                "validation_collection": collection(validation_overlay),
+                "training": {
+                    "training_rows": training_rows,
+                    "validation_rows": validation_rows,
+                    "source_example_counts": source_counts[index],
+                    "best_epoch": 1,
+                    "best_validation_nll": 0.5,
+                    "epochs_trained": 1,
+                },
+            },
+            "timings": dict(timings),
+        }
+        payload["content_identity"] = _content_identity(payload)
+        self._drift_repository("prepublish")
+        return payload
+
+    def dependencies(self) -> object:
+        return self.runner.DaggerDependencies(
+            prepare=self.prepare,
+            validate=self.validate,
+            preflight=self.preflight,
+            baseline=self.baseline,
+            resolve_incoming=self.resolve_incoming,
+            collect=self.collect,
+            build_corpus=self.build_corpus,
+            train=self.train,
+            reopen_actor=self.reopen_actor,
+            load_iteration_context=self.load_iteration_context,
+            reopen_overlay=self.reopen_overlay,
+            build_iteration_identity=self.build_iteration_identity,
+            build_iteration_manifest=self.build_iteration_manifest,
+            repository_identity_provider=self.repository_identity_provider,
+            clock=self.clock,
+        )
+
+
+def test_training_iteration_stage_order_preserves_learner_ownership_and_validation_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The physical chain owns k2/k3 inputs and exact reuse does no compute."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "selective-dagger"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    dependencies = harness.dependencies()
+    manifests = runner.run_training_pipeline(
+        output_root=root, dependencies=dependencies,
+    )
+
+    assert harness.events == [
+        "prepare",
+        "validate",
+        "oracle-preflight",
+        "starting-baseline",
+        "validation-collection-1:snapshot",
+        "train-collection-1:snapshot",
+        "cumulative-corpus-1",
+        "actor-distillation-1:snapshot",
+        "physical-publication-1",
+        "validation-collection-2:dagger_actor",
+        "train-collection-2:dagger_actor",
+        "cumulative-corpus-2",
+        "actor-distillation-2:dagger_actor",
+        "physical-publication-2",
+        "validation-collection-3:dagger_actor",
+        "train-collection-3:dagger_actor",
+        "cumulative-corpus-3",
+        "actor-distillation-3:dagger_actor",
+        "physical-publication-3",
+    ]
+    assert [
+        manifest.identity["incoming_learner"]["source"]["source_kind"]
+        for manifest in manifests
+    ] == ["snapshot", "dagger_actor", "dagger_actor"]
+    assert [
+        len(manifest.identity["cumulative_train_overlays"])
+        for manifest in manifests
+    ] == [1, 2, 3]
+    assert [
+        len(manifest.identity["cumulative_validation_overlays"])
+        for manifest in manifests
+    ] == [1, 2, 3]
+    assert [
+        Path(manifests[index].identity["incoming_learner"]["identity"]["source_run"])
+        for index in (1, 2)
+    ] == [
+        (root / "iterations" / "iteration-1" / "actor").resolve(),
+        (root / "iterations" / "iteration-2" / "actor").resolve(),
+    ]
+
+    compute_keys = (
+        "collect-validation", "collect-train", "corpus", "train",
+    )
+    compute_counts = {key: harness.counts[key] for key in compute_keys}
+    reused = runner.run_training_pipeline(
+        output_root=root, dependencies=dependencies,
+    )
+    assert [item.content_identity for item in reused] == [
+        item.content_identity for item in manifests
+    ]
+    assert {key: harness.counts[key] for key in compute_keys} == compute_counts
+
+
+@pytest.mark.parametrize(
+    "drift_phase",
+    ["validation_collection", "train", "prepublish"],
+)
+def test_run_iteration_repository_drift_fails_before_publication(
+    tmp_path: Path,
+    drift_phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repository change during any long phase cannot enter a manifest."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / f"repository-drift-{drift_phase}"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    harness.drift_phase = drift_phase
+
+    with pytest.raises(ValueError, match="repository identity changed"):
+        runner.run_training_pipeline(
+            output_root=root,
+            dependencies=harness.dependencies(),
+        )
+
+    assert not (root / "iterations" / "iteration-1").exists()
+    assert (root / "iterations" / "iteration-1.staging").is_dir()
+    if drift_phase == "validation_collection":
+        assert harness.counts["collect-validation"] == 1
+        assert harness.counts["collect-train"] == 0
+        assert harness.counts["corpus"] == 0
+        assert harness.counts["train"] == 0
+
+
+def test_run_iteration_rejects_forged_external_prior_actor_before_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A suffix-compatible actor outside this experiment cannot own k2."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "selective-dagger"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    dependencies = harness.dependencies()
+    prepared = harness.prepare(output_root=root)
+    validated = harness.validate(output_root=root, prepared=prepared)
+    preflight = harness.preflight(output_root=root, validated=validated)
+    harness.baseline(
+        output_root=root,
+        validated=validated,
+        preflight=preflight,
+    )
+    runner.run_iteration(1, output_root=root, dependencies=dependencies)
+
+    forged_actor_root = (
+        tmp_path / "forged" / "iterations" / "iteration-1" / "actor"
+    )
+    forged_actor_root.parent.mkdir(parents=True)
+    shutil.copytree(
+        root / "iterations" / "iteration-1" / "actor",
+        forged_actor_root,
+    )
+    forged_actor = harness.reopen_actor(
+        index=1, trained=forged_actor_root,
+    )
+
+    def forged_context(
+        *, index: int, output_root: Path,
+    ) -> dict[str, Any]:
+        context = harness.load_iteration_context(
+            index=index, output_root=output_root,
+        )
+        return {**context, "preceding_actor": forged_actor}
+
+    forged_dependencies = replace(
+        dependencies,
+        load_iteration_context=forged_context,
+    )
+    compute_keys = (
+        "collect-validation", "collect-train", "corpus", "train",
+    )
+    before = {key: harness.counts[key] for key in compute_keys}
+
+    with pytest.raises(ValueError, match="canonical preceding actor"):
+        runner.run_iteration(
+            2,
+            output_root=root,
+            dependencies=forged_dependencies,
+        )
+
+    assert not (root / "iterations" / "iteration-2").exists()
+    assert {key: harness.counts[key] for key in compute_keys} == before
+
+
+def test_dagger_dependencies_cannot_omit_transactional_iteration_boundaries() -> None:
+    """Production orchestration has no in-memory path around physical manifests."""
+
+    import run_annihilation_selective_dagger as runner
+
+    def boundary(*args: object, **kwargs: object) -> object:
+        return None
+
+    with pytest.raises(TypeError):
+        runner.DaggerDependencies(
+            prepare=boundary,
+            validate=boundary,
+            preflight=boundary,
+            baseline=boundary,
+            resolve_incoming=boundary,
+            collect=boundary,
+            build_corpus=boundary,
+            train=boundary,
+            reopen_actor=boundary,
+        )
+
+
+def test_run_iteration_collection_failure_stops_and_retains_unpublished_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed child remains diagnostic evidence and cannot look completed."""
+
+    import run_annihilation_selective_dagger as runner
+
+    events: list[str] = []
+    root = tmp_path / "selective-dagger"
+    repository = {
+        "root": str(root.parent.resolve()),
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": False,
+    }
+
+    def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a downstream callback ran after collection failed")
+
+    def load_iteration_context(
+        *, index: int, output_root: Path,
+    ) -> dict[str, Any]:
+        assert index == 1
+        assert output_root == root
+        events.append("context")
+        return {
+            "validated": {"starting_learner": {"learner_id": "step-38912"}},
+            "preflight": {"selected_oracle": "depth-4-budget-512"},
+            "preceding_actor": None,
+            "train_overlays": (),
+            "validation_overlays": (),
+            "repository": repository,
+        }
+
+    def resolve_incoming(
+        *, index: int, validated: object, preceding_actor: object | None,
+    ) -> dict[str, str]:
+        assert index == 1 and preceding_actor is None
+        events.append("incoming")
+        return validated["starting_learner"]
+
+    def collect(
+        *,
+        partition: str,
+        index: int,
+        learner: object,
+        oracle: object,
+        output_root: Path,
+    ) -> dict[str, Any]:
+        events.append(f"collect-{partition}")
+        assert index == 1
+        assert learner["learner_id"] == "step-38912"
+        assert oracle == "depth-4-budget-512"
+        if partition == "train":
+            raise RuntimeError("injected train collection failure")
+        output_root.mkdir(parents=True)
+        (output_root / "diagnostic.txt").write_text(
+            "held-out collection completed\n", encoding="utf-8",
+        )
+        return {
+            "partition": partition,
+            "iteration": index,
+            "root": output_root,
+            "content_identity": "validation-1",
+        }
+
+    monkeypatch.setattr(
+        runner,
+        "_authenticate_iteration_incoming",
+        lambda index, output_root, context, dependencies: (
+            dependencies.resolve_incoming(
+                index=index,
+                validated=context["validated"],
+                preceding_actor=context["preceding_actor"],
+            )
+        ),
+    )
+    dependencies = runner.DaggerDependencies(
+        prepare=unexpected,
+        validate=unexpected,
+        preflight=unexpected,
+        baseline=unexpected,
+        resolve_incoming=resolve_incoming,
+        collect=collect,
+        build_corpus=unexpected,
+        train=unexpected,
+        reopen_actor=unexpected,
+        load_iteration_context=load_iteration_context,
+        reopen_overlay=unexpected,
+        build_iteration_identity=unexpected,
+        build_iteration_manifest=unexpected,
+        repository_identity_provider=lambda _root: repository,
+    )
+
+    with pytest.raises(RuntimeError, match="injected train collection failure"):
+        runner.run_iteration(1, output_root=root, dependencies=dependencies)
+
+    iteration_root = root / "iterations" / "iteration-1"
+    assert events == [
+        "context",
+        "incoming",
+        "collect-validation",
+        "collect-train",
+    ]
+    assert (
+        iteration_root.with_name("iteration-1.staging")
+        / "validation-overlay"
+        / "diagnostic.txt"
+    ).read_text(encoding="utf-8") == "held-out collection completed\n"
+    assert not (iteration_root / "manifest.json").exists()
+
+
+def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed reuse is physical; corrupt or missing children fail before work."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "selective-dagger"
+    counts: Counter[str] = Counter()
+    contract_hash = "5" * 64
+    encoding_hash = "6" * 64
+    train_identity = "e" * 64
+    validation_identity = "f" * 64
+    source_run = (
+        "C:/Users/cddal/HexWars/python/runs/"
+        "bc227-ppo-random-s227-20260802-v2"
+    )
+    checkpoint_path = f"{source_run}/checkpoints/step_000038912.zip"
+    checkpoint_sha256 = (
+        "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+    )
+    incoming = {
+        "source": {
+            "schema_version": 1,
+            "source_kind": "snapshot",
+            "controller": {
+                "kind": "snapshot",
+                "path": checkpoint_path,
+                "source_run": source_run,
+                "algorithm": "maskable_ppo",
+                "step": 38_912,
+                "inference_mode": "deterministic",
+            },
+            "checkpoint_sha256": checkpoint_sha256,
+        },
+        "identity": {
+            "checkpoint_path": checkpoint_path,
+            "checkpoint_sha256": checkpoint_sha256,
+            "source_run": source_run,
+            "source_manifest_sha256": (
+                "7f02152c2ea39a08e5e203c0b0ba13928b2ad1847e276cc1b19f53331151ba46"
+            ),
+        },
+        "published_actor_sha256": checkpoint_sha256,
+    }
+    selected_oracle = {
+        "spec": {
+            "oracle_type": "bounded-search",
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+            "heuristic_identity": "material-plus-pursuit-v1",
+            "code_hash": "d" * 64,
+        },
+        "evidence_root": "C:/evidence/oracle-preflight",
+        "evidence_content_identity": "1" * 64,
+        "evidence_class": "sealed-engine",
+    }
+    repository = {
+        "root": str(root.parent.resolve()),
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": False,
+    }
+
+    def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("unused pipeline boundary was invoked")
+
+    def load_iteration_context(
+        *, index: int, output_root: Path,
+    ) -> dict[str, Any]:
+        counts["context"] += 1
+        assert index == 1 and output_root == root
+        return {
+            "validated": {"starting_learner": incoming},
+            "preflight": {"selected_oracle": selected_oracle},
+            "preceding_actor": None,
+            "train_overlays": (),
+            "validation_overlays": (),
+            "repository": repository,
+        }
+
+    def resolve_incoming(
+        *, index: int, validated: object, preceding_actor: object | None,
+    ) -> dict[str, Any]:
+        counts["incoming"] += 1
+        assert index == 1 and preceding_actor is None
+        return validated["starting_learner"]
+
+    def collect(
+        *,
+        partition: str,
+        index: int,
+        learner: object,
+        oracle: object,
+        output_root: Path,
+    ) -> dict[str, Any]:
+        counts[f"collect-{partition}"] += 1
+        assert index == 1 and learner is incoming and oracle is selected_oracle
+        output_root.mkdir(parents=True)
+        payload = f"{partition}-{index}\n".encode()
+        (output_root / "artifact.bin").write_bytes(payload)
+        return {
+            "partition": partition,
+            "iteration": index,
+            "root": output_root,
+            "content_identity": (
+                train_identity if partition == "train" else validation_identity
+            ),
+            "row_count": 20_001 if partition == "train" else 2_001,
+        }
+
+    def reopen_overlay(
+        *,
+        partition: str,
+        index: int,
+        output_root: Path,
+        expected: object | None,
+    ) -> dict[str, Any]:
+        counts[f"reopen-{partition}"] += 1
+        artifact = output_root / "artifact.bin"
+        try:
+            payload = artifact.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"{partition} physical overlay is missing") from exc
+        if payload != f"{partition}-{index}\n".encode():
+            raise ValueError(f"{partition} physical overlay is corrupt")
+        result = {
+            "partition": partition,
+            "iteration": index,
+            "root": output_root,
+            "content_identity": (
+                train_identity if partition == "train" else validation_identity
+            ),
+            "row_count": 20_001 if partition == "train" else 2_001,
+        }
+        if (
+            expected is not None
+            and expected["content_identity"] != result["content_identity"]
+        ):
+            raise ValueError(f"{partition} overlay identity changed")
+        return result
+
+    def build_corpus(
+        *,
+        index: int,
+        train_overlays: tuple[object, ...],
+        validation_overlays: tuple[object, ...],
+    ) -> dict[str, Any]:
+        counts["corpus"] += 1
+        assert index == 1
+        assert [item["partition"] for item in train_overlays] == ["train"]
+        assert [item["partition"] for item in validation_overlays] == [
+            "validation"
+        ]
+        return {"training": train_overlays, "held_out": validation_overlays}
+
+    def train(
+        *,
+        index: int,
+        learner: object,
+        corpus: object,
+        output_root: Path,
+    ) -> dict[str, Any]:
+        counts["train"] += 1
+        assert index == 1 and learner is incoming
+        assert corpus["training"][0]["partition"] == "train"
+        output_root.mkdir(parents=True)
+        (output_root / "actor.bin").write_bytes(b"actor-1\n")
+        return {"root": output_root}
+
+    def reopen_actor(*, index: int, trained: object) -> dict[str, Any]:
+        counts["reopen-actor"] += 1
+        actor_root = (
+            Path(trained["root"]) if isinstance(trained, dict) else Path(trained)
+        )
+        try:
+            actor_bytes = (actor_root / "actor.bin").read_bytes()
+        except OSError as exc:
+            raise ValueError("actor physical publication is missing") from exc
+        if actor_bytes != b"actor-1\n":
+            raise ValueError("actor physical publication is corrupt")
+        return {
+            "root": actor_root,
+            "checkpoint_sha256": "2" * 64,
+            "actor_sha256": "3" * 64,
+            "publication_metadata_sha256": "4" * 64,
+            "run_manifest_sha256": "5" * 64,
+            "bc_manifest_sha256": "6" * 64,
+        }
+
+    def build_iteration_identity(
+        *,
+        index: int,
+        context: Mapping[str, Any],
+        incoming: object,
+        train_overlays: tuple[object, ...],
+        validation_overlays: tuple[object, ...],
+    ) -> dict[str, Any]:
+        counts["identity"] += 1
+        assert index == 1 and incoming is context["validated"]["starting_learner"]
+        return {
+            "definition": {
+                "panel_sha256": "7" * 64,
+                "panel_byte_size": 101,
+                "seed_banks_sha256": "8" * 64,
+                "seed_banks_byte_size": 202,
+            },
+            "repository": repository,
+            "scenario": {
+                "source_sha256": "9" * 64,
+                "runtime_sha256": "0" * 64,
+            },
+            "contract": {
+                "version": "tactical-v2",
+                "contract_hash": "d" * 64,
+                "encoding_hash": encoding_hash,
+                "observation_size": 1292,
+                "action_size": 1288,
+                "action_regions": {
+                    "move": {"offset": 1, "count": 351},
+                    "attack": {"offset": 352, "count": 351},
+                    "deploy": {"offset": 703, "count": 585},
+                },
+            },
+            "base_dataset": {
+                "root": "C:/dataset",
+                "manifest_sha256": "1" * 64,
+                "content_sha256": "2" * 64,
+                "file_count": 3966,
+                "byte_size": 17_852_257,
+                "contract_hash": contract_hash,
+                "encoding_hash": encoding_hash,
+                "scenario_hash": "3" * 64,
+            },
+            "selected_oracle": selected_oracle,
+            "incoming_learner": incoming,
+            "cumulative_train_overlays": [
+                {
+                    "iteration": item["iteration"],
+                    "content_identity": item["content_identity"],
+                    "row_count": item["row_count"],
+                }
+                for item in train_overlays
+            ],
+            "cumulative_validation_overlays": [
+                {
+                    "iteration": item["iteration"],
+                    "content_identity": item["content_identity"],
+                    "row_count": item["row_count"],
+                }
+                for item in validation_overlays
+            ],
+            "schedules": {
+                "train": {
+                    "sha256": "4" * 64,
+                    "seed_start": 18_000_000,
+                    "seed_stop": 18_099_999,
+                    "label_target": 20_000,
+                    "game_ceiling": 2_000,
+                },
+                "validation": {
+                    "sha256": "5" * 64,
+                    "seed_start": 19_000_000,
+                    "seed_stop": 19_009_999,
+                    "label_target": 2_000,
+                    "game_ceiling": 200,
+                },
+            },
+            "optimizer": {
+                "source_mixture_basis_points": {
+                    "greedy_standard": 4_900,
+                    "search_conversion": 2_100,
+                    "dagger_targeted": 3_000,
+                },
+                "batch_size": 256,
+                "learning_rate": 3e-4,
+                "max_epochs": 50,
+                "patience": 5,
+                "model_seed": 227,
+                "sampler_seed": 227,
+                "device": "cuda",
+                "publication_device": "cpu",
+                "objective": "actor_only_masked_cross_entropy",
+                "validation_metric": "targeted_negative_log_likelihood",
+            },
+            "runtime": {
+                "hardware": {
+                    "training_device": "cuda:0",
+                    "publication_device": "cpu",
+                    "cuda_runtime": "12.8",
+                    "device_name": "test-gpu",
+                },
+                "software": {
+                    "python": "3.11.test",
+                    "numpy": "test",
+                    "torch": "test",
+                    "stable_baselines3": "test",
+                    "sb3_contrib": "test",
+                },
+            },
+        }
+
+    def build_iteration_manifest(
+        *,
+        index: int,
+        identity: Mapping[str, Any],
+        train_overlay: Mapping[str, Any],
+        validation_overlay: Mapping[str, Any],
+        actor: Mapping[str, Any],
+        timings: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        counts["manifest"] += 1
+        payload = {
+            "schema_version": 1,
+            "status": "completed",
+            "iteration": index,
+            "identity": dict(identity),
+            "artifacts": {
+                "train_overlay": {
+                    "path": "train-overlay",
+                    "content_identity": train_overlay["content_identity"],
+                    "row_count": train_overlay["row_count"],
+                },
+                "validation_overlay": {
+                    "path": "validation-overlay",
+                    "content_identity": validation_overlay["content_identity"],
+                    "row_count": validation_overlay["row_count"],
+                },
+                "actor": {
+                    "path": "actor",
+                    "checkpoint_sha256": actor["checkpoint_sha256"],
+                    "actor_sha256": actor["actor_sha256"],
+                    "publication_metadata_sha256": (
+                        actor["publication_metadata_sha256"]
+                    ),
+                    "run_manifest_sha256": actor["run_manifest_sha256"],
+                    "bc_manifest_sha256": actor["bc_manifest_sha256"],
+                },
+            },
+            "metrics": {
+                "train_collection": {
+                    "games": 2,
+                    "labels": train_overlay["row_count"],
+                    "reason_counts": {
+                        "conversion": train_overlay["row_count"],
+                        "favorable": 0,
+                        "cycle_warning": 0,
+                        "wasted_end_turn": 0,
+                    },
+                    "disagreements": 0,
+                    "mean_expansions": 100.0,
+                    "max_expansions": 512,
+                },
+                "validation_collection": {
+                    "games": 2,
+                    "labels": validation_overlay["row_count"],
+                    "reason_counts": {
+                        "conversion": validation_overlay["row_count"],
+                        "favorable": 0,
+                        "cycle_warning": 0,
+                        "wasted_end_turn": 0,
+                    },
+                    "disagreements": 0,
+                    "mean_expansions": 100.0,
+                    "max_expansions": 512,
+                },
+                "training": {
+                    "training_rows": train_overlay["row_count"],
+                    "validation_rows": validation_overlay["row_count"],
+                    "source_example_counts": {
+                        "greedy_standard": 9_910,
+                        "search_conversion": 4_247,
+                        "dagger_targeted": 6_067,
+                    },
+                    "best_epoch": 1,
+                    "best_validation_nll": 0.5,
+                    "epochs_trained": 1,
+                },
+            },
+            "timings": dict(timings),
+        }
+        payload["content_identity"] = _content_identity(payload)
+        return payload
+
+    monkeypatch.setattr(
+        runner,
+        "_authenticate_iteration_incoming",
+        lambda index, output_root, context, dependencies: (
+            dependencies.resolve_incoming(
+                index=index,
+                validated=context["validated"],
+                preceding_actor=context["preceding_actor"],
+            )
+        ),
+    )
+    dependencies = runner.DaggerDependencies(
+        prepare=unexpected,
+        validate=unexpected,
+        preflight=unexpected,
+        baseline=unexpected,
+        resolve_incoming=resolve_incoming,
+        collect=collect,
+        build_corpus=build_corpus,
+        train=train,
+        reopen_actor=reopen_actor,
+        load_iteration_context=load_iteration_context,
+        reopen_overlay=reopen_overlay,
+        build_iteration_identity=build_iteration_identity,
+        build_iteration_manifest=build_iteration_manifest,
+        repository_identity_provider=lambda _root: repository,
+    )
+
+    first = runner.run_iteration(1, output_root=root, dependencies=dependencies)
+    compute_counts = {
+        name: counts[name]
+        for name in ("collect-validation", "collect-train", "corpus", "train")
+    }
+    second = runner.run_iteration(1, output_root=root, dependencies=dependencies)
+
+    assert second.content_identity == first.content_identity
+    assert {
+        name: counts[name] for name in compute_counts
+    } == compute_counts
+
+    completed_root = root
+    root = tmp_path / "atomic-publication"
+    real_replace = runner.os.replace
+    staging = root / "iterations" / "iteration-1.staging"
+
+    def fail_final_publication(source: object, destination: object) -> None:
+        if Path(source) == staging:
+            raise RuntimeError("injected final publication failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(runner.os, "replace", fail_final_publication)
+    with pytest.raises(RuntimeError, match="final publication failure"):
+        runner.run_iteration(1, output_root=root, dependencies=dependencies)
+
+    assert not (root / "iterations" / "iteration-1").exists()
+    assert (staging / "manifest.json").is_file()
+    assert (staging / "validation-overlay" / "artifact.bin").is_file()
+    assert (staging / "train-overlay" / "artifact.bin").is_file()
+    assert (staging / "actor" / "actor.bin").is_file()
+    compute_counts = {
+        name: counts[name]
+        for name in ("collect-validation", "collect-train", "corpus", "train")
+    }
+    root = completed_root
+    iteration_root = root / "iterations" / "iteration-1"
+    assert (iteration_root / "manifest.json").is_file()
+    assert not (iteration_root / ".staging").exists()
+
+    actor_path = iteration_root / "actor" / "actor.bin"
+    actor_path.write_bytes(b"corrupt\n")
+    with pytest.raises(ValueError, match="actor physical publication is corrupt"):
+        runner.run_iteration(1, output_root=root, dependencies=dependencies)
+    assert {
+        name: counts[name] for name in compute_counts
+    } == compute_counts
+
+    actor_path.write_bytes(b"actor-1\n")
+    (iteration_root / "train-overlay" / "artifact.bin").unlink()
+    with pytest.raises(ValueError, match="train physical overlay is missing"):
+        runner.run_iteration(1, output_root=root, dependencies=dependencies)
+    assert {
+        name: counts[name] for name in compute_counts
+    } == compute_counts
+
+
+def test_prepare_copies_exact_definition_bytes_and_never_repairs_completed_output(
+    tmp_path: Path,
+) -> None:
+    """Prepare is a publish-once byte snapshot, not a mutable configuration copy."""
+
+    import run_annihilation_selective_dagger as runner
+
+    output_root = tmp_path / "selective-dagger"
+    first = runner.run_prepare(
+        output_root=output_root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    copied_panel = output_root / "definition" / "panel.json"
+    copied_seeds = output_root / "definition" / "seed-banks.json"
+
+    assert copied_panel.read_bytes() == PANEL_PATH.read_bytes()
+    assert copied_seeds.read_bytes() == SEED_BANKS_PATH.read_bytes()
+    assert first.identity["definition"] == {
+        "panel_sha256": _sha256(PANEL_PATH),
+        "panel_byte_size": PANEL_PATH.stat().st_size,
+        "seed_banks_sha256": _sha256(SEED_BANKS_PATH),
+        "seed_banks_byte_size": SEED_BANKS_PATH.stat().st_size,
+    }
+    assert first.identity["repository"] == _repository_provider(ROOT)
+
+    first_manifest_bytes = (
+        output_root / "definition" / "manifest.json"
+    ).read_bytes()
+    second = runner.run_prepare(
+        output_root=output_root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    assert second.content_identity == first.content_identity
+    assert (
+        output_root / "definition" / "manifest.json"
+    ).read_bytes() == first_manifest_bytes
+    copied_panel.write_bytes(copied_panel.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="panel physical bytes changed"):
+        runner.run_prepare(
+            output_root=output_root,
+            panel_path=PANEL_PATH,
+            repository_root=ROOT,
+            repository_identity_provider=_repository_provider,
+        )
+    assert copied_panel.read_bytes().endswith(b"\n\n")
+    assert (
+        output_root / "definition" / "manifest.json"
+    ).read_bytes() == first_manifest_bytes
+
+
+def test_prepare_rechecks_repository_identity_immediately_before_publish(
+    tmp_path: Path,
+) -> None:
+    """A prepared definition cannot straddle a repository identity change."""
+
+    import run_annihilation_selective_dagger as runner
+
+    calls = 0
+
+    def drifting_provider(root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(root)
+        if calls == 2:
+            identity["commit"] = "e" * 40
+        return identity
+
+    output_root = tmp_path / "repository-drift"
+    with pytest.raises(ValueError, match="repository identity changed"):
+        runner.run_prepare(
+            output_root=output_root,
+            panel_path=PANEL_PATH,
+            repository_root=ROOT,
+            repository_identity_provider=drifting_provider,
+        )
+
+    assert calls == 2
+    assert not (output_root / "definition").exists()
+    assert (output_root / "definition.staging").is_dir()
+
+
+def test_prepare_allows_the_documented_ignored_output_tree_inside_repository(
+    tmp_path: Path,
+) -> None:
+    """Production artifacts may live in the documented python/runs location."""
+
+    import run_annihilation_selective_dagger as runner
+
+    repository_root = tmp_path / "repository"
+    panel_path = (
+        repository_root
+        / "python"
+        / "panels"
+        / "annihilation-selective-dagger-v1"
+        / "panel.json"
+    )
+    panel_path.parent.mkdir(parents=True)
+    panel_path.write_bytes(b'{"panel":1}\n')
+    (panel_path.parent / "seed-banks.json").write_bytes(b'{"seeds":1}\n')
+
+    def clean_repository(root: Path) -> dict[str, Any]:
+        return {
+            "root": str(root.resolve(strict=True)),
+            "commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "dirty": False,
+        }
+
+    output_root = repository_root / "python" / "runs" / "selective-dagger"
+    prepared = runner.run_prepare(
+        output_root=output_root,
+        panel_path=panel_path,
+        repository_root=repository_root,
+        repository_identity_provider=clean_repository,
+    )
+
+    assert prepared.root == (output_root / "definition").resolve(strict=True)
+    assert prepared.panel_path.read_bytes() == b'{"panel":1}\n'
+
+
+def test_validate_reopens_physical_inputs_without_games_and_reuses_only_exact_identity(
+    tmp_path: Path,
+) -> None:
+    """Validation authenticates learner/data/runtime inputs but launches no duel."""
+
+    import run_annihilation_selective_dagger as runner
+
+    output_root = tmp_path / "selective-dagger"
+    runner.run_prepare(
+        output_root=output_root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    counts: Counter[str] = Counter()
+    drift = {"dataset": False}
+
+    def physical_validator(
+        prepared: runner.PreparedStage,
+    ) -> dict[str, Any]:
+        counts["physical-reopen"] += 1
+        assert prepared.panel_path.read_bytes() == PANEL_PATH.read_bytes()
+        assert prepared.seed_banks_path.read_bytes() == SEED_BANKS_PATH.read_bytes()
+        return {
+            "starting_learner": {
+                "checkpoint_path": "C:/evidence/checkpoints/step_000038912.zip",
+                "checkpoint_sha256": "a" * 64,
+                "source_run": "C:/evidence/source-run",
+                "source_manifest_sha256": "b" * 64,
+            },
+            "base_dataset": {
+                "root": "C:/evidence/base-dataset",
+                "manifest_sha256": "c" * 64,
+                "content_sha256": ("d" if not drift["dataset"] else "e") * 64,
+                "file_count": 3966,
+                "byte_size": 17_852_257,
+                "contract_hash": "9" * 64,
+                "encoding_hash": "1" * 64,
+                "scenario_hash": "2" * 64,
+            },
+            "scenario": {
+                "source_sha256": "3" * 64,
+                "runtime_sha256": "4" * 64,
+            },
+            "contract": {
+                "version": "tactical-v2",
+                "contract_hash": "f" * 64,
+                "encoding_hash": "1" * 64,
+                "observation_size": 1292,
+                "action_size": 1288,
+                "action_regions": {
+                    "move": {"offset": 1, "count": 351},
+                    "attack": {"offset": 352, "count": 351},
+                    "deploy": {"offset": 703, "count": 585},
+                },
+            },
+            "seed_isolation": {
+                "definition_count": len(SEED_RANGES),
+                "overlap_count": 0,
+                "final_bank_touched": False,
+            },
+        }
+
+    def runtime_probe() -> dict[str, Any]:
+        counts["runtime-probe"] += 1
+        return {
+            "hardware": {
+                "training_device": "cuda:0",
+                "publication_device": "cpu",
+                "cuda_available": True,
+                "device_index": 0,
+                "device_name": "test-gpu",
+                "cuda_runtime": "12.8",
+            },
+            "software": {
+                "python": "3.11.test",
+                "implementation": "CPython",
+                "platform": "test-windows",
+                "executable": "C:/python/python.exe",
+                "numpy": "test",
+                "torch": "test",
+                "stable_baselines3": "test",
+                "sb3_contrib": "test",
+            },
+        }
+
+    first = runner.run_validate(
+        output_root=output_root,
+        physical_validator=physical_validator,
+        runtime_probe=runtime_probe,
+        repository_identity_provider=_repository_provider,
+    )
+    manifest_path = output_root / "validation" / "manifest.json"
+    first_bytes = manifest_path.read_bytes()
+    second = runner.run_validate(
+        output_root=output_root,
+        physical_validator=physical_validator,
+        runtime_probe=runtime_probe,
+        repository_identity_provider=_repository_provider,
+    )
+
+    assert second.content_identity == first.content_identity
+    assert (
+        first.physical["base_dataset"]["contract_hash"]
+        != first.physical["contract"]["contract_hash"]
+    )
+    assert manifest_path.read_bytes() == first_bytes
+    assert counts == {"physical-reopen": 2, "runtime-probe": 2}
+    assert not (output_root / "iterations").exists()
+
+    drift["dataset"] = True
+    with pytest.raises(ValueError, match="validation identity differs"):
+        runner.run_validate(
+            output_root=output_root,
+            physical_validator=physical_validator,
+            runtime_probe=runtime_probe,
+            repository_identity_provider=_repository_provider,
+        )
+    assert manifest_path.read_bytes() == first_bytes
+    assert counts == {"physical-reopen": 3, "runtime-probe": 3}
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_validate_rechecks_repository_identity_before_publish_or_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed: bool,
+) -> None:
+    """Validation cannot publish or reuse evidence across a repository change."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / ("completed" if completed else "fresh")
+    runner.run_prepare(
+        output_root=root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    monkeypatch.setattr(runner, "_validate_physical_identity", lambda value: value)
+    monkeypatch.setattr(runner, "_validate_runtime_identity", lambda value: value)
+    boundaries = {
+        "physical_validator": lambda _prepared: {"physical": "authenticated"},
+        "runtime_probe": lambda: {"runtime": "authenticated"},
+    }
+    if completed:
+        runner.run_validate(
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            **boundaries,
+        )
+        completed_bytes = (root / "validation" / "manifest.json").read_bytes()
+
+    calls = 0
+
+    def drifting_provider(repository_root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(repository_root)
+        if calls == 2:
+            identity["source_tree"] = "e" * 40
+        return identity
+
+    with pytest.raises(ValueError, match="repository identity changed"):
+        runner.run_validate(
+            output_root=root,
+            repository_identity_provider=drifting_provider,
+            **boundaries,
+        )
+
+    assert calls == 2
+    if completed:
+        assert (root / "validation" / "manifest.json").read_bytes() == completed_bytes
+        assert not (root / "validation.staging").exists()
+    else:
+        assert not (root / "validation").exists()
+        assert (root / "validation.staging").is_dir()
+
+
+def test_prepared_stage_rejects_rehashed_dirty_repository_before_validation(
+    tmp_path: Path,
+) -> None:
+    """A forged content hash cannot turn dirty prepared provenance into evidence."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "dirty-prepared"
+    runner.run_prepare(
+        output_root=root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    manifest_path = root / "definition" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["identity"]["repository"]["dirty"] = True
+    manifest["content_identity"] = _content_identity(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="clean repository"):
+        runner.run_validate(
+            output_root=root,
+            repository_identity_provider=lambda _root: (
+                (_ for _ in ()).throw(
+                    AssertionError("dirty prepared stage queried the repository")
+                )
+            ),
+            physical_validator=lambda _prepared: (
+                (_ for _ in ()).throw(
+                    AssertionError("dirty prepared stage opened physical inputs")
+                )
+            ),
+            runtime_probe=lambda: (
+                (_ for _ in ()).throw(
+                    AssertionError("dirty prepared stage probed runtime")
+                )
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("hardware", "training_device", "cpu"),
+        ("hardware", "publication_device", "cuda:0"),
+        ("hardware", "cuda_available", 1),
+        ("hardware", "device_index", True),
+        ("hardware", "device_name", ""),
+        ("hardware", "cuda_runtime", None),
+        ("software", "python", ""),
+        ("software", "unexpected", "extra"),
+    ],
+)
+def test_validation_runtime_identity_is_exact_cuda_to_cpu_provenance(
+    section: str,
+    field: str,
+    value: object,
+) -> None:
+    """Loose runtime dictionaries cannot satisfy a production validation stage."""
+
+    import run_annihilation_selective_dagger as runner
+
+    runtime = {
+        "hardware": {
+            "training_device": "cuda:0",
+            "publication_device": "cpu",
+            "cuda_available": True,
+            "device_index": 0,
+            "device_name": "test-gpu",
+            "cuda_runtime": "12.8",
+        },
+        "software": {
+            "python": "3.11.test",
+            "implementation": "CPython",
+            "platform": "test-windows",
+            "executable": "C:/python/python.exe",
+            "numpy": "test",
+            "torch": "test",
+            "stable_baselines3": "test",
+            "sb3_contrib": "test",
+        },
+    }
+    runtime[section][field] = value
+
+    with pytest.raises(ValueError, match="runtime identity"):
+        runner._validate_runtime_identity(runtime)
+
+
+def test_production_preflight_uses_only_the_public_sealed_engine_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 9 must never promote Task 8's private transcript seam."""
+
+    import run_annihilation_selective_dagger as runner
+
+    calls: list[tuple[object, Path, object]] = []
+    session = object()
+    definition = object()
+
+    def public_preflight(
+        supplied_definition: object,
+        *,
+        output_root: Path,
+        execution_session: object | None = None,
+    ) -> dict[str, Any]:
+        calls.append((supplied_definition, output_root, execution_session))
+        return {
+            "selected_oracle": "depth-4-budget-512",
+            "evidence_class": "sealed-engine",
+        }
+
+    def forbidden_private(*args: object, **kwargs: object) -> object:
+        raise AssertionError("private callback transcript boundary was invoked")
+
+    monkeypatch.setattr(
+        dagger_module, "run_oracle_preflight", public_preflight,
+    )
+    monkeypatch.setattr(
+        dagger_module, "_run_oracle_preflight_for_test", forbidden_private,
+    )
+
+    selected = runner.run_sealed_oracle_preflight(
+        definition=definition,
+        output_root=tmp_path / "preflight",
+        execution_session_factory=lambda **kwargs: session,
+        repository_root=ROOT,
+    )
+    assert selected["evidence_class"] == "sealed-engine"
+    assert calls == [(definition, tmp_path / "preflight", session)]
+
+    with pytest.raises(
+        RuntimeError, match="sealed engine execution-session factory",
+    ):
+        runner.run_sealed_oracle_preflight(
+            definition=definition,
+            output_root=tmp_path / "blocked",
+            execution_session_factory=None,
+            repository_root=ROOT,
+        )
+    assert len(calls) == 1
+
+    with pytest.raises(ValueError, match="outside the repository"):
+        runner.run_sealed_oracle_preflight(
+            definition=definition,
+            output_root=ROOT / "python" / "runs" / "in-repository-preflight",
+            execution_session_factory=lambda **kwargs: (
+                (_ for _ in ()).throw(
+                    AssertionError("in-repository preflight opened execution")
+                )
+            ),
+            repository_root=ROOT,
+        )
+    assert len(calls) == 1
+
+
+def test_production_validation_boundary_reopens_panel_and_full_base_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default physical validator delegates to accepted strict audits."""
+
+    import run_annihilation_selective_dagger as runner
+
+    output_root = tmp_path / "selective-dagger"
+    prepared = runner.run_prepare(
+        output_root=output_root,
+        panel_path=PANEL_PATH,
+        repository_root=ROOT,
+        repository_identity_provider=_repository_provider,
+    )
+    source = SimpleNamespace(
+        controller={
+            "path": "C:/evidence/checkpoints/step_000038912.zip",
+            "source_run": "C:/evidence/source-run",
+        },
+        checkpoint_sha256="a" * 64,
+    )
+    definition = SimpleNamespace(
+        repository_root=ROOT.resolve(),
+        starting_learner=source,
+        learner_source_manifest_sha256="b" * 64,
+        dataset_root=Path("C:/evidence/base-dataset"),
+        dataset_manifest_sha256="c" * 64,
+        dataset_content_sha256="d" * 64,
+        dataset_file_count=3966,
+        dataset_byte_size=17_852_257,
+        dataset_contract_hash="a" * 64,
+        dataset_encoding_hash="f" * 64,
+        dataset_scenario_hash="1" * 64,
+        scenario_sha256="2" * 64,
+        runtime_scenario_sha256="3" * 64,
+        contract_hash="e" * 64,
+        encoding_hash="f" * 64,
+        observation_size=1292,
+        action_size=1288,
+        action_regions={
+            "move": {"offset": 1, "count": 351},
+            "attack": {"offset": 352, "count": 351},
+            "deploy": {"offset": 703, "count": 585},
+        },
+        seed_banks=tuple(range(len(SEED_RANGES))),
+    )
+    calls: list[object] = []
+
+    def load(
+        path: Path, *, repository_root: Path,
+    ) -> object:
+        calls.append(("load", path, repository_root))
+        return definition
+
+    def validate(supplied: object) -> None:
+        calls.append(("validate", supplied))
+
+    def audit(supplied: object) -> dict[str, Any]:
+        calls.append(("audit", supplied))
+        return {
+            "content_sha256": definition.dataset_content_sha256,
+            "file_count": definition.dataset_file_count,
+            "byte_size": definition.dataset_byte_size,
+            "audit": {
+                "games": 1980,
+                "teacher_labels": 199_973,
+                "masked_labels": 0,
+                "round_trip_mismatches": 0,
+                "replay_mismatches": 0,
+            },
+        }
+
+    monkeypatch.setattr(dagger_module, "load_panel_definition", load)
+    monkeypatch.setattr(dagger_module, "validate_panel_definition", validate)
+    monkeypatch.setattr(dagger_module, "audit_base_dataset", audit)
+
+    identity = runner.production_physical_validator(prepared)
+
+    assert calls == [
+        ("load", prepared.panel_path, ROOT.resolve()),
+        ("validate", definition),
+        ("audit", definition),
+    ]
+    assert identity["starting_learner"]["checkpoint_sha256"] == "a" * 64
+    assert identity["base_dataset"]["content_sha256"] == "d" * 64
+    assert identity["base_dataset"]["contract_hash"] != identity["contract"]["contract_hash"]
+    assert identity["base_dataset"]["encoding_hash"] == identity["contract"]["encoding_hash"]
+    assert identity["seed_isolation"] == {
+        "definition_count": len(SEED_RANGES),
+        "overlap_count": 0,
+        "final_bank_touched": False,
+    }
+
+
+def test_training_pipeline_dispatches_physical_iterations_transactionally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production-shaped top level must route each k through run_iteration."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "selective-dagger"
+    events: list[str] = []
+
+    def prepare(*, output_root: Path) -> str:
+        assert output_root == root
+        events.append("prepare")
+        return "prepared"
+
+    def validate(*, output_root: Path, prepared: object) -> str:
+        assert output_root == root and prepared == "prepared"
+        events.append("validate")
+        return "validated"
+
+    def preflight(*, output_root: Path, validated: object) -> str:
+        assert output_root == root and validated == "validated"
+        events.append("preflight")
+        return "preflight"
+
+    def baseline(
+        *, output_root: Path, validated: object, preflight: object,
+    ) -> str:
+        assert validated == "validated" and preflight == "preflight"
+        events.append("baseline")
+        return "baseline"
+
+    def physical_iteration(
+        index: int,
+        *,
+        output_root: Path,
+        dependencies: runner.DaggerDependencies,
+    ) -> str:
+        assert output_root == root
+        events.append(f"iteration-{index}")
+        return f"manifest-{index}"
+
+    def unexpected(*args: object, **kwargs: object) -> object:
+        raise AssertionError("in-memory orchestration path was invoked")
+
+    monkeypatch.setattr(runner, "run_iteration", physical_iteration)
+    dependencies = runner.DaggerDependencies(
+        prepare=prepare,
+        validate=validate,
+        preflight=preflight,
+        baseline=baseline,
+        resolve_incoming=unexpected,
+        collect=unexpected,
+        build_corpus=unexpected,
+        train=unexpected,
+        reopen_actor=unexpected,
+        load_iteration_context=lambda **kwargs: {},
+        reopen_overlay=unexpected,
+        build_iteration_identity=unexpected,
+        build_iteration_manifest=unexpected,
+        repository_identity_provider=_repository_provider,
+    )
+
+    manifests = runner.run_training_pipeline(
+        output_root=root,
+        dependencies=dependencies,
+    )
+
+    assert manifests == ("manifest-1", "manifest-2", "manifest-3")
+    assert events == [
+        "prepare",
+        "validate",
+        "preflight",
+        "baseline",
+        "iteration-1",
+        "iteration-2",
+        "iteration-3",
+    ]

@@ -1899,6 +1899,14 @@ def _audit_base_dataset(definition: PanelDefinition) -> dict[str, Any]:
     return {**physical_after, "audit": dict(audit)}
 
 
+def audit_base_dataset(definition: PanelDefinition) -> dict[str, Any]:
+    """Run the accepted stable full physical and semantic base-corpus audit."""
+
+    if not isinstance(definition, PanelDefinition):
+        raise TypeError("definition must be a PanelDefinition")
+    return _audit_base_dataset(definition)
+
+
 def _git_object_id(value: Any, label: str) -> str:
     if (
         not isinstance(value, str)
@@ -3578,6 +3586,670 @@ def _freeze_contract_value(value: Any, label: str) -> Any:
     if value is None or type(value) in {bool, int, float, str}:
         return value
     raise ValueError(f"{label} contains an unsupported value")
+
+
+_ITERATION_MANIFEST_FIELDS = frozenset({
+    "schema_version", "status", "iteration", "identity", "artifacts",
+    "metrics", "timings", "content_identity",
+})
+_ITERATION_IDENTITY_FIELDS = frozenset({
+    "definition", "repository", "scenario", "contract", "base_dataset",
+    "selected_oracle", "incoming_learner", "cumulative_train_overlays",
+    "cumulative_validation_overlays", "schedules", "optimizer", "runtime",
+})
+_ITERATION_ARTIFACT_FIELDS = frozenset({
+    "train_overlay", "validation_overlay", "actor",
+})
+_ITERATION_OVERLAY_ARTIFACT_FIELDS = frozenset({
+    "path", "content_identity", "row_count",
+})
+_ITERATION_ACTOR_ARTIFACT_FIELDS = frozenset({
+    "path", "checkpoint_sha256", "actor_sha256",
+    "publication_metadata_sha256", "run_manifest_sha256",
+    "bc_manifest_sha256",
+})
+_ITERATION_METRIC_FIELDS = frozenset({
+    "train_collection", "validation_collection", "training",
+})
+_ITERATION_COLLECTION_METRIC_FIELDS = frozenset({
+    "games", "labels", "reason_counts", "disagreements",
+    "mean_expansions", "max_expansions",
+})
+_ITERATION_REASON_FIELDS = frozenset({
+    "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+})
+_ITERATION_TRAINING_METRIC_FIELDS = frozenset({
+    "training_rows", "validation_rows", "source_example_counts",
+    "best_epoch", "best_validation_nll", "epochs_trained",
+})
+_ITERATION_SOURCE_COUNT_FIELDS = frozenset({
+    "greedy_standard", "search_conversion", "dagger_targeted",
+})
+_ITERATION_TIMING_FIELDS = frozenset({
+    "elapsed_seconds", "validation_collection_seconds",
+    "train_collection_seconds", "corpus_seconds", "training_seconds",
+    "publication_seconds", "train_labels_per_second",
+    "validation_labels_per_second",
+})
+_ITERATION_OPTIMIZER = {
+    "source_mixture_basis_points": {
+        "greedy_standard": 4_900,
+        "search_conversion": 2_100,
+        "dagger_targeted": 3_000,
+    },
+    "batch_size": 256,
+    "learning_rate": 3e-4,
+    "max_epochs": 50,
+    "patience": 5,
+    "model_seed": 227,
+    "sampler_seed": 227,
+    "device": "cuda",
+    "publication_device": "cpu",
+    "objective": "actor_only_masked_cross_entropy",
+    "validation_metric": "targeted_negative_log_likelihood",
+}
+
+
+def _validate_iteration_overlay_identities(
+    value: Any, *, iteration: int, label: str,
+) -> None:
+    if type(value) is not list or len(value) != iteration:
+        raise ValueError(f"{label} must contain iterations 1 through {iteration}")
+    for expected_iteration, item in enumerate(value, start=1):
+        fields = _strict_fields(
+            item, frozenset({"iteration", "content_identity", "row_count"}), label,
+        )
+        if fields["iteration"] != expected_iteration:
+            raise ValueError(f"{label} iteration order is invalid")
+        _hash(fields["content_identity"], f"{label} content identity")
+        _strict_int(fields["row_count"], f"{label} row count", minimum=1)
+
+
+def _validate_iteration_identity(value: Any, *, iteration: int) -> Mapping[str, Any]:
+    identity = _strict_fields(
+        value, _ITERATION_IDENTITY_FIELDS, "iteration identity",
+    )
+    definition = _strict_fields(
+        identity["definition"],
+        frozenset({
+            "panel_sha256", "panel_byte_size", "seed_banks_sha256",
+            "seed_banks_byte_size",
+        }),
+        "iteration definition identity",
+    )
+    _hash(definition["panel_sha256"], "iteration panel sha256")
+    _strict_int(
+        definition["panel_byte_size"], "iteration panel byte size", minimum=1,
+    )
+    _hash(definition["seed_banks_sha256"], "iteration seed banks sha256")
+    _strict_int(
+        definition["seed_banks_byte_size"],
+        "iteration seed banks byte size",
+        minimum=1,
+    )
+
+    repository = _strict_fields(
+        identity["repository"],
+        frozenset({"root", "commit", "source_tree", "dirty"}),
+        "iteration repository identity",
+    )
+    _strict_string(repository["root"], "iteration repository root")
+    _git_object_id(repository["commit"], "iteration repository commit")
+    _git_object_id(repository["source_tree"], "iteration repository source tree")
+    if type(repository["dirty"]) is not bool or repository["dirty"]:
+        raise ValueError("iteration repository identity must be clean")
+
+    scenario = _strict_fields(
+        identity["scenario"],
+        frozenset({"source_sha256", "runtime_sha256"}),
+        "iteration scenario identity",
+    )
+    _hash(scenario["source_sha256"], "iteration scenario source sha256")
+    _hash(scenario["runtime_sha256"], "iteration scenario runtime sha256")
+
+    contract_fields = _strict_fields(
+        identity["contract"],
+        frozenset({
+            "version", "contract_hash", "encoding_hash", "observation_size",
+            "action_size", "action_regions",
+        }),
+        "iteration contract identity",
+    )
+    contract = EnvironmentContract(
+        version=_strict_string(
+            contract_fields["version"], "iteration contract version",
+        ),
+        contract_hash=_hash(
+            contract_fields["contract_hash"], "iteration contract hash",
+        ),
+        encoding_hash=_hash(
+            contract_fields["encoding_hash"], "iteration encoding hash",
+        ),
+        observation_size=_strict_int(
+            contract_fields["observation_size"],
+            "iteration observation size",
+            minimum=1,
+        ),
+        action_size=_strict_int(
+            contract_fields["action_size"], "iteration action size", minimum=1,
+        ),
+        board={},
+        roster=[],
+        reward={},
+        semantics={"action_regions": contract_fields["action_regions"]},
+    )
+    if contract.version != "tactical-v2":
+        raise ValueError("iteration contract must be tactical-v2")
+    _action_regions(contract)
+
+    dataset = _strict_fields(
+        identity["base_dataset"],
+        frozenset({
+            "root", "manifest_sha256", "content_sha256", "file_count",
+            "byte_size", "contract_hash", "encoding_hash", "scenario_hash",
+        }),
+        "iteration base dataset identity",
+    )
+    _strict_string(dataset["root"], "iteration base dataset root")
+    for name in (
+        "manifest_sha256", "content_sha256", "contract_hash", "encoding_hash",
+        "scenario_hash",
+    ):
+        _hash(dataset[name], f"iteration base dataset {name}")
+    _strict_int(dataset["file_count"], "iteration base dataset file count", minimum=1)
+    _strict_int(dataset["byte_size"], "iteration base dataset byte size", minimum=1)
+    if dataset["encoding_hash"] != contract.encoding_hash:
+        raise ValueError("iteration base dataset contract identity is inconsistent")
+
+    selected = _strict_fields(
+        identity["selected_oracle"],
+        frozenset({
+            "spec", "evidence_root", "evidence_content_identity", "evidence_class",
+        }),
+        "iteration selected oracle identity",
+    )
+    OracleSpec.from_dict(selected["spec"])
+    _strict_string(selected["evidence_root"], "iteration oracle evidence root")
+    _hash(
+        selected["evidence_content_identity"],
+        "iteration oracle evidence content identity",
+    )
+    if selected["evidence_class"] != "sealed-engine":
+        raise ValueError("iteration oracle evidence must be sealed-engine evidence")
+
+    incoming = _strict_fields(
+        identity["incoming_learner"],
+        frozenset({"source", "identity", "published_actor_sha256"}),
+        "iteration incoming learner identity",
+    )
+    raw_source = incoming["source"]
+    if not isinstance(raw_source, Mapping):
+        raise ValueError("iteration incoming actor source must be an object")
+    source = _strict_fields(
+        raw_source,
+        (
+            frozenset({
+                "schema_version", "source_kind", "controller",
+                "checkpoint_sha256", "published_actor_sha256",
+            })
+            if raw_source.get("source_kind") == "dagger_actor"
+            else frozenset({
+                "schema_version", "source_kind", "controller",
+                "checkpoint_sha256",
+            })
+        ),
+        "iteration incoming actor source",
+    )
+    if _strict_int(
+        source["schema_version"], "iteration incoming actor source schema",
+    ) != 1:
+        raise ValueError("iteration incoming actor source schema is invalid")
+    actor_source = ActorTransferSource(
+        source_kind=source["source_kind"],
+        controller=source["controller"],
+        checkpoint_sha256=source["checkpoint_sha256"],
+        published_actor_sha256=source.get("published_actor_sha256"),
+    )
+    source_run = Path(actor_source.controller["source_run"])
+    checkpoint = Path(actor_source.controller["path"])
+    expected_step = 38_912 if iteration == 1 else 0
+    expected_kind = "snapshot" if iteration == 1 else "dagger_actor"
+    if (
+        actor_source.source_kind != expected_kind
+        or actor_source.controller["step"] != expected_step
+        or checkpoint.parent != source_run / "checkpoints"
+        or checkpoint.name != f"step_{expected_step:09d}.zip"
+        or (
+            iteration > 1
+            and (
+                source_run.name != "actor"
+                or source_run.parent.name != f"iteration-{iteration - 1}"
+                or source_run.parent.parent.name != "iterations"
+            )
+        )
+    ):
+        raise ValueError("iteration incoming learner does not own the required source")
+    learner = LearnerIdentity.from_dict(incoming["identity"])
+    published_actor_sha256 = _hash(
+        incoming["published_actor_sha256"],
+        "iteration incoming published actor sha256",
+    )
+    if iteration == 1:
+        audited_source = ActorTransferSource(
+            source_kind="snapshot",
+            controller=_ITERATION_ONE_CONTROLLER,
+            checkpoint_sha256=_ITERATION_ONE_CHECKPOINT_SHA256,
+        )
+        if (
+            actor_source.to_dict() != audited_source.to_dict()
+            or learner.source_manifest_sha256
+            != _ITERATION_ONE_SOURCE_MANIFEST_SHA256
+            or published_actor_sha256 != _ITERATION_ONE_CHECKPOINT_SHA256
+        ):
+            raise ValueError(
+                "iteration manifest does not own the audited iteration-one learner"
+            )
+    if (
+        learner.checkpoint_path != actor_source.controller["path"]
+        or learner.checkpoint_sha256 != actor_source.checkpoint_sha256
+        or learner.source_run != actor_source.controller["source_run"]
+        or (
+            actor_source.published_actor_sha256 is not None
+            and published_actor_sha256 != actor_source.published_actor_sha256
+        )
+    ):
+        raise ValueError("iteration incoming learner identities are inconsistent")
+
+    _validate_iteration_overlay_identities(
+        identity["cumulative_train_overlays"],
+        iteration=iteration,
+        label="iteration cumulative train overlays",
+    )
+    _validate_iteration_overlay_identities(
+        identity["cumulative_validation_overlays"],
+        iteration=iteration,
+        label="iteration cumulative validation overlays",
+    )
+
+    schedules = _strict_fields(
+        identity["schedules"],
+        frozenset({"train", "validation"}),
+        "iteration schedules",
+    )
+    for partition, target, ceiling in (
+        ("train", 20_000, 2_000),
+        ("validation", 2_000, 200),
+    ):
+        schedule = _strict_fields(
+            schedules[partition],
+            frozenset({
+                "sha256", "seed_start", "seed_stop", "label_target",
+                "game_ceiling",
+            }),
+            f"iteration {partition} schedule",
+        )
+        _hash(schedule["sha256"], f"iteration {partition} schedule sha256")
+        expected_start, expected_stop = _seed_range(partition, iteration)
+        if (
+            schedule["seed_start"] != expected_start
+            or schedule["seed_stop"] != expected_stop
+            or schedule["label_target"] != target
+            or schedule["game_ceiling"] != ceiling
+        ):
+            raise ValueError(f"iteration {partition} schedule identity is invalid")
+
+    optimizer = _exact_json(
+        identity["optimizer"], _ITERATION_OPTIMIZER, "iteration optimizer identity",
+    )
+    runtime = _strict_fields(
+        identity["runtime"],
+        frozenset({"hardware", "software"}),
+        "iteration runtime identity",
+    )
+    hardware = runtime["hardware"]
+    software = runtime["software"]
+    if (
+        not isinstance(hardware, Mapping)
+        or not hardware
+        or not isinstance(software, Mapping)
+        or not software
+        or not isinstance(hardware.get("training_device"), str)
+        or not hardware["training_device"].startswith("cuda")
+        or hardware.get("publication_device") != "cpu"
+    ):
+        raise ValueError("iteration runtime identity is invalid")
+    _freeze_contract_value(runtime, "iteration runtime identity")
+    return identity
+
+
+def _validate_iteration_artifacts(
+    value: Any, identity: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    artifacts = _strict_fields(
+        value, _ITERATION_ARTIFACT_FIELDS, "iteration artifacts",
+    )
+    for key, path, identity_key in (
+        ("train_overlay", "train-overlay", "cumulative_train_overlays"),
+        (
+            "validation_overlay",
+            "validation-overlay",
+            "cumulative_validation_overlays",
+        ),
+    ):
+        descriptor = _strict_fields(
+            artifacts[key],
+            _ITERATION_OVERLAY_ARTIFACT_FIELDS,
+            f"iteration {key} artifact",
+        )
+        if descriptor["path"] != path:
+            raise ValueError(f"iteration {key} artifact path is invalid")
+        _hash(
+            descriptor["content_identity"],
+            f"iteration {key} artifact content identity",
+        )
+        _strict_int(
+            descriptor["row_count"],
+            f"iteration {key} artifact row count",
+            minimum=1,
+        )
+        expected = identity[identity_key][-1]
+        if (
+            descriptor["content_identity"] != expected["content_identity"]
+            or descriptor["row_count"] != expected["row_count"]
+        ):
+            raise ValueError(f"iteration {key} artifact identity is inconsistent")
+    actor = _strict_fields(
+        artifacts["actor"],
+        _ITERATION_ACTOR_ARTIFACT_FIELDS,
+        "iteration actor artifact",
+    )
+    if actor["path"] != "actor":
+        raise ValueError("iteration actor artifact path is invalid")
+    for name in (
+        "checkpoint_sha256", "actor_sha256", "publication_metadata_sha256",
+        "run_manifest_sha256", "bc_manifest_sha256",
+    ):
+        _hash(actor[name], f"iteration actor artifact {name}")
+    return artifacts
+
+
+def _nonnegative_number(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+    ):
+        raise ValueError(f"{label} must be finite and non-negative")
+    return float(value)
+
+
+def _validate_iteration_metrics(
+    value: Any,
+    *,
+    identity: Mapping[str, Any],
+    artifacts: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    metrics = _strict_fields(
+        value, _ITERATION_METRIC_FIELDS, "iteration metrics",
+    )
+    budget = identity["selected_oracle"]["spec"]["expansion_budget"]
+    for partition in ("train", "validation"):
+        collection = _strict_fields(
+            metrics[f"{partition}_collection"],
+            _ITERATION_COLLECTION_METRIC_FIELDS,
+            f"iteration {partition} collection metrics",
+        )
+        games = _strict_int(
+            collection["games"],
+            f"iteration {partition} collection games",
+            minimum=1,
+        )
+        labels = _strict_int(
+            collection["labels"],
+            f"iteration {partition} collection labels",
+            minimum=1,
+        )
+        descriptor = artifacts[f"{partition}_overlay"]
+        schedule = identity["schedules"][partition]
+        if (
+            labels != descriptor["row_count"]
+            or labels < schedule["label_target"]
+            or games % 2
+            or games > schedule["game_ceiling"]
+        ):
+            raise ValueError(
+                f"iteration {partition} collection target or ceiling is invalid"
+            )
+        reasons = _strict_fields(
+            collection["reason_counts"],
+            _ITERATION_REASON_FIELDS,
+            f"iteration {partition} collection reason metrics",
+        )
+        for name, count in reasons.items():
+            parsed = _strict_int(
+                count, f"iteration {partition} {name} count", minimum=0,
+            )
+            if parsed > labels:
+                raise ValueError(
+                    f"iteration {partition} reason count exceeds labels"
+                )
+        disagreements = _strict_int(
+            collection["disagreements"],
+            f"iteration {partition} disagreements",
+            minimum=0,
+        )
+        if disagreements > labels:
+            raise ValueError(
+                f"iteration {partition} disagreements exceed labels"
+            )
+        mean = _nonnegative_number(
+            collection["mean_expansions"],
+            f"iteration {partition} mean expansions",
+        )
+        maximum = _strict_int(
+            collection["max_expansions"],
+            f"iteration {partition} max expansions",
+            minimum=0,
+        )
+        if maximum > budget or mean > maximum:
+            raise ValueError(
+                f"iteration {partition} max expansions exceed oracle budget"
+            )
+
+    training = _strict_fields(
+        metrics["training"],
+        _ITERATION_TRAINING_METRIC_FIELDS,
+        "iteration training metrics",
+    )
+    training_rows = _strict_int(
+        training["training_rows"], "iteration training rows", minimum=1,
+    )
+    validation_rows = _strict_int(
+        training["validation_rows"], "iteration validation rows", minimum=1,
+    )
+    if (
+        training_rows
+        < sum(item["row_count"] for item in identity["cumulative_train_overlays"])
+        or validation_rows
+        != sum(
+            item["row_count"]
+            for item in identity["cumulative_validation_overlays"]
+        )
+    ):
+        raise ValueError("iteration training row metrics are inconsistent")
+    counts = _strict_fields(
+        training["source_example_counts"],
+        _ITERATION_SOURCE_COUNT_FIELDS,
+        "iteration source example counts",
+    )
+    for name, count in counts.items():
+        _strict_int(count, f"iteration {name} example count", minimum=1)
+    best_epoch = _strict_int(
+        training["best_epoch"], "iteration best epoch", minimum=1,
+    )
+    epochs = _strict_int(
+        training["epochs_trained"], "iteration epochs trained", minimum=1,
+    )
+    if best_epoch > epochs or epochs > _ITERATION_OPTIMIZER["max_epochs"]:
+        raise ValueError("iteration epoch metrics are inconsistent")
+    source_order = (
+        "greedy_standard", "search_conversion", "dagger_targeted",
+    )
+    batch_size = _ITERATION_OPTIMIZER["batch_size"]
+    fractions = {
+        source: (
+            _ITERATION_OPTIMIZER["source_mixture_basis_points"][source]
+            / 10_000.0
+        )
+        for source in source_order
+    }
+    carry = {source: 0.0 for source in source_order}
+    expected_counts = {source: 0 for source in source_order}
+    batches = math.ceil(training_rows / batch_size) * epochs
+    for _batch in range(batches):
+        targets = {
+            source: batch_size * fractions[source] + carry[source]
+            for source in source_order
+        }
+        allocated = {
+            source: max(0, int(math.floor(targets[source] + 1e-12)))
+            for source in source_order
+        }
+        while sum(allocated.values()) > batch_size:
+            loser = min(
+                (source for source in source_order if allocated[source] > 0),
+                key=lambda source: (
+                    targets[source] - allocated[source],
+                    source_order.index(source),
+                ),
+            )
+            allocated[loser] -= 1
+        while sum(allocated.values()) < batch_size:
+            winner = max(
+                source_order,
+                key=lambda source: (
+                    targets[source] - allocated[source],
+                    -source_order.index(source),
+                ),
+            )
+            allocated[winner] += 1
+        for source in source_order:
+            carry[source] = targets[source] - allocated[source]
+            expected_counts[source] += allocated[source]
+    if any(counts[source] != expected_counts[source] for source in source_order):
+        raise ValueError("iteration source example counts do not match locked mixture")
+    _nonnegative_number(
+        training["best_validation_nll"], "iteration best validation NLL",
+    )
+    return metrics
+
+
+def _validate_iteration_timings(
+    value: Any,
+    *,
+    artifacts: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    timings = _strict_fields(
+        value, _ITERATION_TIMING_FIELDS, "iteration timings",
+    )
+    numbers = {
+        name: _nonnegative_number(item, f"iteration timing {name}")
+        for name, item in timings.items()
+    }
+    phases = sum(numbers[name] for name in (
+        "validation_collection_seconds", "train_collection_seconds",
+        "corpus_seconds", "training_seconds", "publication_seconds",
+    ))
+    if phases > numbers["elapsed_seconds"] + 1e-6:
+        raise ValueError("iteration timing phases exceed elapsed time")
+    for partition in ("train", "validation"):
+        seconds = numbers[f"{partition}_collection_seconds"]
+        labels = artifacts[f"{partition}_overlay"]["row_count"]
+        expected = labels / seconds if seconds > 0 else 0.0
+        if not math.isclose(
+            numbers[f"{partition}_labels_per_second"],
+            expected,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                f"iteration {partition} label throughput is inconsistent"
+            )
+    return timings
+
+
+@dataclass(frozen=True)
+class IterationManifest:
+    """Strict, immutable completion contract for one selective-DAgger iteration."""
+
+    schema_version: int
+    status: str
+    iteration: int
+    identity: Mapping[str, Any]
+    artifacts: Mapping[str, Any]
+    metrics: Mapping[str, Any]
+    timings: Mapping[str, Any]
+    content_identity: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "IterationManifest":
+        fields = _strict_fields(
+            value, _ITERATION_MANIFEST_FIELDS, "iteration manifest",
+        )
+        if fields["schema_version"] != 1:
+            raise ValueError("iteration manifest schema_version must be integer 1")
+        if fields["status"] != "completed":
+            raise ValueError("iteration manifest status must be completed")
+        iteration = _strict_int(
+            fields["iteration"], "iteration manifest iteration", minimum=1,
+        )
+        if iteration not in {1, 2, 3}:
+            raise ValueError("iteration manifest iteration is invalid")
+        identity = _validate_iteration_identity(
+            fields["identity"], iteration=iteration,
+        )
+        artifacts = _validate_iteration_artifacts(fields["artifacts"], identity)
+        metrics = _validate_iteration_metrics(
+            fields["metrics"], identity=identity, artifacts=artifacts,
+        )
+        timings = _validate_iteration_timings(
+            fields["timings"], artifacts=artifacts,
+        )
+        content_identity = _hash(
+            fields["content_identity"], "iteration manifest content identity",
+        )
+        if _content_identity(fields) != content_identity:
+            raise ValueError("iteration manifest content identity does not match")
+        return cls(
+            schema_version=1,
+            status="completed",
+            iteration=iteration,
+            identity=_freeze_contract_value(identity, "iteration identity"),
+            artifacts=_freeze_contract_value(artifacts, "iteration artifacts"),
+            metrics=_freeze_contract_value(metrics, "iteration metrics"),
+            timings=_freeze_contract_value(timings, "iteration timings"),
+            content_identity=content_identity,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "iteration": self.iteration,
+            "identity": _mutable_json_value(self.identity),
+            "artifacts": _mutable_json_value(self.artifacts),
+            "metrics": _mutable_json_value(self.metrics),
+            "timings": _mutable_json_value(self.timings),
+            "content_identity": self.content_identity,
+        }
+
+    def require_identity(self, expected: Mapping[str, Any]) -> None:
+        if not isinstance(expected, Mapping) or not _same_exact_json(
+            _mutable_json_value(self.identity),
+            _mutable_json_value(expected),
+        ):
+            raise ValueError("iteration manifest identity does not match")
 
 
 def _frozen_collection_contract(contract: EnvironmentContract) -> EnvironmentContract:

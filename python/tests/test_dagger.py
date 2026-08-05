@@ -33,6 +33,7 @@ from ml_lab.dagger import (
     DaggerOverlayManifest,
     DaggerOverlayWriter,
     DaggerRow,
+    IterationManifest,
     LearnerIdentity,
     OriginalDatasetIdentity,
     OracleBenchmarkDecision,
@@ -940,6 +941,617 @@ def _identity(value: dict[str, Any]) -> str:
         canonical, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _expected_iteration_source_counts(
+    training_rows: int, epochs: int,
+) -> dict[str, int]:
+    source_order = (
+        "greedy_standard", "search_conversion", "dagger_targeted",
+    )
+    fractions = {
+        "greedy_standard": 0.49,
+        "search_conversion": 0.21,
+        "dagger_targeted": 0.30,
+    }
+    carry = {source: 0.0 for source in source_order}
+    totals = {source: 0 for source in source_order}
+    batches = ((training_rows + 255) // 256) * epochs
+    for _batch in range(batches):
+        targets = {
+            source: 256 * fractions[source] + carry[source]
+            for source in source_order
+        }
+        counts = {
+            source: max(0, int(np.floor(targets[source] + 1e-12)))
+            for source in source_order
+        }
+        while sum(counts.values()) > 256:
+            loser = min(
+                (source for source in source_order if counts[source] > 0),
+                key=lambda source: (
+                    targets[source] - counts[source],
+                    source_order.index(source),
+                ),
+            )
+            counts[loser] -= 1
+        while sum(counts.values()) < 256:
+            winner = max(
+                source_order,
+                key=lambda source: (
+                    targets[source] - counts[source],
+                    -source_order.index(source),
+                ),
+            )
+            counts[winner] += 1
+        for source in source_order:
+            carry[source] = targets[source] - counts[source]
+            totals[source] += counts[source]
+    return totals
+
+
+def _iteration_manifest_payload() -> dict[str, Any]:
+    source = {
+        "schema_version": 1,
+        "source_kind": "dagger_actor",
+        "controller": {
+            "kind": "snapshot",
+            "path": "C:/evidence/iterations/iteration-1/actor/checkpoints/step_000000000.zip",
+            "source_run": "C:/evidence/iterations/iteration-1/actor",
+            "algorithm": "maskable_ppo",
+            "step": 0,
+            "inference_mode": "deterministic",
+        },
+        "checkpoint_sha256": HASHES["a"],
+        "published_actor_sha256": HASHES["b"],
+    }
+    learner = {
+        "checkpoint_path": source["controller"]["path"],
+        "checkpoint_sha256": HASHES["a"],
+        "source_run": source["controller"]["source_run"],
+        "source_manifest_sha256": HASHES["c"],
+    }
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "completed",
+        "iteration": 2,
+        "identity": {
+            "definition": {
+                "panel_sha256": HASHES["1"],
+                "panel_byte_size": 101,
+                "seed_banks_sha256": HASHES["2"],
+                "seed_banks_byte_size": 202,
+            },
+            "repository": {
+                "root": "C:/repo",
+                "commit": "a" * 40,
+                "source_tree": "b" * 40,
+                "dirty": False,
+            },
+            "scenario": {
+                "source_sha256": HASHES["3"],
+                "runtime_sha256": HASHES["4"],
+            },
+            "contract": {
+                "version": "tactical-v2",
+                "contract_hash": HASHES["5"],
+                "encoding_hash": HASHES["6"],
+                "observation_size": 1292,
+                "action_size": 1288,
+                "action_regions": {
+                    "move": {"offset": 1, "count": 351},
+                    "attack": {"offset": 352, "count": 351},
+                    "deploy": {"offset": 703, "count": 585},
+                },
+            },
+            "base_dataset": {
+                "root": "C:/dataset",
+                "manifest_sha256": HASHES["7"],
+                "content_sha256": HASHES["8"],
+                "file_count": 3966,
+                "byte_size": 17_852_257,
+                "contract_hash": HASHES["5"],
+                "encoding_hash": HASHES["6"],
+                "scenario_hash": HASHES["0"],
+            },
+            "selected_oracle": {
+                "spec": _oracle_payload(),
+                "evidence_root": "C:/evidence/oracle-preflight",
+                "evidence_content_identity": HASHES["d"],
+                "evidence_class": "sealed-engine",
+            },
+            "incoming_learner": {
+                "source": source,
+                "identity": learner,
+                "published_actor_sha256": HASHES["b"],
+            },
+            "cumulative_train_overlays": [
+                {"iteration": 1, "content_identity": HASHES["e"], "row_count": 20_001},
+                {"iteration": 2, "content_identity": HASHES["f"], "row_count": 20_002},
+            ],
+            "cumulative_validation_overlays": [
+                {"iteration": 1, "content_identity": HASHES["1"], "row_count": 2_001},
+                {"iteration": 2, "content_identity": HASHES["2"], "row_count": 2_002},
+            ],
+            "schedules": {
+                "train": {
+                    "sha256": HASHES["3"],
+                    "seed_start": 18_100_000,
+                    "seed_stop": 18_199_999,
+                    "label_target": 20_000,
+                    "game_ceiling": 2_000,
+                },
+                "validation": {
+                    "sha256": HASHES["4"],
+                    "seed_start": 19_010_000,
+                    "seed_stop": 19_019_999,
+                    "label_target": 2_000,
+                    "game_ceiling": 200,
+                },
+            },
+            "optimizer": {
+                "source_mixture_basis_points": {
+                    "greedy_standard": 4_900,
+                    "search_conversion": 2_100,
+                    "dagger_targeted": 3_000,
+                },
+                "batch_size": 256,
+                "learning_rate": 3e-4,
+                "max_epochs": 50,
+                "patience": 5,
+                "model_seed": 227,
+                "sampler_seed": 227,
+                "device": "cuda",
+                "publication_device": "cpu",
+                "objective": "actor_only_masked_cross_entropy",
+                "validation_metric": "targeted_negative_log_likelihood",
+            },
+            "runtime": {
+                "hardware": {
+                    "training_device": "cuda:0",
+                    "publication_device": "cpu",
+                    "cuda_runtime": "12.8",
+                    "device_name": "test-gpu",
+                },
+                "software": {
+                    "python": "3.11.test",
+                    "numpy": "test",
+                    "torch": "test",
+                    "stable_baselines3": "test",
+                    "sb3_contrib": "test",
+                },
+            },
+        },
+        "artifacts": {
+            "train_overlay": {
+                "path": "train-overlay",
+                "content_identity": HASHES["f"],
+                "row_count": 20_002,
+            },
+            "validation_overlay": {
+                "path": "validation-overlay",
+                "content_identity": HASHES["2"],
+                "row_count": 2_002,
+            },
+            "actor": {
+                "path": "actor",
+                "checkpoint_sha256": HASHES["a"],
+                "actor_sha256": HASHES["b"],
+                "publication_metadata_sha256": HASHES["c"],
+                "run_manifest_sha256": HASHES["d"],
+                "bc_manifest_sha256": HASHES["e"],
+            },
+        },
+        "metrics": {
+            "train_collection": {
+                "games": 20,
+                "labels": 20_002,
+                "reason_counts": {
+                    "conversion": 10,
+                    "favorable": 20_002,
+                    "cycle_warning": 2,
+                    "wasted_end_turn": 3,
+                },
+                "disagreements": 4,
+                "mean_expansions": 100.0,
+                "max_expansions": 512,
+            },
+            "validation_collection": {
+                "games": 4,
+                "labels": 2_002,
+                "reason_counts": {
+                    "conversion": 2,
+                    "favorable": 2_002,
+                    "cycle_warning": 1,
+                    "wasted_end_turn": 0,
+                },
+                "disagreements": 1,
+                "mean_expansions": 90.0,
+                "max_expansions": 512,
+            },
+            "training": {
+                "training_rows": 240_004,
+                "validation_rows": 4_003,
+                "source_example_counts": {
+                    "greedy_standard": 1_411_953,
+                    "search_conversion": 605_122,
+                    "dagger_targeted": 864_461,
+                },
+                "best_epoch": 7,
+                "best_validation_nll": 0.25,
+                "epochs_trained": 12,
+            },
+        },
+        "timings": {
+            "elapsed_seconds": 20.0,
+            "validation_collection_seconds": 2.0,
+            "train_collection_seconds": 8.0,
+            "corpus_seconds": 1.0,
+            "training_seconds": 8.0,
+            "publication_seconds": 1.0,
+            "train_labels_per_second": 2_500.25,
+            "validation_labels_per_second": 1_001.0,
+        },
+    }
+    payload["content_identity"] = _identity(payload)
+    return payload
+
+
+def _set_iteration_incoming_source(
+    payload: dict[str, Any], iteration: int,
+) -> None:
+    if iteration == 1:
+        source_run = (
+            "C:/Users/cddal/HexWars/python/runs/"
+            "bc227-ppo-random-s227-20260802-v2"
+        )
+        step = 38_912
+        checkpoint_sha256 = (
+            "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+        )
+        source_manifest_sha256 = (
+            "7f02152c2ea39a08e5e203c0b0ba13928b2ad1847e276cc1b19f53331151ba46"
+        )
+        published_actor_sha256 = checkpoint_sha256
+        source: dict[str, Any] = {
+            "schema_version": 1,
+            "source_kind": "snapshot",
+            "controller": {
+                "kind": "snapshot",
+                "path": (
+                    f"{source_run}/checkpoints/step_{step:09d}.zip"
+                ),
+                "source_run": source_run,
+                "algorithm": "maskable_ppo",
+                "step": step,
+                "inference_mode": "deterministic",
+            },
+            "checkpoint_sha256": checkpoint_sha256,
+        }
+    else:
+        source_run = (
+            f"C:/evidence/iterations/iteration-{iteration - 1}/actor"
+        )
+        source = {
+            "schema_version": 1,
+            "source_kind": "dagger_actor",
+            "controller": {
+                "kind": "snapshot",
+                "path": f"{source_run}/checkpoints/step_000000000.zip",
+                "source_run": source_run,
+                "algorithm": "maskable_ppo",
+                "step": 0,
+                "inference_mode": "deterministic",
+            },
+            "checkpoint_sha256": HASHES["a"],
+            "published_actor_sha256": HASHES["b"],
+        }
+        checkpoint_sha256 = HASHES["a"]
+        source_manifest_sha256 = HASHES["c"]
+        published_actor_sha256 = HASHES["b"]
+    payload["identity"]["incoming_learner"] = {
+        "source": source,
+        "identity": {
+            "checkpoint_path": source["controller"]["path"],
+            "checkpoint_sha256": checkpoint_sha256,
+            "source_run": source["controller"]["source_run"],
+            "source_manifest_sha256": source_manifest_sha256,
+        },
+        "published_actor_sha256": published_actor_sha256,
+    }
+
+
+def _configure_iteration_payload(
+    payload: dict[str, Any], iteration: int,
+) -> None:
+    payload["iteration"] = iteration
+    train = [
+        {
+            "iteration": item,
+            "content_identity": f"{item:x}" * 64,
+            "row_count": 20_000 + item,
+        }
+        for item in range(1, iteration + 1)
+    ]
+    validation = [
+        {
+            "iteration": item,
+            "content_identity": f"{item + 8:x}" * 64,
+            "row_count": 2_000 + item,
+        }
+        for item in range(1, iteration + 1)
+    ]
+    payload["identity"]["cumulative_train_overlays"] = train
+    payload["identity"]["cumulative_validation_overlays"] = validation
+    train_start = 18_000_000 + (iteration - 1) * 100_000
+    validation_start = 19_000_000 + (iteration - 1) * 10_000
+    payload["identity"]["schedules"]["train"].update({
+        "seed_start": train_start,
+        "seed_stop": train_start + 99_999,
+    })
+    payload["identity"]["schedules"]["validation"].update({
+        "seed_start": validation_start,
+        "seed_stop": validation_start + 9_999,
+    })
+    payload["artifacts"]["train_overlay"].update({
+        "content_identity": train[-1]["content_identity"],
+        "row_count": train[-1]["row_count"],
+    })
+    payload["artifacts"]["validation_overlay"].update({
+        "content_identity": validation[-1]["content_identity"],
+        "row_count": validation[-1]["row_count"],
+    })
+    payload["metrics"]["train_collection"]["labels"] = train[-1]["row_count"]
+    payload["metrics"]["train_collection"]["reason_counts"]["favorable"] = (
+        train[-1]["row_count"]
+    )
+    payload["metrics"]["validation_collection"]["labels"] = (
+        validation[-1]["row_count"]
+    )
+    payload["metrics"]["validation_collection"]["reason_counts"]["favorable"] = (
+        validation[-1]["row_count"]
+    )
+    training_rows = 200_000 + sum(item["row_count"] for item in train)
+    payload["metrics"]["training"]["training_rows"] = training_rows
+    payload["metrics"]["training"]["validation_rows"] = sum(
+        item["row_count"] for item in validation
+    )
+    payload["metrics"]["training"]["source_example_counts"] = (
+        _expected_iteration_source_counts(
+            training_rows,
+            payload["metrics"]["training"]["epochs_trained"],
+        )
+    )
+    payload["timings"]["train_labels_per_second"] = (
+        train[-1]["row_count"]
+        / payload["timings"]["train_collection_seconds"]
+    )
+    payload["timings"]["validation_labels_per_second"] = (
+        validation[-1]["row_count"]
+        / payload["timings"]["validation_collection_seconds"]
+    )
+    _set_iteration_incoming_source(payload, iteration)
+    payload["content_identity"] = _identity(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "definition",
+        "repository",
+        "scenario",
+        "contract",
+        "base_dataset",
+        "selected_oracle",
+        "incoming_learner",
+        "cumulative_train_overlays",
+        "cumulative_validation_overlays",
+        "schedules",
+        "optimizer",
+        "runtime",
+    ],
+)
+def test_iteration_stage_identity_rejects_every_causal_input_mismatch(
+    field: str,
+) -> None:
+    """A self-consistent rehash must not make a changed stage reusable."""
+
+    expected = IterationManifest.from_dict(_iteration_manifest_payload())
+    changed = _iteration_manifest_payload()
+    value = changed["identity"][field]
+    if isinstance(value, list):
+        value[-1]["content_identity"] = HASHES["0"]
+    elif field == "repository":
+        value["commit"] = "c" * 40
+    elif field == "definition":
+        value["panel_byte_size"] += 1
+    elif field == "scenario":
+        value["runtime_sha256"] = HASHES["0"]
+    elif field == "contract":
+        value["contract_hash"] = HASHES["0"]
+    elif field == "base_dataset":
+        value["content_sha256"] = HASHES["0"]
+    elif field == "selected_oracle":
+        value["evidence_content_identity"] = HASHES["0"]
+    elif field == "incoming_learner":
+        value["published_actor_sha256"] = HASHES["0"]
+    elif field == "schedules":
+        value["train"]["sha256"] = HASHES["0"]
+    elif field == "runtime":
+        value["hardware"]["device_name"] = "different-gpu"
+    else:
+        value["max_epochs"] = 49
+    changed["content_identity"] = _identity(changed)
+
+    with pytest.raises(ValueError, match="identity|invalid|inconsistent"):
+        reopened = IterationManifest.from_dict(changed)
+        reopened.require_identity(expected.identity)
+
+
+@pytest.mark.parametrize("section", ["artifacts", "metrics", "timings"])
+def test_iteration_manifest_rejects_incomplete_physical_summary(
+    section: str,
+) -> None:
+    """A completion marker needs reconstructable child, training, and timing facts."""
+
+    payload = _iteration_manifest_payload()
+    if section == "artifacts":
+        payload["artifacts"]["actor"].pop("actor_sha256")
+    elif section == "metrics":
+        payload["metrics"]["train_collection"].pop("reason_counts")
+    else:
+        payload["timings"].pop("train_labels_per_second")
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match=section[:-1] if section.endswith("s") else section):
+        IterationManifest.from_dict(payload)
+
+
+def test_iteration_manifest_preserves_distinct_compatible_dataset_contract() -> None:
+    """Base demonstrations retain their own contract identity when encoding matches."""
+
+    payload = _iteration_manifest_payload()
+    payload["identity"]["base_dataset"]["contract_hash"] = HASHES["9"]
+    payload["content_identity"] = _identity(payload)
+
+    manifest = IterationManifest.from_dict(payload)
+
+    assert (
+        manifest.identity["base_dataset"]["contract_hash"]
+        != manifest.identity["contract"]["contract_hash"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "train_under_target",
+        "validation_under_target",
+        "train_over_ceiling",
+        "validation_over_ceiling",
+        "wrong_source_mixture",
+    ],
+)
+def test_iteration_manifest_rejects_incomplete_collection_or_mixture(
+    mutation: str,
+) -> None:
+    """Self-consistent hashes cannot certify incomplete collection or fake exposure."""
+
+    payload = _iteration_manifest_payload()
+    if mutation.endswith("under_target"):
+        partition = mutation.removesuffix("_under_target")
+        labels = 19_999 if partition == "train" else 1_999
+        payload["identity"][f"cumulative_{partition}_overlays"][-1][
+            "row_count"
+        ] = labels
+        payload["artifacts"][f"{partition}_overlay"]["row_count"] = labels
+        payload["metrics"][f"{partition}_collection"]["labels"] = labels
+        payload["metrics"][f"{partition}_collection"]["reason_counts"][
+            "favorable"
+        ] = labels
+        if partition == "validation":
+            payload["metrics"]["training"]["validation_rows"] = 2_001 + labels
+        payload["timings"][f"{partition}_labels_per_second"] = (
+            labels
+            / payload["timings"][f"{partition}_collection_seconds"]
+        )
+    elif mutation.endswith("over_ceiling"):
+        partition = mutation.removesuffix("_over_ceiling")
+        payload["metrics"][f"{partition}_collection"]["games"] = (
+            2_002 if partition == "train" else 202
+        )
+    else:
+        payload["metrics"]["training"]["source_example_counts"] = {
+            "greedy_standard": 1,
+            "search_conversion": 1,
+            "dagger_targeted": 1,
+        }
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="target|ceiling|source example"):
+        IterationManifest.from_dict(payload)
+
+
+@pytest.mark.parametrize("mutation", ["iteration_one_dagger", "wrong_prior_actor"])
+def test_iteration_manifest_rejects_wrong_incoming_actor_ownership(
+    mutation: str,
+) -> None:
+    """Persisted provenance enforces snapshot -> actor 1 -> actor 2 ownership."""
+
+    payload = _iteration_manifest_payload()
+    if mutation == "iteration_one_dagger":
+        _configure_iteration_payload(payload, 1)
+        source_run = "C:/evidence/iterations/iteration-0/actor"
+        source = payload["identity"]["incoming_learner"]["source"]
+        source.update({
+            "source_kind": "dagger_actor",
+            "published_actor_sha256": HASHES["b"],
+        })
+        source["controller"].update({
+            "path": f"{source_run}/checkpoints/step_000000000.zip",
+            "source_run": source_run,
+            "step": 0,
+        })
+    else:
+        source_run = "C:/evidence/iterations/iteration-2/actor"
+        source = payload["identity"]["incoming_learner"]["source"]
+        source["controller"].update({
+            "path": f"{source_run}/checkpoints/step_000000000.zip",
+            "source_run": source_run,
+        })
+    learner = payload["identity"]["incoming_learner"]["identity"]
+    learner["checkpoint_path"] = source["controller"]["path"]
+    learner["source_run"] = source["controller"]["source_run"]
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="incoming learner"):
+        IterationManifest.from_dict(payload)
+
+
+def test_iteration_one_rejects_self_consistent_alternate_snapshot() -> None:
+    """An exact-looking step number cannot replace the audited seed-227 bytes."""
+
+    payload = _iteration_manifest_payload()
+    _configure_iteration_payload(payload, 1)
+    source_run = "C:/forged/starting-run"
+    checkpoint = f"{source_run}/checkpoints/step_000038912.zip"
+    source = payload["identity"]["incoming_learner"]["source"]
+    source["controller"]["source_run"] = source_run
+    source["controller"]["path"] = checkpoint
+    source["checkpoint_sha256"] = HASHES["e"]
+    incoming = payload["identity"]["incoming_learner"]
+    incoming["identity"] = {
+        "checkpoint_path": checkpoint,
+        "checkpoint_sha256": HASHES["e"],
+        "source_run": source_run,
+        "source_manifest_sha256": HASHES["f"],
+    }
+    incoming["published_actor_sha256"] = HASHES["d"]
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="audited iteration-one learner"):
+        IterationManifest.from_dict(payload)
+
+
+@pytest.mark.parametrize("iteration", [1, 2, 3])
+def test_iteration_manifest_records_exact_cumulative_overlay_prefix(
+    iteration: int,
+) -> None:
+    """Iteration k owns the canonical train and held-out prefixes 1 through k."""
+
+    payload = _iteration_manifest_payload()
+    _configure_iteration_payload(payload, iteration)
+
+    manifest = IterationManifest.from_dict(payload)
+
+    assert [
+        item["iteration"]
+        for item in manifest.identity["cumulative_train_overlays"]
+    ] == list(range(1, iteration + 1))
+    assert [
+        item["iteration"]
+        for item in manifest.identity["cumulative_validation_overlays"]
+    ] == list(range(1, iteration + 1))
 
 
 def _rewrite_json(path: Path, value: dict[str, Any]) -> None:
