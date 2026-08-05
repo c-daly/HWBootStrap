@@ -2994,6 +2994,7 @@ class _PhysicalIterationHarness:
             != actor["publication_metadata_sha256"]
         ):
             raise ValueError("actor publication verification changed")
+        self._drift_repository("authentication")
         return verification
 
     def build_iteration_identity(
@@ -3324,6 +3325,94 @@ def test_run_iteration_repository_drift_fails_before_publication(
         assert harness.counts["collect-train"] == 0
         assert harness.counts["corpus"] == 0
         assert harness.counts["train"] == 0
+
+
+def test_run_iteration_repository_drift_during_authentication_stops_before_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long physical actor audit cannot hide repository drift before games."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "repository-drift-authentication"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    dependencies = harness.dependencies()
+    prepared = harness.prepare(output_root=root)
+    validated = harness.validate(output_root=root, prepared=prepared)
+    preflight = harness.preflight(output_root=root, validated=validated)
+    harness.baseline(
+        output_root=root,
+        validated=validated,
+        preflight=preflight,
+    )
+    runner.run_iteration(1, output_root=root, dependencies=dependencies)
+
+    compute_keys = (
+        "collect-validation", "collect-train", "corpus", "train",
+    )
+    before = {key: harness.counts[key] for key in compute_keys}
+    harness.drift_phase = "authentication"
+
+    with pytest.raises(ValueError, match="repository identity changed"):
+        runner.run_iteration(2, output_root=root, dependencies=dependencies)
+
+    assert {key: harness.counts[key] for key in compute_keys} == before
+    assert not (root / "iterations" / "iteration-2").exists()
+    assert not (root / "iterations" / "iteration-2.staging").exists()
+
+
+def test_run_iteration_rejects_self_consistent_wrong_predecessor_iteration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid iteration manifest cannot be rebound to another predecessor."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "wrong-predecessor-iteration"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    dependencies = harness.dependencies()
+    prepared = harness.prepare(output_root=root)
+    validated = harness.validate(output_root=root, prepared=prepared)
+    preflight = harness.preflight(output_root=root, validated=validated)
+    harness.baseline(
+        output_root=root,
+        validated=validated,
+        preflight=preflight,
+    )
+    runner.run_iteration(1, output_root=root, dependencies=dependencies)
+    runner.run_iteration(2, output_root=root, dependencies=dependencies)
+
+    iteration_one_manifest = (
+        root / "iterations" / "iteration-1" / "manifest.json"
+    ).read_bytes()
+    (root / "iterations" / "iteration-2" / "manifest.json").write_bytes(
+        iteration_one_manifest
+    )
+    compute_keys = (
+        "collect-validation", "collect-train", "corpus", "train",
+    )
+    before = {key: harness.counts[key] for key in compute_keys}
+
+    with pytest.raises(
+        ValueError, match="canonical predecessor iteration does not match",
+    ):
+        runner.run_iteration(3, output_root=root, dependencies=dependencies)
+
+    assert {key: harness.counts[key] for key in compute_keys} == before
+    assert not (root / "iterations" / "iteration-3").exists()
+    assert not (root / "iterations" / "iteration-3.staging").exists()
 
 
 def test_run_iteration_rejects_forged_external_prior_actor_before_compute(

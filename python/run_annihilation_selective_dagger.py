@@ -1053,6 +1053,10 @@ def _authenticate_iteration_incoming(
         raise ValueError("selective-DAgger canonical preceding actor is required")
 
     prior_manifest = _read_iteration_manifest(canonical_actor.parent / "manifest.json")
+    if prior_manifest.iteration != index - 1:
+        raise ValueError(
+            "selective-DAgger canonical predecessor iteration does not match"
+        )
     if not _same_json(prior_manifest.identity["repository"], context["repository"]):
         raise ValueError("selective-DAgger preceding actor repository identity changed")
     if not _same_json(prior_manifest.identity["contract"], contract_identity):
@@ -1178,6 +1182,7 @@ def run_iteration(
         context=context,
         dependencies=dependencies,
     )
+    _require_iteration_repository(expected_repository, dependencies)
     prior_train = tuple(context["train_overlays"])
     prior_validation = tuple(context["validation_overlays"])
 
