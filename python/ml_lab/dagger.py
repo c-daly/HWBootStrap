@@ -4599,6 +4599,7 @@ class DaggerOverlay:
     root: Path
     manifest: DaggerOverlayManifest
     games: tuple[DaggerGame, ...]
+    rows: tuple[tuple[DaggerRow, ...], ...]
 
     def __new__(cls) -> "DaggerOverlay":
         raise TypeError("DaggerOverlay instances require physical reopen validation")
@@ -4610,21 +4611,31 @@ class DaggerOverlay:
         root: Path,
         manifest: DaggerOverlayManifest,
         games: Sequence[DaggerGame],
+        rows: Sequence[Sequence[DaggerRow]],
     ) -> "DaggerOverlay":
         canonical_games = tuple(games)
-        if len(canonical_games) != len(manifest.games):
+        canonical_rows = tuple(tuple(game_rows) for game_rows in rows)
+        if (
+            len(canonical_games) != len(manifest.games)
+            or len(canonical_rows) != len(canonical_games)
+        ):
             raise ValueError("physical overlay game count is inconsistent")
-        for descriptor, game in zip(manifest.games, canonical_games, strict=True):
+        for descriptor, game, game_rows in zip(
+            manifest.games, canonical_games, canonical_rows, strict=True,
+        ):
             if (
                 descriptor.game_id != game.game_id
                 or game.partition != manifest.definition.partition
                 or game.iteration != manifest.definition.iteration
+                or descriptor.row_count != len(game_rows)
+                or any(row.seat != game.learner_seat for row in game_rows)
             ):
                 raise ValueError("physical overlay game metadata is inconsistent")
         instance = object.__new__(cls)
         object.__setattr__(instance, "root", Path(root))
         object.__setattr__(instance, "manifest", manifest)
         object.__setattr__(instance, "games", canonical_games)
+        object.__setattr__(instance, "rows", canonical_rows)
         return instance
 
     @property
@@ -4938,6 +4949,7 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
         raise ValueError("overlay games must be a list")
 
     games: list[DaggerGame] = []
+    rows: list[tuple[DaggerRow, ...]] = []
     row_keys: set[tuple[int, int]] = set()
     episode_hashes: dict[int, set[str]] = {}
     seen_game_paths: set[str] = set()
@@ -5007,7 +5019,7 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
         if _content_identity(shard_raw) != shard_raw["content_identity"]:
             raise ValueError("shard descriptor content identity is invalid")
         shard_path = _verified_artifact(root, shard_raw, seen_shards)
-        arrays = _read_and_validate_shard(
+        arrays, physical_rows = _read_and_validate_shard(
             shard_path, row_count=row_count, contract=contract, game=game,
             oracle=oracle, row_metadata=game_manifest["row_metadata"],
         )
@@ -5024,6 +5036,7 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
             row_keys.add(key)
             hashes.add(decoded)
         games.append(game)
+        rows.append(physical_rows)
         total_rows += row_count
 
     if len(games) != manifest["game_count"] or total_rows != manifest["row_count"]:
@@ -5039,7 +5052,9 @@ def open_dagger_overlay(root: Path) -> DaggerOverlay:
     }
     if actual_files != expected_files:
         raise ValueError("overlay contains missing or unowned physical files")
-    return DaggerOverlay._create(root=root, manifest=logical, games=games)
+    return DaggerOverlay._create(
+        root=root, manifest=logical, games=games, rows=rows,
+    )
 
 
 def _loaded_base_dataset_identity(base: ImitationDataset) -> OriginalDatasetIdentity:
@@ -5811,7 +5826,7 @@ def _read_and_validate_shard(
     game: DaggerGame,
     oracle: OracleSpec,
     row_metadata: Any,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], tuple[DaggerRow, ...]]:
     required = {
         "observations", "packed_masks", "actions", "learner_actions", "seats",
         "rounds", "decision_indices", "reason_bits", "state_hashes",
@@ -5858,6 +5873,7 @@ def _read_and_validate_shard(
     ).astype(bool)
     if not isinstance(row_metadata, list) or len(row_metadata) != row_count:
         raise ValueError("game row metadata count is invalid")
+    rows: list[DaggerRow] = []
     for index in range(row_count):
         metadata = _strict_fields(
             row_metadata[index], _ROW_METADATA_FIELDS, "row metadata"
@@ -5887,7 +5903,47 @@ def _read_and_validate_shard(
         row = DaggerRow.from_dict(payload, contract=contract, oracle=oracle)
         if row.seat != game.learner_seat:
             raise ValueError("physical row seat does not match game")
-    return arrays
+        rows.append(row)
+    return arrays, tuple(rows)
+
+
+def dagger_overlay_supervised_examples(
+    overlay: DaggerOverlay,
+) -> tuple[Mapping[str, Any], ...]:
+    """Project immutable Task 10 labels from one authenticated physical overlay."""
+
+    if not isinstance(overlay, DaggerOverlay):
+        raise ValueError("supervised overlay requires a physical DAgger reopen")
+    reason_names = (
+        (1, "conversion"),
+        (2, "favorable"),
+        (4, "cycle_warning"),
+        (8, "wasted_end_turn"),
+    )
+    examples: list[Mapping[str, Any]] = []
+    sample_ids: set[str] = set()
+    for game, game_rows in zip(overlay.games, overlay.rows, strict=True):
+        for row in game_rows:
+            reasons = tuple(
+                name for bit, name in reason_names if row.reason_bits & bit
+            )
+            if not reasons:
+                raise ValueError("authenticated supervised row has no reason flags")
+            sample_id = (
+                f"{overlay.content_identity}:{game.game_id}:"
+                f"{row.decision_index}:{row.state_hash}"
+            )
+            if sample_id in sample_ids:
+                raise ValueError("authenticated supervised sample identity is duplicated")
+            sample_ids.add(sample_id)
+            examples.append(MappingProxyType({
+                "sample_id": sample_id,
+                "oracle_action": row.teacher_action,
+                "reasons": reasons,
+            }))
+    if not examples:
+        raise ValueError("authenticated supervised overlay has no rows")
+    return tuple(examples)
 
 
 _REASON_NAMES: tuple[tuple[int, str], ...] = (

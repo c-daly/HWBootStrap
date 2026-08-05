@@ -641,16 +641,29 @@ def _new_writer(
     original_dataset: OriginalDatasetIdentity | None = None,
     iteration: int = 1,
     scenario_hash: str = HASHES["1"],
+    learner_checkpoint: Path | None = None,
+    learner_source_run: str = "seed-227-step-38912",
+    learner_source_manifest_sha256: str = HASHES["d"],
 ) -> tuple[DaggerOverlayWriter, Path]:
-    checkpoint = root.parent / "actor.zip"
-    checkpoint.write_bytes(b"actor")
+    checkpoint = (
+        root.parent / "actor.zip"
+        if learner_checkpoint is None
+        else Path(learner_checkpoint)
+    )
+    if learner_checkpoint is None:
+        checkpoint.write_bytes(b"actor")
+    learner_payload = _learner_payload(checkpoint)
+    learner_payload["source_run"] = learner_source_run
+    learner_payload["source_manifest_sha256"] = (
+        learner_source_manifest_sha256
+    )
     writer = DaggerOverlayWriter.create(
         root,
         contract=contract,
         partition=partition,
         iteration=iteration,
         oracle=OracleSpec.from_dict(_oracle_payload()),
-        learner=LearnerIdentity.from_dict(_learner_payload(checkpoint)),
+        learner=LearnerIdentity.from_dict(learner_payload),
         original_dataset=(
             original_dataset
             if original_dataset is not None
@@ -672,14 +685,44 @@ def _seal_pair(
     *,
     partition: str = "train",
     repository_hash: str = HASHES["2"],
+    iteration: int = 1,
+    row_count: int = 2,
+    learner_checkpoint: Path | None = None,
+    learner_source_run: str = "seed-227-step-38912",
+    learner_source_manifest_sha256: str = HASHES["d"],
 ) -> tuple[DaggerOverlay, Path]:
     writer, checkpoint = _new_writer(
         root, contract, partition=partition, repository_hash=repository_hash,
+        iteration=iteration,
+        learner_checkpoint=learner_checkpoint,
+        learner_source_run=learner_source_run,
+        learner_source_manifest_sha256=learner_source_manifest_sha256,
     )
     for game_id, seat in enumerate((0, 1)):
-        game = _game(game_id=game_id, partition=partition, seat=seat)
+        game = _game(
+            game_id=game_id, partition=partition, seat=seat,
+            iteration=iteration,
+        )
         _write_evidence(root, game)
-        writer.append_game(game, [_row(contract, seat=seat)])
+        game_row_count = row_count // 2 + (
+            1 if game_id == 0 and row_count % 2 else 0
+        )
+        rows = (
+            [_row(contract, seat=seat)]
+            if row_count == 2
+            else [
+                _row(
+                    contract,
+                    seat=seat,
+                    decision_index=index,
+                    state_hash=hashlib.sha256(
+                        f"{iteration}:{game_id}:{index}".encode("ascii")
+                    ).hexdigest(),
+                )
+                for index in range(game_row_count)
+            ]
+        )
+        writer.append_game(game, rows)
     return writer.seal(), checkpoint
 
 
@@ -1918,6 +1961,29 @@ def test_overlay_storage_writes_exact_compact_shards_and_strict_manifests(
     reopened = open_dagger_overlay(root)
     assert reopened.content_identity == overlay.content_identity
     assert reopened.games == overlay.games
+
+
+def test_supervised_examples_are_projected_from_authenticated_overlay_rows(
+    tmp_path: Path, contract: EnvironmentContract,
+) -> None:
+    """Task 10 labels and reason flags must originate in physically reopened shards."""
+
+    overlay, _ = _seal_pair(
+        tmp_path / "validation", contract, partition="validation",
+    )
+    examples = dagger_module.dagger_overlay_supervised_examples(
+        open_dagger_overlay(overlay.root)
+    )
+
+    assert len(examples) == 2
+    assert [item["oracle_action"] for item in examples] == [3, 3]
+    assert [item["reasons"] for item in examples] == [
+        ("conversion", "favorable", "cycle_warning", "wasted_end_turn"),
+        ("conversion", "favorable", "cycle_warning", "wasted_end_turn"),
+    ]
+    assert examples[0]["sample_id"] == (
+        f"{overlay.content_identity}:0:3:{HASHES['e']}"
+    )
 
 
 def test_normal_json_float_narrows_to_float32_bits_and_physically_reopens(
