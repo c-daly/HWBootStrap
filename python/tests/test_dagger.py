@@ -4044,3 +4044,540 @@ def test_production_dagger_distillation_configuration_is_locked() -> None:
         "patience": 5,
         "device": "cuda",
     }
+
+
+def _development_candidate_payload(
+    checkpoint: Path,
+    *,
+    iteration: int,
+) -> dict[str, Any]:
+    candidate_id = "baseline" if iteration == 0 else f"iteration-{iteration}"
+    controller = {
+        "kind": "snapshot",
+        "path": str(checkpoint.resolve()),
+        "source_run": str(checkpoint.parent.parent.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": 38_912 if iteration == 0 else 0,
+        "inference_mode": "deterministic",
+    }
+    return {
+        "candidate_id": candidate_id,
+        "iteration": iteration,
+        "controller": json.dumps(controller, sort_keys=True),
+        "checkpoint_path": str(checkpoint.resolve()),
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "controller_identity": {
+            "kind": "snapshot",
+            "inference_mode": "deterministic",
+            "path": str(checkpoint.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": controller["step"],
+            "contract_hash": HASHES["a"],
+            "contract_version": "tactical-v2",
+            "environment": "tactical-v2",
+            "encoding_hash": HASHES["b"],
+            "contract": {"version": "tactical-v2"},
+            "observation_size": 2,
+            "action_size": 7,
+            "legacy": False,
+            "promotable": True,
+        },
+    }
+
+
+def _development_definition(tmp_path: Path) -> Any:
+    candidates = []
+    for iteration in range(4):
+        run = tmp_path / f"actor-{iteration}"
+        checkpoint_dir = run / "checkpoints"
+        checkpoint_dir.mkdir(parents=True)
+        step = 38_912 if iteration == 0 else 0
+        checkpoint = checkpoint_dir / f"step_{step:09d}.zip"
+        checkpoint.write_bytes(f"actor-{iteration}".encode("ascii"))
+        candidates.append(
+            dagger_module.DevelopmentCandidate.from_dict(
+                _development_candidate_payload(
+                    checkpoint, iteration=iteration,
+                )
+            )
+        )
+    return dagger_module.DevelopmentEvaluationDefinition.create(
+        candidates=candidates,
+        panel_hash=HASHES["1"],
+        scenario_hash=HASHES["2"],
+        contract_hash=HASHES["a"],
+        encoding_hash=HASHES["b"],
+        repository={
+            "root": str(tmp_path.resolve()),
+            "commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "dirty": False,
+        },
+    )
+
+
+def test_development_evaluation_definition_freezes_four_reciprocal_candidates(
+    tmp_path: Path,
+) -> None:
+    """Wrong seed/profile/seat/model schedules must fail before any game launches."""
+
+    definition = _development_definition(tmp_path)
+
+    assert [candidate.candidate_id for candidate in definition.candidates] == [
+        "baseline",
+        "iteration-1",
+        "iteration-2",
+        "iteration-3",
+    ]
+    assert [candidate.iteration for candidate in definition.candidates] == [
+        0, 1, 2, 3,
+    ]
+    assert len(definition.schedule) == 200
+    assert [
+        (
+            game.schedule_index,
+            game.map_seed,
+            game.episode_seed,
+            game.profile,
+            game.reference_seat,
+            game.learner_seat,
+        )
+        for game in definition.schedule
+    ] == [
+        (
+            seed - 20_000_000,
+            seed,
+            seed,
+            "standard-3v3",
+            seat,
+            seat,
+        )
+        for seed in range(20_000_000, 20_000_100)
+        for seat in (0, 1)
+    ]
+    assert definition.opponent == "random"
+    assert definition.inference_mode == "deterministic"
+    assert definition.observer_enabled is False
+    assert definition.search_enabled is False
+
+    changed = list(definition.candidates)
+    changed[2] = replace(
+        changed[2], checkpoint_sha256=HASHES["f"],
+    )
+    with pytest.raises(ValueError, match="candidate|checkpoint|definition"):
+        dagger_module.DevelopmentEvaluationDefinition.create(
+            candidates=changed,
+            panel_hash=definition.panel_hash,
+            scenario_hash=definition.scenario_hash,
+            contract_hash=definition.contract_hash,
+            encoding_hash=definition.encoding_hash,
+            repository=definition.repository,
+        )
+
+
+def _development_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seat_outcomes = {
+        0: ["win"] * 60 + ["loss"] * 10 + ["draw"] * 30,
+        1: ["win"] * 40 + ["loss"] * 30 + ["draw"] * 30,
+    }
+    draw_index = 0
+    for map_offset in range(100):
+        for seat in (0, 1):
+            outcome = seat_outcomes[seat][map_offset]
+            classification = None
+            if outcome == "draw":
+                flags: list[str] = []
+                if draw_index < 40:
+                    flags.append("cycling")
+                if draw_index < 20:
+                    flags.append("action_waste")
+                classification = {
+                    "primary": flags[0] if flags else "unclassified",
+                    "flags": flags,
+                    "evidence": {},
+                }
+                draw_index += 1
+            rows.append({
+                "map_seed": 20_000_000 + map_offset,
+                "candidate_seat": seat,
+                "outcome": outcome,
+                "summary": {
+                    "command_count": 10,
+                    "round_count": 5,
+                    "peak_normalized_advantage": 0.4,
+                    "final_normalized_advantage": 0.2,
+                    "end_turns_by_seat": [2, 2],
+                    "wasted_end_turns_by_seat": (
+                        [1, 0] if seat == 0 else [0, 1]
+                    ),
+                },
+                "classification": classification,
+            })
+    return rows
+
+
+def test_development_metrics_are_typed_complete_and_cumulative_by_reason() -> None:
+    """All Task 10 metrics must be derived from rows and held-out label counts."""
+
+    metrics = dagger_module.summarize_development_candidate(
+        _development_rows(),
+        heldout_collections=(
+            {
+                "labels": 100,
+                "reason_counts": {
+                    "conversion": 50,
+                    "favorable": 40,
+                    "cycle_warning": 30,
+                    "wasted_end_turn": 20,
+                },
+                "disagreements": 20,
+                "disagreement_reason_counts": {
+                    "conversion": 10,
+                    "favorable": 8,
+                    "cycle_warning": 6,
+                    "wasted_end_turn": 4,
+                },
+            },
+            {
+                "labels": 100,
+                "reason_counts": {
+                    "conversion": 50,
+                    "favorable": 40,
+                    "cycle_warning": 30,
+                    "wasted_end_turn": 20,
+                },
+                "disagreements": 10,
+                "disagreement_reason_counts": {
+                    "conversion": 5,
+                    "favorable": 4,
+                    "cycle_warning": 3,
+                    "wasted_end_turn": 2,
+                },
+            },
+        ),
+    )
+
+    assert metrics["counts"] == {
+        "games": 200, "wins": 100, "losses": 40, "draws": 60,
+    }
+    assert metrics["rates"] == {"win": 0.5, "loss": 0.2, "draw": 0.3}
+    assert metrics["confidence_intervals"]["win"] == pytest.approx({
+        "low": 0.4313608596,
+        "high": 0.5686391404,
+        "confidence": 0.95,
+    })
+    assert metrics["seats"]["candidate_as_p0"]["rates"]["win"] == 0.6
+    assert metrics["seats"]["candidate_as_p1"]["rates"]["win"] == 0.4
+    assert metrics["win_rate_p0_minus_p1"] == pytest.approx(0.2)
+    assert metrics["draw_diagnostics"]["cycling"] == {
+        "count": 40, "incidence": 0.2,
+    }
+    assert metrics["draw_diagnostics"]["action_waste"] == {
+        "count": 20, "incidence": 0.1,
+    }
+    assert metrics["candidate_end_turns"] == {
+        "total": 400, "wasted": 200, "wasted_ratio": 0.5,
+    }
+    assert metrics["normalized_advantage"]["all_games"] == {
+        "final": pytest.approx(0.2),
+        "peak": pytest.approx(0.4),
+    }
+    assert metrics["winning_games"]["round_count"]["mean"] == 5
+    assert metrics["winning_games"]["command_count"]["mean"] == 10
+    assert metrics["heldout_teacher"] == {
+        "labels": 200,
+        "agreements": 170,
+        "disagreements": 30,
+        "accuracy": 0.85,
+        "by_reason": {
+            "conversion": {
+                "labels": 100, "disagreements": 15, "accuracy": 0.85,
+            },
+            "favorable": {
+                "labels": 80, "disagreements": 12, "accuracy": 0.85,
+            },
+            "cycle_warning": {
+                "labels": 60, "disagreements": 9, "accuracy": 0.85,
+            },
+            "wasted_end_turn": {
+                "labels": 40, "disagreements": 6, "accuracy": 0.85,
+            },
+        },
+    }
+
+
+def _selection_candidate(
+    candidate_id: str,
+    iteration: int,
+    *,
+    win_rate: float,
+    cycling: float,
+    action_waste: float,
+) -> dict[str, Any]:
+    return {
+        "candidate_id": candidate_id,
+        "iteration": iteration,
+        "summary": {
+            "counts": {
+                "games": 200,
+                "wins": int(win_rate * 200),
+                "losses": 0,
+                "draws": 200 - int(win_rate * 200),
+            },
+            "rates": {
+                "win": win_rate,
+                "loss": 0.0,
+                "draw": 1.0 - win_rate,
+            },
+            "draw_diagnostics": {
+                "cycling": {
+                    "count": int(cycling * 200),
+                    "incidence": cycling,
+                },
+                "action_waste": {
+                    "count": int(action_waste * 200),
+                    "incidence": action_waste,
+                },
+            },
+        },
+    }
+
+
+def test_development_selection_success_and_confirmation_are_separate() -> None:
+    """Teacher accuracy cannot select a model or satisfy a game milestone."""
+
+    candidates = (
+        _selection_candidate(
+            "baseline", 0, win_rate=0.40, cycling=0.60, action_waste=0.30,
+        ),
+        _selection_candidate(
+            "iteration-1", 1, win_rate=0.60, cycling=0.30, action_waste=0.20,
+        ),
+        _selection_candidate(
+            "iteration-2", 2, win_rate=0.60, cycling=0.20, action_waste=0.20,
+        ),
+        _selection_candidate(
+            "iteration-3", 3, win_rate=0.60, cycling=0.20, action_waste=0.10,
+        ),
+    )
+
+    selected = dagger_module.select_development_candidate(candidates)
+    assert selected["candidate_id"] == "iteration-3"
+
+    gain_only = dagger_module.decide_development_success(
+        baseline=candidates[0], selected=selected,
+    )
+    assert gain_only == {
+        "baseline_win_rate": 0.4,
+        "selected_win_rate": 0.6,
+        "win_rate_gain": pytest.approx(0.2),
+        "baseline_cycling_incidence": 0.6,
+        "selected_cycling_incidence": 0.2,
+        "cycling_relative_reduction": pytest.approx(2 / 3),
+        "performance_gate": True,
+        "cycling_gate": True,
+        "treatment_success": True,
+        "replication_authorized": True,
+        "one_seed_winning_rate_gate": False,
+        "confirmation_required": True,
+    }
+    assert dagger_module.confirm_replication_milestone(
+        replicate_win_rates=(0.65, 0.70, 0.75),
+        pooled_wins=420,
+        pooled_games=600,
+    ) == {
+        "replicate_win_rates": [0.65, 0.7, 0.75],
+        "every_replicate_at_least_0_65": True,
+        "pooled_win_rate": 0.7,
+        "pooled_at_least_0_70": True,
+        "confirmed": True,
+    }
+    assert dagger_module.confirm_replication_milestone(
+        replicate_win_rates=(0.64, 0.73, 0.73),
+        pooled_wins=420,
+        pooled_games=600,
+    )["confirmed"] is False
+
+
+def test_development_pairing_and_metric_inputs_fail_closed_on_exact_types() -> None:
+    """Missing reciprocals and scalar aliases must never enter selection."""
+
+    rows = _development_rows()
+    later = copy.deepcopy(rows)
+    later[0]["outcome"] = "loss"
+    later[81]["outcome"] = "win"
+    change = dagger_module.compare_development_candidates(rows, later)
+    assert change["left_only_wins"] == 1
+    assert change["right_only_wins"] == 1
+    assert change["net_win_change"] == 0
+    assert change["exact_sign_test_p_value"] == 1.0
+
+    with pytest.raises(ValueError, match="schedule|missing|games"):
+        dagger_module.compare_development_candidates(rows[:-1], later)
+    malformed = {
+        "labels": True,
+        "reason_counts": {
+            "conversion": 0,
+            "favorable": 0,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        },
+        "disagreements": 0,
+        "disagreement_reason_counts": {
+            "conversion": 0,
+            "favorable": 0,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        },
+    }
+    with pytest.raises(ValueError, match="labels|integer"):
+        dagger_module.summarize_development_candidate(
+            rows, heldout_collections=(malformed,),
+        )
+
+
+def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> None:
+    """The canonical report must preserve the fixed causal interpretation branch."""
+
+    baseline_rows = _development_rows()
+    rows_by_candidate = {
+        "baseline": baseline_rows,
+        "iteration-1": copy.deepcopy(baseline_rows),
+        "iteration-2": copy.deepcopy(baseline_rows),
+        "iteration-3": copy.deepcopy(baseline_rows),
+    }
+    # Make iteration 3 the unambiguous game winner while leaving its supervised
+    # accuracy deliberately lower than iteration 2.
+    for index in range(20):
+        rows_by_candidate["iteration-3"][140 + index]["outcome"] = "win"
+        rows_by_candidate["iteration-3"][140 + index]["classification"] = None
+    heldout = {
+        1: ({
+            "labels": 100,
+            "reason_counts": {
+                "conversion": 100,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+            "disagreements": 20,
+            "disagreement_reason_counts": {
+                "conversion": 20,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+        },),
+        2: ({
+            "labels": 100,
+            "reason_counts": {
+                "conversion": 100,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+            "disagreements": 1,
+            "disagreement_reason_counts": {
+                "conversion": 1,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+        },),
+        3: ({
+            "labels": 100,
+            "reason_counts": {
+                "conversion": 100,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+            "disagreements": 30,
+            "disagreement_reason_counts": {
+                "conversion": 30,
+                "favorable": 0,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+        },),
+    }
+
+    aggregate = dagger_module.build_development_aggregate(
+        rows_by_candidate=rows_by_candidate,
+        heldout_collections_by_iteration=heldout,
+        evidence_identity={
+            "preflight": HASHES["1"],
+            "baseline": HASHES["2"],
+            "iterations": [HASHES["3"], HASHES["4"], HASHES["5"]],
+            "evaluations": [HASHES["6"], HASHES["7"], HASHES["8"], HASHES["9"]],
+        },
+    )
+
+    assert aggregate["selected_candidate_id"] == "iteration-3"
+    assert (
+        aggregate["candidates"]["iteration-2"]["summary"]["heldout_teacher"][
+            "accuracy"
+        ]
+        >
+        aggregate["candidates"]["iteration-3"]["summary"]["heldout_teacher"][
+            "accuracy"
+        ]
+    )
+    assert set(aggregate["paired_vs_baseline"]) == {
+        "iteration-1", "iteration-2", "iteration-3",
+    }
+    canonical = json.dumps(
+        aggregate, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    assert json.dumps(
+        dagger_module.build_development_aggregate(
+            rows_by_candidate=rows_by_candidate,
+            heldout_collections_by_iteration=heldout,
+            evidence_identity=aggregate["evidence_identity"],
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ) == canonical
+
+    report = dagger_module.render_development_report(aggregate)
+    for required in (
+        "Can high-confidence search supervision",
+        "Frozen inputs",
+        "Oracle selection",
+        "Collection yields",
+        "Training curves and timings",
+        "Supervised metrics",
+        "Game outcomes",
+        "Paired tests",
+        "Chosen candidate",
+        "Threshold decisions",
+        "teacher accuracy alone is not success",
+        "final 17m seeds were not used",
+        "three-replicate confirmation is a later experiment",
+    ):
+        assert required in report
+    assert "| baseline | 100 | 40 | 60 | 0.500000 |" in report
+    assert "| iteration-2 | 200 | 179 | 21 | 0.895000 |" in report
+    assert "| 0 | 20 | 20 | 0.100000 |" in report
+    assert (
+        "| baseline | 60/10/30 (0.600000/0.100000/0.300000) | "
+        "40/30/30 (0.400000/0.300000/0.300000) | 0.200000 | "
+        "40 / 0.200000 | 20 / 0.100000 | 200 / 400 / 0.500000 |"
+    ) in report
+    assert (
+        "| baseline | 0.200000 / 0.400000 | 0.2 / 0.4 | "
+        "5 / 5 / 5 | 10 / 10 / 10 |"
+    ) in report
+    assert (
+        'transitions={"draw":{"draw":60,"loss":0,"win":0},'
+        '"loss":{"draw":0,"loss":40,"win":0},'
+        '"win":{"draw":0,"loss":0,"win":100}}'
+    ) in report
+    assert (
+        "| 0.500000 | 0.600000 | 0.100000 | False | 0.200000 | "
+        "0.100000 | 0.500000 | True | False | False | False | False |"
+    ) in report
+    assert "Chosen candidate: iteration-3" in report
+    assert "Interpretation branch: `better-imitation-and-games`." in report

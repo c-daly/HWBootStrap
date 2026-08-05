@@ -7,13 +7,14 @@ import hashlib
 import os
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import ml_lab.dagger as dagger_domain
+import ml_lab.checkpoint_audit as checkpoint_audit_domain
 import ml_lab.imitation as imitation_domain
 from ml_lab.contracts import EnvironmentContract
 from ml_lab.dagger import IterationManifest
@@ -1531,3 +1532,755 @@ def run_training_pipeline(
         )
         for index in (1, 2, 3)
     )
+
+
+# Task 10: immutable reciprocal development evaluation and publication.
+
+
+def _mutable_stage_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _mutable_stage_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_mutable_stage_json(item) for item in value]
+    return value
+
+
+def _canonical_stage_bytes(value: Any) -> bytes:
+    return json.dumps(
+        _mutable_stage_json(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _development_schedule() -> checkpoint_audit_domain.AuditSchedule:
+    return checkpoint_audit_domain.AuditSchedule(
+        seed_start=20_000_000,
+        maps=100,
+        both_seats=True,
+        profile="standard-3v3",
+        opponent="random",
+    )
+
+
+def _development_definition_identity(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+) -> Mapping[str, Any]:
+    if not isinstance(definition, dagger_domain.DevelopmentEvaluationDefinition):
+        raise ValueError("development evaluation definition type is invalid")
+    return definition.to_dict()
+
+
+def _require_development_repository(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    provider: Callable[[Path], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    actual = _validated_repository_identity(
+        Path(definition.repository["root"]), provider,
+    )
+    if not _same_json(actual, definition.repository):
+        raise ValueError("development evaluation repository identity changed")
+    return actual
+
+
+def _retained_artifact_payload(
+    artifact: checkpoint_audit_domain.RetainedArtifactIdentity,
+) -> Mapping[str, Any]:
+    if not isinstance(
+        artifact, checkpoint_audit_domain.RetainedArtifactIdentity,
+    ):
+        raise ValueError("development retained artifact identity type is invalid")
+    return {
+        "trace_path": artifact.trace_path,
+        "trace_sha256": artifact.trace_sha256,
+        "trace_byte_size": artifact.trace_byte_size,
+        "replay_path": artifact.replay_path,
+        "replay_sha256": artifact.replay_sha256,
+        "replay_byte_size": artifact.replay_byte_size,
+    }
+
+
+@dataclass(frozen=True)
+class DevelopmentCandidateEvidence:
+    root: Path
+    candidate_id: str
+    controller: str
+    checkpoint_sha256: str
+    controller_identity: Mapping[str, Any]
+    content_identity: str
+    matches: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DevelopmentCandidateRun:
+    new_games: int
+    reused: bool
+    result: DevelopmentCandidateEvidence
+
+
+_DEVELOPMENT_EVALUATION_MANIFEST_FIELDS = frozenset({
+    "schema_version", "status", "identity", "physical", "content_identity",
+})
+_DEVELOPMENT_EVALUATION_IDENTITY_FIELDS = frozenset({
+    "definition", "candidate",
+})
+_DEVELOPMENT_EVALUATION_PHYSICAL_FIELDS = frozenset({
+    "evaluation", "artifacts", "rows_sha256",
+})
+
+
+def _development_candidate_identity(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    candidate: dagger_domain.DevelopmentCandidate,
+) -> Mapping[str, Any]:
+    if (
+        not isinstance(candidate, dagger_domain.DevelopmentCandidate)
+        or candidate not in definition.candidates
+    ):
+        raise ValueError("development candidate is not in the frozen definition")
+    return {
+        "definition": _development_definition_identity(definition),
+        "candidate": candidate.to_dict(),
+    }
+
+
+def _open_development_candidate_evaluation(
+    root: Path,
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    candidate: dagger_domain.DevelopmentCandidate,
+    validate_candidate: Callable[..., object],
+) -> DevelopmentCandidateEvidence:
+    candidate_root = Path(root).resolve(strict=True)
+    manifest_path = candidate_root / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("development evaluation manifest is unreadable") from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest) != _DEVELOPMENT_EVALUATION_MANIFEST_FIELDS
+        or manifest["schema_version"] != 1
+        or manifest["status"] != "completed"
+    ):
+        raise ValueError("development evaluation manifest fields are invalid")
+    identity = manifest["identity"]
+    if (
+        not isinstance(identity, Mapping)
+        or set(identity) != _DEVELOPMENT_EVALUATION_IDENTITY_FIELDS
+        or not _same_json(
+            identity, _development_candidate_identity(definition, candidate),
+        )
+    ):
+        raise ValueError("development evaluation identity changed")
+    if (
+        not isinstance(manifest["content_identity"], str)
+        or _content_identity(manifest) != manifest["content_identity"]
+    ):
+        raise ValueError("development evaluation content identity changed")
+    physical = manifest["physical"]
+    if (
+        not isinstance(physical, Mapping)
+        or set(physical) != _DEVELOPMENT_EVALUATION_PHYSICAL_FIELDS
+    ):
+        raise ValueError("development evaluation physical fields are invalid")
+    descriptor = physical["evaluation"]
+    if (
+        not isinstance(descriptor, Mapping)
+        or set(descriptor) != {"path", "sha256", "byte_size"}
+        or descriptor["path"] != "physical/evaluation.json"
+    ):
+        raise ValueError("development evaluation descriptor is invalid")
+    evaluation_path = candidate_root / descriptor["path"]
+    try:
+        evaluation_bytes = evaluation_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("development physical evaluation is missing") from exc
+    if (
+        type(descriptor["byte_size"]) is not int
+        or descriptor["byte_size"] < 1
+        or len(evaluation_bytes) != descriptor["byte_size"]
+        or _sha256_bytes(evaluation_bytes)
+        != _require_sha256(descriptor["sha256"], "development evaluation sha256")
+    ):
+        raise ValueError("development physical evaluation bytes changed")
+    retained = validate_candidate(
+        evaluation_path,
+        publication_root=candidate_root / "physical",
+        evidence_root=candidate_root / "physical" / "evidence",
+        schedule=_development_schedule(),
+        expected_candidate_identity=candidate.controller_identity,
+    )
+    if not isinstance(retained, checkpoint_audit_domain.RetainedEvaluation):
+        raise ValueError("development validator returned an invalid retained evaluation")
+    artifacts = physical["artifacts"]
+    expected_artifacts = [
+        _retained_artifact_payload(artifact) for artifact in retained.artifacts
+    ]
+    if not _same_json(artifacts, expected_artifacts):
+        raise ValueError("development retained artifact identities changed")
+    expected_rows_sha256 = _sha256_bytes(
+        _canonical_stage_bytes(retained.matches)
+    )
+    if physical["rows_sha256"] != expected_rows_sha256:
+        raise ValueError("development canonical match rows changed")
+    actual = {
+        path.relative_to(candidate_root).as_posix()
+        for path in candidate_root.iterdir()
+    }
+    if actual != {"manifest.json", "physical"}:
+        raise ValueError("development candidate directory contains unowned evidence")
+    return DevelopmentCandidateEvidence(
+        root=candidate_root,
+        candidate_id=candidate.candidate_id,
+        controller=candidate.controller,
+        checkpoint_sha256=candidate.checkpoint_sha256,
+        controller_identity=_freeze_json(candidate.controller_identity),
+        content_identity=manifest["content_identity"],
+        matches=tuple(_freeze_json(row) for row in retained.matches),
+    )
+
+
+def reopen_development_candidate_evaluation(
+    root: Path,
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    candidate: dagger_domain.DevelopmentCandidate,
+    validate_candidate: Callable[..., object] = (
+        checkpoint_audit_domain.validate_retained_evaluation
+    ),
+) -> DevelopmentCandidateEvidence:
+    """Public Task 10 adapter that reopens all candidate trace/replay evidence."""
+
+    if not callable(validate_candidate):
+        raise RuntimeError("development candidate validator boundary is unavailable")
+    return _open_development_candidate_evaluation(
+        root,
+        definition=definition,
+        candidate=candidate,
+        validate_candidate=validate_candidate,
+    )
+
+
+def run_development_candidate_evaluation(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    candidate: dagger_domain.DevelopmentCandidate,
+    output_root: Path,
+    server_cmd: Sequence[str],
+    workers: int,
+    evaluate_candidate: Callable[..., object] = (
+        checkpoint_audit_domain.evaluate_retained_candidate
+    ),
+    validate_candidate: Callable[..., object] = (
+        checkpoint_audit_domain.validate_retained_evaluation
+    ),
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
+) -> DevelopmentCandidateRun:
+    """Run or physically reopen one immutable 200-game candidate evaluation."""
+
+    identity = _development_candidate_identity(definition, candidate)
+    _require_development_repository(definition, repository_identity_provider)
+    if type(workers) is not int or workers < 1:
+        raise ValueError("development evaluation workers must be positive")
+    if not callable(evaluate_candidate) or not callable(validate_candidate):
+        raise RuntimeError("development physical evaluation boundary is unavailable")
+    if _sha256_bytes(Path(candidate.checkpoint_path).read_bytes()) != candidate.checkpoint_sha256:
+        raise ValueError("development candidate checkpoint bytes changed")
+    root = Path(output_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / candidate.candidate_id
+    staging = root / f"{candidate.candidate_id}.staging"
+    if destination.exists():
+        if staging.exists():
+            raise ValueError("development evaluation destination and staging are ambiguous")
+        reopened = _open_development_candidate_evaluation(
+            destination,
+            definition=definition,
+            candidate=candidate,
+            validate_candidate=validate_candidate,
+        )
+        _require_development_repository(definition, repository_identity_provider)
+        return DevelopmentCandidateRun(new_games=0, reused=True, result=reopened)
+    if staging.exists():
+        raise ValueError("development evaluation staging is partial; use a new output root")
+    staging.mkdir()
+    physical_root = staging / "physical"
+    evaluate_candidate(
+        candidate.controller,
+        expected_candidate_identity=candidate.controller_identity,
+        schedule=_development_schedule(),
+        publication_root=physical_root,
+        server_cmd=server_cmd,
+        workers=workers,
+    )
+    _require_development_repository(definition, repository_identity_provider)
+    retained = validate_candidate(
+        physical_root / "evaluation.json",
+        publication_root=physical_root,
+        evidence_root=physical_root / "evidence",
+        schedule=_development_schedule(),
+        expected_candidate_identity=candidate.controller_identity,
+    )
+    if not isinstance(retained, checkpoint_audit_domain.RetainedEvaluation):
+        raise ValueError("development validator returned an invalid retained evaluation")
+    evaluation_bytes = (physical_root / "evaluation.json").read_bytes()
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "completed",
+        "identity": identity,
+        "physical": {
+            "evaluation": {
+                "path": "physical/evaluation.json",
+                "sha256": _sha256_bytes(evaluation_bytes),
+                "byte_size": len(evaluation_bytes),
+            },
+            "artifacts": [
+                _retained_artifact_payload(artifact)
+                for artifact in retained.artifacts
+            ],
+            "rows_sha256": _sha256_bytes(
+                _canonical_stage_bytes(retained.matches)
+            ),
+        },
+    }
+    manifest["content_identity"] = _content_identity(manifest)
+    atomic_write_json(staging / "manifest.json", manifest)
+    staged = _open_development_candidate_evaluation(
+        staging,
+        definition=definition,
+        candidate=candidate,
+        validate_candidate=validate_candidate,
+    )
+    _require_development_repository(definition, repository_identity_provider)
+    os.replace(staging, destination)
+    published = _open_development_candidate_evaluation(
+        destination,
+        definition=definition,
+        candidate=candidate,
+        validate_candidate=validate_candidate,
+    )
+    if published.content_identity != staged.content_identity:
+        raise ValueError("development evaluation changed during publication")
+    _require_development_repository(definition, repository_identity_provider)
+    return DevelopmentCandidateRun(new_games=200, reused=False, result=published)
+
+
+def run_development_evaluation(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    output_root: Path,
+    server_cmd: Sequence[str],
+    workers: int,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
+) -> tuple[DevelopmentCandidateRun, ...]:
+    """Evaluate baseline, then iterations one through three in frozen order."""
+
+    return tuple(
+        run_development_candidate_evaluation(
+            definition=definition,
+            candidate=candidate,
+            output_root=output_root,
+            server_cmd=server_cmd,
+            workers=workers,
+            repository_identity_provider=repository_identity_provider,
+        )
+        for candidate in definition.candidates
+    )
+
+
+@dataclass(frozen=True)
+class DevelopmentPreflightEvidence:
+    evidence_root: Path
+    content_identity: str
+    selected_oracle: dagger_domain.OracleSpec
+    evidence_class: str
+    starting_learner_checkpoint_path: str
+    starting_learner_checkpoint_sha256: str
+    starting_learner_controller: str
+    starting_learner_controller_identity: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class DevelopmentIterationEvidence:
+    root: Path
+    iteration: int
+    content_identity: str
+    selected_oracle: dagger_domain.OracleSpec
+    preflight_root: Path
+    preflight_content_identity: str
+    preflight_evidence_class: str
+    actor_checkpoint_sha256: str
+    actor_controller: str
+    actor_controller_identity: Mapping[str, Any]
+    validation_collection: Mapping[str, Any]
+    collection_metrics: Mapping[str, Any]
+    training_metrics: Mapping[str, Any]
+    timings: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class DevelopmentAggregatePublication:
+    root: Path
+    aggregate: Mapping[str, Any]
+    report: str
+    content_identity: str
+
+
+def _validated_development_preflight(
+    value: object,
+    *,
+    root: Path,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+) -> DevelopmentPreflightEvidence:
+    if not isinstance(value, DevelopmentPreflightEvidence):
+        raise ValueError("development preflight reopener returned an invalid type")
+    canonical = Path(root).resolve(strict=True)
+    repository_root = Path(definition.repository["root"]).resolve(strict=True)
+    if canonical.is_relative_to(repository_root):
+        raise ValueError("development preflight evidence root must be external")
+    if Path(value.evidence_root) != canonical:
+        raise ValueError("development preflight evidence root identity changed")
+    _require_sha256(value.content_identity, "development preflight content identity")
+    if (
+        not isinstance(value.selected_oracle, dagger_domain.OracleSpec)
+        or value.evidence_class != "sealed-engine"
+    ):
+        raise ValueError("development preflight must be sealed engine evidence")
+    # Reparse the value through the public strict type contract.
+    dagger_domain.OracleSpec.from_dict(value.selected_oracle.to_dict())
+    baseline = definition.candidates[0]
+    if (
+        value.starting_learner_checkpoint_path != baseline.checkpoint_path
+        or value.starting_learner_checkpoint_sha256 != baseline.checkpoint_sha256
+        or value.starting_learner_controller != baseline.controller
+        or not _same_json(
+            value.starting_learner_controller_identity,
+            baseline.controller_identity,
+        )
+        or _sha256_bytes(Path(baseline.checkpoint_path).read_bytes())
+        != baseline.checkpoint_sha256
+    ):
+        raise ValueError(
+            "development baseline checkpoint does not match the validated starting learner"
+        )
+    return value
+
+
+def _validated_development_iteration(
+    value: object,
+    *,
+    root: Path,
+    iteration: int,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    preflight: DevelopmentPreflightEvidence,
+) -> DevelopmentIterationEvidence:
+    if not isinstance(value, DevelopmentIterationEvidence):
+        raise ValueError("development iteration reopener returned an invalid type")
+    canonical = Path(root).resolve(strict=True)
+    if Path(value.root) != canonical or value.iteration != iteration:
+        raise ValueError("development iteration physical identity changed")
+    _require_sha256(value.content_identity, "development iteration content identity")
+    if (
+        not isinstance(value.selected_oracle, dagger_domain.OracleSpec)
+        or not _same_json(
+            value.selected_oracle.to_dict(), preflight.selected_oracle.to_dict(),
+        )
+        or Path(value.preflight_root) != Path(preflight.evidence_root)
+        or value.preflight_content_identity != preflight.content_identity
+        or value.preflight_evidence_class != preflight.evidence_class
+    ):
+        raise ValueError(
+            "development iteration oracle/preflight identity does not reconcile"
+        )
+    expected = definition.candidates[iteration]
+    if (
+        value.actor_checkpoint_sha256 != expected.checkpoint_sha256
+        or value.actor_controller != expected.controller
+        or not _same_json(
+            value.actor_controller_identity, expected.controller_identity,
+        )
+    ):
+        raise ValueError("development iteration actor candidate identity changed")
+    for payload, label in (
+        (value.validation_collection, "validation collection"),
+        (value.collection_metrics, "collection metrics"),
+        (value.training_metrics, "training metrics"),
+        (value.timings, "timings"),
+    ):
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"development iteration {label} is invalid")
+    return value
+
+
+def _validated_development_evaluation_evidence(
+    value: object,
+    *,
+    root: Path,
+    candidate: dagger_domain.DevelopmentCandidate,
+) -> DevelopmentCandidateEvidence:
+    if not isinstance(value, DevelopmentCandidateEvidence):
+        raise ValueError("development evaluation reopener returned an invalid type")
+    canonical = Path(root).resolve(strict=True)
+    if (
+        Path(value.root) != canonical
+        or value.candidate_id != candidate.candidate_id
+        or value.controller != candidate.controller
+        or value.checkpoint_sha256 != candidate.checkpoint_sha256
+        or not _same_json(value.controller_identity, candidate.controller_identity)
+    ):
+        raise ValueError("development physical evaluation candidate identity changed")
+    _require_sha256(value.content_identity, "development evaluation content identity")
+    if type(value.matches) is not tuple:
+        raise ValueError("development physical evaluation rows are invalid")
+    return value
+
+
+_DEVELOPMENT_AGGREGATE_MANIFEST_FIELDS = frozenset({
+    "schema_version", "status", "identity", "artifacts", "content_identity",
+})
+
+
+def _open_development_aggregate_publication(
+    root: Path,
+    *,
+    expected_aggregate: Mapping[str, Any],
+    expected_report: str,
+) -> DevelopmentAggregatePublication:
+    publication_root = Path(root).resolve(strict=True)
+    manifest_path = publication_root / "manifest.json"
+    aggregate_path = publication_root / "aggregate.json"
+    report_path = publication_root / "REPORT.md"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        aggregate_bytes = aggregate_path.read_bytes()
+        aggregate = json.loads(aggregate_bytes.decode("utf-8"))
+        report_bytes = report_path.read_bytes()
+        report = report_bytes.decode("utf-8")
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("development aggregate publication is unreadable") from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest) != _DEVELOPMENT_AGGREGATE_MANIFEST_FIELDS
+        or manifest["schema_version"] != 1
+        or manifest["status"] != "completed"
+        or not isinstance(manifest["identity"], Mapping)
+        or not _same_json(manifest["identity"], expected_aggregate["evidence_identity"])
+        or not _same_json(aggregate, expected_aggregate)
+        or report != expected_report
+    ):
+        raise ValueError("development aggregate publication identity changed")
+    artifacts = manifest["artifacts"]
+    expected_descriptors = {
+        "aggregate": {
+            "path": "aggregate.json",
+            "sha256": _sha256_bytes(aggregate_bytes),
+            "byte_size": len(aggregate_bytes),
+        },
+        "report": {
+            "path": "REPORT.md",
+            "sha256": _sha256_bytes(report_bytes),
+            "byte_size": len(report_bytes),
+        },
+    }
+    if not _same_json(artifacts, expected_descriptors):
+        raise ValueError("development aggregate artifact descriptors changed")
+    if (
+        not isinstance(manifest["content_identity"], str)
+        or _content_identity(manifest) != manifest["content_identity"]
+    ):
+        raise ValueError("development aggregate content identity changed")
+    actual = {
+        path.relative_to(publication_root).as_posix()
+        for path in publication_root.iterdir()
+    }
+    if actual != {"manifest.json", "aggregate.json", "REPORT.md"}:
+        raise ValueError("development aggregate contains unowned files")
+    return DevelopmentAggregatePublication(
+        root=publication_root,
+        aggregate=_freeze_json(aggregate),
+        report=report,
+        content_identity=manifest["content_identity"],
+    )
+
+
+def publish_development_aggregate(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    preflight_root: Path,
+    iteration_roots: Sequence[Path],
+    evaluations_root: Path,
+    output_root: Path,
+    reopen_preflight: Callable[[Path], object] | None,
+    reopen_iteration: Callable[[Path], object] | None,
+    reopen_evaluation: Callable[
+        [Path, dagger_domain.DevelopmentCandidate], object
+    ] | None,
+) -> DevelopmentAggregatePublication:
+    """Reconstruct and transactionally publish Task 10 from physical evidence."""
+
+    if reopen_preflight is None or not callable(reopen_preflight):
+        raise RuntimeError(
+            "development aggregate requires an explicit sealed preflight reopener"
+        )
+    if reopen_iteration is None or not callable(reopen_iteration):
+        raise RuntimeError("development aggregate iteration reopener is unavailable")
+    if reopen_evaluation is None or not callable(reopen_evaluation):
+        raise RuntimeError("development aggregate evaluation reopener is unavailable")
+    _development_definition_identity(definition)
+    canonical_preflight_root = Path(preflight_root).resolve(strict=True)
+    preflight = _validated_development_preflight(
+        reopen_preflight(canonical_preflight_root),
+        root=canonical_preflight_root,
+        definition=definition,
+    )
+    if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
+        raise ValueError("development aggregate requires three physical iterations")
+    iterations = tuple(
+        _validated_development_iteration(
+            reopen_iteration(Path(root).resolve(strict=True)),
+            root=Path(root),
+            iteration=iteration,
+            definition=definition,
+            preflight=preflight,
+        )
+        for iteration, root in enumerate(iteration_roots, start=1)
+    )
+    canonical_evaluations_root = Path(evaluations_root).resolve(strict=True)
+    evaluations = tuple(
+        _validated_development_evaluation_evidence(
+            reopen_evaluation(
+                (canonical_evaluations_root / candidate.candidate_id).resolve(strict=True),
+                candidate,
+            ),
+            root=canonical_evaluations_root / candidate.candidate_id,
+            candidate=candidate,
+        )
+        for candidate in definition.candidates
+    )
+    baseline = definition.candidates[0]
+    if (
+        evaluations[0].controller != preflight.starting_learner_controller
+        or not _same_json(
+            evaluations[0].controller_identity,
+            preflight.starting_learner_controller_identity,
+        )
+        or evaluations[0].checkpoint_sha256
+        != preflight.starting_learner_checkpoint_sha256
+        or not _same_json(
+            evaluations[0].controller_identity, baseline.controller_identity,
+        )
+    ):
+        raise ValueError(
+            "development baseline evaluation does not match the validated learner identity"
+        )
+    aggregate = dict(dagger_domain.build_development_aggregate(
+        rows_by_candidate={
+            candidate.candidate_id: evidence.matches
+            for candidate, evidence in zip(
+                definition.candidates, evaluations, strict=True,
+            )
+        },
+        heldout_collections_by_iteration={
+            iteration.iteration: (iteration.validation_collection,)
+            for iteration in iterations
+        },
+        evidence_identity={
+            "preflight": preflight.content_identity,
+            "baseline": baseline.checkpoint_sha256,
+            "iterations": [item.content_identity for item in iterations],
+            "evaluations": [item.content_identity for item in evaluations],
+        },
+    ))
+    aggregate["frozen_inputs"] = definition.to_dict()
+    aggregate["oracle_selection"] = {
+        "spec": preflight.selected_oracle.to_dict(),
+        "evidence_root": str(preflight.evidence_root),
+        "evidence_content_identity": preflight.content_identity,
+        "evidence_class": preflight.evidence_class,
+        "starting_learner": {
+            "controller": preflight.starting_learner_controller,
+            "controller_identity": _mutable_stage_json(
+                preflight.starting_learner_controller_identity
+            ),
+            "checkpoint_path": preflight.starting_learner_checkpoint_path,
+            "checkpoint_sha256": preflight.starting_learner_checkpoint_sha256,
+        },
+    }
+    aggregate["iteration_evidence"] = [
+        {
+            "iteration": item.iteration,
+            "content_identity": item.content_identity,
+            "actor_checkpoint_sha256": item.actor_checkpoint_sha256,
+            "actor_controller": item.actor_controller,
+            "actor_controller_identity": _mutable_stage_json(
+                item.actor_controller_identity
+            ),
+            "validation_collection": _mutable_stage_json(
+                item.validation_collection
+            ),
+            "collection_metrics": _mutable_stage_json(item.collection_metrics),
+            "training_metrics": _mutable_stage_json(item.training_metrics),
+            "timings": _mutable_stage_json(item.timings),
+        }
+        for item in iterations
+    ]
+    report = dagger_domain.render_development_report(aggregate)
+
+    destination = Path(output_root).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / f"{destination.name}.staging"
+    if destination.exists():
+        if staging.exists():
+            raise ValueError("development aggregate destination and staging are ambiguous")
+        return _open_development_aggregate_publication(
+            destination,
+            expected_aggregate=aggregate,
+            expected_report=report,
+        )
+    if staging.exists():
+        raise ValueError("development aggregate staging is partial; use a new output root")
+    staging.mkdir()
+    atomic_write_json(staging / "aggregate.json", aggregate)
+    _write_exact_file(staging / "REPORT.md", report.encode("utf-8"))
+    aggregate_bytes = (staging / "aggregate.json").read_bytes()
+    report_bytes = (staging / "REPORT.md").read_bytes()
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "completed",
+        "identity": aggregate["evidence_identity"],
+        "artifacts": {
+            "aggregate": {
+                "path": "aggregate.json",
+                "sha256": _sha256_bytes(aggregate_bytes),
+                "byte_size": len(aggregate_bytes),
+            },
+            "report": {
+                "path": "REPORT.md",
+                "sha256": _sha256_bytes(report_bytes),
+                "byte_size": len(report_bytes),
+            },
+        },
+    }
+    manifest["content_identity"] = _content_identity(manifest)
+    atomic_write_json(staging / "manifest.json", manifest)
+    staged = _open_development_aggregate_publication(
+        staging,
+        expected_aggregate=aggregate,
+        expected_report=report,
+    )
+    os.replace(staging, destination)
+    published = _open_development_aggregate_publication(
+        destination,
+        expected_aggregate=aggregate,
+        expected_report=report,
+    )
+    if published.content_identity != staged.content_identity:
+        raise ValueError("development aggregate changed during publication")
+    return published

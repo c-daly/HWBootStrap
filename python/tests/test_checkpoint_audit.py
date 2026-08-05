@@ -838,6 +838,198 @@ def _evaluate_fake_audit(
     return evaluator
 
 
+def _evaluate_generic_retained_candidate(
+    definition: AuditDefinition,
+    output_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, _FakeAuditEvaluator]:
+    """Exercise the public audit-grade boundary without an old audit definition."""
+
+    monkeypatch.setattr(
+        audit_module,
+        "_inspect_replays",
+        _fake_replay_inspection,
+        raising=False,
+    )
+    evaluator = _FakeAuditEvaluator(definition)
+    candidate = definition.candidates[0]
+    retained = audit_module.evaluate_retained_candidate(
+        candidate.controller,
+        expected_candidate_identity=_candidate_identity(candidate),
+        schedule=AuditSchedule(
+            seed_start=20_000_000,
+            maps=1,
+            both_seats=True,
+            profile="standard-3v3",
+            opponent="random",
+        ),
+        publication_root=output_root,
+        server_cmd=("fake-gym-server",),
+        workers=3,
+        evaluator=evaluator,
+    )
+    return retained, evaluator
+
+
+def test_generic_retained_evaluator_delegates_the_exact_physical_call_surface(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 10 evaluation must be ordinary deterministic play, never observer/search."""
+
+    definition = _audit_definition(source_runs, maps=1)
+    publication_root = tmp_path / "candidate-physical"
+
+    retained, evaluator = _evaluate_generic_retained_candidate(
+        definition, publication_root, monkeypatch,
+    )
+
+    candidate = definition.candidates[0]
+    assert evaluator.calls == [
+        (
+            candidate.controller,
+            "random",
+            {
+                "games": 1,
+                "seed_start": 20_000_000,
+                "both_seats": True,
+                "workers": 3,
+                "server_cmd": ("fake-gym-server",),
+                "output_path": publication_root / "evaluation.json",
+                "environment": "tactical-v2",
+                "evidence_dir": publication_root / "evidence",
+                "start_profile": "standard-3v3",
+                "capture_trace": True,
+                "evidence_retention": "all",
+            },
+        )
+    ]
+    assert [
+        (row["seed"], row["candidate_seat"], row["outcome"])
+        for row in retained.matches
+    ] == [
+        (20_000_000, 0, "win"),
+        (20_000_000, 1, "draw"),
+    ]
+    assert len(retained.artifacts) == 2
+    assert all(len(item.trace_sha256) == 64 for item in retained.artifacts)
+    assert all(len(item.replay_sha256) == 64 for item in retained.artifacts)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "candidate_identity",
+        "seed_schedule",
+        "profile",
+        "missing_reciprocal",
+        "trace_bytes",
+        "replay_winner",
+        "trace_escape",
+        "unowned_file",
+    ),
+)
+def test_generic_retained_validator_reopens_and_rejects_drift_or_corruption(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Every reusable result is derived again from contained trace/replay evidence."""
+
+    definition = _audit_definition(source_runs, maps=1)
+    publication_root = tmp_path / "candidate-physical"
+    retained, _evaluator = _evaluate_generic_retained_candidate(
+        definition, publication_root, monkeypatch,
+    )
+    evaluation_path = publication_root / "evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    expected_identity = _candidate_identity(definition.candidates[0])
+
+    if mutation == "candidate_identity":
+        evaluation["candidate"]["path"] = str(tmp_path / "other.zip")
+    elif mutation == "seed_schedule":
+        evaluation["seeds"] = [20_000_001]
+    elif mutation == "profile":
+        evaluation["schedule"]["start_profile"] = "conversion-3v1-near"
+    elif mutation == "missing_reciprocal":
+        evaluation["matches"].pop()
+        evaluation["games"] = 1
+    elif mutation == "trace_bytes":
+        Path(evaluation["matches"][0]["trace_path"]).write_bytes(b"corrupt trace\n")
+    elif mutation == "replay_winner":
+        monkeypatch.setattr(
+            audit_module,
+            "_inspect_replays",
+            lambda paths: {Path(path).resolve(): 1 for path in paths},
+        )
+    elif mutation == "trace_escape":
+        escaped = tmp_path / "escaped-trace.json"
+        escaped.write_bytes(
+            Path(evaluation["matches"][0]["trace_path"]).read_bytes()
+        )
+        evaluation["matches"][0]["trace_path"] = str(escaped)
+    elif mutation == "unowned_file":
+        (publication_root / "evidence" / "unowned.txt").write_text(
+            "not declared", encoding="utf-8",
+        )
+    else:  # pragma: no cover - exhaustive parameter guard
+        raise AssertionError(mutation)
+
+    if mutation not in {"trace_bytes", "replay_winner", "unowned_file"}:
+        _write_json(evaluation_path, evaluation)
+
+    with pytest.raises(ValueError):
+        audit_module.validate_retained_evaluation(
+            evaluation_path,
+            publication_root=publication_root,
+            evidence_root=publication_root / "evidence",
+            schedule=AuditSchedule(
+                seed_start=20_000_000,
+                maps=1,
+                both_seats=True,
+                profile="standard-3v3",
+                opponent="random",
+            ),
+            expected_candidate_identity=expected_identity,
+        )
+
+    # The originally returned artifact identities are immutable values, not a
+    # view over bytes that were later changed.
+    assert retained.artifacts[0].trace_sha256 != ""
+
+
+def test_public_retained_validator_matches_the_legacy_audit_reconstruction(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The new seam must share the old validator's physical semantics."""
+
+    definition = _audit_definition(source_runs, maps=100)
+    output_root = tmp_path / "audit"
+    _evaluate_fake_audit(definition, output_root, monkeypatch)
+    candidate = definition.candidates[0]
+    map_seed = definition.schedule.seed_start
+    evaluation_path = audit_module.audit_map_path(
+        output_root, candidate.candidate_id, map_seed,
+    )
+
+    _legacy_evaluation, legacy_matches = audit_module.validate_physical_map(
+        output_root, candidate, definition.schedule, map_seed,
+    )
+    retained = audit_module.validate_retained_evaluation(
+        evaluation_path,
+        publication_root=output_root,
+        evidence_root=evaluation_path.parent / "evidence",
+        schedule=replace(definition.schedule, seed_start=map_seed, maps=1),
+        expected_candidate_identity=_candidate_identity(candidate),
+    )
+
+    assert retained.matches == legacy_matches
+
+
 def test_schedule_keys_are_exactly_candidate_map_and_reciprocal_seat(
     source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

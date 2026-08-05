@@ -138,6 +138,27 @@ class PreparedAuditInputs:
 
 
 @dataclass(frozen=True)
+class RetainedArtifactIdentity:
+    """Authenticated identity for one retained trace/replay pair."""
+
+    trace_path: str
+    trace_sha256: str
+    trace_byte_size: int
+    replay_path: str
+    replay_sha256: str
+    replay_byte_size: int
+
+
+@dataclass(frozen=True)
+class RetainedEvaluation:
+    """Canonical rows and physical identities reconstructed from retained evidence."""
+
+    evaluation: Mapping[str, Any]
+    matches: tuple[Mapping[str, Any], ...]
+    artifacts: tuple[RetainedArtifactIdentity, ...]
+
+
+@dataclass(frozen=True)
 class _SourceRun:
     path: Path
     manifest: Mapping[str, Any]
@@ -1307,6 +1328,362 @@ def _validated_trace(path: Path, *, candidate_seat: int) -> tuple[int, bool, boo
     )
 
 
+def _validate_retained_schedule(schedule: AuditSchedule) -> None:
+    if type(schedule) is not AuditSchedule:
+        raise ValueError("retained evaluation schedule must be an AuditSchedule")
+    if (
+        type(schedule.seed_start) is not int
+        or schedule.seed_start < 0
+        or type(schedule.maps) is not int
+        or schedule.maps < 1
+        or schedule.both_seats is not True
+        or schedule.profile != "standard-3v3"
+        or schedule.opponent != "random"
+    ):
+        raise ValueError(
+            "retained evaluation requires reciprocal standard-3v3 maps versus random"
+        )
+
+
+def _retained_artifact_path(
+    publication_root: Path,
+    evidence_root: Path,
+    raw_path: object,
+    *,
+    label: str,
+) -> Path:
+    value = _require_string(raw_path, label=label)
+    supplied = Path(value)
+    candidate = supplied if supplied.is_absolute() else publication_root / supplied
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(publication_root)
+        resolved.relative_to(evidence_root)
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"{label} must resolve inside the retained evidence directory"
+        ) from error
+    if not resolved.is_file():
+        raise ValueError(f"{label} must name a retained file")
+    return resolved
+
+
+def _require_exact_retained_inventory(
+    evaluation_path: Path,
+    evidence_root: Path,
+    artifact_paths: Sequence[Path],
+) -> None:
+    root = evaluation_path.parent
+    try:
+        evidence_root.relative_to(root)
+    except ValueError as error:
+        raise ValueError("retained evidence root must be below the evaluation directory") from error
+    expected = {evaluation_path.relative_to(root).as_posix()}
+    expected.add(evidence_root.relative_to(root).as_posix())
+    for artifact in artifact_paths:
+        relative = artifact.relative_to(root)
+        expected.add(relative.as_posix())
+        parent = relative.parent
+        while parent != Path("."):
+            expected.add(parent.as_posix())
+            parent = parent.parent
+    actual: set[str] = set()
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("retained evaluation inventory contains a symbolic link")
+        actual.add(path.relative_to(root).as_posix())
+    if actual != expected:
+        raise ValueError(
+            "retained evaluation inventory contains missing or unowned evidence"
+        )
+
+
+def _validate_retained_evaluation_core(
+    evaluation_path: Path,
+    *,
+    publication_root: Path,
+    evidence_root: Path,
+    schedule: AuditSchedule,
+    expected_candidate_identity: Mapping[str, Any],
+    replay_winners: Mapping[Path, int] | None,
+) -> RetainedEvaluation:
+    _validate_retained_schedule(schedule)
+    if not isinstance(expected_candidate_identity, Mapping) or not expected_candidate_identity:
+        raise ValueError("expected retained candidate identity must be a non-empty object")
+    try:
+        publication = Path(publication_root).resolve(strict=True)
+        evidence = Path(evidence_root).resolve(strict=True)
+        path = Path(evaluation_path).resolve(strict=True)
+        path.relative_to(publication)
+        evidence.relative_to(publication)
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            "retained evaluation and evidence must exist below the publication root"
+        ) from error
+    if not publication.is_dir() or not evidence.is_dir() or not path.is_file():
+        raise ValueError("retained evaluation publication paths are invalid")
+    if evidence != path.parent / "evidence":
+        raise ValueError("retained evidence root must be the evaluation evidence directory")
+
+    evaluation, _raw = _read_json_bytes(path, label="retained evaluation")
+    if evaluation.get("schema_version") != 1:
+        raise ValueError("retained evaluation schema_version must be 1")
+    _require_string(
+        evaluation.get("generated_at"), label="retained evaluation timestamp"
+    )
+    if evaluation.get("candidate") != expected_candidate_identity:
+        raise ValueError("retained evaluation candidate controller identity changed")
+    if evaluation.get("opponent") != _scripted_controller_identity("random"):
+        raise ValueError("retained evaluation opponent controller identity changed")
+    if evaluation.get("schedule") != {
+        "start_profile": "standard-3v3",
+        "reference_seat_policy": "candidate-seat",
+    }:
+        raise ValueError("retained evaluation profile schedule changed")
+
+    expected_seeds = list(range(schedule.seed_start, schedule.seed_start + schedule.maps))
+    expected_games = schedule.maps * 2
+    if (
+        evaluation.get("seed_start") != schedule.seed_start
+        or evaluation.get("seeds") != expected_seeds
+        or evaluation.get("reciprocal") is not True
+        or evaluation.get("games") != expected_games
+    ):
+        raise ValueError("retained evaluation reciprocal seed schedule changed")
+    matches_raw = evaluation.get("matches")
+    if not isinstance(matches_raw, list) or len(matches_raw) != expected_games:
+        raise ValueError("retained evaluation reciprocal match count changed")
+    matches = tuple(
+        _require_mapping(match, label=f"retained match {index}")
+        for index, match in enumerate(matches_raw)
+    )
+
+    totals = {"wins": 0, "losses": 0, "draws": 0}
+    seats = {
+        "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+        "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+    }
+    draw_categories: dict[str, int] = {}
+    artifact_paths: list[Path] = []
+    artifact_identities: list[RetainedArtifactIdentity] = []
+    replay_rows: list[tuple[int, Path]] = []
+    seen_artifacts: set[Path] = set()
+    legacy_identity = evaluation.get("audit_identity")
+    legacy_artifacts: object = None
+    if legacy_identity is not None:
+        identity = _require_mapping(legacy_identity, label="retained audit identity")
+        legacy_artifacts = identity.get("artifacts")
+        if not isinstance(legacy_artifacts, list) or len(legacy_artifacts) != expected_games:
+            raise ValueError("retained audit identity must hash every artifact pair")
+
+    for index, match in enumerate(matches):
+        seed = schedule.seed_start + index // 2
+        seat = index % 2
+        if match.get("seed") != seed or match.get("candidate_seat") != seat:
+            raise ValueError("retained evaluation match ordering or seed changed")
+        if (
+            match.get("start_profile") != "standard-3v3"
+            or match.get("reference_seat") != seat
+        ):
+            raise ValueError("retained evaluation match profile reference changed")
+        winner = match.get("winner")
+        if type(winner) is not int or winner not in {-1, 0, 1}:
+            raise ValueError("retained evaluation match winner is invalid")
+        outcome = "win" if winner == seat else "loss" if winner in {0, 1} else "draw"
+        if match.get("outcome") != outcome:
+            raise ValueError("retained evaluation outcome does not reconcile")
+        if type(match.get("terminated")) is not bool or type(match.get("truncated")) is not bool:
+            raise ValueError("retained evaluation termination fields are invalid")
+
+        trace_path = _retained_artifact_path(
+            publication, evidence, match.get("trace_path"), label="retained trace path"
+        )
+        replay_path = _retained_artifact_path(
+            publication, evidence, match.get("replay_path"), label="retained replay path"
+        )
+        if trace_path == replay_path or trace_path in seen_artifacts or replay_path in seen_artifacts:
+            raise ValueError("retained matches must own distinct trace and replay artifacts")
+        seen_artifacts.update((trace_path, replay_path))
+        artifact_paths.extend((trace_path, replay_path))
+        trace_bytes = trace_path.read_bytes()
+        replay_bytes = replay_path.read_bytes()
+        trace_sha256 = _sha256(trace_bytes)
+        replay_sha256 = _sha256(replay_bytes)
+        for field, expected in (
+            ("trace_sha256", trace_sha256),
+            ("replay_sha256", replay_sha256),
+        ):
+            if field in match and match.get(field) != expected:
+                raise ValueError(f"retained match {field} changed")
+        if isinstance(legacy_artifacts, list):
+            legacy = _require_mapping(
+                legacy_artifacts[index], label=f"retained artifact identity {index}"
+            )
+            if (
+                legacy.get("trace_sha256") != trace_sha256
+                or legacy.get("replay_sha256") != replay_sha256
+            ):
+                raise ValueError("retained audit artifact bytes changed")
+
+        (
+            trace_winner,
+            trace_terminated,
+            trace_truncated,
+            trace_summary,
+            trace_classification,
+        ) = _validated_trace(trace_path, candidate_seat=seat)
+        if winner != trace_winner:
+            raise ValueError("retained winner does not reconcile with its trace")
+        if (
+            match.get("terminated") is not trace_terminated
+            or match.get("truncated") is not trace_truncated
+        ):
+            raise ValueError("retained termination does not reconcile with its trace")
+        if match.get("summary") != trace_summary:
+            raise ValueError("retained summary does not reconcile with its trace")
+        if match.get("classification") != trace_classification:
+            raise ValueError("retained classification does not reconcile with its trace")
+
+        replay_rows.append((winner, replay_path))
+        artifact_identities.append(RetainedArtifactIdentity(
+            trace_path=trace_path.relative_to(publication).as_posix(),
+            trace_sha256=trace_sha256,
+            trace_byte_size=len(trace_bytes),
+            replay_path=replay_path.relative_to(publication).as_posix(),
+            replay_sha256=replay_sha256,
+            replay_byte_size=len(replay_bytes),
+        ))
+        counter = "losses" if outcome == "loss" else f"{outcome}s"
+        totals[counter] += 1
+        seat_key = "candidate_as_p0" if seat == 0 else "candidate_as_p1"
+        seats[seat_key][counter] += 1
+        if outcome == "draw":
+            classification = _require_mapping(
+                trace_classification, label="retained draw classification"
+            )
+            primary = _require_string(
+                classification.get("primary"), label="retained draw classification primary"
+            )
+            draw_categories[primary] = draw_categories.get(primary, 0) + 1
+
+    authoritative_winners = (
+        _inspect_replays(tuple(path for _winner, path in replay_rows))
+        if replay_winners is None
+        else replay_winners
+    )
+    for winner, replay_path in replay_rows:
+        if authoritative_winners.get(replay_path) != winner:
+            raise ValueError("retained winner does not reconcile with its replay")
+
+    _require_exact_retained_inventory(path, evidence, artifact_paths)
+    _require_exact_counts(
+        {key: evaluation.get(key) for key in totals},
+        totals,
+        label="retained outcome totals",
+    )
+    expected_rates = {
+        "win": totals["wins"] / expected_games,
+        "loss": totals["losses"] / expected_games,
+        "draw": totals["draws"] / expected_games,
+    }
+    if evaluation.get("rates") != expected_rates:
+        raise ValueError("retained outcome rates do not reconcile")
+    expected_intervals = {
+        outcome: wilson_interval(totals[counter], expected_games, 0.95)
+        for outcome, counter in (("win", "wins"), ("loss", "losses"), ("draw", "draws"))
+    }
+    if evaluation.get("confidence_intervals") != expected_intervals:
+        raise ValueError("retained Wilson confidence intervals do not reconcile")
+    seat_results = _require_mapping(evaluation.get("seat_results"), label="retained seat results")
+    if set(seat_results) != set(seats):
+        raise ValueError("retained seat result fields are invalid")
+    for seat_key, counts in seats.items():
+        _require_exact_counts(seat_results.get(seat_key), counts, label=seat_key)
+    expected_evidence = {
+        "retention": "all",
+        "retained": expected_games,
+        "draw_traces": totals["draws"],
+        "control_traces": expected_games - totals["draws"],
+        "draw_categories": dict(sorted(draw_categories.items())),
+    }
+    if evaluation.get("evidence") != expected_evidence:
+        raise ValueError("retained evidence summary does not reconcile")
+    return RetainedEvaluation(
+        evaluation=evaluation,
+        matches=matches,
+        artifacts=tuple(artifact_identities),
+    )
+
+
+def validate_retained_evaluation(
+    evaluation_path: Path,
+    *,
+    publication_root: Path,
+    evidence_root: Path,
+    schedule: AuditSchedule,
+    expected_candidate_identity: Mapping[str, Any],
+) -> RetainedEvaluation:
+    """Authoritatively reopen one generic retained reciprocal evaluation."""
+
+    return _validate_retained_evaluation_core(
+        evaluation_path,
+        publication_root=publication_root,
+        evidence_root=evidence_root,
+        schedule=schedule,
+        expected_candidate_identity=expected_candidate_identity,
+        replay_winners=None,
+    )
+
+
+def evaluate_retained_candidate(
+    controller: str,
+    *,
+    expected_candidate_identity: Mapping[str, Any],
+    schedule: AuditSchedule,
+    publication_root: Path,
+    server_cmd: Sequence[str],
+    workers: int,
+    evaluator: Callable[..., Mapping[str, Any]] = evaluate_controllers,
+) -> RetainedEvaluation:
+    """Run the generic audit-grade evaluator and reopen all published evidence."""
+
+    _validate_retained_schedule(schedule)
+    _require_string(controller, label="retained candidate controller")
+    if type(workers) is not int or workers < 1:
+        raise ValueError("retained evaluation workers must be positive")
+    if not isinstance(server_cmd, Sequence) or isinstance(server_cmd, (str, bytes)):
+        raise ValueError("retained evaluation server command must be a sequence")
+    root = Path(publication_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    evaluation_path = root / "evaluation.json"
+    if evaluation_path.exists():
+        raise ValueError("retained evaluation output already exists")
+    result = evaluator(
+        controller,
+        "random",
+        games=schedule.maps,
+        seed_start=schedule.seed_start,
+        both_seats=True,
+        workers=workers,
+        server_cmd=server_cmd,
+        output_path=evaluation_path,
+        environment="tactical-v2",
+        evidence_dir=root / "evidence",
+        start_profile="standard-3v3",
+        capture_trace=True,
+        evidence_retention="all",
+    )
+    if not isinstance(result, Mapping):
+        raise ValueError("retained evaluator must return an evaluation mapping")
+    return validate_retained_evaluation(
+        evaluation_path,
+        publication_root=root,
+        evidence_root=root / "evidence",
+        schedule=schedule,
+        expected_candidate_identity=expected_candidate_identity,
+    )
+
+
 def validate_physical_map(
     root: Path,
     candidate: AuditCandidate,
@@ -1395,6 +1772,18 @@ def validate_physical_map(
         raise ValueError("map evaluation source identity changed")
     if audit_identity.get("checkpoint_sha256") != _checkpoint_digest(candidate):
         raise ValueError("map audit checkpoint identity changed")
+
+    # Keep the legacy audit-specific envelope checks above, then delegate all
+    # retained game/evidence semantics to the public generic core.  The legacy
+    # checks below remain as defense in depth and preserve its frozen contract.
+    _validate_retained_evaluation_core(
+        evaluation_path,
+        publication_root=audit_root,
+        evidence_root=map_root / "evidence",
+        schedule=replace(schedule, seed_start=map_seed, maps=1),
+        expected_candidate_identity=expected_candidate,
+        replay_winners=_replay_winners,
+    )
 
     matches_raw = evaluation.get("matches")
     if not isinstance(matches_raw, list) or len(matches_raw) != 2:

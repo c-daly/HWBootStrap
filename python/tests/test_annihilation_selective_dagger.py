@@ -4922,3 +4922,536 @@ def test_training_pipeline_dispatches_physical_iterations_transactionally(
         "iteration-2",
         "iteration-3",
     ]
+
+
+def _task10_definition(tmp_path: Path) -> object:
+    candidates = []
+    for iteration in range(4):
+        actor = tmp_path / f"task10-actor-{iteration}"
+        checkpoint_dir = actor / "checkpoints"
+        checkpoint_dir.mkdir(parents=True)
+        step = 38_912 if iteration == 0 else 0
+        checkpoint = checkpoint_dir / f"step_{step:09d}.zip"
+        checkpoint.write_bytes(f"task10-actor-{iteration}".encode("ascii"))
+        controller = {
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(actor.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": step,
+            "inference_mode": "deterministic",
+        }
+        identity = {
+            "kind": "snapshot",
+            "inference_mode": "deterministic",
+            "path": str(checkpoint.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": step,
+            "contract_hash": "c" * 64,
+            "contract_version": "tactical-v2",
+            "environment": "tactical-v2",
+            "encoding_hash": "e" * 64,
+            "contract": {"version": "tactical-v2"},
+            "observation_size": 1292,
+            "action_size": 1288,
+            "legacy": False,
+            "promotable": True,
+        }
+        candidates.append(dagger_module.DevelopmentCandidate.from_dict({
+            "candidate_id": (
+                "baseline" if iteration == 0 else f"iteration-{iteration}"
+            ),
+            "iteration": iteration,
+            "controller": json.dumps(controller, sort_keys=True),
+            "checkpoint_path": str(checkpoint.resolve()),
+            "checkpoint_sha256": _sha256(checkpoint),
+            "controller_identity": identity,
+        }))
+    return dagger_module.DevelopmentEvaluationDefinition.create(
+        candidates=candidates,
+        panel_hash="1" * 64,
+        scenario_hash="2" * 64,
+        contract_hash="c" * 64,
+        encoding_hash="e" * 64,
+        repository={
+            "root": str(ROOT.resolve()),
+            "commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "dirty": False,
+        },
+    )
+
+
+def _task10_rows() -> tuple[dict[str, Any], ...]:
+    return tuple({
+        "seed": 20_000_000 + index // 2,
+        "candidate_seat": index % 2,
+        "winner": index % 2,
+        "outcome": "win",
+        "start_profile": "standard-3v3",
+        "reference_seat": index % 2,
+        "terminated": True,
+        "truncated": False,
+        "summary": {
+            "command_count": 1,
+            "round_count": 1,
+            "damage_by_seat": [0, 0],
+            "kills_by_seat": [0, 0],
+            "end_turns_by_seat": [1, 1],
+            "wasted_end_turns_by_seat": [0, 0],
+            "peak_normalized_advantage": 1.0,
+            "final_normalized_advantage": 1.0,
+            "maximum_state_repetition": 1,
+        },
+        "classification": None,
+        "trace_path": f"evidence/traces/match-{index:06d}.json",
+        "replay_path": f"evidence/replays/match-{index:06d}.replay",
+    } for index in range(200))
+
+
+class _Task10PhysicalBoundary:
+    def __init__(self) -> None:
+        self.evaluate_calls: list[dict[str, Any]] = []
+        self.validate_calls: list[dict[str, Any]] = []
+
+    def _open(self, publication_root: Path) -> object:
+        import ml_lab.checkpoint_audit as audit_domain
+
+        root = Path(publication_root)
+        rows = _task10_rows()
+        artifacts = []
+        for row in rows:
+            trace_path = root / row["trace_path"]
+            replay_path = root / row["replay_path"]
+            if not trace_path.is_file() or not replay_path.is_file():
+                raise ValueError("retained Task 10 artifact is missing")
+            artifacts.append(audit_domain.RetainedArtifactIdentity(
+                trace_path=row["trace_path"],
+                trace_sha256=_sha256(trace_path),
+                trace_byte_size=trace_path.stat().st_size,
+                replay_path=row["replay_path"],
+                replay_sha256=_sha256(replay_path),
+                replay_byte_size=replay_path.stat().st_size,
+            ))
+        evaluation_path = root / "evaluation.json"
+        if not evaluation_path.is_file():
+            raise ValueError("retained Task 10 evaluation is missing")
+        return audit_domain.RetainedEvaluation(
+            evaluation=json.loads(evaluation_path.read_text(encoding="utf-8")),
+            matches=rows,
+            artifacts=tuple(artifacts),
+        )
+
+    def evaluate(self, controller: str, **kwargs: Any) -> object:
+        self.evaluate_calls.append({"controller": controller, **kwargs})
+        root = Path(kwargs["publication_root"])
+        (root / "evidence" / "traces").mkdir(parents=True)
+        (root / "evidence" / "replays").mkdir(parents=True)
+        for index, row in enumerate(_task10_rows()):
+            (root / row["trace_path"]).write_bytes(
+                f"trace-{index}".encode("ascii")
+            )
+            (root / row["replay_path"]).write_bytes(
+                f"replay-{index}".encode("ascii")
+            )
+        (root / "evaluation.json").write_text(
+            json.dumps({"schema_version": 1}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return self._open(root)
+
+    def validate(self, evaluation_path: Path, **kwargs: Any) -> object:
+        self.validate_calls.append({
+            "evaluation_path": Path(evaluation_path),
+            **kwargs,
+        })
+        return self._open(Path(kwargs["publication_root"]))
+
+
+def test_task10_candidate_evaluation_is_transactional_and_exact_reuse_launches_zero_games(
+    tmp_path: Path,
+) -> None:
+    """A completed candidate reopens every byte and never calls the game adapter."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    candidate = definition.candidates[0]
+    boundary = _Task10PhysicalBoundary()
+    evaluations_root = tmp_path / "development-evaluations"
+
+    first = runner.run_development_candidate_evaluation(
+        definition=definition,
+        candidate=candidate,
+        output_root=evaluations_root,
+        server_cmd=("fake-gym-server",),
+        workers=3,
+        evaluate_candidate=boundary.evaluate,
+        validate_candidate=boundary.validate,
+        repository_identity_provider=_repository_provider,
+    )
+    assert first.new_games == 200
+    assert first.reused is False
+    assert first.result.root == (evaluations_root / "baseline").resolve()
+    assert len(boundary.evaluate_calls) == 1
+    assert boundary.evaluate_calls[0]["schedule"].seed_start == 20_000_000
+    assert boundary.evaluate_calls[0]["schedule"].maps == 100
+
+    second = runner.run_development_candidate_evaluation(
+        definition=definition,
+        candidate=candidate,
+        output_root=evaluations_root,
+        server_cmd=("fake-gym-server",),
+        workers=3,
+        evaluate_candidate=boundary.evaluate,
+        validate_candidate=boundary.validate,
+        repository_identity_provider=_repository_provider,
+    )
+    assert second.new_games == 0
+    assert second.reused is True
+    assert second.result.content_identity == first.result.content_identity
+    assert len(boundary.evaluate_calls) == 1
+
+    trace = evaluations_root / "baseline" / "physical" / (
+        "evidence/traces/match-000000.json"
+    )
+    trace.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="artifact|hash|physical|reusable"):
+        runner.run_development_candidate_evaluation(
+            definition=definition,
+            candidate=candidate,
+            output_root=evaluations_root,
+            server_cmd=("fake-gym-server",),
+            workers=3,
+            evaluate_candidate=boundary.evaluate,
+            validate_candidate=boundary.validate,
+            repository_identity_provider=_repository_provider,
+        )
+    assert len(boundary.evaluate_calls) == 1
+
+
+def test_task10_candidate_publication_rejects_repository_drift(
+    tmp_path: Path,
+) -> None:
+    """A repository change after games leaves diagnostic staging and no result."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    boundary = _Task10PhysicalBoundary()
+    calls = 0
+
+    def drifting_repository(root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(root)
+        if calls >= 2:
+            identity["source_tree"] = "f" * 40
+        return identity
+
+    output_root = tmp_path / "repository-drift-evaluations"
+    with pytest.raises(ValueError, match="repository|identity|changed"):
+        runner.run_development_candidate_evaluation(
+            definition=definition,
+            candidate=definition.candidates[0],
+            output_root=output_root,
+            server_cmd=("fake-gym-server",),
+            workers=2,
+            evaluate_candidate=boundary.evaluate,
+            validate_candidate=boundary.validate,
+            repository_identity_provider=drifting_repository,
+        )
+
+    assert len(boundary.evaluate_calls) == 1
+    assert not (output_root / "baseline").exists()
+    assert (output_root / "baseline.staging").is_dir()
+
+
+def test_task10_panel_evaluation_dispatches_baseline_then_three_iterations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Panel orchestration owns exactly four candidate directories in locked order."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    calls: list[tuple[str, Path]] = []
+
+    def candidate_stage(*, candidate: object, output_root: Path, **kwargs: Any) -> object:
+        calls.append((candidate.candidate_id, Path(output_root)))
+        return candidate.candidate_id
+
+    monkeypatch.setattr(
+        runner, "run_development_candidate_evaluation", candidate_stage,
+    )
+    results = runner.run_development_evaluation(
+        definition=definition,
+        output_root=tmp_path / "panel",
+        server_cmd=("fake-gym-server",),
+        workers=2,
+        repository_identity_provider=_repository_provider,
+    )
+
+    assert results == (
+        "baseline", "iteration-1", "iteration-2", "iteration-3",
+    )
+    assert calls == [
+        (candidate_id, tmp_path / "panel")
+        for candidate_id in (
+            "baseline", "iteration-1", "iteration-2", "iteration-3",
+        )
+    ]
+
+
+def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Aggregate authority starts at physical preflight evidence, never iteration inference."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    external_preflight = tmp_path / "external-sealed-preflight"
+    external_preflight.mkdir()
+    seal = external_preflight / "oracle-preflight.json"
+    seal.write_bytes(b"sealed-engine-preflight")
+    sealed_sha256 = _sha256(seal)
+    oracle = dagger_module.OracleSpec(
+        oracle_type="bounded-search",
+        depth=4,
+        expansion_budget=512,
+        use_heuristic=True,
+        heuristic_identity="material-plus-pursuit-v1",
+        code_hash="a" * 64,
+    )
+    preflight = runner.DevelopmentPreflightEvidence(
+        evidence_root=external_preflight.resolve(),
+        content_identity=sealed_sha256,
+        selected_oracle=oracle,
+        evidence_class="sealed-engine",
+        starting_learner_checkpoint_path=definition.candidates[0].checkpoint_path,
+        starting_learner_checkpoint_sha256=(
+            definition.candidates[0].checkpoint_sha256
+        ),
+        starting_learner_controller=definition.candidates[0].controller,
+        starting_learner_controller_identity=(
+            definition.candidates[0].controller_identity
+        ),
+    )
+    iteration_roots = tuple(
+        tmp_path / f"physical-iteration-{iteration}"
+        for iteration in (1, 2, 3)
+    )
+    for root in iteration_roots:
+        root.mkdir()
+    heldout = {
+        "labels": 100,
+        "reason_counts": {
+            "conversion": 100,
+            "favorable": 0,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        },
+        "disagreements": 10,
+        "disagreement_reason_counts": {
+            "conversion": 10,
+            "favorable": 0,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        },
+    }
+    iterations = tuple(
+        runner.DevelopmentIterationEvidence(
+            root=root.resolve(),
+            iteration=index,
+            content_identity=hashlib.sha256(
+                f"iteration-{index}".encode("ascii")
+            ).hexdigest(),
+            selected_oracle=oracle,
+            preflight_root=external_preflight.resolve(),
+            preflight_content_identity=sealed_sha256,
+            preflight_evidence_class="sealed-engine",
+            actor_checkpoint_sha256=definition.candidates[index].checkpoint_sha256,
+            actor_controller=definition.candidates[index].controller,
+            actor_controller_identity=(
+                definition.candidates[index].controller_identity
+            ),
+            validation_collection=heldout,
+            collection_metrics={"iteration": index},
+            training_metrics={"iteration": index},
+            timings={"elapsed_seconds": float(index)},
+        )
+        for index, root in enumerate(iteration_roots, start=1)
+    )
+    evaluations_root = tmp_path / "physical-evaluations"
+    evaluation_evidence = {}
+    for candidate in definition.candidates:
+        root = evaluations_root / candidate.candidate_id
+        root.mkdir(parents=True)
+        evaluation_evidence[candidate.candidate_id] = (
+            runner.DevelopmentCandidateEvidence(
+                root=root.resolve(),
+                candidate_id=candidate.candidate_id,
+                controller=candidate.controller,
+                checkpoint_sha256=candidate.checkpoint_sha256,
+                controller_identity=candidate.controller_identity,
+                content_identity=hashlib.sha256(
+                    candidate.candidate_id.encode("ascii")
+                ).hexdigest(),
+                matches=_task10_rows(),
+            )
+        )
+
+    preflight_calls: list[Path] = []
+
+    def reopen_preflight(root: Path) -> object:
+        preflight_calls.append(Path(root))
+        if _sha256(Path(root) / "oracle-preflight.json") != sealed_sha256:
+            raise ValueError("external preflight physical bytes changed")
+        return preflight
+
+    def reopen_iteration(root: Path) -> object:
+        return iterations[iteration_roots.index(Path(root))]
+
+    def reopen_evaluation(root: Path, candidate: object) -> object:
+        evidence = evaluation_evidence[candidate.candidate_id]
+        assert evidence.root == Path(root).resolve()
+        return evidence
+
+    publication = runner.publish_development_aggregate(
+        definition=definition,
+        preflight_root=external_preflight,
+        iteration_roots=iteration_roots,
+        evaluations_root=evaluations_root,
+        output_root=tmp_path / "aggregate-publication",
+        reopen_preflight=reopen_preflight,
+        reopen_iteration=reopen_iteration,
+        reopen_evaluation=reopen_evaluation,
+    )
+    assert preflight_calls == [external_preflight.resolve()]
+    assert publication.aggregate["evidence_identity"]["preflight"] == sealed_sha256
+    assert (publication.root / "aggregate.json").is_file()
+    assert (publication.root / "REPORT.md").is_file()
+    assert sealed_sha256 in publication.report
+    assert definition.candidates[0].checkpoint_sha256 in publication.report
+    assert '"evidence_class":"sealed-engine"' in publication.report
+    assert '"oracle_type":"bounded-search"' in publication.report
+    assert (
+        'validation_collection={"disagreement_reason_counts":'
+        '{"conversion":10,"cycle_warning":0,"favorable":0,'
+        '"wasted_end_turn":0},"disagreements":10,"labels":100,'
+        '"reason_counts":{"conversion":100,"cycle_warning":0,'
+        '"favorable":0,"wasted_end_turn":0}}'
+    ) in publication.report
+    assert 'collection_metrics={"iteration":1}' in publication.report
+    assert 'training_metrics={"iteration":1}' in publication.report
+    assert 'timings={"elapsed_seconds":1.0}' in publication.report
+
+    common = {
+        "definition": definition,
+        "preflight_root": external_preflight,
+        "iteration_roots": iteration_roots,
+        "evaluations_root": evaluations_root,
+        "reopen_iteration": reopen_iteration,
+        "reopen_evaluation": reopen_evaluation,
+    }
+    with pytest.raises(RuntimeError, match="preflight|reopen|sealed"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "missing-boundary",
+            reopen_preflight=None,
+        )
+
+    mismatched = list(iterations)
+    mismatched[1] = replace(
+        mismatched[1], preflight_content_identity="f" * 64,
+    )
+    with pytest.raises(ValueError, match="preflight|oracle|identity"):
+        runner.publish_development_aggregate(
+            **{
+                **common,
+                "reopen_iteration": lambda root: mismatched[
+                    iteration_roots.index(Path(root))
+                ],
+            },
+            output_root=tmp_path / "mismatched-preflight",
+            reopen_preflight=reopen_preflight,
+        )
+
+    wrong_actor_identity = dict(iterations[0].actor_controller_identity)
+    wrong_actor_identity["step"] = 1
+    mismatched_actor = list(iterations)
+    mismatched_actor[0] = replace(
+        mismatched_actor[0], actor_controller_identity=wrong_actor_identity,
+    )
+    with pytest.raises(ValueError, match="actor|candidate|controller|identity"):
+        runner.publish_development_aggregate(
+            **{
+                **common,
+                "reopen_iteration": lambda root: mismatched_actor[
+                    iteration_roots.index(Path(root))
+                ],
+            },
+            output_root=tmp_path / "mismatched-actor-identity",
+            reopen_preflight=reopen_preflight,
+        )
+
+    baseline_mismatch = replace(
+        preflight, starting_learner_checkpoint_sha256="f" * 64,
+    )
+    with pytest.raises(ValueError, match="baseline|learner|checkpoint"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "mismatched-baseline",
+            reopen_preflight=lambda _root: baseline_mismatch,
+        )
+
+    wrong_controller = dict(preflight.starting_learner_controller_identity)
+    wrong_controller["path"] = str(tmp_path / "wrong-controller.zip")
+    learner_identity_mismatch = replace(
+        preflight, starting_learner_controller_identity=wrong_controller,
+    )
+    with pytest.raises(ValueError, match="baseline|learner|controller|identity"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "mismatched-learner-identity",
+            reopen_preflight=lambda _root: learner_identity_mismatch,
+        )
+
+    wrong_controller_spec = json.loads(preflight.starting_learner_controller)
+    wrong_controller_spec["step"] = 38_911
+    learner_spec_mismatch = replace(
+        preflight,
+        starting_learner_controller=json.dumps(
+            wrong_controller_spec, sort_keys=True,
+        ),
+    )
+    with pytest.raises(ValueError, match="baseline|learner|controller|identity"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "mismatched-learner-spec",
+            reopen_preflight=lambda _root: learner_spec_mismatch,
+        )
+
+    manifest_path = publication.root / "manifest.json"
+    aggregate_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    aggregate_manifest["content_identity"] = "f" * 64
+    manifest_path.write_text(
+        json.dumps(aggregate_manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="content|identity"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=publication.root,
+            reopen_preflight=reopen_preflight,
+        )
+
+    seal.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="preflight|physical|bytes"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "corrupt-preflight",
+            reopen_preflight=reopen_preflight,
+        )

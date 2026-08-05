@@ -22,6 +22,7 @@ import numpy as np
 
 from .contracts import EnvironmentContract
 from .algorithms import ActorTransferSource
+from .checkpoint_audit import paired_change, summarize_candidate
 from .controllers import ResolvedController, predict, validate_inference_input
 from .draw_classification import DrawCategory, classify_draw, summarize_episode
 from .evaluation import (
@@ -6567,3 +6568,867 @@ def collect_selective_dagger(
             staging, error=exc, definition=definition, stats=stats,
         )
         raise
+
+
+# Task 10: paired closed-loop development evaluation.
+
+_DEVELOPMENT_CANDIDATE_IDS = (
+    "baseline", "iteration-1", "iteration-2", "iteration-3",
+)
+_DEVELOPMENT_REASON_NAMES = (
+    "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+)
+_DEVELOPMENT_CANDIDATE_FIELDS = frozenset({
+    "candidate_id", "iteration", "controller", "checkpoint_path",
+    "checkpoint_sha256", "controller_identity",
+})
+_DEVELOPMENT_CONTROLLER_FIELDS = frozenset({
+    "kind", "path", "source_run", "algorithm", "step", "inference_mode",
+})
+_DEVELOPMENT_CONTROLLER_IDENTITY_FIELDS = frozenset({
+    "kind", "inference_mode", "path", "algorithm", "step", "contract_hash",
+    "contract_version", "environment", "encoding_hash", "contract",
+    "observation_size", "action_size", "legacy", "promotable",
+})
+
+
+@dataclass(frozen=True)
+class DevelopmentCandidate:
+    candidate_id: str
+    iteration: int
+    controller: str
+    checkpoint_path: str
+    checkpoint_sha256: str
+    controller_identity: Mapping[str, Any]
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "DevelopmentCandidate":
+        fields = _strict_fields(
+            value, _DEVELOPMENT_CANDIDATE_FIELDS, "development candidate",
+        )
+        iteration = _strict_int(
+            fields["iteration"], "development candidate iteration", minimum=0,
+        )
+        if iteration > 3:
+            raise ValueError("development candidate iteration is invalid")
+        candidate_id = _strict_string(
+            fields["candidate_id"], "development candidate id",
+        )
+        if candidate_id != _DEVELOPMENT_CANDIDATE_IDS[iteration]:
+            raise ValueError("development candidate id and iteration are inconsistent")
+        controller_text = _strict_string(
+            fields["controller"], "development candidate controller",
+        )
+        try:
+            controller = _strict_fields(
+                json.loads(controller_text),
+                _DEVELOPMENT_CONTROLLER_FIELDS,
+                "development candidate controller",
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError("development candidate controller must be JSON") from exc
+        checkpoint_text = _strict_string(
+            fields["checkpoint_path"], "development checkpoint path",
+        )
+        try:
+            checkpoint = Path(checkpoint_text).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("development checkpoint must physically exist") from exc
+        if not checkpoint.is_file() or str(checkpoint) != checkpoint_text:
+            raise ValueError("development checkpoint path must be a canonical file")
+        checkpoint_sha256 = _hash(
+            fields["checkpoint_sha256"], "development checkpoint sha256",
+        )
+        if _sha256_file(checkpoint) != checkpoint_sha256:
+            raise ValueError("development checkpoint physical bytes changed")
+        expected_step = 38_912 if iteration == 0 else 0
+        if (
+            controller["kind"] != "snapshot"
+            or controller["path"] != checkpoint_text
+            or controller["algorithm"] != "maskable_ppo"
+            or controller["step"] != expected_step
+            or controller["inference_mode"] != "deterministic"
+            or not isinstance(controller["source_run"], str)
+            or not controller["source_run"]
+        ):
+            raise ValueError("development candidate controller identity is invalid")
+        identity = _strict_fields(
+            fields["controller_identity"],
+            _DEVELOPMENT_CONTROLLER_IDENTITY_FIELDS,
+            "development controller identity",
+        )
+        if (
+            identity["kind"] != "snapshot"
+            or identity["inference_mode"] != "deterministic"
+            or identity["path"] != checkpoint_text
+            or identity["algorithm"] != "maskable_ppo"
+            or identity["step"] != expected_step
+            or identity["contract_version"] != "tactical-v2"
+            or identity["environment"] != "tactical-v2"
+            or identity["legacy"] is not False
+            or identity["promotable"] is not True
+        ):
+            raise ValueError("development controller resolved identity is invalid")
+        _hash(identity["contract_hash"], "development controller contract hash")
+        _hash(identity["encoding_hash"], "development controller encoding hash")
+        _strict_int(
+            identity["observation_size"],
+            "development controller observation size",
+            minimum=1,
+        )
+        _strict_int(
+            identity["action_size"], "development controller action size", minimum=1,
+        )
+        contract = identity["contract"]
+        if not isinstance(contract, Mapping) or contract.get("version") != "tactical-v2":
+            raise ValueError("development controller contract is invalid")
+        return cls(
+            candidate_id=candidate_id,
+            iteration=iteration,
+            controller=controller_text,
+            checkpoint_path=checkpoint_text,
+            checkpoint_sha256=checkpoint_sha256,
+            controller_identity=_freeze_contract_value(
+                identity, "development controller identity",
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "iteration": self.iteration,
+            "controller": self.controller,
+            "checkpoint_path": self.checkpoint_path,
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "controller_identity": _mutable_json_value(self.controller_identity),
+        }
+
+
+@dataclass(frozen=True)
+class DevelopmentEvaluationDefinition:
+    candidates: tuple[DevelopmentCandidate, ...]
+    schedule: tuple[ScheduledDuel, ...]
+    opponent: str
+    inference_mode: str
+    observer_enabled: bool
+    search_enabled: bool
+    panel_hash: str
+    scenario_hash: str
+    contract_hash: str
+    encoding_hash: str
+    repository: Mapping[str, Any]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidates: Sequence[DevelopmentCandidate],
+        panel_hash: str,
+        scenario_hash: str,
+        contract_hash: str,
+        encoding_hash: str,
+        repository: Mapping[str, Any],
+    ) -> "DevelopmentEvaluationDefinition":
+        if type(candidates) not in {list, tuple} or len(candidates) != 4:
+            raise ValueError("development definition requires exactly four candidates")
+        parsed: list[DevelopmentCandidate] = []
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, DevelopmentCandidate):
+                raise ValueError("development definition candidate type is invalid")
+            if (
+                candidate.candidate_id != _DEVELOPMENT_CANDIDATE_IDS[index]
+                or candidate.iteration != index
+                or _sha256_file(Path(candidate.checkpoint_path))
+                != candidate.checkpoint_sha256
+            ):
+                raise ValueError("development candidate checkpoint definition changed")
+            identity = candidate.controller_identity
+            if (
+                identity["contract_hash"] != contract_hash
+                or identity["encoding_hash"] != encoding_hash
+            ):
+                raise ValueError("development candidate contract identity changed")
+            parsed.append(candidate)
+        repository_fields = _strict_fields(
+            repository,
+            frozenset({"root", "commit", "source_tree", "dirty"}),
+            "development repository identity",
+        )
+        root = _strict_string(repository_fields["root"], "development repository root")
+        commit = _git_object_id(
+            repository_fields["commit"], "development repository commit",
+        )
+        source_tree = _git_object_id(
+            repository_fields["source_tree"], "development repository source tree",
+        )
+        if repository_fields["dirty"] is not False:
+            raise ValueError("development evaluation requires a clean repository")
+        schedule = tuple(
+            ScheduledDuel(
+                schedule_index=seed - 20_000_000,
+                map_seed=seed,
+                episode_seed=seed,
+                profile="standard-3v3",
+                reference_seat=seat,
+                learner_seat=seat,
+            )
+            for seed in range(20_000_000, 20_000_100)
+            for seat in (0, 1)
+        )
+        return cls(
+            candidates=tuple(parsed),
+            schedule=schedule,
+            opponent="random",
+            inference_mode="deterministic",
+            observer_enabled=False,
+            search_enabled=False,
+            panel_hash=_hash(panel_hash, "development panel hash"),
+            scenario_hash=_hash(scenario_hash, "development scenario hash"),
+            contract_hash=_hash(contract_hash, "development contract hash"),
+            encoding_hash=_hash(encoding_hash, "development encoding hash"),
+            repository=MappingProxyType({
+                "root": root,
+                "commit": commit,
+                "source_tree": source_tree,
+                "dirty": False,
+            }),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "schedule": [game.to_dict() for game in self.schedule],
+            "opponent": self.opponent,
+            "inference_mode": self.inference_mode,
+            "observer_enabled": self.observer_enabled,
+            "search_enabled": self.search_enabled,
+            "panel_hash": self.panel_hash,
+            "scenario_hash": self.scenario_hash,
+            "contract_hash": self.contract_hash,
+            "encoding_hash": self.encoding_hash,
+            "repository": dict(self.repository),
+        }
+
+
+def _development_rows_with_map_seed(
+    rows: Sequence[Mapping[str, Any]], *, label: str,
+) -> tuple[Mapping[str, Any], ...]:
+    if type(rows) not in {list, tuple} or len(rows) != 200:
+        raise ValueError(f"{label} schedule requires exactly 200 games")
+    normalized: list[Mapping[str, Any]] = []
+    for index, raw in enumerate(rows):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{label} row must be an object")
+        expected_seed = 20_000_000 + index // 2
+        expected_seat = index % 2
+        seed = raw.get("map_seed", raw.get("seed"))
+        if type(seed) is not int or seed != expected_seed:
+            raise ValueError(f"{label} schedule seed or ordering changed")
+        if (
+            type(raw.get("candidate_seat")) is not int
+            or raw.get("candidate_seat") != expected_seat
+        ):
+            raise ValueError(f"{label} schedule reciprocal seat changed")
+        if raw.get("outcome") not in {"win", "loss", "draw"}:
+            raise ValueError(f"{label} outcome is invalid")
+        row = dict(raw)
+        row["map_seed"] = seed
+        normalized.append(row)
+    return tuple(normalized)
+
+
+def _development_heldout_summary(
+    collections: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    if type(collections) not in {list, tuple}:
+        raise ValueError("heldout collections must be a list or tuple")
+    labels = 0
+    disagreements = 0
+    reason_labels = {name: 0 for name in _DEVELOPMENT_REASON_NAMES}
+    reason_disagreements = {name: 0 for name in _DEVELOPMENT_REASON_NAMES}
+    expected = frozenset({
+        "labels", "reason_counts", "disagreements", "disagreement_reason_counts",
+    })
+    for raw in collections:
+        fields = _strict_fields(raw, expected, "heldout collection")
+        count = _strict_int(fields["labels"], "heldout labels", minimum=0)
+        mismatch = _strict_int(
+            fields["disagreements"], "heldout disagreements", minimum=0,
+        )
+        if mismatch > count:
+            raise ValueError("heldout disagreements exceed labels")
+        reasons = _strict_fields(
+            fields["reason_counts"],
+            frozenset(_DEVELOPMENT_REASON_NAMES),
+            "heldout reason counts",
+        )
+        disagreement_reasons = _strict_fields(
+            fields["disagreement_reason_counts"],
+            frozenset(_DEVELOPMENT_REASON_NAMES),
+            "heldout disagreement reason counts",
+        )
+        labels += count
+        disagreements += mismatch
+        for name in _DEVELOPMENT_REASON_NAMES:
+            owned = _strict_int(
+                reasons[name], f"heldout {name} labels", minimum=0,
+            )
+            different = _strict_int(
+                disagreement_reasons[name],
+                f"heldout {name} disagreements",
+                minimum=0,
+            )
+            if owned > count or different > owned:
+                raise ValueError("heldout disagreement reason counts are inconsistent")
+            reason_labels[name] += owned
+            reason_disagreements[name] += different
+    return {
+        "labels": labels,
+        "agreements": labels - disagreements,
+        "disagreements": disagreements,
+        "accuracy": (labels - disagreements) / labels if labels else None,
+        "by_reason": {
+            name: {
+                "labels": reason_labels[name],
+                "disagreements": reason_disagreements[name],
+                "accuracy": (
+                    (reason_labels[name] - reason_disagreements[name])
+                    / reason_labels[name]
+                    if reason_labels[name]
+                    else None
+                ),
+            }
+            for name in _DEVELOPMENT_REASON_NAMES
+        },
+    }
+
+
+def summarize_development_candidate(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    heldout_collections: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Derive Task 10 game and cumulative supervised metrics from canonical rows."""
+
+    normalized = _development_rows_with_map_seed(rows, label="development candidate")
+    summary = dict(summarize_candidate(normalized))
+    summary["confidence_intervals"] = {
+        name: {**dict(interval), "confidence": 0.95}
+        for name, interval in summary["confidence_intervals"].items()
+    }
+    summary["heldout_teacher"] = _development_heldout_summary(heldout_collections)
+    return summary
+
+
+def compare_development_candidates(
+    earlier: Sequence[Mapping[str, Any]],
+    later: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    left = _development_rows_with_map_seed(earlier, label="earlier development")
+    right = _development_rows_with_map_seed(later, label="later development")
+    return paired_change(left, right)
+
+
+def _development_candidate_rates(
+    candidate: Mapping[str, Any],
+) -> tuple[float, float, float]:
+    if not isinstance(candidate, Mapping):
+        raise ValueError("development selection candidate must be an object")
+    summary = candidate.get("summary")
+    if not isinstance(summary, Mapping):
+        raise ValueError("development selection summary is missing")
+    rates = summary.get("rates")
+    diagnostics = summary.get("draw_diagnostics")
+    if not isinstance(rates, Mapping) or not isinstance(diagnostics, Mapping):
+        raise ValueError("development selection metrics are missing")
+    try:
+        win = rates["win"]
+        cycling = diagnostics["cycling"]["incidence"]
+        action_waste = diagnostics["action_waste"]["incidence"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("development selection metrics are incomplete") from exc
+    for value, label in (
+        (win, "win rate"),
+        (cycling, "cycling incidence"),
+        (action_waste, "action-waste incidence"),
+    ):
+        if (
+            type(value) is not float
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError(f"development {label} must be a finite float")
+    return win, cycling, action_waste
+
+
+def select_development_candidate(
+    candidates: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    if type(candidates) not in {list, tuple} or len(candidates) != 4:
+        raise ValueError("development selection requires baseline and three iterations")
+    by_iteration: dict[int, Mapping[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("development selection candidate must be an object")
+        iteration = _strict_int(
+            candidate.get("iteration"), "development selection iteration", minimum=0,
+        )
+        candidate_id = _strict_string(
+            candidate.get("candidate_id"), "development selection candidate id",
+        )
+        if iteration > 3 or candidate_id != _DEVELOPMENT_CANDIDATE_IDS[iteration]:
+            raise ValueError("development selection candidate identity is invalid")
+        if iteration in by_iteration:
+            raise ValueError("development selection candidate iteration is duplicated")
+        _development_candidate_rates(candidate)
+        by_iteration[iteration] = candidate
+    if set(by_iteration) != {0, 1, 2, 3}:
+        raise ValueError("development selection candidate panel is incomplete")
+    return min(
+        (by_iteration[index] for index in (1, 2, 3)),
+        key=lambda candidate: (
+            -_development_candidate_rates(candidate)[0],
+            _development_candidate_rates(candidate)[1],
+            _development_candidate_rates(candidate)[2],
+            candidate["iteration"],
+        ),
+    )
+
+
+def decide_development_success(
+    *,
+    baseline: Mapping[str, Any],
+    selected: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    baseline_win, baseline_cycling, _baseline_waste = _development_candidate_rates(
+        baseline
+    )
+    selected_win, selected_cycling, _selected_waste = _development_candidate_rates(
+        selected
+    )
+    gain = selected_win - baseline_win
+    reduction = (
+        (baseline_cycling - selected_cycling) / baseline_cycling
+        if baseline_cycling > 0.0
+        else 0.0
+    )
+    performance_gate = gain + 1e-12 >= 0.20 or selected_win >= 0.65
+    cycling_gate = reduction + 1e-12 >= 0.50
+    treatment_success = performance_gate and cycling_gate
+    return {
+        "baseline_win_rate": baseline_win,
+        "selected_win_rate": selected_win,
+        "win_rate_gain": gain,
+        "baseline_cycling_incidence": baseline_cycling,
+        "selected_cycling_incidence": selected_cycling,
+        "cycling_relative_reduction": reduction,
+        "performance_gate": performance_gate,
+        "cycling_gate": cycling_gate,
+        "treatment_success": treatment_success,
+        "replication_authorized": treatment_success,
+        "one_seed_winning_rate_gate": selected_win >= 0.65,
+        "confirmation_required": treatment_success,
+    }
+
+
+def confirm_replication_milestone(
+    *,
+    replicate_win_rates: Sequence[float],
+    pooled_wins: int,
+    pooled_games: int,
+) -> Mapping[str, Any]:
+    if (
+        type(replicate_win_rates) not in {list, tuple}
+        or len(replicate_win_rates) != 3
+    ):
+        raise ValueError("replication milestone requires exactly three win rates")
+    rates: list[float] = []
+    for value in replicate_win_rates:
+        if (
+            type(value) is not float
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
+            raise ValueError("replicate win rates must be finite floats")
+        rates.append(value)
+    wins = _strict_int(pooled_wins, "pooled wins", minimum=0)
+    games = _strict_int(pooled_games, "pooled games", minimum=1)
+    if wins > games:
+        raise ValueError("pooled wins exceed pooled games")
+    pooled = wins / games
+    every = all(rate >= 0.65 for rate in rates)
+    pooled_gate = pooled >= 0.70
+    return {
+        "replicate_win_rates": rates,
+        "every_replicate_at_least_0_65": every,
+        "pooled_win_rate": pooled,
+        "pooled_at_least_0_70": pooled_gate,
+        "confirmed": every and pooled_gate,
+    }
+
+
+def _development_evidence_identity(value: Any) -> dict[str, Any]:
+    fields = _strict_fields(
+        value,
+        frozenset({"preflight", "baseline", "iterations", "evaluations"}),
+        "development evidence identity",
+    )
+    iterations = fields["iterations"]
+    evaluations = fields["evaluations"]
+    if type(iterations) not in {list, tuple} or len(iterations) != 3:
+        raise ValueError("development iteration evidence identity is incomplete")
+    if type(evaluations) not in {list, tuple} or len(evaluations) != 4:
+        raise ValueError("development evaluation evidence identity is incomplete")
+    return {
+        "preflight": _hash(fields["preflight"], "development preflight identity"),
+        "baseline": _hash(fields["baseline"], "development baseline identity"),
+        "iterations": [
+            _hash(item, "development iteration identity") for item in iterations
+        ],
+        "evaluations": [
+            _hash(item, "development evaluation identity") for item in evaluations
+        ],
+    }
+
+
+def build_development_aggregate(
+    *,
+    rows_by_candidate: Mapping[str, Sequence[Mapping[str, Any]]],
+    heldout_collections_by_iteration: Mapping[
+        int, Sequence[Mapping[str, Any]]
+    ],
+    evidence_identity: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Build the deterministic Task 10 decision aggregate from reopened evidence."""
+
+    if (
+        not isinstance(rows_by_candidate, Mapping)
+        or set(rows_by_candidate) != set(_DEVELOPMENT_CANDIDATE_IDS)
+    ):
+        raise ValueError("development aggregate candidate panel is incomplete")
+    if (
+        not isinstance(heldout_collections_by_iteration, Mapping)
+        or set(heldout_collections_by_iteration) != {1, 2, 3}
+    ):
+        raise ValueError("development aggregate heldout iteration panel is incomplete")
+    cumulative: dict[int, tuple[Mapping[str, Any], ...]] = {}
+    accumulated: list[Mapping[str, Any]] = []
+    for iteration in (1, 2, 3):
+        current = heldout_collections_by_iteration[iteration]
+        if type(current) not in {list, tuple} or not current:
+            raise ValueError("development heldout iteration collection is missing")
+        accumulated.extend(current)
+        cumulative[iteration] = tuple(accumulated)
+
+    candidates: dict[str, Mapping[str, Any]] = {}
+    normalized_rows: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    for iteration, candidate_id in enumerate(_DEVELOPMENT_CANDIDATE_IDS):
+        rows = _development_rows_with_map_seed(
+            rows_by_candidate[candidate_id], label=f"development {candidate_id}",
+        )
+        normalized_rows[candidate_id] = rows
+        summary = summarize_development_candidate(
+            rows,
+            heldout_collections=(() if iteration == 0 else cumulative[iteration]),
+        )
+        candidates[candidate_id] = {
+            "candidate_id": candidate_id,
+            "iteration": iteration,
+            "summary": summary,
+        }
+
+    selected = select_development_candidate(tuple(candidates.values()))
+    baseline = candidates["baseline"]
+    decision = decide_development_success(baseline=baseline, selected=selected)
+    paired = {
+        candidate_id: compare_development_candidates(
+            normalized_rows["baseline"], normalized_rows[candidate_id],
+        )
+        for candidate_id in _DEVELOPMENT_CANDIDATE_IDS[1:]
+    }
+    selected_summary = selected["summary"]
+    heldout_accuracy = selected_summary["heldout_teacher"]["accuracy"]
+    game_gain = decision["win_rate_gain"]
+    if game_gain > 0.0 and heldout_accuracy is not None:
+        interpretation = "better-imitation-and-games"
+    elif heldout_accuracy is not None:
+        interpretation = "better-imitation-without-better-games"
+    elif game_gain < 0.0:
+        interpretation = "regression"
+    else:
+        interpretation = "poor-imitation"
+    return {
+        "schema_version": 1,
+        "causal_question": (
+            "Can high-confidence search supervision improve closed-loop standard-3v3 "
+            "play from the frozen starting learner?"
+        ),
+        "evidence_identity": _development_evidence_identity(evidence_identity),
+        "candidates": candidates,
+        "paired_vs_baseline": paired,
+        "selected_candidate_id": selected["candidate_id"],
+        "decision": decision,
+        "replication_confirmation": {
+            "performed": False,
+            "required": decision["confirmation_required"],
+        },
+        "interpretation": interpretation,
+        "final_bank_used": False,
+    }
+
+
+def render_development_report(aggregate: Mapping[str, Any]) -> str:
+    """Render the fixed Task 10 interpretation without promoting diagnostics."""
+
+    if not isinstance(aggregate, Mapping) or aggregate.get("schema_version") != 1:
+        raise ValueError("development aggregate is invalid")
+    selected_id = _strict_string(
+        aggregate.get("selected_candidate_id"), "development selected candidate",
+    )
+    candidates = aggregate.get("candidates")
+    if not isinstance(candidates, Mapping) or selected_id not in candidates:
+        raise ValueError("development aggregate selected candidate is missing")
+    decision = aggregate.get("decision")
+    if not isinstance(decision, Mapping):
+        raise ValueError("development aggregate decision is missing")
+    treatment = "passed" if decision.get("treatment_success") is True else "did not pass"
+    evidence = aggregate.get("evidence_identity")
+    paired = aggregate.get("paired_vs_baseline")
+    if not isinstance(evidence, Mapping) or not isinstance(paired, Mapping):
+        raise ValueError("development aggregate evidence or paired tests are missing")
+
+    def canonical(value: Any) -> str:
+        return json.dumps(
+            _mutable_json_value(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    def optional_metric(value: Any, *, label: str) -> str:
+        if value is None:
+            return "n/a"
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"development report {label} is invalid")
+        return f"{value:.6g}"
+
+    def distribution(value: Any, *, label: str) -> str:
+        if not isinstance(value, Mapping) or set(value) != {"mean", "median", "p90"}:
+            raise ValueError(f"development report {label} distribution is invalid")
+        return " / ".join(
+            optional_metric(value[name], label=f"{label} {name}")
+            for name in ("mean", "median", "p90")
+        )
+
+    lines = [
+        "# Selective DAgger development evaluation",
+        "",
+        "## Causal question",
+        str(aggregate.get("causal_question")),
+        "",
+        "## Frozen inputs",
+        "The four deterministic checkpoints used the identical reciprocal 20m standard-3v3 schedule against Random.",
+        f"Evidence identities: `{canonical(evidence)}`",
+    ]
+    frozen_inputs = aggregate.get("frozen_inputs")
+    if isinstance(frozen_inputs, Mapping):
+        lines.append(f"Frozen definition: `{canonical(frozen_inputs)}`")
+    lines.extend((
+        "",
+        "## Oracle selection",
+    ))
+    oracle = aggregate.get("oracle_selection")
+    lines.append(
+        f"Reopened selection: `{canonical(oracle)}`"
+        if isinstance(oracle, Mapping)
+        else f"Reopened preflight content identity: `{evidence['preflight']}`"
+    )
+
+    iteration_evidence = aggregate.get("iteration_evidence", ())
+    if type(iteration_evidence) not in {list, tuple}:
+        raise ValueError("development iteration evidence is invalid")
+    lines.extend((
+        "",
+        "## Collection yields",
+        "Training and cumulative held-out label yields are retained by iteration and eligibility reason.",
+    ))
+    if iteration_evidence:
+        for item in iteration_evidence:
+            if not isinstance(item, Mapping):
+                raise ValueError("development iteration evidence row is invalid")
+            lines.append(
+                f"- iteration {item.get('iteration')}: "
+                f"validation_collection={canonical(item.get('validation_collection'))}; "
+                f"collection_metrics={canonical(item.get('collection_metrics'))}"
+            )
+    else:
+        lines.append("- Physical iteration detail is supplied by the publication layer.")
+
+    lines.extend((
+        "",
+        "## Training curves and timings",
+        "Iteration manifests retain the training curves, best validation NLL, and phase timings.",
+    ))
+    if iteration_evidence:
+        for item in iteration_evidence:
+            lines.append(
+                f"- iteration {item.get('iteration')}: "
+                f"training_metrics={canonical(item.get('training_metrics'))}; "
+                f"timings={canonical(item.get('timings'))}"
+            )
+    else:
+        lines.append("- Physical training detail is supplied by the publication layer.")
+
+    lines.extend((
+        "",
+        "## Supervised metrics",
+        "Held-out teacher accuracy and disagreement are reported cumulatively and by eligibility reason; teacher accuracy alone is not success.",
+        "| Candidate | Labels | Agreements | Disagreements | Accuracy | By reason |",
+        "|---|---:|---:|---:|---:|---|",
+    ))
+    for candidate_id in _DEVELOPMENT_CANDIDATE_IDS:
+        candidate = candidates.get(candidate_id)
+        if not isinstance(candidate, Mapping):
+            raise ValueError("development report candidate is missing")
+        summary = candidate.get("summary")
+        teacher = summary.get("heldout_teacher") if isinstance(summary, Mapping) else None
+        if not isinstance(teacher, Mapping):
+            raise ValueError("development report heldout metrics are missing")
+        accuracy = teacher.get("accuracy")
+        accuracy_text = "n/a" if accuracy is None else f"{accuracy:.6f}"
+        lines.append(
+            f"| {candidate_id} | {teacher['labels']} | {teacher['agreements']} | "
+            f"{teacher['disagreements']} | {accuracy_text} | "
+            f"`{canonical(teacher['by_reason'])}` |"
+        )
+
+    lines.extend((
+        "",
+        "## Game outcomes",
+        "W/L/D, Wilson intervals, seats, cycling, action waste, EndTurn waste, advantages, rounds, and decisions are derived from retained games.",
+        "| Candidate | W | L | D | Win rate | Wilson 95% | Cycling | Action waste | Wasted EndTurn ratio | Seat asymmetry |",
+        "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|",
+    ))
+    for candidate_id in _DEVELOPMENT_CANDIDATE_IDS:
+        summary = candidates[candidate_id]["summary"]
+        counts = summary["counts"]
+        rates = summary["rates"]
+        diagnostics = summary["draw_diagnostics"]
+        interval = summary["confidence_intervals"]["win"]
+        lines.append(
+            f"| {candidate_id} | {counts['wins']} | {counts['losses']} | "
+            f"{counts['draws']} | {rates['win']:.6f} | "
+            f"[{interval['low']:.6f}, {interval['high']:.6f}] | "
+            f"{diagnostics['cycling']['incidence']:.6f} | "
+            f"{diagnostics['action_waste']['incidence']:.6f} | "
+            f"{summary['candidate_end_turns']['wasted_ratio']:.6f} | "
+            f"{summary['win_rate_p0_minus_p1']:.6f} |"
+        )
+
+    lines.extend((
+        "",
+        "### Seat and waste diagnostics",
+        "Seat cells are W/L/D counts followed by win/loss/draw rates. Incidence and EndTurn values use all 200 games.",
+        "| Candidate | P0 W/L/D (rates) | P1 W/L/D (rates) | P0-P1 win rate | Cycling count / incidence | Action-waste count / incidence | Wasted / total EndTurns / ratio |",
+        "|---|---|---|---:|---:|---:|---:|",
+    ))
+    for candidate_id in _DEVELOPMENT_CANDIDATE_IDS:
+        summary = candidates[candidate_id]["summary"]
+        p0 = summary["seats"]["candidate_as_p0"]
+        p1 = summary["seats"]["candidate_as_p1"]
+        diagnostics = summary["draw_diagnostics"]
+        end_turns = summary["candidate_end_turns"]
+
+        def seat_text(seat: Mapping[str, Any]) -> str:
+            rates = seat["rates"]
+            return (
+                f"{seat['wins']}/{seat['losses']}/{seat['draws']} "
+                f"({rates['win']:.6f}/{rates['loss']:.6f}/{rates['draw']:.6f})"
+            )
+
+        lines.append(
+            f"| {candidate_id} | {seat_text(p0)} | {seat_text(p1)} | "
+            f"{summary['win_rate_p0_minus_p1']:.6f} | "
+            f"{diagnostics['cycling']['count']} / "
+            f"{diagnostics['cycling']['incidence']:.6f} | "
+            f"{diagnostics['action_waste']['count']} / "
+            f"{diagnostics['action_waste']['incidence']:.6f} | "
+            f"{end_turns['wasted']} / {end_turns['total']} / "
+            f"{end_turns['wasted_ratio']:.6f} |"
+        )
+
+    lines.extend((
+        "",
+        "### Advantage and time-to-victory diagnostics",
+        "Advantage cells are final / peak means. Victory durations are mean / median / p90.",
+        "| Candidate | All-game advantage | Draw advantage | Winning rounds | Winning decisions |",
+        "|---|---:|---:|---:|---:|",
+    ))
+    for candidate_id in _DEVELOPMENT_CANDIDATE_IDS:
+        summary = candidates[candidate_id]["summary"]
+        advantage = summary["normalized_advantage"]
+        all_games = advantage["all_games"]
+        draws = advantage["draws"]
+        winning = summary["winning_games"]
+        lines.append(
+            f"| {candidate_id} | {all_games['final']:.6f} / "
+            f"{all_games['peak']:.6f} | "
+            f"{optional_metric(draws['final'], label='draw final advantage')} / "
+            f"{optional_metric(draws['peak'], label='draw peak advantage')} | "
+            f"{distribution(winning['round_count'], label='winning rounds')} | "
+            f"{distribution(winning['command_count'], label='winning decisions')} |"
+        )
+
+    lines.extend((
+        "",
+        "## Paired tests",
+        "Each iteration is compared with the baseline on identical map-seat keys using an exact sign test.",
+        "| Candidate | Transition table | Baseline-only wins | Candidate-only wins | Net win change | Absolute win-rate change | Exact sign-test p |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ))
+    for candidate_id in _DEVELOPMENT_CANDIDATE_IDS[1:]:
+        change = paired.get(candidate_id)
+        if not isinstance(change, Mapping):
+            raise ValueError("development report paired result is missing")
+        lines.append(
+            f"| {candidate_id} | transitions={canonical(change['transition_table'])} | "
+            f"{change['left_only_wins']} | "
+            f"{change['right_only_wins']} | {change['net_win_change']} | "
+            f"{change['absolute_win_rate_change']:.6f} | "
+            f"{change['exact_sign_test_p_value']:.12g} |"
+        )
+
+    lines.extend((
+        "",
+        "## Chosen candidate",
+        f"Chosen candidate: {selected_id}",
+        f"{selected_id} was selected by win rate, then cycling, action waste, and earlier-iteration tie breaks.",
+        "",
+        "## Threshold decisions",
+        f"Decision values: `{canonical(decision)}`",
+        "| Baseline win | Selected win | Gain | Performance gate | Baseline cycling | Selected cycling | Relative reduction | Cycling gate | Treatment success | Replication authorized | One-seed 65% gate | Confirmation required |",
+        "|---:|---:|---:|---|---:|---:|---:|---|---|---|---|---|",
+        (
+            f"| {decision['baseline_win_rate']:.6f} | "
+            f"{decision['selected_win_rate']:.6f} | "
+            f"{decision['win_rate_gain']:.6f} | {decision['performance_gate']} | "
+            f"{decision['baseline_cycling_incidence']:.6f} | "
+            f"{decision['selected_cycling_incidence']:.6f} | "
+            f"{decision['cycling_relative_reduction']:.6f} | "
+            f"{decision['cycling_gate']} | {decision['treatment_success']} | "
+            f"{decision['replication_authorized']} | "
+            f"{decision['one_seed_winning_rate_gate']} | "
+            f"{decision['confirmation_required']} |"
+        ),
+        f"The one-seed treatment {treatment}; a 20-point gain below 65% authorizes replication but is not the winning-model milestone.",
+        "",
+        "## Fixed interpretation",
+        f"Interpretation branch: `{aggregate.get('interpretation')}`.",
+        "The final 17m seeds were not used. The three-replicate confirmation is a later experiment.",
+        "",
+    ))
+    return "\n".join(lines)
