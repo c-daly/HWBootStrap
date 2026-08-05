@@ -2737,6 +2737,28 @@ class _PhysicalIterationHarness:
         assert preceding_actor is not None
         return preceding_actor["incoming"]
 
+    def collection_metrics(self, *, partition: str, index: int) -> dict[str, Any]:
+        row_count = 20_000 + index if partition == "train" else 2_000 + index
+        return {
+            "games": 2,
+            "labels": row_count,
+            "reason_counts": {
+                "conversion": row_count,
+                "favorable": index,
+                "cycle_warning": index,
+                "wasted_end_turn": 0,
+            },
+            "disagreements": index,
+            "disagreement_reason_counts": {
+                "conversion": index,
+                "favorable": index,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+            "mean_expansions": 100.0,
+            "max_expansions": 512,
+        }
+
     def collect(
         self,
         *,
@@ -2764,6 +2786,9 @@ class _PhysicalIterationHarness:
             "row_count": (
                 20_000 + index if partition == "train" else 2_000 + index
             ),
+            "collection_metrics": self.collection_metrics(
+                partition=partition, index=index,
+            ),
         }
 
     def reopen_overlay(
@@ -2788,6 +2813,9 @@ class _PhysicalIterationHarness:
             "content_identity": _sha256(artifact),
             "row_count": (
                 20_000 + index if partition == "train" else 2_000 + index
+            ),
+            "collection_metrics": self.collection_metrics(
+                partition=partition, index=index,
             ),
         }
         if (
@@ -3022,6 +3050,19 @@ class _PhysicalIterationHarness:
             ]
 
         return {
+            "predecessor": (
+                None
+                if index == 1
+                else {
+                    "iteration": index - 1,
+                    "content_identity": json.loads(
+                        (
+                            self.root / "iterations"
+                            / f"iteration-{index - 1}" / "manifest.json"
+                        ).read_text(encoding="utf-8")
+                    )["content_identity"],
+                }
+            ),
             "definition": {
                 "panel_sha256": "3" * 64,
                 "panel_byte_size": 101,
@@ -3092,11 +3133,20 @@ class _PhysicalIterationHarness:
                 "hardware": {
                     "training_device": "cuda:0",
                     "publication_device": "cpu",
+                    "cuda_available": True,
+                    "device_index": 0,
+                    "cuda_runtime": "12.8",
                     "device_name": "test-gpu",
                 },
                 "software": {
-                    "python": "test",
+                    "python": "3.11.test",
+                    "implementation": "CPython",
+                    "platform": "test-platform",
+                    "executable": "C:/python/python.exe",
+                    "numpy": "test",
                     "torch": "test",
+                    "stable_baselines3": "test",
+                    "sb3_contrib": "test",
                 },
             },
         }
@@ -3137,19 +3187,7 @@ class _PhysicalIterationHarness:
         )
 
         def collection(overlay: object) -> dict[str, Any]:
-            return {
-                "games": 2,
-                "labels": overlay["row_count"],
-                "reason_counts": {
-                    "conversion": overlay["row_count"],
-                    "favorable": 0,
-                    "cycle_warning": 0,
-                    "wasted_end_turn": 0,
-                },
-                "disagreements": 0,
-                "mean_expansions": 100.0,
-                "max_expansions": 512,
-            }
+            return json.loads(json.dumps(overlay["collection_metrics"]))
 
         payload = {
             "schema_version": 1,
@@ -3270,6 +3308,32 @@ def test_training_iteration_stage_order_preserves_learner_ownership_and_validati
         for manifest in manifests
     ] == [1, 2, 3]
     assert [
+        manifest.metrics["train_collection"]["disagreement_reason_counts"]
+        for manifest in manifests
+    ] == [
+        {
+            "conversion": index,
+            "favorable": index,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        }
+        for index in (1, 2, 3)
+    ]
+    assert [
+        manifest.metrics["validation_collection"][
+            "disagreement_reason_counts"
+        ]
+        for manifest in manifests
+    ] == [
+        {
+            "conversion": index,
+            "favorable": index,
+            "cycle_warning": 0,
+            "wasted_end_turn": 0,
+        }
+        for index in (1, 2, 3)
+    ]
+    assert [
         Path(manifests[index].identity["incoming_learner"]["identity"]["source_run"])
         for index in (1, 2)
     ] == [
@@ -3288,6 +3352,48 @@ def test_training_iteration_stage_order_preserves_learner_ownership_and_validati
         item.content_identity for item in manifests
     ]
     assert {key: harness.counts[key] for key in compute_keys} == compute_counts
+
+
+def test_run_iteration_rejects_manifest_collection_metrics_not_in_overlay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A builder cannot invent disagreement reasons absent from reopened data."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "collection-metric-tamper"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+
+    def tampered_manifest(**kwargs: object) -> dict[str, Any]:
+        payload = harness.build_iteration_manifest(**kwargs)
+        payload["metrics"]["train_collection"][
+            "disagreement_reason_counts"
+        ]["conversion"] = 0
+        payload["content_identity"] = _content_identity(payload)
+        return payload
+
+    dependencies = replace(
+        harness.dependencies(),
+        build_iteration_manifest=tampered_manifest,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="collection metrics do not match reopened overlay evidence",
+    ):
+        runner.run_training_pipeline(
+            output_root=root,
+            dependencies=dependencies,
+        )
+
+    assert not (root / "iterations" / "iteration-1").exists()
+    assert (root / "iterations" / "iteration-1.staging").is_dir()
 
 
 @pytest.mark.parametrize(
@@ -3415,6 +3521,89 @@ def test_run_iteration_rejects_self_consistent_wrong_predecessor_iteration(
     assert not (root / "iterations" / "iteration-3.staging").exists()
 
 
+@pytest.mark.parametrize(
+    "tamper_mode",
+    ["self-consistent-manifest", "cross-chain-manifest-and-actor"],
+)
+@pytest.mark.parametrize(
+    ("predecessor_index", "next_index"),
+    [(1, 2), (2, 3)],
+)
+def test_run_iteration_rejects_spliced_predecessor_chain_before_compute(
+    tmp_path: Path,
+    tamper_mode: str,
+    predecessor_index: int,
+    next_index: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """k2/k3 authenticate the recursively reconstructed physical causal chain."""
+
+    import run_annihilation_selective_dagger as runner
+
+    root = tmp_path / "selective-dagger"
+    harness = _PhysicalIterationHarness(root, runner)
+    monkeypatch.setattr(
+        runner.imitation_domain,
+        "validate_actor_supervision_publication",
+        harness.validate_actor_supervision_publication,
+    )
+    dependencies = harness.dependencies()
+    prepared = harness.prepare(output_root=root)
+    validated = harness.validate(output_root=root, prepared=prepared)
+    preflight = harness.preflight(output_root=root, validated=validated)
+    harness.baseline(
+        output_root=root,
+        validated=validated,
+        preflight=preflight,
+    )
+    for index in range(1, predecessor_index + 1):
+        runner.run_iteration(index, output_root=root, dependencies=dependencies)
+
+    predecessor_iteration = (
+        root / "iterations" / f"iteration-{predecessor_index}"
+    )
+    manifest_path = predecessor_iteration / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["identity"]["definition"]["panel_sha256"] = "f" * 64
+    manifest["content_identity"] = _content_identity(manifest)
+
+    if tamper_mode == "cross-chain-manifest-and-actor":
+        foreign_iteration = (
+            tmp_path / "foreign-experiment" / "iterations"
+            / f"iteration-{predecessor_index}"
+        )
+        foreign_iteration.mkdir(parents=True)
+        _rewrite(foreign_iteration / "manifest.json", manifest)
+        shutil.copytree(
+            predecessor_iteration / "actor",
+            foreign_iteration / "actor",
+        )
+        shutil.copytree(
+            foreign_iteration / "actor",
+            predecessor_iteration / "actor",
+            dirs_exist_ok=True,
+        )
+        manifest_path.write_bytes(
+            (foreign_iteration / "manifest.json").read_bytes()
+        )
+    else:
+        _rewrite(manifest_path, manifest)
+
+    compute_keys = (
+        "collect-validation", "collect-train", "corpus", "train",
+    )
+    before = {key: harness.counts[key] for key in compute_keys}
+
+    with pytest.raises(ValueError, match="predecessor.*identity|iteration.*identity"):
+        runner.run_iteration(next_index, output_root=root, dependencies=dependencies)
+
+    assert {key: harness.counts[key] for key in compute_keys} == before
+    assert not (root / "iterations" / f"iteration-{next_index}").exists()
+    assert not (
+        root / "iterations" / f"iteration-{next_index}.staging"
+    ).exists()
+
+
 def test_run_iteration_rejects_forged_external_prior_actor_before_compute(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3459,7 +3648,11 @@ def test_run_iteration_rejects_forged_external_prior_actor_before_compute(
         context = harness.load_iteration_context(
             index=index, output_root=output_root,
         )
-        return {**context, "preceding_actor": forged_actor}
+        return (
+            {**context, "preceding_actor": forged_actor}
+            if index == 2
+            else context
+        )
 
     forged_dependencies = replace(
         dependencies,
@@ -3706,6 +3899,28 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
         assert index == 1 and preceding_actor is None
         return validated["starting_learner"]
 
+    def collection_metrics(partition: str) -> dict[str, Any]:
+        row_count = 20_001 if partition == "train" else 2_001
+        return {
+            "games": 2,
+            "labels": row_count,
+            "reason_counts": {
+                "conversion": row_count,
+                "favorable": 1,
+                "cycle_warning": 1,
+                "wasted_end_turn": 0,
+            },
+            "disagreements": 1,
+            "disagreement_reason_counts": {
+                "conversion": 1,
+                "favorable": 1,
+                "cycle_warning": 0,
+                "wasted_end_turn": 0,
+            },
+            "mean_expansions": 100.0,
+            "max_expansions": 512,
+        }
+
     def collect(
         *,
         partition: str,
@@ -3727,6 +3942,7 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
                 train_identity if partition == "train" else validation_identity
             ),
             "row_count": 20_001 if partition == "train" else 2_001,
+            "collection_metrics": collection_metrics(partition),
         }
 
     def reopen_overlay(
@@ -3752,6 +3968,7 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
                 train_identity if partition == "train" else validation_identity
             ),
             "row_count": 20_001 if partition == "train" else 2_001,
+            "collection_metrics": collection_metrics(partition),
         }
         if (
             expected is not None
@@ -3819,6 +4036,7 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
         counts["identity"] += 1
         assert index == 1 and incoming is context["validated"]["starting_learner"]
         return {
+            "predecessor": None,
             "definition": {
                 "panel_sha256": "7" * 64,
                 "panel_byte_size": 101,
@@ -3907,11 +4125,16 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
                 "hardware": {
                     "training_device": "cuda:0",
                     "publication_device": "cpu",
+                    "cuda_available": True,
+                    "device_index": 0,
                     "cuda_runtime": "12.8",
                     "device_name": "test-gpu",
                 },
                 "software": {
                     "python": "3.11.test",
+                    "implementation": "CPython",
+                    "platform": "test-platform",
+                    "executable": "C:/python/python.exe",
                     "numpy": "test",
                     "torch": "test",
                     "stable_baselines3": "test",
@@ -3958,32 +4181,10 @@ def test_run_iteration_exact_reuse_reopens_children_without_games_or_epochs(
                 },
             },
             "metrics": {
-                "train_collection": {
-                    "games": 2,
-                    "labels": train_overlay["row_count"],
-                    "reason_counts": {
-                        "conversion": train_overlay["row_count"],
-                        "favorable": 0,
-                        "cycle_warning": 0,
-                        "wasted_end_turn": 0,
-                    },
-                    "disagreements": 0,
-                    "mean_expansions": 100.0,
-                    "max_expansions": 512,
-                },
-                "validation_collection": {
-                    "games": 2,
-                    "labels": validation_overlay["row_count"],
-                    "reason_counts": {
-                        "conversion": validation_overlay["row_count"],
-                        "favorable": 0,
-                        "cycle_warning": 0,
-                        "wasted_end_turn": 0,
-                    },
-                    "disagreements": 0,
-                    "mean_expansions": 100.0,
-                    "max_expansions": 512,
-                },
+                "train_collection": dict(train_overlay["collection_metrics"]),
+                "validation_collection": dict(
+                    validation_overlay["collection_metrics"]
+                ),
                 "training": {
                     "training_rows": train_overlay["row_count"],
                     "validation_rows": validation_overlay["row_count"],

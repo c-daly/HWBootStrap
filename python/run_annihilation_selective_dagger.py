@@ -877,7 +877,36 @@ def _build_iteration_manifest(
         actor=actor,
         timings=timings,
     )
-    return IterationManifest.from_dict(payload)
+    manifest = IterationManifest.from_dict(payload)
+    expected_collections = {
+        "train_collection": _iteration_overlay_collection_metrics(train_overlay),
+        "validation_collection": _iteration_overlay_collection_metrics(
+            validation_overlay
+        ),
+    }
+    if any(
+        not _same_json(manifest.metrics[name], expected)
+        for name, expected in expected_collections.items()
+    ):
+        raise ValueError(
+            "selective-DAgger iteration collection metrics do not match "
+            "reopened overlay evidence"
+        )
+    return manifest
+
+
+def _iteration_overlay_collection_metrics(overlay: object) -> Mapping[str, Any]:
+    if isinstance(overlay, dagger_domain.DaggerOverlay):
+        metrics = dagger_domain.dagger_overlay_collection_metrics(overlay)
+    elif isinstance(overlay, Mapping):
+        metrics = overlay.get("collection_metrics")
+    else:
+        metrics = getattr(overlay, "collection_metrics", None)
+    if not isinstance(metrics, Mapping):
+        raise ValueError(
+            "selective-DAgger reopened overlay collection metrics are unavailable"
+        )
+    return metrics
 
 
 def _iteration_overlay_row_count(overlay: object) -> int:
@@ -1141,6 +1170,52 @@ def _require_iteration_identity_repository(
         raise ValueError("selective-DAgger iteration manifest repository identity changed")
 
 
+_PREDECESSOR_STABLE_IDENTITY_FIELDS = (
+    "definition", "repository", "scenario", "contract", "base_dataset",
+    "selected_oracle", "optimizer", "runtime",
+)
+
+
+def _require_iteration_predecessor_chain(
+    identity: Mapping[str, Any],
+    *,
+    index: int,
+    predecessor: IterationManifest | None,
+) -> None:
+    if "predecessor" not in identity:
+        raise ValueError("selective-DAgger iteration predecessor identity is missing")
+    reference = identity["predecessor"]
+    if index == 1:
+        if predecessor is not None or reference is not None:
+            raise ValueError("selective-DAgger iteration one predecessor identity is invalid")
+        return
+    if predecessor is None:
+        raise ValueError("selective-DAgger physical predecessor is unavailable")
+    expected_reference = {
+        "iteration": index - 1,
+        "content_identity": predecessor.content_identity,
+    }
+    if not _same_json(reference, expected_reference):
+        raise ValueError("selective-DAgger predecessor content identity changed")
+    for field in _PREDECESSOR_STABLE_IDENTITY_FIELDS:
+        if not _same_json(identity.get(field), predecessor.identity[field]):
+            raise ValueError(
+                f"selective-DAgger predecessor causal identity changed: {field}"
+            )
+    for field in (
+        "cumulative_train_overlays", "cumulative_validation_overlays",
+    ):
+        current = identity.get(field)
+        if (
+            not isinstance(current, (list, tuple))
+            or len(current) != index
+            or not _same_json(current[:-1], predecessor.identity[field])
+        ):
+            raise ValueError(
+                f"selective-DAgger predecessor overlay chain changed: {field}"
+            )
+
+
 def run_iteration(
     index: int,
     *,
@@ -1162,6 +1237,10 @@ def run_iteration(
             "selective-DAgger iteration is partial; use a new output root"
         )
     completed = _read_iteration_manifest(manifest_path) if manifest_path.is_file() else None
+    if completed is not None and completed.iteration != index:
+        raise ValueError(
+            "selective-DAgger canonical predecessor iteration does not match"
+        )
     if completed is not None and staging.exists():
         raise ValueError(
             "completed selective-DAgger iteration has ambiguous staging"
@@ -1169,6 +1248,21 @@ def run_iteration(
     if completed is None and staging.exists():
         raise ValueError(
             "selective-DAgger iteration staging is partial; use a new output root"
+        )
+
+    predecessor: IterationManifest | None = None
+    if index > 1:
+        predecessor_path = (
+            iterations_root / f"iteration-{index - 1}" / "manifest.json"
+        )
+        if not predecessor_path.is_file():
+            raise ValueError(
+                "selective-DAgger preceding iteration is incomplete"
+            )
+        predecessor = run_iteration(
+            index - 1,
+            output_root=root,
+            dependencies=dependencies,
         )
 
     context = _iteration_context(
@@ -1213,6 +1307,9 @@ def run_iteration(
             dependencies=dependencies,
         )
         _require_iteration_identity_repository(identity, expected_repository)
+        _require_iteration_predecessor_chain(
+            identity, index=index, predecessor=predecessor,
+        )
         completed.require_identity(identity)
         reconstructed = _build_iteration_manifest(
             index=index,
@@ -1318,6 +1415,9 @@ def run_iteration(
         dependencies=dependencies,
     )
     _require_iteration_identity_repository(identity, expected_repository)
+    _require_iteration_predecessor_chain(
+        identity, index=index, predecessor=predecessor,
+    )
     elapsed = max(0.0, dependencies.clock() - started)
     timings = {
         "elapsed_seconds": elapsed,
@@ -1386,6 +1486,9 @@ def run_iteration(
         dependencies=dependencies,
     )
     _require_iteration_identity_repository(published_identity, expected_repository)
+    _require_iteration_predecessor_chain(
+        published_identity, index=index, predecessor=predecessor,
+    )
     reopened.require_identity(published_identity)
     reconstructed = _build_iteration_manifest(
         index=index,

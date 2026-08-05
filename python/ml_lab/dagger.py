@@ -3593,7 +3593,7 @@ _ITERATION_MANIFEST_FIELDS = frozenset({
     "metrics", "timings", "content_identity",
 })
 _ITERATION_IDENTITY_FIELDS = frozenset({
-    "definition", "repository", "scenario", "contract", "base_dataset",
+    "predecessor", "definition", "repository", "scenario", "contract", "base_dataset",
     "selected_oracle", "incoming_learner", "cumulative_train_overlays",
     "cumulative_validation_overlays", "schedules", "optimizer", "runtime",
 })
@@ -3613,7 +3613,7 @@ _ITERATION_METRIC_FIELDS = frozenset({
 })
 _ITERATION_COLLECTION_METRIC_FIELDS = frozenset({
     "games", "labels", "reason_counts", "disagreements",
-    "mean_expansions", "max_expansions",
+    "disagreement_reason_counts", "mean_expansions", "max_expansions",
 })
 _ITERATION_REASON_FIELDS = frozenset({
     "conversion", "favorable", "cycle_warning", "wasted_end_turn",
@@ -3659,7 +3659,10 @@ def _validate_iteration_overlay_identities(
         fields = _strict_fields(
             item, frozenset({"iteration", "content_identity", "row_count"}), label,
         )
-        if fields["iteration"] != expected_iteration:
+        actual_iteration = _strict_int(
+            fields["iteration"], f"{label} iteration", minimum=1,
+        )
+        if actual_iteration != expected_iteration:
             raise ValueError(f"{label} iteration order is invalid")
         _hash(fields["content_identity"], f"{label} content identity")
         _strict_int(fields["row_count"], f"{label} row count", minimum=1)
@@ -3669,6 +3672,27 @@ def _validate_iteration_identity(value: Any, *, iteration: int) -> Mapping[str, 
     identity = _strict_fields(
         value, _ITERATION_IDENTITY_FIELDS, "iteration identity",
     )
+    predecessor = identity["predecessor"]
+    if iteration == 1:
+        if predecessor is not None:
+            raise ValueError("iteration one predecessor identity must be null")
+    else:
+        predecessor_fields = _strict_fields(
+            predecessor,
+            frozenset({"iteration", "content_identity"}),
+            "iteration predecessor identity",
+        )
+        predecessor_iteration = _strict_int(
+            predecessor_fields["iteration"],
+            "iteration predecessor index",
+            minimum=1,
+        )
+        if predecessor_iteration != iteration - 1:
+            raise ValueError("iteration predecessor index is invalid")
+        _hash(
+            predecessor_fields["content_identity"],
+            "iteration predecessor content identity",
+        )
     definition = _strict_fields(
         identity["definition"],
         frozenset({
@@ -3890,11 +3914,25 @@ def _validate_iteration_identity(value: Any, *, iteration: int) -> Mapping[str, 
         )
         _hash(schedule["sha256"], f"iteration {partition} schedule sha256")
         expected_start, expected_stop = _seed_range(partition, iteration)
+        seed_start = _strict_int(
+            schedule["seed_start"], f"iteration {partition} seed start",
+        )
+        seed_stop = _strict_int(
+            schedule["seed_stop"], f"iteration {partition} seed stop",
+        )
+        label_target = _strict_int(
+            schedule["label_target"], f"iteration {partition} label target",
+            minimum=1,
+        )
+        game_ceiling = _strict_int(
+            schedule["game_ceiling"], f"iteration {partition} game ceiling",
+            minimum=1,
+        )
         if (
-            schedule["seed_start"] != expected_start
-            or schedule["seed_stop"] != expected_stop
-            or schedule["label_target"] != target
-            or schedule["game_ceiling"] != ceiling
+            seed_start != expected_start
+            or seed_stop != expected_stop
+            or label_target != target
+            or game_ceiling != ceiling
         ):
             raise ValueError(f"iteration {partition} schedule identity is invalid")
 
@@ -3906,16 +3944,38 @@ def _validate_iteration_identity(value: Any, *, iteration: int) -> Mapping[str, 
         frozenset({"hardware", "software"}),
         "iteration runtime identity",
     )
-    hardware = runtime["hardware"]
-    software = runtime["software"]
+    hardware = _strict_fields(
+        runtime["hardware"],
+        frozenset({
+            "training_device", "publication_device", "cuda_available",
+            "device_index", "device_name", "cuda_runtime",
+        }),
+        "iteration runtime hardware identity",
+    )
+    software = _strict_fields(
+        runtime["software"],
+        frozenset({
+            "python", "implementation", "platform", "executable", "numpy",
+            "torch", "stable_baselines3", "sb3_contrib",
+        }),
+        "iteration runtime software identity",
+    )
+    _strict_int(
+        hardware["device_index"], "iteration runtime device index", minimum=0,
+    )
     if (
-        not isinstance(hardware, Mapping)
-        or not hardware
-        or not isinstance(software, Mapping)
-        or not software
-        or not isinstance(hardware.get("training_device"), str)
+        not isinstance(hardware["training_device"], str)
         or not hardware["training_device"].startswith("cuda")
-        or hardware.get("publication_device") != "cpu"
+        or hardware["publication_device"] != "cpu"
+        or hardware["cuda_available"] is not True
+        or any(
+            not isinstance(hardware[name], str) or not hardware[name]
+            for name in ("device_name", "cuda_runtime")
+        )
+        or any(
+            not isinstance(software[name], str) or not software[name]
+            for name in software
+        )
     ):
         raise ValueError("iteration runtime identity is invalid")
     _freeze_contract_value(runtime, "iteration runtime identity")
@@ -3975,13 +4035,14 @@ def _validate_iteration_artifacts(
 
 def _nonnegative_number(value: Any, label: str) -> float:
     if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
+        type(value) is not float
+        or not math.isfinite(value)
         or value < 0
     ):
-        raise ValueError(f"{label} must be finite and non-negative")
-    return float(value)
+        raise ValueError(
+            f"{label} must be a finite non-negative continuous float"
+        )
+    return value
 
 
 def _validate_iteration_metrics(
@@ -4043,6 +4104,22 @@ def _validate_iteration_metrics(
             raise ValueError(
                 f"iteration {partition} disagreements exceed labels"
             )
+        disagreement_reasons = _strict_fields(
+            collection["disagreement_reason_counts"],
+            _ITERATION_REASON_FIELDS,
+            f"iteration {partition} disagreement reason metrics",
+        )
+        for name, count in disagreement_reasons.items():
+            parsed = _strict_int(
+                count,
+                f"iteration {partition} disagreement {name} count",
+                minimum=0,
+            )
+            if parsed > reasons[name] or parsed > disagreements:
+                raise ValueError(
+                    f"iteration {partition} disagreement reason count is inconsistent"
+                )
+        # Reason flags overlap: their sum may exceed the number of disagreeing rows.
         mean = _nonnegative_number(
             collection["mean_expansions"],
             f"iteration {partition} mean expansions",
@@ -4197,7 +4274,10 @@ class IterationManifest:
         fields = _strict_fields(
             value, _ITERATION_MANIFEST_FIELDS, "iteration manifest",
         )
-        if fields["schema_version"] != 1:
+        schema_version = _strict_int(
+            fields["schema_version"], "iteration manifest schema_version",
+        )
+        if schema_version != 1:
             raise ValueError("iteration manifest schema_version must be integer 1")
         if fields["status"] != "completed":
             raise ValueError("iteration manifest status must be completed")
@@ -5951,6 +6031,7 @@ def _empty_collection_stats() -> dict[str, Any]:
         "labels": 0,
         "reason_counts": Counter(),
         "disagreements": 0,
+        "disagreement_reason_counts": Counter(),
         "expansion_total": 0,
         "max_expansions": 0,
         "completed_pairs": 0,
@@ -5963,10 +6044,13 @@ def _update_collection_stats(
     stats["games"] += 1
     stats["labels"] += len(rows)
     for row in rows:
+        disagreement = int(row.disagreement)
         for bit, name in _REASON_NAMES:
             if row.reason_bits & bit:
                 stats["reason_counts"][name] += 1
-        stats["disagreements"] += int(row.disagreement)
+                if disagreement:
+                    stats["disagreement_reason_counts"][name] += 1
+        stats["disagreements"] += disagreement
         stats["expansion_total"] += row.oracle_actual_expansion_count
         stats["max_expansions"] = max(
             stats["max_expansions"], row.oracle_actual_expansion_count,
@@ -5994,15 +6078,56 @@ def _overlay_collection_stats(overlay: DaggerOverlay) -> dict[str, Any]:
         stats["games"] += 1
         stats["labels"] += len(reason_bits)
         for bits, row_metadata in zip(reason_bits, metadata, strict=True):
+            disagreement = int(row_metadata["disagreement"])
             for bit, name in _REASON_NAMES:
                 if int(bits) & bit:
                     stats["reason_counts"][name] += 1
-            stats["disagreements"] += int(row_metadata["disagreement"])
+                    if disagreement:
+                        stats["disagreement_reason_counts"][name] += 1
+            stats["disagreements"] += disagreement
             expansions = row_metadata["oracle_actual_expansion_count"]
             stats["expansion_total"] += expansions
             stats["max_expansions"] = max(stats["max_expansions"], expansions)
     stats["completed_pairs"] = stats["games"] // 2
     return stats
+
+
+def dagger_overlay_collection_metrics(overlay: DaggerOverlay) -> Mapping[str, Any]:
+    """Reconstruct immutable iteration metrics from authenticated physical rows.
+
+    Reason flags are independent bit flags, so one disagreeing row may contribute
+    to several disagreement-reason counts.
+    """
+
+    if not isinstance(overlay, DaggerOverlay):
+        raise ValueError("collection metric overlay is invalid")
+    stats = _overlay_collection_stats(overlay)
+    labels = int(stats["labels"])
+    canonical_names = {
+        "conversion": "conversion",
+        "favorable": "favorable",
+        "cycle_warning": "cycle_warning",
+        "wasted_end_turn": "action_waste",
+    }
+    return {
+        "games": int(stats["games"]),
+        "labels": labels,
+        "reason_counts": {
+            canonical: int(stats["reason_counts"].get(physical, 0))
+            for canonical, physical in canonical_names.items()
+        },
+        "disagreements": int(stats["disagreements"]),
+        "disagreement_reason_counts": {
+            canonical: int(
+                stats["disagreement_reason_counts"].get(physical, 0)
+            )
+            for canonical, physical in canonical_names.items()
+        },
+        "mean_expansions": (
+            float(stats["expansion_total"]) / labels if labels else 0.0
+        ),
+        "max_expansions": int(stats["max_expansions"]),
+    }
 
 
 def _emit_collection_progress(
@@ -6032,6 +6157,10 @@ def _emit_collection_progress(
             for _, name in _REASON_NAMES
         },
         "disagreements": int(stats["disagreements"]),
+        "disagreement_reason_counts": {
+            name: int(stats["disagreement_reason_counts"].get(name, 0))
+            for _, name in _REASON_NAMES
+        },
         "mean_expansions": (
             float(stats["expansion_total"]) / labels if labels else 0.0
         ),

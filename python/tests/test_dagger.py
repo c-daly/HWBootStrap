@@ -1016,6 +1016,10 @@ def _iteration_manifest_payload() -> dict[str, Any]:
         "status": "completed",
         "iteration": 2,
         "identity": {
+            "predecessor": {
+                "iteration": 1,
+                "content_identity": HASHES["0"],
+            },
             "definition": {
                 "panel_sha256": HASHES["1"],
                 "panel_byte_size": 101,
@@ -1110,11 +1114,16 @@ def _iteration_manifest_payload() -> dict[str, Any]:
                 "hardware": {
                     "training_device": "cuda:0",
                     "publication_device": "cpu",
+                    "cuda_available": True,
+                    "device_index": 0,
                     "cuda_runtime": "12.8",
                     "device_name": "test-gpu",
                 },
                 "software": {
                     "python": "3.11.test",
+                    "implementation": "CPython",
+                    "platform": "test-platform",
+                    "executable": "C:/python/python.exe",
                     "numpy": "test",
                     "torch": "test",
                     "stable_baselines3": "test",
@@ -1152,6 +1161,12 @@ def _iteration_manifest_payload() -> dict[str, Any]:
                     "cycle_warning": 2,
                     "wasted_end_turn": 3,
                 },
+                "disagreement_reason_counts": {
+                    "conversion": 4,
+                    "favorable": 3,
+                    "cycle_warning": 1,
+                    "wasted_end_turn": 0,
+                },
                 "disagreements": 4,
                 "mean_expansions": 100.0,
                 "max_expansions": 512,
@@ -1163,6 +1178,12 @@ def _iteration_manifest_payload() -> dict[str, Any]:
                     "conversion": 2,
                     "favorable": 2_002,
                     "cycle_warning": 1,
+                    "wasted_end_turn": 0,
+                },
+                "disagreement_reason_counts": {
+                    "conversion": 1,
+                    "favorable": 1,
+                    "cycle_warning": 0,
                     "wasted_end_turn": 0,
                 },
                 "disagreements": 1,
@@ -1265,6 +1286,14 @@ def _configure_iteration_payload(
     payload: dict[str, Any], iteration: int,
 ) -> None:
     payload["iteration"] = iteration
+    payload["identity"]["predecessor"] = (
+        None
+        if iteration == 1
+        else {
+            "iteration": iteration - 1,
+            "content_identity": f"{iteration + 9:x}" * 64,
+        }
+    )
     train = [
         {
             "iteration": item,
@@ -1337,6 +1366,7 @@ def _configure_iteration_payload(
 @pytest.mark.parametrize(
     "field",
     [
+        "predecessor",
         "definition",
         "repository",
         "scenario",
@@ -1359,7 +1389,9 @@ def test_iteration_stage_identity_rejects_every_causal_input_mismatch(
     expected = IterationManifest.from_dict(_iteration_manifest_payload())
     changed = _iteration_manifest_payload()
     value = changed["identity"][field]
-    if isinstance(value, list):
+    if field == "predecessor":
+        value["content_identity"] = HASHES["f"]
+    elif isinstance(value, list):
         value[-1]["content_identity"] = HASHES["0"]
     elif field == "repository":
         value["commit"] = "c" * 40
@@ -1404,6 +1436,133 @@ def test_iteration_manifest_rejects_incomplete_physical_summary(
     payload["content_identity"] = _identity(payload)
 
     with pytest.raises(ValueError, match=section[:-1] if section.endswith("s") else section):
+        IterationManifest.from_dict(payload)
+
+
+def test_iteration_manifest_rejects_boolean_schema_version_alias() -> None:
+    payload = _iteration_manifest_payload()
+    payload["schema_version"] = True
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="schema_version.*integer"):
+        IterationManifest.from_dict(payload)
+
+
+_ITERATION_CONTINUOUS_PATHS = (
+    ("metrics", "train_collection", "mean_expansions"),
+    ("metrics", "validation_collection", "mean_expansions"),
+    ("metrics", "training", "best_validation_nll"),
+    ("timings", "elapsed_seconds"),
+    ("timings", "validation_collection_seconds"),
+    ("timings", "train_collection_seconds"),
+    ("timings", "corpus_seconds"),
+    ("timings", "training_seconds"),
+    ("timings", "publication_seconds"),
+    ("timings", "train_labels_per_second"),
+    ("timings", "validation_labels_per_second"),
+)
+
+
+@pytest.mark.parametrize("path", _ITERATION_CONTINUOUS_PATHS)
+def test_iteration_manifest_rejects_integer_alias_for_continuous_summary(
+    path: tuple[str, ...],
+) -> None:
+    payload = _iteration_manifest_payload()
+    if path[-1] == "train_labels_per_second":
+        payload["timings"]["train_collection_seconds"] = 2.0
+        payload["timings"]["train_labels_per_second"] = 10_001
+    else:
+        target: Any = payload
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = int(target[path[-1]])
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="float|continuous"):
+        IterationManifest.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("metrics", "train_collection", "mean_expansions"),
+        ("metrics", "training", "best_validation_nll"),
+        ("timings", "elapsed_seconds"),
+        ("timings", "validation_labels_per_second"),
+    ],
+)
+def test_iteration_manifest_rejects_boolean_alias_for_continuous_summary(
+    path: tuple[str, ...],
+) -> None:
+    payload = _iteration_manifest_payload()
+    target: Any = payload
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = True
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="float|continuous"):
+        IterationManifest.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["overlay_iteration_float", "schedule_seed_float", "runtime_index_float"],
+)
+def test_iteration_manifest_rejects_float_alias_for_integer_identity(
+    mutation: str,
+) -> None:
+    payload = _iteration_manifest_payload()
+    if mutation == "overlay_iteration_float":
+        payload["identity"]["cumulative_train_overlays"][1]["iteration"] = 2.0
+    elif mutation == "schedule_seed_float":
+        payload["identity"]["schedules"]["train"]["seed_start"] = 18_100_000.0
+    else:
+        payload["identity"]["runtime"]["hardware"]["device_index"] = 0.0
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="integer|runtime"):
+        IterationManifest.from_dict(payload)
+
+
+def test_iteration_manifest_preserves_overlapping_disagreement_reason_counts() -> None:
+    manifest = IterationManifest.from_dict(_iteration_manifest_payload())
+    train = manifest.metrics["train_collection"]
+
+    assert train["disagreement_reason_counts"] == {
+        "conversion": 4,
+        "favorable": 3,
+        "cycle_warning": 1,
+        "wasted_end_turn": 0,
+    }
+    assert sum(train["disagreement_reason_counts"].values()) > train["disagreements"]
+    with pytest.raises(TypeError):
+        train["disagreement_reason_counts"]["conversion"] = 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["unknown", "float", "bool", "exceeds_reason", "exceeds_disagreements"],
+)
+def test_iteration_manifest_rejects_invalid_disagreement_reason_counts(
+    mutation: str,
+) -> None:
+    payload = _iteration_manifest_payload()
+    collection = payload["metrics"]["train_collection"]
+    counts = collection["disagreement_reason_counts"]
+    if mutation == "unknown":
+        counts["other"] = 0
+    elif mutation == "float":
+        counts["conversion"] = 4.0
+    elif mutation == "bool":
+        counts["conversion"] = True
+    elif mutation == "exceeds_reason":
+        counts["conversion"] = collection["reason_counts"]["conversion"] + 1
+    else:
+        counts["conversion"] = collection["disagreements"] + 1
+    payload["content_identity"] = _identity(payload)
+
+    with pytest.raises(ValueError, match="disagreement|fields|integer"):
         IterationManifest.from_dict(payload)
 
 
@@ -2917,6 +3076,12 @@ def test_train_collection_runs_both_seats_executes_only_learner_and_reports_prog
     assert [item["new_games"] for item in progress] == [1, 2, 2]
     assert progress[-1]["pair_complete"] is True
     assert progress[-1]["disagreements"] == 10_000
+    assert progress[-1]["disagreement_reason_counts"] == {
+        "conversion": 10_000,
+        "favorable": 10_000,
+        "cycle_warning": 10_000,
+        "action_waste": 10_000,
+    }
     assert progress[-1]["reason_counts"] == {
         "conversion": 20_000,
         "favorable": 20_000,
@@ -2927,7 +3092,8 @@ def test_train_collection_runs_both_seats_executes_only_learner_and_reports_prog
     assert progress[-1]["max_expansions"] == 10
     assert set(progress[-1]) == {
         "event", "partition", "iteration", "games", "labels",
-        "reason_counts", "disagreements", "mean_expansions",
+        "reason_counts", "disagreements", "disagreement_reason_counts",
+        "mean_expansions",
         "max_expansions", "labels_per_second", "elapsed_seconds",
         "eta_seconds", "pair_index", "pair_complete", "new_games",
     }
@@ -2944,6 +3110,11 @@ def test_train_collection_runs_both_seats_executes_only_learner_and_reports_prog
     ):
         assert [item["reason_counts"][reason] for item in progress] == sorted(
             item["reason_counts"][reason] for item in progress
+        )
+        assert [
+            item["disagreement_reason_counts"][reason] for item in progress
+        ] == sorted(
+            item["disagreement_reason_counts"][reason] for item in progress
         )
     assert progress[-1]["labels_per_second"] >= 0.0
     assert progress[-1]["eta_seconds"] == 0.0
