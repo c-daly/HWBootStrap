@@ -644,6 +644,9 @@ def _new_writer(
     learner_checkpoint: Path | None = None,
     learner_source_run: str = "seed-227-step-38912",
     learner_source_manifest_sha256: str = HASHES["d"],
+    oracle: OracleSpec | None = None,
+    panel_hash: str = HASHES["3"],
+    schedule_hash: str = HASHES["4"],
 ) -> tuple[DaggerOverlayWriter, Path]:
     checkpoint = (
         root.parent / "actor.zip"
@@ -662,7 +665,7 @@ def _new_writer(
         contract=contract,
         partition=partition,
         iteration=iteration,
-        oracle=OracleSpec.from_dict(_oracle_payload()),
+        oracle=(OracleSpec.from_dict(_oracle_payload()) if oracle is None else oracle),
         learner=LearnerIdentity.from_dict(learner_payload),
         original_dataset=(
             original_dataset
@@ -671,8 +674,8 @@ def _new_writer(
         ),
         scenario_hash=scenario_hash,
         repository_hash=repository_hash,
-        panel_hash=HASHES["3"],
-        schedule_hash=HASHES["4"],
+        panel_hash=panel_hash,
+        schedule_hash=schedule_hash,
         label_target=20_000 if partition == "train" else 2_000,
         game_ceiling=2_000 if partition == "train" else 200,
     )
@@ -690,6 +693,11 @@ def _seal_pair(
     learner_checkpoint: Path | None = None,
     learner_source_run: str = "seed-227-step-38912",
     learner_source_manifest_sha256: str = HASHES["d"],
+    oracle: OracleSpec | None = None,
+    original_dataset: OriginalDatasetIdentity | None = None,
+    scenario_hash: str = HASHES["1"],
+    panel_hash: str = HASHES["3"],
+    schedule_hash: str = HASHES["4"],
 ) -> tuple[DaggerOverlay, Path]:
     writer, checkpoint = _new_writer(
         root, contract, partition=partition, repository_hash=repository_hash,
@@ -697,6 +705,11 @@ def _seal_pair(
         learner_checkpoint=learner_checkpoint,
         learner_source_run=learner_source_run,
         learner_source_manifest_sha256=learner_source_manifest_sha256,
+        oracle=oracle,
+        original_dataset=original_dataset,
+        scenario_hash=scenario_hash,
+        panel_hash=panel_hash,
+        schedule_hash=schedule_hash,
     )
     for game_id, seat in enumerate((0, 1)):
         game = _game(

@@ -2769,6 +2769,67 @@ def _finish_open_oracle_preflight_v2(
     return selected
 
 
+@dataclass(frozen=True)
+class OraclePreflightPublication:
+    """Physical Task 8 publication identity returned by the real schema-2 opener."""
+
+    root: Path
+    content_identity: str
+    selected_oracle: OracleSpec
+    evidence_class: str
+    identity: Mapping[str, Any]
+
+
+def open_oracle_preflight_publication(
+    root: Path,
+    *,
+    definition: PanelDefinition,
+    repository_identity_provider: Callable[[Path], Mapping[str, Any]],
+) -> OraclePreflightPublication:
+    """Recompute Task 8 inputs and invoke the complete schema-2 physical validator."""
+
+    validate_panel_definition(definition)
+    repository = _validated_repository_identity(
+        definition, repository_identity_provider,
+    )
+    dataset = _audit_base_dataset(definition)
+    expected_identity = _oracle_preflight_identity(
+        definition, repository, dataset,
+    )
+    canonical = _lexical_canonical_path(
+        Path(root), "oracle preflight publication root", strict=True,
+    )
+    manifest_path = canonical / "oracle-preflight.json"
+    manifest_bytes = manifest_path.read_bytes()
+    selected = _open_oracle_preflight_v2(
+        canonical,
+        expected_identity=expected_identity,
+        definition=definition,
+    )
+    manifest = _read_json(manifest_path)
+    trust = expected_identity["execution_trust"]
+    if (
+        manifest_path.read_bytes() != manifest_bytes
+        or manifest.get("identity") != expected_identity
+        or manifest.get("selected_oracle") != selected.to_dict()
+        or not isinstance(trust, Mapping)
+        or not isinstance(trust.get("evidence_class"), str)
+    ):
+        raise ValueError("oracle preflight publication changed while reopening")
+    return OraclePreflightPublication(
+        root=canonical,
+        content_identity=_hash(
+            manifest.get("content_identity"),
+            "oracle preflight publication content identity",
+        ),
+        selected_oracle=selected,
+        evidence_class=trust["evidence_class"],
+        identity=_freeze_contract_value(
+            expected_identity, "oracle preflight publication identity",
+        ),
+    )
+
+
 def _reserve_preflight_diagnostic_root_v2(
     destination: Path,
 ) -> tuple[Path, Path]:

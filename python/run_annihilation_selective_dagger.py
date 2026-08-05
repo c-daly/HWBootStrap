@@ -1746,15 +1746,23 @@ def _open_development_candidate_evaluation(
     if physical["rows_sha256"] != expected_rows_sha256:
         raise ValueError("development canonical match rows changed")
     physical_root = candidate_root / "physical"
+    artifact_snapshots: list[tuple[Path, bytes]] = []
     for artifact in retained.artifacts:
         for path_text, sha256, byte_size in (
             (artifact.trace_path, artifact.trace_sha256, artifact.trace_byte_size),
             (artifact.replay_path, artifact.replay_sha256, artifact.replay_byte_size),
         ):
             artifact_path = (physical_root / path_text).resolve(strict=True)
-            if not artifact_path.is_relative_to(physical_root):
+            supplied_artifact = physical_root / path_text
+            junction = getattr(supplied_artifact, "is_junction", None)
+            if (
+                supplied_artifact.is_symlink()
+                or bool(junction is not None and junction())
+                or not artifact_path.is_relative_to(physical_root)
+            ):
                 raise ValueError("development retained artifact escaped its root")
             artifact_bytes = artifact_path.read_bytes()
+            artifact_snapshots.append((artifact_path, artifact_bytes))
             if (
                 len(artifact_bytes) != byte_size
                 or _sha256_bytes(artifact_bytes) != sha256
@@ -1769,6 +1777,7 @@ def _open_development_candidate_evaluation(
     if (
         manifest_path.read_bytes() != manifest_bytes
         or evaluation_path.read_bytes() != evaluation_bytes
+        or any(path.read_bytes() != raw for path, raw in artifact_snapshots)
     ):
         raise ValueError("development candidate evidence changed while reopening")
     return DevelopmentCandidateEvidence(
@@ -2177,9 +2186,17 @@ def _open_development_supervised_evaluation(
     overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
     examples: Sequence[Mapping[str, Any]],
 ) -> DevelopmentSupervisedEvidence:
-    publication_root = Path(root).resolve(strict=True)
+    supplied_root = Path(root)
+    root_junction = getattr(supplied_root, "is_junction", None)
+    if supplied_root.is_symlink() or bool(
+        root_junction is not None and root_junction()
+    ):
+        raise ValueError("development supervised root is a reparse point")
+    publication_root = supplied_root.resolve(strict=True)
+    manifest_path = publication_root / "manifest.json"
     try:
-        manifest = json.loads((publication_root / "manifest.json").read_text("utf-8"))
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("development supervised manifest is unreadable") from exc
     if (
@@ -2204,6 +2221,7 @@ def _open_development_supervised_evaluation(
     }:
         raise ValueError("development supervised artifact descriptors are invalid")
     payloads: dict[str, Any] = {}
+    artifact_snapshots: dict[Path, bytes] = {}
     for name in ("evidence", "predictions", "metrics"):
         descriptor = artifacts[name]
         expected_path = f"{name}.json"
@@ -2215,8 +2233,19 @@ def _open_development_supervised_evaluation(
             or descriptor["byte_size"] < 1
         ):
             raise ValueError("development supervised artifact descriptor changed")
+        supplied_path = publication_root / expected_path
+        junction = getattr(supplied_path, "is_junction", None)
         try:
-            raw = (publication_root / expected_path).read_bytes()
+            artifact_path = supplied_path.resolve(strict=True)
+            if (
+                supplied_path.is_symlink()
+                or bool(junction is not None and junction())
+                or artifact_path.parent != publication_root
+            ):
+                raise ValueError(
+                    "development supervised artifact is not a contained regular file"
+                )
+            raw = artifact_path.read_bytes()
             payload = json.loads(raw.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"development supervised {name} artifact is unreadable") from exc
@@ -2229,6 +2258,7 @@ def _open_development_supervised_evaluation(
         ):
             raise ValueError(f"development supervised {name} artifact hash changed")
         payloads[name] = payload
+        artifact_snapshots[artifact_path] = raw
     expected_evidence = {
         "schema_version": 1,
         "iteration": iteration,
@@ -2258,9 +2288,21 @@ def _open_development_supervised_evaluation(
     metrics = _supervised_metrics(examples, pre, post)
     if not _same_json(payloads["metrics"], metrics):
         raise ValueError("development supervised metrics changed")
-    actual = {path.name for path in publication_root.iterdir()}
+    actual = set()
+    for path in publication_root.iterdir():
+        junction = getattr(path, "is_junction", None)
+        if path.is_symlink() or bool(junction is not None and junction()):
+            raise ValueError(
+                "development supervised publication contains a reparse point"
+            )
+        actual.add(path.name)
     if actual != {"evidence.json", "predictions.json", "metrics.json", "manifest.json"}:
         raise ValueError("development supervised publication contains unowned files")
+    if (
+        manifest_path.read_bytes() != manifest_bytes
+        or any(path.read_bytes() != raw for path, raw in artifact_snapshots.items())
+    ):
+        raise ValueError("development supervised bytes changed while reopening")
     return DevelopmentSupervisedEvidence(
         root=publication_root,
         iteration=iteration,
@@ -2281,22 +2323,30 @@ def _open_development_supervised_evaluation_from_physical_bytes(
 ) -> DevelopmentSupervisedEvidence:
     """Discover overlay roots from the owned evidence artifact, then reopen all."""
 
-    publication_root = Path(root).resolve(strict=True)
+    supplied_root = Path(root)
+    root_junction = getattr(supplied_root, "is_junction", None)
+    if supplied_root.is_symlink() or bool(
+        root_junction is not None and root_junction()
+    ):
+        raise ValueError("development supervised root is a reparse point")
+    publication_root = supplied_root.resolve(strict=True)
+    manifest_path = publication_root / "manifest.json"
     try:
-        manifest = json.loads(
-            (publication_root / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
         descriptor = manifest["artifacts"]["evidence"]
         if (
             descriptor["path"] != "evidence.json"
             or set(descriptor) != {"path", "sha256", "byte_size"}
         ):
             raise ValueError("development supervised evidence descriptor changed")
-        evidence_path = (publication_root / descriptor["path"]).resolve(
-            strict=True
-        )
+        supplied_evidence_path = publication_root / descriptor["path"]
+        evidence_junction = getattr(supplied_evidence_path, "is_junction", None)
+        evidence_path = supplied_evidence_path.resolve(strict=True)
         if (
-            not evidence_path.is_relative_to(publication_root)
+            supplied_evidence_path.is_symlink()
+            or bool(evidence_junction is not None and evidence_junction())
+            or not evidence_path.is_relative_to(publication_root)
             or evidence_path.parent != publication_root
         ):
             raise ValueError("development supervised evidence escaped publication")
@@ -2334,13 +2384,19 @@ def _open_development_supervised_evaluation_from_physical_bytes(
         roots=roots,
         reopen=lambda _root: None,
     )
-    return _open_development_supervised_evaluation(
+    result = _open_development_supervised_evaluation(
         publication_root,
         definition=definition,
         iteration=iteration,
         overlays=overlays,
         examples=examples,
     )
+    if (
+        manifest_path.read_bytes() != manifest_bytes
+        or evidence_path.read_bytes() != raw
+    ):
+        raise ValueError("development supervised bytes changed while reopening")
+    return result
 
 
 def reopen_development_supervised_evaluation(
@@ -2531,114 +2587,32 @@ class DevelopmentPreflightEvidence:
     starting_learner_source_content_identity: str
 
 
-_DEVELOPMENT_PREFLIGHT_MANIFEST_FIELDS = frozenset({
-    "schema_version", "status", "evidence_class", "selected_oracle",
-    "starting_learner", "artifact", "envelope_identity",
-})
-
-
-def _preflight_envelope_identity(value: Mapping[str, Any]) -> str:
-    payload = {
-        key: item for key, item in value.items() if key != "envelope_identity"
-    }
-    return _sha256_bytes(json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8"))
-
-
 def _open_development_preflight_evidence(
     root: Path,
 ) -> DevelopmentPreflightEvidence:
-    """Open the sealed Task 8 handoff from its exact physical envelope."""
+    """Authenticate Task 8 physically and fail closed until Task 11 seals it."""
 
-    canonical = Path(root).resolve(strict=True)
-    manifest_path = canonical / "manifest.json"
     try:
-        manifest_bytes = manifest_path.read_bytes()
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("development preflight manifest is unreadable") from exc
-    if (
-        not isinstance(manifest, Mapping)
-        or set(manifest) != _DEVELOPMENT_PREFLIGHT_MANIFEST_FIELDS
-        or manifest["schema_version"] != 1
-        or manifest["status"] != "completed"
-        or manifest["evidence_class"] != "sealed-engine"
-        or _preflight_envelope_identity(manifest)
-        != manifest["envelope_identity"]
-    ):
-        raise ValueError("development preflight physical envelope changed")
-    artifact = manifest["artifact"]
-    if (
-        not isinstance(artifact, Mapping)
-        or set(artifact) != {"path", "sha256", "byte_size"}
-        or artifact["path"] != "oracle-preflight.json"
-    ):
-        raise ValueError("development preflight artifact descriptor changed")
-    artifact_path = (canonical / artifact["path"]).resolve(strict=True)
-    if (
-        not artifact_path.is_relative_to(canonical)
-        or artifact_path.parent != canonical
-    ):
-        raise ValueError("development preflight artifact escaped its root")
-    raw = artifact_path.read_bytes()
-    if (
-        len(raw) != artifact["byte_size"]
-        or _sha256_bytes(raw)
-        != _require_sha256(artifact["sha256"], "development preflight artifact")
-    ):
-        raise ValueError("development preflight artifact bytes changed")
-    starting = manifest["starting_learner"]
-    required_starting = {
-        "checkpoint_path", "checkpoint_sha256", "controller",
-        "controller_identity", "model_seed", "step", "source_content_identity",
-    }
-    if not isinstance(starting, Mapping) or set(starting) != required_starting:
-        raise ValueError("development preflight starting learner fields changed")
-    checkpoint = Path(starting["checkpoint_path"]).resolve(strict=True)
-    checkpoint_bytes = checkpoint.read_bytes()
-    if (
-        not checkpoint.is_file()
-        or str(checkpoint) != starting["checkpoint_path"]
-        or _sha256_bytes(checkpoint_bytes)
-        != starting["checkpoint_sha256"]
-        or starting["checkpoint_sha256"]
-        != _LOCKED_DEVELOPMENT_BASELINE_CHECKPOINT_SHA256
-        or starting["model_seed"] != 227
-        or starting["step"] != 38_912
-    ):
-        raise ValueError("development preflight locked starting learner changed")
-    oracle = dagger_domain.OracleSpec.from_dict(manifest["selected_oracle"])
-    if {path.name for path in canonical.iterdir()} != {
-        "manifest.json", "oracle-preflight.json",
-    }:
-        raise ValueError("development preflight contains unowned files")
-    if (
-        manifest_path.read_bytes() != manifest_bytes
-        or artifact_path.read_bytes() != raw
-        or checkpoint.read_bytes() != checkpoint_bytes
-    ):
-        raise ValueError("development preflight bytes changed while reopening")
-    return DevelopmentPreflightEvidence(
-        evidence_root=canonical,
-        content_identity=artifact["sha256"],
-        selected_oracle=oracle,
-        evidence_class="sealed-engine",
-        starting_learner_checkpoint_path=starting["checkpoint_path"],
-        starting_learner_checkpoint_sha256=starting["checkpoint_sha256"],
-        starting_learner_controller=starting["controller"],
-        starting_learner_controller_identity=_freeze_json(
-            starting["controller_identity"]
-        ),
-        starting_learner_model_seed=227,
-        starting_learner_step=38_912,
-        starting_learner_source_content_identity=starting[
-            "source_content_identity"
-        ],
+        definition = dagger_domain.load_panel_definition(
+            _PANEL_PATH, repository_root=_REPOSITORY_ROOT,
+        )
+        publication = dagger_domain.open_oracle_preflight_publication(
+            Path(root),
+            definition=definition,
+            repository_identity_provider=_git_repository_identity,
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "development Task 8 schema-2 preflight publication is invalid"
+        ) from exc
+    if publication.evidence_class == "untrusted-test-transcript":
+        raise ValueError(
+            "Task 8 evidence is an untrusted-test-transcript; Task 11 sealed-engine "
+            "provenance is required for production Task 10 evaluation"
+        )
+    raise ValueError(
+        "Task 11 sealed-engine provenance adapter is required before production "
+        "Task 10 evaluation can accept Task 8 evidence"
     )
 
 
@@ -2738,60 +2712,90 @@ def _development_source_publication_identity(
 
 def _open_development_source_publication_claim(
     root: Path,
+    *,
+    preflight: DevelopmentPreflightEvidence,
 ) -> DevelopmentSourcePublicationEvidence:
-    """Open a Task 10 source claim from owned physical bytes."""
+    """Open the real audited baseline publication, never a Task 10 claim."""
 
-    canonical = Path(root).resolve(strict=True)
-    manifest_path = canonical / "manifest.json"
-    try:
-        raw = manifest_path.read_bytes()
-        payload = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("development source physical manifest is unreadable") from exc
-    if (
-        not isinstance(payload, Mapping)
-        or set(payload) != _DEVELOPMENT_SOURCE_PUBLICATION_FIELDS
-        or _content_identity(payload) != payload.get("content_identity")
-    ):
-        raise ValueError("development source physical manifest identity changed")
-    try:
-        value = DevelopmentSourcePublicationEvidence(
-            root=canonical,
-            kind=payload["kind"],
-            iteration=payload["iteration"],
-            content_identity=payload["content_identity"],
-            preflight_root=Path(payload["preflight_root"]),
-            preflight_content_identity=payload["preflight_content_identity"],
-            incoming_source_content_identity=payload[
-                "incoming_source_content_identity"
-            ],
-            source_run=payload["source_run"],
-            model_seed=payload["model_seed"],
-            step=payload["step"],
-            controller=payload["controller"],
-            controller_identity=_freeze_json(payload["controller_identity"]),
-            checkpoint_path=payload["checkpoint_path"],
-            checkpoint_sha256=payload["checkpoint_sha256"],
-            actor_sha256=payload["actor_sha256"],
-            publication_metadata_sha256=payload["publication_metadata_sha256"],
-            run_manifest_sha256=payload["run_manifest_sha256"],
-            bc_manifest_sha256=payload["bc_manifest_sha256"],
-            train_overlay_prefix=tuple(payload["train_overlay_prefix"]),
-            validation_overlay_prefix=tuple(
-                payload["validation_overlay_prefix"]
-            ),
-            publication_identity=_freeze_json(dict(payload)),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            "development source physical manifest fields are invalid"
-        ) from exc
-    actual = {path.name for path in canonical.iterdir()}
-    if actual != {"manifest.json"}:
-        raise ValueError(
-            "development source publication contains unowned files"
-        )
-    return value
+    physical = checkpoint_audit_domain.validate_audited_baseline_publication(
+        Path(root),
+        expected_checkpoint_sha256=(
+            _LOCKED_DEVELOPMENT_BASELINE_CHECKPOINT_SHA256
+        ),
+    )
+    canonical = physical.root
+    contract = _actor_publication_contract(canonical)
+    if physical.contract != contract.to_dict():
+        raise ValueError("development baseline contract bytes changed")
+    controller_payload = {
+        "kind": "snapshot",
+        "path": str(physical.checkpoint_path),
+        "source_run": str(canonical),
+        "algorithm": "maskable_ppo",
+        "step": physical.step,
+        "inference_mode": "deterministic",
+    }
+    controller = json.dumps(controller_payload, sort_keys=True)
+    controller_identity = _freeze_json({
+        "kind": "snapshot",
+        "inference_mode": "deterministic",
+        "path": str(physical.checkpoint_path),
+        "algorithm": "maskable_ppo",
+        "step": physical.step,
+        "contract_hash": contract.contract_hash,
+        "contract_version": contract.version,
+        "environment": contract.environment,
+        "encoding_hash": contract.encoding_hash,
+        "contract": contract.to_dict(),
+        "observation_size": contract.observation_size,
+        "action_size": contract.action_size,
+        "legacy": False,
+        "promotable": True,
+    })
+    values = {
+        "kind": "audited-baseline",
+        "iteration": 0,
+        "content_identity": physical.content_identity,
+        "preflight_root": str(Path(preflight.evidence_root)),
+        "preflight_content_identity": preflight.content_identity,
+        "incoming_source_content_identity": None,
+        "source_run": str(canonical),
+        "model_seed": physical.model_seed,
+        "step": physical.step,
+        "controller": controller,
+        "controller_identity": controller_identity,
+        "checkpoint_path": str(physical.checkpoint_path),
+        "checkpoint_sha256": physical.checkpoint_sha256,
+        "actor_sha256": physical.checkpoint_sha256,
+        "publication_metadata_sha256": physical.initialization_sha256,
+        "run_manifest_sha256": physical.run_manifest_sha256,
+        "bc_manifest_sha256": physical.source_bc_sha256,
+        "train_overlay_prefix": [],
+        "validation_overlay_prefix": [],
+    }
+    return DevelopmentSourcePublicationEvidence(
+        root=canonical,
+        kind=values["kind"],
+        iteration=0,
+        content_identity=values["content_identity"],
+        preflight_root=Path(preflight.evidence_root),
+        preflight_content_identity=preflight.content_identity,
+        incoming_source_content_identity=None,
+        source_run=str(canonical),
+        model_seed=physical.model_seed,
+        step=physical.step,
+        controller=controller,
+        controller_identity=controller_identity,
+        checkpoint_path=str(physical.checkpoint_path),
+        checkpoint_sha256=physical.checkpoint_sha256,
+        actor_sha256=physical.checkpoint_sha256,
+        publication_metadata_sha256=physical.initialization_sha256,
+        run_manifest_sha256=physical.run_manifest_sha256,
+        bc_manifest_sha256=physical.source_bc_sha256,
+        train_overlay_prefix=(),
+        validation_overlay_prefix=(),
+        publication_identity=_freeze_json(values),
+    )
 
 
 def _development_actor_controller_identity(
@@ -2817,6 +2821,48 @@ def _development_actor_controller_identity(
     })
 
 
+_TASK7_ACTOR_FILES = frozenset({
+    "actor-fixtures.npz", "bc.json", "metrics.json", "publication.json",
+    "run.json", "scenario.json", "training-history.json",
+    "checkpoints/step_000000000.zip",
+})
+
+
+def _task7_actor_snapshot(root: Path) -> Mapping[str, bytes]:
+    files: set[str] = set()
+    directories: set[str] = set()
+    for path in root.rglob("*"):
+        junction = getattr(path, "is_junction", None)
+        if path.is_symlink() or bool(junction is not None and junction()):
+            raise ValueError("development Task 7 actor inventory contains a reparse point")
+        try:
+            path.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError("development Task 7 actor inventory escaped its root") from exc
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            directories.add(relative)
+        elif path.is_file():
+            files.add(relative)
+        else:
+            raise ValueError("development Task 7 actor inventory is invalid")
+    if files != _TASK7_ACTOR_FILES or directories != {"checkpoints"}:
+        raise ValueError("development Task 7 actor exact inventory changed")
+    return {
+        relative: (root / relative).read_bytes() for relative in sorted(files)
+    }
+
+
+def _task9_repository_hash(repository: Mapping[str, Any]) -> str:
+    return _sha256_bytes(json.dumps(
+        _mutable_stage_json(repository),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8"))
+
+
 def _open_development_iteration_source(
     root: Path,
     *,
@@ -2838,6 +2884,7 @@ def _open_development_iteration_source(
         raise ValueError("development Task 9 publication contains unowned entries")
 
     opened_overlays: dict[str, dagger_domain.DaggerOverlay] = {}
+    recomputed_metrics: dict[str, Mapping[str, Any]] = {}
     for partition in ("train", "validation"):
         descriptor = manifest.artifacts[f"{partition}_overlay"]
         relative = descriptor["path"]
@@ -2861,6 +2908,63 @@ def _open_development_iteration_source(
             or overlay.definition.learner.source_run != previous.source_run
         ):
             raise ValueError("development Task 9 physical overlay identity changed")
+        expected_overlay_definition = {
+            "partition": partition,
+            "iteration": iteration,
+            "observation_size": manifest.identity["contract"]["observation_size"],
+            "action_size": manifest.identity["contract"]["action_size"],
+            "action_regions": manifest.identity["contract"]["action_regions"],
+            "oracle": manifest.identity["selected_oracle"]["spec"],
+            "learner": overlay.definition.learner.to_dict(),
+            "original_dataset": overlay.definition.original_dataset.to_dict(),
+            "scenario_hash": manifest.identity["scenario"]["runtime_sha256"],
+            "contract_hash": manifest.identity["contract"]["contract_hash"],
+            "encoding_hash": manifest.identity["contract"]["encoding_hash"],
+            "repository_hash": _task9_repository_hash(
+                manifest.identity["repository"]
+            ),
+            "panel_hash": manifest.identity["definition"]["panel_sha256"],
+            "schedule_hash": manifest.identity["schedules"][partition]["sha256"],
+            "label_target": manifest.identity["schedules"][partition]["label_target"],
+            "game_ceiling": manifest.identity["schedules"][partition]["game_ceiling"],
+        }
+        actual_overlay_definition = overlay.definition.to_dict()
+        incoming_learner = manifest.identity["incoming_learner"]["identity"]
+        learner_mismatch = (
+            Path(incoming_learner["checkpoint_path"]).resolve(strict=True)
+            != Path(overlay.definition.learner.checkpoint_path).resolve(strict=True)
+            or Path(incoming_learner["source_run"]).resolve(strict=True)
+            != Path(overlay.definition.learner.source_run).resolve(strict=True)
+            or incoming_learner["checkpoint_sha256"]
+            != overlay.definition.learner.checkpoint_sha256
+            or incoming_learner["source_manifest_sha256"]
+            != overlay.definition.learner.source_manifest_sha256
+        )
+        definition_mismatches = tuple(
+            key for key in expected_overlay_definition
+            if not _same_json(
+                actual_overlay_definition[key], expected_overlay_definition[key]
+            )
+        )
+        if definition_mismatches or learner_mismatch or (
+            overlay.definition.original_dataset.manifest_sha256
+            != manifest.identity["base_dataset"]["manifest_sha256"]
+        ):
+            raise ValueError(
+                "development Task 9 overlay definition does not match its manifest: "
+                + ", ".join(
+                    definition_mismatches
+                    or (("learner",) if learner_mismatch else ("original_dataset",))
+                )
+            )
+        physical_metrics = dagger_domain.dagger_overlay_collection_metrics(overlay)
+        if not _same_json(
+            physical_metrics, manifest.metrics[f"{partition}_collection"],
+        ):
+            raise ValueError(
+                "development Task 9 collection metrics differ from physical rows"
+            )
+        recomputed_metrics[partition] = physical_metrics
         opened_overlays[partition] = overlay
     train_shared = opened_overlays["train"].definition.to_dict()
     validation_shared = opened_overlays["validation"].definition.to_dict()
@@ -2923,6 +3027,7 @@ def _open_development_iteration_source(
         or actor_root.parent != canonical
     ):
         raise ValueError("development Task 7 actor escaped its Task 9 publication")
+    actor_snapshot = _task7_actor_snapshot(actor_root)
     contract = _actor_publication_contract(actor_root)
     if not _same_json(
         _critical_contract(contract), manifest.identity["contract"],
@@ -2930,8 +3035,8 @@ def _open_development_iteration_source(
         raise ValueError("development Task 7 actor contract changed")
     run_path = actor_root / "run.json"
     bc_path = actor_root / "bc.json"
-    run_sha_before = _sha256_bytes(run_path.read_bytes())
-    bc_sha_before = _sha256_bytes(bc_path.read_bytes())
+    run_sha_before = _sha256_bytes(actor_snapshot["run.json"])
+    bc_sha_before = _sha256_bytes(actor_snapshot["bc.json"])
     verification = imitation_domain.validate_actor_supervision_publication(
         actor_root, contract,
     )
@@ -2940,7 +3045,7 @@ def _open_development_iteration_source(
     if run_sha_before != run_sha_after or bc_sha_before != bc_sha_after:
         raise ValueError("development Task 7 actor changed during authentication")
     try:
-        run_manifest = json.loads(run_path.read_text(encoding="utf-8"))
+        run_manifest = json.loads(actor_snapshot["run.json"].decode("utf-8"))
         latest = run_manifest["latest_checkpoint"]
         checkpoint = (actor_root / latest).resolve(strict=True)
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
@@ -2951,7 +3056,9 @@ def _open_development_iteration_source(
         or checkpoint.parent != (actor_root / "checkpoints").resolve()
     ):
         raise ValueError("development Task 7 checkpoint containment changed")
-    checkpoint_sha = _sha256_bytes(checkpoint.read_bytes())
+    checkpoint_sha = _sha256_bytes(
+        actor_snapshot["checkpoints/step_000000000.zip"]
+    )
     physical_actor = {
         "checkpoint_sha256": checkpoint_sha,
         "actor_sha256": verification.get("actor_sha256"),
@@ -2971,11 +3078,19 @@ def _open_development_iteration_source(
     # to the same immutable content identity after actor validation.
     if manifest_path.read_bytes() != manifest_bytes_before:
         raise ValueError("development Task 9 manifest changed during authentication")
+    if _task7_actor_snapshot(actor_root) != actor_snapshot:
+        raise ValueError("development Task 7 actor changed during authentication")
     for partition, original in opened_overlays.items():
         reopened = dagger_domain.open_dagger_overlay(
             canonical / f"{partition}-overlay"
         )
-        if reopened.content_identity != original.content_identity:
+        if (
+            reopened.content_identity != original.content_identity
+            or not _same_json(
+                dagger_domain.dagger_overlay_collection_metrics(reopened),
+                recomputed_metrics[partition],
+            )
+        ):
             raise ValueError("development Task 9 overlay changed during authentication")
 
     controller_payload = {
@@ -3048,7 +3163,9 @@ def _validated_development_source_publication(
         raise ValueError("development source publication reopener returned an invalid type")
     canonical = Path(root).resolve(strict=True)
     if iteration == 0:
-        physical = _open_development_source_publication_claim(canonical)
+        physical = _open_development_source_publication_claim(
+            canonical, preflight=preflight,
+        )
     else:
         if previous is None:
             raise ValueError("development Task 9 source predecessor is missing")
@@ -3123,14 +3240,8 @@ def _validated_development_source_publication(
         for content_identity in prefix:
             _require_sha256(content_identity, "development source overlay identity")
     if iteration == 0:
-        source_run = Path(value.source_run).resolve(strict=True)
-        run_path = source_run / "run.json"
-        initialization_path = source_run / "initialization.json"
         if (
-            _sha256_bytes(run_path.read_bytes()) != value.run_manifest_sha256
-            or _sha256_bytes(initialization_path.read_bytes())
-            != value.bc_manifest_sha256
-            or value.publication_metadata_sha256 != value.bc_manifest_sha256
+            value.root != Path(value.source_run).resolve(strict=True)
             or value.actor_sha256 != value.checkpoint_sha256
         ):
             raise ValueError("development baseline physical publication bytes changed")
@@ -3207,7 +3318,7 @@ def build_development_evaluation_definition(
     sources: list[DevelopmentSourcePublicationEvidence] = []
     for iteration, root in enumerate(roots):
         reopened = (
-            _open_development_source_publication_claim(root)
+            _open_development_source_publication_claim(root, preflight=preflight)
             if iteration == 0
             else _open_development_iteration_source(
                 root,
@@ -3485,6 +3596,22 @@ def _open_development_iteration_evidence_from_physical_bytes(
     manifest = _read_iteration_manifest(manifest_path)
     if manifest.content_identity != source.content_identity:
         raise ValueError("development aggregate Task 9 manifest identity changed")
+    physical_collection_metrics = {
+        partition: dagger_domain.dagger_overlay_collection_metrics(
+            dagger_domain.open_dagger_overlay(
+                canonical / f"{partition}-overlay"
+            )
+        )
+        for partition in ("train", "validation")
+    }
+    if any(
+        not _same_json(
+            physical_collection_metrics[partition],
+            manifest.metrics[f"{partition}_collection"],
+        )
+        for partition in ("train", "validation")
+    ):
+        raise ValueError("development aggregate Task 9 physical metrics changed")
     actor_root = Path(source.source_run)
     history, history_identity = imitation_domain._read_training_history_identity(
         actor_root
@@ -3501,11 +3628,10 @@ def _open_development_iteration_evidence_from_physical_bytes(
         actor_checkpoint_sha256=source.checkpoint_sha256,
         actor_controller=source.controller,
         actor_controller_identity=source.controller_identity,
-        validation_collection=manifest.metrics["validation_collection"],
-        collection_metrics=_freeze_json({
-            "train": manifest.metrics["train_collection"],
-            "validation": manifest.metrics["validation_collection"],
-        }),
+        validation_collection=_freeze_json(
+            physical_collection_metrics["validation"]
+        ),
+        collection_metrics=_freeze_json(physical_collection_metrics),
         training_metrics=_freeze_json({
             "best_epoch": training["best_epoch"],
             "best_validation_nll": training["best_validation_nll"],
@@ -3763,9 +3889,23 @@ def publish_development_aggregate(
         Path(root).resolve(strict=True) for root in iteration_roots
     )
     iteration_values: list[DevelopmentIterationEvidence] = []
-    previous_source = _development_source_from_candidate(
-        definition.candidates[0]
+    canonical_baseline_root = Path(
+        definition.candidates[0].source_publication["source_run"]
+    ).resolve(strict=True)
+    previous_source = _validated_development_source_publication(
+        _open_development_source_publication_claim(
+            canonical_baseline_root, preflight=preflight,
+        ),
+        root=canonical_baseline_root,
+        iteration=0,
+        preflight=preflight,
+        previous=None,
     )
+    if not _same_json(
+        _development_source_publication_identity(previous_source),
+        definition.candidates[0].source_publication,
+    ):
+        raise ValueError("development aggregate baseline source identity changed")
     for iteration, root in enumerate(canonical_iteration_roots, start=1):
         evidence, previous_source = (
             _open_development_iteration_evidence_from_physical_bytes(
@@ -3907,9 +4047,21 @@ def publish_development_aggregate(
         _development_preflight_snapshot(preflight),
     ):
         raise ValueError("development aggregate preflight source identity changed")
-    previous_source = _development_source_from_candidate(
-        definition.candidates[0]
+    reopened_baseline = _validated_development_source_publication(
+        _open_development_source_publication_claim(
+            canonical_baseline_root, preflight=reopened_preflight,
+        ),
+        root=canonical_baseline_root,
+        iteration=0,
+        preflight=reopened_preflight,
+        previous=None,
     )
+    if not _same_json(
+        _development_source_publication_identity(reopened_baseline),
+        definition.candidates[0].source_publication,
+    ):
+        raise ValueError("development aggregate baseline source identity changed")
+    previous_source = reopened_baseline
     for iteration, root in enumerate(canonical_iteration_roots, start=1):
         reopened, previous_source = (
             _open_development_iteration_evidence_from_physical_bytes(

@@ -96,6 +96,97 @@ def _write_run(
     return root
 
 
+def _write_audited_baseline(root: Path) -> tuple[Path, str]:
+    source = _write_run(
+        root / "actor-source", kind="clone", checkpoints=(0,),
+    )
+    source_checkpoint = source / "checkpoints" / "step_000000000.zip"
+    source_bc = source / "bc.json"
+    source_fixtures = source / "actor-fixtures.npz"
+    _write_json(source_bc, {
+        "schema_version": 1,
+        "algorithm": "maskable_ppo",
+        "model_seed": 227,
+        "dataset_manifest_sha256": "d" * 64,
+    })
+    source_fixtures.write_bytes(b"actor-fixtures")
+    source_run = json.loads((source / "run.json").read_text(encoding="utf-8"))
+    source_run["dataset_manifest_sha256"] = "d" * 64
+    _write_json(source / "run.json", source_run)
+
+    baseline = _write_run(
+        root / "baseline",
+        kind="ppo",
+        checkpoints=(14_336, 26_624, 38_912),
+        actor_init_source=str(source.resolve()),
+        state="stopped",
+    )
+    run = json.loads((baseline / "run.json").read_text(encoding="utf-8"))
+    run.update({
+        "created_at": "2026-08-02T00:00:00Z",
+        "episodes": 1,
+        "latest_message": "stopped",
+        "monitor_files": [f"monitor.worker_{index}.csv" for index in range(4)],
+        "opponent_snapshot": {"kind": "scripted", "name": "random"},
+        "pid": 1,
+        "tracker_status": {},
+        "updated_at": "2026-08-02T00:01:00Z",
+    })
+    run["scenario"]["template_id"] = "annihilation-imitation-v1"
+    run["config"].update({
+        "algorithm_options": {},
+        "allow_unsafe_legacy_resume": False,
+        "backend": "sb3",
+        "checkpoint_interval": 12_800,
+        "device": "cuda",
+        "episode_seed_base": 15_000_000,
+        "learner_seat": "alternating",
+        "opponent": {"kind": "scripted", "name": "random"},
+        "policy": "HexCNN",
+        "resume_source": None,
+        "run_name": "audited-baseline",
+        "timestep_mode": "absolute",
+        "total_timesteps": 51_200,
+        "trackers": [{"kind": "local"}],
+        "workers": 4,
+    })
+    _write_json(baseline / "run.json", run)
+    for name in (
+        "control.json", "evaluation.json", "monitor.csv", "params.json",
+        "progress.csv", "train-err.log", "train.log",
+        *(f"monitor.worker_{index}.csv" for index in range(4)),
+    ):
+        (baseline / name).write_bytes(b"\n")
+    (baseline / "replays").mkdir()
+    initialization = {
+        "actor_modules": ["features_extractor", "policy_net", "action_net"],
+        "comparison_atol": 1e-7,
+        "comparison_rtol": 1e-6,
+        "device": "cuda",
+        "kind": "actor_only",
+        "maximum_absolute_logit_difference": 0.0,
+        "schema_version": 1,
+        "source_actor_fixtures_sha256": hashlib.sha256(
+            source_fixtures.read_bytes()
+        ).hexdigest(),
+        "source_bc_sha256": hashlib.sha256(source_bc.read_bytes()).hexdigest(),
+        "source_checkpoint": "checkpoints/step_000000000.zip",
+        "source_checkpoint_sha256": hashlib.sha256(
+            source_checkpoint.read_bytes()
+        ).hexdigest(),
+        "source_contract_hash": run["contract"]["contract_hash"],
+        "source_dataset_manifest_sha256": "d" * 64,
+        "source_encoding_hash": run["contract"]["encoding_hash"],
+        "source_run": str(source.resolve()),
+        "source_run_manifest_sha256": hashlib.sha256(
+            (source / "run.json").read_bytes()
+        ).hexdigest(),
+    }
+    _write_json(baseline / "initialization.json", initialization)
+    checkpoint = baseline / "checkpoints" / "step_000038912.zip"
+    return baseline, hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+
 @pytest.fixture
 def source_runs(tmp_path: Path) -> tuple[Path, Path]:
     clone = _write_run(tmp_path / "clone", kind="clone", checkpoints=(0,))
@@ -110,6 +201,42 @@ def source_runs(tmp_path: Path) -> tuple[Path, Path]:
     )
     (ppo / "checkpoints" / "step_000051200.zip.partial").write_bytes(b"not-a-candidate")
     return clone, ppo
+
+
+def test_audited_baseline_validator_authenticates_physical_source_chain(
+    tmp_path: Path,
+) -> None:
+    baseline, checkpoint_sha256 = _write_audited_baseline(tmp_path)
+
+    publication = audit_module.validate_audited_baseline_publication(
+        baseline,
+        expected_checkpoint_sha256=checkpoint_sha256,
+        expected_checkpoint_steps=(14_336, 26_624, 38_912),
+    )
+
+    assert publication.root == baseline.resolve()
+    assert publication.step == 38_912
+    assert publication.checkpoint_sha256 == checkpoint_sha256
+    assert publication.source_run == (tmp_path / "actor-source").resolve()
+
+
+@pytest.mark.parametrize("mutation", ("invalid-initialization", "extra-file"))
+def test_audited_baseline_validator_rejects_unauthenticated_publication(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    baseline, checkpoint_sha256 = _write_audited_baseline(tmp_path)
+    if mutation == "invalid-initialization":
+        (baseline / "initialization.json").write_bytes(b"not-json")
+    else:
+        (baseline / "unowned.bin").write_bytes(b"extra")
+
+    with pytest.raises(ValueError, match="baseline|initialization|inventory"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=checkpoint_sha256,
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
 
 
 def test_candidate_discovery_uses_only_physical_checkpoint_trajectory(

@@ -2863,11 +2863,14 @@ class _PhysicalIterationHarness:
         checkpoint = output_root / "checkpoints" / "step_000000000.zip"
         checkpoint.parent.mkdir(parents=True)
         checkpoint.write_bytes(f"checkpoint-{index}\n".encode("ascii"))
-        actor_path = output_root / "actor.bin"
-        actor_path.write_bytes(f"actor-{index}\n".encode("ascii"))
         _rewrite(output_root / "publication.json", {"iteration": index})
+        (output_root / "actor-fixtures.npz").write_bytes(b"test-fixtures")
+        _rewrite(output_root / "metrics.json", {"iteration": index})
+        _rewrite(output_root / "scenario.json", {"environment": "tactical-v2"})
         checkpoint_sha256 = _sha256(checkpoint)
-        actor_sha256 = _sha256(actor_path)
+        actor_sha256 = hashlib.sha256(
+            f"actor-state-{index}".encode("ascii")
+        ).hexdigest()
         publication_sha256 = _sha256(output_root / "publication.json")
         verification = {
             "checkpoint_sha256": checkpoint_sha256,
@@ -2929,13 +2932,11 @@ class _PhysicalIterationHarness:
             Path(trained["root"]) if isinstance(trained, dict) else Path(trained)
         )
         checkpoint = actor_root / "checkpoints" / "step_000000000.zip"
-        actor_path = actor_root / "actor.bin"
         publication_path = actor_root / "publication.json"
         run_path = actor_root / "run.json"
         bc_path = actor_root / "bc.json"
         try:
             checkpoint_payload = checkpoint.read_bytes()
-            actor_payload = actor_path.read_bytes()
             publication = json.loads(
                 publication_path.read_text(encoding="utf-8")
             )
@@ -2945,7 +2946,6 @@ class _PhysicalIterationHarness:
             raise ValueError("actor physical publication is missing") from exc
         if (
             checkpoint_payload != f"checkpoint-{index}\n".encode("ascii")
-            or actor_payload != f"actor-{index}\n".encode("ascii")
             or publication != {"iteration": index}
             or run_manifest["distillation_iteration"] != index
             or bc_manifest["distillation_iteration"] != index
@@ -2956,7 +2956,9 @@ class _PhysicalIterationHarness:
         canonical_root = actor_root.resolve()
         canonical_checkpoint = checkpoint.resolve()
         checkpoint_sha256 = _sha256(checkpoint)
-        actor_sha256 = _sha256(actor_path)
+        actor_sha256 = hashlib.sha256(
+            f"actor-state-{index}".encode("ascii")
+        ).hexdigest()
         publication_sha256 = _sha256(publication_path)
         run_sha256 = _sha256(run_path)
         bc_sha256 = _sha256(bc_path)
@@ -4928,6 +4930,7 @@ def test_training_pipeline_dispatches_physical_iterations_transactionally(
 
 def _task10_definition(
     tmp_path: Path, *, physical_overlays: bool = False,
+    locked_baseline: bool = False,
 ) -> object:
     train_overlay_ids: list[str] = []
     validation_overlay_ids: list[str] = []
@@ -4993,6 +4996,13 @@ def _task10_definition(
         step = 38_912 if iteration == 0 else 0
         checkpoint = checkpoint_dir / f"step_{step:09d}.zip"
         checkpoint.write_bytes(f"task10-actor-{iteration}".encode("ascii"))
+        if locked_baseline and iteration == 0:
+            locked_checkpoint = Path(
+                "C:/Users/cddal/HexWars/python/runs/"
+                "bc227-ppo-random-s227-20260802-v2/"
+                "checkpoints/step_000038912.zip"
+            ).resolve(strict=True)
+            checkpoint.write_bytes(locked_checkpoint.read_bytes())
         controller = {
             "kind": "snapshot",
             "path": str(checkpoint.resolve()),
@@ -5037,7 +5047,11 @@ def _task10_definition(
             "controller_identity": identity,
             "checkpoint_path": str(checkpoint.resolve()),
             "checkpoint_sha256": _sha256(checkpoint),
-            "actor_sha256": hashlib.sha256(f"actor-{iteration}".encode()).hexdigest(),
+            "actor_sha256": (
+                _sha256(checkpoint)
+                if locked_baseline and iteration == 0
+                else hashlib.sha256(f"actor-{iteration}".encode()).hexdigest()
+            ),
             "publication_metadata_sha256": hashlib.sha256(
                 f"metadata-{iteration}".encode()
             ).hexdigest(),
@@ -5249,64 +5263,13 @@ def _task10_physical_source_chain(
     preflight_artifact.write_bytes(b"sealed-source-preflight")
     preflight_identity = _sha256(preflight_artifact)
 
-    baseline_root = tmp_path / "physical-baseline-source"
-    baseline_root.mkdir()
-    initialization_sha = _sha256(baseline_run / "initialization.json")
-    baseline_manifest = {
-        "kind": "audited-baseline",
-        "iteration": 0,
-        "preflight_root": str(preflight_root.resolve()),
-        "preflight_content_identity": preflight_identity,
-        "incoming_source_content_identity": None,
-        "source_run": str(baseline_run),
-        "model_seed": 227,
-        "step": 38_912,
-        "controller": json.dumps(
-            baseline_controller_payload, sort_keys=True,
-        ),
-        "controller_identity": baseline_identity,
-        "checkpoint_path": str(baseline_checkpoint),
-        "checkpoint_sha256": _sha256(baseline_checkpoint),
-        "actor_sha256": _sha256(baseline_checkpoint),
-        "publication_metadata_sha256": initialization_sha,
-        "run_manifest_sha256": _sha256(baseline_run / "run.json"),
-        "bc_manifest_sha256": initialization_sha,
-        "train_overlay_prefix": [],
-        "validation_overlay_prefix": [],
-    }
-    baseline_manifest["content_identity"] = _content_identity(
-        baseline_manifest
+    baseline_root = baseline_run
+    baseline_physical = (
+        runner.checkpoint_audit_domain.validate_audited_baseline_publication(
+            baseline_run,
+            expected_checkpoint_sha256=_sha256(baseline_checkpoint),
+        )
     )
-    _rewrite(baseline_root / "manifest.json", baseline_manifest)
-    baseline = runner._open_development_source_publication_claim(
-        baseline_root
-    )
-    preflight_manifest = {
-        "schema_version": 1,
-        "status": "completed",
-        "evidence_class": "sealed-engine",
-        "selected_oracle": oracle.to_dict(),
-        "starting_learner": {
-            "checkpoint_path": str(baseline_checkpoint),
-            "checkpoint_sha256": _sha256(baseline_checkpoint),
-            "controller": baseline.controller,
-            "controller_identity": runner._mutable_stage_json(
-                baseline.controller_identity
-            ),
-            "model_seed": 227,
-            "step": 38_912,
-            "source_content_identity": baseline.content_identity,
-        },
-        "artifact": {
-            "path": "oracle-preflight.json",
-            "sha256": preflight_identity,
-            "byte_size": preflight_artifact.stat().st_size,
-        },
-    }
-    preflight_manifest["envelope_identity"] = (
-        runner._preflight_envelope_identity(preflight_manifest)
-    )
-    _rewrite(preflight_root / "manifest.json", preflight_manifest)
     preflight = runner.DevelopmentPreflightEvidence(
         evidence_root=preflight_root.resolve(),
         content_identity=preflight_identity,
@@ -5314,11 +5277,29 @@ def _task10_physical_source_chain(
         evidence_class="sealed-engine",
         starting_learner_checkpoint_path=str(baseline_checkpoint),
         starting_learner_checkpoint_sha256=_sha256(baseline_checkpoint),
-        starting_learner_controller=baseline.controller,
-        starting_learner_controller_identity=baseline.controller_identity,
+        starting_learner_controller=json.dumps(
+            baseline_controller_payload, sort_keys=True,
+        ),
+        starting_learner_controller_identity=runner._freeze_json(baseline_identity),
         starting_learner_model_seed=227,
         starting_learner_step=38_912,
-        starting_learner_source_content_identity=baseline.content_identity,
+        starting_learner_source_content_identity=baseline_physical.content_identity,
+    )
+
+    def open_test_preflight(root: Path) -> object:
+        canonical = Path(root).resolve(strict=True)
+        if (
+            canonical != preflight_root.resolve()
+            or _sha256(preflight_artifact) != preflight_identity
+        ):
+            raise ValueError("test preflight physical identity changed")
+        return preflight
+
+    monkeypatch.setattr(
+        runner, "_open_development_preflight_evidence", open_test_preflight,
+    )
+    baseline = runner._open_development_source_publication_claim(
+        baseline_root, preflight=preflight,
     )
 
     compact_contract = EnvironmentContract(
@@ -5359,6 +5340,16 @@ def _task10_physical_source_chain(
         "evidence_content_identity": preflight_identity,
         "evidence_class": "sealed-engine",
     }
+    repository_hash = hashlib.sha256(json.dumps(
+        harness.repository,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    original_dataset = dagger_module.OriginalDatasetIdentity.from_dict(
+        fixture_module._dataset_payload()
+    )
 
     def validate_fake_actor(
         run_dir: Path, expected_contract: EnvironmentContract,
@@ -5371,7 +5362,7 @@ def _task10_physical_source_chain(
         checkpoint = actor_root / "checkpoints" / "step_000000000.zip"
         physical = {
             "checkpoint_sha256": _sha256(checkpoint),
-            "actor_sha256": _sha256(actor_root / "actor.bin"),
+            "actor_sha256": verification["actor_sha256"],
             "publication_metadata_sha256": _sha256(
                 actor_root / "publication.json"
             ),
@@ -5410,6 +5401,12 @@ def _task10_physical_source_chain(
             learner_checkpoint=Path(previous.checkpoint_path),
             learner_source_run=previous.source_run,
             learner_source_manifest_sha256=previous_manifest_sha,
+            oracle=oracle,
+            original_dataset=original_dataset,
+            scenario_hash="2" * 64,
+            repository_hash=repository_hash,
+            panel_hash="1" * 64,
+            schedule_hash="4" * 64,
         )
         validation, _ = seal_pair(
             root / "validation-overlay",
@@ -5420,6 +5417,12 @@ def _task10_physical_source_chain(
             learner_checkpoint=Path(previous.checkpoint_path),
             learner_source_run=previous.source_run,
             learner_source_manifest_sha256=previous_manifest_sha,
+            oracle=oracle,
+            original_dataset=original_dataset,
+            scenario_hash="2" * 64,
+            repository_hash=repository_hash,
+            panel_hash="1" * 64,
+            schedule_hash="4" * 64,
         )
 
         def overlay_payload(value: object) -> dict[str, Any]:
@@ -5501,6 +5504,17 @@ def _task10_physical_source_chain(
             train_overlays=tuple(cumulative_train),
             validation_overlays=tuple(cumulative_validation),
         )
+        identity["definition"]["panel_sha256"] = train.definition.panel_hash
+        identity["scenario"]["runtime_sha256"] = train.definition.scenario_hash
+        identity["base_dataset"]["manifest_sha256"] = (
+            train.definition.original_dataset.manifest_sha256
+        )
+        identity["schedules"]["train"]["sha256"] = (
+            train.definition.schedule_hash
+        )
+        identity["schedules"]["validation"]["sha256"] = (
+            validation.definition.schedule_hash
+        )
         timings = {
             "elapsed_seconds": 6.0,
             "validation_collection_seconds": 1.0,
@@ -5562,6 +5576,160 @@ def test_task10_definition_builder_requires_existing_physical_roots(
         )
 
 
+def test_task10_preflight_opener_rejects_self_authored_envelope(
+    tmp_path: Path,
+) -> None:
+    """A Task 10 checksum wrapper is not authentic Task 8 evidence."""
+
+    import run_annihilation_selective_dagger as runner
+
+    checkpoint = Path(
+        "C:/Users/cddal/HexWars/python/runs/"
+        "bc227-ppo-random-s227-20260802-v2/"
+        "checkpoints/step_000038912.zip"
+    ).resolve(strict=True)
+    root = tmp_path / "self-authored-task8-envelope"
+    root.mkdir()
+    artifact = root / "oracle-preflight.json"
+    artifact.write_bytes(b"arbitrary bytes, not a Task 8 publication")
+    manifest = {
+        "schema_version": 1,
+        "status": "completed",
+        "evidence_class": "sealed-engine",
+        "selected_oracle": dagger_module.OracleSpec(
+            oracle_type="bounded-search",
+            depth=4,
+            expansion_budget=512,
+            use_heuristic=True,
+            heuristic_identity="material-plus-pursuit-v1",
+            code_hash="a" * 64,
+        ).to_dict(),
+        "starting_learner": {
+            "checkpoint_path": str(checkpoint),
+            "checkpoint_sha256": _sha256(checkpoint),
+            "controller": "{}",
+            "controller_identity": {},
+            "model_seed": 227,
+            "step": 38_912,
+            "source_content_identity": "0" * 64,
+        },
+        "artifact": {
+            "path": artifact.name,
+            "sha256": _sha256(artifact),
+            "byte_size": artifact.stat().st_size,
+        },
+    }
+    unsigned = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    manifest["envelope_identity"] = hashlib.sha256(unsigned).hexdigest()
+    _rewrite(root / "manifest.json", manifest)
+
+    with pytest.raises(ValueError, match="Task 8|schema|preflight"):
+        runner._open_development_preflight_evidence(root)
+
+
+def test_task10_preflight_opener_rejects_real_untrusted_task8_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Schema-2 test transcripts stay explicitly non-production until Task 11."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    evaluator, benchmark, codec, clock, _schedules, _queries = (
+        _preflight_boundaries(wins={512: 210, 2048: 220})
+    )
+    root = tmp_path / "real-task8-publication"
+    run_oracle_preflight(
+        definition,
+        output_root=root,
+        repository_identity_provider=_repository_provider,
+        evaluator=evaluator,
+        benchmark=benchmark,
+        codec=codec,
+        clock=clock,
+    )
+    publication = dagger_module.open_oracle_preflight_publication(
+        root,
+        definition=definition,
+        repository_identity_provider=_repository_provider,
+    )
+    assert publication.evidence_class == "untrusted-test-transcript"
+
+    monkeypatch.setattr(runner, "_git_repository_identity", _repository_provider)
+    with pytest.raises(
+        ValueError, match="untrusted-test-transcript.*Task 11|Task 11.*sealed-engine",
+    ):
+        runner._open_development_preflight_evidence(root)
+
+
+def test_task10_public_definition_cannot_select_private_preflight_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public callback arguments cannot bypass the authenticated Task 8 opener."""
+
+    import run_annihilation_selective_dagger as runner
+
+    preflight_root = tmp_path / "task8"
+    preflight_root.mkdir()
+    locked_definition = object()
+    public_calls: list[tuple[Path, object, object]] = []
+    callback_calls = 0
+
+    monkeypatch.setattr(
+        runner.dagger_domain,
+        "load_panel_definition",
+        lambda panel_path, *, repository_root: locked_definition,
+    )
+
+    def open_public_task8(
+        root: Path, *, definition: object, repository_identity_provider: object,
+    ) -> object:
+        public_calls.append((Path(root), definition, repository_identity_provider))
+        return SimpleNamespace(evidence_class="untrusted-test-transcript")
+
+    monkeypatch.setattr(
+        runner.dagger_domain,
+        "open_oracle_preflight_publication",
+        open_public_task8,
+    )
+
+    def forbidden_public_callback(_root: Path) -> object:
+        nonlocal callback_calls
+        callback_calls += 1
+        return SimpleNamespace(evidence_class="sealed-engine")
+
+    with pytest.raises(ValueError, match="untrusted-test-transcript.*Task 11"):
+        runner.build_development_evaluation_definition(
+            preflight_root=preflight_root,
+            baseline_root=tmp_path / "baseline",
+            iteration_roots=tuple(
+                tmp_path / f"iteration-{iteration}" for iteration in (1, 2, 3)
+            ),
+            panel_hash="1" * 64,
+            scenario_hash="2" * 64,
+            contract_hash="c" * 64,
+            encoding_hash="e" * 64,
+            repository_root=ROOT,
+            reopen_preflight=forbidden_public_callback,
+            reopen_baseline=None,
+            reopen_iteration=None,
+            repository_identity_provider=_repository_provider,
+        )
+
+    assert callback_calls == 0
+    assert public_calls == [(
+        preflight_root.resolve(),
+        locked_definition,
+        runner._git_repository_identity,
+    )]
+
+
 def test_task10_definition_builder_authenticates_real_task7_task9_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5598,6 +5766,50 @@ def test_task10_definition_builder_authenticates_real_task7_task9_chain(
         chain.sources[index].validation_overlay_prefix[-1]
         for index in (1, 2, 3)
     )
+
+
+@pytest.mark.parametrize(
+    "mutation", ("copied-metrics", "overlay-definition", "actor-extra-file"),
+)
+def test_task10_iteration_source_rejects_unphysical_task7_task9_claims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Task 9 summaries and Task 7 inventory must come from reopened bytes."""
+
+    import run_annihilation_selective_dagger as runner
+
+    chain = _task10_physical_source_chain(tmp_path, runner, monkeypatch)
+    root = chain.iteration_roots[0]
+    manifest_path = root / "manifest.json"
+    if mutation == "actor-extra-file":
+        (root / "actor" / "unowned.bin").write_bytes(b"unowned")
+    else:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if mutation == "copied-metrics":
+            physical = dagger_module.dagger_overlay_collection_metrics(
+                dagger_module.open_dagger_overlay(root / "train-overlay")
+            )
+            manifest["metrics"]["train_collection"]["mean_expansions"] = (
+                physical["mean_expansions"] / 2.0
+            )
+        else:
+            manifest["identity"]["scenario"]["runtime_sha256"] = "f" * 64
+        manifest["content_identity"] = _content_identity(manifest)
+        dagger_module.IterationManifest.from_dict(manifest)
+        _rewrite(manifest_path, manifest)
+
+    with pytest.raises(
+        ValueError,
+        match="Task 7|Task 9|actor|inventory|metric|overlay|scenario|physical",
+    ):
+        runner._open_development_iteration_source(
+            root,
+            iteration=1,
+            preflight=chain.preflight,
+            previous=chain.sources[0],
+        )
 
 
 @pytest.mark.parametrize(
@@ -5866,6 +6078,55 @@ def test_task10_candidate_manifest_ignores_callback_authored_validator_result(
 
     assert result.new_games == 200
     assert len(boundary.validate_calls) == 3
+
+
+def test_task10_candidate_final_guard_rereads_trace_and_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trace changed during the final evaluation reread cannot escape detection."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    candidate = definition.candidates[0]
+    boundary = _Task10PhysicalBoundary()
+    monkeypatch.setattr(
+        runner.checkpoint_audit_domain,
+        "validate_retained_evaluation",
+        boundary.validate,
+    )
+    result = runner.run_development_candidate_evaluation(
+        definition=definition,
+        candidate=candidate,
+        output_root=tmp_path / "candidate-final-reread",
+        server_cmd=("fake",),
+        workers=1,
+        evaluate_candidate=boundary.evaluate,
+        validate_candidate=boundary.validate,
+        repository_identity_provider=_repository_provider,
+    )
+    evaluation_path = result.result.root / "physical" / "evaluation.json"
+    trace_path = result.result.root / "physical" / _task10_rows()[0]["trace_path"]
+    original_read_bytes = Path.read_bytes
+    evaluation_reads = 0
+
+    def mutate_on_final_evaluation_read(path: Path) -> bytes:
+        nonlocal evaluation_reads
+        raw = original_read_bytes(path)
+        if path == evaluation_path:
+            evaluation_reads += 1
+            if evaluation_reads == 2:
+                trace_path.write_bytes(b"changed-at-final-guard")
+        return raw
+
+    monkeypatch.setattr(Path, "read_bytes", mutate_on_final_evaluation_read)
+    with pytest.raises(ValueError, match="trace|replay|artifact|changed"):
+        runner.reopen_development_candidate_evaluation(
+            result.result.root,
+            definition=definition,
+            candidate=candidate,
+        )
 
 
 def test_task10_candidate_publication_rejects_repository_drift(
@@ -6227,6 +6488,62 @@ def test_task10_supervised_ignores_callback_label_forgery_and_uses_physical_rows
     assert prediction_calls == 2
 
 
+@pytest.mark.parametrize("mutation", ("end-of-open", "reparse-file"))
+def test_task10_supervised_rejects_local_toctou_and_reparse_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Every local supervised artifact remains contained and stable to return."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    result = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=1,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=tmp_path / "supervised-local-guard",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    )
+    if mutation == "reparse-file":
+        predictions = result.result.root / "predictions.json"
+        target = tmp_path / "external-predictions.json"
+        target.write_bytes(predictions.read_bytes())
+        predictions.unlink()
+        _symlink_or_skip_windows_privilege(predictions, target)
+    else:
+        original_metrics = runner._supervised_metrics
+
+        def mutate_evidence(*args: Any, **kwargs: Any) -> object:
+            metrics = original_metrics(*args, **kwargs)
+            (result.result.root / "evidence.json").write_bytes(
+                b"changed-at-end-of-open"
+            )
+            return metrics
+
+        monkeypatch.setattr(runner, "_supervised_metrics", mutate_evidence)
+
+    with pytest.raises(ValueError, match="supervised|reparse|contained|changed"):
+        runner._open_development_supervised_evaluation_from_physical_bytes(
+            result.result.root,
+            definition=definition,
+            iteration=1,
+        )
+
+
 def test_task10_supervised_post_rename_repository_drift_rolls_back_to_staging(
     tmp_path: Path,
 ) -> None:
@@ -6386,11 +6703,13 @@ def _task10_fast_aggregate_fixture(
     runner: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> SimpleNamespace:
-    definition = _task10_definition(tmp_path, physical_overlays=True)
-    preflight_root = tmp_path / "aggregate-matrix-preflight"
+    definition = _task10_definition(
+        tmp_path, physical_overlays=True, locked_baseline=True,
+    )
+    preflight_root = tmp_path / "task10-preflight"
     preflight_root.mkdir()
     seal = preflight_root / "oracle-preflight.json"
-    seal.write_bytes(b"aggregate-matrix-preflight")
+    seal.write_bytes(b"preflight")
     seal_sha256 = _sha256(seal)
     oracle = dagger_module.OracleSpec(
         oracle_type="bounded-search", depth=4, expansion_budget=512,
@@ -6554,6 +6873,21 @@ def _task10_fast_aggregate_fixture(
         callback_counts[f"supervised-{iteration}"] += 1
         return supervised[iteration]
 
+    baseline_source = runner._development_source_from_candidate(
+        definition.candidates[0]
+    )
+
+    def open_baseline(
+        root: Path, *, preflight: object,
+    ) -> object:
+        assert Path(root) == Path(baseline_source.source_run).resolve()
+        assert preflight is not None
+        return baseline_source
+
+    monkeypatch.setattr(
+        runner, "_open_development_source_publication_claim", open_baseline,
+    )
+
     kwargs = {
         "definition": definition,
         "preflight_root": preflight_root,
@@ -6569,7 +6903,7 @@ def _task10_fast_aggregate_fixture(
         definition=definition, kwargs=kwargs, callback_counts=callback_counts,
         seal=seal, iterations=iterations, iteration_roots=iteration_roots,
         evaluations=evaluations, evaluations_root=evaluations_root,
-        supervised=supervised, boundary=boundary,
+        supervised=supervised, boundary=boundary, baseline_source=baseline_source,
     )
 
 
@@ -6781,7 +7115,12 @@ def test_task10_aggregate_internally_authenticates_task8_task9_sources(
 
 
 @pytest.mark.parametrize(
-    "mutation", ("candidate-trace-second-pass", "supervised-metrics-second-pass"),
+    "mutation", (
+        "baseline-checkpoint-second-pass",
+        "baseline-checkpoint-delete-second-pass",
+        "candidate-trace-second-pass",
+        "supervised-metrics-second-pass",
+    ),
 )
 def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
     tmp_path: Path,
@@ -6793,7 +7132,25 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
     import run_annihilation_selective_dagger as runner
 
     fixture = _task10_fast_aggregate_fixture(tmp_path, runner, monkeypatch)
-    if mutation == "candidate-trace-second-pass":
+    if mutation.startswith("baseline-checkpoint"):
+        original = runner._open_development_source_publication_claim
+        baseline_calls = 0
+
+        def open_baseline(root: Path, *, preflight: object) -> object:
+            nonlocal baseline_calls
+            baseline_calls += 1
+            if baseline_calls == 3:
+                checkpoint = Path(fixture.baseline_source.checkpoint_path)
+                if "delete" in mutation:
+                    checkpoint.unlink()
+                else:
+                    checkpoint.write_bytes(b"changed-between-aggregate-passes")
+            return original(root, preflight=preflight)
+
+        monkeypatch.setattr(
+            runner, "_open_development_source_publication_claim", open_baseline,
+        )
+    elif mutation == "candidate-trace-second-pass":
         calls: defaultdict[str, int] = defaultdict(int)
         target = fixture.definition.candidates[2]
 
@@ -6838,7 +7195,10 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
         )
 
     destination = tmp_path / f"aggregate-internal-{mutation}"
-    with pytest.raises(ValueError, match="artifact|hash|bytes|changed|physical"):
+    with pytest.raises(
+        (ValueError, FileNotFoundError),
+        match="artifact|hash|bytes|changed|physical|checkpoint|missing",
+    ):
         runner.publish_development_aggregate(
             **fixture.kwargs,
             output_root=destination,

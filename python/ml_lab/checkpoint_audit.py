@@ -160,6 +160,24 @@ class RetainedEvaluation:
 
 
 @dataclass(frozen=True)
+class AuditedBaselinePublication:
+    """Authenticated physical identity of the locked PPO baseline publication."""
+
+    root: Path
+    content_identity: str
+    model_seed: int
+    step: int
+    checkpoint_path: Path
+    checkpoint_sha256: str
+    run_manifest_sha256: str
+    initialization_sha256: str
+    source_bc_sha256: str
+    source_run: Path
+    contract: Mapping[str, Any]
+    scenario_sha256: str
+
+
+@dataclass(frozen=True)
 class _SourceRun:
     path: Path
     manifest: Mapping[str, Any]
@@ -332,6 +350,304 @@ def _physical_checkpoints(source: _SourceRun, *, label: str) -> list[tuple[int, 
         if recorded != steps:
             raise ValueError(f"{label} checkpoint steps must be unique and strictly increasing physical steps")
     return checkpoints
+
+
+_AUDITED_BASELINE_AUXILIARY_FILES = frozenset({
+    "control.json", "evaluation.json", "monitor.csv", "params.json",
+    "progress.csv", "train-err.log", "train.log",
+})
+_AUDITED_BASELINE_INITIALIZATION_FIELDS = frozenset({
+    "actor_modules", "comparison_atol", "comparison_rtol", "device", "kind",
+    "maximum_absolute_logit_difference", "schema_version",
+    "source_actor_fixtures_sha256", "source_bc_sha256", "source_checkpoint",
+    "source_checkpoint_sha256", "source_contract_hash",
+    "source_dataset_manifest_sha256", "source_encoding_hash", "source_run",
+    "source_run_manifest_sha256",
+})
+
+
+def _is_reparse_point(path: Path) -> bool:
+    junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(junction is not None and junction())
+
+
+def _physical_tree_inventory(root: Path, *, label: str) -> tuple[set[str], set[str]]:
+    files: set[str] = set()
+    directories: set[str] = set()
+    for path in root.rglob("*"):
+        if _is_reparse_point(path):
+            raise ValueError(f"{label} inventory contains a reparse point")
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{label} inventory escaped its canonical root") from error
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            directories.add(relative)
+        elif path.is_file():
+            files.add(relative)
+        else:
+            raise ValueError(f"{label} inventory contains a non-file entry")
+    return files, directories
+
+
+def _json_object_from_bytes(raw: bytes, *, label: str) -> Mapping[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} must be readable JSON") from error
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _contained_source_file(root: Path, relative: str, *, label: str) -> Path:
+    supplied = Path(relative)
+    if supplied.is_absolute() or supplied.as_posix() != relative:
+        raise ValueError(f"{label} path is not canonical")
+    try:
+        path = (root / supplied).resolve(strict=True)
+        path.relative_to(root)
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{label} escaped its source publication") from error
+    if not path.is_file() or _is_reparse_point(path):
+        raise ValueError(f"{label} must be a contained regular file")
+    return path
+
+
+def validate_audited_baseline_publication(
+    run_root: Path,
+    *,
+    expected_checkpoint_sha256: str,
+    expected_checkpoint_steps: Sequence[int] = (14_336, 26_624, 38_912),
+    expected_step: int = 38_912,
+    expected_model_seed: int = _EXPECTED_SEED,
+) -> AuditedBaselinePublication:
+    """Reopen the locked baseline and its actor source from physical bytes."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_checkpoint_sha256):
+        raise ValueError("audited baseline expected checkpoint SHA-256 is invalid")
+    if (
+        type(expected_checkpoint_steps) not in {list, tuple}
+        or not expected_checkpoint_steps
+        or any(type(step) is not int or step < 0 for step in expected_checkpoint_steps)
+        or tuple(sorted(set(expected_checkpoint_steps))) != tuple(expected_checkpoint_steps)
+        or expected_step not in expected_checkpoint_steps
+        or type(expected_model_seed) is not int
+    ):
+        raise ValueError("audited baseline locked checkpoint trajectory is invalid")
+    supplied_root = Path(run_root)
+    if _is_reparse_point(supplied_root):
+        raise ValueError("audited baseline root must not be a reparse point")
+    root = _canonical_run(supplied_root, label="audited baseline")
+    source = _load_source(root, label="audited baseline")
+    checkpoints = _physical_checkpoints(source, label="audited baseline")
+    if tuple(step for step, _path, _digest in checkpoints) != tuple(
+        expected_checkpoint_steps
+    ):
+        raise ValueError("audited baseline physical checkpoint inventory changed")
+    checkpoint_rows = [row for row in checkpoints if row[0] == expected_step]
+    if len(checkpoint_rows) != 1:
+        raise ValueError("audited baseline locked checkpoint is missing")
+    _step, checkpoint_path, checkpoint_sha256 = checkpoint_rows[0]
+    run = source.manifest
+    config = source.config
+    if (
+        run.get("state") != "stopped"
+        or run.get("latest_checkpoint")
+        != f"checkpoints/step_{expected_step:09d}.zip"
+        or run.get("latest_checkpoint_step") != expected_step
+        or type(run.get("timesteps")) is not int
+        or run["timesteps"] < expected_step
+        or checkpoint_sha256 != expected_checkpoint_sha256
+        or config.get("algorithm") != "maskable_ppo"
+        or config.get("policy") != "HexCNN"
+        or config.get("seed") != expected_model_seed
+        or config.get("environment") != "tactical-v2"
+        or config.get("opponent") != {"kind": "scripted", "name": "random"}
+        or run.get("opponent_snapshot") != config.get("opponent")
+    ):
+        raise ValueError("audited baseline run/controller identity changed")
+    scenario_descriptor = run.get("scenario")
+    if (
+        not isinstance(scenario_descriptor, Mapping)
+        or scenario_descriptor.get("path") != "scenario.json"
+        or scenario_descriptor.get("schema_version") != 1
+    ):
+        raise ValueError("audited baseline scenario descriptor changed")
+    monitor_files = run.get("monitor_files")
+    expected_monitors = [f"monitor.worker_{index}.csv" for index in range(4)]
+    if monitor_files != expected_monitors:
+        raise ValueError("audited baseline monitor inventory changed")
+
+    files, directories = _physical_tree_inventory(root, label="audited baseline")
+    expected_files = {
+        "run.json", "scenario.json", "initialization.json",
+        *_AUDITED_BASELINE_AUXILIARY_FILES,
+        *expected_monitors,
+        *(f"checkpoints/step_{step:09d}.zip" for step in expected_checkpoint_steps),
+    }
+    if files != expected_files or directories != {"checkpoints", "replays"}:
+        raise ValueError("audited baseline exact physical inventory changed")
+    baseline_snapshot = {
+        relative: (root / relative).read_bytes() for relative in sorted(files)
+    }
+    run_snapshot = _json_object_from_bytes(
+        baseline_snapshot["run.json"], label="audited baseline run.json",
+    )
+    if run_snapshot != run:
+        raise ValueError("audited baseline run changed during semantic validation")
+    initialization = _json_object_from_bytes(
+        baseline_snapshot["initialization.json"],
+        label="audited baseline initialization",
+    )
+    if (
+        set(initialization) != _AUDITED_BASELINE_INITIALIZATION_FIELDS
+        or initialization.get("schema_version") != 1
+        or initialization.get("kind") != "actor_only"
+        or initialization.get("actor_modules")
+        != ["features_extractor", "policy_net", "action_net"]
+        or initialization.get("device") != config.get("device")
+        or initialization.get("source_run") != config.get("actor_init_source")
+        or initialization.get("source_encoding_hash")
+        != source.contract.get("encoding_hash")
+    ):
+        raise ValueError("audited baseline initialization identity changed")
+    for field in (
+        "source_actor_fixtures_sha256", "source_bc_sha256",
+        "source_checkpoint_sha256", "source_contract_hash",
+        "source_dataset_manifest_sha256", "source_encoding_hash",
+        "source_run_manifest_sha256",
+    ):
+        if not isinstance(initialization.get(field), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", initialization[field]
+        ):
+            raise ValueError(f"audited baseline initialization {field} is invalid")
+    for field in (
+        "comparison_atol", "comparison_rtol", "maximum_absolute_logit_difference",
+    ):
+        value = initialization.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("audited baseline initialization comparison is invalid")
+    if (
+        initialization["comparison_atol"] < 0
+        or initialization["comparison_rtol"] < 0
+        or initialization["maximum_absolute_logit_difference"] < 0
+    ):
+        raise ValueError("audited baseline initialization comparison is invalid")
+
+    source_root_text = _require_string(
+        initialization.get("source_run"), label="audited baseline actor source",
+    )
+    actor_source_supplied = Path(source_root_text)
+    if _is_reparse_point(actor_source_supplied):
+        raise ValueError("audited baseline actor source root is a reparse point")
+    actor_source = _canonical_run(
+        actor_source_supplied, label="audited baseline actor source",
+    )
+    if str(actor_source) != source_root_text:
+        raise ValueError("audited baseline actor source path is not canonical")
+    source_paths = {
+        "run.json": _contained_source_file(
+            actor_source, "run.json", label="audited baseline source run",
+        ),
+        "bc.json": _contained_source_file(
+            actor_source, "bc.json", label="audited baseline source bc",
+        ),
+        "actor-fixtures.npz": _contained_source_file(
+            actor_source, "actor-fixtures.npz", label="audited baseline source fixtures",
+        ),
+        "checkpoint": _contained_source_file(
+            actor_source,
+            _require_string(
+                initialization.get("source_checkpoint"),
+                label="audited baseline source checkpoint",
+            ),
+            label="audited baseline source checkpoint",
+        ),
+        "scenario.json": _contained_source_file(
+            actor_source, "scenario.json", label="audited baseline source scenario",
+        ),
+    }
+    source_snapshot = {name: path.read_bytes() for name, path in source_paths.items()}
+    source_run = _json_object_from_bytes(
+        source_snapshot["run.json"], label="audited baseline source run",
+    )
+    source_bc = _json_object_from_bytes(
+        source_snapshot["bc.json"], label="audited baseline source bc",
+    )
+    source_contract = source_run.get("contract")
+    dataset_sha256 = initialization["source_dataset_manifest_sha256"]
+    if (
+        _sha256(source_snapshot["run.json"])
+        != initialization["source_run_manifest_sha256"]
+        or _sha256(source_snapshot["bc.json"])
+        != initialization["source_bc_sha256"]
+        or _sha256(source_snapshot["actor-fixtures.npz"])
+        != initialization["source_actor_fixtures_sha256"]
+        or _sha256(source_snapshot["checkpoint"])
+        != initialization["source_checkpoint_sha256"]
+        or source_run.get("schema_version") != 1
+        or source_run.get("state") != "completed"
+        or source_run.get("latest_checkpoint") != initialization["source_checkpoint"]
+        or source_run.get("latest_checkpoint_step") != 0
+        or source_run.get("model_seed") != expected_model_seed
+        or source_run.get("dataset_manifest_sha256") != dataset_sha256
+        or source_bc.get("schema_version") != 1
+        or source_bc.get("algorithm") != "maskable_ppo"
+        or source_bc.get("model_seed") != expected_model_seed
+        or source_bc.get("dataset_manifest_sha256") != dataset_sha256
+        or not isinstance(source_contract, Mapping)
+        or source_contract.get("contract_hash")
+        != initialization["source_contract_hash"]
+        or source_contract.get("encoding_hash")
+        != initialization["source_encoding_hash"]
+        or any(
+            source_contract.get(field) != source.contract.get(field)
+            for field in (
+                "environment", "version", "encoding_hash",
+                "observation_size", "action_size",
+            )
+        )
+        or source_snapshot["scenario.json"] != baseline_snapshot["scenario.json"]
+    ):
+        raise ValueError("audited baseline actor source physical identity changed")
+
+    final_files, final_directories = _physical_tree_inventory(
+        root, label="audited baseline",
+    )
+    if final_files != files or final_directories != directories or any(
+        (root / relative).read_bytes() != raw
+        for relative, raw in baseline_snapshot.items()
+    ) or any(path.read_bytes() != source_snapshot[name] for name, path in source_paths.items()):
+        raise ValueError("audited baseline bytes changed while reopening")
+    content_identity = _sha256(json.dumps(
+        {
+            relative: {
+                "sha256": _sha256(raw), "byte_size": len(raw),
+            }
+            for relative, raw in sorted(baseline_snapshot.items())
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8"))
+    return AuditedBaselinePublication(
+        root=root,
+        content_identity=content_identity,
+        model_seed=expected_model_seed,
+        step=expected_step,
+        checkpoint_path=checkpoint_path,
+        checkpoint_sha256=checkpoint_sha256,
+        run_manifest_sha256=_sha256(baseline_snapshot["run.json"]),
+        initialization_sha256=_sha256(baseline_snapshot["initialization.json"]),
+        source_bc_sha256=initialization["source_bc_sha256"],
+        source_run=actor_source,
+        contract=dict(source.contract),
+        scenario_sha256=_sha256(baseline_snapshot["scenario.json"]),
+    )
 
 
 def _require_compatible(left: _SourceRun, right: _SourceRun, *, label: str) -> None:
