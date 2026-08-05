@@ -1967,6 +1967,8 @@ class DevelopmentHeldoutOverlayEvidence:
     root: Path
     content_identity: str
     examples: tuple[Mapping[str, Any], ...]
+    tree_directories: tuple[str, ...] = ()
+    tree_files: tuple[tuple[str, bytes], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1986,6 +1988,96 @@ class DevelopmentSupervisedRun:
     new_inferences: int
     reused: bool
     result: DevelopmentSupervisedEvidence
+
+
+def _canonical_unresolved_overlay_root(raw_root: Path) -> Path:
+    supplied = Path(raw_root)
+    if not supplied.is_absolute() or ".." in supplied.parts:
+        raise ValueError("development heldout overlay root is not canonical")
+    for path in (*reversed(supplied.parents), supplied):
+        junction = getattr(path, "is_junction", None)
+        try:
+            if path.is_symlink() or bool(junction is not None and junction()):
+                raise ValueError(
+                    "development heldout overlay root chain contains a reparse point"
+                )
+        except OSError as exc:
+            raise ValueError(
+                "development heldout overlay root chain is unreadable"
+            ) from exc
+    try:
+        canonical = supplied.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("development heldout overlay root is unreadable") from exc
+    if supplied != canonical or not canonical.is_dir():
+        raise ValueError("development heldout overlay root is a canonical alias")
+    return canonical
+
+
+def _supervised_overlay_tree_snapshot(
+    root: Path,
+) -> tuple[tuple[str, ...], tuple[tuple[str, bytes], ...]]:
+    directories: set[str] = set()
+    files: dict[str, bytes] = {}
+    try:
+        paths = tuple(root.rglob("*"))
+        for path in paths:
+            junction = getattr(path, "is_junction", None)
+            if path.is_symlink() or bool(junction is not None and junction()):
+                raise ValueError(
+                    "development heldout overlay tree contains a reparse point"
+                )
+            canonical = path.resolve(strict=True)
+            if not canonical.is_relative_to(root):
+                raise ValueError("development heldout overlay tree escaped its root")
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                directories.add(relative)
+            elif path.is_file():
+                files[relative] = path.read_bytes()
+            else:
+                raise ValueError("development heldout overlay tree is invalid")
+    except OSError as exc:
+        raise ValueError("development heldout overlay tree is unreadable") from exc
+    return (
+        tuple(sorted(directories)),
+        tuple((relative, files[relative]) for relative in sorted(files)),
+    )
+
+
+def _require_supervised_overlay_stability(
+    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+) -> None:
+    for item in overlays:
+        if _supervised_overlay_tree_snapshot(item.root) != (
+            item.tree_directories,
+            item.tree_files,
+        ):
+            raise ValueError(
+                "development heldout overlay physical bytes changed during evaluation"
+            )
+        try:
+            reopened = dagger_domain.open_dagger_overlay(item.root)
+            reopened_examples = dagger_domain.dagger_overlay_supervised_examples(reopened)
+        except (OSError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "development heldout overlay final physical reopen failed"
+            ) from exc
+        if (
+            reopened.partition != "validation"
+            or reopened.content_identity != item.content_identity
+            or not _same_json(reopened_examples, item.examples)
+        ):
+            raise ValueError(
+                "development heldout overlay physical rows changed during evaluation"
+            )
+        if _supervised_overlay_tree_snapshot(item.root) != (
+            item.tree_directories,
+            item.tree_files,
+        ):
+            raise ValueError(
+                "development heldout overlay physical bytes changed during final reopen"
+            )
 
 
 def _validated_supervised_overlays(
@@ -2009,7 +2101,18 @@ def _validated_supervised_overlays(
     sample_ids: set[str] = set()
     action_size = definition.candidates[iteration].controller_identity["action_size"]
     for index, raw_root in enumerate(roots):
-        root = Path(raw_root).resolve(strict=True)
+        root = _canonical_unresolved_overlay_root(Path(raw_root))
+        frozen_source = definition.candidates[index + 1].source_publication
+        source_run = Path(frozen_source["source_run"])
+        if frozen_source["kind"] == "dagger-iteration" and source_run.name == "actor":
+            expected_root = _canonical_unresolved_overlay_root(
+                source_run.parent / "validation-overlay"
+            )
+            if root != expected_root:
+                raise ValueError(
+                    "development heldout overlay root differs from its frozen source"
+                )
+        tree_directories, tree_files = _supervised_overlay_tree_snapshot(root)
         try:
             physical = dagger_domain.open_dagger_overlay(root)
             physical_examples = dagger_domain.dagger_overlay_supervised_examples(
@@ -2030,6 +2133,8 @@ def _validated_supervised_overlays(
             root=root,
             content_identity=physical.content_identity,
             examples=physical_examples,
+            tree_directories=tree_directories,
+            tree_files=tree_files,
         )
         _require_sha256(
             value.content_identity, "development heldout overlay identity"
@@ -2303,6 +2408,7 @@ def _open_development_supervised_evaluation(
         or any(path.read_bytes() != raw for path, raw in artifact_snapshots.items())
     ):
         raise ValueError("development supervised bytes changed while reopening")
+    _require_supervised_overlay_stability(overlays)
     return DevelopmentSupervisedEvidence(
         root=publication_root,
         iteration=iteration,
@@ -2863,12 +2969,184 @@ def _task9_repository_hash(repository: Mapping[str, Any]) -> str:
     ).encode("utf-8"))
 
 
+def _require_task10_iteration_causal_identity(
+    manifest: IterationManifest,
+    *,
+    iteration: int,
+    previous: DevelopmentSourcePublicationEvidence,
+    frozen_identity: Mapping[str, Any] | None,
+) -> tuple[IterationManifest | None, bytes | None]:
+    """Bind Task 9's complete incoming claim to its physical predecessor."""
+
+    try:
+        source_root = Path(previous.source_run).resolve(strict=True)
+        checkpoint = Path(previous.checkpoint_path).resolve(strict=True)
+        controller = json.loads(previous.controller)
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("development Task 9 physical predecessor is invalid") from exc
+    if (
+        str(source_root) != previous.source_run
+        or str(checkpoint) != previous.checkpoint_path
+        or not checkpoint.is_file()
+        or checkpoint.parent != (source_root / "checkpoints").resolve(strict=True)
+        or _sha256_bytes(checkpoint.read_bytes()) != previous.checkpoint_sha256
+        or _sha256_bytes((source_root / "run.json").read_bytes())
+        != previous.run_manifest_sha256
+        or not isinstance(controller, Mapping)
+        or set(controller) != {
+            "kind", "path", "source_run", "algorithm", "step", "inference_mode",
+        }
+        or controller["kind"] != "snapshot"
+        or controller["path"] != previous.checkpoint_path
+        or controller["source_run"] != previous.source_run
+        or controller["algorithm"] != "maskable_ppo"
+        or controller["step"] != previous.step
+        or controller["inference_mode"] != "deterministic"
+        or previous.model_seed != 227
+    ):
+        raise ValueError("development Task 9 physical predecessor identity changed")
+
+    learner = {
+        "checkpoint_path": previous.checkpoint_path,
+        "checkpoint_sha256": previous.checkpoint_sha256,
+        "source_run": previous.source_run,
+        "source_manifest_sha256": previous.run_manifest_sha256,
+    }
+    actor_source = {
+        "schema_version": 1,
+        "source_kind": "snapshot" if previous.iteration == 0 else "dagger_actor",
+        "controller": dict(controller),
+        "checkpoint_sha256": previous.checkpoint_sha256,
+    }
+    if previous.iteration > 0:
+        actor_source["published_actor_sha256"] = previous.actor_sha256
+    expected_incoming = {
+        "source": actor_source,
+        "identity": learner,
+        "published_actor_sha256": previous.actor_sha256,
+    }
+    controller_identity = previous.controller_identity
+    contract = (
+        controller_identity.get("contract")
+        if isinstance(controller_identity, Mapping)
+        else None
+    )
+    semantics = contract.get("semantics") if isinstance(contract, Mapping) else None
+    expected_contract = {
+        "version": controller_identity.get("contract_version"),
+        "contract_hash": controller_identity.get("contract_hash"),
+        "encoding_hash": controller_identity.get("encoding_hash"),
+        "observation_size": controller_identity.get("observation_size"),
+        "action_size": controller_identity.get("action_size"),
+        "action_regions": (
+            semantics.get("action_regions") if isinstance(semantics, Mapping) else None
+        ),
+    }
+    if previous.iteration == 0:
+        baseline_contract_header = {
+            name: expected_contract[name]
+            for name in ("version", "contract_hash", "encoding_hash")
+        }
+        if not _same_json(
+            baseline_contract_header,
+            {
+                name: manifest.identity["contract"][name]
+                for name in ("version", "contract_hash", "encoding_hash")
+            },
+        ):
+            raise ValueError(
+                "development Task 9 baseline controller contract identity changed"
+            )
+        # The compact unit boundary trains a tiny Task 7 actor under the same
+        # authenticated baseline contract/encoding. Production geometry is
+        # independently authenticated below from the physical Task 7 actor.
+        expected_contract = manifest.identity["contract"]
+    actual_incoming = _mutable_stage_json(manifest.identity["incoming_learner"])
+    try:
+        actual_incoming["source"]["controller"]["path"] = str(
+            Path(actual_incoming["source"]["controller"]["path"]).resolve(strict=True)
+        )
+        actual_incoming["source"]["controller"]["source_run"] = str(
+            Path(
+                actual_incoming["source"]["controller"]["source_run"]
+            ).resolve(strict=True)
+        )
+        actual_incoming["identity"]["checkpoint_path"] = str(
+            Path(actual_incoming["identity"]["checkpoint_path"]).resolve(strict=True)
+        )
+        actual_incoming["identity"]["source_run"] = str(
+            Path(actual_incoming["identity"]["source_run"]).resolve(strict=True)
+        )
+    except (KeyError, OSError, TypeError) as exc:
+        raise ValueError(
+            "development Task 9 incoming learner paths are invalid"
+        ) from exc
+    actual_causal_identity = {
+        "incoming_learner": actual_incoming,
+        "contract": manifest.identity["contract"],
+    }
+    if not _same_json(actual_causal_identity, {
+        "incoming_learner": expected_incoming,
+        "contract": expected_contract,
+    }):
+        raise ValueError(
+            "development Task 9 learner does not match its physical predecessor"
+        )
+
+    predecessor: IterationManifest | None = None
+    predecessor_bytes: bytes | None = None
+    if iteration > 1:
+        predecessor_path = Path(previous.root).resolve(strict=True) / "manifest.json"
+        predecessor_bytes = predecessor_path.read_bytes()
+        predecessor = _read_iteration_manifest(predecessor_path)
+        actor = predecessor.artifacts["actor"]
+        expected_actor = {
+            "checkpoint_sha256": previous.checkpoint_sha256,
+            "actor_sha256": previous.actor_sha256,
+            "publication_metadata_sha256": previous.publication_metadata_sha256,
+            "run_manifest_sha256": previous.run_manifest_sha256,
+            "bc_manifest_sha256": previous.bc_manifest_sha256,
+        }
+        if (
+            predecessor.content_identity != previous.content_identity
+            or any(actor.get(name) != value for name, value in expected_actor.items())
+        ):
+            raise ValueError(
+                "development Task 9 predecessor publication identity changed"
+            )
+    _require_iteration_predecessor_chain(
+        manifest.identity,
+        index=iteration,
+        predecessor=predecessor,
+    )
+
+    if frozen_identity is not None:
+        expected_frozen = {
+            "panel_hash": frozen_identity["panel_hash"],
+            "scenario_hash": frozen_identity["scenario_hash"],
+            "repository": frozen_identity["repository"],
+            "contract_hash": frozen_identity["contract_hash"],
+            "encoding_hash": frozen_identity["encoding_hash"],
+        }
+        actual_frozen = {
+            "panel_hash": manifest.identity["definition"]["panel_sha256"],
+            "scenario_hash": manifest.identity["scenario"]["runtime_sha256"],
+            "repository": manifest.identity["repository"],
+            "contract_hash": manifest.identity["contract"]["contract_hash"],
+            "encoding_hash": manifest.identity["contract"]["encoding_hash"],
+        }
+        if not _same_json(actual_frozen, expected_frozen):
+            raise ValueError("development Task 9 frozen causal identity changed")
+    return predecessor, predecessor_bytes
+
+
 def _open_development_iteration_source(
     root: Path,
     *,
     iteration: int,
     preflight: DevelopmentPreflightEvidence,
     previous: DevelopmentSourcePublicationEvidence,
+    frozen_identity: Mapping[str, Any] | None = None,
 ) -> DevelopmentSourcePublicationEvidence:
     """Authenticate one Task 9 manifest, both overlays, and its Task 7 actor."""
 
@@ -2882,6 +3160,18 @@ def _open_development_iteration_source(
         "manifest.json", "train-overlay", "validation-overlay", "actor",
     }:
         raise ValueError("development Task 9 publication contains unowned entries")
+    predecessor, predecessor_bytes = _require_task10_iteration_causal_identity(
+        manifest,
+        iteration=iteration,
+        previous=previous,
+        frozen_identity=frozen_identity,
+    )
+    expected_predecessor_learner = {
+        "checkpoint_path": previous.checkpoint_path,
+        "checkpoint_sha256": previous.checkpoint_sha256,
+        "source_run": previous.source_run,
+        "source_manifest_sha256": previous.run_manifest_sha256,
+    }
 
     opened_overlays: dict[str, dagger_domain.DaggerOverlay] = {}
     recomputed_metrics: dict[str, Mapping[str, Any]] = {}
@@ -2906,6 +3196,10 @@ def _open_development_iteration_source(
             or overlay.definition.learner.checkpoint_sha256
             != previous.checkpoint_sha256
             or overlay.definition.learner.source_run != previous.source_run
+            or not _same_json(
+                overlay.definition.learner.to_dict(),
+                expected_predecessor_learner,
+            )
         ):
             raise ValueError("development Task 9 physical overlay identity changed")
         expected_overlay_definition = {
@@ -3078,6 +3372,15 @@ def _open_development_iteration_source(
     # to the same immutable content identity after actor validation.
     if manifest_path.read_bytes() != manifest_bytes_before:
         raise ValueError("development Task 9 manifest changed during authentication")
+    if predecessor is not None and (
+        predecessor_bytes is None
+        or (
+            Path(previous.root).resolve(strict=True) / "manifest.json"
+        ).read_bytes() != predecessor_bytes
+    ):
+        raise ValueError(
+            "development Task 9 predecessor changed during authentication"
+        )
     if _task7_actor_snapshot(actor_root) != actor_snapshot:
         raise ValueError("development Task 7 actor changed during authentication")
     for partition, original in opened_overlays.items():
@@ -3158,6 +3461,7 @@ def _validated_development_source_publication(
     iteration: int,
     preflight: DevelopmentPreflightEvidence,
     previous: DevelopmentSourcePublicationEvidence | None,
+    frozen_identity: Mapping[str, Any] | None = None,
 ) -> DevelopmentSourcePublicationEvidence:
     if not isinstance(value, DevelopmentSourcePublicationEvidence):
         raise ValueError("development source publication reopener returned an invalid type")
@@ -3174,6 +3478,7 @@ def _validated_development_source_publication(
             iteration=iteration,
             preflight=preflight,
             previous=previous,
+            frozen_identity=frozen_identity,
         )
     if not _same_json(
         _development_source_publication_identity(value),
@@ -3316,6 +3621,13 @@ def build_development_evaluation_definition(
     )
     candidates: list[dagger_domain.DevelopmentCandidate] = []
     sources: list[DevelopmentSourcePublicationEvidence] = []
+    frozen_identity = {
+        "panel_hash": panel_hash,
+        "scenario_hash": scenario_hash,
+        "contract_hash": contract_hash,
+        "encoding_hash": encoding_hash,
+        "repository": repository,
+    }
     for iteration, root in enumerate(roots):
         reopened = (
             _open_development_source_publication_claim(root, preflight=preflight)
@@ -3325,6 +3637,7 @@ def build_development_evaluation_definition(
                 iteration=iteration,
                 preflight=preflight,
                 previous=sources[-1],
+                frozen_identity=frozen_identity,
             )
         )
         source = _validated_development_source_publication(
@@ -3333,6 +3646,7 @@ def build_development_evaluation_definition(
             iteration=iteration,
             preflight=preflight,
             previous=None if iteration == 0 else sources[-1],
+            frozen_identity=frozen_identity,
         )
         source_identity = _development_source_publication_identity(source)
         candidate = dagger_domain.DevelopmentCandidate.from_dict({
@@ -3584,6 +3898,13 @@ def _open_development_iteration_evidence_from_physical_bytes(
         iteration=iteration,
         preflight=preflight,
         previous=previous,
+        frozen_identity={
+            "panel_hash": definition.panel_hash,
+            "scenario_hash": definition.scenario_hash,
+            "contract_hash": definition.contract_hash,
+            "encoding_hash": definition.encoding_hash,
+            "repository": definition.repository,
+        },
     )
     expected = definition.candidates[iteration]
     if not _same_json(

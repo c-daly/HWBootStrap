@@ -5812,6 +5812,72 @@ def test_task10_iteration_source_rejects_unphysical_task7_task9_claims(
         )
 
 
+def test_task10_iteration_source_rejects_resealed_predecessor_manifest_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overlay and Task 9 reseals cannot replace the physical predecessor hash."""
+
+    import run_annihilation_selective_dagger as runner
+
+    chain = _task10_physical_source_chain(tmp_path, runner, monkeypatch)
+    previous = chain.sources[1]
+    previous_run = Path(previous.source_run) / "run.json"
+    physical_predecessor_manifest_sha256 = hashlib.sha256(
+        previous_run.read_bytes()
+    ).hexdigest()
+    forged_manifest_sha256 = "f" * 64
+    assert physical_predecessor_manifest_sha256 != forged_manifest_sha256
+
+    root = chain.iteration_roots[1]
+    overlay_identities: dict[str, str] = {}
+    for partition in ("train", "validation"):
+        overlay_root = root / f"{partition}-overlay"
+        overlay_path = overlay_root / "manifest.json"
+        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+        overlay["learner"]["source_manifest_sha256"] = forged_manifest_sha256
+        for descriptor in overlay["games"]:
+            game_path = overlay_root / descriptor["path"]
+            game = json.loads(game_path.read_text(encoding="utf-8"))
+            game["learner"]["source_manifest_sha256"] = forged_manifest_sha256
+            game["content_identity"] = _content_identity(game)
+            _rewrite(game_path, game)
+            descriptor.update({
+                "sha256": _sha256(game_path),
+                "byte_size": game_path.stat().st_size,
+                "content_identity": game["content_identity"],
+            })
+        overlay["content_identity"] = _content_identity(overlay)
+        _rewrite(overlay_path, overlay)
+        overlay_identities[partition] = overlay["content_identity"]
+
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["identity"]["incoming_learner"]["identity"][
+        "source_manifest_sha256"
+    ] = forged_manifest_sha256
+    for partition in ("train", "validation"):
+        identity_key = f"cumulative_{partition}_overlays"
+        artifact_key = f"{partition}_overlay"
+        manifest["identity"][identity_key][-1]["content_identity"] = (
+            overlay_identities[partition]
+        )
+        manifest["artifacts"][artifact_key]["content_identity"] = (
+            overlay_identities[partition]
+        )
+    manifest["content_identity"] = _content_identity(manifest)
+    dagger_module.IterationManifest.from_dict(manifest)
+    _rewrite(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="predecessor|source|manifest|learner"):
+        runner._open_development_iteration_source(
+            root,
+            iteration=2,
+            preflight=chain.preflight,
+            previous=previous,
+        )
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
@@ -6541,6 +6607,86 @@ def test_task10_supervised_rejects_local_toctou_and_reparse_artifacts(
             result.result.root,
             definition=definition,
             iteration=1,
+        )
+
+
+def test_task10_supervised_rejects_overlay_shard_mutated_during_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-row-extraction shard mutation must fail the final physical reopen."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    result = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=1,
+        heldout_overlay_roots=(overlays[0].root,),
+        output_root=tmp_path / "supervised-overlay-mid-metrics",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    )
+    overlay_manifest = json.loads(
+        (overlays[0].root / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_game = json.loads(
+        (
+            overlays[0].root / overlay_manifest["games"][0]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    shard = overlays[0].root / first_game["shard"]["path"]
+    original_metrics = runner._supervised_metrics
+
+    def mutate_shard(*args: Any, **kwargs: Any) -> object:
+        metrics = original_metrics(*args, **kwargs)
+        shard.write_bytes(b"corrupted-after-row-extraction")
+        return metrics
+
+    monkeypatch.setattr(runner, "_supervised_metrics", mutate_shard)
+    with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
+        runner._open_development_supervised_evaluation_from_physical_bytes(
+            result.result.root,
+            definition=definition,
+            iteration=1,
+        )
+
+
+def test_task10_supervised_rejects_reparse_overlay_root(
+    tmp_path: Path,
+) -> None:
+    """The supplied overlay root's unresolved path chain must contain no reparse."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    alias = tmp_path / "heldout-overlay-reparse-alias"
+    try:
+        alias.symlink_to(overlays[0].root, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip(f"Windows symbolic-link privilege is unavailable: {exc}")
+        raise
+
+    with pytest.raises(ValueError, match="overlay|reparse|canonical|alias"):
+        runner._validated_supervised_overlays(
+            definition=definition,
+            iteration=1,
+            roots=(alias,),
         )
 
 

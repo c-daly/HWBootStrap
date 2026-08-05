@@ -364,6 +364,402 @@ _AUDITED_BASELINE_INITIALIZATION_FIELDS = frozenset({
     "source_dataset_manifest_sha256", "source_encoding_hash", "source_run",
     "source_run_manifest_sha256",
 })
+_AUDITED_BASELINE_RUN_FIELDS = frozenset({
+    "config", "contract", "created_at", "episodes", "latest_checkpoint",
+    "latest_checkpoint_step", "latest_message", "monitor_files",
+    "opponent_snapshot", "pid", "scenario", "schema_version", "state",
+    "timesteps", "tracker_status", "updated_at",
+})
+_AUDITED_BASELINE_CONFIG_FIELDS = frozenset({
+    "actor_init_source", "algorithm", "algorithm_options",
+    "allow_unsafe_legacy_resume", "backend", "checkpoint_interval", "device",
+    "environment", "episode_seed_base", "learner_seat", "opponent", "policy",
+    "resume_source", "run_name", "seed", "timestep_mode", "total_timesteps",
+    "trackers", "workers",
+})
+_AUDITED_SOURCE_RUN_FIELDS = frozenset({
+    "bc_config", "best_epoch", "config", "contract",
+    "dataset_manifest_sha256", "latest_checkpoint", "latest_checkpoint_step",
+    "model_seed", "scenario", "schema_version", "state", "timesteps",
+})
+_AUDITED_SOURCE_CONFIG_FIELDS = frozenset({
+    "algorithm", "backend", "behavioral_cloning", "device", "model_seed",
+    "policy", "seed",
+})
+_AUDITED_BC_CONFIG_FIELDS = frozenset({
+    "batch_size", "device", "learning_rate", "max_epochs", "model_seed",
+    "patience",
+})
+_AUDITED_SOURCE_BC_FIELDS = frozenset({
+    "actor_parameter_count", "algorithm", "best_epoch", "best_validation_nll",
+    "config", "dataset_manifest_sha256", "epochs_trained", "model_seed",
+    "policy", "publication_device", "schema_version",
+    "training_decision_count", "training_device", "validation_decision_count",
+    "validation_game_count", "value_parameter_count",
+    "value_parameters_sha256_after", "value_parameters_sha256_before",
+})
+_AUDITED_CONTRACT_FIELDS = frozenset({
+    "action_size", "board", "contract_hash", "encoding_hash", "environment",
+    "observation_size", "reward", "roster", "semantics", "version",
+})
+_AUDITED_TRAINING_DEVICE_FIELDS = frozenset({
+    "cuda_runtime", "device_index", "device_name", "requested", "resolved",
+    "torch_version",
+})
+_AUDITED_SOURCE_METRICS_FIELDS = frozenset({
+    "expected_calibration_error", "illegal_probability",
+    "mean_end_turn_probability", "nll", "strata", "top1_accuracy",
+    "top3_accuracy", "top5_accuracy",
+})
+_AUDITED_SOURCE_PANEL_FIELDS = frozenset({
+    "dataset_manifest", "dataset_manifest_sha256", "definition_hashes",
+    "model_seed", "sampler_seed", "schema_version",
+})
+_AUDITED_SOURCE_TRAINING_FIELDS = frozenset({
+    "epochs", "model_seed", "publication_device", "schema_version",
+    "training_device",
+})
+_AUDITED_SOURCE_EPOCH_FIELDS = frozenset({
+    "batches", "best_epoch", "best_validation_nll", "device",
+    "elapsed_seconds", "epoch", "epoch_seconds", "epochs_without_improvement",
+    "event", "examples", "examples_per_second", "max_epochs",
+    "mean_training_loss", "model_seed", "optimization_seconds", "patience",
+    "sampling_seconds", "schema_version", "top1_accuracy", "top3_accuracy",
+    "top5_accuracy", "transfer_forward_seconds", "unclassified_seconds",
+    "validation_nll", "validation_seconds",
+})
+
+
+def _exact_object(
+    value: object, expected_fields: frozenset[str], *, label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError(f"{label} schema is invalid")
+    return value
+
+
+def _audited_sha256(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _audited_int(value: object, *, label: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{label} must be an integer >= {minimum}")
+    return value
+
+
+def _audited_number(
+    value: object, *, label: str, minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite number")
+    result = float(value)
+    if (
+        not math.isfinite(result)
+        or (minimum is not None and result < minimum)
+        or (maximum is not None and result > maximum)
+    ):
+        raise ValueError(f"{label} is outside its valid range")
+    return result
+
+
+def _validate_audited_contract(value: object, *, label: str) -> Mapping[str, Any]:
+    contract = _exact_object(value, _AUDITED_CONTRACT_FIELDS, label=label)
+    if contract["environment"] != "tactical-v2" or contract["version"] != "tactical-v2":
+        raise ValueError(f"{label} version is invalid")
+    _audited_sha256(contract["contract_hash"], label=f"{label} contract hash")
+    _audited_sha256(contract["encoding_hash"], label=f"{label} encoding hash")
+    _audited_int(contract["observation_size"], label=f"{label} observation size", minimum=1)
+    _audited_int(contract["action_size"], label=f"{label} action size", minimum=1)
+    if (
+        not isinstance(contract["board"], Mapping)
+        or not isinstance(contract["reward"], Mapping)
+        or type(contract["roster"]) is not list
+        or any(not isinstance(item, str) or not item for item in contract["roster"])
+    ):
+        raise ValueError(f"{label} structure is invalid")
+    semantics = _require_mapping(contract["semantics"], label=f"{label} semantics")
+    environment_kind = _require_string(
+        semantics.get("environment_kind"), label=f"{label} environment kind",
+    )
+    canonical = json.dumps(
+        {
+            "action_size": contract["action_size"],
+            "contract_version": contract["version"],
+            "environment_kind": environment_kind,
+            "observation_size": contract["observation_size"],
+            "reward": contract["reward"],
+            "roster": contract["roster"],
+            "semantics": semantics,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    if _sha256(canonical) != contract["contract_hash"]:
+        raise ValueError(f"{label} contract hash is not derived from its physical semantics")
+    return contract
+
+
+def _validate_audited_bc_config(value: object, *, label: str) -> Mapping[str, Any]:
+    config = _exact_object(value, _AUDITED_BC_CONFIG_FIELDS, label=label)
+    for field in ("batch_size", "max_epochs", "model_seed", "patience"):
+        _audited_int(config[field], label=f"{label} {field}", minimum=1)
+    _audited_number(config["learning_rate"], label=f"{label} learning_rate", minimum=0.0)
+    if config["device"] != "cuda" or config["model_seed"] != _EXPECTED_SEED:
+        raise ValueError(f"{label} identity is invalid")
+    return config
+
+
+def _validate_audited_training_device(
+    value: object, *, label: str,
+) -> Mapping[str, Any]:
+    device = _exact_object(value, _AUDITED_TRAINING_DEVICE_FIELDS, label=label)
+    _audited_int(device["device_index"], label=f"{label} device_index")
+    for field in (
+        "cuda_runtime", "device_name", "requested", "resolved", "torch_version",
+    ):
+        _require_string(device[field], label=f"{label} {field}")
+    if device["requested"] != "cuda":
+        raise ValueError(f"{label} requested device is invalid")
+    return device
+
+
+def _validate_audited_baseline_run_schema(
+    run: Mapping[str, Any], *, expected_step: int, expected_model_seed: int,
+) -> None:
+    _exact_object(run, _AUDITED_BASELINE_RUN_FIELDS, label="audited baseline run")
+    config = _exact_object(
+        run["config"], _AUDITED_BASELINE_CONFIG_FIELDS,
+        label="audited baseline config",
+    )
+    _validate_audited_contract(run["contract"], label="audited baseline contract")
+    algorithm_options = _exact_object(
+        config["algorithm_options"],
+        frozenset({"learning_rate", "n_epochs", "target_kl"}),
+        label="audited baseline algorithm options",
+    )
+    _audited_number(
+        algorithm_options["learning_rate"],
+        label="audited baseline learning rate", minimum=0.0,
+    )
+    _audited_int(
+        algorithm_options["n_epochs"], label="audited baseline n_epochs", minimum=1,
+    )
+    _audited_number(
+        algorithm_options["target_kl"],
+        label="audited baseline target_kl", minimum=0.0,
+    )
+    for field in (
+        "checkpoint_interval", "episode_seed_base", "seed", "total_timesteps",
+        "workers",
+    ):
+        _audited_int(config[field], label=f"audited baseline {field}", minimum=1)
+    if (
+        config["seed"] != expected_model_seed
+        or config["algorithm"] != "maskable_ppo"
+        or config["backend"] != "sb3"
+        or config["device"] != "cuda"
+        or config["environment"] != "tactical-v2"
+        or config["learner_seat"] != "alternating"
+        or config["opponent"] != {"kind": "scripted", "name": "random"}
+        or config["policy"] != "HexCNN"
+        or config["resume_source"] is not None
+        or config["timestep_mode"] != "absolute"
+        or config["trackers"] != [{"kind": "local"}]
+        or config["allow_unsafe_legacy_resume"] is not False
+        or not isinstance(config["actor_init_source"], str)
+        or not isinstance(config["run_name"], str)
+        or run["pid"] is not None
+        or type(run["tracker_status"]) is not list
+    ):
+        raise ValueError("audited baseline run scalar identity changed")
+    for field in ("created_at", "latest_message", "updated_at"):
+        _require_string(run[field], label=f"audited baseline {field}")
+    _audited_int(run["episodes"], label="audited baseline episodes", minimum=1)
+    _audited_int(run["timesteps"], label="audited baseline timesteps", minimum=expected_step)
+    scenario = _exact_object(
+        run["scenario"], frozenset({"path", "schema_version", "template_id"}),
+        label="audited baseline scenario descriptor",
+    )
+    if (
+        scenario != {
+            "path": "scenario.json",
+            "schema_version": 1,
+            "template_id": "annihilation-imitation-v1",
+        }
+        or run["schema_version"] != 1
+    ):
+        raise ValueError("audited baseline scenario schema changed")
+
+
+def _validate_audited_source_documents(
+    *,
+    source_run: Mapping[str, Any],
+    source_bc: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    panel: Mapping[str, Any],
+    training: Mapping[str, Any],
+    expected_model_seed: int,
+    dataset_sha256: str,
+) -> None:
+    _exact_object(source_run, _AUDITED_SOURCE_RUN_FIELDS, label="audited source run")
+    source_config = _exact_object(
+        source_run["config"], _AUDITED_SOURCE_CONFIG_FIELDS,
+        label="audited source config",
+    )
+    bc_config = _validate_audited_bc_config(
+        source_run["bc_config"], label="audited source BC config",
+    )
+    _validate_audited_contract(source_run["contract"], label="audited source contract")
+    _exact_object(source_bc, _AUDITED_SOURCE_BC_FIELDS, label="audited source bc")
+    bc_manifest_config = _validate_audited_bc_config(
+        source_bc["config"], label="audited source bc config",
+    )
+    training_device = _validate_audited_training_device(
+        source_bc["training_device"], label="audited source bc training device",
+    )
+    integer_fields = (
+        "actor_parameter_count", "best_epoch", "epochs_trained",
+        "training_decision_count", "validation_decision_count",
+        "validation_game_count", "value_parameter_count",
+    )
+    for field in integer_fields:
+        _audited_int(source_bc[field], label=f"audited source bc {field}", minimum=1)
+    _audited_number(
+        source_bc["best_validation_nll"],
+        label="audited source bc best validation nll", minimum=0.0,
+    )
+    for field in ("value_parameters_sha256_after", "value_parameters_sha256_before"):
+        _audited_sha256(source_bc[field], label=f"audited source bc {field}")
+    if (
+        source_run["schema_version"] != 1
+        or source_run["state"] != "completed"
+        or source_run["timesteps"] != 0
+        or source_run["latest_checkpoint_step"] != 0
+        or source_run["model_seed"] != expected_model_seed
+        or source_run["dataset_manifest_sha256"] != dataset_sha256
+        or source_run["best_epoch"] != source_bc["best_epoch"]
+        or source_config["algorithm"] != "maskable_ppo"
+        or source_config["backend"] != "stable_baselines3"
+        or source_config["device"] != "cpu"
+        or source_config["model_seed"] != expected_model_seed
+        or source_config["policy"] != "HexCNN"
+        or source_config["seed"] != expected_model_seed
+        or source_config["behavioral_cloning"] != bc_config
+        or bc_manifest_config != bc_config
+        or source_bc["schema_version"] != 1
+        or source_bc["algorithm"] != "maskable_ppo"
+        or source_bc["model_seed"] != expected_model_seed
+        or source_bc["dataset_manifest_sha256"] != dataset_sha256
+        or source_bc["policy"] != "HexCNN"
+        or source_bc["publication_device"] != source_config["device"]
+        or source_bc["value_parameters_sha256_after"]
+        != source_bc["value_parameters_sha256_before"]
+    ):
+        raise ValueError("audited source run and BC identity changed")
+
+    _exact_object(metrics, _AUDITED_SOURCE_METRICS_FIELDS, label="audited source metrics")
+    for field in (
+        "expected_calibration_error", "illegal_probability",
+        "mean_end_turn_probability", "top1_accuracy", "top3_accuracy",
+        "top5_accuracy",
+    ):
+        _audited_number(
+            metrics[field], label=f"audited source metrics {field}",
+            minimum=0.0, maximum=1.0,
+        )
+    _audited_number(metrics["nll"], label="audited source metrics nll", minimum=0.0)
+    if metrics["nll"] != source_bc["best_validation_nll"]:
+        raise ValueError("audited source metrics do not match BC publication")
+    if not isinstance(metrics["strata"], Mapping):
+        raise ValueError("audited source metric strata schema is invalid")
+    for name, item in metrics["strata"].items():
+        if not isinstance(name, str):
+            raise ValueError("audited source metric stratum name is invalid")
+        row = _exact_object(
+            item, frozenset({"accuracy", "count"}),
+            label="audited source metric stratum",
+        )
+        _audited_number(
+            row["accuracy"], label="audited source stratum accuracy",
+            minimum=0.0, maximum=1.0,
+        )
+        _audited_int(row["count"], label="audited source stratum count", minimum=1)
+
+    _exact_object(panel, _AUDITED_SOURCE_PANEL_FIELDS, label="audited source panel")
+    definition_hashes = _exact_object(
+        panel["definition_hashes"],
+        frozenset({"panel_sha256", "scenario_sha256", "seed_banks_sha256"}),
+        label="audited source panel definition hashes",
+    )
+    for field in ("panel_sha256", "scenario_sha256", "seed_banks_sha256"):
+        _audited_sha256(definition_hashes[field], label=f"audited source panel {field}")
+    if (
+        panel["schema_version"] != 1
+        or panel["model_seed"] != expected_model_seed
+        or panel["sampler_seed"] != expected_model_seed
+        or panel["dataset_manifest_sha256"] != dataset_sha256
+        or not isinstance(panel["dataset_manifest"], str)
+        or not panel["dataset_manifest"]
+    ):
+        raise ValueError("audited source panel provenance changed")
+
+    _exact_object(
+        training, _AUDITED_SOURCE_TRAINING_FIELDS,
+        label="audited source training history",
+    )
+    history_device = _validate_audited_training_device(
+        training["training_device"], label="audited source training device",
+    )
+    if (
+        training["schema_version"] != 1
+        or training["model_seed"] != expected_model_seed
+        or training["publication_device"] != source_bc["publication_device"]
+        or history_device != training_device
+        or type(training["epochs"]) is not list
+        or not training["epochs"]
+    ):
+        raise ValueError("audited source training history identity changed")
+    observed_epochs: list[int] = []
+    for item in training["epochs"]:
+        epoch = _exact_object(
+            item, _AUDITED_SOURCE_EPOCH_FIELDS, label="audited source training epoch",
+        )
+        for field in (
+            "batches", "best_epoch", "epoch", "examples", "max_epochs",
+            "model_seed", "patience",
+        ):
+            _audited_int(epoch[field], label=f"audited source epoch {field}", minimum=1)
+        _audited_int(
+            epoch["epochs_without_improvement"],
+            label="audited source epoch epochs_without_improvement",
+        )
+        for field in (
+            "best_validation_nll", "elapsed_seconds", "epoch_seconds",
+            "examples_per_second", "mean_training_loss", "optimization_seconds",
+            "sampling_seconds", "top1_accuracy", "top3_accuracy",
+            "top5_accuracy", "transfer_forward_seconds", "unclassified_seconds",
+            "validation_nll", "validation_seconds",
+        ):
+            _audited_number(epoch[field], label=f"audited source epoch {field}", minimum=0.0)
+        if (
+            epoch["schema_version"] != 1
+            or epoch["event"] != "bc_epoch"
+            or epoch["model_seed"] != expected_model_seed
+            or not isinstance(epoch["device"], str)
+        ):
+            raise ValueError("audited source training epoch identity changed")
+        observed_epochs.append(epoch["epoch"])
+    if (
+        observed_epochs != list(range(1, len(observed_epochs) + 1))
+        or source_bc["best_epoch"] not in observed_epochs
+    ):
+        raise ValueError("audited source training epoch sequence changed")
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -498,6 +894,11 @@ def validate_audited_baseline_publication(
     )
     if run_snapshot != run:
         raise ValueError("audited baseline run changed during semantic validation")
+    _validate_audited_baseline_run_schema(
+        run_snapshot,
+        expected_step=expected_step,
+        expected_model_seed=expected_model_seed,
+    )
     initialization = _json_object_from_bytes(
         baseline_snapshot["initialization.json"],
         label="audited baseline initialization",
@@ -548,6 +949,24 @@ def validate_audited_baseline_publication(
     )
     if str(actor_source) != source_root_text:
         raise ValueError("audited baseline actor source path is not canonical")
+    source_checkpoint_relative = _require_string(
+        initialization.get("source_checkpoint"),
+        label="audited baseline source checkpoint",
+    )
+    source_files, source_directories = _physical_tree_inventory(
+        actor_source, label="audited baseline actor source",
+    )
+    expected_source_files = {
+        "actor-fixtures.npz", "bc.json", "metrics.json",
+        "panel-provenance.json", "run.json", "scenario.json",
+        "training-history.json", source_checkpoint_relative,
+    }
+    if source_files != expected_source_files or source_directories != {"checkpoints"}:
+        raise ValueError("audited baseline actor source exact inventory changed")
+    source_tree_snapshot = {
+        relative: (actor_source / relative).read_bytes()
+        for relative in sorted(source_files)
+    }
     source_paths = {
         "run.json": _contained_source_file(
             actor_source, "run.json", label="audited baseline source run",
@@ -560,10 +979,7 @@ def validate_audited_baseline_publication(
         ),
         "checkpoint": _contained_source_file(
             actor_source,
-            _require_string(
-                initialization.get("source_checkpoint"),
-                label="audited baseline source checkpoint",
-            ),
+            source_checkpoint_relative,
             label="audited baseline source checkpoint",
         ),
         "scenario.json": _contained_source_file(
@@ -576,6 +992,27 @@ def validate_audited_baseline_publication(
     )
     source_bc = _json_object_from_bytes(
         source_snapshot["bc.json"], label="audited baseline source bc",
+    )
+    source_metrics = _json_object_from_bytes(
+        source_tree_snapshot["metrics.json"],
+        label="audited baseline source metrics",
+    )
+    source_panel = _json_object_from_bytes(
+        source_tree_snapshot["panel-provenance.json"],
+        label="audited baseline source panel provenance",
+    )
+    source_training = _json_object_from_bytes(
+        source_tree_snapshot["training-history.json"],
+        label="audited baseline source training history",
+    )
+    _validate_audited_source_documents(
+        source_run=source_run,
+        source_bc=source_bc,
+        metrics=source_metrics,
+        panel=source_panel,
+        training=source_training,
+        expected_model_seed=expected_model_seed,
+        dataset_sha256=initialization["source_dataset_manifest_sha256"],
     )
     source_contract = source_run.get("contract")
     dataset_sha256 = initialization["source_dataset_manifest_sha256"]
@@ -617,17 +1054,31 @@ def validate_audited_baseline_publication(
     final_files, final_directories = _physical_tree_inventory(
         root, label="audited baseline",
     )
+    final_source_files, final_source_directories = _physical_tree_inventory(
+        actor_source, label="audited baseline actor source",
+    )
     if final_files != files or final_directories != directories or any(
         (root / relative).read_bytes() != raw
         for relative, raw in baseline_snapshot.items()
-    ) or any(path.read_bytes() != source_snapshot[name] for name, path in source_paths.items()):
+    ) or (
+        final_source_files != source_files
+        or final_source_directories != source_directories
+    ) or any(
+        (actor_source / relative).read_bytes() != raw
+        for relative, raw in source_tree_snapshot.items()
+    ):
         raise ValueError("audited baseline bytes changed while reopening")
     content_identity = _sha256(json.dumps(
         {
-            relative: {
+            f"baseline/{relative}": {
                 "sha256": _sha256(raw), "byte_size": len(raw),
             }
             for relative, raw in sorted(baseline_snapshot.items())
+        } | {
+            f"actor-source/{relative}": {
+                "sha256": _sha256(raw), "byte_size": len(raw),
+            }
+            for relative, raw in sorted(source_tree_snapshot.items())
         },
         sort_keys=True,
         separators=(",", ":"),

@@ -21,6 +21,12 @@ from ml_lab.tactical_trace import CommandFrame, EpisodeTrace, SeatFrame, StateFr
 
 
 ENCODING_HASH = "e" * 64
+LOCKED_BASELINE_CONTRACT_HASH = (
+    "7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6"
+)
+LOCKED_SOURCE_CONTRACT_HASH = (
+    "2d6984089aa151cee59e10bb37b0d2239e7a0668f34d90e1af64216aaf713edf"
+)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -41,6 +47,30 @@ def _contract(*, contract_hash: str = "c" * 64, **changes: object) -> dict[str, 
         "semantics": {"start_profiles": [{"id": "standard-3v3"}]},
     }
     result.update(changes)
+    return result
+
+
+def _sealed_test_contract(*, environment_kind: str) -> dict[str, object]:
+    """Build a tiny contract whose hash is derived from the engine's public format."""
+
+    result = _contract(contract_hash="0" * 64)
+    result["semantics"]["environment_kind"] = environment_kind
+    document = {
+        "action_size": result["action_size"],
+        "contract_version": result["version"],
+        "environment_kind": environment_kind,
+        "observation_size": result["observation_size"],
+        "reward": result["reward"],
+        "roster": result["roster"],
+        "semantics": result["semantics"],
+    }
+    result["contract_hash"] = hashlib.sha256(json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
     return result
 
 
@@ -99,20 +129,122 @@ def _write_run(
 def _write_audited_baseline(root: Path) -> tuple[Path, str]:
     source = _write_run(
         root / "actor-source", kind="clone", checkpoints=(0,),
+        contract=_sealed_test_contract(environment_kind="duel"),
     )
     source_checkpoint = source / "checkpoints" / "step_000000000.zip"
     source_bc = source / "bc.json"
     source_fixtures = source / "actor-fixtures.npz"
+    source_training_device = {
+        "cuda_runtime": "13.0",
+        "device_index": 0,
+        "device_name": "test-cuda",
+        "requested": "cuda",
+        "resolved": "cuda:0",
+        "torch_version": "test",
+    }
+    source_bc_config = {
+        "batch_size": 256,
+        "device": "cuda",
+        "learning_rate": 0.0003,
+        "max_epochs": 50,
+        "model_seed": 227,
+        "patience": 5,
+    }
     _write_json(source_bc, {
         "schema_version": 1,
         "algorithm": "maskable_ppo",
+        "actor_parameter_count": 2_044_488,
+        "best_epoch": 1,
+        "best_validation_nll": 1.25,
+        "config": source_bc_config,
+        "epochs_trained": 1,
         "model_seed": 227,
         "dataset_manifest_sha256": "d" * 64,
+        "policy": "HexCNN",
+        "publication_device": "cpu",
+        "training_decision_count": 2_000,
+        "training_device": source_training_device,
+        "validation_decision_count": 200,
+        "validation_game_count": 2,
+        "value_parameter_count": 20_673,
+        "value_parameters_sha256_after": "a" * 64,
+        "value_parameters_sha256_before": "a" * 64,
     })
     source_fixtures.write_bytes(b"actor-fixtures")
     source_run = json.loads((source / "run.json").read_text(encoding="utf-8"))
-    source_run["dataset_manifest_sha256"] = "d" * 64
+    source_run.update({
+        "bc_config": source_bc_config,
+        "best_epoch": 1,
+        "dataset_manifest_sha256": "d" * 64,
+        "timesteps": 0,
+    })
+    source_run["config"] = {
+        "algorithm": "maskable_ppo",
+        "backend": "stable_baselines3",
+        "behavioral_cloning": source_bc_config,
+        "device": "cpu",
+        "model_seed": 227,
+        "policy": "HexCNN",
+        "seed": 227,
+    }
     _write_json(source / "run.json", source_run)
+    _write_json(source / "metrics.json", {
+        "expected_calibration_error": 0.1,
+        "illegal_probability": 0.0,
+        "mean_end_turn_probability": 0.25,
+        "nll": 1.25,
+        "strata": {},
+        "top1_accuracy": 0.5,
+        "top3_accuracy": 0.75,
+        "top5_accuracy": 0.9,
+    })
+    _write_json(source / "panel-provenance.json", {
+        "dataset_manifest": str((root / "dataset" / "manifest.json").resolve()),
+        "dataset_manifest_sha256": "d" * 64,
+        "definition_hashes": {
+            "panel_sha256": "b" * 64,
+            "scenario_sha256": hashlib.sha256(
+                (source / "scenario.json").read_bytes()
+            ).hexdigest(),
+            "seed_banks_sha256": "c" * 64,
+        },
+        "model_seed": 227,
+        "sampler_seed": 227,
+        "schema_version": 1,
+    })
+    _write_json(source / "training-history.json", {
+        "epochs": [{
+            "batches": 1,
+            "best_epoch": 1,
+            "best_validation_nll": 1.25,
+            "device": "cuda:0",
+            "elapsed_seconds": 1.0,
+            "epoch": 1,
+            "epoch_seconds": 1.0,
+            "epochs_without_improvement": 0,
+            "event": "bc_epoch",
+            "examples": 256,
+            "examples_per_second": 256.0,
+            "max_epochs": 50,
+            "mean_training_loss": 1.5,
+            "model_seed": 227,
+            "optimization_seconds": 0.4,
+            "patience": 5,
+            "sampling_seconds": 0.1,
+            "schema_version": 1,
+            "top1_accuracy": 0.5,
+            "top3_accuracy": 0.75,
+            "top5_accuracy": 0.9,
+            "transfer_forward_seconds": 0.2,
+            "unclassified_seconds": 0.1,
+            "validation_nll": 1.25,
+            "validation_seconds": 0.2,
+        }],
+        "model_seed": 227,
+        "publication_device": "cpu",
+        "schema_version": 1,
+        "training_device": source_training_device,
+    })
 
     baseline = _write_run(
         root / "baseline",
@@ -120,21 +252,27 @@ def _write_audited_baseline(root: Path) -> tuple[Path, str]:
         checkpoints=(14_336, 26_624, 38_912),
         actor_init_source=str(source.resolve()),
         state="stopped",
+        contract=_sealed_test_contract(environment_kind="tactical"),
     )
     run = json.loads((baseline / "run.json").read_text(encoding="utf-8"))
+    run.pop("model_seed")
     run.update({
         "created_at": "2026-08-02T00:00:00Z",
         "episodes": 1,
         "latest_message": "stopped",
         "monitor_files": [f"monitor.worker_{index}.csv" for index in range(4)],
         "opponent_snapshot": {"kind": "scripted", "name": "random"},
-        "pid": 1,
-        "tracker_status": {},
+        "pid": None,
+        "tracker_status": [],
         "updated_at": "2026-08-02T00:01:00Z",
     })
     run["scenario"]["template_id"] = "annihilation-imitation-v1"
     run["config"].update({
-        "algorithm_options": {},
+        "algorithm_options": {
+            "learning_rate": 0.0003,
+            "n_epochs": 10,
+            "target_kl": 0.02,
+        },
         "allow_unsafe_legacy_resume": False,
         "backend": "sb3",
         "checkpoint_interval": 12_800,
@@ -150,6 +288,7 @@ def _write_audited_baseline(root: Path) -> tuple[Path, str]:
         "trackers": [{"kind": "local"}],
         "workers": 4,
     })
+    run["config"].pop("model_seed")
     _write_json(baseline / "run.json", run)
     for name in (
         "control.json", "evaluation.json", "monitor.csv", "params.json",
@@ -174,7 +313,7 @@ def _write_audited_baseline(root: Path) -> tuple[Path, str]:
         "source_checkpoint_sha256": hashlib.sha256(
             source_checkpoint.read_bytes()
         ).hexdigest(),
-        "source_contract_hash": run["contract"]["contract_hash"],
+        "source_contract_hash": source_run["contract"]["contract_hash"],
         "source_dataset_manifest_sha256": "d" * 64,
         "source_encoding_hash": run["contract"]["encoding_hash"],
         "source_run": str(source.resolve()),
@@ -218,6 +357,87 @@ def test_audited_baseline_validator_authenticates_physical_source_chain(
     assert publication.step == 38_912
     assert publication.checkpoint_sha256 == checkpoint_sha256
     assert publication.source_run == (tmp_path / "actor-source").resolve()
+
+
+def test_audited_baseline_validator_rejects_extra_actor_source_file(
+    tmp_path: Path,
+) -> None:
+    baseline, checkpoint_sha256 = _write_audited_baseline(tmp_path)
+    (tmp_path / "actor-source" / "unowned-source.bin").write_bytes(b"unowned")
+
+    with pytest.raises(ValueError, match="source|inventory"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=checkpoint_sha256,
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
+
+
+def test_audited_baseline_validator_rejects_extra_baseline_run_field(
+    tmp_path: Path,
+) -> None:
+    baseline, checkpoint_sha256 = _write_audited_baseline(tmp_path)
+    run_path = baseline / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    run["forged_field"] = "self-consistent"
+    _write_json(run_path, run)
+
+    with pytest.raises(ValueError, match="baseline|schema|run"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=checkpoint_sha256,
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
+
+
+def test_audited_baseline_validator_rejects_resealed_source_contract_claim(
+    tmp_path: Path,
+) -> None:
+    baseline, checkpoint_sha256 = _write_audited_baseline(tmp_path)
+    source_run_path = tmp_path / "actor-source" / "run.json"
+    source_run = json.loads(source_run_path.read_text(encoding="utf-8"))
+    source_run["contract"]["contract_hash"] = "f" * 64
+    _write_json(source_run_path, source_run)
+    initialization_path = baseline / "initialization.json"
+    initialization = json.loads(initialization_path.read_text(encoding="utf-8"))
+    initialization["source_contract_hash"] = "f" * 64
+    initialization["source_run_manifest_sha256"] = hashlib.sha256(
+        source_run_path.read_bytes()
+    ).hexdigest()
+    _write_json(initialization_path, initialization)
+
+    with pytest.raises(ValueError, match="source|contract|baseline"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=checkpoint_sha256,
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
+
+
+def test_audited_baseline_validator_accepts_real_locked_step_38912_run() -> None:
+    common_git_dir = Path(subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True,
+    ).strip())
+    baseline = common_git_dir.parent / "python" / "runs" / (
+        "bc227-ppo-random-s227-20260802-v2"
+    )
+    if not baseline.is_dir():
+        pytest.skip("real locked baseline publication is not retained")
+
+    publication = audit_module.validate_audited_baseline_publication(
+        baseline,
+        expected_checkpoint_sha256=(
+            "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+        ),
+        expected_checkpoint_steps=(14_336, 26_624, 38_912),
+    )
+
+    assert publication.step == 38_912
+    assert publication.checkpoint_sha256 == (
+        "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+    )
+    assert publication.contract["contract_hash"] == LOCKED_BASELINE_CONTRACT_HASH
 
 
 @pytest.mark.parametrize("mutation", ("invalid-initialization", "extra-file"))
