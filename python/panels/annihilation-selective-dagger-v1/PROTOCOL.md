@@ -90,6 +90,13 @@ insufficient.
 DAgger never edits this corpus; each iteration adds a separate immutable
 overlay.
 
+A semantic-audit cache cannot weaken that physical binding. Its key includes
+the corpus content root, file count, byte count, scenario/contract/encoding
+identities, and an explicit audit-algorithm version. The implementation takes a
+stable physical snapshot before and after either a full audit or a cache hit,
+and performs another full physical rehash immediately before publication.
+Mutation during any of those windows fails closed.
+
 The scenario is resolved rather than trusted as an opaque declaration. Its
 canonical identity must match the base corpus, its tactical-v2 action regions
 must match the learner contract, and `fog_of_war` must be `false`. Bounded
@@ -212,7 +219,7 @@ W/L/D overall, by seat, and for each profile (exactly 40 games and 20 games per
 seat), paired-map counts, Wilson 95% intervals, cycling and action-waste
 diagnostics, and wasted EndTurns.
 For a binomial count \(x\) in \(n\) games, the reported Wilson interval uses
-\(z=1.96\):
+the 0.975 standard-normal quantile, \(z \approx 1.96\):
 
 ```text
 center = (p_hat + z^2/(2n)) / (1 + z^2/n)
@@ -227,6 +234,37 @@ execution identity. The latter is derived from the canonical Git toplevel,
 `HEAD`, `HEAD^{tree}`, and a clean status before work, then checked again
 immediately before publication. Preflight output must be outside the
 repository, so producing evidence cannot be hidden from the cleanliness check.
+
+Task 8 deliberately stops at a sealed production boundary. The public
+`run_oracle_preflight` entry point exposes only the panel definition, output root,
+and an engine execution-session parameter, and fails closed until Task 9
+supplies the production engine-session factory. The callback-driven executor
+is private test infrastructure. Its manifests declare
+`mode=private-test-transcript`, `engine_authenticated=false`, no engine
+session evidence root, and the Task 9 requirement. Even a coherently rewritten
+and rehashed private transcript cannot authorize production work.
+
+Task 9 must bind the two search queries, tactical-v2 encode/decode, legal mask,
+and `GameEngine.Apply` evidence to one sealed authoritative engine session and
+state. It must add physical runtime-artifact identities and an engine-session
+evidence root independently of Git `HEAD`/tree/status identity. Git proves which
+source tree was reviewed; it does not prove which engine process produced a
+label.
+
+Input and evidence limits are part of the contract:
+
+- one game may expose at most 1,024 benchmark samples, for at most 491,520
+  samples and 983,040 search queries across the fixed 480-game preflight;
+- an oracle state is finite canonical JSON with at most 32 levels, 50,000
+  nodes, one MiB of canonical bytes, and signed-32-bit integer magnitude;
+- each manifest is at most 8 MiB, trace 32 MiB, replay 8 MiB, benchmark 64 MiB,
+  and diagnostic 8 MiB;
+- the sealed preflight owns exactly one manifest and three files per game:
+  1,441 files, with a theoretical per-file-cap total below 48.76 GiB.
+
+These are hard safety ceilings, not target sizes. Reads hash and parse one
+bounded, stable snapshot from the same opened file handle; writes serialize and
+check the bound before atomic replacement.
 
 ## Overlay schema and aggregation
 
@@ -343,6 +381,18 @@ Every stage writes beneath a deterministic `.staging` directory. It may publish
 by atomic rename only after reopening all outputs, checking strict schemas,
 rehashing every owned physical file, and reconstructing summary metrics from
 the physical evidence.
+
+Preflight execution first acquires an exclusive sibling `.lock` directory with a
+random owner token, process ID, and creation time. A live owner is never stolen.
+Only a lease whose process is proven dead may be preserved as a stale
+diagnostic, and unsealed staging may be rotated only when its exact owner token
+matches that stale lease. Release verifies the current token before deleting
+only the caller's lease. Diagnostic attempt names use exclusive reservation
+markers, so concurrent failures cannot overwrite one another.
+
+The caller must supply lexical canonical paths before resolution. Parent
+traversal, aliases, symlinks, junctions, and other reparse points are rejected
+for the output, staging, diagnostics, lease, and reopened evidence paths.
 
 An exact completed artifact is immutable and reusable with zero games, oracle
 queries, codec calls, or downstream success callbacks. Reuse requires

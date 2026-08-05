@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -21,7 +22,6 @@ from ml_lab.dagger import (
     OracleCodecEvidence,
     OraclePreflightGameResult,
     load_panel_definition,
-    run_oracle_preflight,
     validate_panel_definition,
 )
 from ml_lab.tactical_trace import (
@@ -34,6 +34,9 @@ from ml_lab.tactical_trace import (
 
 
 REAL_BASE_DATASET_AUDIT = dagger_module._audit_base_dataset
+REAL_DATASET_TREE_IDENTITY = dagger_module._dataset_tree_identity
+# Callback-driven preflight construction is intentionally private test infrastructure.
+run_oracle_preflight = dagger_module._run_oracle_preflight_for_test
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +130,15 @@ def _stub_full_base_dataset_audit(monkeypatch: pytest.MonkeyPatch) -> None:
             "replay_mismatches": 0,
         },
     })
+
+
+def _symlink_or_skip_windows_privilege(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+            pytest.skip(f'Windows symbolic-link privilege is unavailable: {exc}')
+        raise
 
 
 def _windows_directory_junction(link: Path, target: Path) -> None:
@@ -315,6 +327,33 @@ def test_definition_rejects_unknown_fields(tmp_path: Path, location: str) -> Non
         load_panel_definition(panel_path, repository_root=ROOT)
 
 
+@pytest.mark.parametrize(
+    'mutation',
+    ['panel_bool', 'panel_float', 'seed_bool', 'seed_float', 'maps_float'],
+)
+def test_panel_and_seed_versions_and_counts_reject_scalar_aliases(
+    tmp_path: Path, mutation: str,
+) -> None:
+    panel_path, seeds_path, panel, seeds = _copy_definitions(tmp_path)
+    if mutation == 'panel_bool':
+        panel['schema_version'] = True
+    elif mutation == 'panel_float':
+        panel['schema_version'] = 1.0
+    elif mutation == 'seed_bool':
+        seeds['schema_version'] = True
+    elif mutation == 'seed_float':
+        seeds['schema_version'] = 1.0
+    else:
+        seeds['oracle_preflight_profiles'][0]['maps'] = 20.0
+    if mutation.startswith('seed') or mutation == 'maps_float':
+        _rewrite(seeds_path, seeds)
+        panel['seed_banks']['sha256'] = _sha256(seeds_path)
+    _rewrite(panel_path, panel)
+
+    with pytest.raises(ValueError, match='integer|schema|maps'):
+        load_panel_definition(panel_path, repository_root=ROOT)
+
+
 @pytest.mark.parametrize("mutation", ["overlap", "wrong_count", "final_seed"])
 def test_seed_definition_rejects_overlap_count_drift_and_final_bank_use(
     tmp_path: Path, mutation: str,
@@ -442,6 +481,54 @@ def test_definition_rejects_repository_root_junction_alias(tmp_path: Path) -> No
         load_panel_definition(PANEL_PATH, repository_root=alias)
 
 
+def test_definition_rejects_panel_file_symlink_even_when_target_is_in_root(
+    tmp_path: Path,
+) -> None:
+    panel_path, _seeds_path, _panel, _seeds = _copy_definitions(tmp_path)
+    alias = panel_path.with_name('panel-alias.json')
+    _symlink_or_skip_windows_privilege(alias, panel_path)
+
+    with pytest.raises(ValueError, match='canonical|symlink|reparse'):
+        load_panel_definition(alias, repository_root=ROOT)
+
+
+def test_definition_rejects_panel_directory_junction_even_when_target_is_in_root(
+    tmp_path: Path,
+) -> None:
+    panel_path, _seeds_path, _panel, _seeds = _copy_definitions(tmp_path)
+    alias = tmp_path / 'panel-junction'
+    _windows_directory_junction(alias, panel_path.parent)
+
+    with pytest.raises(ValueError, match='canonical|junction|reparse'):
+        load_panel_definition(alias / panel_path.name, repository_root=ROOT)
+
+
+def test_preflight_path_set_rejects_lexical_alias_and_staging_junction(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    parent = tmp_path / 'canonical'
+    child = parent / 'child'
+    child.mkdir(parents=True)
+    lexical_alias = child / '..' / 'preflight'
+    with pytest.raises(ValueError, match='canonical|lexical'):
+        dagger_module._validate_preflight_path_set_v2(definition, lexical_alias)
+
+    destination = tmp_path / 'destination'
+    staging = destination.with_name(destination.name + '.staging')
+    target = tmp_path / 'staging-target'
+    target.mkdir()
+    sentinel = target / 'sentinel.bin'
+    sentinel.write_bytes(b'unchanged')
+    _windows_directory_junction(staging, target)
+    try:
+        with pytest.raises(ValueError, match='junction|reparse|symlink'):
+            dagger_module._validate_preflight_path_set_v2(definition, destination)
+        assert sentinel.read_bytes() == b'unchanged'
+    finally:
+        staging.rmdir()
+
+
 def test_dataset_tree_rejects_an_inner_windows_junction(tmp_path: Path) -> None:
     root = tmp_path / "dataset"
     target = tmp_path / "payload"
@@ -515,6 +602,95 @@ def test_base_dataset_boundary_binds_tree_and_invokes_loader_and_full_audit(
         REAL_BASE_DATASET_AUDIT(definition)
 
 
+def test_base_dataset_audit_rejects_mutation_during_semantic_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / 'dataset'
+    root.mkdir()
+    (root / 'manifest.json').write_text('{}\n', encoding='utf-8')
+    shard = root / 'shard.bin'
+    shard.write_bytes(b'rows-a')
+    physical = REAL_DATASET_TREE_IDENTITY(root)
+    definition = replace(
+        load_panel_definition(PANEL_PATH, repository_root=ROOT),
+        dataset_root=root,
+        dataset_content_sha256=physical['content_sha256'],
+        dataset_file_count=physical['file_count'],
+        dataset_byte_size=physical['byte_size'],
+    )
+    dagger_module._BASE_DATASET_SEMANTIC_AUDIT_CACHE.clear()
+    monkeypatch.setattr(
+        dagger_module, 'load_imitation_dataset',
+        lambda *_args, **_kwargs: object(),
+    )
+
+    def mutate_during_audit(_dataset):
+        shard.write_bytes(b'rows-b')
+        return {
+            'games': 1,
+            'teacher_labels': 1,
+            'masked_labels': 0,
+            'round_trip_mismatches': 0,
+            'replay_mismatches': 0,
+        }
+
+    monkeypatch.setattr(
+        dagger_module, 'audit_imitation_dataset', mutate_during_audit,
+    )
+    with pytest.raises(ValueError, match='changed during|stable|content identity'):
+        REAL_BASE_DATASET_AUDIT(definition)
+
+
+def test_base_dataset_cache_hit_rehashes_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / 'dataset'
+    root.mkdir()
+    (root / 'manifest.json').write_text('{}\n', encoding='utf-8')
+    shard = root / 'shard.bin'
+    shard.write_bytes(b'cache-a')
+    physical = REAL_DATASET_TREE_IDENTITY(root)
+    definition = replace(
+        load_panel_definition(PANEL_PATH, repository_root=ROOT),
+        dataset_root=root,
+        dataset_content_sha256=physical['content_sha256'],
+        dataset_file_count=physical['file_count'],
+        dataset_byte_size=physical['byte_size'],
+    )
+    dagger_module._BASE_DATASET_SEMANTIC_AUDIT_CACHE.clear()
+    monkeypatch.setattr(
+        dagger_module, 'load_imitation_dataset',
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        dagger_module, 'audit_imitation_dataset',
+        lambda _dataset: {
+            'games': 1,
+            'teacher_labels': 1,
+            'masked_labels': 0,
+            'round_trip_mismatches': 0,
+            'replay_mismatches': 0,
+        },
+    )
+    REAL_BASE_DATASET_AUDIT(definition)
+    calls = 0
+
+    def mutate_after_snapshot(dataset_root: Path):
+        nonlocal calls
+        identity = REAL_DATASET_TREE_IDENTITY(dataset_root)
+        calls += 1
+        if calls == 1:
+            shard.write_bytes(b'cache-b')
+        return identity
+
+    monkeypatch.setattr(
+        dagger_module, '_dataset_tree_identity', mutate_after_snapshot,
+    )
+    with pytest.raises(ValueError, match='changed during|stable|content identity'):
+        REAL_BASE_DATASET_AUDIT(definition)
+    assert calls == 2
+
+
 def test_definition_is_deeply_immutable_and_revalidates_from_disk() -> None:
     """Post-load mutation must not change a preflight or downstream stage identity."""
 
@@ -557,7 +733,10 @@ def test_definition_rejects_bool_integer_and_float_integer_aliases(
 def test_benchmark_sample_is_typed_deeply_frozen_and_exact() -> None:
     state = {"round": 1, "units": [{"id": 7}]}
     sample = OracleBenchmarkSample(
-        state_hash="c" * 64,
+        state_hash=hashlib.sha256(json.dumps(
+            state, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        ).encode("utf-8")).hexdigest(),
         decision_index=0,
         observation=(0.0, 1.0),
         legal_mask=(True, False),
@@ -761,6 +940,243 @@ def _preflight_boundaries(
     return evaluator, benchmark, codec, clock, schedules, queries
 
 
+def test_public_oracle_preflight_rejects_unsealed_execution_and_exposes_no_fake_seams(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    parameters = inspect.signature(dagger_module.run_oracle_preflight).parameters
+
+    assert set(parameters) == {'definition', 'output_root', 'execution_session'}
+    assert not {
+        'evaluator', 'benchmark', 'codec', 'repository_identity_provider', 'clock',
+        'on_selected',
+    } & set(parameters)
+    with pytest.raises(RuntimeError, match='sealed engine execution session|Task 9'):
+        dagger_module.run_oracle_preflight(
+            definition,
+            output_root=tmp_path / 'production-preflight',
+            execution_session=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ('state', 'message'),
+    [
+        ({'value': float('inf')}, 'finite'),
+        ({'value': 1 << 40}, 'int32|magnitude'),
+        ({'value': 'x' * 1_048_577}, 'byte|size'),
+    ],
+)
+def test_oracle_benchmark_state_rejects_nonfinite_huge_or_oversized_payload(
+    state: dict[str, Any], message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        dagger_module._validate_oracle_state_payload_v2(state)
+
+
+def test_oracle_benchmark_state_rejects_excessive_nesting() -> None:
+    state: dict[str, Any] = {'leaf': 0}
+    for _ in range(40):
+        state = {'nested': state}
+
+    with pytest.raises(ValueError, match='depth|nest'):
+        dagger_module._validate_oracle_state_payload_v2(state)
+
+
+def test_oracle_preflight_bounds_samples_per_game() -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    game = definition.preflight_schedule[0]
+    sample = _benchmark_sample(game)
+
+    assert dagger_module._MAX_PREFLIGHT_SAMPLES_PER_GAME == 1024
+    with pytest.raises(ValueError, match='sample.*limit|too many'):
+        OraclePreflightGameResult(
+            outcome='win',
+            cycling=False,
+            action_waste=False,
+            wasted_end_turns=0,
+            trace=_trace('win', game.learner_seat),
+            replay='bounded samples\n',
+            samples=(sample,) * 1025,
+        )
+
+
+def test_preflight_json_read_and_write_reject_oversized_bytes_before_io(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / 'oversized.json'
+    source.write_text('{"payload":"' + ('x' * 64) + '"}\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='byte|size|large'):
+        dagger_module._read_bounded_json_v2(
+            source, max_bytes=32, label='test artifact',
+        )
+
+    destination = tmp_path / 'not-written.json'
+    with pytest.raises(ValueError, match='byte|size|large'):
+        dagger_module._bounded_atomic_write_json_v2(
+            destination,
+            {'payload': 'x' * 64},
+            max_bytes=32,
+            label='test artifact',
+        )
+    assert not destination.exists()
+
+
+def test_preflight_writer_rejects_oversized_replay_before_writing_file(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    game = definition.preflight_schedule[0]
+    result = OraclePreflightGameResult(
+        outcome='win',
+        cycling=False,
+        action_waste=False,
+        wasted_end_turns=0,
+        trace=_trace('win', game.learner_seat),
+        replay='x' * (dagger_module._MAX_PREFLIGHT_REPLAY_BYTES + 1),
+        samples=(_benchmark_sample(game),),
+    )
+
+    with pytest.raises(ValueError, match='replay.*byte|byte.*large'):
+        dagger_module._write_preflight_game_v2(
+            staging=tmp_path,
+            candidate_index=0,
+            game_index=0,
+            oracle=definition.oracle_candidates[0],
+            game=game,
+            result=result,
+            benchmark_records=[],
+            game_evidence=[],
+            candidate_games=[],
+        )
+    assert not next(tmp_path.rglob('*.replay.json'), None)
+
+
+def test_preflight_reopen_rejects_oversized_manifest_before_json_parse(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    manifest = tmp_path / 'oracle-preflight.json'
+    manifest.write_bytes(
+        (b' ' * dagger_module._MAX_PREFLIGHT_MANIFEST_BYTES) + b'{}',
+    )
+
+    with pytest.raises(ValueError, match='manifest.*byte|byte.*large'):
+        dagger_module._open_oracle_preflight_v2(
+            tmp_path,
+            expected_identity={},
+            definition=definition,
+        )
+
+
+def test_oracle_benchmark_sample_hash_is_derived_from_state() -> None:
+    state = {'round': 1, 'active_seat': 0, 'units': []}
+
+    with pytest.raises(ValueError, match='canonical state hash'):
+        OracleBenchmarkSample(
+            state_hash='f' * 64,
+            decision_index=0,
+            observation=(0.0,),
+            legal_mask=(True,),
+            state=state,
+        )
+
+
+def test_private_preflight_identity_declares_unauthenticated_test_transcript() -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    identity = dagger_module._oracle_preflight_identity(
+        definition,
+        _repository_provider(ROOT),
+        {
+            'content_sha256': definition.dataset_content_sha256,
+            'file_count': definition.dataset_file_count,
+            'byte_size': definition.dataset_byte_size,
+            'audit': {
+                'games': 1,
+                'teacher_labels': 1,
+                'masked_labels': 0,
+                'round_trip_mismatches': 0,
+                'replay_mismatches': 0,
+            },
+        },
+    )
+
+    assert identity['execution_trust'] == {
+        'mode': 'private-test-transcript',
+        'engine_authenticated': False,
+        'engine_session_evidence_root': None,
+        'task_9_factory_required': True,
+    }
+
+
+@pytest.mark.parametrize(
+    ('field', 'alias'),
+    [
+        ('schema_version', True),
+        ('schema_version', 1.0),
+        ('candidate_index', False),
+        ('candidate_index', 0.0),
+        ('game_index', False),
+        ('game_index', 0.0),
+    ],
+)
+def test_preflight_envelope_context_rejects_bool_and_float_integer_aliases(
+    field: str, alias: Any,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    game = definition.preflight_schedule[0]
+    envelope = {
+        'schema_version': 1,
+        'candidate_index': 0,
+        'game_index': 0,
+        'schedule': game.to_dict(),
+    }
+    envelope[field] = alias
+
+    with pytest.raises(ValueError, match='integer|context|schema'):
+        dagger_module._validate_preflight_envelope_context_v2(
+            envelope,
+            candidate_index=0,
+            game_index=0,
+            game=game,
+            label='test envelope',
+        )
+
+
+def test_oracle_expansion_budget_accepts_exact_limit_and_rejects_one_over() -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    oracle = definition.oracle_candidates[0]
+    game = definition.preflight_schedule[0]
+    sample = _benchmark_sample(game)
+    decision = OracleBenchmarkDecision(
+        encoded_action=0,
+        command={
+            'Kind': 'end_turn',
+            'Issuer': game.learner_seat,
+            'ActorId': None,
+            'TargetId': None,
+            'Q': None,
+            'R': None,
+        },
+        actual_expansion_count=oracle.expansion_budget,
+    )
+
+    dagger_module._preflight_decision_valid_v2(
+        decision, sample=sample, oracle=oracle, game=game, definition=definition,
+    )
+    with pytest.raises(ValueError, match='exceeded.*expansion budget'):
+        dagger_module._preflight_decision_valid_v2(
+            replace(
+                decision,
+                actual_expansion_count=oracle.expansion_budget + 1,
+            ),
+            sample=sample,
+            oracle=oracle,
+            game=game,
+            definition=definition,
+        )
+
+
 def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
     tmp_path: Path,
 ) -> None:
@@ -815,6 +1231,105 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
         assert candidate["query_count"] == 480
         assert candidate["expansion_total"] == 480 * 127
         assert candidate["mean_expansions"] == 127.0
+
+    forged_root = tmp_path / 'coherently-forged-test-transcript'
+    shutil.copytree(tmp_path / 'oracle-preflight', forged_root)
+    forged_manifest_path = forged_root / 'oracle-preflight.json'
+    forged_manifest = json.loads(forged_manifest_path.read_text(encoding='utf-8'))
+    descriptor = forged_manifest['games'][0]['benchmark']
+    benchmark_path = forged_root / descriptor['path']
+    payload = json.loads(benchmark_path.read_text(encoding='utf-8'))
+    record = payload['records'][0]
+    record['sample']['state']['round'] += 1
+    state_hash = _content_identity({
+        **record['sample']['state'],
+        'content_identity': 'discarded',
+    })
+    record['sample']['state_hash'] = state_hash
+    record['sample_sha256'] = _content_identity({
+        **record['sample'],
+        'content_identity': 'discarded',
+    })
+    for query in ('first', 'second'):
+        record[query]['codec']['state_hash'] = state_hash
+        record[query]['decision']['actual_expansion_count'] += 1
+        record[query]['elapsed_seconds'] += 0.125
+    record['pair_seconds'] = (
+        record['first']['elapsed_seconds'] + record['second']['elapsed_seconds']
+    )
+    _rewrite(benchmark_path, payload)
+    descriptor['sha256'] = _sha256(benchmark_path)
+    descriptor['byte_size'] = benchmark_path.stat().st_size
+    summary = forged_manifest['candidates'][0]
+    summary['expansion_total'] += 2
+    summary['max_expansions'] = 128
+    summary['mean_expansions'] = (
+        summary['expansion_total'] / summary['query_count']
+    )
+    summary['benchmark_seconds'] += 0.25
+    summary['labels_per_second'] = (
+        summary['labels'] / summary['benchmark_seconds']
+    )
+    forged_manifest['content_identity'] = _content_identity(forged_manifest)
+    _rewrite(forged_manifest_path, forged_manifest)
+
+    with pytest.raises(RuntimeError, match='sealed engine execution session|Task 9'):
+        dagger_module.run_oracle_preflight(
+            definition,
+            output_root=forged_root,
+            execution_session=object(),
+        )
+    valid_root = tmp_path / 'oracle-preflight'
+    valid_manifest_path = valid_root / 'oracle-preflight.json'
+    valid_manifest_bytes = valid_manifest_path.read_bytes()
+    valid_manifest = json.loads(valid_manifest_bytes)
+
+    artifact_aliases = (
+        ('trace', 'schema_version', True, None),
+        ('replay', 'candidate_index', 0.0, None),
+        ('benchmark', 'game_index', False, None),
+        ('benchmark', 'sample_index', 0.0, 0),
+    )
+    for artifact, field, alias, record_index in artifact_aliases:
+        manifest = json.loads(valid_manifest_bytes)
+        descriptor = manifest['games'][0][artifact]
+        artifact_path = valid_root / descriptor['path']
+        artifact_bytes = artifact_path.read_bytes()
+        payload = json.loads(artifact_bytes)
+        if record_index is None:
+            payload[field] = alias
+        else:
+            payload['records'][record_index][field] = alias
+        try:
+            _rewrite(artifact_path, payload)
+            descriptor['sha256'] = _sha256(artifact_path)
+            descriptor['byte_size'] = artifact_path.stat().st_size
+            manifest['content_identity'] = _content_identity(manifest)
+            _rewrite(valid_manifest_path, manifest)
+
+            with pytest.raises(ValueError, match='integer|schema|context|sample'):
+                dagger_module._open_oracle_preflight_v2(
+                    valid_root,
+                    expected_identity=valid_manifest['identity'],
+                    definition=definition,
+                )
+        finally:
+            artifact_path.write_bytes(artifact_bytes)
+            valid_manifest_path.write_bytes(valid_manifest_bytes)
+
+    manifest = json.loads(valid_manifest_bytes)
+    manifest['schema_version'] = 2.0
+    manifest['content_identity'] = _content_identity(manifest)
+    try:
+        _rewrite(valid_manifest_path, manifest)
+        with pytest.raises(ValueError, match='integer|completed'):
+            dagger_module._open_oracle_preflight_v2(
+                valid_root,
+                expected_identity=valid_manifest['identity'],
+                definition=definition,
+            )
+    finally:
+        valid_manifest_path.write_bytes(valid_manifest_bytes)
 
 
 def test_oracle_preflight_accepts_exact_win_and_throughput_boundaries(
@@ -1118,6 +1633,42 @@ def test_oracle_preflight_exact_reuse_launches_zero_games_and_rehashes_evidence(
     assert calls == 0
 
 
+def test_repository_execution_identity_uses_real_clean_git_and_rejects_unrelated_root(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+    subprocess.run(
+        ['git', '-C', str(repository), 'config', 'user.email', 'test@example.invalid'],
+        check=True,
+    )
+    subprocess.run(
+        ['git', '-C', str(repository), 'config', 'user.name', 'Task 8 Test'],
+        check=True,
+    )
+    tracked = repository / 'tracked.txt'
+    tracked.write_text('tracked\n', encoding='utf-8')
+    subprocess.run(['git', '-C', str(repository), 'add', 'tracked.txt'], check=True)
+    subprocess.run(
+        ['git', '-C', str(repository), 'commit', '-q', '-m', 'initial'],
+        check=True,
+    )
+
+    identity = dagger_module._repository_execution_identity(repository)
+    assert identity['root'] == str(repository.resolve())
+    assert identity['dirty'] is False
+    assert len(identity['commit']) == len(identity['source_tree']) == 40
+
+    nested = repository / 'nested'
+    nested.mkdir()
+    with pytest.raises(ValueError, match='toplevel|root'):
+        dagger_module._repository_execution_identity(nested)
+
+    (repository / 'untracked.txt').write_text('dirty\n', encoding='utf-8')
+    assert dagger_module._repository_execution_identity(repository)['dirty'] is True
+
+
 def test_oracle_preflight_rechecks_repository_identity_before_publication(
     tmp_path: Path,
 ) -> None:
@@ -1154,6 +1705,82 @@ def test_oracle_preflight_rechecks_repository_identity_before_publication(
             "attempt-*/diagnostic.json"
         )
     )) == 1
+
+
+def test_oracle_preflight_rechecks_repository_identity_immediately_before_publish(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
+        wins={512: 210, 2048: 220},
+    )
+    calls = 0
+
+    def third_check_drift(root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(root)
+        if calls == 3:
+            identity['commit'] = 'e' * 40
+        return identity
+
+    root = tmp_path / 'third-repository-drift'
+    with pytest.raises(ValueError, match='repository identity changed'):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=third_check_drift,
+            evaluator=evaluator,
+            benchmark=benchmark,
+            codec=codec,
+            clock=clock,
+        )
+    assert calls == 3
+    assert not root.exists()
+
+
+def test_oracle_preflight_rehashes_dataset_immediately_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
+        wins={512: 210, 2048: 220},
+    )
+    initial = {
+        'content_sha256': definition.dataset_content_sha256,
+        'file_count': definition.dataset_file_count,
+        'byte_size': definition.dataset_byte_size,
+        'audit': {
+            'games': 1980,
+            'teacher_labels': 199973,
+            'masked_labels': 0,
+            'round_trip_mismatches': 0,
+            'replay_mismatches': 0,
+        },
+    }
+    calls = 0
+
+    def drifting_dataset(_definition):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return initial
+        return {**initial, 'content_sha256': 'f' * 64}
+
+    monkeypatch.setattr(dagger_module, '_audit_base_dataset', drifting_dataset)
+    root = tmp_path / 'dataset-drift'
+    with pytest.raises(ValueError, match='dataset.*changed|content identity'):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=evaluator,
+            benchmark=benchmark,
+            codec=codec,
+            clock=clock,
+        )
+    assert calls == 2
+    assert not root.exists()
 
 
 def test_oracle_preflight_reuse_recomputes_reported_metrics_from_physical_games(
@@ -1314,6 +1941,132 @@ def test_oracle_preflight_recovers_completed_staging_and_rejects_coexistence(
     assert (root / "oracle-preflight.json").read_bytes() == before
     assert (staging / "sentinel.txt").read_text(encoding="utf-8") == "do not overwrite\n"
     assert calls == 0
+
+
+def test_oracle_preflight_live_owner_is_never_stolen_or_rotated(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    root = tmp_path / 'live-owner'
+    staging = root.with_name(root.name + '.staging')
+    lease_root = root.with_name(root.name + '.lock')
+    owner = {
+        'schema_version': 1,
+        'destination': str(root.resolve()),
+        'owner_id': 'live-owner-token',
+        'pid': os.getpid(),
+        'created_ns': 1,
+    }
+    lease_root.mkdir()
+    _rewrite(lease_root / 'lease.json', owner)
+    staging.mkdir()
+    _rewrite(staging / '.owner.json', owner)
+    sentinel = staging / 'sentinel.bin'
+    sentinel.write_bytes(b'owned-by-live-process')
+    before = sentinel.read_bytes()
+
+    try:
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match='live.*owner|lease'):
+                run_oracle_preflight(
+                    definition,
+                    output_root=root,
+                    repository_identity_provider=_repository_provider,
+                    evaluator=lambda *_args: pytest.fail('evaluator must not run'),
+                    benchmark=lambda *_args: pytest.fail('benchmark must not run'),
+                    codec=lambda *_args: pytest.fail('codec must not run'),
+                )
+            assert sentinel.read_bytes() == before
+            assert _read_owner(staging / '.owner.json') == owner
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if lease_root.exists():
+            shutil.rmtree(lease_root)
+
+
+def test_oracle_preflight_dead_owner_authorizes_exact_staging_recovery(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    root = tmp_path / 'dead-owner'
+    staging = root.with_name(root.name + '.staging')
+    lease_root = root.with_name(root.name + '.lock')
+    stale_owner = {
+        'schema_version': 1,
+        'destination': str(root.resolve()),
+        'owner_id': 'proven-dead-owner-token',
+        'pid': (1 << 31) - 1,
+        'created_ns': 1,
+    }
+    lease_root.mkdir()
+    _rewrite(lease_root / 'lease.json', stale_owner)
+    staging.mkdir()
+    _rewrite(staging / '.owner.json', stale_owner)
+    (staging / 'sentinel.bin').write_bytes(b'owned-by-dead-process')
+
+    def fail(*_args):
+        raise ConnectionError('new owner evaluation failed')
+
+    with pytest.raises(ConnectionError, match='new owner evaluation failed'):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=fail,
+            benchmark=lambda *_args: pytest.fail('benchmark must not run'),
+            codec=lambda *_args: pytest.fail('codec must not run'),
+        )
+
+    assert not root.exists()
+    assert not staging.exists()
+    assert not lease_root.exists()
+    diagnostics = root.with_name(root.name + '.diagnostics')
+    attempts = sorted(diagnostics.glob('attempt-*/diagnostic.json'))
+    assert len(attempts) == 3
+    statuses = [json.loads(path.read_text(encoding='utf-8'))['status'] for path in attempts]
+    assert statuses == ['stale-lease', 'failed', 'failed']
+    assert any(
+        (path.parent / 'sentinel.bin').read_bytes() == b'owned-by-dead-process'
+        for path in attempts
+        if (path.parent / 'sentinel.bin').is_file()
+    )
+
+def _read_owner(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def test_oracle_preflight_diagnostic_attempt_reservation_skips_collisions(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    root = tmp_path / 'diagnostic-collision'
+    diagnostics = root.with_name(root.name + '.diagnostics')
+    diagnostics.mkdir()
+    reservation = diagnostics / '.attempt-000000.reserve'
+    reservation.write_bytes(b'live-reservation')
+    collision = diagnostics / 'attempt-000001'
+    collision.mkdir()
+    sentinel = collision / 'sentinel.bin'
+    sentinel.write_bytes(b'unrelated-attempt')
+
+    def fail(*_args):
+        raise ConnectionError('collision test failure')
+
+    with pytest.raises(ConnectionError, match='collision test failure'):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=fail,
+            benchmark=lambda *_args: pytest.fail('benchmark must not run'),
+            codec=lambda *_args: pytest.fail('codec must not run'),
+        )
+
+    assert reservation.read_bytes() == b'live-reservation'
+    assert sentinel.read_bytes() == b'unrelated-attempt'
+    assert (diagnostics / 'attempt-000002' / 'diagnostic.json').is_file()
+    assert not root.with_name(root.name + '.lock').exists()
 
 
 def test_oracle_preflight_runtime_failure_remains_diagnostic_not_complete(
