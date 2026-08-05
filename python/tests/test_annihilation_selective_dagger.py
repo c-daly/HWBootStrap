@@ -8,14 +8,17 @@ import os
 import shutil
 import subprocess
 from collections import Counter, defaultdict
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import ml_lab.dagger as dagger_module
 from ml_lab.dagger import (
     OracleBenchmarkDecision,
+    OracleBenchmarkSample,
+    OracleCodecEvidence,
     OraclePreflightGameResult,
     load_panel_definition,
     run_oracle_preflight,
@@ -28,6 +31,9 @@ from ml_lab.tactical_trace import (
     StateFrame,
     TransitionFrame,
 )
+
+
+REAL_BASE_DATASET_AUDIT = dagger_module._audit_base_dataset
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +102,33 @@ def _content_identity(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _repository_provider(root: Path) -> dict[str, Any]:
+    return {
+        "root": str(root.resolve()),
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": False,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _stub_full_base_dataset_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production boundary performs the expensive full corpus audit once."""
+
+    monkeypatch.setattr(dagger_module, "_audit_base_dataset", lambda definition: {
+        "content_sha256": definition.dataset_content_sha256,
+        "file_count": definition.dataset_file_count,
+        "byte_size": definition.dataset_byte_size,
+        "audit": {
+            "games": 1980,
+            "teacher_labels": 199973,
+            "masked_labels": 0,
+            "round_trip_mismatches": 0,
+            "replay_mismatches": 0,
+        },
+    })
+
+
 def _windows_directory_junction(link: Path, target: Path) -> None:
     if os.name != "nt":
         pytest.skip("Windows junction coverage runs only on Windows")
@@ -137,9 +170,7 @@ def test_panel_definition_freezes_every_causal_input_and_threshold() -> None:
     assert definition.repository_policy == {
         "required_clean": True,
         "identity_fields": ("commit", "source_tree", "dirty"),
-        "ignored_generated_root": (
-            "python/panels/annihilation-selective-dagger-v1/evidence/"
-        ),
+        "output_policy": "outside_repository",
     }
     assert definition.starting_learner.to_dict() == {
         "schema_version": 1,
@@ -174,11 +205,14 @@ def test_panel_definition_freezes_every_causal_input_and_threshold() -> None:
     )
     assert definition.profiles == PROFILES
     assert [
-        (item.depth, item.expansion_budget, item.heuristic_identity)
+        (
+            item.depth, item.expansion_budget, item.use_heuristic,
+            item.heuristic_identity,
+        )
         for item in definition.oracle_candidates
     ] == [
-        (4, 512, "material-plus-pursuit-v1"),
-        (4, 2_048, "material-plus-pursuit-v1"),
+        (4, 512, True, "material-plus-pursuit-v1"),
+        (4, 2_048, True, "material-plus-pursuit-v1"),
     ]
     assert definition.preflight == {
         "maps_per_profile": 20,
@@ -408,6 +442,79 @@ def test_definition_rejects_repository_root_junction_alias(tmp_path: Path) -> No
         load_panel_definition(PANEL_PATH, repository_root=alias)
 
 
+def test_dataset_tree_rejects_an_inner_windows_junction(tmp_path: Path) -> None:
+    root = tmp_path / "dataset"
+    target = tmp_path / "payload"
+    root.mkdir()
+    target.mkdir()
+    (target / "shard.bin").write_bytes(b"payload")
+    _windows_directory_junction(root / "shards", target)
+
+    with pytest.raises(ValueError, match="junction|reparse|symlink"):
+        dagger_module._dataset_tree_identity(root)
+
+
+def test_preflight_rejects_an_output_parent_windows_junction(tmp_path: Path) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    target = tmp_path / "real-output"
+    target.mkdir()
+    alias = tmp_path / "output-junction"
+    _windows_directory_junction(alias, target)
+
+    with pytest.raises(ValueError, match="junction|reparse|symlink"):
+        run_oracle_preflight(
+            definition,
+            output_root=alias / "preflight",
+            repository_identity_provider=_repository_provider,
+            evaluator=lambda *_args: pytest.fail("evaluator must not run"),
+            benchmark=lambda *_args: pytest.fail("benchmark must not run"),
+            codec=lambda *_args: pytest.fail("codec must not run"),
+        )
+
+
+def test_base_dataset_boundary_binds_tree_and_invokes_loader_and_full_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "dataset"
+    root.mkdir()
+    (root / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (root / "shard.bin").write_bytes(b"rows")
+    physical = dagger_module._dataset_tree_identity(root)
+    definition = replace(
+        load_panel_definition(PANEL_PATH, repository_root=ROOT),
+        dataset_root=root,
+        dataset_content_sha256=physical["content_sha256"],
+        dataset_file_count=physical["file_count"],
+        dataset_byte_size=physical["byte_size"],
+    )
+    calls: list[str] = []
+    sentinel = object()
+    monkeypatch.setattr(
+        dagger_module, "load_imitation_dataset",
+        lambda dataset_root, expected_contract: (
+            calls.append(f"load:{dataset_root}") or sentinel
+        ),
+    )
+    monkeypatch.setattr(
+        dagger_module, "audit_imitation_dataset",
+        lambda dataset: calls.append("audit") or {
+            "games": 1,
+            "teacher_labels": 1,
+            "masked_labels": 0,
+            "round_trip_mismatches": 0,
+            "replay_mismatches": 0,
+        },
+    )
+
+    evidence = REAL_BASE_DATASET_AUDIT(definition)
+    assert evidence["content_sha256"] == physical["content_sha256"]
+    assert calls == [f"load:{root}", "audit"]
+
+    (root / "shard.bin").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="full content identity"):
+        REAL_BASE_DATASET_AUDIT(definition)
+
+
 def test_definition_is_deeply_immutable_and_revalidates_from_disk() -> None:
     """Post-load mutation must not change a preflight or downstream stage identity."""
 
@@ -421,6 +528,53 @@ def test_definition_is_deeply_immutable_and_revalidates_from_disk() -> None:
         definition.oracle_candidates[0].depth = 1
     with pytest.raises(ValueError, match="identity"):
         validate_panel_definition(replace(definition, contract_hash="0" * 64))
+
+
+@pytest.mark.parametrize(
+    ("location", "field"),
+    [
+        ("repository", "required_clean"),
+        ("candidate", "use_heuristic"),
+        ("preflight", "labels_per_second_minimum"),
+    ],
+)
+def test_definition_rejects_bool_integer_and_float_integer_aliases(
+    tmp_path: Path, location: str, field: str,
+) -> None:
+    panel_path, _seeds_path, panel, _seeds = _copy_definitions(tmp_path)
+    if location == "candidate":
+        panel["oracle"]["candidates"][0][field] = 1
+    elif location == "preflight":
+        panel["oracle"]["preflight"][field] = 10
+    else:
+        panel[location][field] = 1
+    _rewrite(panel_path, panel)
+
+    with pytest.raises(ValueError, match="candidate|preflight|repository|values"):
+        load_panel_definition(panel_path, repository_root=ROOT)
+
+
+def test_benchmark_sample_is_typed_deeply_frozen_and_exact() -> None:
+    state = {"round": 1, "units": [{"id": 7}]}
+    sample = OracleBenchmarkSample(
+        state_hash="c" * 64,
+        decision_index=0,
+        observation=(0.0, 1.0),
+        legal_mask=(True, False),
+        state=state,
+    )
+    state["units"][0]["id"] = 99
+
+    assert sample.state["units"][0]["id"] == 7
+    assert isinstance(sample.observation, tuple)
+    with pytest.raises(TypeError):
+        sample.state["round"] = 2
+    with pytest.raises(FrozenInstanceError):
+        sample.decision_index = 1
+    malformed = sample.to_dict()
+    malformed["observation"][0] = 0
+    with pytest.raises(ValueError, match="finite floats"):
+        OracleBenchmarkSample.from_dict(malformed)
 
 
 class _FakeClock:
@@ -502,6 +656,25 @@ def _trace(
     )
 
 
+def _benchmark_sample(game) -> OracleBenchmarkSample:
+    state = {
+        "round": 1,
+        "active_seat": game.learner_seat,
+        "map_seed": game.map_seed,
+        "profile": game.profile,
+        "units": [],
+    }
+    return OracleBenchmarkSample(
+        state_hash=hashlib.sha256(json.dumps(
+            state, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest(),
+        decision_index=0,
+        observation=(0.0,) * 1292,
+        legal_mask=(True, True, *([False] * 1286)),
+        state=state,
+    )
+
+
 def _preflight_boundaries(
     *,
     wins: dict[int, int],
@@ -509,13 +682,13 @@ def _preflight_boundaries(
     seconds_per_query: dict[int, float] | None = None,
     nondeterministic: bool = False,
     round_trip_failure: bool = False,
-) -> tuple[Any, Any, _FakeClock, dict[int, list], Counter]:
+) -> tuple[Any, Any, Any, _FakeClock, dict[int, list], Counter]:
     clock = _FakeClock()
     schedules: dict[int, list] = defaultdict(list)
     queries: Counter = Counter()
     cycling_draws = cycling_draws or {}
     seconds_per_query = seconds_per_query or {512: 0.001, 2048: 0.001}
-    legal_mask = (True, *([False] * 1287))
+    legal_mask = (True, True, *([False] * 1286))
 
     def evaluator(oracle, game):
         schedules[oracle.expansion_budget].append(game)
@@ -542,11 +715,11 @@ def _preflight_boundaries(
             ),
             replay=f"preflight {oracle.expansion_budget} {game.map_seed} "
             f"{game.learner_seat}\n",
-            samples=(f"{game.map_seed}:{game.learner_seat}",),
+            samples=(_benchmark_sample(game),),
         )
 
     def benchmark(oracle, game, sample):
-        key = (oracle.expansion_budget, sample)
+        key = (oracle.expansion_budget, game.map_seed, game.learner_seat)
         queries[key] += 1
         clock.advance(seconds_per_query[oracle.expansion_budget])
         action = (
@@ -554,7 +727,6 @@ def _preflight_boundaries(
             if nondeterministic and queries[key] == 2
             else 0
         )
-        round_trip_action = 1 if round_trip_failure else action
         command = {
             "Kind": "end_turn" if action == 0 else "move",
             "Issuer": game.learner_seat,
@@ -565,13 +737,28 @@ def _preflight_boundaries(
         }
         return OracleBenchmarkDecision(
             encoded_action=action,
-            round_trip_action=round_trip_action,
-            legal_mask=legal_mask,
             command=command,
             actual_expansion_count=min(127, oracle.expansion_budget),
         )
 
-    return evaluator, benchmark, clock, schedules, queries
+    def codec(oracle, game, sample, decision):
+        decoded = dict(decision.command)
+        if round_trip_failure:
+            decoded["Kind"] = "move" if decoded["Kind"] == "end_turn" else "end_turn"
+        return OracleCodecEvidence(
+            authority="HexWars.Engine.TacticalV2Coding-v1",
+            state_hash=sample.state_hash,
+            contract_hash="7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6",
+            encoding_hash="2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a",
+            requested_action=decision.encoded_action,
+            encoded_action=decision.encoded_action,
+            encoded_command=decision.command,
+            decoded_command=decoded,
+            mask_legal=sample.legal_mask[decision.encoded_action],
+            apply_success=True,
+        )
+
+    return evaluator, benchmark, codec, clock, schedules, queries
 
 
 def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
@@ -580,7 +767,7 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
     """Dropping a seat/map or one determinism query would invalidate oracle selection."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, schedules, queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, schedules, queries = _preflight_boundaries(
         wins={512: 210, 2048: 220},
     )
     callbacks: list[int] = []
@@ -588,9 +775,10 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
     selected = run_oracle_preflight(
         definition,
         output_root=tmp_path / "oracle-preflight",
-        repository_hash="a" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
         on_selected=lambda oracle: callbacks.append(oracle.expansion_budget),
     )
@@ -613,6 +801,20 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
     assert all(item["determinism_failures"] == 0 for item in manifest["candidates"])
     assert all(item["round_trip_failures"] == 0 for item in manifest["candidates"])
     assert all(item["labels_per_second"] >= 10.0 for item in manifest["candidates"])
+    for candidate in manifest["candidates"]:
+        assert set(candidate["profiles"]) == set(PROFILES)
+        assert all(
+            profile["games"] == 40
+            and profile["seats"]["0"]["games"] == 20
+            and profile["seats"]["1"]["games"] == 20
+            and (
+                profile["wins"] + profile["losses"] + profile["draws"] == 40
+            )
+            for profile in candidate["profiles"].values()
+        )
+        assert candidate["query_count"] == 480
+        assert candidate["expansion_total"] == 480 * 127
+        assert candidate["mean_expansions"] == 127.0
 
 
 def test_oracle_preflight_accepts_exact_win_and_throughput_boundaries(
@@ -621,7 +823,7 @@ def test_oracle_preflight_accepts_exact_win_and_throughput_boundaries(
     """The locked gates are inclusive: 204/240 wins and 10 labels/s both pass."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, base_benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, base_benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins={512: 204, 2048: 204},
         seconds_per_query={512: 0.0, 2048: 0.0},
     )
@@ -637,9 +839,10 @@ def test_oracle_preflight_accepts_exact_win_and_throughput_boundaries(
     selected = run_oracle_preflight(
         definition,
         output_root=tmp_path / "exact-boundaries",
-        repository_hash="9" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
     )
 
@@ -676,7 +879,7 @@ def test_oracle_preflight_uses_the_locked_lexicographic_tie_break(
     """Oracle choice is win rate, cycling, throughput, then the smaller budget."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins=wins,
         cycling_draws=cycling,
         seconds_per_query=seconds,
@@ -685,9 +888,10 @@ def test_oracle_preflight_uses_the_locked_lexicographic_tie_break(
     selected = run_oracle_preflight(
         definition,
         output_root=tmp_path / f"preflight-{expected}",
-        repository_hash="b" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
     )
 
@@ -701,7 +905,7 @@ def test_oracle_preflight_gate_failure_blocks_downstream_callback(
     """No collection or training callback may follow an oracle that misses any gate."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins={512: 203, 2048: 203} if failure == "wins" else {512: 210, 2048: 210},
         seconds_per_query=(
             {512: 0.1, 2048: 0.1}
@@ -717,16 +921,79 @@ def test_oracle_preflight_gate_failure_blocks_downstream_callback(
         run_oracle_preflight(
             definition,
             output_root=tmp_path / f"failed-{failure}",
-            repository_hash="c" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=evaluator,
             benchmark=benchmark,
+            codec=codec,
             clock=clock,
             on_selected=lambda oracle: callbacks.append(oracle.expansion_budget),
         )
 
     assert callbacks == []
     assert not (tmp_path / f"failed-{failure}").exists()
-    assert (tmp_path / f"failed-{failure}.staging" / "diagnostic.json").is_file()
+    diagnostics = tmp_path / f"failed-{failure}.diagnostics"
+    attempts = list(diagnostics.glob("attempt-*/diagnostic.json"))
+    assert len(attempts) == 1
+    assert not (tmp_path / f"failed-{failure}.staging").exists()
+    diagnostic_payload = json.loads(attempts[0].read_text(encoding="utf-8"))
+    if failure == "determinism":
+        assert all(
+            item["determinism_failures"] == 240
+            and item["round_trip_failures"] == 0
+            for item in diagnostic_payload["candidates"]
+        )
+    if failure == "round_trip":
+        assert all(
+            item["determinism_failures"] == 0
+            and item["round_trip_failures"] == 480
+            for item in diagnostic_payload["candidates"]
+        )
+
+
+@pytest.mark.parametrize("failure", ["mutation", "duplicate"])
+def test_oracle_preflight_rejects_mutated_or_duplicated_typed_samples(
+    tmp_path: Path, failure: str,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
+        wins={512: 210, 2048: 220},
+    )
+    if failure == "duplicate":
+        base_evaluator = evaluator
+
+        def evaluator(oracle, game):
+            result = base_evaluator(oracle, game)
+            return replace(result, samples=(result.samples[0], result.samples[0]))
+    else:
+        base_benchmark = benchmark
+        mutated = False
+
+        def benchmark(oracle, game, sample):
+            nonlocal mutated
+            decision = base_benchmark(oracle, game, sample)
+            if not mutated:
+                object.__setattr__(sample, "decision_index", 1)
+                mutated = True
+            return decision
+
+    root = tmp_path / failure
+    with pytest.raises(ValueError, match="mutated|duplicated"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=evaluator,
+            benchmark=benchmark,
+            codec=codec,
+            clock=clock,
+        )
+    assert not root.exists()
+    assert not root.with_name(root.name + ".staging").exists()
+    assert len(list(
+        root.with_name(root.name + ".diagnostics").glob(
+            "attempt-*/diagnostic.json"
+        )
+    )) == 1
 
 
 @pytest.mark.parametrize("diagnostic", ["cycling", "action_waste"])
@@ -745,17 +1012,20 @@ def test_oracle_preflight_rejects_diagnostics_not_supported_by_the_trace(
             wasted_end_turns=3 if diagnostic == "action_waste" else 0,
             trace=_trace("draw", game.learner_seat),
             replay="unsupported diagnostic\n",
-            samples=("sample",),
+            samples=(_benchmark_sample(game),),
         )
 
     with pytest.raises(ValueError, match="cycling|waste|diagnostic|trace"):
         run_oracle_preflight(
             definition,
             output_root=tmp_path / f"unsupported-{diagnostic}",
-            repository_hash="5" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=evaluator,
             benchmark=lambda *_args: pytest.fail(
                 "diagnostics must be checked before an oracle query"
+            ),
+            codec=lambda *_args: pytest.fail(
+                "diagnostics must be checked before codec validation"
             ),
         )
 
@@ -766,16 +1036,17 @@ def test_oracle_preflight_exact_reuse_launches_zero_games_and_rehashes_evidence(
     """Reuse must physically reopen all traces/replays and reject any identity drift."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins={512: 210, 2048: 220},
     )
     root = tmp_path / "oracle-preflight"
     selected = run_oracle_preflight(
         definition,
         output_root=root,
-        repository_hash="d" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
     )
 
@@ -789,9 +1060,11 @@ def test_oracle_preflight_exact_reuse_launches_zero_games_and_rehashes_evidence(
     reused = run_oracle_preflight(
         definition,
         output_root=root,
-        repository_hash="d" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=forbidden,
         benchmark=forbidden,
+        codec=forbidden,
+        on_selected=forbidden,
     )
     assert reused == selected
     assert calls == 0
@@ -801,24 +1074,86 @@ def test_oracle_preflight_exact_reuse_launches_zero_games_and_rehashes_evidence(
         run_oracle_preflight(
             definition,
             output_root=root,
-            repository_hash="e" * 64,
+            repository_identity_provider=lambda root: {
+                **_repository_provider(root), "commit": "e" * 40,
+            },
             evaluator=forbidden,
             benchmark=forbidden,
+            codec=forbidden,
         )
     assert (root / "oracle-preflight.json").read_bytes() == before
     assert calls == 0
 
-    replay = next((root / "games").rglob("*.replay"))
+    games = root / "games"
+    games_target = tmp_path / "games-target"
+    os.replace(games, games_target)
+    _windows_directory_junction(games, games_target)
+    try:
+        with pytest.raises(ValueError, match="reparse|junction|reusable"):
+            run_oracle_preflight(
+                definition,
+                output_root=root,
+                repository_identity_provider=_repository_provider,
+                evaluator=forbidden,
+                benchmark=forbidden,
+                codec=forbidden,
+                on_selected=forbidden,
+            )
+    finally:
+        games.rmdir()
+        os.replace(games_target, games)
+    assert calls == 0
+
+    replay = next((root / "games").rglob("*.replay.json"))
     replay.write_text("tampered\n", encoding="utf-8")
     with pytest.raises(ValueError, match="hash|reusable|evidence"):
         run_oracle_preflight(
             definition,
             output_root=root,
-            repository_hash="d" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=forbidden,
             benchmark=forbidden,
+            codec=forbidden,
         )
     assert calls == 0
+
+
+def test_oracle_preflight_rechecks_repository_identity_before_publication(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
+        wins={512: 210, 2048: 220},
+    )
+    calls = 0
+
+    def drifting_provider(root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(root)
+        if calls > 1:
+            identity["source_tree"] = "e" * 40
+        return identity
+
+    root = tmp_path / "repository-drift"
+    with pytest.raises(ValueError, match="repository identity changed"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=drifting_provider,
+            evaluator=evaluator,
+            benchmark=benchmark,
+            codec=codec,
+            clock=clock,
+        )
+    assert calls == 2
+    assert not root.exists()
+    assert not root.with_name(root.name + ".staging").exists()
+    assert len(list(
+        root.with_name(root.name + ".diagnostics").glob(
+            "attempt-*/diagnostic.json"
+        )
+    )) == 1
 
 
 def test_oracle_preflight_reuse_recomputes_reported_metrics_from_physical_games(
@@ -827,20 +1162,22 @@ def test_oracle_preflight_reuse_recomputes_reported_metrics_from_physical_games(
     """A refreshed self-hash cannot make a false rate or selection authoritative."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins={512: 210, 2048: 220},
     )
     root = tmp_path / "oracle-preflight"
     run_oracle_preflight(
         definition,
         output_root=root,
-        repository_hash="8" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
     )
     manifest_path = root / "oracle-preflight.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    original_manifest = manifest_path.read_bytes()
+    manifest = json.loads(original_manifest)
     manifest["candidates"][0]["rates"]["win"] = 1.0
     manifest["selected_oracle"] = manifest["candidates"][0]["oracle"]
     manifest["content_identity"] = _content_identity(manifest)
@@ -856,9 +1193,67 @@ def test_oracle_preflight_reuse_recomputes_reported_metrics_from_physical_games(
         run_oracle_preflight(
             definition,
             output_root=root,
-            repository_hash="8" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=forbidden,
             benchmark=forbidden,
+            codec=forbidden,
+        )
+    assert calls == 0
+
+    manifest_path.write_bytes(original_manifest)
+    manifest = json.loads(original_manifest)
+    benchmark_descriptor = manifest["games"][0]["benchmark"]
+    benchmark_path = root / benchmark_descriptor["path"]
+    original_benchmark = benchmark_path.read_bytes()
+    benchmark_payload = json.loads(original_benchmark)
+    benchmark_payload["records"][0]["first"]["decision"][
+        "actual_expansion_count"
+    ] += 1
+    _rewrite(benchmark_path, benchmark_payload)
+    benchmark_descriptor["sha256"] = _sha256(benchmark_path)
+    benchmark_descriptor["byte_size"] = benchmark_path.stat().st_size
+    manifest["content_identity"] = _content_identity(manifest)
+    _rewrite(manifest_path, manifest)
+    with pytest.raises(ValueError, match="metric|summary|reusable|determin"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=forbidden,
+            benchmark=forbidden,
+            codec=forbidden,
+            on_selected=forbidden,
+        )
+    assert calls == 0
+
+    benchmark_path.write_bytes(original_benchmark)
+    manifest_path.write_bytes(original_manifest)
+    manifest = json.loads(original_manifest)
+    manifest["games"][1]["trace"] = manifest["games"][0]["trace"]
+    manifest["content_identity"] = _content_identity(manifest)
+    _rewrite(manifest_path, manifest)
+    with pytest.raises(ValueError, match="duplicated|reusable|owned"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=forbidden,
+            benchmark=forbidden,
+            codec=forbidden,
+        )
+    assert calls == 0
+
+    manifest_path.write_bytes(original_manifest)
+    orphan = root / "games" / "orphan.json"
+    orphan.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unowned|reusable|evidence"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=forbidden,
+            benchmark=forbidden,
+            codec=forbidden,
         )
     assert calls == 0
 
@@ -869,16 +1264,17 @@ def test_oracle_preflight_recovers_completed_staging_and_rejects_coexistence(
     """A crash after sealing is reusable, while two authoritative roots are not."""
 
     definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
-    evaluator, benchmark, clock, _schedules, _queries = _preflight_boundaries(
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
         wins={512: 210, 2048: 220},
     )
     root = tmp_path / "oracle-preflight"
     selected = run_oracle_preflight(
         definition,
         output_root=root,
-        repository_hash="7" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=evaluator,
         benchmark=benchmark,
+        codec=codec,
         clock=clock,
     )
     staging = root.with_name(root.name + ".staging")
@@ -893,9 +1289,10 @@ def test_oracle_preflight_recovers_completed_staging_and_rejects_coexistence(
     recovered = run_oracle_preflight(
         definition,
         output_root=root,
-        repository_hash="7" * 64,
+        repository_identity_provider=_repository_provider,
         evaluator=forbidden,
         benchmark=forbidden,
+        codec=forbidden,
     )
     assert recovered == selected
     assert root.is_dir()
@@ -909,9 +1306,10 @@ def test_oracle_preflight_recovers_completed_staging_and_rejects_coexistence(
         run_oracle_preflight(
             definition,
             output_root=root,
-            repository_hash="7" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=forbidden,
             benchmark=forbidden,
+            codec=forbidden,
         )
     assert (root / "oracle-preflight.json").read_bytes() == before
     assert (staging / "sentinel.txt").read_text(encoding="utf-8") == "do not overwrite\n"
@@ -934,21 +1332,59 @@ def test_oracle_preflight_runtime_failure_remains_diagnostic_not_complete(
         run_oracle_preflight(
             definition,
             output_root=root,
-            repository_hash="6" * 64,
+            repository_identity_provider=_repository_provider,
             evaluator=failed_evaluator,
             benchmark=lambda *_args: pytest.fail("benchmark must not run"),
+            codec=lambda *_args: pytest.fail("codec must not run"),
             on_selected=lambda oracle: callbacks.append(oracle.expansion_budget),
         )
 
-    staging = root.with_name(root.name + ".staging")
     assert not root.exists()
-    assert not (staging / "oracle-preflight.json").exists()
-    diagnostic = json.loads(
-        (staging / "diagnostic.json").read_text(encoding="utf-8")
+    assert not root.with_name(root.name + ".staging").exists()
+    attempts = list(
+        root.with_name(root.name + ".diagnostics").glob("attempt-*/diagnostic.json")
     )
+    assert len(attempts) == 1
+    diagnostic = json.loads(attempts[0].read_text(encoding="utf-8"))
     assert diagnostic["status"] == "failed"
     assert diagnostic["exception"] == {
         "type": "ConnectionError",
         "message": "test evaluator disconnected",
     }
     assert callbacks == []
+
+    with pytest.raises(ConnectionError, match="disconnected"):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=failed_evaluator,
+            benchmark=lambda *_args: pytest.fail("benchmark must not run"),
+            codec=lambda *_args: pytest.fail("codec must not run"),
+        )
+    assert len(list(
+        root.with_name(root.name + ".diagnostics").glob(
+            "attempt-*/diagnostic.json"
+        )
+    )) == 2
+
+    evaluator, benchmark, codec, clock, _schedules, _queries = _preflight_boundaries(
+        wins={512: 210, 2048: 220},
+    )
+    selected = run_oracle_preflight(
+        definition,
+        output_root=root,
+        repository_identity_provider=_repository_provider,
+        evaluator=evaluator,
+        benchmark=benchmark,
+        codec=codec,
+        clock=clock,
+        on_selected=lambda oracle: callbacks.append(oracle.expansion_budget),
+    )
+    assert selected.expansion_budget == 2048
+    assert callbacks == [2048]
+    assert len(list(
+        root.with_name(root.name + ".diagnostics").glob(
+            "attempt-*/diagnostic.json"
+        )
+    )) == 2

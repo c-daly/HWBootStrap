@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import tempfile
 import time
 from collections import Counter, OrderedDict
@@ -38,6 +39,8 @@ from .imitation import (
     MaterializedImitationPartition,
     PRODUCTION_DAGGER_DISTILLATION_CONFIG,
     Source,
+    audit_imitation_dataset,
+    load_imitation_dataset,
     materialize_imitation_partition,
     train_actor_supervision,
 )
@@ -65,6 +68,9 @@ _ITERATION_ONE_CONTROLLER = {
 }
 _ITERATION_ONE_CHECKPOINT_SHA256 = (
     "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+)
+_ITERATION_ONE_SOURCE_MANIFEST_SHA256 = (
+    "7f02152c2ea39a08e5e203c0b0ba13928b2ad1847e276cc1b19f53331151ba46"
 )
 _INT32_MAX = (1 << 31) - 1
 _HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -232,30 +238,38 @@ class OracleSpec:
     oracle_type: str
     depth: int
     expansion_budget: int
+    use_heuristic: bool
     heuristic_identity: str
     code_hash: str
 
     @classmethod
     def from_dict(cls, value: Any) -> "OracleSpec":
         fields = _strict_fields(value, frozenset({
-            "oracle_type", "depth", "expansion_budget", "heuristic_identity",
-            "code_hash",
+            "oracle_type", "depth", "expansion_budget", "use_heuristic",
+            "heuristic_identity", "code_hash",
         }), "oracle")
         oracle_type = _strict_string(fields["oracle_type"], "oracle_type")
         if oracle_type != "bounded-search":
             raise ValueError("oracle_type is unsupported")
         depth = _strict_int(fields["depth"], "depth", minimum=1)
         budget = _strict_int(fields["expansion_budget"], "expansion_budget", minimum=1)
+        use_heuristic = fields["use_heuristic"]
+        if type(use_heuristic) is not bool:
+            raise ValueError("use_heuristic must be a boolean")
         heuristic = _strict_string(fields["heuristic_identity"], "heuristic_identity")
         if heuristic != "material-plus-pursuit-v1":
             raise ValueError("heuristic_identity is unsupported")
-        return cls(oracle_type, depth, budget, heuristic, _hash(fields["code_hash"], "code_hash"))
+        return cls(
+            oracle_type, depth, budget, use_heuristic, heuristic,
+            _hash(fields["code_hash"], "code_hash"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "oracle_type": self.oracle_type,
             "depth": self.depth,
             "expansion_budget": self.expansion_budget,
+            "use_heuristic": self.use_heuristic,
             "heuristic_identity": self.heuristic_identity,
             "code_hash": self.code_hash,
         }
@@ -737,6 +751,9 @@ class PanelDefinition:
     learner_source_scenario_sha256: str
     dataset_root: Path
     dataset_manifest_sha256: str
+    dataset_content_sha256: str
+    dataset_file_count: int
+    dataset_byte_size: int
     dataset_contract_hash: str
     dataset_encoding_hash: str
     dataset_scenario_hash: str
@@ -778,15 +795,85 @@ _BASE_DATASET_PATH = (
 _BASE_DATASET_MANIFEST_SHA256 = (
     "6c9f1fd43cded0691080dd12c390aee086d49b144ebc0207d2f80e6b5a9422c4"
 )
+_BASE_DATASET_CONTRACT_HASH = (
+    "2d6984089aa151cee59e10bb37b0d2239e7a0668f34d90e1af64216aaf713edf"
+)
+_BASE_DATASET_ENCODING_HASH = (
+    "2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a"
+)
+_BASE_DATASET_SCENARIO_HASH = (
+    "3236e528f9f3c41a1c696834d48f24db4ffae48cf96c174b5aaafa862c3a589f"
+)
+_BASE_DATASET_CONTENT_SHA256 = (
+    "da077fb8291f00bf2359e3ce9c834a331032dc4f43397e3fa434d69c0d28989c"
+)
+_BASE_DATASET_FILE_COUNT = 3966
+_BASE_DATASET_BYTE_SIZE = 17_852_257
+_BASE_DATASET_SEMANTIC_AUDIT_CACHE: dict[
+    tuple[str, str, str], dict[str, int]
+] = {}
 _PANEL_SCENARIO_PATH = "python/config/annihilation-imitation-v1.json"
 _ORACLE_SOURCE_PATH = "engine/HexWars.Engine/BoundedSearchAgent.cs"
+_PANEL_SCENARIO_SHA256 = (
+    "4f085b8a80f7ba8e450a85dbcceb73e05723ce7b37045f1ddd1ef91d67a95632"
+)
+_RUNTIME_SCENARIO_SHA256 = (
+    "00684a8623f3f1deadd8d31cb71a0492441508c34a42d6f5ac6a1f8e662aaaa4"
+)
+_PANEL_CONTRACT_HASH = (
+    "7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6"
+)
+_PANEL_ENCODING_HASH = _BASE_DATASET_ENCODING_HASH
+_PANEL_ACTION_REGIONS = {
+    "move": {"offset": 1, "count": 351},
+    "attack": {"offset": 352, "count": 351},
+    "deploy": {"offset": 703, "count": 585},
+}
 
 
 def _exact_json(value: Any, expected: Mapping[str, Any], label: str) -> Mapping[str, Any]:
     fields = _strict_fields(value, frozenset(expected), label)
-    if dict(fields) != dict(expected):
+    if not _same_exact_json(fields, expected):
         raise ValueError(f"{label} values are invalid")
     return fields
+
+
+def _same_exact_json(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(actual, Mapping)
+            and set(actual) == set(expected)
+            and all(_same_exact_json(actual[key], value)
+                    for key, value in expected.items())
+        )
+    if isinstance(expected, list):
+        return (
+            type(actual) is list
+            and len(actual) == len(expected)
+            and all(_same_exact_json(left, right)
+                    for left, right in zip(actual, expected, strict=True))
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        stat = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"authoritative path is missing: {path}") from exc
+    return path.is_symlink() or bool(
+        getattr(stat, "st_file_attributes", 0) & 0x400
+    )
+
+
+def _reject_reparse_chain(path: Path, label: str) -> None:
+    absolute = Path(path).absolute()
+    parts = absolute.parts
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current /= part
+        if current.exists() and _is_reparse_point(current):
+            raise ValueError(f"{label} must not traverse a symlink, junction, or reparse point")
 
 
 def _canonical_external_path(value: Any, label: str) -> Path:
@@ -794,6 +881,7 @@ def _canonical_external_path(value: Any, label: str) -> Path:
     path = Path(text)
     if not path.is_absolute():
         raise ValueError(f"{label} must be absolute")
+    _reject_reparse_chain(path, label)
     try:
         resolved = path.resolve(strict=True)
     except OSError as exc:
@@ -807,6 +895,8 @@ def _definition_file(
     root: Path, relative: Any, label: str,
 ) -> Path:
     canonical = _safe_relative(relative, label)
+    _reject_reparse_chain(Path(root), label)
+    _reject_reparse_chain(Path(root) / canonical, label)
     try:
         resolved_root = Path(root).resolve(strict=True)
         resolved = (resolved_root / canonical).resolve(strict=True)
@@ -825,6 +915,8 @@ def _repository_file(
     repository_root: Path, relative: Any, label: str,
 ) -> Path:
     canonical = _safe_relative(relative, label)
+    _reject_reparse_chain(Path(repository_root), label)
+    _reject_reparse_chain(Path(repository_root) / canonical, label)
     try:
         root = Path(repository_root).resolve(strict=True)
         resolved = (root / canonical).resolve(strict=True)
@@ -960,6 +1052,11 @@ def load_panel_definition(
         raise ValueError("panel scenario path is not the locked definition")
     scenario_path = _repository_file(root, scenario["path"], "panel scenario")
     scenario_sha256 = _hash(scenario["sha256"], "scenario sha256")
+    if (
+        scenario_sha256 != _PANEL_SCENARIO_SHA256
+        or scenario["runtime_snapshot_sha256"] != _RUNTIME_SCENARIO_SHA256
+    ):
+        raise ValueError("scenario identity is not the locked panel scenario")
     if _sha256_file(scenario_path) != scenario_sha256:
         raise ValueError("scenario physical hash changed")
     resolved_scenario = resolve_scenario(
@@ -1003,8 +1100,11 @@ def load_panel_definition(
     )
     if (
         contract.version != "tactical-v2"
+        or contract.contract_hash != _PANEL_CONTRACT_HASH
+        or contract.encoding_hash != _PANEL_ENCODING_HASH
         or contract.observation_size != 1292
         or contract.action_size != 1288
+        or not _same_exact_json(contract_fields["action_regions"], _PANEL_ACTION_REGIONS)
     ):
         raise ValueError("panel tactical-v2 contract geometry is invalid")
     action_regions = _regions_to_dict(_action_regions(contract))
@@ -1012,14 +1112,12 @@ def load_panel_definition(
     repository = _exact_json(panel["repository"], {
         "required_clean": True,
         "identity_fields": ["commit", "source_tree", "dirty"],
-        "ignored_generated_root": (
-            "python/panels/annihilation-selective-dagger-v1/evidence/"
-        ),
+        "output_policy": "outside_repository",
     }, "repository policy")
     repository_policy = MappingProxyType({
         "required_clean": True,
         "identity_fields": tuple(repository["identity_fields"]),
-        "ignored_generated_root": repository["ignored_generated_root"],
+        "output_policy": repository["output_policy"],
     })
 
     learner = _strict_fields(panel["starting_learner"], frozenset({
@@ -1034,6 +1132,8 @@ def load_panel_definition(
             learner["checkpoint_sha256"], "learner checkpoint sha256",
         ),
     )
+    if learner["source_manifest_sha256"] != _ITERATION_ONE_SOURCE_MANIFEST_SHA256:
+        raise ValueError("learner source manifest is not the locked snapshot manifest")
     if (
         dict(starting_learner.controller) != _ITERATION_ONE_CONTROLLER
         or starting_learner.checkpoint_sha256 != _ITERATION_ONE_CHECKPOINT_SHA256
@@ -1101,8 +1201,8 @@ def load_panel_definition(
         raise ValueError("learner runtime scenario physical hash changed")
 
     dataset = _strict_fields(panel["original_dataset"], frozenset({
-        "path", "manifest_sha256", "contract_hash", "encoding_hash",
-        "scenario_hash",
+        "path", "manifest_sha256", "content_sha256", "file_count", "byte_size",
+        "contract_hash", "encoding_hash", "scenario_hash",
     }), "original dataset")
     if dataset["path"] != _BASE_DATASET_PATH:
         raise ValueError("original dataset path is not the locked corpus")
@@ -1130,11 +1230,26 @@ def load_panel_definition(
     dataset_scenario_hash = _hash(
         dataset["scenario_hash"], "original dataset scenario hash",
     )
+    dataset_content_sha256 = _hash(
+        dataset["content_sha256"], "original dataset content sha256",
+    )
+    dataset_file_count = _strict_int(
+        dataset["file_count"], "original dataset file count", minimum=1,
+    )
+    dataset_byte_size = _strict_int(
+        dataset["byte_size"], "original dataset byte size", minimum=1,
+    )
     if (
         dataset_manifest.get("contract_hash") != dataset_contract_hash
         or dataset_manifest.get("encoding_hash") != dataset_encoding_hash
         or dataset_encoding_hash != contract.encoding_hash
         or dataset_scenario_hash != canonical_scenario_hash
+        or dataset_contract_hash != _BASE_DATASET_CONTRACT_HASH
+        or dataset_encoding_hash != _BASE_DATASET_ENCODING_HASH
+        or dataset_scenario_hash != _BASE_DATASET_SCENARIO_HASH
+        or dataset_content_sha256 != _BASE_DATASET_CONTENT_SHA256
+        or dataset_file_count != _BASE_DATASET_FILE_COUNT
+        or dataset_byte_size != _BASE_DATASET_BYTE_SIZE
     ):
         raise ValueError("original dataset manifest or scenario identity changed")
 
@@ -1158,15 +1273,19 @@ def load_panel_definition(
     if _sha256_file(oracle_source) != _ORACLE_CODE_SHA256:
         raise ValueError("bounded-search oracle source physical hash changed")
     candidates_raw = oracle["candidates"]
-    if not isinstance(candidates_raw, list) or candidates_raw != [
-        {"depth": 4, "expansion_budget": 512, "use_heuristic": True},
-        {"depth": 4, "expansion_budget": 2048, "use_heuristic": True},
-    ]:
+    if not isinstance(candidates_raw, list) or not _same_exact_json(
+        candidates_raw,
+        [
+            {"depth": 4, "expansion_budget": 512, "use_heuristic": True},
+            {"depth": 4, "expansion_budget": 2048, "use_heuristic": True},
+        ],
+    ):
         raise ValueError("panel oracle candidates are invalid")
     candidates = tuple(OracleSpec.from_dict({
         "oracle_type": oracle["oracle_type"],
         "depth": item["depth"],
         "expansion_budget": item["expansion_budget"],
+        "use_heuristic": item["use_heuristic"],
         "heuristic_identity": oracle["heuristic_identity"],
         "code_hash": oracle["code_sha256"],
     }) for item in candidates_raw)
@@ -1273,6 +1392,9 @@ def load_panel_definition(
         learner_source_scenario_sha256=runtime_scenario_sha256,
         dataset_root=dataset_root,
         dataset_manifest_sha256=dataset_manifest_sha256,
+        dataset_content_sha256=dataset_content_sha256,
+        dataset_file_count=dataset_file_count,
+        dataset_byte_size=dataset_byte_size,
         dataset_contract_hash=dataset_contract_hash,
         dataset_encoding_hash=dataset_encoding_hash,
         dataset_scenario_hash=dataset_scenario_hash,
@@ -1309,7 +1431,7 @@ class OraclePreflightGameResult:
     wasted_end_turns: int
     trace: EpisodeTrace
     replay: str
-    samples: tuple[Any, ...]
+    samples: tuple["OracleBenchmarkSample", ...]
 
     def __post_init__(self) -> None:
         if self.outcome not in {"win", "loss", "draw"}:
@@ -1323,28 +1445,83 @@ class OraclePreflightGameResult:
             raise ValueError("preflight trace must contain transitions")
         if not isinstance(self.replay, str) or not self.replay:
             raise ValueError("preflight replay must be non-empty text")
-        if not isinstance(self.samples, tuple) or not self.samples:
+        if (
+            not isinstance(self.samples, tuple)
+            or not self.samples
+            or any(not isinstance(item, OracleBenchmarkSample) for item in self.samples)
+        ):
             raise ValueError("preflight game must expose benchmark samples")
+
+
+@dataclass(frozen=True)
+class OracleBenchmarkSample:
+    state_hash: str
+    decision_index: int
+    observation: tuple[float, ...]
+    legal_mask: tuple[bool, ...]
+    state: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _hash(self.state_hash, "oracle benchmark state hash")
+        _strict_int(
+            self.decision_index, "oracle benchmark decision index", minimum=0,
+        )
+        if (
+            not isinstance(self.observation, (tuple, list))
+            or not self.observation
+            or any(type(item) is not float or not math.isfinite(item)
+                   for item in self.observation)
+        ):
+            raise ValueError("oracle benchmark observation must contain finite floats")
+        if (
+            not isinstance(self.legal_mask, (tuple, list))
+            or not self.legal_mask
+            or any(type(item) is not bool for item in self.legal_mask)
+        ):
+            raise ValueError("oracle benchmark legal mask is invalid")
+        if not isinstance(self.state, Mapping):
+            raise ValueError("oracle benchmark state must be an object")
+        object.__setattr__(self, "observation", tuple(self.observation))
+        object.__setattr__(self, "legal_mask", tuple(self.legal_mask))
+        object.__setattr__(
+            self, "state", _freeze_contract_value(self.state, "oracle benchmark state"),
+        )
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "OracleBenchmarkSample":
+        fields = _strict_fields(value, frozenset({
+            "state_hash", "decision_index", "observation", "legal_mask", "state",
+        }), "oracle benchmark sample")
+        return cls(
+            state_hash=fields["state_hash"],
+            decision_index=fields["decision_index"],
+            observation=fields["observation"],
+            legal_mask=fields["legal_mask"],
+            state=fields["state"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state_hash": self.state_hash,
+            "decision_index": self.decision_index,
+            "observation": list(self.observation),
+            "legal_mask": list(self.legal_mask),
+            "state": _mutable_json_value(self.state),
+        }
+
+    @property
+    def content_sha256(self) -> str:
+        return _json_sha256(self.to_dict())
 
 
 @dataclass(frozen=True)
 class OracleBenchmarkDecision:
     encoded_action: int
-    round_trip_action: int
-    legal_mask: tuple[bool, ...]
     command: Mapping[str, Any]
     actual_expansion_count: int
 
     def __post_init__(self) -> None:
         _strict_int(self.encoded_action, "oracle benchmark action", minimum=0)
-        _strict_int(
-            self.round_trip_action, "oracle benchmark round-trip action", minimum=0,
-        )
-        if (
-            not isinstance(self.legal_mask, (tuple, list))
-            or any(type(item) is not bool for item in self.legal_mask)
-        ):
-            raise ValueError("oracle benchmark legal mask is invalid")
         if not isinstance(self.command, Mapping):
             raise ValueError("oracle benchmark command is invalid")
         _strict_int(
@@ -1352,47 +1529,84 @@ class OracleBenchmarkDecision:
             "oracle benchmark expansion count",
             minimum=0,
         )
-        object.__setattr__(self, "legal_mask", tuple(self.legal_mask))
         object.__setattr__(
-            self, "command", MappingProxyType(dict(self.command)),
+            self, "command",
+            _freeze_contract_value(self.command, "oracle benchmark command"),
         )
 
+    @classmethod
+    def from_dict(cls, value: Any) -> "OracleBenchmarkDecision":
+        fields = _strict_fields(value, frozenset({
+            "encoded_action", "command", "actual_expansion_count",
+        }), "oracle benchmark decision")
+        return cls(**fields)
 
-_PREFLIGHT_MANIFEST_FIELDS = frozenset({
-    "schema_version", "status", "identity", "candidates", "selected_oracle",
-    "games", "content_identity",
-})
-_PREFLIGHT_GAME_FIELDS = frozenset({
-    "candidate_index", "game_index", "schedule_index", "map_seed",
-    "episode_seed", "profile", "reference_seat", "learner_seat", "outcome",
-    "cycling", "action_waste", "wasted_end_turns", "transition_count",
-    "trace", "replay",
-})
-_PREFLIGHT_FILE_FIELDS = frozenset({"path", "sha256", "byte_size"})
-_PREFLIGHT_CANDIDATE_FIELDS = frozenset({
-    "oracle", "games", "wins", "losses", "draws", "rates",
-    "confidence_intervals", "cycling_draws", "action_waste_games",
-    "wasted_end_turns", "paired_maps", "seats", "labels",
-    "determinism_failures", "round_trip_failures", "expansion_total",
-    "max_expansions", "mean_expansions", "elapsed_seconds",
-    "benchmark_seconds", "labels_per_second", "eligible",
-})
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "encoded_action": self.encoded_action,
+            "command": _mutable_json_value(self.command),
+            "actual_expansion_count": self.actual_expansion_count,
+        }
 
 
-def _atomic_text_file(path: Path, value: str) -> None:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent,
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            stream.write(value)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, destination)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+@dataclass(frozen=True)
+class OracleCodecEvidence:
+    authority: str
+    state_hash: str
+    contract_hash: str
+    encoding_hash: str
+    requested_action: int
+    encoded_action: int
+    encoded_command: Mapping[str, Any]
+    decoded_command: Mapping[str, Any]
+    mask_legal: bool
+    apply_success: bool
+
+    def __post_init__(self) -> None:
+        if self.authority != "HexWars.Engine.TacticalV2Coding-v1":
+            raise ValueError("oracle codec authority is invalid")
+        _hash(self.state_hash, "oracle codec state hash")
+        _hash(self.contract_hash, "oracle codec contract hash")
+        _hash(self.encoding_hash, "oracle codec encoding hash")
+        _strict_int(self.requested_action, "oracle codec requested action", minimum=0)
+        _strict_int(self.encoded_action, "oracle codec encoded action", minimum=0)
+        if not isinstance(self.encoded_command, Mapping):
+            raise ValueError("oracle codec encoded command is invalid")
+        if not isinstance(self.decoded_command, Mapping):
+            raise ValueError("oracle codec decoded command is invalid")
+        if type(self.mask_legal) is not bool or type(self.apply_success) is not bool:
+            raise ValueError("oracle codec legality evidence must be boolean")
+        object.__setattr__(
+            self, "encoded_command",
+            _freeze_contract_value(self.encoded_command, "oracle codec encoded command"),
+        )
+        object.__setattr__(
+            self, "decoded_command",
+            _freeze_contract_value(self.decoded_command, "oracle codec decoded command"),
+        )
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "OracleCodecEvidence":
+        fields = _strict_fields(value, frozenset({
+            "authority", "state_hash", "contract_hash", "encoding_hash",
+            "requested_action", "encoded_action", "encoded_command",
+            "decoded_command", "mask_legal", "apply_success",
+        }), "oracle codec evidence")
+        return cls(**fields)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "authority": self.authority,
+            "state_hash": self.state_hash,
+            "contract_hash": self.contract_hash,
+            "encoding_hash": self.encoding_hash,
+            "requested_action": self.requested_action,
+            "encoded_action": self.encoded_action,
+            "encoded_command": _mutable_json_value(self.encoded_command),
+            "decoded_command": _mutable_json_value(self.decoded_command),
+            "mask_legal": self.mask_legal,
+            "apply_success": self.apply_success,
+        }
 
 
 def _preflight_file_descriptor(root: Path, path: Path) -> dict[str, Any]:
@@ -1404,8 +1618,147 @@ def _preflight_file_descriptor(root: Path, path: Path) -> dict[str, Any]:
     }
 
 
+def _dataset_tree_identity(root: Path) -> dict[str, Any]:
+    root = Path(root)
+    _reject_reparse_chain(root, "original dataset")
+    files: list[Path] = []
+    for current, directories, names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in [*directories, *names]:
+            child = current_path / name
+            if _is_reparse_point(child):
+                raise ValueError(
+                    "original dataset must not contain a symlink, junction, or reparse point"
+                )
+        files.extend(current_path / name for name in names)
+    files.sort(key=lambda path: path.relative_to(root).as_posix())
+    digest = hashlib.sha256()
+    byte_size = 0
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        file_hash = _sha256_file(path)
+        digest.update(relative.encode("utf-8"))
+        digest.update(bytes((0,)))
+        digest.update(file_hash.encode("ascii"))
+        digest.update(b"\n")
+        byte_size += path.stat().st_size
+    return {
+        "content_sha256": digest.hexdigest(),
+        "file_count": len(files),
+        "byte_size": byte_size,
+    }
+
+
+def _audit_base_dataset(definition: PanelDefinition) -> dict[str, Any]:
+    physical = _dataset_tree_identity(definition.dataset_root)
+    expected_physical = {
+        "content_sha256": definition.dataset_content_sha256,
+        "file_count": definition.dataset_file_count,
+        "byte_size": definition.dataset_byte_size,
+    }
+    if physical != expected_physical:
+        raise ValueError("original dataset full content identity changed")
+    cache_key = (
+        physical["content_sha256"],
+        definition.dataset_contract_hash,
+        definition.dataset_encoding_hash,
+    )
+    audit = _BASE_DATASET_SEMANTIC_AUDIT_CACHE.get(cache_key)
+    if audit is None:
+        contract = EnvironmentContract(
+            version="tactical-v2",
+            contract_hash=definition.dataset_contract_hash,
+            encoding_hash=definition.dataset_encoding_hash,
+            observation_size=definition.observation_size,
+            action_size=definition.action_size,
+            board={},
+            roster=[],
+            reward={},
+            semantics={"action_regions": definition.action_regions},
+        )
+        dataset = load_imitation_dataset(
+            definition.dataset_root, expected_contract=contract,
+        )
+        audit = dict(audit_imitation_dataset(dataset))
+        _BASE_DATASET_SEMANTIC_AUDIT_CACHE[cache_key] = dict(audit)
+    if (
+        audit["games"] <= 0
+        or audit["teacher_labels"] <= 0
+        or audit["masked_labels"] != 0
+        or audit["round_trip_mismatches"] != 0
+        or audit["replay_mismatches"] != 0
+    ):
+        raise ValueError("original dataset full semantic audit failed")
+    return {**physical, "audit": dict(audit)}
+
+
+def _git_object_id(value: Any, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) is None
+    ):
+        raise ValueError(f"{label} must be a lowercase Git object id")
+    return value
+
+
+def _repository_execution_identity(repository_root: Path) -> dict[str, Any]:
+    root = Path(repository_root).resolve(strict=True)
+
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise ValueError(
+                f"repository identity command failed: {' '.join(arguments)}"
+            )
+        return completed.stdout.strip()
+
+    discovered = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
+    if discovered != root:
+        raise ValueError("panel repository root is not the Git toplevel")
+    return {
+        "root": str(root),
+        "commit": git("rev-parse", "HEAD").lower(),
+        "source_tree": git("rev-parse", "HEAD^{tree}").lower(),
+        "dirty": bool(git("status", "--porcelain", "--untracked-files=all")),
+    }
+
+
+def _validated_repository_identity(
+    definition: PanelDefinition,
+    provider: Callable[[Path], Mapping[str, Any]],
+) -> dict[str, Any]:
+    raw = _strict_fields(
+        provider(definition.repository_root),
+        frozenset({"root", "commit", "source_tree", "dirty"}),
+        "repository execution identity",
+    )
+    try:
+        root = Path(_strict_string(raw["root"], "repository identity root")).resolve(
+            strict=True,
+        )
+    except OSError as exc:
+        raise ValueError("repository identity root is missing") from exc
+    if root != definition.repository_root:
+        raise ValueError("repository identity root changed")
+    if type(raw["dirty"]) is not bool or raw["dirty"]:
+        raise ValueError("oracle preflight requires a clean repository")
+    return {
+        "root": str(root),
+        "commit": _git_object_id(raw["commit"], "repository commit"),
+        "source_tree": _git_object_id(raw["source_tree"], "repository source tree"),
+        "dirty": False,
+    }
+
+
 def _oracle_preflight_identity(
-    definition: PanelDefinition, repository_hash: str,
+    definition: PanelDefinition,
+    repository: Mapping[str, Any],
+    dataset: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -1416,7 +1769,7 @@ def _oracle_preflight_identity(
         "runtime_scenario_sha256": definition.runtime_scenario_sha256,
         "contract_hash": definition.contract_hash,
         "encoding_hash": definition.encoding_hash,
-        "repository_hash": _hash(repository_hash, "preflight repository hash"),
+        "repository": dict(repository),
         "starting_learner": definition.starting_learner.to_dict(),
         "learner_source_manifest_sha256": (
             definition.learner_source_manifest_sha256
@@ -1426,6 +1779,10 @@ def _oracle_preflight_identity(
             "contract_hash": definition.dataset_contract_hash,
             "encoding_hash": definition.dataset_encoding_hash,
             "scenario_hash": definition.dataset_scenario_hash,
+            "content_sha256": dataset["content_sha256"],
+            "file_count": dataset["file_count"],
+            "byte_size": dataset["byte_size"],
+            "audit": dict(dataset["audit"]),
         },
         "profiles": list(definition.profiles),
         "oracle_candidates": [
@@ -1450,46 +1807,6 @@ def _oracle_preflight_identity(
             definition.preflight_schedule,
         ),
     }
-
-
-def _validate_benchmark_decision(
-    decision: OracleBenchmarkDecision,
-    *,
-    oracle: OracleSpec,
-    game: ScheduledDuel,
-    definition: PanelDefinition,
-) -> None:
-    if not isinstance(decision, OracleBenchmarkDecision):
-        raise ValueError("oracle benchmark returned an invalid decision")
-    if len(decision.legal_mask) != definition.action_size:
-        raise ValueError("oracle benchmark legal mask shape changed")
-    action = decision.encoded_action
-    if (
-        action >= definition.action_size
-        or not decision.legal_mask[action]
-        or decision.round_trip_action != action
-    ):
-        raise ValueError("oracle benchmark action is not legal and round-tripping")
-    contract = EnvironmentContract(
-        version="tactical-v2",
-        contract_hash=definition.contract_hash,
-        encoding_hash=definition.encoding_hash,
-        observation_size=definition.observation_size,
-        action_size=definition.action_size,
-        board={},
-        roster=[],
-        reward={},
-        semantics={"action_regions": definition.action_regions},
-    )
-    _command(
-        decision.command,
-        seat=game.learner_seat,
-        action=action,
-        contract=contract,
-        label="oracle benchmark",
-    )
-    if decision.actual_expansion_count > oracle.expansion_budget:
-        raise ValueError("oracle benchmark exceeded its expansion budget")
 
 
 def _validate_preflight_game_result(
@@ -1548,85 +1865,6 @@ def _preflight_trace_diagnostics(
     }
 
 
-def _preflight_candidate_summary(
-    *,
-    oracle: OracleSpec,
-    games: Sequence[Mapping[str, Any]],
-    labels: int,
-    determinism_failures: int,
-    round_trip_failures: int,
-    expansion_total: int,
-    max_expansions: int,
-    elapsed_seconds: float,
-    benchmark_seconds: float,
-    definition: PanelDefinition,
-) -> dict[str, Any]:
-    counts = Counter(game["outcome"] for game in games)
-    total = len(games)
-    cycling_draws = sum(
-        int(game["cycling"] and game["outcome"] == "draw") for game in games
-    )
-    action_waste_games = sum(int(game["action_waste"]) for game in games)
-    wasted_end_turns = sum(int(game["wasted_end_turns"]) for game in games)
-    by_seat: dict[str, dict[str, int]] = {}
-    for seat in (0, 1):
-        seat_games = [game for game in games if game["learner_seat"] == seat]
-        seat_counts = Counter(game["outcome"] for game in seat_games)
-        by_seat[str(seat)] = {
-            "games": len(seat_games),
-            "wins": seat_counts["win"],
-            "losses": seat_counts["loss"],
-            "draws": seat_counts["draw"],
-        }
-    throughput = labels / benchmark_seconds if benchmark_seconds > 0.0 else 0.0
-    win_rate = counts["win"] / total if total else 0.0
-    win_minimum = (
-        definition.preflight["pooled_win_rate_minimum_basis_points"] / 10_000
-    )
-    throughput_minimum = definition.preflight["labels_per_second_minimum"]
-    eligible = (
-        total == definition.preflight["games_per_candidate"]
-        and win_rate >= win_minimum
-        and determinism_failures == 0
-        and round_trip_failures == 0
-        and labels > 0
-        and throughput >= throughput_minimum
-    )
-    return {
-        "oracle": oracle.to_dict(),
-        "games": total,
-        "wins": counts["win"],
-        "losses": counts["loss"],
-        "draws": counts["draw"],
-        "rates": {
-            "win": win_rate,
-            "loss": counts["loss"] / total,
-            "draw": counts["draw"] / total,
-        },
-        "confidence_intervals": {
-            name: wilson_interval(counts[counter], total, 0.95)
-            for name, counter in (
-                ("win", "win"), ("loss", "loss"), ("draw", "draw")
-            )
-        },
-        "cycling_draws": cycling_draws,
-        "action_waste_games": action_waste_games,
-        "wasted_end_turns": wasted_end_turns,
-        "paired_maps": total // 2,
-        "seats": by_seat,
-        "labels": labels,
-        "determinism_failures": determinism_failures,
-        "round_trip_failures": round_trip_failures,
-        "expansion_total": expansion_total,
-        "max_expansions": max_expansions,
-        "mean_expansions": expansion_total / labels if labels else 0.0,
-        "elapsed_seconds": elapsed_seconds,
-        "benchmark_seconds": benchmark_seconds,
-        "labels_per_second": throughput,
-        "eligible": eligible,
-    }
-
-
 def _select_preflight_candidate(
     summaries: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
@@ -1655,188 +1893,566 @@ def _validate_preflight_file(
     return path
 
 
-def _open_oracle_preflight(
+_PREFLIGHT_V2_MANIFEST_FIELDS = frozenset({
+    "schema_version", "status", "identity", "candidates", "selected_oracle",
+    "games", "content_identity",
+})
+_PREFLIGHT_FILE_FIELDS = frozenset({"path", "sha256", "byte_size"})
+_PREFLIGHT_V2_GAME_FIELDS = frozenset({
+    "candidate_index", "game_index", "schedule_index", "map_seed",
+    "episode_seed", "profile", "reference_seat", "learner_seat", "outcome",
+    "cycling", "action_waste", "wasted_end_turns", "transition_count",
+    "sample_count", "trace", "replay", "benchmark",
+})
+_PREFLIGHT_V2_CANDIDATE_FIELDS = frozenset({
+    "oracle", "games", "wins", "losses", "draws", "rates",
+    "confidence_intervals", "cycling_draws", "action_waste_games",
+    "wasted_end_turns", "paired_maps", "seats", "profiles", "samples",
+    "query_count", "labels", "determinism_failures", "round_trip_failures",
+    "expansion_total", "max_expansions", "mean_expansions",
+    "benchmark_seconds", "labels_per_second", "eligible",
+})
+_PREFLIGHT_TRACE_ENVELOPE_FIELDS = frozenset({
+    "schema_version", "candidate_index", "game_index", "schedule", "outcome",
+    "trace",
+})
+_PREFLIGHT_REPLAY_ENVELOPE_FIELDS = frozenset({
+    "schema_version", "candidate_index", "game_index", "schedule", "outcome",
+    "payload", "payload_sha256",
+})
+_PREFLIGHT_BENCHMARK_ENVELOPE_FIELDS = frozenset({
+    "schema_version", "candidate_index", "game_index", "schedule", "records",
+})
+_PREFLIGHT_BENCHMARK_RECORD_FIELDS = frozenset({
+    "sample_index", "sample_sha256", "sample", "first", "second",
+    "pair_seconds",
+})
+_PREFLIGHT_QUERY_FIELDS = frozenset({
+    "decision", "codec", "elapsed_seconds",
+})
+
+
+def _preflight_decision_valid_v2(
+    decision: OracleBenchmarkDecision,
+    *,
+    sample: OracleBenchmarkSample,
+    oracle: OracleSpec,
+    game: ScheduledDuel,
+    definition: PanelDefinition,
+) -> None:
+    if not isinstance(decision, OracleBenchmarkDecision):
+        raise ValueError("oracle benchmark returned an invalid decision")
+    if (
+        len(sample.observation) != definition.observation_size
+        or len(sample.legal_mask) != definition.action_size
+    ):
+        raise ValueError("oracle benchmark sample shape changed")
+    action = decision.encoded_action
+    if action >= definition.action_size or not sample.legal_mask[action]:
+        raise ValueError("oracle benchmark action is masked")
+    contract = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash=definition.contract_hash,
+        encoding_hash=definition.encoding_hash,
+        observation_size=definition.observation_size,
+        action_size=definition.action_size,
+        board={},
+        roster=[],
+        reward={},
+        semantics={"action_regions": definition.action_regions},
+    )
+    _command(
+        decision.command,
+        seat=game.learner_seat,
+        action=action,
+        contract=contract,
+        label="oracle benchmark",
+    )
+    if decision.actual_expansion_count > oracle.expansion_budget:
+        raise ValueError("oracle benchmark exceeded its expansion budget")
+
+
+def _preflight_codec_valid_v2(
+    evidence: OracleCodecEvidence,
+    *,
+    decision: OracleBenchmarkDecision,
+    sample: OracleBenchmarkSample,
+    definition: PanelDefinition,
+) -> bool:
+    if not isinstance(evidence, OracleCodecEvidence):
+        raise ValueError("oracle codec callback returned invalid evidence")
+    action = decision.encoded_action
+    return (
+        evidence.authority == "HexWars.Engine.TacticalV2Coding-v1"
+        and evidence.state_hash == sample.state_hash
+        and evidence.contract_hash == definition.contract_hash
+        and evidence.encoding_hash == definition.encoding_hash
+        and evidence.requested_action == action
+        and evidence.encoded_action == action
+        and evidence.encoded_command == decision.command
+        and evidence.decoded_command == decision.command
+        and evidence.mask_legal is True
+        and evidence.apply_success is True
+        and action < len(sample.legal_mask)
+        and sample.legal_mask[action]
+    )
+
+
+def _preflight_query_from_payload_v2(
+    value: Any,
+    *,
+    sample: OracleBenchmarkSample,
+    oracle: OracleSpec,
+    game: ScheduledDuel,
+    definition: PanelDefinition,
+) -> tuple[OracleBenchmarkDecision, bool, float]:
+    fields = _strict_fields(value, _PREFLIGHT_QUERY_FIELDS, "preflight query")
+    decision = OracleBenchmarkDecision.from_dict(fields["decision"])
+    evidence = OracleCodecEvidence.from_dict(fields["codec"])
+    elapsed = fields["elapsed_seconds"]
+    if type(elapsed) is not float or not math.isfinite(elapsed) or elapsed < 0.0:
+        raise ValueError("preflight query elapsed_seconds must be a finite float")
+    _preflight_decision_valid_v2(
+        decision, sample=sample, oracle=oracle, game=game, definition=definition,
+    )
+    valid = _preflight_codec_valid_v2(
+        evidence, decision=decision, sample=sample, definition=definition,
+    )
+    return decision, valid, elapsed
+
+
+def _preflight_profile_counts_v2(
+    games: Sequence[Mapping[str, Any]], profiles: Sequence[str],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for profile in profiles:
+        selected = [game for game in games if game["profile"] == profile]
+        counts = Counter(game["outcome"] for game in selected)
+        seats = {}
+        for seat in (0, 1):
+            by_seat = [game for game in selected if game["learner_seat"] == seat]
+            by_outcome = Counter(game["outcome"] for game in by_seat)
+            seats[str(seat)] = {
+                "games": len(by_seat),
+                "wins": by_outcome["win"],
+                "losses": by_outcome["loss"],
+                "draws": by_outcome["draw"],
+            }
+        result[profile] = {
+            "games": len(selected),
+            "wins": counts["win"],
+            "losses": counts["loss"],
+            "draws": counts["draw"],
+            "seats": seats,
+        }
+    return result
+
+
+def _preflight_candidate_summary_v2(
+    *,
+    oracle: OracleSpec,
+    games: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    definition: PanelDefinition,
+) -> dict[str, Any]:
+    counts = Counter(game["outcome"] for game in games)
+    total = len(games)
+    seats = {}
+    for seat in (0, 1):
+        selected = [game for game in games if game["learner_seat"] == seat]
+        by_outcome = Counter(game["outcome"] for game in selected)
+        seats[str(seat)] = {
+            "games": len(selected),
+            "wins": by_outcome["win"],
+            "losses": by_outcome["loss"],
+            "draws": by_outcome["draw"],
+        }
+    determinism_failures = sum(
+        item["first_decision"] != item["second_decision"] for item in records
+    )
+    round_trip_failures = sum(
+        int(not item["first_codec_valid"]) + int(not item["second_codec_valid"])
+        for item in records
+    )
+    labels = sum(
+        item["first_decision"] == item["second_decision"]
+        and item["first_codec_valid"]
+        and item["second_codec_valid"]
+        for item in records
+    )
+    decisions = [
+        item[key]
+        for item in records
+        for key in ("first_decision", "second_decision")
+    ]
+    query_count = len(decisions)
+    expansion_total = sum(item.actual_expansion_count for item in decisions)
+    max_expansions = max(
+        (item.actual_expansion_count for item in decisions), default=0,
+    )
+    benchmark_seconds = sum(
+        item["first_seconds"] + item["second_seconds"] for item in records
+    )
+    throughput = labels / benchmark_seconds if benchmark_seconds > 0.0 else 0.0
+    win_rate = counts["win"] / total if total else 0.0
+    eligible = (
+        total == definition.preflight["games_per_candidate"]
+        and win_rate
+        >= definition.preflight["pooled_win_rate_minimum_basis_points"] / 10_000
+        and determinism_failures == 0
+        and round_trip_failures == 0
+        and labels > 0
+        and throughput >= definition.preflight["labels_per_second_minimum"]
+    )
+    return {
+        "oracle": oracle.to_dict(),
+        "games": total,
+        "wins": counts["win"],
+        "losses": counts["loss"],
+        "draws": counts["draw"],
+        "rates": {
+            "win": win_rate,
+            "loss": counts["loss"] / total if total else 0.0,
+            "draw": counts["draw"] / total if total else 0.0,
+        },
+        "confidence_intervals": {
+            name: wilson_interval(counts[counter], total, 0.95)
+            for name, counter in (
+                ("win", "win"), ("loss", "loss"), ("draw", "draw")
+            )
+        },
+        "cycling_draws": sum(
+            game["cycling"] and game["outcome"] == "draw" for game in games
+        ),
+        "action_waste_games": sum(game["action_waste"] for game in games),
+        "wasted_end_turns": sum(game["wasted_end_turns"] for game in games),
+        "paired_maps": total // 2,
+        "seats": seats,
+        "profiles": _preflight_profile_counts_v2(games, definition.profiles),
+        "samples": len(records),
+        "query_count": query_count,
+        "labels": labels,
+        "determinism_failures": determinism_failures,
+        "round_trip_failures": round_trip_failures,
+        "expansion_total": expansion_total,
+        "max_expansions": max_expansions,
+        "mean_expansions": expansion_total / query_count if query_count else 0.0,
+        "benchmark_seconds": benchmark_seconds,
+        "labels_per_second": throughput,
+        "eligible": eligible,
+    }
+
+
+def _preflight_trace_envelope_v2(
+    *, candidate_index: int, game_index: int, game: ScheduledDuel,
+    result: OraclePreflightGameResult,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "candidate_index": candidate_index,
+        "game_index": game_index,
+        "schedule": game.to_dict(),
+        "outcome": result.outcome,
+        "trace": result.trace.to_dict(),
+    }
+
+
+def _preflight_replay_envelope_v2(
+    *, candidate_index: int, game_index: int, game: ScheduledDuel,
+    result: OraclePreflightGameResult,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "candidate_index": candidate_index,
+        "game_index": game_index,
+        "schedule": game.to_dict(),
+        "outcome": result.outcome,
+        "payload": result.replay,
+        "payload_sha256": hashlib.sha256(result.replay.encode("utf-8")).hexdigest(),
+    }
+
+
+def _preflight_benchmark_record_v2(
+    *, sample_index: int, sample: OracleBenchmarkSample,
+    first: OracleBenchmarkDecision, first_codec: OracleCodecEvidence,
+    first_seconds: float, second: OracleBenchmarkDecision,
+    second_codec: OracleCodecEvidence, second_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "sample_index": sample_index,
+        "sample_sha256": sample.content_sha256,
+        "sample": sample.to_dict(),
+        "first": {
+            "decision": first.to_dict(),
+            "codec": first_codec.to_dict(),
+            "elapsed_seconds": first_seconds,
+        },
+        "second": {
+            "decision": second.to_dict(),
+            "codec": second_codec.to_dict(),
+            "elapsed_seconds": second_seconds,
+        },
+        "pair_seconds": first_seconds + second_seconds,
+    }
+
+
+def _validate_preflight_envelope_context_v2(
+    fields: Mapping[str, Any],
+    *,
+    candidate_index: int,
+    game_index: int,
+    game: ScheduledDuel,
+    label: str,
+) -> None:
+    if (
+        fields["schema_version"] != 1
+        or fields["candidate_index"] != candidate_index
+        or fields["game_index"] != game_index
+        or not _same_exact_json(fields["schedule"], game.to_dict())
+    ):
+        raise ValueError(f"{label} context does not match its manifest game")
+
+
+def _open_oracle_preflight_v2(
     root: Path, *, expected_identity: Mapping[str, Any],
+    definition: PanelDefinition,
 ) -> OracleSpec:
     try:
         canonical_root = Path(root).resolve(strict=True)
     except OSError as exc:
         raise ValueError("oracle preflight root is missing") from exc
+    _reject_reparse_chain(canonical_root, "oracle preflight root")
     if not canonical_root.is_dir():
         raise ValueError("oracle preflight root must be a directory")
-    manifest_path = canonical_root / "oracle-preflight.json"
+    for current, directories, files in os.walk(canonical_root, followlinks=False):
+        for name in [*directories, *files]:
+            if _is_reparse_point(Path(current) / name):
+                raise ValueError("oracle preflight evidence contains a reparse point")
     manifest = _strict_fields(
-        _read_json(manifest_path),
-        _PREFLIGHT_MANIFEST_FIELDS,
+        _read_json(canonical_root / "oracle-preflight.json"),
+        _PREFLIGHT_V2_MANIFEST_FIELDS,
         "oracle preflight manifest",
     )
-    if manifest["schema_version"] != 1 or manifest["status"] != "completed":
+    if manifest["schema_version"] != 2 or manifest["status"] != "completed":
         raise ValueError("oracle preflight is not completed")
-    identity = manifest["identity"]
-    if not isinstance(identity, Mapping) or dict(identity) != dict(expected_identity):
+    if not _same_exact_json(manifest["identity"], expected_identity):
         raise ValueError("oracle preflight identity changed")
-    content_identity = _hash(
+    if _content_identity(manifest) != _hash(
         manifest["content_identity"], "oracle preflight content identity",
-    )
-    if _content_identity(manifest) != content_identity:
+    ):
         raise ValueError("oracle preflight manifest content identity changed")
-
     candidates = manifest["candidates"]
     games = manifest["games"]
+    expected_candidates = expected_identity["oracle_candidates"]
+    expected_schedule = expected_identity["teacher_schedule"]
     if (
-        not isinstance(candidates, list)
-        or len(candidates) != 2
-        or not isinstance(games, list)
-        or len(games) != 480
+        type(candidates) is not list
+        or len(candidates) != len(expected_candidates)
+        or type(games) is not list
+        or len(games) != len(expected_candidates) * len(expected_schedule)
     ):
         raise ValueError("oracle preflight candidate or game count changed")
-    normalized_candidates: list[Mapping[str, Any]] = []
-    for index, (raw, expected_oracle) in enumerate(zip(
-        candidates,
-        expected_identity["oracle_candidates"],
-        strict=True,
-    )):
-        summary = _strict_fields(
-            raw, _PREFLIGHT_CANDIDATE_FIELDS, "oracle preflight candidate",
-        )
-        oracle = OracleSpec.from_dict(summary["oracle"])
-        if oracle.to_dict() != expected_oracle:
-            raise ValueError("oracle preflight candidate identity changed")
-        integers = (
-            "games", "wins", "losses", "draws", "cycling_draws",
-            "action_waste_games", "wasted_end_turns", "paired_maps", "labels",
-            "determinism_failures", "round_trip_failures", "expansion_total",
-            "max_expansions",
-        )
-        for field in integers:
-            _strict_int(summary[field], f"preflight candidate {field}", minimum=0)
-        if (
-            summary["games"] != 240
-            or summary["wins"] + summary["losses"] + summary["draws"] != 240
-            or summary["paired_maps"] != 120
-            or type(summary["eligible"]) is not bool
-        ):
-            raise ValueError("oracle preflight candidate counts changed")
-        for field in (
-            "mean_expansions", "elapsed_seconds", "benchmark_seconds",
-            "labels_per_second",
-        ):
-            value = summary[field]
-            if type(value) not in {int, float} or not math.isfinite(float(value)):
-                raise ValueError("oracle preflight candidate timing is invalid")
-            if float(value) < 0.0:
-                raise ValueError("oracle preflight candidate timing is negative")
-        rates = _strict_fields(
-            summary["rates"], frozenset({"win", "loss", "draw"}),
-            "oracle preflight rates",
-        )
-        if any(
-            type(value) not in {int, float}
-            or not math.isfinite(float(value))
-            or not 0.0 <= float(value) <= 1.0
-            for value in rates.values()
-        ):
-            raise ValueError("oracle preflight rates are invalid")
-        intervals = _strict_fields(
-            summary["confidence_intervals"],
-            frozenset({"win", "loss", "draw"}),
-            "oracle preflight confidence intervals",
-        )
-        for interval in intervals.values():
-            bounds = _strict_fields(
-                interval, frozenset({"low", "high", "confidence"}),
-                "oracle preflight Wilson interval",
-            )
-            if (
-                bounds["confidence"] != 0.95
-                or type(bounds["low"]) is not float
-                or type(bounds["high"]) is not float
-                or not 0.0 <= bounds["low"] <= bounds["high"] <= 1.0
-            ):
-                raise ValueError("oracle preflight Wilson interval is invalid")
-        normalized_candidates.append(summary)
 
-    by_candidate: dict[int, list[Mapping[str, Any]]] = {0: [], 1: []}
+    summaries: list[Mapping[str, Any]] = []
+    by_candidate_games: dict[int, list[Mapping[str, Any]]] = {
+        index: [] for index in range(len(candidates))
+    }
+    by_candidate_records: dict[int, list[Mapping[str, Any]]] = {
+        index: [] for index in range(len(candidates))
+    }
+    state_hashes: dict[int, set[str]] = {
+        index: set() for index in range(len(candidates))
+    }
     owned = {"oracle-preflight.json"}
+    descriptor_paths: set[str] = set()
+
     for position, raw_game in enumerate(games):
-        game = _strict_fields(
-            raw_game, _PREFLIGHT_GAME_FIELDS, "oracle preflight game",
+        record = _strict_fields(
+            raw_game, _PREFLIGHT_V2_GAME_FIELDS, "oracle preflight game",
         )
         candidate_index = _strict_int(
-            game["candidate_index"], "preflight candidate index", minimum=0,
+            record["candidate_index"], "preflight candidate index", minimum=0,
         )
-        if candidate_index not in {0, 1}:
-            raise ValueError("preflight candidate index is invalid")
         game_index = _strict_int(
-            game["game_index"], "preflight game index", minimum=0,
+            record["game_index"], "preflight game index", minimum=0,
         )
-        if position != candidate_index * 240 + game_index or game_index >= 240:
-            raise ValueError("preflight game ordering changed")
-        expected_game = expected_identity["teacher_schedule"][game_index]
-        for field in (
-            "schedule_index", "map_seed", "episode_seed", "profile",
-            "reference_seat", "learner_seat",
+        if (
+            candidate_index not in by_candidate_games
+            or game_index >= len(expected_schedule)
+            or position != candidate_index * len(expected_schedule) + game_index
         ):
-            if game[field] != expected_game[field]:
+            raise ValueError("preflight game ordering changed")
+        game = ScheduledDuel(**expected_schedule[game_index])
+        for field, expected in game.to_dict().items():
+            if type(record[field]) is not type(expected) or record[field] != expected:
                 raise ValueError("preflight game schedule changed")
-        if game["outcome"] not in {"win", "loss", "draw"}:
+        if record["outcome"] not in {"win", "loss", "draw"}:
             raise ValueError("preflight game outcome is invalid")
-        if type(game["cycling"]) is not bool or type(game["action_waste"]) is not bool:
+        if type(record["cycling"]) is not bool or type(record["action_waste"]) is not bool:
             raise ValueError("preflight game diagnostics are invalid")
         wasted = _strict_int(
-            game["wasted_end_turns"], "preflight wasted EndTurns", minimum=0,
+            record["wasted_end_turns"], "preflight wasted EndTurns", minimum=0,
         )
         transitions = _strict_int(
-            game["transition_count"], "preflight transition count", minimum=1,
+            record["transition_count"], "preflight transition count", minimum=1,
         )
-        trace_path = _validate_preflight_file(
-            canonical_root, game["trace"], "preflight trace",
+        sample_count = _strict_int(
+            record["sample_count"], "preflight sample count", minimum=1,
         )
-        replay_path = _validate_preflight_file(
-            canonical_root, game["replay"], "preflight replay",
+        paths: dict[str, Path] = {}
+        for label in ("trace", "replay", "benchmark"):
+            descriptor = _strict_fields(
+                record[label], _PREFLIGHT_FILE_FIELDS, f"preflight {label}",
+            )
+            relative = _safe_relative(
+                descriptor["path"], f"preflight {label} path",
+            )
+            if relative in descriptor_paths:
+                raise ValueError("preflight evidence descriptor path is duplicated")
+            descriptor_paths.add(relative)
+            _reject_reparse_chain(
+                canonical_root / relative, f"preflight {label}",
+            )
+            paths[label] = _validate_preflight_file(
+                canonical_root, descriptor, f"preflight {label}",
+            )
+            owned.add(relative)
+
+        trace_fields = _strict_fields(
+            _read_json(paths["trace"]), _PREFLIGHT_TRACE_ENVELOPE_FIELDS,
+            "preflight trace envelope",
         )
-        owned.update({
-            trace_path.relative_to(canonical_root).as_posix(),
-            replay_path.relative_to(canonical_root).as_posix(),
-        })
-        trace = EpisodeTrace.from_payload(_read_json(trace_path))
+        _validate_preflight_envelope_context_v2(
+            trace_fields, candidate_index=candidate_index, game_index=game_index,
+            game=game, label="preflight trace",
+        )
+        if trace_fields["outcome"] != record["outcome"]:
+            raise ValueError("preflight trace outcome context changed")
+        trace = EpisodeTrace.from_payload(trace_fields["trace"])
         if (
             len(trace.transitions) != transitions
             or not trace.transitions[-1].after.is_game_over
         ):
             raise ValueError("preflight trace terminal evidence changed")
         winner = trace.transitions[-1].after.winner
-        learner_seat = game["learner_seat"]
         outcome = (
-            "draw"
-            if winner is None
-            else "win"
-            if winner == learner_seat
-            else "loss"
+            "draw" if winner is None else
+            "win" if winner == game.learner_seat else "loss"
         )
-        if outcome != game["outcome"]:
-            raise ValueError("preflight trace outcome changed")
-        if not replay_path.read_text(encoding="utf-8"):
-            raise ValueError("preflight replay is empty")
         diagnostics = _preflight_trace_diagnostics(
-            trace, learner_seat=learner_seat, outcome=outcome,
+            trace, learner_seat=game.learner_seat, outcome=outcome,
         )
         if (
-            game["cycling"] != diagnostics["cycling"]
-            or game["action_waste"] != diagnostics["action_waste"]
+            outcome != record["outcome"]
+            or record["cycling"] != diagnostics["cycling"]
+            or record["action_waste"] != diagnostics["action_waste"]
             or wasted != diagnostics["wasted_end_turns"]
         ):
-            raise ValueError(
-                "preflight physical trace diagnostics changed"
+            raise ValueError("preflight physical trace diagnostics changed")
+
+        replay_fields = _strict_fields(
+            _read_json(paths["replay"]), _PREFLIGHT_REPLAY_ENVELOPE_FIELDS,
+            "preflight replay envelope",
+        )
+        _validate_preflight_envelope_context_v2(
+            replay_fields, candidate_index=candidate_index, game_index=game_index,
+            game=game, label="preflight replay",
+        )
+        payload = replay_fields["payload"]
+        if (
+            replay_fields["outcome"] != outcome
+            or not isinstance(payload, str)
+            or not payload
+            or _hash(replay_fields["payload_sha256"], "preflight replay payload hash")
+            != hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        ):
+            raise ValueError("preflight replay semantic binding changed")
+
+        benchmark_fields = _strict_fields(
+            _read_json(paths["benchmark"]), _PREFLIGHT_BENCHMARK_ENVELOPE_FIELDS,
+            "preflight benchmark envelope",
+        )
+        _validate_preflight_envelope_context_v2(
+            benchmark_fields, candidate_index=candidate_index,
+            game_index=game_index, game=game, label="preflight benchmark",
+        )
+        benchmark_records = benchmark_fields["records"]
+        if type(benchmark_records) is not list or len(benchmark_records) != sample_count:
+            raise ValueError("preflight benchmark sample count changed")
+        oracle = OracleSpec.from_dict(expected_candidates[candidate_index])
+        for sample_index, raw_benchmark in enumerate(benchmark_records):
+            benchmark_record = _strict_fields(
+                raw_benchmark, _PREFLIGHT_BENCHMARK_RECORD_FIELDS,
+                "preflight benchmark record",
             )
-        by_candidate[candidate_index].append({
+            if benchmark_record["sample_index"] != sample_index:
+                raise ValueError("preflight benchmark sample ordering changed")
+            sample = OracleBenchmarkSample.from_dict(benchmark_record["sample"])
+            if (
+                sample.content_sha256
+                != _hash(benchmark_record["sample_sha256"], "preflight sample sha256")
+                or len(sample.observation) != definition.observation_size
+                or len(sample.legal_mask) != definition.action_size
+            ):
+                raise ValueError("preflight benchmark sample identity or shape changed")
+            if sample.state_hash in state_hashes[candidate_index]:
+                raise ValueError("preflight benchmark state identity is duplicated")
+            state_hashes[candidate_index].add(sample.state_hash)
+            first, first_valid, first_seconds = _preflight_query_from_payload_v2(
+                benchmark_record["first"], sample=sample, oracle=oracle, game=game,
+                definition=definition,
+            )
+            second, second_valid, second_seconds = _preflight_query_from_payload_v2(
+                benchmark_record["second"], sample=sample, oracle=oracle, game=game,
+                definition=definition,
+            )
+            pair_seconds = benchmark_record["pair_seconds"]
+            if (
+                type(pair_seconds) is not float
+                or not math.isfinite(pair_seconds)
+                or pair_seconds < 0.0
+                or pair_seconds != first_seconds + second_seconds
+            ):
+                raise ValueError("preflight benchmark pair timing changed")
+            by_candidate_records[candidate_index].append({
+                "first_decision": first,
+                "second_decision": second,
+                "first_codec_valid": first_valid,
+                "second_codec_valid": second_valid,
+                "first_seconds": first_seconds,
+                "second_seconds": second_seconds,
+            })
+        by_candidate_games[candidate_index].append({
+            **game.to_dict(),
             "outcome": outcome,
-            "cycling": game["cycling"],
-            "action_waste": game["action_waste"],
+            "cycling": record["cycling"],
+            "action_waste": record["action_waste"],
             "wasted_end_turns": wasted,
-            "learner_seat": learner_seat,
         })
 
+    return _finish_open_oracle_preflight_v2(
+        canonical_root=canonical_root,
+        manifest=manifest,
+        candidates=candidates,
+        expected_candidates=expected_candidates,
+        by_candidate_games=by_candidate_games,
+        by_candidate_records=by_candidate_records,
+        owned=owned,
+        definition=definition,
+    )
+
+
+def _finish_open_oracle_preflight_v2(
+    *,
+    canonical_root: Path,
+    manifest: Mapping[str, Any],
+    candidates: Sequence[Any],
+    expected_candidates: Sequence[Any],
+    by_candidate_games: Mapping[int, Sequence[Mapping[str, Any]]],
+    by_candidate_records: Mapping[int, Sequence[Mapping[str, Any]]],
+    owned: set[str],
+    definition: PanelDefinition,
+) -> OracleSpec:
     actual = {
         path.relative_to(canonical_root).as_posix()
         for path in canonical_root.rglob("*")
@@ -1844,98 +2460,57 @@ def _open_oracle_preflight(
     }
     if actual != owned:
         raise ValueError("oracle preflight contains missing or unowned evidence")
-    for index, summary in enumerate(normalized_candidates):
-        reconstructed = by_candidate[index]
-        counts = Counter(item["outcome"] for item in reconstructed)
-        total = len(reconstructed)
-        seats = {
-            str(seat): {
-                "games": sum(item["learner_seat"] == seat for item in reconstructed),
-                "wins": sum(
-                    item["learner_seat"] == seat and item["outcome"] == "win"
-                    for item in reconstructed
-                ),
-                "losses": sum(
-                    item["learner_seat"] == seat and item["outcome"] == "loss"
-                    for item in reconstructed
-                ),
-                "draws": sum(
-                    item["learner_seat"] == seat and item["outcome"] == "draw"
-                    for item in reconstructed
-                ),
-            }
-            for seat in (0, 1)
-        }
-        expected_rates = {
-            "win": counts["win"] / total,
-            "loss": counts["loss"] / total,
-            "draw": counts["draw"] / total,
-        }
-        expected_intervals = {
-            name: wilson_interval(counts[counter], total, 0.95)
-            for name, counter in (
-                ("win", "win"), ("loss", "loss"), ("draw", "draw")
-            )
-        }
-        labels = summary["labels"]
-        expansion_total = summary["expansion_total"]
-        benchmark_seconds = float(summary["benchmark_seconds"])
-        expected_mean_expansions = expansion_total / labels if labels else 0.0
-        expected_throughput = (
-            labels / benchmark_seconds if benchmark_seconds > 0.0 else 0.0
+    summaries: list[Mapping[str, Any]] = []
+    for index, (raw, expected_oracle) in enumerate(zip(
+        candidates, expected_candidates, strict=True,
+    )):
+        supplied = _strict_fields(
+            raw, _PREFLIGHT_V2_CANDIDATE_FIELDS, "oracle preflight candidate",
         )
-        oracle = OracleSpec.from_dict(summary["oracle"])
-        expected_eligible = (
-            total == 240
-            and expected_rates["win"]
-            >= expected_identity["preflight"]["pooled_win_rate_minimum_basis_points"]
-            / 10_000
-            and summary["determinism_failures"] == 0
-            and summary["round_trip_failures"] == 0
-            and labels > 0
-            and expected_throughput
-            >= expected_identity["preflight"]["labels_per_second_minimum"]
+        oracle = OracleSpec.from_dict(expected_oracle)
+        recomputed = _preflight_candidate_summary_v2(
+            oracle=oracle,
+            games=by_candidate_games[index],
+            records=by_candidate_records[index],
+            definition=definition,
         )
-        if (
-            summary["wins"] != counts["win"]
-            or summary["losses"] != counts["loss"]
-            or summary["draws"] != counts["draw"]
-            or dict(summary["rates"]) != expected_rates
-            or dict(summary["confidence_intervals"]) != expected_intervals
-            or summary["cycling_draws"] != sum(
-                item["cycling"] and item["outcome"] == "draw"
-                for item in reconstructed
-            )
-            or summary["action_waste_games"] != sum(
-                item["action_waste"] for item in reconstructed
-            )
-            or summary["wasted_end_turns"] != sum(
-                item["wasted_end_turns"] for item in reconstructed
-            )
-            or summary["seats"] != seats
-            or summary["mean_expansions"] != expected_mean_expansions
-            or summary["labels_per_second"] != expected_throughput
-            or summary["eligible"] is not expected_eligible
-            or summary["max_expansions"] > oracle.expansion_budget
-            or expansion_total > labels * oracle.expansion_budget
-            or benchmark_seconds > float(summary["elapsed_seconds"])
-        ):
+        if not _same_exact_json(supplied, recomputed):
             raise ValueError(
-                "oracle preflight summary metrics do not match physical games"
+                "oracle preflight summary metrics do not match physical evidence"
             )
-
-    selected_summary = _select_preflight_candidate(normalized_candidates)
+        for profile in definition.profiles:
+            profile_summary = supplied["profiles"][profile]
+            if (
+                profile_summary["games"] != 40
+                or profile_summary["seats"]["0"]["games"] != 20
+                or profile_summary["seats"]["1"]["games"] != 20
+            ):
+                raise ValueError("oracle preflight per-profile coverage changed")
+        summaries.append(supplied)
+    selected_summary = _select_preflight_candidate(summaries)
     if selected_summary is None:
         raise ValueError("completed oracle preflight has no eligible candidate")
     selected = OracleSpec.from_dict(manifest["selected_oracle"])
-    if selected.to_dict() != selected_summary["oracle"]:
+    if not _same_exact_json(selected.to_dict(), selected_summary["oracle"]):
         raise ValueError("oracle preflight selected candidate changed")
     return selected
 
 
-def _write_preflight_diagnostic(
+def _next_preflight_diagnostic_root_v2(destination: Path) -> Path:
+    parent = destination.parent / f"{destination.name}.diagnostics"
+    _reject_reparse_chain(parent, "oracle preflight diagnostics")
+    parent.mkdir(parents=True, exist_ok=True)
+    for index in range(1_000_000):
+        target = parent / f"attempt-{index:06d}"
+        if not target.exists():
+            return target
+    raise RuntimeError("oracle preflight diagnostic namespace is exhausted")
+
+
+def _seal_preflight_diagnostic_v2(
     staging: Path,
     *,
+    destination: Path,
     error: BaseException,
     identity: Mapping[str, Any],
     summaries: Sequence[Mapping[str, Any]],
@@ -1944,186 +2519,343 @@ def _write_preflight_diagnostic(
         return
     (staging / "oracle-preflight.json").unlink(missing_ok=True)
     atomic_write_json(staging / "diagnostic.json", {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "failed",
-        "identity": dict(identity),
+        "identity": _mutable_json_value(identity),
         "exception": {
             "type": type(error).__name__,
             "message": str(error),
         },
-        "candidates": [dict(summary) for summary in summaries],
+        "candidates": [_mutable_json_value(summary) for summary in summaries],
         "physical_files": sorted(
             path.relative_to(staging).as_posix()
             for path in staging.rglob("*")
             if path.is_file() and path.name != "diagnostic.json"
         ),
     })
+    os.replace(staging, _next_preflight_diagnostic_root_v2(destination))
+
+
+def _validate_preflight_output_root_v2(
+    definition: PanelDefinition, destination: Path,
+) -> None:
+    _reject_reparse_chain(destination.parent, "oracle preflight output")
+    if destination.exists():
+        _reject_reparse_chain(destination, "oracle preflight output")
+    repository = definition.repository_root
+    if destination.is_relative_to(repository):
+        raise ValueError("oracle preflight output must be outside the repository")
 
 
 def run_oracle_preflight(
     definition: PanelDefinition,
     *,
     output_root: Path,
-    repository_hash: str,
     evaluator: Callable[
         [OracleSpec, ScheduledDuel], OraclePreflightGameResult
     ],
     benchmark: Callable[
-        [OracleSpec, ScheduledDuel, Any], OracleBenchmarkDecision
+        [OracleSpec, ScheduledDuel, OracleBenchmarkSample],
+        OracleBenchmarkDecision,
     ],
+    codec: Callable[
+        [OracleSpec, ScheduledDuel, OracleBenchmarkSample, OracleBenchmarkDecision],
+        OracleCodecEvidence,
+    ],
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _repository_execution_identity,
     clock: Callable[[], float] = time.perf_counter,
     on_selected: Callable[[OracleSpec], None] | None = None,
 ) -> OracleSpec:
-    """Run, seal, reopen, and select the one global bounded-search oracle."""
+    """Run, seal, fully reconstruct, and select the global bounded-search oracle."""
 
     validate_panel_definition(definition)
-    identity = _oracle_preflight_identity(definition, repository_hash)
-    if not callable(evaluator) or not callable(benchmark) or not callable(clock):
-        raise TypeError("oracle preflight boundaries must be callable")
+    for boundary, label in (
+        (evaluator, "evaluator"), (benchmark, "benchmark"), (codec, "codec"),
+        (repository_identity_provider, "repository identity provider"),
+        (clock, "clock"),
+    ):
+        if not callable(boundary):
+            raise TypeError(f"oracle preflight {label} must be callable")
     if on_selected is not None and not callable(on_selected):
         raise TypeError("oracle preflight success callback must be callable")
     destination = Path(output_root).absolute()
     staging = destination.with_name(destination.name + ".staging")
+    _validate_preflight_output_root_v2(definition, destination)
     if destination.exists() and staging.exists():
         raise ValueError("oracle preflight destination and staging coexist ambiguously")
+    repository = _validated_repository_identity(
+        definition, repository_identity_provider,
+    )
+    dataset = _audit_base_dataset(definition)
+    identity = _oracle_preflight_identity(definition, repository, dataset)
     if destination.exists():
         try:
-            selected = _open_oracle_preflight(
-                destination, expected_identity=identity,
+            return _open_oracle_preflight_v2(
+                destination, expected_identity=identity, definition=definition,
             )
         except (OSError, TypeError, ValueError) as exc:
             raise ValueError(
                 "existing oracle preflight is not exactly reusable"
             ) from exc
-        if on_selected is not None:
-            on_selected(selected)
-        return selected
     if staging.exists():
         try:
-            selected = _open_oracle_preflight(staging, expected_identity=identity)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging, destination)
-            selected = _open_oracle_preflight(
-                destination, expected_identity=identity,
+            selected = _open_oracle_preflight_v2(
+                staging, expected_identity=identity, definition=definition,
             )
         except (OSError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "oracle preflight staging is not exactly reusable"
-            ) from exc
-        if on_selected is not None:
-            on_selected(selected)
-        return selected
+            _seal_preflight_diagnostic_v2(
+                staging, destination=destination, error=exc, identity=identity,
+                summaries=(),
+            )
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging, destination)
+            return _open_oracle_preflight_v2(
+                destination, expected_identity=identity, definition=definition,
+            )
+    return _execute_oracle_preflight_v2(
+        definition=definition,
+        destination=destination,
+        staging=staging,
+        identity=identity,
+        repository=repository,
+        repository_identity_provider=repository_identity_provider,
+        evaluator=evaluator,
+        benchmark=benchmark,
+        codec=codec,
+        clock=clock,
+        on_selected=on_selected,
+    )
 
+
+def _execute_oracle_preflight_v2(
+    *,
+    definition: PanelDefinition,
+    destination: Path,
+    staging: Path,
+    identity: Mapping[str, Any],
+    repository: Mapping[str, Any],
+    repository_identity_provider: Callable[[Path], Mapping[str, Any]],
+    evaluator: Callable[[OracleSpec, ScheduledDuel], OraclePreflightGameResult],
+    benchmark: Callable[
+        [OracleSpec, ScheduledDuel, OracleBenchmarkSample],
+        OracleBenchmarkDecision,
+    ],
+    codec: Callable[
+        [OracleSpec, ScheduledDuel, OracleBenchmarkSample, OracleBenchmarkDecision],
+        OracleCodecEvidence,
+    ],
+    clock: Callable[[], float],
+    on_selected: Callable[[OracleSpec], None] | None,
+) -> OracleSpec:
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging.mkdir()
     summaries: list[Mapping[str, Any]] = []
     game_evidence: list[Mapping[str, Any]] = []
     try:
         for candidate_index, oracle in enumerate(definition.oracle_candidates):
-            candidate_started = float(clock())
-            benchmark_seconds = 0.0
-            labels = 0
-            determinism_failures = 0
-            round_trip_failures = 0
-            expansion_total = 0
-            max_expansions = 0
             candidate_games: list[Mapping[str, Any]] = []
+            candidate_records: list[Mapping[str, Any]] = []
+            seen_state_hashes: set[str] = set()
             for game_index, game in enumerate(definition.preflight_schedule):
                 result = evaluator(oracle, game)
                 _validate_preflight_game_result(result, game)
-                for sample in result.samples:
-                    query_started = float(clock())
+                benchmark_records: list[Mapping[str, Any]] = []
+                for sample_index, sample in enumerate(result.samples):
+                    if (
+                        len(sample.observation) != definition.observation_size
+                        or len(sample.legal_mask) != definition.action_size
+                    ):
+                        raise ValueError("oracle benchmark sample shape changed")
+                    if sample.state_hash in seen_state_hashes:
+                        raise ValueError("oracle benchmark state identity is duplicated")
+                    seen_state_hashes.add(sample.state_hash)
+                    before_hash = sample.content_sha256
+                    first_started = float(clock())
                     first = benchmark(oracle, game, sample)
+                    first_codec = codec(oracle, game, sample, first)
+                    first_seconds = float(clock()) - first_started
+                    between_hash = sample.content_sha256
+                    second_started = float(clock())
                     second = benchmark(oracle, game, sample)
-                    query_elapsed = float(clock()) - query_started
-                    if not math.isfinite(query_elapsed) or query_elapsed < 0.0:
-                        raise ValueError("oracle benchmark clock moved backwards")
-                    benchmark_seconds += query_elapsed
-                    if first != second:
-                        determinism_failures += 1
-                    valid = True
-                    for decision in (first, second):
-                        try:
-                            _validate_benchmark_decision(
-                                decision,
-                                oracle=oracle,
-                                game=game,
-                                definition=definition,
-                            )
-                        except (TypeError, ValueError):
-                            valid = False
-                    if first != second or not valid:
-                        round_trip_failures += int(not valid)
-                        continue
-                    labels += 1
-                    expansion_total += first.actual_expansion_count
-                    max_expansions = max(
-                        max_expansions, first.actual_expansion_count,
+                    second_codec = codec(oracle, game, sample, second)
+                    second_seconds = float(clock()) - second_started
+                    after_hash = sample.content_sha256
+                    if before_hash != between_hash or before_hash != after_hash:
+                        raise ValueError("oracle benchmark sample mutated across queries")
+                    for elapsed in (first_seconds, second_seconds):
+                        if not math.isfinite(elapsed) or elapsed < 0.0:
+                            raise ValueError("oracle benchmark clock moved backwards")
+                    _preflight_decision_valid_v2(
+                        first, sample=sample, oracle=oracle, game=game,
+                        definition=definition,
                     )
-
-                candidate_root = (
-                    staging / "games" /
-                    f"candidate-{oracle.expansion_budget:08d}"
+                    _preflight_decision_valid_v2(
+                        second, sample=sample, oracle=oracle, game=game,
+                        definition=definition,
+                    )
+                    first_valid = _preflight_codec_valid_v2(
+                        first_codec, decision=first, sample=sample,
+                        definition=definition,
+                    )
+                    second_valid = _preflight_codec_valid_v2(
+                        second_codec, decision=second, sample=sample,
+                        definition=definition,
+                    )
+                    benchmark_records.append(_preflight_benchmark_record_v2(
+                        sample_index=sample_index,
+                        sample=sample,
+                        first=first,
+                        first_codec=first_codec,
+                        first_seconds=first_seconds,
+                        second=second,
+                        second_codec=second_codec,
+                        second_seconds=second_seconds,
+                    ))
+                    candidate_records.append({
+                        "first_decision": first,
+                        "second_decision": second,
+                        "first_codec_valid": first_valid,
+                        "second_codec_valid": second_valid,
+                        "first_seconds": first_seconds,
+                        "second_seconds": second_seconds,
+                    })
+                _write_preflight_game_v2(
+                    staging=staging,
+                    candidate_index=candidate_index,
+                    game_index=game_index,
+                    oracle=oracle,
+                    game=game,
+                    result=result,
+                    benchmark_records=benchmark_records,
+                    game_evidence=game_evidence,
+                    candidate_games=candidate_games,
                 )
-                trace_path = candidate_root / f"game-{game_index:08d}.trace.json"
-                replay_path = candidate_root / f"game-{game_index:08d}.replay"
-                atomic_write_json(trace_path, result.trace.to_dict())
-                _atomic_text_file(replay_path, result.replay)
-                record = {
-                    "candidate_index": candidate_index,
-                    "game_index": game_index,
-                    **game.to_dict(),
-                    "outcome": result.outcome,
-                    "cycling": result.cycling,
-                    "action_waste": result.action_waste,
-                    "wasted_end_turns": result.wasted_end_turns,
-                    "transition_count": len(result.trace.transitions),
-                    "trace": _preflight_file_descriptor(staging, trace_path),
-                    "replay": _preflight_file_descriptor(staging, replay_path),
-                }
-                game_evidence.append(record)
-                candidate_games.append(record)
-            elapsed = float(clock()) - candidate_started
-            if not math.isfinite(elapsed) or elapsed < 0.0:
-                raise ValueError("oracle preflight clock moved backwards")
-            summaries.append(_preflight_candidate_summary(
+            summaries.append(_preflight_candidate_summary_v2(
                 oracle=oracle,
                 games=candidate_games,
-                labels=labels,
-                determinism_failures=determinism_failures,
-                round_trip_failures=round_trip_failures,
-                expansion_total=expansion_total,
-                max_expansions=max_expansions,
-                elapsed_seconds=elapsed,
-                benchmark_seconds=benchmark_seconds,
+                records=candidate_records,
                 definition=definition,
             ))
-        selected_summary = _select_preflight_candidate(summaries)
-        if selected_summary is None:
-            raise RuntimeError("oracle preflight has no candidate that passes every gate")
-        manifest: dict[str, Any] = {
-            "schema_version": 1,
-            "status": "completed",
-            "identity": identity,
-            "candidates": [dict(summary) for summary in summaries],
-            "selected_oracle": dict(selected_summary["oracle"]),
-            "games": [dict(game) for game in game_evidence],
-        }
-        manifest["content_identity"] = _content_identity(manifest)
-        atomic_write_json(staging / "oracle-preflight.json", manifest)
-        _open_oracle_preflight(staging, expected_identity=identity)
-        os.replace(staging, destination)
-        selected = _open_oracle_preflight(
-            destination, expected_identity=identity,
+        return _publish_preflight_v2(
+            definition=definition,
+            destination=destination,
+            staging=staging,
+            identity=identity,
+            repository=repository,
+            repository_identity_provider=repository_identity_provider,
+            summaries=summaries,
+            game_evidence=game_evidence,
+            on_selected=on_selected,
         )
-        if on_selected is not None:
-            on_selected(selected)
-        return selected
     except BaseException as exc:
-        _write_preflight_diagnostic(
-            staging, error=exc, identity=identity, summaries=summaries,
+        _seal_preflight_diagnostic_v2(
+            staging, destination=destination, error=exc, identity=identity,
+            summaries=summaries,
         )
         raise
+
+
+def _write_preflight_game_v2(
+    *,
+    staging: Path,
+    candidate_index: int,
+    game_index: int,
+    oracle: OracleSpec,
+    game: ScheduledDuel,
+    result: OraclePreflightGameResult,
+    benchmark_records: Sequence[Mapping[str, Any]],
+    game_evidence: list[Mapping[str, Any]],
+    candidate_games: list[Mapping[str, Any]],
+) -> None:
+    candidate_root = (
+        staging / "games" / f"candidate-{oracle.expansion_budget:08d}"
+    )
+    trace_path = candidate_root / f"game-{game_index:08d}.trace.json"
+    replay_path = candidate_root / f"game-{game_index:08d}.replay.json"
+    benchmark_path = candidate_root / f"game-{game_index:08d}.benchmark.json"
+    atomic_write_json(trace_path, _preflight_trace_envelope_v2(
+        candidate_index=candidate_index, game_index=game_index,
+        game=game, result=result,
+    ))
+    atomic_write_json(replay_path, _preflight_replay_envelope_v2(
+        candidate_index=candidate_index, game_index=game_index,
+        game=game, result=result,
+    ))
+    atomic_write_json(benchmark_path, {
+        "schema_version": 1,
+        "candidate_index": candidate_index,
+        "game_index": game_index,
+        "schedule": game.to_dict(),
+        "records": [_mutable_json_value(item) for item in benchmark_records],
+    })
+    record = {
+        "candidate_index": candidate_index,
+        "game_index": game_index,
+        **game.to_dict(),
+        "outcome": result.outcome,
+        "cycling": result.cycling,
+        "action_waste": result.action_waste,
+        "wasted_end_turns": result.wasted_end_turns,
+        "transition_count": len(result.trace.transitions),
+        "sample_count": len(benchmark_records),
+        "trace": _preflight_file_descriptor(staging, trace_path),
+        "replay": _preflight_file_descriptor(staging, replay_path),
+        "benchmark": _preflight_file_descriptor(staging, benchmark_path),
+    }
+    game_evidence.append(record)
+    candidate_games.append(record)
+
+
+def _publish_preflight_v2(
+    *,
+    definition: PanelDefinition,
+    destination: Path,
+    staging: Path,
+    identity: Mapping[str, Any],
+    repository: Mapping[str, Any],
+    repository_identity_provider: Callable[[Path], Mapping[str, Any]],
+    summaries: Sequence[Mapping[str, Any]],
+    game_evidence: Sequence[Mapping[str, Any]],
+    on_selected: Callable[[OracleSpec], None] | None,
+) -> OracleSpec:
+    selected_summary = _select_preflight_candidate(summaries)
+    if selected_summary is None:
+        raise RuntimeError(
+            "oracle preflight has no candidate that passes every gate"
+        )
+    final_repository = _validated_repository_identity(
+        definition, repository_identity_provider,
+    )
+    if not _same_exact_json(final_repository, repository):
+        raise ValueError("repository identity changed during oracle preflight")
+    manifest: dict[str, Any] = {
+        "schema_version": 2,
+        "status": "completed",
+        "identity": _mutable_json_value(identity),
+        "candidates": [_mutable_json_value(item) for item in summaries],
+        "selected_oracle": _mutable_json_value(selected_summary["oracle"]),
+        "games": [_mutable_json_value(item) for item in game_evidence],
+    }
+    manifest["content_identity"] = _content_identity(manifest)
+    atomic_write_json(staging / "oracle-preflight.json", manifest)
+    _open_oracle_preflight_v2(
+        staging, expected_identity=identity, definition=definition,
+    )
+    publication_repository = _validated_repository_identity(
+        definition, repository_identity_provider,
+    )
+    if not _same_exact_json(publication_repository, repository):
+        raise ValueError("repository identity changed before oracle publication")
+    os.replace(staging, destination)
+    selected = _open_oracle_preflight_v2(
+        destination, expected_identity=identity, definition=definition,
+    )
+    if on_selected is not None:
+        on_selected(selected)
+    return selected
 
 
 def _freeze_contract_value(value: Any, label: str) -> Any:
@@ -3506,6 +4238,25 @@ def _read_json(path: Path) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"JSON artifact {path} must be an object")
     return value
+
+
+def _mutable_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _mutable_json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_mutable_json_value(item) for item in value]
+    return value
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        _mutable_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_trace_file(path: Path, game: DaggerGame) -> EpisodeTrace:

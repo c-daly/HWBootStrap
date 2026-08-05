@@ -81,6 +81,12 @@ The original imitation dataset remains immutable at
 `C:/Users/cddal/HexWars/.worktrees/tactical-baseline-evidence/python/datasets/annihilation-imitation-v1`.
 Its manifest SHA-256 is
 `6c9f1fd43cded0691080dd12c390aee086d49b144ebc0207d2f80e6b5a9422c4`.
+The panel also pins a content root over all 3,966 files
+(`da077fb8291f00bf2359e3ce9c834a331032dc4f43397e3fa434d69c0d28989c`)
+and the exact 17,852,257-byte total. Before preflight, the existing imitation
+dataset loader reopens all game/shard/replay ownership and the full dataset
+audit reads every label and legal mask. Manifest validity alone is
+insufficient.
 DAgger never edits this corpus; each iteration adds a separate immutable
 overlay.
 
@@ -159,8 +165,14 @@ seats:
 This is 120 maps and 240 games per candidate. Every sampled state is queried
 twice with the identical state and oracle configuration. Each returned command
 must be legal under the authoritative mask, encode to the recorded action, and
-round-trip through the tactical-v2 codec. The measured expansion count may not
-exceed the candidate budget.
+round-trip through the tactical-v2 codec. Codec evidence comes from an explicit
+engine boundary and records `TacticalV2Coding` encode/decode, legal-mask, and
+`GameEngine.Apply` results; a caller-supplied round-trip integer is not
+evidence. The measured expansion count may not exceed the candidate budget.
+The sample is a deeply frozen object containing the complete observation,
+legal mask, canonical state hash, decision index, and full oracle state
+payload. Its canonical content hash is checked before, between, and after the
+two queries, and a state hash may appear only once per candidate.
 
 For candidate \(c\), define
 
@@ -190,10 +202,15 @@ selection order is:
 No per-state teacher choice or post-hoc budget tuning is allowed. If neither
 candidate is eligible, the experiment stops before collection or training.
 
-Preflight evidence contains per-game traces and replays plus W/L/D,
-seat-specific counts, paired-map counts, Wilson 95% intervals, cycling and
-action-waste diagnostics, wasted EndTurns, query determinism, codec failures,
-expansions, elapsed time, benchmark time, throughput, and the selected oracle.
+Preflight evidence contains semantically bound per-game trace, replay, and
+benchmark envelopes. Each benchmark record persists the full sample, both
+complete decisions, both engine codec records, both query times, their pair
+time, and both expansion counts. Reopening recomputes determinism, valid
+labels, codec failures, expansion total/mean/maximum, benchmark time,
+throughput, eligibility, and selection from these records. It also recomputes
+W/L/D overall, by seat, and for each profile (exactly 40 games and 20 games per
+seat), paired-map counts, Wilson 95% intervals, cycling and action-waste
+diagnostics, and wasted EndTurns.
 For a binomial count \(x\) in \(n\) games, the reported Wilson interval uses
 \(z=1.96\):
 
@@ -206,7 +223,10 @@ interval = [center-radius, center+radius].
 
 The bounded-search source identity is pinned to the physical
 `engine/HexWars.Engine/BoundedSearchAgent.cs` bytes as well as the repository
-execution identity.
+execution identity. The latter is derived from the canonical Git toplevel,
+`HEAD`, `HEAD^{tree}`, and a clean status before work, then checked again
+immediately before publication. Preflight output must be outside the
+repository, so producing evidence cannot be hidden from the cleanliness check.
 
 ## Overlay schema and aggregation
 
@@ -324,17 +344,22 @@ by atomic rename only after reopening all outputs, checking strict schemas,
 rehashing every owned physical file, and reconstructing summary metrics from
 the physical evidence.
 
-An exact completed artifact is immutable and reusable with zero games or
-epochs. Reuse requires identical repository, panel bytes, seed-bank bytes,
+An exact completed artifact is immutable and reusable with zero games, oracle
+queries, codec calls, or downstream success callbacks. Reuse requires
+identical repository, panel bytes, seed-bank bytes,
 scenario, contract, encoding, learner, dataset, selected teacher, and schedule.
 Changed identity requires a new output root. A destination and staging root may
 not coexist ambiguously, and incompatible completed evidence is never
 overwritten.
 
-Interrupted or failed work may retain `diagnostic.json`, traces, and replays for
-inspection, but it has no completion manifest and cannot be consumed as
-complete. Operators determine completion from the validated manifest, never
-from a process disappearing or a file merely existing.
+Interrupted or failed work is atomically moved from the canonical
+`.staging` path into a distinct sealed
+`<output>.diagnostics/attempt-NNNNNN` directory. It may retain
+`diagnostic.json`, traces, replays, and benchmark records for inspection, but
+it has no completion manifest and cannot be consumed as complete. A later
+attempt therefore starts from a clean staging path and never overwrites an
+earlier diagnostic. Operators determine completion from the validated
+manifest, never from a process disappearing or a file merely existing.
 
 ## Non-goals and limits of inference
 

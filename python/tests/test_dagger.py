@@ -119,6 +119,7 @@ def _oracle_payload() -> dict[str, Any]:
         "oracle_type": "bounded-search",
         "depth": 4,
         "expansion_budget": 512,
+        "use_heuristic": True,
         "heuristic_identity": "material-plus-pursuit-v1",
         "code_hash": HASHES["c"],
     }
@@ -296,8 +297,15 @@ def test_schema_parsers_reject_coercible_values_and_are_frozen(tmp_path: Path) -
         OracleSpec.from_dict(oracle_payload)
 
     oracle = OracleSpec.from_dict(_oracle_payload())
+    assert oracle.use_heuristic is True
+    assert oracle.to_dict()["use_heuristic"] is True
     with pytest.raises(FrozenInstanceError):
         oracle.depth = 5  # type: ignore[misc]
+
+    oracle_payload = _oracle_payload()
+    oracle_payload["use_heuristic"] = 1
+    with pytest.raises(ValueError, match="use_heuristic"):
+        OracleSpec.from_dict(oracle_payload)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "extra"])

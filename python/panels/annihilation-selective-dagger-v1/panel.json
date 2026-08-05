@@ -22,7 +22,7 @@
   "repository": {
     "required_clean": true,
     "identity_fields": ["commit", "source_tree", "dirty"],
-    "ignored_generated_root": "python/panels/annihilation-selective-dagger-v1/evidence/"
+    "output_policy": "outside_repository"
   },
   "starting_learner": {
     "source_kind": "snapshot",
@@ -43,6 +43,9 @@
   "original_dataset": {
     "path": "C:/Users/cddal/HexWars/.worktrees/tactical-baseline-evidence/python/datasets/annihilation-imitation-v1",
     "manifest_sha256": "6c9f1fd43cded0691080dd12c390aee086d49b144ebc0207d2f80e6b5a9422c4",
+    "content_sha256": "da077fb8291f00bf2359e3ce9c834a331032dc4f43397e3fa434d69c0d28989c",
+    "file_count": 3966,
+    "byte_size": 17852257,
     "contract_hash": "2d6984089aa151cee59e10bb37b0d2239e7a0668f34d90e1af64216aaf713edf",
     "encoding_hash": "2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a",
     "scenario_hash": "3236e528f9f3c41a1c696834d48f24db4ffae48cf96c174b5aaafa862c3a589f"
