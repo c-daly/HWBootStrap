@@ -83,6 +83,18 @@ _MAX_PREFLIGHT_TRACE_BYTES = 32 << 20
 _MAX_PREFLIGHT_REPLAY_BYTES = 8 << 20
 _MAX_PREFLIGHT_BENCHMARK_BYTES = 64 << 20
 _MAX_PREFLIGHT_DIAGNOSTIC_BYTES = 8 << 20
+_MAX_PREFLIGHT_OWNER_BYTES = 4096
+_MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILES = 1500
+_MAX_PREFLIGHT_DIAGNOSTIC_TREE_BYTES = 2 << 30
+_MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILE_BYTES = 64 << 20
+_PRIVATE_TEST_EXECUTION_TRUST = MappingProxyType({
+    "schema_version": 1,
+    "mode": "private-test-transcript",
+    "evidence_class": "untrusted-test-transcript",
+    "engine_authenticated": False,
+    "engine_evidence_root": None,
+    "task_9_production_seal_required": True,
+})
 _HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _STATE_HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
 _COMMAND_FIELDS = frozenset({"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"})
@@ -1595,6 +1607,32 @@ class OracleBenchmarkSample:
         return _json_sha256(self.to_dict())
 
 
+_PRIVATE_TEST_TRUST_FIELDS = frozenset({
+    "schema_version", "mode", "evidence_class", "engine_authenticated",
+    "engine_evidence_root", "task_9_production_seal_required",
+})
+
+
+def _private_test_execution_trust_v3() -> dict[str, Any]:
+    return dict(_PRIVATE_TEST_EXECUTION_TRUST)
+
+
+def _validate_private_test_execution_trust_v3(
+    value: Any, label: str,
+) -> dict[str, Any]:
+    fields = _strict_fields(value, _PRIVATE_TEST_TRUST_FIELDS, label)
+    if (
+        _strict_int(fields["schema_version"], f"{label} schema_version") != 1
+        or fields["mode"] != "private-test-transcript"
+        or fields["evidence_class"] != "untrusted-test-transcript"
+        or fields["engine_authenticated"] is not False
+        or fields["engine_evidence_root"] is not None
+        or fields["task_9_production_seal_required"] is not True
+    ):
+        raise ValueError(f"{label} is not the exact private test trust declaration")
+    return _private_test_execution_trust_v3()
+
+
 @dataclass(frozen=True)
 class OracleBenchmarkDecision:
     encoded_action: int
@@ -1632,7 +1670,7 @@ class OracleBenchmarkDecision:
 
 @dataclass(frozen=True)
 class OracleCodecEvidence:
-    authority: str
+    provenance: str
     state_hash: str
     contract_hash: str
     encoding_hash: str
@@ -1644,8 +1682,8 @@ class OracleCodecEvidence:
     apply_success: bool
 
     def __post_init__(self) -> None:
-        if self.authority != "HexWars.Engine.TacticalV2Coding-v1":
-            raise ValueError("oracle codec authority is invalid")
+        if self.provenance != "private-test-callback":
+            raise ValueError("oracle codec provenance is not private test callback evidence")
         _hash(self.state_hash, "oracle codec state hash")
         _hash(self.contract_hash, "oracle codec contract hash")
         _hash(self.encoding_hash, "oracle codec encoding hash")
@@ -1669,15 +1707,22 @@ class OracleCodecEvidence:
     @classmethod
     def from_dict(cls, value: Any) -> "OracleCodecEvidence":
         fields = _strict_fields(value, frozenset({
-            "authority", "state_hash", "contract_hash", "encoding_hash",
+            "provenance", "execution_trust", "state_hash", "contract_hash",
+            "encoding_hash",
             "requested_action", "encoded_action", "encoded_command",
             "decoded_command", "mask_legal", "apply_success",
-        }), "oracle codec evidence")
-        return cls(**fields)
+        }), "private oracle codec callback record")
+        _validate_private_test_execution_trust_v3(
+            fields["execution_trust"], "oracle codec execution trust",
+        )
+        payload = dict(fields)
+        del payload["execution_trust"]
+        return cls(**payload)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "authority": self.authority,
+            "provenance": self.provenance,
+            "execution_trust": _private_test_execution_trust_v3(),
             "state_hash": self.state_hash,
             "contract_hash": self.contract_hash,
             "encoding_hash": self.encoding_hash,
@@ -1923,12 +1968,7 @@ def _oracle_preflight_identity(
     dataset: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
-        'execution_trust': {
-            'mode': 'private-test-transcript',
-            'engine_authenticated': False,
-            'engine_session_evidence_root': None,
-            'task_9_factory_required': True,
-        },
+        "execution_trust": _private_test_execution_trust_v3(),
         "schema_version": 1,
         "panel_id": definition.panel_id,
         "panel_sha256": definition.panel_sha256,
@@ -2083,18 +2123,19 @@ _PREFLIGHT_V2_CANDIDATE_FIELDS = frozenset({
 })
 _PREFLIGHT_TRACE_ENVELOPE_FIELDS = frozenset({
     "schema_version", "candidate_index", "game_index", "schedule", "outcome",
-    "trace",
+    "execution_trust", "trace",
 })
 _PREFLIGHT_REPLAY_ENVELOPE_FIELDS = frozenset({
     "schema_version", "candidate_index", "game_index", "schedule", "outcome",
-    "payload", "payload_sha256",
+    "execution_trust", "payload", "payload_sha256",
 })
 _PREFLIGHT_BENCHMARK_ENVELOPE_FIELDS = frozenset({
-    "schema_version", "candidate_index", "game_index", "schedule", "records",
+    "schema_version", "candidate_index", "game_index", "schedule",
+    "execution_trust", "records",
 })
 _PREFLIGHT_BENCHMARK_RECORD_FIELDS = frozenset({
     "sample_index", "sample_sha256", "sample", "first", "second",
-    "pair_seconds",
+    "pair_seconds", "execution_trust",
 })
 _PREFLIGHT_QUERY_FIELDS = frozenset({
     "decision", "codec", "elapsed_seconds",
@@ -2152,7 +2193,7 @@ def _preflight_codec_valid_v2(
         raise ValueError("oracle codec callback returned invalid evidence")
     action = decision.encoded_action
     return (
-        evidence.authority == "HexWars.Engine.TacticalV2Coding-v1"
+        evidence.provenance == "private-test-callback"
         and evidence.state_hash == sample.state_hash
         and evidence.contract_hash == definition.contract_hash
         and evidence.encoding_hash == definition.encoding_hash
@@ -2318,6 +2359,7 @@ def _preflight_trace_envelope_v2(
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
+        "execution_trust": _private_test_execution_trust_v3(),
         "candidate_index": candidate_index,
         "game_index": game_index,
         "schedule": game.to_dict(),
@@ -2332,6 +2374,7 @@ def _preflight_replay_envelope_v2(
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
+        "execution_trust": _private_test_execution_trust_v3(),
         "candidate_index": candidate_index,
         "game_index": game_index,
         "schedule": game.to_dict(),
@@ -2348,6 +2391,7 @@ def _preflight_benchmark_record_v2(
     second_codec: OracleCodecEvidence, second_seconds: float,
 ) -> dict[str, Any]:
     return {
+        "execution_trust": _private_test_execution_trust_v3(),
         "sample_index": sample_index,
         "sample_sha256": sample.content_sha256,
         "sample": sample.to_dict(),
@@ -2373,6 +2417,9 @@ def _validate_preflight_envelope_context_v2(
     game: ScheduledDuel,
     label: str,
 ) -> None:
+    _validate_private_test_execution_trust_v3(
+        fields["execution_trust"], f"{label} execution trust",
+    )
     schema_version = _strict_int(
         fields["schema_version"], f"{label} schema_version",
     )
@@ -2422,6 +2469,12 @@ def _open_oracle_preflight_v2(
         raise ValueError("oracle preflight is not completed")
     if not _same_exact_json(manifest["identity"], expected_identity):
         raise ValueError("oracle preflight identity changed")
+    identity = manifest["identity"]
+    if not isinstance(identity, Mapping):
+        raise ValueError("oracle preflight identity must be an object")
+    _validate_private_test_execution_trust_v3(
+        identity.get("execution_trust"), "oracle preflight identity execution trust",
+    )
     if _content_identity(manifest) != _hash(
         manifest["content_identity"], "oracle preflight content identity",
     ):
@@ -2585,6 +2638,10 @@ def _open_oracle_preflight_v2(
                 raw_benchmark, _PREFLIGHT_BENCHMARK_RECORD_FIELDS,
                 "preflight benchmark record",
             )
+            _validate_private_test_execution_trust_v3(
+                benchmark_record["execution_trust"],
+                "preflight benchmark record execution trust",
+            )
             if (
                 _strict_int(
                     benchmark_record["sample_index"],
@@ -2731,6 +2788,7 @@ def _reserve_preflight_diagnostic_root_v2(
 def _move_to_preflight_diagnostic_v2(
     source: Path, *, destination: Path,
 ) -> Path:
+    _validate_preflight_diagnostic_tree_v3(source)
     while True:
         target, marker = _reserve_preflight_diagnostic_root_v2(destination)
         try:
@@ -2744,6 +2802,41 @@ def _move_to_preflight_diagnostic_v2(
             marker.unlink(missing_ok=True)
 
 
+def _validate_preflight_diagnostic_tree_v3(source: Path) -> dict[str, int]:
+    canonical = _lexical_canonical_path(
+        Path(source), "oracle preflight diagnostic source", strict=True,
+    )
+    if not canonical.is_dir():
+        raise ValueError("oracle preflight diagnostic source must be a directory")
+    file_count = 0
+    byte_size = 0
+    for current, directories, files in os.walk(canonical, followlinks=False):
+        current_path = Path(current)
+        for name in directories:
+            _reject_reparse_chain(
+                current_path / name, "oracle preflight diagnostic directory",
+            )
+        for name in files:
+            path = current_path / name
+            _reject_reparse_chain(path, "oracle preflight diagnostic file")
+            file_count += 1
+            if file_count > _MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILES:
+                raise ValueError(
+                    "oracle preflight diagnostic file-count limit exceeded"
+                )
+            payload = _opened_file_snapshot_v2(
+                path,
+                max_bytes=_MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILE_BYTES,
+                label="oracle preflight diagnostic file",
+            )
+            byte_size += len(payload)
+            if byte_size > _MAX_PREFLIGHT_DIAGNOSTIC_TREE_BYTES:
+                raise ValueError(
+                    "oracle preflight diagnostic total-byte limit exceeded"
+                )
+    return {"file_count": file_count, "byte_size": byte_size}
+
+
 def _seal_preflight_diagnostic_v2(
     staging: Path,
     *,
@@ -2754,6 +2847,7 @@ def _seal_preflight_diagnostic_v2(
 ) -> None:
     if not staging.exists():
         return
+    _validate_preflight_diagnostic_tree_v3(staging)
     (staging / "oracle-preflight.json").unlink(missing_ok=True)
     _bounded_atomic_write_json_v2(
         staging / "diagnostic.json",
@@ -2779,7 +2873,8 @@ def _seal_preflight_diagnostic_v2(
 
 
 _PREFLIGHT_LEASE_FIELDS = frozenset({
-    "schema_version", "destination", "owner_id", "pid", "created_ns",
+    "schema_version", "destination", "destination_identity", "owner_id", "pid",
+    "process_start_marker", "created_ns",
 })
 
 
@@ -2787,85 +2882,185 @@ _PREFLIGHT_LEASE_FIELDS = frozenset({
 class _PreflightLease:
     root: Path
     payload: Mapping[str, Any]
-    stale_owner_ids: frozenset[str]
+    stale_owners: tuple[Mapping[str, Any], ...]
+
+
+def _preflight_destination_identity_v3(destination: Path) -> str:
+    return hashlib.sha256(str(destination).encode("utf-8")).hexdigest()
 
 
 def _preflight_lease_payload(
     value: Any, *, destination: Path,
 ) -> dict[str, Any]:
     fields = _strict_fields(value, _PREFLIGHT_LEASE_FIELDS, "oracle preflight lease")
-    if _strict_int(fields["schema_version"], "preflight lease schema_version") != 1:
+    if _strict_int(fields["schema_version"], "preflight lease schema_version") != 2:
         raise ValueError("oracle preflight lease schema_version is invalid")
     if fields["destination"] != str(destination):
         raise ValueError("oracle preflight lease destination changed")
+    if fields["destination_identity"] != _preflight_destination_identity_v3(
+        destination,
+    ):
+        raise ValueError("oracle preflight lease destination identity changed")
     owner_id = _strict_string(fields["owner_id"], "preflight lease owner id")
-    if len(owner_id) > 128:
-        raise ValueError("oracle preflight lease owner id is too long")
+    if re.fullmatch(r"[0-9a-f]{32}", owner_id) is None:
+        raise ValueError("oracle preflight lease owner id must be a UUID hex token")
+    marker = _strict_string(
+        fields["process_start_marker"], "preflight process start marker",
+    )
+    if (
+        len(marker) > 256
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", marker) is None
+    ):
+        raise ValueError("oracle preflight process start marker is invalid")
+    pid = _strict_int(fields["pid"], "preflight lease pid", minimum=1)
+    if pid > _INT32_MAX:
+        raise ValueError("oracle preflight lease pid exceeds int32")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "destination": str(destination),
+        "destination_identity": _preflight_destination_identity_v3(destination),
         "owner_id": owner_id,
-        "pid": _strict_int(fields["pid"], "preflight lease pid", minimum=1),
+        "pid": pid,
+        "process_start_marker": marker,
         "created_ns": _strict_int(
             fields["created_ns"], "preflight lease creation time", minimum=0,
         ),
     }
 
 
-def _preflight_process_is_live(pid: int) -> bool:
-    if pid == os.getpid():
-        return True
+def _read_preflight_owner_v3(
+    path: Path, *, destination: Path, label: str,
+) -> dict[str, Any]:
+    canonical = _lexical_canonical_path(Path(path), label, strict=True)
+    if not canonical.is_file():
+        raise ValueError(f"{label} must be a regular file")
+    return _preflight_lease_payload(
+        _read_bounded_json_v2(
+            canonical,
+            max_bytes=_MAX_PREFLIGHT_OWNER_BYTES,
+            label=label,
+        ),
+        destination=destination,
+    )
+
+
+def _preflight_process_start_marker_v3(pid: int) -> str | None:
+    pid = _strict_int(pid, "preflight owner pid", minimum=1)
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
+
+        class FileTime(ctypes.Structure):
+            _fields_ = (
+                ("low", wintypes.DWORD),
+                ("high", wintypes.DWORD),
+            )
 
         process_query_limited_information = 0x1000
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+        )
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        )
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(
             process_query_limited_information, False, pid,
         )
-        if handle:
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:
+                return None
+            raise RuntimeError(
+                f"cannot verify preflight owner process identity: WinError {error}"
+            )
+        try:
+            created = FileTime()
+            exited = FileTime()
+            kernel = FileTime()
+            user = FileTime()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                raise RuntimeError(
+                    "cannot read preflight owner process start time"
+                )
+            ticks = (created.high << 32) | created.low
+            return f"windows-filetime:{ticks}"
+        finally:
             kernel32.CloseHandle(handle)
-            return True
-        return ctypes.get_last_error() != 87
+
+    proc_stat = Path(f"/proc/{pid}/stat")
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        stat = proc_stat.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot verify preflight owner process identity"
+        ) from exc
+    closing = stat.rfind(")")
+    fields_after_name = stat[closing + 2:].split()
+    if closing < 0 or len(fields_after_name) <= 19:
+        raise RuntimeError("preflight owner process identity is malformed")
+    return f"proc-start:{fields_after_name[19]}"
 
 
 def _acquire_preflight_lease_v2(destination: Path) -> _PreflightLease:
     root = destination.with_name(destination.name + ".lock")
-    stale_owner_ids: set[str] = set()
+    stale_owners: list[Mapping[str, Any]] = []
     while True:
         try:
             root.mkdir()
         except FileExistsError:
             _lexical_canonical_path(root, "oracle preflight lease", strict=True)
-            payload = _preflight_lease_payload(
-                _read_json(root / "lease.json"), destination=destination,
+            payload = _read_preflight_owner_v3(
+                root / "lease.json",
+                destination=destination,
+                label="oracle preflight lease metadata",
             )
-            if _preflight_process_is_live(payload["pid"]):
+            current_marker = _preflight_process_start_marker_v3(payload["pid"])
+            if current_marker == payload["process_start_marker"]:
                 raise RuntimeError("oracle preflight lease has a live owner")
-            stale_owner_ids.add(payload["owner_id"])
+            stale_owners.append(MappingProxyType(dict(payload)))
             atomic_write_json(root / "diagnostic.json", {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": "stale-lease",
                 "lease": payload,
             })
             _move_to_preflight_diagnostic_v2(root, destination=destination)
             continue
+        process_start_marker = _preflight_process_start_marker_v3(os.getpid())
+        if process_start_marker is None:
+            raise RuntimeError("current preflight process identity disappeared")
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "destination": str(destination),
+            "destination_identity": _preflight_destination_identity_v3(destination),
             "owner_id": uuid.uuid4().hex,
             "pid": os.getpid(),
+            "process_start_marker": process_start_marker,
             "created_ns": time.time_ns(),
         }
         try:
-            atomic_write_json(root / "lease.json", payload)
+            _bounded_atomic_write_json_v2(
+                root / "lease.json",
+                payload,
+                max_bytes=_MAX_PREFLIGHT_OWNER_BYTES,
+                label="oracle preflight lease metadata",
+            )
         except BaseException:
             try:
                 root.rmdir()
@@ -2875,19 +3070,23 @@ def _acquire_preflight_lease_v2(destination: Path) -> _PreflightLease:
         return _PreflightLease(
             root=root,
             payload=MappingProxyType(payload),
-            stale_owner_ids=frozenset(stale_owner_ids),
+            stale_owners=tuple(stale_owners),
         )
 
 
 def _release_preflight_lease_v2(lease: _PreflightLease) -> None:
     if not lease.root.exists():
         raise RuntimeError("oracle preflight lease disappeared while owned")
-    actual = _preflight_lease_payload(
-        _read_json(lease.root / "lease.json"),
-        destination=Path(lease.payload["destination"]),
+    _lexical_canonical_path(
+        lease.root, "oracle preflight lease", strict=True,
     )
-    if actual["owner_id"] != lease.payload["owner_id"]:
-        raise RuntimeError("oracle preflight lease owner changed")
+    actual = _read_preflight_owner_v3(
+        lease.root / "lease.json",
+        destination=Path(lease.payload["destination"]),
+        label="oracle preflight lease metadata",
+    )
+    if not _same_exact_json(actual, dict(lease.payload)):
+        raise RuntimeError("oracle preflight complete lease owner record changed")
     (lease.root / "lease.json").unlink()
     lease.root.rmdir()
 
@@ -2895,15 +3094,24 @@ def _release_preflight_lease_v2(lease: _PreflightLease) -> None:
 def _require_stale_staging_owner_v2(
     staging: Path, *, lease: _PreflightLease,
 ) -> None:
-    owner_path = staging / ".owner.json"
-    if not owner_path.is_file() or _is_reparse_point(owner_path):
-        raise RuntimeError("unsealed oracle staging has no proven stale owner")
-    owner = _preflight_lease_payload(
-        _read_json(owner_path),
-        destination=Path(lease.payload["destination"]),
+    _lexical_canonical_path(
+        staging, "unsealed oracle staging", strict=True,
     )
-    if owner["owner_id"] not in lease.stale_owner_ids:
-        raise RuntimeError("unsealed oracle staging owner is not proven stale")
+    owner_path = staging / ".owner.json"
+    if not owner_path.is_file():
+        raise RuntimeError("unsealed oracle staging has no proven stale owner")
+    owner = _read_preflight_owner_v3(
+        owner_path,
+        destination=Path(lease.payload["destination"]),
+        label="unsealed oracle staging owner metadata",
+    )
+    if not any(
+        _same_exact_json(owner, dict(stale_owner))
+        for stale_owner in lease.stale_owners
+    ):
+        raise RuntimeError(
+            "unsealed oracle staging complete owner record is not proven stale"
+        )
 
 
 def _validate_preflight_output_root_v2(
@@ -2922,6 +3130,14 @@ def _validate_preflight_path_set_v2(
 ) -> tuple[Path, Path, Path, Path]:
     canonical = _lexical_canonical_path(
         Path(destination), "oracle preflight output", strict=False,
+    )
+    _validate_preflight_output_root_v2(definition, canonical)
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    _lexical_canonical_path(
+        canonical.parent, "oracle preflight output parent", strict=True,
+    )
+    canonical = _lexical_canonical_path(
+        canonical, "oracle preflight output", strict=False,
     )
     staging = canonical.with_name(canonical.name + ".staging")
     diagnostics = canonical.with_name(canonical.name + ".diagnostics")
@@ -2974,7 +3190,7 @@ def _run_oracle_preflight_for_test(
     clock: Callable[[], float] = time.perf_counter,
     on_selected: Callable[[OracleSpec], None] | None = None,
 ) -> OracleSpec:
-    """Run, seal, fully reconstruct, and select the global bounded-search oracle."""
+    """Build and reopen an explicitly untrusted private callback transcript."""
 
     validate_panel_definition(definition)
     for boundary, label in (
@@ -3098,7 +3314,12 @@ def _execute_oracle_preflight_v2(
 ) -> OracleSpec:
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging.mkdir()
-    atomic_write_json(staging / ".owner.json", dict(lease.payload))
+    _bounded_atomic_write_json_v2(
+        staging / ".owner.json",
+        dict(lease.payload),
+        max_bytes=_MAX_PREFLIGHT_OWNER_BYTES,
+        label="oracle preflight staging owner metadata",
+    )
     summaries: list[Mapping[str, Any]] = []
     game_evidence: list[Mapping[str, Any]] = []
     try:
@@ -3245,6 +3466,7 @@ def _write_preflight_game_v2(
         benchmark_path,
         {
             "schema_version": 1,
+            "execution_trust": _private_test_execution_trust_v3(),
             "candidate_index": candidate_index,
             "game_index": game_index,
             "schedule": game.to_dict(),

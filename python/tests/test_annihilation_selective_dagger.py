@@ -52,6 +52,14 @@ PROFILES = (
     "conversion-1v1-near",
     "conversion-1v1-far",
 )
+PRIVATE_TEST_TRUST = {
+    'schema_version': 1,
+    'mode': 'private-test-transcript',
+    'evidence_class': 'untrusted-test-transcript',
+    'engine_authenticated': False,
+    'engine_evidence_root': None,
+    'task_9_production_seal_required': True,
+}
 SEED_RANGES = (
     ("train", 1, 18_000_000, 18_099_999),
     ("train", 2, 18_100_000, 18_199_999),
@@ -925,7 +933,7 @@ def _preflight_boundaries(
         if round_trip_failure:
             decoded["Kind"] = "move" if decoded["Kind"] == "end_turn" else "end_turn"
         return OracleCodecEvidence(
-            authority="HexWars.Engine.TacticalV2Coding-v1",
+            provenance="private-test-callback",
             state_hash=sample.state_hash,
             contract_hash="7347819c2e68fa2d216dc712afc4785e185ca50d3832487d66589a68eee5a9d6",
             encoding_hash="2f334bc2163fd931d84c004e9dc8f44bae68934e46fbf2ec2c819fa3e297054a",
@@ -1101,12 +1109,7 @@ def test_private_preflight_identity_declares_unauthenticated_test_transcript() -
         },
     )
 
-    assert identity['execution_trust'] == {
-        'mode': 'private-test-transcript',
-        'engine_authenticated': False,
-        'engine_session_evidence_root': None,
-        'task_9_factory_required': True,
-    }
+    assert identity['execution_trust'] == PRIVATE_TEST_TRUST
 
 
 @pytest.mark.parametrize(
@@ -1127,6 +1130,7 @@ def test_preflight_envelope_context_rejects_bool_and_float_integer_aliases(
     game = definition.preflight_schedule[0]
     envelope = {
         'schema_version': 1,
+        'execution_trust': PRIVATE_TEST_TRUST,
         'candidate_index': 0,
         'game_index': 0,
         'schedule': game.to_dict(),
@@ -1211,6 +1215,7 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
         tmp_path / "oracle-preflight" / "oracle-preflight.json"
     ).read_text(encoding="utf-8"))
     assert manifest["status"] == "completed"
+    assert manifest["identity"]["execution_trust"] == PRIVATE_TEST_TRUST
     assert manifest["selected_oracle"]["expansion_budget"] == 2048
     assert [item["games"] for item in manifest["candidates"]] == [240, 240]
     assert [item["labels"] for item in manifest["candidates"]] == [240, 240]
@@ -1231,6 +1236,24 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
         assert candidate["query_count"] == 480
         assert candidate["expansion_total"] == 480 * 127
         assert candidate["mean_expansions"] == 127.0
+
+    physical_payloads = {
+        artifact: json.loads((
+            tmp_path / 'oracle-preflight' / manifest['games'][0][artifact]['path']
+        ).read_text(encoding='utf-8'))
+        for artifact in ('trace', 'replay', 'benchmark')
+    }
+    assert all(
+        payload['execution_trust'] == PRIVATE_TEST_TRUST
+        for payload in physical_payloads.values()
+    )
+    physical_record = physical_payloads['benchmark']['records'][0]
+    assert physical_record['execution_trust'] == PRIVATE_TEST_TRUST
+    for query in ('first', 'second'):
+        codec_payload = physical_record[query]['codec']
+        assert codec_payload['execution_trust'] == PRIVATE_TEST_TRUST
+        assert codec_payload['provenance'] == 'private-test-callback'
+        assert 'authority' not in codec_payload
 
     forged_root = tmp_path / 'coherently-forged-test-transcript'
     shutil.copytree(tmp_path / 'oracle-preflight', forged_root)
@@ -1283,6 +1306,74 @@ def test_oracle_preflight_runs_identical_240_game_schedules_and_double_queries(
     valid_manifest_path = valid_root / 'oracle-preflight.json'
     valid_manifest_bytes = valid_manifest_path.read_bytes()
     valid_manifest = json.loads(valid_manifest_bytes)
+
+    manifest = json.loads(valid_manifest_bytes)
+    manifest['identity']['execution_trust']['mode'] = 'engine-authenticated'
+    manifest['content_identity'] = _content_identity(manifest)
+    try:
+        _rewrite(valid_manifest_path, manifest)
+        with pytest.raises(ValueError, match='trust|private|authenticated'):
+            dagger_module._open_oracle_preflight_v2(
+                valid_root,
+                expected_identity=manifest['identity'],
+                definition=definition,
+            )
+    finally:
+        valid_manifest_path.write_bytes(valid_manifest_bytes)
+
+    def remove_envelope_trust(payload):
+        payload.pop('execution_trust')
+
+    def change_replay_trust(payload):
+        payload['execution_trust']['engine_authenticated'] = True
+
+    def change_benchmark_trust(payload):
+        payload['execution_trust']['evidence_class'] = 'engine-authoritative'
+
+    def remove_record_trust(payload):
+        payload['records'][0].pop('execution_trust')
+
+    def remove_codec_trust(payload):
+        payload['records'][0]['first']['codec'].pop('execution_trust')
+
+    def overclaim_codec_provenance(payload):
+        payload['records'][0]['second']['codec']['provenance'] = (
+            'HexWars.Engine.TacticalV2Coding-v1'
+        )
+
+    trust_mutations = (
+        ('trace', remove_envelope_trust),
+        ('replay', change_replay_trust),
+        ('benchmark', change_benchmark_trust),
+        ('benchmark', remove_record_trust),
+        ('benchmark', remove_codec_trust),
+        ('benchmark', overclaim_codec_provenance),
+    )
+    for artifact, mutate in trust_mutations:
+        manifest = json.loads(valid_manifest_bytes)
+        descriptor = manifest['games'][0][artifact]
+        artifact_path = valid_root / descriptor['path']
+        artifact_bytes = artifact_path.read_bytes()
+        payload = json.loads(artifact_bytes)
+        mutate(payload)
+        try:
+            _rewrite(artifact_path, payload)
+            descriptor['sha256'] = _sha256(artifact_path)
+            descriptor['byte_size'] = artifact_path.stat().st_size
+            manifest['content_identity'] = _content_identity(manifest)
+            _rewrite(valid_manifest_path, manifest)
+
+            with pytest.raises(
+                ValueError, match='trust|private|provenance|fields',
+            ):
+                dagger_module._open_oracle_preflight_v2(
+                    valid_root,
+                    expected_identity=valid_manifest['identity'],
+                    definition=definition,
+                )
+        finally:
+            artifact_path.write_bytes(artifact_bytes)
+            valid_manifest_path.write_bytes(valid_manifest_bytes)
 
     artifact_aliases = (
         ('trace', 'schema_version', True, None),
@@ -1943,6 +2034,28 @@ def test_oracle_preflight_recovers_completed_staging_and_rejects_coexistence(
     assert calls == 0
 
 
+def _owner_record(
+    root: Path,
+    *,
+    pid: int,
+    process_start_marker: str,
+    owner_id: str = '11111111111111111111111111111111',
+    created_ns: int = 1,
+) -> dict[str, Any]:
+    destination = str(root.resolve())
+    return {
+        'schema_version': 2,
+        'destination': destination,
+        'destination_identity': hashlib.sha256(
+            destination.encode('utf-8'),
+        ).hexdigest(),
+        'owner_id': owner_id,
+        'pid': pid,
+        'process_start_marker': process_start_marker,
+        'created_ns': created_ns,
+    }
+
+
 def test_oracle_preflight_live_owner_is_never_stolen_or_rotated(
     tmp_path: Path,
 ) -> None:
@@ -1950,13 +2063,13 @@ def test_oracle_preflight_live_owner_is_never_stolen_or_rotated(
     root = tmp_path / 'live-owner'
     staging = root.with_name(root.name + '.staging')
     lease_root = root.with_name(root.name + '.lock')
-    owner = {
-        'schema_version': 1,
-        'destination': str(root.resolve()),
-        'owner_id': 'live-owner-token',
-        'pid': os.getpid(),
-        'created_ns': 1,
-    }
+    owner = _owner_record(
+        root,
+        pid=os.getpid(),
+        process_start_marker=dagger_module._preflight_process_start_marker_v3(
+            os.getpid(),
+        ),
+    )
     lease_root.mkdir()
     _rewrite(lease_root / 'lease.json', owner)
     staging.mkdir()
@@ -1985,6 +2098,57 @@ def test_oracle_preflight_live_owner_is_never_stolen_or_rotated(
             shutil.rmtree(lease_root)
 
 
+def test_preflight_process_start_marker_distinguishes_live_and_absent_pid() -> None:
+    marker = dagger_module._preflight_process_start_marker_v3(os.getpid())
+
+    assert isinstance(marker, str)
+    assert marker
+    assert dagger_module._preflight_process_start_marker_v3((1 << 31) - 1) is None
+
+
+def test_preflight_path_set_creates_and_revalidates_missing_parent_before_lease(
+    tmp_path: Path,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    root = tmp_path / 'missing' / 'nested' / 'preflight'
+
+    destination, staging, diagnostics, lease = (
+        dagger_module._validate_preflight_path_set_v2(definition, root)
+    )
+
+    assert destination == root.resolve()
+    assert destination.parent.is_dir()
+    assert destination.parent.resolve(strict=True) == destination.parent
+    assert staging.parent == diagnostics.parent == lease.parent == destination.parent
+
+
+def test_acquired_lease_records_complete_canonical_owner_identity(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / 'complete-owner').resolve()
+    lease = dagger_module._acquire_preflight_lease_v2(root)
+    try:
+        payload = dict(lease.payload)
+        assert set(payload) == {
+            'schema_version', 'destination', 'destination_identity', 'owner_id',
+            'pid', 'process_start_marker', 'created_ns',
+        }
+        assert payload['schema_version'] == 2
+        assert payload['destination'] == str(root)
+        assert payload['destination_identity'] == hashlib.sha256(
+            str(root).encode('utf-8'),
+        ).hexdigest()
+        assert len(payload['owner_id']) == 32
+        int(payload['owner_id'], 16)
+        assert payload['pid'] == os.getpid()
+        assert payload['process_start_marker'] == (
+            dagger_module._preflight_process_start_marker_v3(os.getpid())
+        )
+        assert type(payload['created_ns']) is int and payload['created_ns'] > 0
+    finally:
+        dagger_module._release_preflight_lease_v2(lease)
+
+
 def test_oracle_preflight_dead_owner_authorizes_exact_staging_recovery(
     tmp_path: Path,
 ) -> None:
@@ -1992,13 +2156,11 @@ def test_oracle_preflight_dead_owner_authorizes_exact_staging_recovery(
     root = tmp_path / 'dead-owner'
     staging = root.with_name(root.name + '.staging')
     lease_root = root.with_name(root.name + '.lock')
-    stale_owner = {
-        'schema_version': 1,
-        'destination': str(root.resolve()),
-        'owner_id': 'proven-dead-owner-token',
-        'pid': (1 << 31) - 1,
-        'created_ns': 1,
-    }
+    stale_owner = _owner_record(
+        root,
+        pid=(1 << 31) - 1,
+        process_start_marker='absent-process:start-1',
+    )
     lease_root.mkdir()
     _rewrite(lease_root / 'lease.json', stale_owner)
     staging.mkdir()
@@ -2031,6 +2193,229 @@ def test_oracle_preflight_dead_owner_authorizes_exact_staging_recovery(
         for path in attempts
         if (path.parent / 'sentinel.bin').is_file()
     )
+
+
+def _mutate_owner_field(
+    owner: dict[str, Any], field: str, root: Path,
+) -> dict[str, Any]:
+    changed = dict(owner)
+    replacements = {
+        'destination': str((root.parent / 'different-destination').resolve()),
+        'destination_identity': 'f' * 64,
+        'owner_id': '22222222222222222222222222222222',
+        'pid': (1 << 31) - 2,
+        'process_start_marker': 'absent-process:start-2',
+        'created_ns': owner['created_ns'] + 1,
+    }
+    changed[field] = replacements[field]
+    return changed
+
+
+@pytest.mark.parametrize(
+    'field',
+    [
+        'destination', 'destination_identity', 'owner_id', 'pid',
+        'process_start_marker', 'created_ns',
+    ],
+)
+def test_stale_staging_requires_the_exact_complete_owner_record(
+    tmp_path: Path, field: str,
+) -> None:
+    definition = load_panel_definition(PANEL_PATH, repository_root=ROOT)
+    root = tmp_path / f'stale-owner-mismatch-{field}'
+    staging = root.with_name(root.name + '.staging')
+    lease_root = root.with_name(root.name + '.lock')
+    stale_owner = _owner_record(
+        root,
+        pid=(1 << 31) - 1,
+        process_start_marker='absent-process:start-1',
+    )
+    lease_root.mkdir()
+    _rewrite(lease_root / 'lease.json', stale_owner)
+    staging.mkdir()
+    _rewrite(
+        staging / '.owner.json',
+        _mutate_owner_field(stale_owner, field, root),
+    )
+    sentinel = staging / 'sentinel.bin'
+    sentinel.write_bytes(b'mismatched-owner-must-remain')
+
+    with pytest.raises(
+        (RuntimeError, ValueError), match='owner|lease|destination|process',
+    ):
+        run_oracle_preflight(
+            definition,
+            output_root=root,
+            repository_identity_provider=_repository_provider,
+            evaluator=lambda *_args: pytest.fail('evaluator must not run'),
+            benchmark=lambda *_args: pytest.fail('benchmark must not run'),
+            codec=lambda *_args: pytest.fail('codec must not run'),
+        )
+
+    assert sentinel.read_bytes() == b'mismatched-owner-must-remain'
+    assert staging.is_dir()
+    assert not lease_root.exists()
+
+
+@pytest.mark.parametrize(
+    'field',
+    [
+        'destination', 'destination_identity', 'owner_id', 'pid',
+        'process_start_marker', 'created_ns',
+    ],
+)
+def test_release_mismatch_leaves_the_foreign_lease_untouched(
+    tmp_path: Path, field: str,
+) -> None:
+    root = (tmp_path / f'release-mismatch-{field}').resolve()
+    lease = dagger_module._acquire_preflight_lease_v2(root)
+    foreign = _mutate_owner_field(dict(lease.payload), field, root)
+    _rewrite(lease.root / 'lease.json', foreign)
+
+    try:
+        with pytest.raises(
+            (RuntimeError, ValueError), match='owner|lease|destination|process',
+        ):
+            dagger_module._release_preflight_lease_v2(lease)
+        assert _read_owner(lease.root / 'lease.json') == foreign
+    finally:
+        if lease.root.exists():
+            shutil.rmtree(lease.root)
+
+
+def test_pid_reuse_with_a_different_start_marker_is_not_the_live_owner(
+    tmp_path: Path,
+) -> None:
+    root = (tmp_path / 'pid-reuse').resolve()
+    old_owner = _owner_record(
+        root,
+        pid=os.getpid(),
+        process_start_marker='windows-filetime:1',
+    )
+    lease_root = root.with_name(root.name + '.lock')
+    lease_root.mkdir()
+    _rewrite(lease_root / 'lease.json', old_owner)
+
+    lease = dagger_module._acquire_preflight_lease_v2(root)
+    try:
+        assert [dict(owner) for owner in lease.stale_owners] == [old_owner]
+        stale_diagnostics = list(
+            root.with_name(root.name + '.diagnostics').glob(
+                'attempt-*/diagnostic.json',
+            )
+        )
+        assert len(stale_diagnostics) == 1
+        assert json.loads(stale_diagnostics[0].read_text(encoding='utf-8'))[
+            'lease'
+        ] == old_owner
+    finally:
+        dagger_module._release_preflight_lease_v2(lease)
+
+
+@pytest.mark.parametrize('case', ['missing', 'malformed', 'oversized'])
+def test_owner_metadata_is_bounded_strict_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    root = (tmp_path / f'owner-metadata-{case}').resolve()
+    metadata = tmp_path / f'{case}.owner.json'
+    if case == 'malformed':
+        metadata.write_bytes(b'{not-json')
+    elif case == 'oversized':
+        monkeypatch.setattr(dagger_module, '_MAX_PREFLIGHT_OWNER_BYTES', 32)
+        _rewrite(metadata, _owner_record(
+            root,
+            pid=(1 << 31) - 1,
+            process_start_marker='absent-process:start-1',
+        ))
+
+    with pytest.raises(ValueError, match='missing|invalid|byte|size|large'):
+        dagger_module._read_preflight_owner_v3(
+            metadata,
+            destination=root,
+            label='test owner metadata',
+        )
+
+
+@pytest.mark.parametrize(
+    ('field', 'alias'),
+    [
+        ('schema_version', True),
+        ('pid', 1.0),
+        ('created_ns', False),
+    ],
+)
+def test_owner_metadata_rejects_scalar_aliases_and_missing_fields(
+    tmp_path: Path, field: str, alias: Any,
+) -> None:
+    root = (tmp_path / f'owner-alias-{field}').resolve()
+    metadata = tmp_path / f'{field}.owner.json'
+    owner = _owner_record(
+        root,
+        pid=(1 << 31) - 1,
+        process_start_marker='absent-process:start-1',
+    )
+    owner[field] = alias
+    _rewrite(metadata, owner)
+
+    with pytest.raises(ValueError, match='integer|schema|boolean'):
+        dagger_module._read_preflight_owner_v3(
+            metadata,
+            destination=root,
+            label='test owner metadata',
+        )
+
+    owner = _owner_record(
+        root,
+        pid=(1 << 31) - 1,
+        process_start_marker='absent-process:start-1',
+    )
+    owner.pop(field)
+    _rewrite(metadata, owner)
+    with pytest.raises(ValueError, match='fields'):
+        dagger_module._read_preflight_owner_v3(
+            metadata,
+            destination=root,
+            label='test owner metadata',
+        )
+
+
+@pytest.mark.parametrize('location', ['lease', 'staging-owner'])
+def test_lease_and_staging_owner_metadata_reject_symlinked_inner_files(
+    tmp_path: Path, location: str,
+) -> None:
+    root = (tmp_path / f'symlinked-{location}').resolve()
+    target = tmp_path / f'{location}-target.json'
+    owner = _owner_record(
+        root,
+        pid=(1 << 31) - 1,
+        process_start_marker='absent-process:start-1',
+    )
+    _rewrite(target, owner)
+
+    if location == 'lease':
+        lease_root = root.with_name(root.name + '.lock')
+        lease_root.mkdir()
+        _symlink_or_skip_windows_privilege(lease_root / 'lease.json', target)
+        try:
+            with pytest.raises(ValueError, match='canonical|symlink|reparse'):
+                dagger_module._acquire_preflight_lease_v2(root)
+        finally:
+            if lease_root.exists():
+                shutil.rmtree(lease_root)
+        return
+
+    lease = dagger_module._acquire_preflight_lease_v2(root)
+    staging = root.with_name(root.name + '.staging')
+    staging.mkdir()
+    _symlink_or_skip_windows_privilege(staging / '.owner.json', target)
+    try:
+        with pytest.raises(ValueError, match='canonical|symlink|reparse'):
+            dagger_module._require_stale_staging_owner_v2(staging, lease=lease)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+        dagger_module._release_preflight_lease_v2(lease)
+
 
 def _read_owner(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding='utf-8'))
@@ -2067,6 +2452,40 @@ def test_oracle_preflight_diagnostic_attempt_reservation_skips_collisions(
     assert sentinel.read_bytes() == b'unrelated-attempt'
     assert (diagnostics / 'attempt-000002' / 'diagnostic.json').is_file()
     assert not root.with_name(root.name + '.lock').exists()
+
+
+@pytest.mark.parametrize('limit_kind', ['file-count', 'total-bytes', 'file-bytes'])
+def test_diagnostic_rotation_rejects_over_limit_tree_without_moving_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit_kind: str,
+) -> None:
+    root = tmp_path / f'diagnostic-tree-{limit_kind}'
+    staging = root.with_name(root.name + '.staging')
+    staging.mkdir()
+    (staging / 'first.bin').write_bytes(b'abc')
+    (staging / 'second.bin').write_bytes(b'def')
+    if limit_kind == 'file-count':
+        monkeypatch.setattr(
+            dagger_module, '_MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILES', 1,
+        )
+    elif limit_kind == 'total-bytes':
+        monkeypatch.setattr(
+            dagger_module, '_MAX_PREFLIGHT_DIAGNOSTIC_TREE_BYTES', 5,
+        )
+    else:
+        monkeypatch.setattr(
+            dagger_module, '_MAX_PREFLIGHT_DIAGNOSTIC_TREE_FILE_BYTES', 2,
+        )
+
+    with pytest.raises(ValueError, match='diagnostic.*(file|byte|size|limit)'):
+        dagger_module._move_to_preflight_diagnostic_v2(
+            staging,
+            destination=root,
+        )
+
+    assert staging.is_dir()
+    assert (staging / 'first.bin').read_bytes() == b'abc'
+    diagnostics = root.with_name(root.name + '.diagnostics')
+    assert not list(diagnostics.glob('attempt-*')) if diagnostics.exists() else True
 
 
 def test_oracle_preflight_runtime_failure_remains_diagnostic_not_complete(

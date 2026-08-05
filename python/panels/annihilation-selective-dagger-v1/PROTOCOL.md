@@ -95,7 +95,10 @@ the corpus content root, file count, byte count, scenario/contract/encoding
 identities, and an explicit audit-algorithm version. The implementation takes a
 stable physical snapshot before and after either a full audit or a cache hit,
 and performs another full physical rehash immediately before publication.
-Mutation during any of those windows fails closed.
+Visible drift and mutation during a same-open-handle read fail closed. These
+checks do not prove that a hostile writer never changed bytes and restored them
+between observations. Such a guarantee would require an immutable filesystem
+snapshot or an externally enforced writer lock.
 
 The scenario is resolved rather than trusted as an opaque declaration. Its
 canonical identity must match the base corpus, its tactical-v2 action regions
@@ -151,6 +154,28 @@ relaxed after observing results.
 
 ## Oracle preflight
 
+Task 8 does not run or authenticate the HexWars engine. The public entry point
+fails closed; the only executable path in this task is a private callback test
+runner. Every physical artifact created by that runner carries this exact trust
+declaration:
+
+```text
+schema_version=1
+mode=private-test-transcript
+evidence_class=untrusted-test-transcript
+engine_authenticated=false
+engine_evidence_root=null
+task_9_production_seal_required=true
+```
+
+Strict reopening verifies the declaration at the outer identity, every
+envelope and benchmark record, and every codec callback record. Recomputed
+hashes, masks, commands, state identities, codec results, and apply results
+establish only internal consistency of a caller-supplied test transcript. They
+do not establish that an engine produced any of those values. The schedule and
+eligibility gates below are therefore Task 9 production requirements; Task 8
+tests their sealed artifact mechanics with explicitly untrusted callbacks.
+
 One global teacher is selected before any DAgger collection. The two candidates
 share depth 4 and the `material-plus-pursuit-v1` heuristic:
 
@@ -169,12 +194,13 @@ seats:
 5. `conversion-1v1-near`
 6. `conversion-1v1-far`
 
-This is 120 maps and 240 games per candidate. Every sampled state is queried
-twice with the identical state and oracle configuration. Each returned command
-must be legal under the authoritative mask, encode to the recorded action, and
-round-trip through the tactical-v2 codec. Codec evidence comes from an explicit
-engine boundary and records `TacticalV2Coding` encode/decode, legal-mask, and
-`GameEngine.Apply` results; a caller-supplied round-trip integer is not
+This is 120 maps and 240 games per candidate. In the future Task 9 production
+session, every sampled state must be queried twice with the identical sealed
+engine state and oracle configuration. Each returned command must be legal
+under the mask obtained from that same session, encode to the recorded action,
+and round-trip through tactical-v2. Task 9 must record
+`TacticalV2Coding` encode/decode, legal-mask, and `GameEngine.Apply` results from
+that engine boundary; a caller-supplied round-trip integer is not production
 evidence. The measured expansion count may not exceed the candidate budget.
 The sample is a deeply frozen object containing the complete observation,
 legal mask, canonical state hash, decision index, and full oracle state
@@ -209,15 +235,17 @@ selection order is:
 No per-state teacher choice or post-hoc budget tuning is allowed. If neither
 candidate is eligible, the experiment stops before collection or training.
 
-Preflight evidence contains semantically bound per-game trace, replay, and
-benchmark envelopes. Each benchmark record persists the full sample, both
-complete decisions, both engine codec records, both query times, their pair
-time, and both expansion counts. Reopening recomputes determinism, valid
-labels, codec failures, expansion total/mean/maximum, benchmark time,
-throughput, eligibility, and selection from these records. It also recomputes
-W/L/D overall, by seat, and for each profile (exactly 40 games and 20 games per
-seat), paired-map counts, Wilson 95% intervals, cycling and action-waste
-diagnostics, and wasted EndTurns.
+The private runner writes semantically bound per-game trace, replay, and
+benchmark envelopes from callback-supplied samples and decisions. Each
+benchmark record persists the full sample, both complete decisions, both
+`private-test-callback` codec records, both query times, their pair time, and
+both expansion counts. Every artifact repeats the untrusted declaration above.
+Reopening recomputes determinism, valid labels, codec failures, expansion
+total/mean/maximum, benchmark time, throughput, eligibility, and selection from
+these records. It also recomputes W/L/D overall, by seat, and for each profile
+(exactly 40 games and 20 games per seat), paired-map counts, Wilson 95%
+intervals, cycling and action-waste diagnostics, and wasted EndTurns. This
+reconstruction proves internal transcript consistency only.
 For a binomial count \(x\) in \(n\) games, the reported Wilson interval uses
 the 0.975 standard-normal quantile, \(z \approx 1.96\):
 
@@ -239,14 +267,13 @@ Task 8 deliberately stops at a sealed production boundary. The public
 `run_oracle_preflight` entry point exposes only the panel definition, output root,
 and an engine execution-session parameter, and fails closed until Task 9
 supplies the production engine-session factory. The callback-driven executor
-is private test infrastructure. Its manifests declare
-`mode=private-test-transcript`, `engine_authenticated=false`, no engine
-session evidence root, and the Task 9 requirement. Even a coherently rewritten
-and rehashed private transcript cannot authorize production work.
+is private test infrastructure. Its physical artifacts declare the exact
+six-field trust record above. Even a coherently rewritten and rehashed private
+transcript cannot authorize production work.
 
 Task 9 must bind the two search queries, tactical-v2 encode/decode, legal mask,
-and `GameEngine.Apply` evidence to one sealed authoritative engine session and
-state. It must add physical runtime-artifact identities and an engine-session
+and `GameEngine.Apply` evidence to one sealed engine session and state. It
+must add physical runtime-artifact identities and an engine-session
 evidence root independently of Git `HEAD`/tree/status identity. Git proves which
 source tree was reviewed; it does not prove which engine process produced a
 label.
@@ -258,7 +285,10 @@ Input and evidence limits are part of the contract:
 - an oracle state is finite canonical JSON with at most 32 levels, 50,000
   nodes, one MiB of canonical bytes, and signed-32-bit integer magnitude;
 - each manifest is at most 8 MiB, trace 32 MiB, replay 8 MiB, benchmark 64 MiB,
-  and diagnostic 8 MiB;
+  diagnostic 8 MiB, and lease or staging-owner record 4 KiB;
+- one recovered diagnostic tree may contain at most 1,500 files and 2 GiB
+  total, with at most 64 MiB per file; an over-limit tree remains in staging
+  rather than being partially rotated;
 - the sealed preflight owns exactly one manifest and three files per game:
   1,441 files, with a theoretical per-file-cap total below 48.76 GiB.
 
@@ -271,8 +301,8 @@ check the bound before atomic replacement.
 Each accepted DAgger row retains:
 
 - the exact policy observation and legal mask;
-- learner action and authoritative learner command;
-- teacher action and authoritative teacher command;
+- learner action and learner command from the future sealed collection session;
+- teacher action and teacher command from that same future session;
 - all eligibility reasons, disagreement, and canonical state hash;
 - normalized advantage, opponent unit count, and productive-action count;
 - seed, seat, profile, round, decision index, and game identity;
@@ -382,13 +412,17 @@ by atomic rename only after reopening all outputs, checking strict schemas,
 rehashing every owned physical file, and reconstructing summary metrics from
 the physical evidence.
 
-Preflight execution first acquires an exclusive sibling `.lock` directory with a
-random owner token, process ID, and creation time. A live owner is never stolen.
-Only a lease whose process is proven dead may be preserved as a stale
-diagnostic, and unsealed staging may be rotated only when its exact owner token
-matches that stale lease. Release verifies the current token before deleting
-only the caller's lease. Diagnostic attempt names use exclusive reservation
-markers, so concurrent failures cannot overwrite one another.
+Preflight execution first creates and revalidates a missing output parent, then
+acquires an exclusive sibling `.lock` directory. Its bounded version-2 owner
+record includes the canonical destination path and destination-identity hash,
+random owner token, process ID, process-start identity, and creation time. A
+process is live only when both PID and start identity still match, so PID reuse
+does not preserve a stale lease. Stale recovery, staging authorization, and
+release compare the complete strict record; a foreign or malformed record is
+left untouched and fails closed. The lease and staging-owner files themselves
+must be canonical, bounded regular files with no symlink, junction, or reparse
+point. Diagnostic attempt names use exclusive reservation markers, so
+concurrent failures cannot overwrite one another.
 
 The caller must supply lexical canonical paths before resolution. Parent
 traversal, aliases, symlinks, junctions, and other reparse points are rejected
@@ -408,8 +442,11 @@ Interrupted or failed work is atomically moved from the canonical
 `diagnostic.json`, traces, replays, and benchmark records for inspection, but
 it has no completion manifest and cannot be consumed as complete. A later
 attempt therefore starts from a clean staging path and never overwrites an
-earlier diagnostic. Operators determine completion from the validated
-manifest, never from a process disappearing or a file merely existing.
+earlier diagnostic. Rotation validates the 1,500-file, 2-GiB-total, and
+64-MiB-per-file limits before reserving or moving the tree and rechecks after
+writing the diagnostic record. An over-limit staging tree is retained in place.
+Operators determine completion from the validated manifest, never from a
+process disappearing or a file merely existing.
 
 ## Non-goals and limits of inference
 
