@@ -1000,6 +1000,103 @@ def test_generic_retained_validator_reopens_and_rejects_drift_or_corruption(
     assert retained.artifacts[0].trace_sha256 != ""
 
 
+_RETAINED_SCHEMA_MUTATIONS = (
+    ("schema-bool", ("schema_version",), True),
+    ("schema-float", ("schema_version",), 1.0),
+    ("candidate-step-bool", ("candidate", "step"), True),
+    ("candidate-legacy-int", ("candidate", "legacy"), 0),
+    ("candidate-promotable-int", ("candidate", "promotable"), 1),
+    ("opponent-legacy-int", ("opponent", "legacy"), 0),
+    ("seed-start-float", ("seed_start",), 20_000_000.0),
+    ("seed-entry-float", ("seeds", 0), 20_000_000.0),
+    ("games-float", ("games",), 2.0),
+    ("count-float", ("wins",), 1.0),
+    ("rate-int-alias", ("rates", "loss"), 0),
+    (
+        "wilson-int-alias",
+        ("confidence_intervals", "loss", "low"),
+        0,
+    ),
+    (
+        "seat-count-float",
+        ("seat_results", "candidate_as_p0", "wins"),
+        1.0,
+    ),
+    ("evidence-count-float", ("evidence", "retained"), 2.0),
+    (
+        "category-count-float",
+        ("evidence", "draw_categories", "invalid_scenario"),
+        1.0,
+    ),
+    ("match-seed-float", ("matches", 0, "seed"), 20_000_000.0),
+    ("match-seat-bool", ("matches", 0, "candidate_seat"), False),
+    ("match-seat-float", ("matches", 1, "candidate_seat"), 1.0),
+    ("match-reference-bool", ("matches", 0, "reference_seat"), False),
+    (
+        "trace-summary-bool-count",
+        ("matches", 0, "summary", "command_count"),
+        True,
+    ),
+    (
+        "classification-float",
+        ("matches", 1, "classification", "flags"),
+        1.0,
+    ),
+    ("unknown-top-field", ("unexpected" ,), "unowned"),
+    ("unknown-match-field", ("matches", 0, "unexpected"), "unowned"),
+    ("bogus-trace-size", ("matches", 0, "trace_byte_size"), 0),
+    ("bogus-replay-size", ("matches", 0, "replay_byte_size"), 999_999),
+)
+
+
+def _set_json_path(value: object, path: tuple[object, ...], replacement: object) -> None:
+    cursor = value
+    for key in path[:-1]:
+        cursor = cursor[key]  # type: ignore[index]
+    cursor[path[-1]] = replacement  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("case_name", "path", "replacement"),
+    _RETAINED_SCHEMA_MUTATIONS,
+    ids=[case[0] for case in _RETAINED_SCHEMA_MUTATIONS],
+)
+def test_public_retained_validator_rejects_exact_schema_and_type_aliases(
+    source_runs: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    path: tuple[object, ...],
+    replacement: object,
+) -> None:
+    """Any alias, unknown field, or unauthenticated size must invalidate reuse."""
+
+    definition = _audit_definition(source_runs, maps=1)
+    publication_root = tmp_path / case_name
+    _evaluate_generic_retained_candidate(definition, publication_root, monkeypatch)
+    evaluation_path = publication_root / "evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+    _set_json_path(evaluation, path, replacement)
+    _write_json(evaluation_path, evaluation)
+
+    with pytest.raises(ValueError):
+        audit_module.validate_retained_evaluation(
+            evaluation_path,
+            publication_root=publication_root,
+            evidence_root=publication_root / "evidence",
+            schedule=AuditSchedule(
+                seed_start=20_000_000,
+                maps=1,
+                both_seats=True,
+                profile="standard-3v3",
+                opponent="random",
+            ),
+            expected_candidate_identity=_candidate_identity(
+                definition.candidates[0]
+            ),
+        )
+
+
 def test_public_retained_validator_matches_the_legacy_audit_reconstruction(
     source_runs: tuple[Path, Path],
     tmp_path: Path,

@@ -4060,28 +4060,66 @@ def _development_candidate_payload(
         "step": 38_912 if iteration == 0 else 0,
         "inference_mode": "deterministic",
     }
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    controller_identity = {
+        "kind": "snapshot",
+        "inference_mode": "deterministic",
+        "path": str(checkpoint.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": controller["step"],
+        "contract_hash": HASHES["a"],
+        "contract_version": "tactical-v2",
+        "environment": "tactical-v2",
+        "encoding_hash": HASHES["b"],
+        "contract": {"version": "tactical-v2"},
+        "observation_size": 2,
+        "action_size": 7,
+        "legacy": False,
+        "promotable": True,
+    }
+    source_publication = {
+        "kind": "audited-baseline" if iteration == 0 else "dagger-iteration",
+        "iteration": iteration,
+        "content_identity": hashlib.sha256(
+            f"source-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "preflight_root": str((checkpoint.parents[2] / "preflight").resolve()),
+        "preflight_content_identity": hashlib.sha256(b"preflight").hexdigest(),
+        "incoming_source_content_identity": (
+            None if iteration == 0 else hashlib.sha256(
+                f"source-{iteration - 1}".encode("ascii")
+            ).hexdigest()
+        ),
+        "source_run": controller["source_run"],
+        "model_seed": 227,
+        "step": controller["step"],
+        "controller": json.dumps(controller, sort_keys=True),
+        "controller_identity": controller_identity,
+        "checkpoint_path": str(checkpoint.resolve()),
+        "checkpoint_sha256": checkpoint_sha256,
+        "actor_sha256": hashlib.sha256(f"actor-{iteration}".encode()).hexdigest(),
+        "publication_metadata_sha256": hashlib.sha256(
+            f"metadata-{iteration}".encode()
+        ).hexdigest(),
+        "run_manifest_sha256": hashlib.sha256(f"run-{iteration}".encode()).hexdigest(),
+        "bc_manifest_sha256": hashlib.sha256(f"bc-{iteration}".encode()).hexdigest(),
+        "train_overlay_prefix": [
+            hashlib.sha256(f"train-{index}".encode()).hexdigest()
+            for index in range(1, iteration + 1)
+        ],
+        "validation_overlay_prefix": [
+            hashlib.sha256(f"validation-{index}".encode()).hexdigest()
+            for index in range(1, iteration + 1)
+        ],
+    }
     return {
         "candidate_id": candidate_id,
         "iteration": iteration,
         "controller": json.dumps(controller, sort_keys=True),
         "checkpoint_path": str(checkpoint.resolve()),
-        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
-        "controller_identity": {
-            "kind": "snapshot",
-            "inference_mode": "deterministic",
-            "path": str(checkpoint.resolve()),
-            "algorithm": "maskable_ppo",
-            "step": controller["step"],
-            "contract_hash": HASHES["a"],
-            "contract_version": "tactical-v2",
-            "environment": "tactical-v2",
-            "encoding_hash": HASHES["b"],
-            "contract": {"version": "tactical-v2"},
-            "observation_size": 2,
-            "action_size": 7,
-            "legacy": False,
-            "promotable": True,
-        },
+        "checkpoint_sha256": checkpoint_sha256,
+        "controller_identity": controller_identity,
+        "source_publication": source_publication,
     }
 
 
@@ -4377,6 +4415,7 @@ def test_development_selection_success_and_confirmation_are_separate() -> None:
         "cycling_relative_reduction": pytest.approx(2 / 3),
         "performance_gate": True,
         "cycling_gate": True,
+        "cycling_gate_reason": "threshold-met",
         "treatment_success": True,
         "replication_authorized": True,
         "one_seed_winning_rate_gate": False,
@@ -4398,6 +4437,79 @@ def test_development_selection_success_and_confirmation_are_separate() -> None:
         pooled_wins=420,
         pooled_games=600,
     )["confirmed"] is False
+
+
+def test_development_selection_preserves_dominant_baseline_and_names_best_treatment() -> None:
+    """A worse treatment can be analyzed without silently replacing the baseline."""
+
+    candidates = (
+        _selection_candidate(
+            "baseline", 0, win_rate=0.70, cycling=0.10, action_waste=0.05,
+        ),
+        _selection_candidate(
+            "iteration-1", 1, win_rate=0.60, cycling=0.05, action_waste=0.02,
+        ),
+        _selection_candidate(
+            "iteration-2", 2, win_rate=0.65, cycling=0.08, action_waste=0.03,
+        ),
+        _selection_candidate(
+            "iteration-3", 3, win_rate=0.65, cycling=0.08, action_waste=0.04,
+        ),
+    )
+
+    assert dagger_module.select_development_candidate(candidates)["candidate_id"] == (
+        "baseline"
+    )
+    assert dagger_module.select_development_treatment(candidates)["candidate_id"] == (
+        "iteration-2"
+    )
+    decision = dagger_module.decide_development_success(
+        baseline=candidates[0], selected=candidates[2],
+    )
+    assert decision["win_rate_gain"] == pytest.approx(-0.05)
+    assert decision["treatment_success"] is False
+
+
+def test_development_thresholds_use_exact_counts_and_zero_cycling_is_undefined() -> None:
+    """Binary thresholds have no epsilon halo and no invented zero-denominator reduction."""
+
+    baseline = _selection_candidate(
+        "baseline", 0, win_rate=0.40, cycling=0.20, action_waste=0.10,
+    )
+    at_gain = _selection_candidate(
+        "iteration-1", 1, win_rate=0.60, cycling=0.10, action_waste=0.10,
+    )
+    below_gain = _selection_candidate(
+        "iteration-1", 1, win_rate=0.595, cycling=0.10, action_waste=0.10,
+    )
+    below_rate = _selection_candidate(
+        "iteration-1", 1, win_rate=0.645, cycling=0.10, action_waste=0.10,
+    )
+    assert dagger_module.decide_development_success(
+        baseline=baseline, selected=at_gain,
+    )["performance_gate"] is True
+    assert dagger_module.decide_development_success(
+        baseline=baseline, selected=below_gain,
+    )["performance_gate"] is False
+    high_baseline = _selection_candidate(
+        "baseline", 0, win_rate=0.50, cycling=0.20, action_waste=0.10,
+    )
+    assert dagger_module.decide_development_success(
+        baseline=high_baseline, selected=below_rate,
+    )["performance_gate"] is False
+
+    zero_cycling = _selection_candidate(
+        "baseline", 0, win_rate=0.40, cycling=0.0, action_waste=0.10,
+    )
+    zero_selected = _selection_candidate(
+        "iteration-1", 1, win_rate=0.65, cycling=0.0, action_waste=0.10,
+    )
+    zero_decision = dagger_module.decide_development_success(
+        baseline=zero_cycling, selected=zero_selected,
+    )
+    assert zero_decision["cycling_relative_reduction"] is None
+    assert zero_decision["cycling_gate"] is False
+    assert zero_decision["cycling_gate_reason"] == "no-reducible-baseline"
 
 
 def test_development_pairing_and_metric_inputs_fail_closed_on_exact_types() -> None:
@@ -4437,7 +4549,70 @@ def test_development_pairing_and_metric_inputs_fail_closed_on_exact_types() -> N
         )
 
 
-def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    ("nan-advantage", "negative-decisions", "impossible-peak", "waste-over-total"),
+)
+def test_development_summary_rejects_impossible_physical_metrics(
+    mutation: str,
+) -> None:
+    """Non-finite, negative, incoherent, or impossible trace metrics cannot aggregate."""
+
+    rows = _development_rows()
+    summary = rows[0]["summary"]
+    if mutation == "nan-advantage":
+        summary["final_normalized_advantage"] = float("nan")
+    elif mutation == "negative-decisions":
+        summary["command_count"] = -1
+    elif mutation == "impossible-peak":
+        summary["peak_normalized_advantage"] = 99.0
+    elif mutation == "waste-over-total":
+        summary["end_turns_by_seat"] = [1, 2]
+        summary["wasted_end_turns_by_seat"] = [2, 0]
+    else:  # pragma: no cover - exhaustive parameter guard
+        raise AssertionError(mutation)
+
+    with pytest.raises(ValueError, match="metric|advantage|waste|summary"):
+        dagger_module.summarize_development_candidate(
+            rows, heldout_collections=(),
+        )
+
+
+def _development_supervised_metrics(
+    *,
+    pre_agreements: int,
+    post_agreements: int,
+    labels: int = 100,
+) -> dict[str, Any]:
+    def side(agreements: int) -> dict[str, Any]:
+        return {
+            "agreements": agreements,
+            "disagreements": labels - agreements,
+            "accuracy": agreements / labels,
+            "by_reason": {
+                reason: {
+                    "labels": labels if reason == "conversion" else 0,
+                    "agreements": agreements if reason == "conversion" else 0,
+                    "disagreements": (
+                        labels - agreements if reason == "conversion" else 0
+                    ),
+                    "accuracy": agreements / labels if reason == "conversion" else None,
+                }
+                for reason in (
+                    "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+                )
+            },
+        }
+
+    return {
+        "labels": labels,
+        "pre": side(pre_agreements),
+        "post": side(post_agreements),
+        "accuracy_change": post_agreements / labels - pre_agreements / labels,
+    }
+
+
+def test_development_aggregate_and_report_use_games_not_supervised_accuracy() -> None:
     """The canonical report must preserve the fixed causal interpretation branch."""
 
     baseline_rows = _development_rows()
@@ -4452,78 +4627,42 @@ def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> No
     for index in range(20):
         rows_by_candidate["iteration-3"][140 + index]["outcome"] = "win"
         rows_by_candidate["iteration-3"][140 + index]["classification"] = None
-    heldout = {
-        1: ({
-            "labels": 100,
-            "reason_counts": {
-                "conversion": 100,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-            "disagreements": 20,
-            "disagreement_reason_counts": {
-                "conversion": 20,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-        },),
-        2: ({
-            "labels": 100,
-            "reason_counts": {
-                "conversion": 100,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-            "disagreements": 1,
-            "disagreement_reason_counts": {
-                "conversion": 1,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-        },),
-        3: ({
-            "labels": 100,
-            "reason_counts": {
-                "conversion": 100,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-            "disagreements": 30,
-            "disagreement_reason_counts": {
-                "conversion": 30,
-                "favorable": 0,
-                "cycle_warning": 0,
-                "wasted_end_turn": 0,
-            },
-        },),
+    supervised = {
+        1: _development_supervised_metrics(pre_agreements=80, post_agreements=80),
+        2: _development_supervised_metrics(pre_agreements=80, post_agreements=99),
+        3: _development_supervised_metrics(pre_agreements=60, post_agreements=70),
     }
 
     aggregate = dagger_module.build_development_aggregate(
         rows_by_candidate=rows_by_candidate,
-        heldout_collections_by_iteration=heldout,
+        supervised_metrics_by_iteration=supervised,
         evidence_identity={
             "preflight": HASHES["1"],
             "baseline": HASHES["2"],
             "iterations": [HASHES["3"], HASHES["4"], HASHES["5"]],
             "evaluations": [HASHES["6"], HASHES["7"], HASHES["8"], HASHES["9"]],
+            "supervised": [HASHES["a"], HASHES["b"], HASHES["c"]],
         },
     )
 
     assert aggregate["selected_candidate_id"] == "iteration-3"
     assert (
-        aggregate["candidates"]["iteration-2"]["summary"]["heldout_teacher"][
+        aggregate["candidates"]["iteration-2"]["summary"]["heldout_supervised"][
             "accuracy"
         ]
         >
-        aggregate["candidates"]["iteration-3"]["summary"]["heldout_teacher"][
+        aggregate["candidates"]["iteration-3"]["summary"]["heldout_supervised"][
             "accuracy"
         ]
     )
+    assert aggregate["best_treatment_candidate_id"] == "iteration-3"
+    assert aggregate["treatment_supervised_comparison"] == {
+        "iteration": 3,
+        "labels": 100,
+        "pre_accuracy": 0.6,
+        "post_accuracy": 0.7,
+        "accuracy_change": pytest.approx(0.1),
+    }
     assert set(aggregate["paired_vs_baseline"]) == {
         "iteration-1", "iteration-2", "iteration-3",
     }
@@ -4533,7 +4672,7 @@ def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> No
     assert json.dumps(
         dagger_module.build_development_aggregate(
             rows_by_candidate=rows_by_candidate,
-            heldout_collections_by_iteration=heldout,
+            supervised_metrics_by_iteration=supervised,
             evidence_identity=aggregate["evidence_identity"],
         ),
         sort_keys=True,
@@ -4553,13 +4692,13 @@ def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> No
         "Paired tests",
         "Chosen candidate",
         "Threshold decisions",
-        "teacher accuracy alone is not success",
+        "supervised accuracy alone is not success",
         "final 17m seeds were not used",
         "three-replicate confirmation is a later experiment",
     ):
         assert required in report
-    assert "| baseline | 100 | 40 | 60 | 0.500000 |" in report
-    assert "| iteration-2 | 200 | 179 | 21 | 0.895000 |" in report
+    assert "| baseline | 100 | 80 | 20 | 0.800000 |" in report
+    assert "| iteration-2 | 100 | 99 | 1 | 0.990000 |" in report
     assert "| 0 | 20 | 20 | 0.100000 |" in report
     assert (
         "| baseline | 60/10/30 (0.600000/0.100000/0.300000) | "
@@ -4580,4 +4719,37 @@ def test_development_aggregate_and_report_use_games_not_teacher_accuracy() -> No
         "0.100000 | 0.500000 | True | False | False | False | False |"
     ) in report
     assert "Chosen candidate: iteration-3" in report
+    assert "Best treatment iteration: iteration-3" in report
+    assert "Win/loss/draw Wilson 95%" in report
     assert "Interpretation branch: `better-imitation-and-games`." in report
+
+
+def test_development_aggregate_preserves_baseline_and_regression_precedes_imitation() -> None:
+    """A treatment with better imitation but worse games is a regression, not deployable."""
+
+    baseline_rows = _development_rows()
+    rows_by_candidate = {"baseline": baseline_rows}
+    for iteration in (1, 2, 3):
+        rows = copy.deepcopy(baseline_rows)
+        for index in range(iteration * 5):
+            rows[index]["outcome"] = "loss"
+        rows_by_candidate[f"iteration-{iteration}"] = rows
+    supervised = {
+        1: _development_supervised_metrics(pre_agreements=50, post_agreements=90),
+        2: _development_supervised_metrics(pre_agreements=50, post_agreements=90),
+        3: _development_supervised_metrics(pre_agreements=50, post_agreements=90),
+    }
+    aggregate = dagger_module.build_development_aggregate(
+        rows_by_candidate=rows_by_candidate,
+        supervised_metrics_by_iteration=supervised,
+        evidence_identity={
+            "preflight": HASHES["1"], "baseline": HASHES["2"],
+            "iterations": [HASHES["3"], HASHES["4"], HASHES["5"]],
+            "evaluations": [HASHES["6"], HASHES["7"], HASHES["8"], HASHES["9"]],
+            "supervised": [HASHES["a"], HASHES["b"], HASHES["c"]],
+        },
+    )
+
+    assert aggregate["selected_candidate_id"] == "baseline"
+    assert aggregate["best_treatment_candidate_id"] == "iteration-1"
+    assert aggregate["interpretation"] == "regression"

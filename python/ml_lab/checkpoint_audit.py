@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 import subprocess
 import time
@@ -1224,7 +1225,7 @@ def _require_exact_counts(value: object, expected: Mapping[str, int], *, label: 
     if set(mapping) != set(expected):
         raise ValueError(f"{label} fields are invalid")
     for field, count in expected.items():
-        if isinstance(mapping.get(field), bool) or mapping.get(field) != count:
+        if type(mapping.get(field)) is not int or mapping.get(field) != count:
             raise ValueError(f"{label} does not reconcile")
 
 
@@ -1345,6 +1346,64 @@ def _validate_retained_schedule(schedule: AuditSchedule) -> None:
         )
 
 
+_RETAINED_EVALUATION_FIELDS = frozenset({
+    "schema_version", "generated_at", "schedule", "candidate", "opponent",
+    "seed_start", "seeds", "reciprocal", "games", "wins", "losses",
+    "draws", "rates", "confidence_intervals", "seat_results", "matches",
+    "evidence",
+})
+_RETAINED_MATCH_FIELDS = frozenset({
+    "seed", "candidate_seat", "winner", "outcome", "start_profile",
+    "reference_seat", "terminated", "truncated", "summary", "classification",
+    "trace_path", "trace_sha256", "trace_byte_size", "replay_path",
+    "replay_sha256", "replay_byte_size",
+})
+_LEGACY_RETAINED_MATCH_FIELDS = _RETAINED_MATCH_FIELDS - {
+    "trace_byte_size", "replay_byte_size",
+}
+
+
+def _require_exact_fields(
+    value: object, fields: frozenset[str], *, label: str,
+) -> Mapping[str, Any]:
+    mapping = _require_mapping(value, label=label)
+    if set(mapping) != fields:
+        raise ValueError(f"{label} fields are invalid")
+    return mapping
+
+
+def _require_exact_json(value: object, expected: object, *, label: str) -> None:
+    """Compare JSON values without Python's bool/int/float equality aliases."""
+
+    if isinstance(expected, Mapping):
+        actual = _require_mapping(value, label=label)
+        if set(actual) != set(expected):
+            raise ValueError(f"{label} fields are invalid")
+        for key, expected_item in expected.items():
+            _require_exact_json(
+                actual[key], expected_item, label=f"{label}.{key}",
+            )
+        return
+    if isinstance(expected, (list, tuple)):
+        if not isinstance(value, list) or len(value) != len(expected):
+            raise ValueError(f"{label} list identity changed")
+        for index, (actual_item, expected_item) in enumerate(
+            zip(value, expected, strict=True)
+        ):
+            _require_exact_json(
+                actual_item, expected_item, label=f"{label}[{index}]",
+            )
+        return
+    if expected is None:
+        if value is not None:
+            raise ValueError(f"{label} must be null")
+        return
+    if type(value) is not type(expected) or value != expected:
+        raise ValueError(f"{label} identity changed")
+    if type(value) is float and not math.isfinite(value):
+        raise ValueError(f"{label} must be finite")
+
+
 def _retained_artifact_path(
     publication_root: Path,
     evidence_root: Path,
@@ -1426,30 +1485,47 @@ def _validate_retained_evaluation_core(
         raise ValueError("retained evidence root must be the evaluation evidence directory")
 
     evaluation, _raw = _read_json_bytes(path, label="retained evaluation")
-    if evaluation.get("schema_version") != 1:
+    legacy_identity = evaluation.get("audit_identity")
+    expected_top_fields = (
+        _RETAINED_EVALUATION_FIELDS | {"audit_identity"}
+        if legacy_identity is not None else _RETAINED_EVALUATION_FIELDS
+    )
+    _require_exact_fields(
+        evaluation, frozenset(expected_top_fields), label="retained evaluation",
+    )
+    if type(evaluation.get("schema_version")) is not int or evaluation.get("schema_version") != 1:
         raise ValueError("retained evaluation schema_version must be 1")
     _require_string(
         evaluation.get("generated_at"), label="retained evaluation timestamp"
     )
-    if evaluation.get("candidate") != expected_candidate_identity:
-        raise ValueError("retained evaluation candidate controller identity changed")
-    if evaluation.get("opponent") != _scripted_controller_identity("random"):
-        raise ValueError("retained evaluation opponent controller identity changed")
-    if evaluation.get("schedule") != {
+    _require_exact_json(
+        evaluation.get("candidate"), expected_candidate_identity,
+        label="retained evaluation candidate controller",
+    )
+    _require_exact_json(
+        evaluation.get("opponent"), _scripted_controller_identity("random"),
+        label="retained evaluation opponent controller",
+    )
+    _require_exact_json(evaluation.get("schedule"), {
         "start_profile": "standard-3v3",
         "reference_seat_policy": "candidate-seat",
-    }:
-        raise ValueError("retained evaluation profile schedule changed")
+    }, label="retained evaluation profile schedule")
 
     expected_seeds = list(range(schedule.seed_start, schedule.seed_start + schedule.maps))
     expected_games = schedule.maps * 2
     if (
-        evaluation.get("seed_start") != schedule.seed_start
-        or evaluation.get("seeds") != expected_seeds
+        type(evaluation.get("seed_start")) is not int
+        or evaluation.get("seed_start") != schedule.seed_start
+        or type(evaluation.get("seeds")) is not list
         or evaluation.get("reciprocal") is not True
+        or type(evaluation.get("games")) is not int
         or evaluation.get("games") != expected_games
     ):
         raise ValueError("retained evaluation reciprocal seed schedule changed")
+    _require_exact_json(
+        evaluation.get("seeds"), expected_seeds,
+        label="retained evaluation seeds",
+    )
     matches_raw = evaluation.get("matches")
     if not isinstance(matches_raw, list) or len(matches_raw) != expected_games:
         raise ValueError("retained evaluation reciprocal match count changed")
@@ -1468,7 +1544,6 @@ def _validate_retained_evaluation_core(
     artifact_identities: list[RetainedArtifactIdentity] = []
     replay_rows: list[tuple[int, Path]] = []
     seen_artifacts: set[Path] = set()
-    legacy_identity = evaluation.get("audit_identity")
     legacy_artifacts: object = None
     if legacy_identity is not None:
         identity = _require_mapping(legacy_identity, label="retained audit identity")
@@ -1477,12 +1552,24 @@ def _validate_retained_evaluation_core(
             raise ValueError("retained audit identity must hash every artifact pair")
 
     for index, match in enumerate(matches):
+        _require_exact_fields(
+            match,
+            _LEGACY_RETAINED_MATCH_FIELDS
+            if legacy_identity is not None else _RETAINED_MATCH_FIELDS,
+            label=f"retained match {index}",
+        )
         seed = schedule.seed_start + index // 2
         seat = index % 2
-        if match.get("seed") != seed or match.get("candidate_seat") != seat:
+        if (
+            type(match.get("seed")) is not int
+            or match.get("seed") != seed
+            or type(match.get("candidate_seat")) is not int
+            or match.get("candidate_seat") != seat
+        ):
             raise ValueError("retained evaluation match ordering or seed changed")
         if (
             match.get("start_profile") != "standard-3v3"
+            or type(match.get("reference_seat")) is not int
             or match.get("reference_seat") != seat
         ):
             raise ValueError("retained evaluation match profile reference changed")
@@ -1513,11 +1600,21 @@ def _validate_retained_evaluation_core(
             ("trace_sha256", trace_sha256),
             ("replay_sha256", replay_sha256),
         ):
-            if field in match and match.get(field) != expected:
+            if type(match.get(field)) is not str or match.get(field) != expected:
                 raise ValueError(f"retained match {field} changed")
+        if legacy_identity is None:
+            if (
+                type(match.get("trace_byte_size")) is not int
+                or match.get("trace_byte_size") != len(trace_bytes)
+                or type(match.get("replay_byte_size")) is not int
+                or match.get("replay_byte_size") != len(replay_bytes)
+            ):
+                raise ValueError("retained match artifact byte sizes changed")
         if isinstance(legacy_artifacts, list):
-            legacy = _require_mapping(
-                legacy_artifacts[index], label=f"retained artifact identity {index}"
+            legacy = _require_exact_fields(
+                legacy_artifacts[index],
+                frozenset({"trace_sha256", "replay_sha256"}),
+                label=f"retained artifact identity {index}",
             )
             if (
                 legacy.get("trace_sha256") != trace_sha256
@@ -1539,10 +1636,14 @@ def _validate_retained_evaluation_core(
             or match.get("truncated") is not trace_truncated
         ):
             raise ValueError("retained termination does not reconcile with its trace")
-        if match.get("summary") != trace_summary:
-            raise ValueError("retained summary does not reconcile with its trace")
-        if match.get("classification") != trace_classification:
-            raise ValueError("retained classification does not reconcile with its trace")
+        _require_exact_json(
+            match.get("summary"), trace_summary,
+            label="retained summary",
+        )
+        _require_exact_json(
+            match.get("classification"), trace_classification,
+            label="retained classification",
+        )
 
         replay_rows.append((winner, replay_path))
         artifact_identities.append(RetainedArtifactIdentity(
@@ -1586,14 +1687,18 @@ def _validate_retained_evaluation_core(
         "loss": totals["losses"] / expected_games,
         "draw": totals["draws"] / expected_games,
     }
-    if evaluation.get("rates") != expected_rates:
-        raise ValueError("retained outcome rates do not reconcile")
+    _require_exact_json(
+        evaluation.get("rates"), expected_rates,
+        label="retained outcome rates",
+    )
     expected_intervals = {
         outcome: wilson_interval(totals[counter], expected_games, 0.95)
         for outcome, counter in (("win", "wins"), ("loss", "losses"), ("draw", "draws"))
     }
-    if evaluation.get("confidence_intervals") != expected_intervals:
-        raise ValueError("retained Wilson confidence intervals do not reconcile")
+    _require_exact_json(
+        evaluation.get("confidence_intervals"), expected_intervals,
+        label="retained Wilson confidence intervals",
+    )
     seat_results = _require_mapping(evaluation.get("seat_results"), label="retained seat results")
     if set(seat_results) != set(seats):
         raise ValueError("retained seat result fields are invalid")
@@ -1606,8 +1711,10 @@ def _validate_retained_evaluation_core(
         "control_traces": expected_games - totals["draws"],
         "draw_categories": dict(sorted(draw_categories.items())),
     }
-    if evaluation.get("evidence") != expected_evidence:
-        raise ValueError("retained evidence summary does not reconcile")
+    _require_exact_json(
+        evaluation.get("evidence"), expected_evidence,
+        label="retained evidence summary",
+    )
     return RetainedEvaluation(
         evaluation=evaluation,
         matches=matches,
@@ -1633,6 +1740,42 @@ def validate_retained_evaluation(
         expected_candidate_identity=expected_candidate_identity,
         replay_winners=None,
     )
+
+
+def _seal_retained_evaluation_artifacts(
+    evaluation_path: Path, *, publication_root: Path, evidence_root: Path,
+) -> None:
+    """Add mandatory physical hashes/sizes before public validation and reuse."""
+
+    evaluation, _raw = _read_json_bytes(
+        evaluation_path, label="retained evaluator output",
+    )
+    matches = evaluation.get("matches")
+    if not isinstance(matches, list):
+        raise ValueError("retained evaluator output matches must be a list")
+    sealed_matches: list[dict[str, Any]] = []
+    for index, raw_match in enumerate(matches):
+        match = dict(_require_mapping(raw_match, label=f"retained match {index}"))
+        trace = _retained_artifact_path(
+            publication_root, evidence_root, match.get("trace_path"),
+            label="retained trace path",
+        )
+        replay = _retained_artifact_path(
+            publication_root, evidence_root, match.get("replay_path"),
+            label="retained replay path",
+        )
+        trace_bytes = trace.read_bytes()
+        replay_bytes = replay.read_bytes()
+        match.update({
+            "trace_sha256": _sha256(trace_bytes),
+            "trace_byte_size": len(trace_bytes),
+            "replay_sha256": _sha256(replay_bytes),
+            "replay_byte_size": len(replay_bytes),
+        })
+        sealed_matches.append(match)
+    sealed = dict(evaluation)
+    sealed["matches"] = sealed_matches
+    atomic_write_json(evaluation_path, sealed)
 
 
 def evaluate_retained_candidate(
@@ -1675,6 +1818,11 @@ def evaluate_retained_candidate(
     )
     if not isinstance(result, Mapping):
         raise ValueError("retained evaluator must return an evaluation mapping")
+    _seal_retained_evaluation_artifacts(
+        evaluation_path,
+        publication_root=root,
+        evidence_root=root / "evidence",
+    )
     return validate_retained_evaluation(
         evaluation_path,
         publication_root=root,
@@ -2214,6 +2362,17 @@ def _trace_metric(summary: Mapping[str, Any], aggregate_field: str) -> float:
     value = summary.get(raw_field, summary.get(aggregate_field))
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"match summary {raw_field} must be numeric")
+    if not math.isfinite(value):
+        raise ValueError(f"match summary {raw_field} metric must be finite")
+    if aggregate_field in {"round_count", "command_count"}:
+        if type(value) is not int or value < 0:
+            raise ValueError(
+                f"match summary {raw_field} metric must be a nonnegative integer"
+            )
+    elif not -1.0 <= value <= 1.0:
+        raise ValueError(
+            f"match summary {raw_field} advantage must be between -1 and 1"
+        )
     return float(value)
 
 
@@ -2272,6 +2431,10 @@ def summarize_candidate(
         command_count = _trace_metric(summary, "command_count")
         peak_advantage = _trace_metric(summary, "peak_normalized_advantage")
         final_advantage = _trace_metric(summary, "final_normalized_advantage")
+        if peak_advantage < final_advantage:
+            raise ValueError(
+                "match summary peak advantage cannot be below final advantage"
+            )
         end_turns = summary.get("end_turns_by_seat")
         wasted_end_turns = summary.get("wasted_end_turns_by_seat")
         for values, label in (
@@ -2289,6 +2452,10 @@ def summarize_candidate(
                 )
             ):
                 raise ValueError(f"match summary {label} must contain two nonnegative integers")
+        if any(
+            wasted_end_turns[index] > end_turns[index] for index in (0, 1)
+        ):
+            raise ValueError("match summary wasted EndTurns exceed total EndTurns")
 
         counter = "losses" if outcome == "loss" else f"{outcome}s"
         counts[counter] += 1

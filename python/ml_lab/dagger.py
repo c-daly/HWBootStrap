@@ -6580,7 +6580,7 @@ _DEVELOPMENT_REASON_NAMES = (
 )
 _DEVELOPMENT_CANDIDATE_FIELDS = frozenset({
     "candidate_id", "iteration", "controller", "checkpoint_path",
-    "checkpoint_sha256", "controller_identity",
+    "checkpoint_sha256", "controller_identity", "source_publication",
 })
 _DEVELOPMENT_CONTROLLER_FIELDS = frozenset({
     "kind", "path", "source_run", "algorithm", "step", "inference_mode",
@@ -6590,6 +6590,72 @@ _DEVELOPMENT_CONTROLLER_IDENTITY_FIELDS = frozenset({
     "contract_version", "environment", "encoding_hash", "contract",
     "observation_size", "action_size", "legacy", "promotable",
 })
+_DEVELOPMENT_SOURCE_PUBLICATION_FIELDS = frozenset({
+    "kind", "iteration", "content_identity", "preflight_root",
+    "preflight_content_identity", "incoming_source_content_identity",
+    "source_run", "model_seed", "step", "controller", "controller_identity",
+    "checkpoint_path", "checkpoint_sha256", "actor_sha256",
+    "publication_metadata_sha256", "run_manifest_sha256", "bc_manifest_sha256",
+    "train_overlay_prefix", "validation_overlay_prefix",
+})
+
+
+def _development_source_publication(
+    value: Any,
+    *,
+    iteration: int,
+    controller: str,
+    controller_identity: Mapping[str, Any],
+    checkpoint_path: str,
+    checkpoint_sha256: str,
+) -> Mapping[str, Any]:
+    source = _strict_fields(
+        value,
+        _DEVELOPMENT_SOURCE_PUBLICATION_FIELDS,
+        "development source publication",
+    )
+    expected_kind = "audited-baseline" if iteration == 0 else "dagger-iteration"
+    expected_step = 38_912 if iteration == 0 else 0
+    if (
+        source["kind"] != expected_kind
+        or source["iteration"] != iteration
+        or source["model_seed"] != 227
+        or source["step"] != expected_step
+        or source["controller"] != controller
+        or source["checkpoint_path"] != checkpoint_path
+        or source["checkpoint_sha256"] != checkpoint_sha256
+        or not isinstance(source["preflight_root"], str)
+        or not source["preflight_root"]
+        or not isinstance(source["source_run"], str)
+        or not source["source_run"]
+        or _mutable_json_value(source["controller_identity"])
+        != _mutable_json_value(controller_identity)
+    ):
+        raise ValueError("development source publication identity is invalid")
+    _strict_int(source["iteration"], "development source iteration", minimum=0)
+    _strict_int(source["model_seed"], "development source model seed", minimum=0)
+    _strict_int(source["step"], "development source step", minimum=0)
+    for field in (
+        "content_identity", "preflight_content_identity", "checkpoint_sha256",
+        "actor_sha256", "publication_metadata_sha256", "run_manifest_sha256",
+        "bc_manifest_sha256",
+    ):
+        _hash(source[field], f"development source {field}")
+    incoming = source["incoming_source_content_identity"]
+    if iteration == 0:
+        if incoming is not None:
+            raise ValueError("development baseline source predecessor is invalid")
+    else:
+        _hash(incoming, "development source predecessor identity")
+    for field in ("train_overlay_prefix", "validation_overlay_prefix"):
+        prefix = source[field]
+        if type(prefix) not in {list, tuple} or len(prefix) != iteration:
+            raise ValueError("development source overlay prefix is invalid")
+        for item in prefix:
+            _hash(item, "development source overlay content identity")
+        if len(set(prefix)) != len(prefix):
+            raise ValueError("development source overlay prefix contains duplicates")
+    return _freeze_contract_value(source, "development source publication")
 
 
 @dataclass(frozen=True)
@@ -6600,6 +6666,7 @@ class DevelopmentCandidate:
     checkpoint_path: str
     checkpoint_sha256: str
     controller_identity: Mapping[str, Any]
+    source_publication: Mapping[str, Any]
 
     @classmethod
     def from_dict(cls, value: Any) -> "DevelopmentCandidate":
@@ -6682,15 +6749,25 @@ class DevelopmentCandidate:
         contract = identity["contract"]
         if not isinstance(contract, Mapping) or contract.get("version") != "tactical-v2":
             raise ValueError("development controller contract is invalid")
+        frozen_identity = _freeze_contract_value(
+            identity, "development controller identity",
+        )
+        source_publication = _development_source_publication(
+            fields["source_publication"],
+            iteration=iteration,
+            controller=controller_text,
+            controller_identity=frozen_identity,
+            checkpoint_path=checkpoint_text,
+            checkpoint_sha256=checkpoint_sha256,
+        )
         return cls(
             candidate_id=candidate_id,
             iteration=iteration,
             controller=controller_text,
             checkpoint_path=checkpoint_text,
             checkpoint_sha256=checkpoint_sha256,
-            controller_identity=_freeze_contract_value(
-                identity, "development controller identity",
-            ),
+            controller_identity=frozen_identity,
+            source_publication=source_publication,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -6701,6 +6778,7 @@ class DevelopmentCandidate:
             "checkpoint_path": self.checkpoint_path,
             "checkpoint_sha256": self.checkpoint_sha256,
             "controller_identity": _mutable_json_value(self.controller_identity),
+            "source_publication": _mutable_json_value(self.source_publication),
         }
 
 
@@ -6749,6 +6827,26 @@ class DevelopmentEvaluationDefinition:
             ):
                 raise ValueError("development candidate contract identity changed")
             parsed.append(candidate)
+        baseline_source = parsed[0].source_publication
+        if baseline_source["incoming_source_content_identity"] is not None:
+            raise ValueError("development baseline source chain is invalid")
+        for index, candidate in enumerate(parsed[1:], start=1):
+            previous = parsed[index - 1].source_publication
+            source = candidate.source_publication
+            if (
+                source["preflight_root"] != baseline_source["preflight_root"]
+                or source["preflight_content_identity"]
+                != baseline_source["preflight_content_identity"]
+                or source["incoming_source_content_identity"]
+                != previous["content_identity"]
+                or tuple(source["train_overlay_prefix"][:-1])
+                != tuple(previous["train_overlay_prefix"])
+                or tuple(source["validation_overlay_prefix"][:-1])
+                != tuple(previous["validation_overlay_prefix"])
+            ):
+                raise ValueError(
+                    "development source publication chain or cumulative overlay prefix changed"
+                )
         repository_fields = _strict_fields(
             repository,
             frozenset({"root", "commit", "source_tree", "dirty"}),
@@ -6906,9 +7004,10 @@ def _development_heldout_summary(
 def summarize_development_candidate(
     rows: Sequence[Mapping[str, Any]],
     *,
-    heldout_collections: Sequence[Mapping[str, Any]],
+    supervised_metrics: Mapping[str, Any] | None = None,
+    heldout_collections: Sequence[Mapping[str, Any]] | None = None,
 ) -> Mapping[str, Any]:
-    """Derive Task 10 game and cumulative supervised metrics from canonical rows."""
+    """Derive Task 10 game metrics and attach owned supervised evidence."""
 
     normalized = _development_rows_with_map_seed(rows, label="development candidate")
     summary = dict(summarize_candidate(normalized))
@@ -6916,8 +7015,111 @@ def summarize_development_candidate(
         name: {**dict(interval), "confidence": 0.95}
         for name, interval in summary["confidence_intervals"].items()
     }
-    summary["heldout_teacher"] = _development_heldout_summary(heldout_collections)
+    if supervised_metrics is not None:
+        summary["heldout_supervised"] = _development_supervised_candidate_metrics(
+            supervised_metrics,
+        )
+    elif heldout_collections is not None:
+        # Compatibility for callers outside the production aggregate boundary.
+        summary["heldout_teacher"] = _development_heldout_summary(heldout_collections)
+    else:
+        raise ValueError("development supervised metrics are required")
     return summary
+
+
+def _development_supervised_candidate_metrics(value: Any) -> dict[str, Any]:
+    fields = _strict_fields(
+        value,
+        frozenset({"labels", "agreements", "disagreements", "accuracy", "by_reason"}),
+        "development supervised candidate metrics",
+    )
+    labels = _strict_int(fields["labels"], "development supervised labels", minimum=1)
+    agreements = _strict_int(
+        fields["agreements"], "development supervised agreements", minimum=0,
+    )
+    disagreements = _strict_int(
+        fields["disagreements"], "development supervised disagreements", minimum=0,
+    )
+    accuracy = fields["accuracy"]
+    if (
+        agreements + disagreements != labels
+        or type(accuracy) is not float
+        or not math.isfinite(accuracy)
+        or accuracy != agreements / labels
+    ):
+        raise ValueError("development supervised overall metrics are inconsistent")
+    reasons = _strict_fields(
+        fields["by_reason"],
+        frozenset(_DEVELOPMENT_REASON_NAMES),
+        "development supervised reason metrics",
+    )
+    parsed_reasons: dict[str, Any] = {}
+    for reason in _DEVELOPMENT_REASON_NAMES:
+        item = _strict_fields(
+            reasons[reason],
+            frozenset({"labels", "agreements", "disagreements", "accuracy"}),
+            f"development supervised {reason} metrics",
+        )
+        reason_labels = _strict_int(
+            item["labels"], f"development supervised {reason} labels", minimum=0,
+        )
+        reason_agreements = _strict_int(
+            item["agreements"],
+            f"development supervised {reason} agreements",
+            minimum=0,
+        )
+        reason_disagreements = _strict_int(
+            item["disagreements"],
+            f"development supervised {reason} disagreements",
+            minimum=0,
+        )
+        expected_accuracy = (
+            reason_agreements / reason_labels if reason_labels else None
+        )
+        if (
+            reason_labels > labels
+            or reason_agreements + reason_disagreements != reason_labels
+            or item["accuracy"] != expected_accuracy
+        ):
+            raise ValueError(
+                f"development supervised {reason} metrics are inconsistent"
+            )
+        parsed_reasons[reason] = dict(item)
+    return {
+        "labels": labels,
+        "agreements": agreements,
+        "disagreements": disagreements,
+        "accuracy": accuracy,
+        "by_reason": parsed_reasons,
+    }
+
+
+def _development_supervised_pair(value: Any) -> dict[str, Any]:
+    fields = _strict_fields(
+        value,
+        frozenset({"labels", "pre", "post", "accuracy_change"}),
+        "development supervised evidence metrics",
+    )
+    labels = _strict_int(fields["labels"], "development supervised labels", minimum=1)
+    sides: dict[str, Any] = {}
+    for side in ("pre", "post"):
+        raw = fields[side]
+        if not isinstance(raw, Mapping):
+            raise ValueError("development supervised side metrics are invalid")
+        sides[side] = _development_supervised_candidate_metrics({
+            "labels": labels,
+            **dict(raw),
+        })
+    change = fields["accuracy_change"]
+    expected_change = sides["post"]["accuracy"] - sides["pre"]["accuracy"]
+    if type(change) is not float or not math.isfinite(change) or change != expected_change:
+        raise ValueError("development supervised accuracy change is inconsistent")
+    return {
+        "labels": labels,
+        "pre": {key: item for key, item in sides["pre"].items() if key != "labels"},
+        "post": {key: item for key, item in sides["post"].items() if key != "labels"},
+        "accuracy_change": change,
+    }
 
 
 def compare_development_candidates(
@@ -6961,6 +7163,29 @@ def _development_candidate_rates(
     return win, cycling, action_waste
 
 
+def _development_candidate_counts(candidate: Mapping[str, Any]) -> tuple[int, int, int]:
+    summary = candidate.get("summary")
+    counts = summary.get("counts") if isinstance(summary, Mapping) else None
+    diagnostics = summary.get("draw_diagnostics") if isinstance(summary, Mapping) else None
+    if not isinstance(counts, Mapping) or not isinstance(diagnostics, Mapping):
+        raise ValueError("development selection counts are missing")
+    games = _strict_int(counts.get("games"), "development game count", minimum=1)
+    wins = _strict_int(counts.get("wins"), "development win count", minimum=0)
+    try:
+        cycling_count = diagnostics["cycling"]["count"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("development cycling count is missing") from exc
+    cycling = _strict_int(
+        cycling_count, "development cycling count", minimum=0,
+    )
+    if wins > games or cycling > games:
+        raise ValueError("development selection counts exceed games")
+    rates = _development_candidate_rates(candidate)
+    if rates[0] != wins / games or rates[1] != cycling / games:
+        raise ValueError("development selection counts and rates are inconsistent")
+    return games, wins, cycling
+
+
 def select_development_candidate(
     candidates: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any]:
@@ -6981,9 +7206,33 @@ def select_development_candidate(
         if iteration in by_iteration:
             raise ValueError("development selection candidate iteration is duplicated")
         _development_candidate_rates(candidate)
+        _development_candidate_counts(candidate)
         by_iteration[iteration] = candidate
     if set(by_iteration) != {0, 1, 2, 3}:
         raise ValueError("development selection candidate panel is incomplete")
+    return min(
+        (by_iteration[index] for index in (0, 1, 2, 3)),
+        key=lambda candidate: (
+            -_development_candidate_rates(candidate)[0],
+            _development_candidate_rates(candidate)[1],
+            _development_candidate_rates(candidate)[2],
+            candidate["iteration"],
+        ),
+    )
+
+
+def select_development_treatment(
+    candidates: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Select the best treatment iteration without treating it as deployable."""
+
+    by_iteration = {
+        candidate.get("iteration"): candidate
+        for candidate in candidates
+        if isinstance(candidate, Mapping)
+    }
+    # Reuse the public panel validator before limiting the selection domain.
+    select_development_candidate(candidates)
     return min(
         (by_iteration[index] for index in (1, 2, 3)),
         key=lambda candidate: (
@@ -7006,14 +7255,36 @@ def decide_development_success(
     selected_win, selected_cycling, _selected_waste = _development_candidate_rates(
         selected
     )
+    baseline_games, baseline_wins, baseline_cycling_count = (
+        _development_candidate_counts(baseline)
+    )
+    selected_games, selected_wins, selected_cycling_count = (
+        _development_candidate_counts(selected)
+    )
     gain = selected_win - baseline_win
     reduction = (
         (baseline_cycling - selected_cycling) / baseline_cycling
         if baseline_cycling > 0.0
-        else 0.0
+        else None
     )
-    performance_gate = gain + 1e-12 >= 0.20 or selected_win >= 0.65
-    cycling_gate = reduction + 1e-12 >= 0.50
+    gain_numerator = selected_wins * baseline_games - baseline_wins * selected_games
+    gain_denominator = selected_games * baseline_games
+    performance_gate = (
+        gain_numerator * 5 >= gain_denominator
+        or selected_wins * 20 >= selected_games * 13
+    )
+    cycling_gate = baseline_cycling_count > 0 and (
+        (
+            baseline_cycling_count * selected_games
+            - selected_cycling_count * baseline_games
+        ) * 2
+        >= baseline_cycling_count * selected_games
+    )
+    cycling_gate_reason = (
+        "no-reducible-baseline"
+        if baseline_cycling_count == 0
+        else "threshold-met" if cycling_gate else "threshold-not-met"
+    )
     treatment_success = performance_gate and cycling_gate
     return {
         "baseline_win_rate": baseline_win,
@@ -7024,6 +7295,7 @@ def decide_development_success(
         "cycling_relative_reduction": reduction,
         "performance_gate": performance_gate,
         "cycling_gate": cycling_gate,
+        "cycling_gate_reason": cycling_gate_reason,
         "treatment_success": treatment_success,
         "replication_authorized": treatment_success,
         "one_seed_winning_rate_gate": selected_win >= 0.65,
@@ -7070,15 +7342,20 @@ def confirm_replication_milestone(
 def _development_evidence_identity(value: Any) -> dict[str, Any]:
     fields = _strict_fields(
         value,
-        frozenset({"preflight", "baseline", "iterations", "evaluations"}),
+        frozenset({
+            "preflight", "baseline", "iterations", "evaluations", "supervised",
+        }),
         "development evidence identity",
     )
     iterations = fields["iterations"]
     evaluations = fields["evaluations"]
+    supervised = fields["supervised"]
     if type(iterations) not in {list, tuple} or len(iterations) != 3:
         raise ValueError("development iteration evidence identity is incomplete")
     if type(evaluations) not in {list, tuple} or len(evaluations) != 4:
         raise ValueError("development evaluation evidence identity is incomplete")
+    if type(supervised) not in {list, tuple} or len(supervised) != 3:
+        raise ValueError("development supervised evidence identity is incomplete")
     return {
         "preflight": _hash(fields["preflight"], "development preflight identity"),
         "baseline": _hash(fields["baseline"], "development baseline identity"),
@@ -7088,15 +7365,16 @@ def _development_evidence_identity(value: Any) -> dict[str, Any]:
         "evaluations": [
             _hash(item, "development evaluation identity") for item in evaluations
         ],
+        "supervised": [
+            _hash(item, "development supervised identity") for item in supervised
+        ],
     }
 
 
 def build_development_aggregate(
     *,
     rows_by_candidate: Mapping[str, Sequence[Mapping[str, Any]]],
-    heldout_collections_by_iteration: Mapping[
-        int, Sequence[Mapping[str, Any]]
-    ],
+    supervised_metrics_by_iteration: Mapping[int, Mapping[str, Any]],
     evidence_identity: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     """Build the deterministic Task 10 decision aggregate from reopened evidence."""
@@ -7107,18 +7385,16 @@ def build_development_aggregate(
     ):
         raise ValueError("development aggregate candidate panel is incomplete")
     if (
-        not isinstance(heldout_collections_by_iteration, Mapping)
-        or set(heldout_collections_by_iteration) != {1, 2, 3}
+        not isinstance(supervised_metrics_by_iteration, Mapping)
+        or set(supervised_metrics_by_iteration) != {1, 2, 3}
     ):
-        raise ValueError("development aggregate heldout iteration panel is incomplete")
-    cumulative: dict[int, tuple[Mapping[str, Any], ...]] = {}
-    accumulated: list[Mapping[str, Any]] = []
-    for iteration in (1, 2, 3):
-        current = heldout_collections_by_iteration[iteration]
-        if type(current) not in {list, tuple} or not current:
-            raise ValueError("development heldout iteration collection is missing")
-        accumulated.extend(current)
-        cumulative[iteration] = tuple(accumulated)
+        raise ValueError("development aggregate supervised iteration panel is incomplete")
+    supervised = {
+        iteration: _development_supervised_pair(
+            supervised_metrics_by_iteration[iteration]
+        )
+        for iteration in (1, 2, 3)
+    }
 
     candidates: dict[str, Mapping[str, Any]] = {}
     normalized_rows: dict[str, tuple[Mapping[str, Any], ...]] = {}
@@ -7127,9 +7403,14 @@ def build_development_aggregate(
             rows_by_candidate[candidate_id], label=f"development {candidate_id}",
         )
         normalized_rows[candidate_id] = rows
+        source_iteration = 1 if iteration == 0 else iteration
+        side = "pre" if iteration == 0 else "post"
+        supervised_side = {
+            "labels": supervised[source_iteration]["labels"],
+            **supervised[source_iteration][side],
+        }
         summary = summarize_development_candidate(
-            rows,
-            heldout_collections=(() if iteration == 0 else cumulative[iteration]),
+            rows, supervised_metrics=supervised_side,
         )
         candidates[candidate_id] = {
             "candidate_id": candidate_id,
@@ -7138,23 +7419,25 @@ def build_development_aggregate(
         }
 
     selected = select_development_candidate(tuple(candidates.values()))
+    treatment = select_development_treatment(tuple(candidates.values()))
     baseline = candidates["baseline"]
-    decision = decide_development_success(baseline=baseline, selected=selected)
+    decision = decide_development_success(baseline=baseline, selected=treatment)
     paired = {
         candidate_id: compare_development_candidates(
             normalized_rows["baseline"], normalized_rows[candidate_id],
         )
         for candidate_id in _DEVELOPMENT_CANDIDATE_IDS[1:]
     }
-    selected_summary = selected["summary"]
-    heldout_accuracy = selected_summary["heldout_teacher"]["accuracy"]
+    treatment_iteration = treatment["iteration"]
+    treatment_supervised = supervised[treatment_iteration]
+    imitation_change = treatment_supervised["accuracy_change"]
     game_gain = decision["win_rate_gain"]
-    if game_gain > 0.0 and heldout_accuracy is not None:
-        interpretation = "better-imitation-and-games"
-    elif heldout_accuracy is not None:
-        interpretation = "better-imitation-without-better-games"
-    elif game_gain < 0.0:
+    if game_gain < 0.0:
         interpretation = "regression"
+    elif imitation_change > 0.0 and game_gain > 0.0:
+        interpretation = "better-imitation-and-games"
+    elif imitation_change > 0.0:
+        interpretation = "better-imitation-without-better-games"
     else:
         interpretation = "poor-imitation"
     return {
@@ -7167,6 +7450,14 @@ def build_development_aggregate(
         "candidates": candidates,
         "paired_vs_baseline": paired,
         "selected_candidate_id": selected["candidate_id"],
+        "best_treatment_candidate_id": treatment["candidate_id"],
+        "treatment_supervised_comparison": {
+            "iteration": treatment_iteration,
+            "labels": treatment_supervised["labels"],
+            "pre_accuracy": treatment_supervised["pre"]["accuracy"],
+            "post_accuracy": treatment_supervised["post"]["accuracy"],
+            "accuracy_change": imitation_change,
+        },
         "decision": decision,
         "replication_confirmation": {
             "performed": False,
@@ -7188,6 +7479,12 @@ def render_development_report(aggregate: Mapping[str, Any]) -> str:
     candidates = aggregate.get("candidates")
     if not isinstance(candidates, Mapping) or selected_id not in candidates:
         raise ValueError("development aggregate selected candidate is missing")
+    treatment_id = _strict_string(
+        aggregate.get("best_treatment_candidate_id"),
+        "development best treatment candidate",
+    )
+    if treatment_id not in _DEVELOPMENT_CANDIDATE_IDS[1:] or treatment_id not in candidates:
+        raise ValueError("development aggregate best treatment candidate is missing")
     decision = aggregate.get("decision")
     if not isinstance(decision, Mapping):
         raise ValueError("development aggregate decision is missing")
@@ -7278,15 +7575,50 @@ def render_development_report(aggregate: Mapping[str, Any]) -> str:
             lines.append(
                 f"- iteration {item.get('iteration')}: "
                 f"training_metrics={canonical(item.get('training_metrics'))}; "
-                f"timings={canonical(item.get('timings'))}"
+                f"timings={canonical(item.get('timings'))}; "
+                f"training_history_identity={canonical(item.get('training_history_identity'))}"
             )
+        lines.extend((
+            "",
+            "### Authenticated per-epoch training curves",
+            "| Iteration | Epoch | Validation NLL | Top-1 accuracy | Epoch seconds | Elapsed seconds | Phase timings |",
+            "|---:|---:|---:|---:|---:|---:|---|",
+        ))
+        for item in iteration_evidence:
+            history = item.get("training_history")
+            identity = item.get("training_history_identity")
+            if (
+                not isinstance(history, Mapping)
+                or not isinstance(identity, Mapping)
+                or identity.get("path") != "training-history.json"
+                or not isinstance(history.get("epochs"), (list, tuple))
+                or identity.get("epoch_count") != len(history["epochs"])
+            ):
+                raise ValueError("development report training history is invalid")
+            for event in history["epochs"]:
+                if not isinstance(event, Mapping):
+                    raise ValueError("development report training epoch is invalid")
+                phases = {
+                    key: event.get(key)
+                    for key in (
+                        "sampling_seconds", "transfer_forward_seconds",
+                        "optimization_seconds", "validation_seconds",
+                        "unclassified_seconds",
+                    )
+                }
+                lines.append(
+                    f"| {item.get('iteration')} | {event.get('epoch')} | "
+                    f"{event.get('validation_nll')} | {event.get('top1_accuracy')} | "
+                    f"{event.get('epoch_seconds')} | {event.get('elapsed_seconds')} | "
+                    f"`{canonical(phases)}` |"
+                )
     else:
         lines.append("- Physical training detail is supplied by the publication layer.")
 
     lines.extend((
         "",
         "## Supervised metrics",
-        "Held-out teacher accuracy and disagreement are reported cumulatively and by eligibility reason; teacher accuracy alone is not success.",
+        "Owned held-out pre/post actor accuracy is reported by exact corpus and eligibility reason; supervised accuracy alone is not success.",
         "| Candidate | Labels | Agreements | Disagreements | Accuracy | By reason |",
         "|---|---:|---:|---:|---:|---|",
     ))
@@ -7295,34 +7627,38 @@ def render_development_report(aggregate: Mapping[str, Any]) -> str:
         if not isinstance(candidate, Mapping):
             raise ValueError("development report candidate is missing")
         summary = candidate.get("summary")
-        teacher = summary.get("heldout_teacher") if isinstance(summary, Mapping) else None
-        if not isinstance(teacher, Mapping):
-            raise ValueError("development report heldout metrics are missing")
-        accuracy = teacher.get("accuracy")
+        supervised = (
+            summary.get("heldout_supervised") if isinstance(summary, Mapping) else None
+        )
+        if not isinstance(supervised, Mapping):
+            raise ValueError("development report heldout supervised metrics are missing")
+        accuracy = supervised.get("accuracy")
         accuracy_text = "n/a" if accuracy is None else f"{accuracy:.6f}"
         lines.append(
-            f"| {candidate_id} | {teacher['labels']} | {teacher['agreements']} | "
-            f"{teacher['disagreements']} | {accuracy_text} | "
-            f"`{canonical(teacher['by_reason'])}` |"
+            f"| {candidate_id} | {supervised['labels']} | "
+            f"{supervised['agreements']} | {supervised['disagreements']} | "
+            f"{accuracy_text} | `{canonical(supervised['by_reason'])}` |"
         )
 
     lines.extend((
         "",
         "## Game outcomes",
-        "W/L/D, Wilson intervals, seats, cycling, action waste, EndTurn waste, advantages, rounds, and decisions are derived from retained games.",
-        "| Candidate | W | L | D | Win rate | Wilson 95% | Cycling | Action waste | Wasted EndTurn ratio | Seat asymmetry |",
-        "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|",
+        "W/L/D, Win/loss/draw Wilson 95% intervals, seats, cycling, action waste, EndTurn waste, advantages, rounds, and decisions are derived from retained games.",
+        "| Candidate | W | L | D | Win rate | Win Wilson 95% | Loss Wilson 95% | Draw Wilson 95% | Cycling | Action waste | Wasted EndTurn ratio | Seat asymmetry |",
+        "|---|---:|---:|---:|---:|---|---|---|---:|---:|---:|---:|",
     ))
     for candidate_id in _DEVELOPMENT_CANDIDATE_IDS:
         summary = candidates[candidate_id]["summary"]
         counts = summary["counts"]
         rates = summary["rates"]
         diagnostics = summary["draw_diagnostics"]
-        interval = summary["confidence_intervals"]["win"]
+        intervals = summary["confidence_intervals"]
         lines.append(
             f"| {candidate_id} | {counts['wins']} | {counts['losses']} | "
             f"{counts['draws']} | {rates['win']:.6f} | "
-            f"[{interval['low']:.6f}, {interval['high']:.6f}] | "
+            f"[{intervals['win']['low']:.6f}, {intervals['win']['high']:.6f}] | "
+            f"[{intervals['loss']['low']:.6f}, {intervals['loss']['high']:.6f}] | "
+            f"[{intervals['draw']['low']:.6f}, {intervals['draw']['high']:.6f}] | "
             f"{diagnostics['cycling']['incidence']:.6f} | "
             f"{diagnostics['action_waste']['incidence']:.6f} | "
             f"{summary['candidate_end_turns']['wasted_ratio']:.6f} | "
@@ -7406,7 +7742,9 @@ def render_development_report(aggregate: Mapping[str, Any]) -> str:
         "",
         "## Chosen candidate",
         f"Chosen candidate: {selected_id}",
-        f"{selected_id} was selected by win rate, then cycling, action waste, and earlier-iteration tie breaks.",
+        f"{selected_id} was selected across baseline plus all treatments by win rate, then cycling, action waste, and earlier-iteration tie breaks.",
+        f"Best treatment iteration: {treatment_id}",
+        f"{treatment_id} alone is used for treatment thresholds and matched-corpus interpretation.",
         "",
         "## Threshold decisions",
         f"Decision values: `{canonical(decision)}`",
@@ -7418,13 +7756,18 @@ def render_development_report(aggregate: Mapping[str, Any]) -> str:
             f"{decision['win_rate_gain']:.6f} | {decision['performance_gate']} | "
             f"{decision['baseline_cycling_incidence']:.6f} | "
             f"{decision['selected_cycling_incidence']:.6f} | "
-            f"{decision['cycling_relative_reduction']:.6f} | "
+            f"{('n/a' if decision['cycling_relative_reduction'] is None else format(decision['cycling_relative_reduction'], '.6f'))} | "
             f"{decision['cycling_gate']} | {decision['treatment_success']} | "
             f"{decision['replication_authorized']} | "
             f"{decision['one_seed_winning_rate_gate']} | "
             f"{decision['confirmation_required']} |"
         ),
         f"The one-seed treatment {treatment}; a 20-point gain below 65% authorizes replication but is not the winning-model milestone.",
+        (
+            "Cycling gate: no reducible baseline incidence; the relative reduction is undefined."
+            if decision.get("cycling_gate_reason") == "no-reducible-baseline"
+            else f"Cycling gate reason: {decision.get('cycling_gate_reason')}."
+        ),
         "",
         "## Fixed interpretation",
         f"Interpretation branch: `{aggregate.get('interpretation')}`.",

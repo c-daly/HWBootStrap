@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import subprocess
 import time
@@ -1585,6 +1586,20 @@ def _require_development_repository(
     return actual
 
 
+def _require_development_candidate_inputs(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    candidate: dagger_domain.DevelopmentCandidate,
+    provider: Callable[[Path], Mapping[str, Any]],
+) -> None:
+    try:
+        checkpoint_sha256 = _sha256_bytes(Path(candidate.checkpoint_path).read_bytes())
+    except OSError as exc:
+        raise ValueError("development candidate checkpoint is missing") from exc
+    if checkpoint_sha256 != candidate.checkpoint_sha256:
+        raise ValueError("development candidate checkpoint identity changed")
+    _require_development_repository(definition, provider)
+
+
 def _retained_artifact_payload(
     artifact: checkpoint_audit_domain.RetainedArtifactIdentity,
 ) -> Mapping[str, Any]:
@@ -1784,13 +1799,13 @@ def run_development_candidate_evaluation(
     """Run or physically reopen one immutable 200-game candidate evaluation."""
 
     identity = _development_candidate_identity(definition, candidate)
-    _require_development_repository(definition, repository_identity_provider)
+    _require_development_candidate_inputs(
+        definition, candidate, repository_identity_provider,
+    )
     if type(workers) is not int or workers < 1:
         raise ValueError("development evaluation workers must be positive")
     if not callable(evaluate_candidate) or not callable(validate_candidate):
         raise RuntimeError("development physical evaluation boundary is unavailable")
-    if _sha256_bytes(Path(candidate.checkpoint_path).read_bytes()) != candidate.checkpoint_sha256:
-        raise ValueError("development candidate checkpoint bytes changed")
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     destination = root / candidate.candidate_id
@@ -1804,7 +1819,9 @@ def run_development_candidate_evaluation(
             candidate=candidate,
             validate_candidate=validate_candidate,
         )
-        _require_development_repository(definition, repository_identity_provider)
+        _require_development_candidate_inputs(
+            definition, candidate, repository_identity_provider,
+        )
         return DevelopmentCandidateRun(new_games=0, reused=True, result=reopened)
     if staging.exists():
         raise ValueError("development evaluation staging is partial; use a new output root")
@@ -1818,7 +1835,9 @@ def run_development_candidate_evaluation(
         server_cmd=server_cmd,
         workers=workers,
     )
-    _require_development_repository(definition, repository_identity_provider)
+    _require_development_candidate_inputs(
+        definition, candidate, repository_identity_provider,
+    )
     retained = validate_candidate(
         physical_root / "evaluation.json",
         publication_root=physical_root,
@@ -1828,6 +1847,9 @@ def run_development_candidate_evaluation(
     )
     if not isinstance(retained, checkpoint_audit_domain.RetainedEvaluation):
         raise ValueError("development validator returned an invalid retained evaluation")
+    _require_development_candidate_inputs(
+        definition, candidate, repository_identity_provider,
+    )
     evaluation_bytes = (physical_root / "evaluation.json").read_bytes()
     manifest: dict[str, Any] = {
         "schema_version": 1,
@@ -1856,17 +1878,29 @@ def run_development_candidate_evaluation(
         candidate=candidate,
         validate_candidate=validate_candidate,
     )
-    _require_development_repository(definition, repository_identity_provider)
-    os.replace(staging, destination)
-    published = _open_development_candidate_evaluation(
-        destination,
-        definition=definition,
-        candidate=candidate,
-        validate_candidate=validate_candidate,
+    _require_development_candidate_inputs(
+        definition, candidate, repository_identity_provider,
     )
-    if published.content_identity != staged.content_identity:
-        raise ValueError("development evaluation changed during publication")
-    _require_development_repository(definition, repository_identity_provider)
+    _require_development_candidate_inputs(
+        definition, candidate, repository_identity_provider,
+    )
+    os.replace(staging, destination)
+    try:
+        published = _open_development_candidate_evaluation(
+            destination,
+            definition=definition,
+            candidate=candidate,
+            validate_candidate=validate_candidate,
+        )
+        _require_development_candidate_inputs(
+            definition, candidate, repository_identity_provider,
+        )
+        if published.content_identity != staged.content_identity:
+            raise ValueError("development evaluation changed during publication")
+    except Exception:
+        if destination.exists() and not staging.exists():
+            os.replace(destination, staging)
+        raise
     return DevelopmentCandidateRun(new_games=200, reused=False, result=published)
 
 
@@ -1895,6 +1929,485 @@ def run_development_evaluation(
     )
 
 
+_DEVELOPMENT_SUPERVISED_REASONS = (
+    "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+)
+
+
+@dataclass(frozen=True)
+class DevelopmentHeldoutOverlayEvidence:
+    root: Path
+    content_identity: str
+    examples: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DevelopmentSupervisedEvidence:
+    root: Path
+    iteration: int
+    content_identity: str
+    heldout_overlay_roots: tuple[Path, ...]
+    heldout_overlay_prefix: tuple[str, ...]
+    incoming_candidate_id: str
+    trained_candidate_id: str
+    metrics: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class DevelopmentSupervisedRun:
+    new_inferences: int
+    reused: bool
+    result: DevelopmentSupervisedEvidence
+
+
+def _validated_supervised_overlays(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+    roots: Sequence[Path],
+    reopen: Callable[[Path], object],
+) -> tuple[tuple[DevelopmentHeldoutOverlayEvidence, ...], tuple[Mapping[str, Any], ...]]:
+    if type(iteration) is not int or iteration not in {1, 2, 3}:
+        raise ValueError("development supervised iteration must be 1, 2, or 3")
+    expected_prefix = tuple(
+        definition.candidates[iteration].source_publication[
+            "validation_overlay_prefix"
+        ]
+    )
+    if type(roots) not in {list, tuple} or len(roots) != iteration:
+        raise ValueError("development supervised cumulative overlay roots are incomplete")
+    opened: list[DevelopmentHeldoutOverlayEvidence] = []
+    examples: list[Mapping[str, Any]] = []
+    sample_ids: set[str] = set()
+    action_size = definition.candidates[iteration].controller_identity["action_size"]
+    for index, raw_root in enumerate(roots):
+        root = Path(raw_root).resolve(strict=True)
+        value = reopen(root)
+        if not isinstance(value, DevelopmentHeldoutOverlayEvidence):
+            raise ValueError("development heldout overlay reopener returned an invalid type")
+        if Path(value.root) != root or value.content_identity != expected_prefix[index]:
+            raise ValueError("development heldout overlay prefix identity changed")
+        _require_sha256(value.content_identity, "development heldout overlay identity")
+        if type(value.examples) is not tuple or not value.examples:
+            raise ValueError("development heldout overlay examples are missing")
+        for raw in value.examples:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "sample_id", "oracle_action", "reasons",
+            }:
+                raise ValueError("development heldout sample fields are invalid")
+            sample_id = raw["sample_id"]
+            action = raw["oracle_action"]
+            reasons = raw["reasons"]
+            if (
+                not isinstance(sample_id, str)
+                or not sample_id
+                or sample_id in sample_ids
+                or type(action) is not int
+                or not 0 <= action < action_size
+                or type(reasons) not in {list, tuple}
+                or not reasons
+                or len(set(reasons)) != len(reasons)
+                or any(reason not in _DEVELOPMENT_SUPERVISED_REASONS for reason in reasons)
+            ):
+                raise ValueError("development heldout sample identity is invalid")
+            sample_ids.add(sample_id)
+            examples.append(_freeze_json({
+                "sample_id": sample_id,
+                "oracle_action": action,
+                "reasons": list(reasons),
+            }))
+        opened.append(value)
+    return tuple(opened), tuple(examples)
+
+
+def _validated_supervised_predictions(
+    value: object,
+    *,
+    examples: Sequence[Mapping[str, Any]],
+    action_size: int,
+    label: str,
+) -> tuple[Mapping[str, Any], ...]:
+    if type(value) not in {list, tuple} or len(value) != len(examples):
+        raise ValueError(f"development {label} predictions are incomplete")
+    parsed: list[Mapping[str, Any]] = []
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping) or set(raw) != {"sample_id", "action"}:
+            raise ValueError(f"development {label} prediction fields are invalid")
+        if (
+            raw["sample_id"] != examples[index]["sample_id"]
+            or type(raw["action"]) is not int
+            or not 0 <= raw["action"] < action_size
+        ):
+            raise ValueError(
+                f"development {label} ordered sample prediction identity changed"
+            )
+        parsed.append(_freeze_json(dict(raw)))
+    return tuple(parsed)
+
+
+def _supervised_accuracy(
+    examples: Sequence[Mapping[str, Any]],
+    predictions: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    agreements = sum(
+        prediction["action"] == example["oracle_action"]
+        for example, prediction in zip(examples, predictions, strict=True)
+    )
+    labels = len(examples)
+    by_reason: dict[str, Any] = {}
+    for reason in _DEVELOPMENT_SUPERVISED_REASONS:
+        indices = [
+            index for index, example in enumerate(examples)
+            if reason in example["reasons"]
+        ]
+        reason_agreements = sum(
+            predictions[index]["action"] == examples[index]["oracle_action"]
+            for index in indices
+        )
+        reason_labels = len(indices)
+        by_reason[reason] = {
+            "labels": reason_labels,
+            "agreements": reason_agreements,
+            "disagreements": reason_labels - reason_agreements,
+            "accuracy": (
+                reason_agreements / reason_labels if reason_labels else None
+            ),
+        }
+    return {
+        "agreements": agreements,
+        "disagreements": labels - agreements,
+        "accuracy": agreements / labels if labels else None,
+        "by_reason": by_reason,
+    }
+
+
+def _supervised_metrics(
+    examples: Sequence[Mapping[str, Any]],
+    pre: Sequence[Mapping[str, Any]],
+    post: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    pre_metrics = _supervised_accuracy(examples, pre)
+    post_metrics = _supervised_accuracy(examples, post)
+    return {
+        "labels": len(examples),
+        "pre": pre_metrics,
+        "post": post_metrics,
+        "accuracy_change": post_metrics["accuracy"] - pre_metrics["accuracy"],
+    }
+
+
+def _supervised_identity(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+) -> dict[str, Any]:
+    return {
+        "definition": _development_definition_identity(definition),
+        "iteration": iteration,
+        "heldout_overlay_roots": [str(Path(item.root)) for item in overlays],
+        "heldout_overlay_prefix": [item.content_identity for item in overlays],
+        "incoming_candidate": definition.candidates[iteration - 1].to_dict(),
+        "trained_candidate": definition.candidates[iteration].to_dict(),
+    }
+
+
+def _supervised_artifact_descriptor(path: Path, relative: str) -> dict[str, Any]:
+    payload = path.read_bytes()
+    return {
+        "path": relative,
+        "sha256": _sha256_bytes(payload),
+        "byte_size": len(payload),
+    }
+
+
+def _require_supervised_checkpoints(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+) -> None:
+    for candidate in definition.candidates[iteration - 1:iteration + 1]:
+        try:
+            actual = _sha256_bytes(Path(candidate.checkpoint_path).read_bytes())
+        except OSError as exc:
+            raise ValueError("development supervised checkpoint is missing") from exc
+        if actual != candidate.checkpoint_sha256:
+            raise ValueError("development supervised checkpoint bytes changed")
+
+
+def _open_development_supervised_evaluation(
+    root: Path,
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+    examples: Sequence[Mapping[str, Any]],
+) -> DevelopmentSupervisedEvidence:
+    publication_root = Path(root).resolve(strict=True)
+    try:
+        manifest = json.loads((publication_root / "manifest.json").read_text("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("development supervised manifest is unreadable") from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest) != {
+            "schema_version", "status", "identity", "artifacts", "content_identity",
+        }
+        or manifest["schema_version"] != 1
+        or manifest["status"] != "completed"
+        or not _same_json(
+            manifest["identity"],
+            _supervised_identity(
+                definition=definition, iteration=iteration, overlays=overlays,
+            ),
+        )
+        or _content_identity(manifest) != manifest["content_identity"]
+    ):
+        raise ValueError("development supervised publication identity changed")
+    artifacts = manifest["artifacts"]
+    if not isinstance(artifacts, Mapping) or set(artifacts) != {
+        "evidence", "predictions", "metrics",
+    }:
+        raise ValueError("development supervised artifact descriptors are invalid")
+    payloads: dict[str, Any] = {}
+    for name in ("evidence", "predictions", "metrics"):
+        descriptor = artifacts[name]
+        expected_path = f"{name}.json"
+        if (
+            not isinstance(descriptor, Mapping)
+            or set(descriptor) != {"path", "sha256", "byte_size"}
+            or descriptor["path"] != expected_path
+            or type(descriptor["byte_size"]) is not int
+            or descriptor["byte_size"] < 1
+        ):
+            raise ValueError("development supervised artifact descriptor changed")
+        try:
+            raw = (publication_root / expected_path).read_bytes()
+            payload = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"development supervised {name} artifact is unreadable") from exc
+        if (
+            len(raw) != descriptor["byte_size"]
+            or _sha256_bytes(raw)
+            != _require_sha256(
+                descriptor["sha256"], f"development supervised {name} sha256",
+            )
+        ):
+            raise ValueError(f"development supervised {name} artifact hash changed")
+        payloads[name] = payload
+    expected_evidence = {
+        "schema_version": 1,
+        "iteration": iteration,
+        "overlays": [
+            {
+                "root": str(Path(item.root)),
+                "content_identity": item.content_identity,
+            }
+            for item in overlays
+        ],
+        "examples": _mutable_stage_json(examples),
+    }
+    if not _same_json(payloads["evidence"], expected_evidence):
+        raise ValueError("development supervised evidence bytes changed")
+    predictions = payloads["predictions"]
+    if not isinstance(predictions, Mapping) or set(predictions) != {
+        "schema_version", "iteration", "pre", "post",
+    } or predictions["schema_version"] != 1 or predictions["iteration"] != iteration:
+        raise ValueError("development supervised prediction fields are invalid")
+    action_size = definition.candidates[iteration].controller_identity["action_size"]
+    pre = _validated_supervised_predictions(
+        predictions["pre"], examples=examples, action_size=action_size, label="pre",
+    )
+    post = _validated_supervised_predictions(
+        predictions["post"], examples=examples, action_size=action_size, label="post",
+    )
+    metrics = _supervised_metrics(examples, pre, post)
+    if not _same_json(payloads["metrics"], metrics):
+        raise ValueError("development supervised metrics changed")
+    actual = {path.name for path in publication_root.iterdir()}
+    if actual != {"evidence.json", "predictions.json", "metrics.json", "manifest.json"}:
+        raise ValueError("development supervised publication contains unowned files")
+    return DevelopmentSupervisedEvidence(
+        root=publication_root,
+        iteration=iteration,
+        content_identity=manifest["content_identity"],
+        heldout_overlay_roots=tuple(Path(item.root) for item in overlays),
+        heldout_overlay_prefix=tuple(item.content_identity for item in overlays),
+        incoming_candidate_id=definition.candidates[iteration - 1].candidate_id,
+        trained_candidate_id=definition.candidates[iteration].candidate_id,
+        metrics=_freeze_json(metrics),
+    )
+
+
+def reopen_development_supervised_evaluation(
+    root: Path,
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+    heldout_overlay_roots: Sequence[Path],
+    reopen_heldout_overlay: Callable[[Path], object] | None,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
+) -> DevelopmentSupervisedEvidence:
+    """Reopen every source and byte of a completed Task 10 supervised stage."""
+
+    if not callable(reopen_heldout_overlay):
+        raise RuntimeError("development heldout overlay reopener is unavailable")
+    _require_development_repository(definition, repository_identity_provider)
+    overlays, examples = _validated_supervised_overlays(
+        definition=definition,
+        iteration=iteration,
+        roots=heldout_overlay_roots,
+        reopen=reopen_heldout_overlay,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    result = _open_development_supervised_evaluation(
+        root,
+        definition=definition,
+        iteration=iteration,
+        overlays=overlays,
+        examples=examples,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    return result
+
+
+def run_development_supervised_evaluation(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+    heldout_overlay_roots: Sequence[Path],
+    output_root: Path,
+    reopen_heldout_overlay: Callable[[Path], object] | None,
+    predict_actions: Callable[..., object] | None = None,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
+) -> DevelopmentSupervisedRun:
+    """Run ordered pre/post held-out predictions or exactly reuse their publication."""
+
+    if not callable(reopen_heldout_overlay):
+        raise RuntimeError("development heldout overlay reopener is unavailable")
+    _require_development_repository(definition, repository_identity_provider)
+    overlays, examples = _validated_supervised_overlays(
+        definition=definition,
+        iteration=iteration,
+        roots=heldout_overlay_roots,
+        reopen=reopen_heldout_overlay,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    root = Path(output_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"iteration-{iteration}"
+    staging = root / f"iteration-{iteration}.staging"
+    if destination.exists():
+        if staging.exists():
+            raise ValueError("development supervised destination and staging are ambiguous")
+        reopened = _open_development_supervised_evaluation(
+            destination,
+            definition=definition,
+            iteration=iteration,
+            overlays=overlays,
+            examples=examples,
+        )
+        _require_supervised_checkpoints(definition, iteration)
+        _require_development_repository(definition, repository_identity_provider)
+        return DevelopmentSupervisedRun(
+            new_inferences=0, reused=True, result=reopened,
+        )
+    if staging.exists():
+        raise ValueError("development supervised staging is partial; use a new output root")
+    if not callable(predict_actions):
+        raise RuntimeError(
+            "development supervised predictor is unavailable until the Task 11 adapter is injected"
+        )
+    action_size = definition.candidates[iteration].controller_identity["action_size"]
+    incoming = definition.candidates[iteration - 1]
+    trained = definition.candidates[iteration]
+    pre_raw = predict_actions(
+        controller=incoming.controller,
+        controller_identity=incoming.controller_identity,
+        checkpoint_path=incoming.checkpoint_path,
+        examples=examples,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    pre = _validated_supervised_predictions(
+        pre_raw, examples=examples, action_size=action_size, label="pre",
+    )
+    post_raw = predict_actions(
+        controller=trained.controller,
+        controller_identity=trained.controller_identity,
+        checkpoint_path=trained.checkpoint_path,
+        examples=examples,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    post = _validated_supervised_predictions(
+        post_raw, examples=examples, action_size=action_size, label="post",
+    )
+    staging.mkdir()
+    evidence = {
+        "schema_version": 1,
+        "iteration": iteration,
+        "overlays": [
+            {"root": str(Path(item.root)), "content_identity": item.content_identity}
+            for item in overlays
+        ],
+        "examples": _mutable_stage_json(examples),
+    }
+    predictions = {
+        "schema_version": 1,
+        "iteration": iteration,
+        "pre": _mutable_stage_json(pre),
+        "post": _mutable_stage_json(post),
+    }
+    metrics = _supervised_metrics(examples, pre, post)
+    atomic_write_json(staging / "evidence.json", evidence)
+    atomic_write_json(staging / "predictions.json", predictions)
+    atomic_write_json(staging / "metrics.json", metrics)
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "completed",
+        "identity": _supervised_identity(
+            definition=definition, iteration=iteration, overlays=overlays,
+        ),
+        "artifacts": {
+            name: _supervised_artifact_descriptor(staging / f"{name}.json", f"{name}.json")
+            for name in ("evidence", "predictions", "metrics")
+        },
+    }
+    manifest["content_identity"] = _content_identity(manifest)
+    atomic_write_json(staging / "manifest.json", manifest)
+    staged = _open_development_supervised_evaluation(
+        staging,
+        definition=definition,
+        iteration=iteration,
+        overlays=overlays,
+        examples=examples,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    os.replace(staging, destination)
+    published = _open_development_supervised_evaluation(
+        destination,
+        definition=definition,
+        iteration=iteration,
+        overlays=overlays,
+        examples=examples,
+    )
+    if published.content_identity != staged.content_identity:
+        raise ValueError("development supervised publication changed")
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    return DevelopmentSupervisedRun(
+        new_inferences=len(examples) * 2,
+        reused=False,
+        result=published,
+    )
+
+
 @dataclass(frozen=True)
 class DevelopmentPreflightEvidence:
     evidence_root: Path
@@ -1905,6 +2418,34 @@ class DevelopmentPreflightEvidence:
     starting_learner_checkpoint_sha256: str
     starting_learner_controller: str
     starting_learner_controller_identity: Mapping[str, Any]
+    starting_learner_model_seed: int
+    starting_learner_step: int
+    starting_learner_source_content_identity: str
+
+
+@dataclass(frozen=True)
+class DevelopmentSourcePublicationEvidence:
+    root: Path
+    kind: str
+    iteration: int
+    content_identity: str
+    preflight_root: Path
+    preflight_content_identity: str
+    incoming_source_content_identity: str | None
+    source_run: str
+    model_seed: int
+    step: int
+    controller: str
+    controller_identity: Mapping[str, Any]
+    checkpoint_path: str
+    checkpoint_sha256: str
+    actor_sha256: str
+    publication_metadata_sha256: str
+    run_manifest_sha256: str
+    bc_manifest_sha256: str
+    train_overlay_prefix: tuple[str, ...]
+    validation_overlay_prefix: tuple[str, ...]
+    publication_identity: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1923,6 +2464,9 @@ class DevelopmentIterationEvidence:
     collection_metrics: Mapping[str, Any]
     training_metrics: Mapping[str, Any]
     timings: Mapping[str, Any]
+    training_history_root: Path
+    training_history: Mapping[str, Any]
+    training_history_identity: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1931,6 +2475,228 @@ class DevelopmentAggregatePublication:
     aggregate: Mapping[str, Any]
     report: str
     content_identity: str
+
+
+_DEVELOPMENT_SOURCE_PUBLICATION_FIELDS = frozenset({
+    "kind", "iteration", "content_identity", "preflight_root",
+    "preflight_content_identity", "incoming_source_content_identity",
+    "source_run", "model_seed", "step", "controller", "controller_identity",
+    "checkpoint_path", "checkpoint_sha256", "actor_sha256",
+    "publication_metadata_sha256", "run_manifest_sha256", "bc_manifest_sha256",
+    "train_overlay_prefix", "validation_overlay_prefix",
+})
+
+
+def _development_source_publication_identity(
+    value: DevelopmentSourcePublicationEvidence,
+) -> dict[str, Any]:
+    return {
+        "kind": value.kind,
+        "iteration": value.iteration,
+        "content_identity": value.content_identity,
+        "preflight_root": str(Path(value.preflight_root)),
+        "preflight_content_identity": value.preflight_content_identity,
+        "incoming_source_content_identity": value.incoming_source_content_identity,
+        "source_run": value.source_run,
+        "model_seed": value.model_seed,
+        "step": value.step,
+        "controller": value.controller,
+        "controller_identity": value.controller_identity,
+        "checkpoint_path": value.checkpoint_path,
+        "checkpoint_sha256": value.checkpoint_sha256,
+        "actor_sha256": value.actor_sha256,
+        "publication_metadata_sha256": value.publication_metadata_sha256,
+        "run_manifest_sha256": value.run_manifest_sha256,
+        "bc_manifest_sha256": value.bc_manifest_sha256,
+        "train_overlay_prefix": list(value.train_overlay_prefix),
+        "validation_overlay_prefix": list(value.validation_overlay_prefix),
+    }
+
+
+def _validated_development_source_publication(
+    value: object,
+    *,
+    root: Path,
+    iteration: int,
+    preflight: DevelopmentPreflightEvidence,
+    previous: DevelopmentSourcePublicationEvidence | None,
+) -> DevelopmentSourcePublicationEvidence:
+    if not isinstance(value, DevelopmentSourcePublicationEvidence):
+        raise ValueError("development source publication reopener returned an invalid type")
+    canonical = Path(root).resolve(strict=True)
+    if Path(value.root) != canonical or type(value.iteration) is not int:
+        raise ValueError("development source publication physical identity changed")
+    expected_identity = _development_source_publication_identity(value)
+    if (
+        set(value.publication_identity) != _DEVELOPMENT_SOURCE_PUBLICATION_FIELDS
+        or not _same_json(value.publication_identity, expected_identity)
+    ):
+        raise ValueError(
+            "development source publication identity or cumulative overlay prefix changed"
+        )
+    expected_kind = "audited-baseline" if iteration == 0 else "dagger-iteration"
+    expected_step = 38_912 if iteration == 0 else 0
+    if (
+        value.iteration != iteration
+        or value.kind != expected_kind
+        or Path(value.preflight_root) != Path(preflight.evidence_root)
+        or value.preflight_content_identity != preflight.content_identity
+        or type(value.model_seed) is not int
+        or value.model_seed != 227
+        or type(value.step) is not int
+        or value.step != expected_step
+    ):
+        raise ValueError("development source preflight, seed, or step identity changed")
+    for field in (
+        "content_identity", "preflight_content_identity", "checkpoint_sha256",
+        "actor_sha256", "publication_metadata_sha256", "run_manifest_sha256",
+        "bc_manifest_sha256",
+    ):
+        _require_sha256(getattr(value, field), f"development source {field}")
+    checkpoint = Path(value.checkpoint_path).resolve(strict=True)
+    if (
+        not checkpoint.is_file()
+        or str(checkpoint) != value.checkpoint_path
+        or _sha256_bytes(checkpoint.read_bytes()) != value.checkpoint_sha256
+    ):
+        raise ValueError("development source checkpoint identity changed")
+    try:
+        controller = json.loads(value.controller)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("development source controller identity is invalid") from exc
+    if (
+        not isinstance(controller, Mapping)
+        or controller.get("path") != value.checkpoint_path
+        or controller.get("source_run") != value.source_run
+        or controller.get("step") != expected_step
+        or not isinstance(value.controller_identity, Mapping)
+        or value.controller_identity.get("path") != value.checkpoint_path
+        or value.controller_identity.get("step") != expected_step
+    ):
+        raise ValueError("development source actor controller identity changed")
+    for field in ("train_overlay_prefix", "validation_overlay_prefix"):
+        prefix = getattr(value, field)
+        if type(prefix) is not tuple or len(prefix) != iteration:
+            raise ValueError("development source cumulative overlay prefix changed")
+        for content_identity in prefix:
+            _require_sha256(content_identity, "development source overlay identity")
+    if iteration == 0:
+        if (
+            previous is not None
+            or value.incoming_source_content_identity is not None
+            or value.content_identity
+            != preflight.starting_learner_source_content_identity
+        ):
+            raise ValueError("development baseline source identity changed")
+    else:
+        if previous is None or (
+            value.incoming_source_content_identity != previous.content_identity
+            or value.train_overlay_prefix[:-1] != previous.train_overlay_prefix
+            or value.validation_overlay_prefix[:-1]
+            != previous.validation_overlay_prefix
+        ):
+            raise ValueError("development source cumulative overlay chain changed")
+    return value
+
+
+def build_development_evaluation_definition(
+    *,
+    preflight_root: Path,
+    baseline_root: Path,
+    iteration_roots: Sequence[Path],
+    panel_hash: str,
+    scenario_hash: str,
+    contract_hash: str,
+    encoding_hash: str,
+    repository_root: Path,
+    reopen_preflight: Callable[[Path], object] | None,
+    reopen_baseline: Callable[[Path], object] | None,
+    reopen_iteration: Callable[[Path], object] | None,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
+) -> dagger_domain.DevelopmentEvaluationDefinition:
+    """Build the four-candidate definition only from reopened physical evidence."""
+
+    if (
+        reopen_preflight is None
+        or reopen_baseline is None
+        or reopen_iteration is None
+    ):
+        raise RuntimeError("physical preflight and publication reopen adapters are required")
+    if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
+        raise ValueError("development definition requires exactly three iteration roots")
+    repository = _validated_repository_identity(
+        Path(repository_root), repository_identity_provider,
+    )
+    canonical_preflight_root = Path(preflight_root).resolve(strict=True)
+    preflight_value = reopen_preflight(canonical_preflight_root)
+    if not isinstance(preflight_value, DevelopmentPreflightEvidence):
+        raise ValueError("development preflight reopener returned an invalid type")
+    preflight = preflight_value
+    if (
+        Path(preflight.evidence_root) != canonical_preflight_root
+        or canonical_preflight_root.is_relative_to(Path(repository["root"]))
+        or preflight.evidence_class != "sealed-engine"
+        or not isinstance(preflight.selected_oracle, dagger_domain.OracleSpec)
+        or type(preflight.starting_learner_model_seed) is not int
+        or preflight.starting_learner_model_seed != 227
+        or type(preflight.starting_learner_step) is not int
+        or preflight.starting_learner_step != 38_912
+    ):
+        raise ValueError("development physical preflight identity is invalid")
+    _require_sha256(preflight.content_identity, "development preflight content identity")
+    _require_sha256(
+        preflight.starting_learner_source_content_identity,
+        "development preflight starting source identity",
+    )
+    dagger_domain.OracleSpec.from_dict(preflight.selected_oracle.to_dict())
+    roots = (
+        Path(baseline_root).resolve(strict=True),
+        *(Path(root).resolve(strict=True) for root in iteration_roots),
+    )
+    candidates: list[dagger_domain.DevelopmentCandidate] = []
+    sources: list[DevelopmentSourcePublicationEvidence] = []
+    for iteration, root in enumerate(roots):
+        reopened = reopen_baseline(root) if iteration == 0 else reopen_iteration(root)
+        source = _validated_development_source_publication(
+            reopened,
+            root=root,
+            iteration=iteration,
+            preflight=preflight,
+            previous=None if iteration == 0 else sources[-1],
+        )
+        source_identity = _development_source_publication_identity(source)
+        candidate = dagger_domain.DevelopmentCandidate.from_dict({
+            "candidate_id": "baseline" if iteration == 0 else f"iteration-{iteration}",
+            "iteration": iteration,
+            "controller": source.controller,
+            "checkpoint_path": source.checkpoint_path,
+            "checkpoint_sha256": source.checkpoint_sha256,
+            "controller_identity": source.controller_identity,
+            "source_publication": source_identity,
+        })
+        if iteration == 0 and (
+            preflight.starting_learner_checkpoint_path != candidate.checkpoint_path
+            or preflight.starting_learner_checkpoint_sha256
+            != candidate.checkpoint_sha256
+            or preflight.starting_learner_controller != candidate.controller
+            or not _same_json(
+                preflight.starting_learner_controller_identity,
+                candidate.controller_identity,
+            )
+        ):
+            raise ValueError("development baseline does not match preflight starting learner")
+        sources.append(source)
+        candidates.append(candidate)
+    return dagger_domain.DevelopmentEvaluationDefinition.create(
+        candidates=candidates,
+        panel_hash=panel_hash,
+        scenario_hash=scenario_hash,
+        contract_hash=contract_hash,
+        encoding_hash=encoding_hash,
+        repository=repository,
+    )
 
 
 def _validated_development_preflight(
@@ -2016,6 +2782,88 @@ def _validated_development_iteration(
     ):
         if not isinstance(payload, Mapping):
             raise ValueError(f"development iteration {label} is invalid")
+    expected_training_fields = {
+        "schema_version", "model_seed", "device", "epoch", "max_epochs",
+        "batches", "examples", "mean_training_loss", "validation_nll",
+        "top1_accuracy", "top3_accuracy", "top5_accuracy", "best_epoch",
+        "best_validation_nll", "epochs_without_improvement", "patience",
+        "epoch_seconds", "elapsed_seconds", "examples_per_second",
+        "sampling_seconds", "transfer_forward_seconds", "optimization_seconds",
+        "validation_seconds", "unclassified_seconds",
+    }
+    try:
+        actor_source_root = Path(json.loads(expected.controller)["source_run"]).resolve(
+            strict=True
+        )
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("development iteration actor source run is invalid") from exc
+    if Path(value.training_history_root) != actor_source_root:
+        raise ValueError("development iteration training history root identity changed")
+    physical_history, physical_identity = imitation_domain._read_training_history_identity(
+        actor_source_root,
+    )
+    if (
+        not _same_json(value.training_history, physical_history)
+        or not _same_json(value.training_history_identity, physical_identity)
+        or set(physical_history) != {
+            "schema_version", "model_seed", "training_device",
+            "publication_device", "epochs",
+        }
+        or physical_history["schema_version"] != 1
+        or type(physical_history["model_seed"]) is not int
+        or physical_history["model_seed"] != 227
+        or not isinstance(physical_history["training_device"], Mapping)
+        or physical_history["publication_device"] != "cpu"
+    ):
+        raise ValueError("development iteration physical training history identity changed")
+    epochs = physical_history["epochs"]
+    previous_elapsed = -1.0
+    for epoch_index, event in enumerate(epochs, start=1):
+        if not isinstance(event, Mapping) or set(event) != expected_training_fields:
+            raise ValueError("development iteration training history epoch fields changed")
+        imitation_domain._validate_behavioral_cloning_progress_event(event)
+        if (
+            event["model_seed"] != 227
+            or event["epoch"] != epoch_index
+            or event["max_epochs"] != 50
+            or not isinstance(event["device"], str)
+            or not event["device"]
+            or event["validation_nll"] < 0
+            or event["best_validation_nll"] < 0
+            or any(
+                not 0.0 <= event[field] <= 1.0
+                for field in ("top1_accuracy", "top3_accuracy", "top5_accuracy")
+            )
+            or not (
+                event["top1_accuracy"]
+                <= event["top3_accuracy"]
+                <= event["top5_accuracy"]
+            )
+            or not 1 <= event["best_epoch"] <= event["epoch"]
+            or event["elapsed_seconds"] < previous_elapsed
+        ):
+            raise ValueError("development iteration training history epoch is invalid")
+        previous_elapsed = float(event["elapsed_seconds"])
+    training_metrics = value.training_metrics
+    if set(training_metrics) != {
+        "best_epoch", "best_validation_nll", "epochs_trained",
+    }:
+        raise ValueError("development iteration training summary fields changed")
+    final = epochs[-1]
+    if (
+        type(training_metrics["best_epoch"]) is not int
+        or type(training_metrics["epochs_trained"]) is not int
+        or isinstance(training_metrics["best_validation_nll"], bool)
+        or not isinstance(training_metrics["best_validation_nll"], (int, float))
+        or not math.isfinite(training_metrics["best_validation_nll"])
+        or training_metrics["best_validation_nll"] < 0
+        or training_metrics["best_epoch"] != final["best_epoch"]
+        or training_metrics["best_validation_nll"]
+        != final["best_validation_nll"]
+        or training_metrics["epochs_trained"] != len(epochs)
+        or physical_identity.get("epoch_count") != len(epochs)
+    ):
+        raise ValueError("development iteration training history summary changed")
     return value
 
 
@@ -2040,6 +2888,114 @@ def _validated_development_evaluation_evidence(
     if type(value.matches) is not tuple:
         raise ValueError("development physical evaluation rows are invalid")
     return value
+
+
+def _validated_development_supervised_evidence(
+    value: object,
+    *,
+    root: Path,
+    iteration: int,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+) -> DevelopmentSupervisedEvidence:
+    if not isinstance(value, DevelopmentSupervisedEvidence):
+        raise ValueError("development supervised reopener returned an invalid type")
+    canonical = Path(root).resolve(strict=True)
+    expected_prefix = tuple(
+        definition.candidates[iteration].source_publication[
+            "validation_overlay_prefix"
+        ]
+    )
+    if (
+        Path(value.root) != canonical
+        or type(value.iteration) is not int
+        or value.iteration != iteration
+        or value.incoming_candidate_id
+        != definition.candidates[iteration - 1].candidate_id
+        or value.trained_candidate_id != definition.candidates[iteration].candidate_id
+        or value.heldout_overlay_prefix != expected_prefix
+        or type(value.heldout_overlay_roots) is not tuple
+        or len(value.heldout_overlay_roots) != iteration
+        or any(not Path(item).resolve(strict=True).is_dir()
+               for item in value.heldout_overlay_roots)
+        or not isinstance(value.metrics, Mapping)
+    ):
+        raise ValueError("development physical supervised evidence identity changed")
+    _require_sha256(value.content_identity, "development supervised content identity")
+    return value
+
+
+def _development_preflight_snapshot(value: DevelopmentPreflightEvidence) -> Mapping[str, Any]:
+    return {
+        "evidence_root": str(value.evidence_root),
+        "content_identity": value.content_identity,
+        "selected_oracle": value.selected_oracle.to_dict(),
+        "evidence_class": value.evidence_class,
+        "starting_learner_checkpoint_path": value.starting_learner_checkpoint_path,
+        "starting_learner_checkpoint_sha256": value.starting_learner_checkpoint_sha256,
+        "starting_learner_controller": value.starting_learner_controller,
+        "starting_learner_controller_identity": value.starting_learner_controller_identity,
+        "starting_learner_model_seed": value.starting_learner_model_seed,
+        "starting_learner_step": value.starting_learner_step,
+        "starting_learner_source_content_identity": (
+            value.starting_learner_source_content_identity
+        ),
+    }
+
+
+def _development_iteration_snapshot(value: DevelopmentIterationEvidence) -> Mapping[str, Any]:
+    return {
+        "root": str(value.root), "iteration": value.iteration,
+        "content_identity": value.content_identity,
+        "selected_oracle": value.selected_oracle.to_dict(),
+        "preflight_root": str(value.preflight_root),
+        "preflight_content_identity": value.preflight_content_identity,
+        "preflight_evidence_class": value.preflight_evidence_class,
+        "actor_checkpoint_sha256": value.actor_checkpoint_sha256,
+        "actor_controller": value.actor_controller,
+        "actor_controller_identity": value.actor_controller_identity,
+        "validation_collection": value.validation_collection,
+        "collection_metrics": value.collection_metrics,
+        "training_metrics": value.training_metrics,
+        "timings": value.timings,
+        "training_history_root": str(value.training_history_root),
+        "training_history": value.training_history,
+        "training_history_identity": value.training_history_identity,
+    }
+
+
+def _development_evaluation_snapshot(value: DevelopmentCandidateEvidence) -> Mapping[str, Any]:
+    return {
+        "root": str(value.root), "candidate_id": value.candidate_id,
+        "controller": value.controller,
+        "checkpoint_sha256": value.checkpoint_sha256,
+        "controller_identity": value.controller_identity,
+        "content_identity": value.content_identity,
+        "matches": value.matches,
+    }
+
+
+def _development_supervised_snapshot(value: DevelopmentSupervisedEvidence) -> Mapping[str, Any]:
+    return {
+        "root": str(value.root), "iteration": value.iteration,
+        "content_identity": value.content_identity,
+        "heldout_overlay_roots": [str(root) for root in value.heldout_overlay_roots],
+        "heldout_overlay_prefix": value.heldout_overlay_prefix,
+        "incoming_candidate_id": value.incoming_candidate_id,
+        "trained_candidate_id": value.trained_candidate_id,
+        "metrics": value.metrics,
+    }
+
+
+def _require_development_definition_checkpoints(
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+) -> None:
+    for candidate in definition.candidates:
+        try:
+            actual = _sha256_bytes(Path(candidate.checkpoint_path).read_bytes())
+        except OSError as exc:
+            raise ValueError("development aggregate source checkpoint is missing") from exc
+        if actual != candidate.checkpoint_sha256:
+            raise ValueError("development aggregate source checkpoint identity changed")
 
 
 _DEVELOPMENT_AGGREGATE_MANIFEST_FIELDS = frozenset({
@@ -2116,12 +3072,17 @@ def publish_development_aggregate(
     preflight_root: Path,
     iteration_roots: Sequence[Path],
     evaluations_root: Path,
+    supervised_roots: Sequence[Path],
     output_root: Path,
     reopen_preflight: Callable[[Path], object] | None,
     reopen_iteration: Callable[[Path], object] | None,
     reopen_evaluation: Callable[
         [Path, dagger_domain.DevelopmentCandidate], object
     ] | None,
+    reopen_supervised: Callable[[Path, int], object] | None,
+    repository_identity_provider: Callable[
+        [Path], Mapping[str, Any]
+    ] = _git_repository_identity,
 ) -> DevelopmentAggregatePublication:
     """Reconstruct and transactionally publish Task 10 from physical evidence."""
 
@@ -2133,37 +3094,60 @@ def publish_development_aggregate(
         raise RuntimeError("development aggregate iteration reopener is unavailable")
     if reopen_evaluation is None or not callable(reopen_evaluation):
         raise RuntimeError("development aggregate evaluation reopener is unavailable")
+    if reopen_supervised is None or not callable(reopen_supervised):
+        raise RuntimeError("development aggregate supervised reopener is unavailable")
     _development_definition_identity(definition)
+    _require_development_definition_checkpoints(definition)
+    _require_development_repository(definition, repository_identity_provider)
     canonical_preflight_root = Path(preflight_root).resolve(strict=True)
     preflight = _validated_development_preflight(
         reopen_preflight(canonical_preflight_root),
         root=canonical_preflight_root,
         definition=definition,
     )
+    _require_development_repository(definition, repository_identity_provider)
     if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
         raise ValueError("development aggregate requires three physical iterations")
-    iterations = tuple(
-        _validated_development_iteration(
-            reopen_iteration(Path(root).resolve(strict=True)),
-            root=Path(root),
+    canonical_iteration_roots = tuple(
+        Path(root).resolve(strict=True) for root in iteration_roots
+    )
+    iteration_values: list[DevelopmentIterationEvidence] = []
+    for iteration, root in enumerate(canonical_iteration_roots, start=1):
+        iteration_values.append(_validated_development_iteration(
+            reopen_iteration(root),
+            root=root,
             iteration=iteration,
             definition=definition,
             preflight=preflight,
-        )
-        for iteration, root in enumerate(iteration_roots, start=1)
-    )
+        ))
+        _require_development_repository(definition, repository_identity_provider)
+    iterations = tuple(iteration_values)
     canonical_evaluations_root = Path(evaluations_root).resolve(strict=True)
-    evaluations = tuple(
-        _validated_development_evaluation_evidence(
-            reopen_evaluation(
-                (canonical_evaluations_root / candidate.candidate_id).resolve(strict=True),
-                candidate,
-            ),
-            root=canonical_evaluations_root / candidate.candidate_id,
+    evaluation_values: list[DevelopmentCandidateEvidence] = []
+    for candidate in definition.candidates:
+        root = (canonical_evaluations_root / candidate.candidate_id).resolve(strict=True)
+        evaluation_values.append(_validated_development_evaluation_evidence(
+            reopen_evaluation(root, candidate),
+            root=root,
             candidate=candidate,
-        )
-        for candidate in definition.candidates
+        ))
+        _require_development_repository(definition, repository_identity_provider)
+    evaluations = tuple(evaluation_values)
+    if type(supervised_roots) not in {list, tuple} or len(supervised_roots) != 3:
+        raise ValueError("development aggregate requires three physical supervised evidences")
+    canonical_supervised_roots = tuple(
+        Path(root).resolve(strict=True) for root in supervised_roots
     )
+    supervised_values: list[DevelopmentSupervisedEvidence] = []
+    for iteration, root in enumerate(canonical_supervised_roots, start=1):
+        supervised_values.append(_validated_development_supervised_evidence(
+            reopen_supervised(root, iteration),
+            root=root,
+            iteration=iteration,
+            definition=definition,
+        ))
+        _require_development_repository(definition, repository_identity_provider)
+    supervised = tuple(supervised_values)
     baseline = definition.candidates[0]
     if (
         evaluations[0].controller != preflight.starting_learner_controller
@@ -2187,15 +3171,15 @@ def publish_development_aggregate(
                 definition.candidates, evaluations, strict=True,
             )
         },
-        heldout_collections_by_iteration={
-            iteration.iteration: (iteration.validation_collection,)
-            for iteration in iterations
+        supervised_metrics_by_iteration={
+            item.iteration: item.metrics for item in supervised
         },
         evidence_identity={
             "preflight": preflight.content_identity,
             "baseline": baseline.checkpoint_sha256,
             "iterations": [item.content_identity for item in iterations],
             "evaluations": [item.content_identity for item in evaluations],
+            "supervised": [item.content_identity for item in supervised],
         },
     ))
     aggregate["frozen_inputs"] = definition.to_dict()
@@ -2228,10 +3212,81 @@ def publish_development_aggregate(
             "collection_metrics": _mutable_stage_json(item.collection_metrics),
             "training_metrics": _mutable_stage_json(item.training_metrics),
             "timings": _mutable_stage_json(item.timings),
+            "training_history_root": str(item.training_history_root),
+            "training_history_identity": _mutable_stage_json(
+                item.training_history_identity
+            ),
+            "training_history": _mutable_stage_json(item.training_history),
         }
         for item in iterations
     ]
+    aggregate["supervised_evidence"] = [
+        {
+            "iteration": item.iteration,
+            "content_identity": item.content_identity,
+            "heldout_overlay_roots": [
+                str(root) for root in item.heldout_overlay_roots
+            ],
+            "heldout_overlay_prefix": list(item.heldout_overlay_prefix),
+            "incoming_candidate_id": item.incoming_candidate_id,
+            "trained_candidate_id": item.trained_candidate_id,
+            "metrics": _mutable_stage_json(item.metrics),
+        }
+        for item in supervised
+    ]
     report = dagger_domain.render_development_report(aggregate)
+
+    reopened_preflight = _validated_development_preflight(
+        reopen_preflight(canonical_preflight_root),
+        root=canonical_preflight_root,
+        definition=definition,
+    )
+    if not _same_json(
+        _development_preflight_snapshot(reopened_preflight),
+        _development_preflight_snapshot(preflight),
+    ):
+        raise ValueError("development aggregate preflight source identity changed")
+    for iteration, root in enumerate(canonical_iteration_roots, start=1):
+        reopened = _validated_development_iteration(
+            reopen_iteration(root),
+            root=root,
+            iteration=iteration,
+            definition=definition,
+            preflight=preflight,
+        )
+        if not _same_json(
+            _development_iteration_snapshot(reopened),
+            _development_iteration_snapshot(iterations[iteration - 1]),
+        ):
+            raise ValueError("development aggregate iteration source identity changed")
+    for candidate, original in zip(
+        definition.candidates, evaluations, strict=True,
+    ):
+        root = (canonical_evaluations_root / candidate.candidate_id).resolve(strict=True)
+        reopened = _validated_development_evaluation_evidence(
+            reopen_evaluation(root, candidate),
+            root=root,
+            candidate=candidate,
+        )
+        if not _same_json(
+            _development_evaluation_snapshot(reopened),
+            _development_evaluation_snapshot(original),
+        ):
+            raise ValueError("development aggregate evaluation source identity changed")
+    for iteration, root in enumerate(canonical_supervised_roots, start=1):
+        reopened = _validated_development_supervised_evidence(
+            reopen_supervised(root, iteration),
+            root=root,
+            iteration=iteration,
+            definition=definition,
+        )
+        if not _same_json(
+            _development_supervised_snapshot(reopened),
+            _development_supervised_snapshot(supervised[iteration - 1]),
+        ):
+            raise ValueError("development aggregate supervised source identity changed")
+    _require_development_definition_checkpoints(definition)
+    _require_development_repository(definition, repository_identity_provider)
 
     destination = Path(output_root).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2239,11 +3294,14 @@ def publish_development_aggregate(
     if destination.exists():
         if staging.exists():
             raise ValueError("development aggregate destination and staging are ambiguous")
-        return _open_development_aggregate_publication(
+        reopened = _open_development_aggregate_publication(
             destination,
             expected_aggregate=aggregate,
             expected_report=report,
         )
+        _require_development_definition_checkpoints(definition)
+        _require_development_repository(definition, repository_identity_provider)
+        return reopened
     if staging.exists():
         raise ValueError("development aggregate staging is partial; use a new output root")
     staging.mkdir()
@@ -2275,12 +3333,21 @@ def publish_development_aggregate(
         expected_aggregate=aggregate,
         expected_report=report,
     )
+    _require_development_definition_checkpoints(definition)
+    _require_development_repository(definition, repository_identity_provider)
     os.replace(staging, destination)
-    published = _open_development_aggregate_publication(
-        destination,
-        expected_aggregate=aggregate,
-        expected_report=report,
-    )
-    if published.content_identity != staged.content_identity:
-        raise ValueError("development aggregate changed during publication")
+    try:
+        published = _open_development_aggregate_publication(
+            destination,
+            expected_aggregate=aggregate,
+            expected_report=report,
+        )
+        _require_development_definition_checkpoints(definition)
+        _require_development_repository(definition, repository_identity_provider)
+        if published.content_identity != staged.content_identity:
+            raise ValueError("development aggregate changed during publication")
+    except Exception:
+        if destination.exists() and not staging.exists():
+            os.replace(destination, staging)
+        raise
     return published

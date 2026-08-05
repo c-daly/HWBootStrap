@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 import ml_lab.dagger as dagger_module
+import ml_lab.imitation as imitation_module
 from ml_lab.dagger import (
     OracleBenchmarkDecision,
     OracleBenchmarkSample,
@@ -4957,6 +4958,45 @@ def _task10_definition(tmp_path: Path) -> object:
             "legacy": False,
             "promotable": True,
         }
+        source_publication = {
+            "kind": "audited-baseline" if iteration == 0 else "dagger-iteration",
+            "iteration": iteration,
+            "content_identity": hashlib.sha256(
+                f"source-{iteration}".encode("ascii")
+            ).hexdigest(),
+            "preflight_root": str((tmp_path / "task10-preflight").resolve()),
+            "preflight_content_identity": hashlib.sha256(b"preflight").hexdigest(),
+            "incoming_source_content_identity": (
+                None if iteration == 0 else hashlib.sha256(
+                    f"source-{iteration - 1}".encode("ascii")
+                ).hexdigest()
+            ),
+            "source_run": controller["source_run"],
+            "model_seed": 227,
+            "step": step,
+            "controller": json.dumps(controller, sort_keys=True),
+            "controller_identity": identity,
+            "checkpoint_path": str(checkpoint.resolve()),
+            "checkpoint_sha256": _sha256(checkpoint),
+            "actor_sha256": hashlib.sha256(f"actor-{iteration}".encode()).hexdigest(),
+            "publication_metadata_sha256": hashlib.sha256(
+                f"metadata-{iteration}".encode()
+            ).hexdigest(),
+            "run_manifest_sha256": hashlib.sha256(
+                f"run-{iteration}".encode()
+            ).hexdigest(),
+            "bc_manifest_sha256": hashlib.sha256(
+                f"bc-{iteration}".encode()
+            ).hexdigest(),
+            "train_overlay_prefix": [
+                hashlib.sha256(f"train-{index}".encode()).hexdigest()
+                for index in range(1, iteration + 1)
+            ],
+            "validation_overlay_prefix": [
+                hashlib.sha256(f"validation-{index}".encode()).hexdigest()
+                for index in range(1, iteration + 1)
+            ],
+        }
         candidates.append(dagger_module.DevelopmentCandidate.from_dict({
             "candidate_id": (
                 "baseline" if iteration == 0 else f"iteration-{iteration}"
@@ -4966,6 +5006,7 @@ def _task10_definition(tmp_path: Path) -> object:
             "checkpoint_path": str(checkpoint.resolve()),
             "checkpoint_sha256": _sha256(checkpoint),
             "controller_identity": identity,
+            "source_publication": source_publication,
         }))
     return dagger_module.DevelopmentEvaluationDefinition.create(
         candidates=candidates,
@@ -5007,6 +5048,351 @@ def _task10_rows() -> tuple[dict[str, Any], ...]:
         "trace_path": f"evidence/traces/match-{index:06d}.json",
         "replay_path": f"evidence/replays/match-{index:06d}.replay",
     } for index in range(200))
+
+
+def _task10_source_evidence(
+    runner: object,
+    *,
+    definition: object,
+    root: Path,
+    preflight_root: Path,
+    preflight_identity: str,
+    iteration: int,
+) -> object:
+    candidate = definition.candidates[iteration]
+    root.mkdir()
+    controller_spec = json.loads(candidate.controller)
+    values = {
+        "root": root.resolve(),
+        "kind": "audited-baseline" if iteration == 0 else "dagger-iteration",
+        "iteration": iteration,
+        "content_identity": hashlib.sha256(
+            f"source-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "preflight_root": preflight_root.resolve(),
+        "preflight_content_identity": preflight_identity,
+        "incoming_source_content_identity": (
+            None
+            if iteration == 0
+            else hashlib.sha256(
+                f"source-{iteration - 1}".encode("ascii")
+            ).hexdigest()
+        ),
+        "source_run": controller_spec["source_run"],
+        "model_seed": 227,
+        "step": 38_912 if iteration == 0 else 0,
+        "controller": candidate.controller,
+        "controller_identity": candidate.controller_identity,
+        "checkpoint_path": candidate.checkpoint_path,
+        "checkpoint_sha256": candidate.checkpoint_sha256,
+        "actor_sha256": hashlib.sha256(
+            f"actor-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "publication_metadata_sha256": hashlib.sha256(
+            f"metadata-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "run_manifest_sha256": hashlib.sha256(
+            f"run-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "bc_manifest_sha256": hashlib.sha256(
+            f"bc-{iteration}".encode("ascii")
+        ).hexdigest(),
+        "train_overlay_prefix": tuple(
+            hashlib.sha256(f"train-{index}".encode("ascii")).hexdigest()
+            for index in range(1, iteration + 1)
+        ),
+        "validation_overlay_prefix": tuple(
+            hashlib.sha256(f"validation-{index}".encode("ascii")).hexdigest()
+            for index in range(1, iteration + 1)
+        ),
+    }
+    publication_identity = {
+        key: str(value) if key == "preflight_root" else value
+        for key, value in values.items()
+        if key != "root"
+    }
+    return runner.DevelopmentSourcePublicationEvidence(
+        **values,
+        publication_identity=publication_identity,
+    )
+
+
+def test_task10_definition_builder_requires_physical_reopen_adapters(
+    tmp_path: Path,
+) -> None:
+    """Production candidate definitions cannot originate from caller-authored DTOs."""
+
+    import run_annihilation_selective_dagger as runner
+
+    with pytest.raises(RuntimeError, match="reopen|physical|preflight"):
+        runner.build_development_evaluation_definition(
+            preflight_root=tmp_path / "preflight",
+            baseline_root=tmp_path / "baseline",
+            iteration_roots=tuple(tmp_path / f"iteration-{i}" for i in (1, 2, 3)),
+            panel_hash="1" * 64,
+            scenario_hash="2" * 64,
+            contract_hash="c" * 64,
+            encoding_hash="e" * 64,
+            repository_root=ROOT,
+            reopen_preflight=None,
+            reopen_baseline=None,
+            reopen_iteration=None,
+            repository_identity_provider=_repository_provider,
+        )
+
+
+def test_task10_definition_builder_freezes_exact_preflight_and_publication_chain(
+    tmp_path: Path,
+) -> None:
+    """Baseline and all actors must be derived from one authenticated physical chain."""
+
+    import run_annihilation_selective_dagger as runner
+
+    seed_definition = _task10_definition(tmp_path)
+    external_preflight = tmp_path / "external-builder-preflight"
+    external_preflight.mkdir()
+    preflight_identity = hashlib.sha256(b"builder-preflight").hexdigest()
+    oracle = dagger_module.OracleSpec(
+        oracle_type="bounded-search",
+        depth=4,
+        expansion_budget=512,
+        use_heuristic=True,
+        heuristic_identity="material-plus-pursuit-v1",
+        code_hash="a" * 64,
+    )
+    preflight = runner.DevelopmentPreflightEvidence(
+        evidence_root=external_preflight.resolve(),
+        content_identity=preflight_identity,
+        selected_oracle=oracle,
+        evidence_class="sealed-engine",
+        starting_learner_checkpoint_path=(
+            seed_definition.candidates[0].checkpoint_path
+        ),
+        starting_learner_checkpoint_sha256=(
+            seed_definition.candidates[0].checkpoint_sha256
+        ),
+        starting_learner_controller=seed_definition.candidates[0].controller,
+        starting_learner_controller_identity=(
+            seed_definition.candidates[0].controller_identity
+        ),
+        starting_learner_model_seed=227,
+        starting_learner_step=38_912,
+        starting_learner_source_content_identity=hashlib.sha256(
+            b"source-0"
+        ).hexdigest(),
+    )
+    baseline_root = tmp_path / "physical-baseline-source"
+    iteration_roots = tuple(
+        tmp_path / f"physical-builder-iteration-{index}" for index in (1, 2, 3)
+    )
+    sources = tuple(
+        _task10_source_evidence(
+            runner,
+            definition=seed_definition,
+            root=baseline_root if index == 0 else iteration_roots[index - 1],
+            preflight_root=external_preflight,
+            preflight_identity=preflight_identity,
+            iteration=index,
+        )
+        for index in range(4)
+    )
+    calls: list[tuple[str, Path]] = []
+
+    def reopen_preflight(root: Path) -> object:
+        calls.append(("preflight", root))
+        return preflight
+
+    def reopen_baseline(root: Path) -> object:
+        calls.append(("baseline", root))
+        return sources[0]
+
+    def reopen_iteration(root: Path) -> object:
+        calls.append(("iteration", root))
+        return sources[iteration_roots.index(root) + 1]
+
+    definition = runner.build_development_evaluation_definition(
+        preflight_root=external_preflight,
+        baseline_root=baseline_root,
+        iteration_roots=iteration_roots,
+        panel_hash="1" * 64,
+        scenario_hash="2" * 64,
+        contract_hash="c" * 64,
+        encoding_hash="e" * 64,
+        repository_root=ROOT,
+        reopen_preflight=reopen_preflight,
+        reopen_baseline=reopen_baseline,
+        reopen_iteration=reopen_iteration,
+        repository_identity_provider=_repository_provider,
+    )
+
+    assert calls == [
+        ("preflight", external_preflight.resolve()),
+        ("baseline", baseline_root.resolve()),
+        *(("iteration", root.resolve()) for root in iteration_roots),
+    ]
+    assert [candidate.candidate_id for candidate in definition.candidates] == [
+        "baseline", "iteration-1", "iteration-2", "iteration-3",
+    ]
+    assert definition.candidates[0].source_publication["model_seed"] == 227
+    assert definition.candidates[0].source_publication["step"] == 38_912
+    assert definition.candidates[3].source_publication["validation_overlay_prefix"] == tuple(
+        hashlib.sha256(f"validation-{index}".encode("ascii")).hexdigest()
+        for index in (1, 2, 3)
+    )
+    for field in (
+        "content_identity", "actor_sha256", "publication_metadata_sha256",
+        "run_manifest_sha256", "bc_manifest_sha256",
+    ):
+        assert len(definition.candidates[3].source_publication[field]) == 64
+
+    drifted = list(sources)
+    drifted[2] = replace(
+        drifted[2],
+        validation_overlay_prefix=(sources[2].validation_overlay_prefix[-1],),
+    )
+    with pytest.raises(ValueError, match="overlay|prefix|cumulative"):
+        runner.build_development_evaluation_definition(
+            preflight_root=external_preflight,
+            baseline_root=baseline_root,
+            iteration_roots=iteration_roots,
+            panel_hash="1" * 64,
+            scenario_hash="2" * 64,
+            contract_hash="c" * 64,
+            encoding_hash="e" * 64,
+            repository_root=ROOT,
+            reopen_preflight=lambda _root: preflight,
+            reopen_baseline=lambda _root: sources[0],
+            reopen_iteration=lambda root: drifted[iteration_roots.index(root) + 1],
+            repository_identity_provider=_repository_provider,
+        )
+
+
+_TASK10_BUILDER_MUTATIONS = (
+    ("baseline-source-run", 0, "source_run", "C:/other/source"),
+    ("baseline-seed", 0, "model_seed", 228),
+    ("baseline-step", 0, "step", 38_911),
+    ("baseline-checkpoint", 0, "checkpoint_sha256", "f" * 64),
+    ("baseline-content", 0, "content_identity", "f" * 64),
+    ("iteration-1-content", 1, "content_identity", "f" * 64),
+    ("iteration-2-content", 2, "content_identity", "f" * 64),
+    ("iteration-3-content", 3, "content_identity", "f" * 64),
+    ("task7-checkpoint", 2, "checkpoint_sha256", "f" * 64),
+    ("task7-actor", 2, "actor_sha256", "f" * 64),
+    (
+        "task7-publication-metadata", 2,
+        "publication_metadata_sha256", "f" * 64,
+    ),
+    ("task7-run-manifest", 2, "run_manifest_sha256", "f" * 64),
+    ("task7-bc-manifest", 2, "bc_manifest_sha256", "f" * 64),
+    ("actor-controller", 2, "controller", "controller-sentinel"),
+    ("actor-resolved-identity", 2, "controller_identity", "identity-sentinel"),
+    ("train-prefix-hash", 2, "train_overlay_prefix", ("f" * 64, "e" * 64)),
+    (
+        "validation-prefix-hash", 2, "validation_overlay_prefix",
+        ("f" * 64, "e" * 64),
+    ),
+    ("train-prefix-order", 3, "train_overlay_prefix", "reverse-prefix"),
+    ("validation-prefix-order", 3, "validation_overlay_prefix", "reverse-prefix"),
+)
+
+
+@pytest.mark.parametrize(
+    ("case_name", "source_index", "field", "replacement"),
+    _TASK10_BUILDER_MUTATIONS,
+    ids=[case[0] for case in _TASK10_BUILDER_MUTATIONS],
+)
+def test_task10_definition_builder_rejects_each_source_identity_mutation_early(
+    tmp_path: Path,
+    case_name: str,
+    source_index: int,
+    field: str,
+    replacement: object,
+) -> None:
+    """Every duplicated physical identity must reconcile before a later source opens."""
+
+    import run_annihilation_selective_dagger as runner
+
+    seed_definition = _task10_definition(tmp_path)
+    preflight_root = tmp_path / "external-matrix-preflight"
+    preflight_root.mkdir()
+    preflight_identity = hashlib.sha256(b"matrix-preflight").hexdigest()
+    preflight = runner.DevelopmentPreflightEvidence(
+        evidence_root=preflight_root.resolve(),
+        content_identity=preflight_identity,
+        selected_oracle=dagger_module.OracleSpec(
+            oracle_type="bounded-search", depth=4, expansion_budget=512,
+            use_heuristic=True, heuristic_identity="material-plus-pursuit-v1",
+            code_hash="a" * 64,
+        ),
+        evidence_class="sealed-engine",
+        starting_learner_checkpoint_path=seed_definition.candidates[0].checkpoint_path,
+        starting_learner_checkpoint_sha256=seed_definition.candidates[0].checkpoint_sha256,
+        starting_learner_controller=seed_definition.candidates[0].controller,
+        starting_learner_controller_identity=seed_definition.candidates[0].controller_identity,
+        starting_learner_model_seed=227,
+        starting_learner_step=38_912,
+        starting_learner_source_content_identity=hashlib.sha256(b"source-0").hexdigest(),
+    )
+    roots = tuple(tmp_path / f"matrix-source-{index}" for index in range(4))
+    sources = [
+        _task10_source_evidence(
+            runner,
+            definition=seed_definition,
+            root=roots[index],
+            preflight_root=preflight_root,
+            preflight_identity=preflight_identity,
+            iteration=index,
+        )
+        for index in range(4)
+    ]
+    if case_name == "baseline-source-run":
+        controller = json.loads(sources[0].controller)
+        controller["source_run"] = replacement
+        sources[0] = replace(sources[0], controller=json.dumps(controller, sort_keys=True))
+    elif case_name == "actor-controller":
+        controller = json.loads(sources[source_index].controller)
+        controller["path"] = str(tmp_path / "wrong-actor.zip")
+        sources[source_index] = replace(
+            sources[source_index], controller=json.dumps(controller, sort_keys=True),
+        )
+    elif case_name == "actor-resolved-identity":
+        identity = dict(sources[source_index].controller_identity)
+        identity["step"] = 1
+        sources[source_index] = replace(
+            sources[source_index], controller_identity=identity,
+        )
+    elif case_name.endswith("prefix-order"):
+        prefix = tuple(getattr(sources[source_index], field))
+        sources[source_index] = replace(
+            sources[source_index], **{field: tuple(reversed(prefix))},
+        )
+    else:
+        sources[source_index] = replace(
+            sources[source_index], **{field: replacement},
+        )
+    calls: list[int] = []
+
+    def reopen_iteration(root: Path) -> object:
+        index = roots.index(root)
+        calls.append(index)
+        return sources[index]
+
+    with pytest.raises(ValueError, match="source|identity|checkpoint|overlay|seed|step"):
+        runner.build_development_evaluation_definition(
+            preflight_root=preflight_root,
+            baseline_root=roots[0],
+            iteration_roots=roots[1:],
+            panel_hash="1" * 64,
+            scenario_hash="2" * 64,
+            contract_hash="c" * 64,
+            encoding_hash="e" * 64,
+            repository_root=ROOT,
+            reopen_preflight=lambda _root: preflight,
+            reopen_baseline=lambda root: reopen_iteration(root),
+            reopen_iteration=reopen_iteration,
+            repository_identity_provider=_repository_provider,
+        )
+    assert calls == list(range(source_index + 1))
 
 
 class _Task10PhysicalBoundary:
@@ -5167,6 +5553,106 @@ def test_task10_candidate_publication_rejects_repository_drift(
     assert (output_root / "baseline.staging").is_dir()
 
 
+@pytest.mark.parametrize(
+    ("phase", "validate_call"),
+    (
+        ("after-evaluator", 0),
+        ("after-validator", 1),
+        ("staged-reopen", 2),
+        ("published-reopen", 3),
+    ),
+)
+def test_task10_candidate_checkpoint_drift_at_every_late_boundary_never_publishes(
+    tmp_path: Path,
+    phase: str,
+    validate_call: int,
+) -> None:
+    """Checkpoint identity is probed through staged and published reopen boundaries."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    candidate = definition.candidates[0]
+    checkpoint = Path(candidate.checkpoint_path)
+    boundary = _Task10PhysicalBoundary()
+    validation_calls = 0
+
+    def mutate_checkpoint() -> None:
+        checkpoint.write_bytes(f"drift-{phase}".encode("ascii"))
+
+    def evaluate(*args: Any, **kwargs: Any) -> object:
+        result = boundary.evaluate(*args, **kwargs)
+        if phase == "after-evaluator":
+            mutate_checkpoint()
+        return result
+
+    def validate(*args: Any, **kwargs: Any) -> object:
+        nonlocal validation_calls
+        validation_calls += 1
+        result = boundary.validate(*args, **kwargs)
+        if validation_calls == validate_call:
+            mutate_checkpoint()
+        return result
+
+    output_root = tmp_path / f"checkpoint-drift-{phase}"
+    with pytest.raises(ValueError, match="checkpoint|identity|changed|drift"):
+        runner.run_development_candidate_evaluation(
+            definition=definition,
+            candidate=candidate,
+            output_root=output_root,
+            server_cmd=("fake-gym-server",),
+            workers=2,
+            evaluate_candidate=evaluate,
+            validate_candidate=validate,
+            repository_identity_provider=_repository_provider,
+        )
+    assert not (output_root / "baseline").exists()
+    assert len(boundary.evaluate_calls) == 1
+
+
+def test_task10_candidate_reuse_rejects_checkpoint_drift_after_reopen_with_zero_games(
+    tmp_path: Path,
+) -> None:
+    """Exact reuse probes the checkpoint after reopening every retained artifact."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    candidate = definition.candidates[0]
+    checkpoint = Path(candidate.checkpoint_path)
+    boundary = _Task10PhysicalBoundary()
+    output_root = tmp_path / "reuse-checkpoint-drift"
+    runner.run_development_candidate_evaluation(
+        definition=definition,
+        candidate=candidate,
+        output_root=output_root,
+        server_cmd=("fake-gym-server",),
+        workers=2,
+        evaluate_candidate=boundary.evaluate,
+        validate_candidate=boundary.validate,
+        repository_identity_provider=_repository_provider,
+    )
+    original_validate = boundary.validate
+
+    def mutate_after_reopen(*args: Any, **kwargs: Any) -> object:
+        result = original_validate(*args, **kwargs)
+        checkpoint.write_bytes(b"reuse-checkpoint-drift")
+        return result
+
+    with pytest.raises(ValueError, match="checkpoint|identity|changed|drift"):
+        runner.run_development_candidate_evaluation(
+            definition=definition,
+            candidate=candidate,
+            output_root=output_root,
+            server_cmd=("fake-gym-server",),
+            workers=2,
+            evaluate_candidate=boundary.evaluate,
+            validate_candidate=mutate_after_reopen,
+            repository_identity_provider=_repository_provider,
+        )
+    assert len(boundary.evaluate_calls) == 1
+
+
 def test_task10_panel_evaluation_dispatches_baseline_then_three_iterations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5204,6 +5690,178 @@ def test_task10_panel_evaluation_dispatches_baseline_then_three_iterations(
     ]
 
 
+def _task10_heldout_overlays(
+    runner: object,
+    *,
+    definition: object,
+    tmp_path: Path,
+    iteration: int,
+) -> tuple[object, ...]:
+    prefix = definition.candidates[iteration].source_publication[
+        "validation_overlay_prefix"
+    ]
+    overlays = []
+    reasons = ("conversion", "favorable", "cycle_warning", "wasted_end_turn")
+    for overlay_index, content_identity in enumerate(prefix, start=1):
+        root = tmp_path / f"heldout-overlay-{overlay_index}"
+        root.mkdir(exist_ok=True)
+        examples = tuple(
+            {
+                "sample_id": f"overlay-{overlay_index}-sample-{reason_index}",
+                "oracle_action": overlay_index * 100 + reason_index,
+                "reasons": (reason,),
+            }
+            for reason_index, reason in enumerate(reasons)
+        )
+        overlays.append(runner.DevelopmentHeldoutOverlayEvidence(
+            root=root.resolve(),
+            content_identity=content_identity,
+            examples=examples,
+        ))
+    return tuple(overlays)
+
+
+def test_task10_supervised_evaluation_is_transactional_and_reuse_runs_zero_inference(
+    tmp_path: Path,
+) -> None:
+    """Task 10 owns ordered pre/post inference and exact physical reuse."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+    by_root = {item.root: item for item in overlays}
+    prediction_calls: list[str] = []
+
+    def predict_actions(*, controller: str, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        prediction_calls.append(controller)
+        trained = controller == definition.candidates[2].controller
+        records = []
+        for index, example in enumerate(examples):
+            action = example["oracle_action"]
+            if (trained and index == len(examples) - 1) or (not trained and index % 2):
+                action += 1
+            records.append({"sample_id": example["sample_id"], "action": action})
+        return tuple(records)
+
+    output_root = tmp_path / "supervised-evaluations"
+    first = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=output_root,
+        reopen_heldout_overlay=lambda root: by_root[Path(root)],
+        predict_actions=predict_actions,
+        repository_identity_provider=_repository_provider,
+    )
+    assert first.new_inferences == 16
+    assert first.reused is False
+    assert len(prediction_calls) == 2
+    assert first.result.metrics["labels"] == 8
+    assert first.result.metrics["pre"]["accuracy"] == 0.5
+    assert first.result.metrics["post"]["accuracy"] == 0.875
+    assert set(first.result.metrics["post"]["by_reason"]) == {
+        "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+    }
+    assert {path.name for path in first.result.root.iterdir()} == {
+        "evidence.json", "predictions.json", "metrics.json", "manifest.json",
+    }
+
+    second = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=output_root,
+        reopen_heldout_overlay=lambda root: by_root[Path(root)],
+        predict_actions=predict_actions,
+        repository_identity_provider=_repository_provider,
+    )
+    assert second.reused is True
+    assert second.new_inferences == 0
+    assert len(prediction_calls) == 2
+    assert second.result.content_identity == first.result.content_identity
+
+    (first.result.root / "predictions.json").write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="prediction|hash|reusable|artifact"):
+        runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=2,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=output_root,
+            reopen_heldout_overlay=lambda root: by_root[Path(root)],
+            predict_actions=predict_actions,
+            repository_identity_provider=_repository_provider,
+        )
+    assert len(prediction_calls) == 2
+
+
+def test_task10_supervised_evaluation_fails_closed_on_shift_or_unordered_predictions(
+    tmp_path: Path,
+) -> None:
+    """Cumulative corpus identity and prediction order reconcile before publication."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+    calls = 0
+
+    def predictor(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        nonlocal calls
+        calls += 1
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in reversed(examples)
+        )
+
+    shifted = dict((item.root, item) for item in overlays)
+    shifted[overlays[1].root] = replace(
+        overlays[1], content_identity="f" * 64,
+    )
+    with pytest.raises(ValueError, match="overlay|prefix|identity"):
+        runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=2,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=tmp_path / "shifted-supervised",
+            reopen_heldout_overlay=lambda root: shifted[Path(root)],
+            predict_actions=predictor,
+            repository_identity_provider=_repository_provider,
+        )
+    assert calls == 0
+
+    with pytest.raises(ValueError, match="ordered|sample|prediction"):
+        runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=2,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=tmp_path / "unordered-supervised",
+            reopen_heldout_overlay=lambda root: dict(
+                (item.root, item) for item in overlays
+            )[Path(root)],
+            predict_actions=predictor,
+            repository_identity_provider=_repository_provider,
+        )
+    assert not (tmp_path / "unordered-supervised" / "iteration-2").exists()
+
+    with pytest.raises(RuntimeError, match="predictor|Task 11|inference"):
+        runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=2,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=tmp_path / "missing-predictor",
+            reopen_heldout_overlay=lambda root: dict(
+                (item.root, item) for item in overlays
+            )[Path(root)],
+            predict_actions=None,
+            repository_identity_provider=_repository_provider,
+        )
+
+
 def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -5238,6 +5896,11 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
         starting_learner_controller_identity=(
             definition.candidates[0].controller_identity
         ),
+        starting_learner_model_seed=227,
+        starting_learner_step=38_912,
+        starting_learner_source_content_identity=(
+            definition.candidates[0].source_publication["content_identity"]
+        ),
     )
     iteration_roots = tuple(
         tmp_path / f"physical-iteration-{iteration}"
@@ -5261,6 +5924,54 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
             "wasted_end_turn": 0,
         },
     }
+    training_histories = {}
+    for index in (1, 2, 3):
+        actor_root = Path(json.loads(definition.candidates[index].controller)["source_run"])
+        epochs = []
+        elapsed = 0.0
+        for epoch in (1, 2):
+            elapsed += float(epoch)
+            epochs.append({
+                "schema_version": 1,
+                "model_seed": 227,
+                "device": "cuda",
+                "epoch": epoch,
+                "max_epochs": 50,
+                "batches": 2,
+                "examples": 512,
+                "mean_training_loss": 1.0 / epoch,
+                "validation_nll": 0.5 / epoch,
+                "top1_accuracy": 0.5 + 0.1 * epoch,
+                "top3_accuracy": 0.7 + 0.1 * epoch,
+                "top5_accuracy": 0.8 + 0.05 * epoch,
+                "best_epoch": epoch,
+                "best_validation_nll": 0.5 / epoch,
+                "epochs_without_improvement": 0,
+                "patience": 5,
+                "epoch_seconds": float(epoch),
+                "elapsed_seconds": elapsed,
+                "examples_per_second": 512.0 / epoch,
+                "sampling_seconds": 0.1 * epoch,
+                "transfer_forward_seconds": 0.2 * epoch,
+                "optimization_seconds": 0.4 * epoch,
+                "validation_seconds": 0.2 * epoch,
+                "unclassified_seconds": 0.1 * epoch,
+            })
+        history = {
+            "schema_version": 1,
+            "model_seed": 227,
+            "training_device": {"requested": "cuda", "resolved": "cuda"},
+            "publication_device": "cpu",
+            "epochs": epochs,
+        }
+        (actor_root / "training-history.json").write_text(
+            json.dumps(history, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        physical_history, identity = imitation_module._read_training_history_identity(
+            actor_root,
+        )
+        training_histories[index] = (actor_root, physical_history, identity)
+
     iterations = tuple(
         runner.DevelopmentIterationEvidence(
             root=root.resolve(),
@@ -5279,8 +5990,15 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
             ),
             validation_collection=heldout,
             collection_metrics={"iteration": index},
-            training_metrics={"iteration": index},
+            training_metrics={
+                "best_epoch": 2,
+                "best_validation_nll": 0.25,
+                "epochs_trained": 2,
+            },
             timings={"elapsed_seconds": float(index)},
+            training_history_root=training_histories[index][0],
+            training_history=training_histories[index][1],
+            training_history_identity=training_histories[index][2],
         )
         for index, root in enumerate(iteration_roots, start=1)
     )
@@ -5303,6 +6021,42 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
             )
         )
 
+    supervised_runs = {}
+    supervised_overlays = {}
+    for iteration in (1, 2, 3):
+        overlays = _task10_heldout_overlays(
+            runner, definition=definition, tmp_path=tmp_path, iteration=iteration,
+        )
+        supervised_overlays[iteration] = overlays
+        by_root = {item.root: item for item in overlays}
+
+        def predict_actions(
+            *, controller: str, examples: tuple[object, ...], _iteration: int = iteration,
+            **_kwargs: Any,
+        ) -> object:
+            trained = controller == definition.candidates[_iteration].controller
+            return tuple(
+                {
+                    "sample_id": item["sample_id"],
+                    "action": (
+                        item["oracle_action"]
+                        if trained or index % 2 == 0
+                        else item["oracle_action"] + 1
+                    ),
+                }
+                for index, item in enumerate(examples)
+            )
+
+        supervised_runs[iteration] = runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=iteration,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=tmp_path / "physical-supervised-evaluations",
+            reopen_heldout_overlay=lambda root, _by_root=by_root: _by_root[Path(root)],
+            predict_actions=predict_actions,
+            repository_identity_provider=_repository_provider,
+        ).result
+
     preflight_calls: list[Path] = []
 
     def reopen_preflight(root: Path) -> object:
@@ -5324,12 +6078,19 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
         preflight_root=external_preflight,
         iteration_roots=iteration_roots,
         evaluations_root=evaluations_root,
+        supervised_roots=tuple(
+            supervised_runs[iteration].root for iteration in (1, 2, 3)
+        ),
         output_root=tmp_path / "aggregate-publication",
         reopen_preflight=reopen_preflight,
         reopen_iteration=reopen_iteration,
         reopen_evaluation=reopen_evaluation,
+        reopen_supervised=lambda root, iteration: supervised_runs[iteration],
+        repository_identity_provider=_repository_provider,
     )
-    assert preflight_calls == [external_preflight.resolve()]
+    assert preflight_calls == [
+        external_preflight.resolve(), external_preflight.resolve(),
+    ]
     assert publication.aggregate["evidence_identity"]["preflight"] == sealed_sha256
     assert (publication.root / "aggregate.json").is_file()
     assert (publication.root / "REPORT.md").is_file()
@@ -5345,22 +6106,41 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
         '"favorable":0,"wasted_end_turn":0}}'
     ) in publication.report
     assert 'collection_metrics={"iteration":1}' in publication.report
-    assert 'training_metrics={"iteration":1}' in publication.report
+    assert (
+        'training_metrics={"best_epoch":2,"best_validation_nll":0.25,'
+        '"epochs_trained":2}'
+    ) in publication.report
     assert 'timings={"elapsed_seconds":1.0}' in publication.report
+    assert "training-history.json" in publication.report
+    assert "| 1 | 1 | 0.5 | 0.6 | 1.0 | 1.0 |" in publication.report
+    assert "| 1 | 2 | 0.25 | 0.7 | 2.0 | 3.0 |" in publication.report
 
     common = {
         "definition": definition,
         "preflight_root": external_preflight,
         "iteration_roots": iteration_roots,
         "evaluations_root": evaluations_root,
+        "supervised_roots": tuple(
+            supervised_runs[iteration].root for iteration in (1, 2, 3)
+        ),
         "reopen_iteration": reopen_iteration,
         "reopen_evaluation": reopen_evaluation,
+        "reopen_supervised": lambda root, iteration: supervised_runs[iteration],
+        "repository_identity_provider": _repository_provider,
     }
     with pytest.raises(RuntimeError, match="preflight|reopen|sealed"):
         runner.publish_development_aggregate(
             **common,
             output_root=tmp_path / "missing-boundary",
             reopen_preflight=None,
+        )
+
+    with pytest.raises(RuntimeError, match="supervised|reopen|physical"):
+        runner.publish_development_aggregate(
+            **{key: value for key, value in common.items() if key != "reopen_supervised"},
+            output_root=tmp_path / "missing-supervised-boundary",
+            reopen_preflight=reopen_preflight,
+            reopen_supervised=None,
         )
 
     mismatched = list(iterations)
@@ -5419,6 +6199,66 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
             reopen_preflight=lambda _root: learner_identity_mismatch,
         )
 
+    tampered_history_path = training_histories[2][0] / "training-history.json"
+    tampered_history = json.loads(tampered_history_path.read_text(encoding="utf-8"))
+    tampered_history["epochs"][0]["top1_accuracy"] = 0.99
+    tampered_history_path.write_text(
+        json.dumps(tampered_history, sort_keys=True) + "\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="training history|epoch|hash|physical"):
+        runner.publish_development_aggregate(
+            **common,
+            output_root=tmp_path / "tampered-training-history",
+            reopen_preflight=reopen_preflight,
+        )
+    tampered_history_path.write_text(
+        json.dumps(training_histories[2][1], sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    evaluation_reopens: dict[str, int] = defaultdict(int)
+
+    def mutate_evaluation_on_prepublication_reopen(
+        root: Path, candidate: object,
+    ) -> object:
+        evaluation_reopens[candidate.candidate_id] += 1
+        evidence = evaluation_evidence[candidate.candidate_id]
+        if (
+            candidate.candidate_id == "iteration-2"
+            and evaluation_reopens[candidate.candidate_id] == 2
+        ):
+            return replace(evidence, content_identity="f" * 64)
+        return evidence
+
+    with pytest.raises(ValueError, match="source|evaluation|identity|changed"):
+        runner.publish_development_aggregate(
+            **{**common, "reopen_evaluation": mutate_evaluation_on_prepublication_reopen},
+            output_root=tmp_path / "aggregate-source-drift",
+            reopen_preflight=reopen_preflight,
+        )
+    assert not (tmp_path / "aggregate-source-drift").exists()
+    assert evaluation_reopens["baseline"] == 2
+    assert evaluation_reopens["iteration-2"] == 2
+
+    repository_calls = 0
+
+    def drift_after_source_callback(root: Path) -> dict[str, Any]:
+        nonlocal repository_calls
+        repository_calls += 1
+        identity = _repository_provider(root)
+        if repository_calls >= 5:
+            identity["source_tree"] = "f" * 40
+        return identity
+
+    with pytest.raises(ValueError, match="repository|identity|changed"):
+        runner.publish_development_aggregate(
+            **{**common, "repository_identity_provider": drift_after_source_callback},
+            output_root=tmp_path / "aggregate-repository-drift",
+            reopen_preflight=reopen_preflight,
+        )
+    assert repository_calls == 5
+    assert not (tmp_path / "aggregate-repository-drift").exists()
+
     wrong_controller_spec = json.loads(preflight.starting_learner_controller)
     wrong_controller_spec["step"] = 38_911
     learner_spec_mismatch = replace(
@@ -5455,3 +6295,364 @@ def test_task10_aggregate_reopens_authenticated_external_preflight_and_fails_clo
             output_root=tmp_path / "corrupt-preflight",
             reopen_preflight=reopen_preflight,
         )
+
+
+def _task10_fast_aggregate_fixture(tmp_path: Path, runner: object) -> SimpleNamespace:
+    definition = _task10_definition(tmp_path)
+    preflight_root = tmp_path / "aggregate-matrix-preflight"
+    preflight_root.mkdir()
+    seal = preflight_root / "oracle-preflight.json"
+    seal.write_bytes(b"aggregate-matrix-preflight")
+    seal_sha256 = _sha256(seal)
+    oracle = dagger_module.OracleSpec(
+        oracle_type="bounded-search", depth=4, expansion_budget=512,
+        use_heuristic=True, heuristic_identity="material-plus-pursuit-v1",
+        code_hash="a" * 64,
+    )
+    preflight = runner.DevelopmentPreflightEvidence(
+        evidence_root=preflight_root.resolve(),
+        content_identity=seal_sha256,
+        selected_oracle=oracle,
+        evidence_class="sealed-engine",
+        starting_learner_checkpoint_path=definition.candidates[0].checkpoint_path,
+        starting_learner_checkpoint_sha256=definition.candidates[0].checkpoint_sha256,
+        starting_learner_controller=definition.candidates[0].controller,
+        starting_learner_controller_identity=definition.candidates[0].controller_identity,
+        starting_learner_model_seed=227,
+        starting_learner_step=38_912,
+        starting_learner_source_content_identity=(
+            definition.candidates[0].source_publication["content_identity"]
+        ),
+    )
+    iteration_roots = tuple(tmp_path / f"aggregate-matrix-iteration-{i}" for i in (1, 2, 3))
+    iterations = []
+    for iteration, root in enumerate(iteration_roots, start=1):
+        root.mkdir()
+        actor_root = Path(json.loads(definition.candidates[iteration].controller)["source_run"])
+        event = {
+            "schema_version": 1, "model_seed": 227, "device": "cuda",
+            "epoch": 1, "max_epochs": 50, "batches": 1, "examples": 256,
+            "mean_training_loss": 1.0, "validation_nll": 0.5,
+            "top1_accuracy": 0.5, "top3_accuracy": 0.75,
+            "top5_accuracy": 0.9, "best_epoch": 1,
+            "best_validation_nll": 0.5, "epochs_without_improvement": 0,
+            "patience": 5, "epoch_seconds": 1.0, "elapsed_seconds": 1.0,
+            "examples_per_second": 256.0, "sampling_seconds": 0.1,
+            "transfer_forward_seconds": 0.2, "optimization_seconds": 0.4,
+            "validation_seconds": 0.2, "unclassified_seconds": 0.1,
+        }
+        history = {
+            "schema_version": 1, "model_seed": 227,
+            "training_device": {"requested": "cuda", "resolved": "cuda"},
+            "publication_device": "cpu", "epochs": [event],
+        }
+        history_path = actor_root / "training-history.json"
+        history_path.write_text(json.dumps(history, sort_keys=True) + "\n", encoding="utf-8")
+        physical_history, history_identity = imitation_module._read_training_history_identity(
+            actor_root,
+        )
+        iterations.append(runner.DevelopmentIterationEvidence(
+            root=root.resolve(), iteration=iteration,
+            content_identity=hashlib.sha256(f"matrix-iteration-{iteration}".encode()).hexdigest(),
+            selected_oracle=oracle, preflight_root=preflight_root.resolve(),
+            preflight_content_identity=seal_sha256,
+            preflight_evidence_class="sealed-engine",
+            actor_checkpoint_sha256=definition.candidates[iteration].checkpoint_sha256,
+            actor_controller=definition.candidates[iteration].controller,
+            actor_controller_identity=definition.candidates[iteration].controller_identity,
+            validation_collection={"iteration": iteration},
+            collection_metrics={"iteration": iteration},
+            training_metrics={
+                "best_epoch": 1, "best_validation_nll": 0.5, "epochs_trained": 1,
+            },
+            timings={"elapsed_seconds": float(iteration)},
+            training_history_root=actor_root,
+            training_history=physical_history,
+            training_history_identity=history_identity,
+        ))
+    evaluations_root = tmp_path / "aggregate-matrix-evaluations"
+    evaluations = {}
+    for candidate in definition.candidates:
+        root = evaluations_root / candidate.candidate_id
+        root.mkdir(parents=True)
+        (root / "trace.bin").write_bytes(b"trace")
+        (root / "replay.bin").write_bytes(b"replay")
+        evaluations[candidate.candidate_id] = runner.DevelopmentCandidateEvidence(
+            root=root.resolve(), candidate_id=candidate.candidate_id,
+            controller=candidate.controller,
+            checkpoint_sha256=candidate.checkpoint_sha256,
+            controller_identity=candidate.controller_identity,
+            content_identity=hashlib.sha256(f"matrix-{candidate.candidate_id}".encode()).hexdigest(),
+            matches=_task10_rows(),
+        )
+    supervised_root = tmp_path / "aggregate-matrix-supervised"
+    supervised = {}
+    for iteration in (1, 2, 3):
+        root = supervised_root / f"iteration-{iteration}"
+        root.mkdir(parents=True)
+        (root / "predictions.json").write_bytes(b"predictions")
+        (root / "metrics.json").write_bytes(b"metrics")
+        overlays = _task10_heldout_overlays(
+            runner, definition=definition, tmp_path=tmp_path, iteration=iteration,
+        )
+        labels = 4 * iteration
+
+        def side(agreements: int) -> dict[str, Any]:
+            return {
+                "agreements": agreements, "disagreements": labels - agreements,
+                "accuracy": agreements / labels,
+                "by_reason": {
+                    reason: {
+                        "labels": iteration,
+                        "agreements": iteration if agreements == labels else 0,
+                        "disagreements": 0 if agreements == labels else iteration,
+                        "accuracy": 1.0 if agreements == labels else 0.0,
+                    }
+                    for reason in (
+                        "conversion", "favorable", "cycle_warning", "wasted_end_turn",
+                    )
+                },
+            }
+        metrics = {
+            "labels": labels, "pre": side(0), "post": side(labels),
+            "accuracy_change": 1.0,
+        }
+        supervised[iteration] = runner.DevelopmentSupervisedEvidence(
+            root=root.resolve(), iteration=iteration,
+            content_identity=hashlib.sha256(f"matrix-supervised-{iteration}".encode()).hexdigest(),
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            heldout_overlay_prefix=tuple(item.content_identity for item in overlays),
+            incoming_candidate_id=definition.candidates[iteration - 1].candidate_id,
+            trained_candidate_id=definition.candidates[iteration].candidate_id,
+            metrics=metrics,
+        )
+    callback_counts: defaultdict[str, int] = defaultdict(int)
+
+    def reopen_preflight(root: Path) -> object:
+        callback_counts["preflight"] += 1
+        if _sha256(seal) != seal_sha256:
+            raise ValueError("preflight physical bytes changed")
+        return preflight
+
+    def reopen_iteration(root: Path) -> object:
+        index = iteration_roots.index(Path(root)) + 1
+        callback_counts[f"iteration-{index}"] += 1
+        return iterations[index - 1]
+
+    def reopen_evaluation(root: Path, candidate: object) -> object:
+        callback_counts[f"evaluation-{candidate.candidate_id}"] += 1
+        if (Path(root) / "trace.bin").read_bytes() != b"trace":
+            raise ValueError("evaluation trace bytes changed")
+        if (Path(root) / "replay.bin").read_bytes() != b"replay":
+            raise ValueError("evaluation replay bytes changed")
+        return evaluations[candidate.candidate_id]
+
+    def reopen_supervised(root: Path, iteration: int) -> object:
+        callback_counts[f"supervised-{iteration}"] += 1
+        if (Path(root) / "predictions.json").read_bytes() != b"predictions":
+            raise ValueError("supervised prediction bytes changed")
+        if (Path(root) / "metrics.json").read_bytes() != b"metrics":
+            raise ValueError("supervised metrics bytes changed")
+        return supervised[iteration]
+
+    kwargs = {
+        "definition": definition,
+        "preflight_root": preflight_root,
+        "iteration_roots": iteration_roots,
+        "evaluations_root": evaluations_root,
+        "supervised_roots": tuple(supervised[i].root for i in (1, 2, 3)),
+        "reopen_preflight": reopen_preflight,
+        "reopen_iteration": reopen_iteration,
+        "reopen_evaluation": reopen_evaluation,
+        "reopen_supervised": reopen_supervised,
+    }
+    return SimpleNamespace(
+        definition=definition, kwargs=kwargs, callback_counts=callback_counts,
+        seal=seal, iterations=iterations, iteration_roots=iteration_roots,
+        evaluations=evaluations, evaluations_root=evaluations_root,
+        supervised=supervised,
+    )
+
+
+_TASK10_AGGREGATE_REPOSITORY_PHASES = (
+    ("after-preflight", 2, False),
+    ("after-iteration-1", 3, False),
+    ("after-iteration-2", 4, False),
+    ("after-iteration-3", 5, False),
+    ("after-evaluation-baseline", 6, False),
+    ("after-evaluation-1", 7, False),
+    ("after-evaluation-2", 8, False),
+    ("after-evaluation-3", 9, False),
+    ("after-supervised-1", 10, False),
+    ("after-supervised-2", 11, False),
+    ("after-supervised-3", 12, False),
+    ("immediate-prepublish", 13, False),
+    ("postpublished-reopen", 15, False),
+    ("reuse", 14, True),
+)
+
+
+@pytest.mark.parametrize(
+    ("phase", "drift_call", "reuse"),
+    _TASK10_AGGREGATE_REPOSITORY_PHASES,
+    ids=[item[0] for item in _TASK10_AGGREGATE_REPOSITORY_PHASES],
+)
+def test_task10_aggregate_repository_probe_matrix(
+    tmp_path: Path,
+    phase: str,
+    drift_call: int,
+    reuse: bool,
+) -> None:
+    """Repository identity is probed after every source and publication boundary."""
+
+    import run_annihilation_selective_dagger as runner
+
+    fixture = _task10_fast_aggregate_fixture(tmp_path, runner)
+    destination = tmp_path / f"aggregate-repository-{phase}"
+    if reuse:
+        runner.publish_development_aggregate(
+            **fixture.kwargs,
+            output_root=destination,
+            repository_identity_provider=_repository_provider,
+        )
+        original_manifest = (destination / "manifest.json").read_bytes()
+    calls = 0
+
+    def provider(root: Path) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        identity = _repository_provider(root)
+        if calls >= drift_call:
+            identity["source_tree"] = "f" * 40
+        return identity
+
+    with pytest.raises(ValueError, match="repository|identity|changed"):
+        runner.publish_development_aggregate(
+            **fixture.kwargs,
+            output_root=destination,
+            repository_identity_provider=provider,
+        )
+    assert calls == drift_call
+    if reuse:
+        assert (destination / "manifest.json").read_bytes() == original_manifest
+    else:
+        assert not destination.exists()
+
+
+_TASK10_AGGREGATE_SOURCE_MUTATIONS = (
+    "preflight-bytes", "iteration-identity", "overlay-identity",
+    "training-history-bytes", "checkpoint-bytes", "evaluation-trace-bytes",
+    "evaluation-replay-bytes", "supervised-prediction-bytes",
+    "supervised-metrics-bytes",
+)
+
+
+@pytest.mark.parametrize("mutation", _TASK10_AGGREGATE_SOURCE_MUTATIONS)
+def test_task10_aggregate_second_reopen_source_mutation_matrix(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Every source class is reopened and compared immediately before publication."""
+
+    import run_annihilation_selective_dagger as runner
+
+    fixture = _task10_fast_aggregate_fixture(tmp_path, runner)
+    kwargs = dict(fixture.kwargs)
+    counts: defaultdict[str, int] = defaultdict(int)
+    if mutation == "preflight-bytes":
+        original = kwargs["reopen_preflight"]
+
+        def reopen_preflight(root: Path) -> object:
+            counts["source"] += 1
+            if counts["source"] == 2:
+                fixture.seal.write_bytes(b"changed")
+            return original(root)
+        kwargs["reopen_preflight"] = reopen_preflight
+    elif mutation in {
+        "iteration-identity", "overlay-identity", "training-history-bytes",
+        "checkpoint-bytes",
+    }:
+        original = kwargs["reopen_iteration"]
+
+        def reopen_iteration(root: Path) -> object:
+            index = fixture.iteration_roots.index(Path(root)) + 1
+            if index == 2:
+                counts["source"] += 1
+                if counts["source"] == 2:
+                    if mutation == "training-history-bytes":
+                        history = Path(fixture.iterations[1].training_history_root) / "training-history.json"
+                        history.write_bytes(b"changed")
+                    elif mutation == "checkpoint-bytes":
+                        Path(fixture.definition.candidates[2].checkpoint_path).write_bytes(b"changed")
+                    elif mutation == "iteration-identity":
+                        return replace(fixture.iterations[1], content_identity="f" * 64)
+                    else:
+                        return replace(
+                            fixture.iterations[1], validation_collection={"changed": True},
+                        )
+            return original(root)
+        kwargs["reopen_iteration"] = reopen_iteration
+    elif mutation.startswith("evaluation-"):
+        original = kwargs["reopen_evaluation"]
+
+        def reopen_evaluation(root: Path, candidate: object) -> object:
+            if candidate.candidate_id == "iteration-2":
+                counts["source"] += 1
+                if counts["source"] == 2:
+                    filename = "trace.bin" if "trace" in mutation else "replay.bin"
+                    (Path(root) / filename).write_bytes(b"changed")
+            return original(root, candidate)
+        kwargs["reopen_evaluation"] = reopen_evaluation
+    else:
+        original = kwargs["reopen_supervised"]
+
+        def reopen_supervised(root: Path, iteration: int) -> object:
+            if iteration == 2:
+                counts["source"] += 1
+                if counts["source"] == 2:
+                    filename = (
+                        "predictions.json" if "prediction" in mutation else "metrics.json"
+                    )
+                    (Path(root) / filename).write_bytes(b"changed")
+            return original(root, iteration)
+        kwargs["reopen_supervised"] = reopen_supervised
+    destination = tmp_path / f"aggregate-source-{mutation}"
+    with pytest.raises(
+        ValueError,
+        match="source|identity|changed|physical|bytes|checkpoint|training history",
+    ):
+        runner.publish_development_aggregate(
+            **kwargs,
+            output_root=destination,
+            repository_identity_provider=_repository_provider,
+        )
+    assert counts["source"] == 2
+    assert not destination.exists()
+
+
+def test_task10_aggregate_success_reopens_every_source_twice_and_probes_repository(
+    tmp_path: Path,
+) -> None:
+    import run_annihilation_selective_dagger as runner
+
+    fixture = _task10_fast_aggregate_fixture(tmp_path, runner)
+    repository_calls = 0
+
+    def provider(root: Path) -> dict[str, Any]:
+        nonlocal repository_calls
+        repository_calls += 1
+        return _repository_provider(root)
+
+    runner.publish_development_aggregate(
+        **fixture.kwargs,
+        output_root=tmp_path / "aggregate-matrix-success",
+        repository_identity_provider=provider,
+    )
+    assert fixture.callback_counts == {
+        "preflight": 2,
+        "iteration-1": 2, "iteration-2": 2, "iteration-3": 2,
+        "evaluation-baseline": 2, "evaluation-iteration-1": 2,
+        "evaluation-iteration-2": 2, "evaluation-iteration-3": 2,
+        "supervised-1": 2, "supervised-2": 2, "supervised-3": 2,
+    }
+    assert repository_calls == 15
