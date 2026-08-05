@@ -4202,6 +4202,85 @@ def _development_candidate_payload(
     }
 
 
+def _development_stable_identity(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "definition": {
+            "panel_sha256": HASHES["1"],
+            "panel_byte_size": 101,
+            "seed_banks_sha256": HASHES["3"],
+            "seed_banks_byte_size": 202,
+        },
+        "repository": {
+            "root": str(tmp_path.resolve()),
+            "commit": "a" * 40,
+            "source_tree": "b" * 40,
+            "dirty": False,
+        },
+        "scenario": {
+            "source_sha256": HASHES["4"],
+            "runtime_sha256": HASHES["2"],
+        },
+        "contract": {
+            "version": "tactical-v2",
+            "contract_hash": HASHES["a"],
+            "encoding_hash": HASHES["b"],
+            "observation_size": 2,
+            "action_size": 7,
+            "action_regions": {
+                "move": {"offset": 1, "count": 2},
+                "attack": {"offset": 3, "count": 2},
+                "deploy": {"offset": 5, "count": 2},
+            },
+        },
+        "base_dataset": {
+            "root": str((tmp_path / "base-dataset").resolve()),
+            "manifest_sha256": HASHES["5"],
+            "content_sha256": HASHES["6"],
+            "file_count": 1,
+            "byte_size": 1,
+            "contract_hash": HASHES["a"],
+            "encoding_hash": HASHES["b"],
+            "scenario_hash": HASHES["7"],
+        },
+        "selected_oracle": {
+            "spec": _oracle_payload(),
+            "evidence_root": str((tmp_path / "preflight").resolve()),
+            "evidence_content_identity": HASHES["8"],
+            "evidence_class": "sealed-engine",
+        },
+        "optimizer": {
+            "source_mixture_basis_points": {
+                "greedy_standard": 4_900,
+                "search_conversion": 2_100,
+                "dagger_targeted": 3_000,
+            },
+            "batch_size": 256,
+            "learning_rate": 3e-4,
+            "max_epochs": 50,
+            "patience": 5,
+            "model_seed": 227,
+            "sampler_seed": 227,
+            "device": "cuda",
+            "publication_device": "cpu",
+            "objective": "actor_only_masked_cross_entropy",
+            "validation_metric": "targeted_negative_log_likelihood",
+        },
+        "runtime": {
+            "hardware": {
+                "training_device": "cuda:0", "publication_device": "cpu",
+                "cuda_available": True, "device_index": 0,
+                "device_name": "test-gpu", "cuda_runtime": "12.8",
+            },
+            "software": {
+                "python": "test", "implementation": "CPython",
+                "platform": "test", "executable": "C:/python.exe",
+                "numpy": "test", "torch": "test",
+                "stable_baselines3": "test", "sb3_contrib": "test",
+            },
+        },
+    }
+
+
 def _development_definition(tmp_path: Path) -> Any:
     candidates = []
     for iteration in range(4):
@@ -4230,6 +4309,7 @@ def _development_definition(tmp_path: Path) -> Any:
             "source_tree": "b" * 40,
             "dirty": False,
         },
+        stable_iteration_identity=_development_stable_identity(tmp_path),
     )
 
 
@@ -4289,6 +4369,7 @@ def test_development_evaluation_definition_freezes_four_reciprocal_candidates(
             contract_hash=definition.contract_hash,
             encoding_hash=definition.encoding_hash,
             repository=definition.repository,
+            stable_iteration_identity=definition.stable_iteration_identity,
         )
 
 

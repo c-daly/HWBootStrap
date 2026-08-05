@@ -5089,18 +5089,95 @@ def _task10_definition(
             "controller_identity": identity,
             "source_publication": source_publication,
         }))
+    repository = {
+        "root": str(ROOT.resolve()),
+        "commit": "a" * 40,
+        "source_tree": "b" * 40,
+        "dirty": False,
+    }
+    stable_iteration_identity = {
+        "definition": {
+            "panel_sha256": "1" * 64,
+            "panel_byte_size": 101,
+            "seed_banks_sha256": "3" * 64,
+            "seed_banks_byte_size": 202,
+        },
+        "repository": repository,
+        "scenario": {"source_sha256": "4" * 64, "runtime_sha256": "2" * 64},
+        "contract": {
+            "version": "tactical-v2",
+            "contract_hash": "c" * 64,
+            "encoding_hash": "e" * 64,
+            "observation_size": 2 if physical_overlays else 1292,
+            "action_size": 7 if physical_overlays else 1288,
+            "action_regions": {
+                "move": {"offset": 1, "count": 2},
+                "attack": {"offset": 3, "count": 2},
+                "deploy": {"offset": 5, "count": 2},
+            },
+        },
+        "base_dataset": {
+            "root": str((tmp_path / "base-dataset").resolve()),
+            "manifest_sha256": "5" * 64,
+            "content_sha256": "6" * 64,
+            "file_count": 1,
+            "byte_size": 1,
+            "contract_hash": "c" * 64,
+            "encoding_hash": "e" * 64,
+            "scenario_hash": "7" * 64,
+        },
+        "selected_oracle": {
+            "spec": {
+                "oracle_type": "bounded-search",
+                "depth": 4,
+                "expansion_budget": 512,
+                "use_heuristic": True,
+                "heuristic_identity": "material-plus-pursuit-v1",
+                "code_hash": "a" * 64,
+            },
+            "evidence_root": str((tmp_path / "task10-preflight").resolve()),
+            "evidence_content_identity": hashlib.sha256(b"preflight").hexdigest(),
+            "evidence_class": "sealed-engine",
+        },
+        "optimizer": {
+            "source_mixture_basis_points": {
+                "greedy_standard": 4_900,
+                "search_conversion": 2_100,
+                "dagger_targeted": 3_000,
+            },
+            "batch_size": 256,
+            "learning_rate": 3e-4,
+            "max_epochs": 50,
+            "patience": 5,
+            "model_seed": 227,
+            "sampler_seed": 227,
+            "device": "cuda",
+            "publication_device": "cpu",
+            "objective": "actor_only_masked_cross_entropy",
+            "validation_metric": "targeted_negative_log_likelihood",
+        },
+        "runtime": {
+            "hardware": {
+                "training_device": "cuda:0", "publication_device": "cpu",
+                "cuda_available": True, "device_index": 0,
+                "device_name": "test-gpu", "cuda_runtime": "12.8",
+            },
+            "software": {
+                "python": "test", "implementation": "CPython",
+                "platform": "test", "executable": "C:/python.exe",
+                "numpy": "test", "torch": "test",
+                "stable_baselines3": "test", "sb3_contrib": "test",
+            },
+        },
+    }
     return dagger_module.DevelopmentEvaluationDefinition.create(
         candidates=candidates,
         panel_hash="1" * 64,
         scenario_hash="2" * 64,
         contract_hash="c" * 64,
         encoding_hash="e" * 64,
-        repository={
-            "root": str(ROOT.resolve()),
-            "commit": "a" * 40,
-            "source_tree": "b" * 40,
-            "dirty": False,
-        },
+        repository=repository,
+        stable_iteration_identity=stable_iteration_identity,
     )
 
 
@@ -5249,6 +5326,80 @@ def _task10_physical_source_chain(
         "legacy": False,
         "promotable": True,
     }
+    repository = _repository_provider(ROOT)
+    optimizer = {
+        "source_mixture_basis_points": {
+            "greedy_standard": 4_900,
+            "search_conversion": 2_100,
+            "dagger_targeted": 3_000,
+        },
+        "batch_size": 256,
+        "learning_rate": 3e-4,
+        "max_epochs": 50,
+        "patience": 5,
+        "model_seed": 227,
+        "sampler_seed": 227,
+        "device": "cuda",
+        "publication_device": "cpu",
+        "objective": "actor_only_masked_cross_entropy",
+        "validation_metric": "targeted_negative_log_likelihood",
+    }
+    panel_bytes = (json.dumps(
+        {"training": optimizer}, sort_keys=True,
+    ) + "\n").encode("utf-8")
+    seed_banks_bytes = b'{"seed_banks":"task10-test"}\n'
+    definition_identity = {
+        "panel_sha256": hashlib.sha256(panel_bytes).hexdigest(),
+        "panel_byte_size": len(panel_bytes),
+        "seed_banks_sha256": hashlib.sha256(seed_banks_bytes).hexdigest(),
+        "seed_banks_byte_size": len(seed_banks_bytes),
+    }
+    stable_scenario = {
+        "source_sha256": "5" * 64,
+        "runtime_sha256": "2" * 64,
+    }
+    stable_contract = {
+        "version": "tactical-v2",
+        "contract_hash": baseline_contract.contract_hash,
+        "encoding_hash": baseline_contract.encoding_hash,
+        "observation_size": 2,
+        "action_size": 7,
+        "action_regions": {
+            "move": {"offset": 1, "count": 2},
+            "attack": {"offset": 3, "count": 2},
+            "deploy": {"offset": 5, "count": 2},
+        },
+    }
+    stable_dataset = {
+        "root": str((tmp_path / "base-dataset").resolve()),
+        "manifest_sha256": "5" * 64,
+        "content_sha256": "8" * 64,
+        "file_count": 3966,
+        "byte_size": 17_852_257,
+        "contract_hash": "d" * 64,
+        "encoding_hash": baseline_contract.encoding_hash,
+        "scenario_hash": "9" * 64,
+    }
+    stable_runtime = {
+        "hardware": {
+            "training_device": "cuda:0",
+            "publication_device": "cpu",
+            "cuda_available": True,
+            "device_index": 0,
+            "cuda_runtime": "12.8",
+            "device_name": "test-gpu",
+        },
+        "software": {
+            "python": "3.11.test",
+            "implementation": "CPython",
+            "platform": "test-platform",
+            "executable": "C:/python/python.exe",
+            "numpy": "test",
+            "torch": "test",
+            "stable_baselines3": "test",
+            "sb3_contrib": "test",
+        },
+    }
     oracle = dagger_module.OracleSpec(
         oracle_type="bounded-search",
         depth=4,
@@ -5284,6 +5435,42 @@ def _task10_physical_source_chain(
         starting_learner_model_seed=227,
         starting_learner_step=38_912,
         starting_learner_source_content_identity=baseline_physical.content_identity,
+        publication_identity=runner._freeze_json({
+            "execution_trust": {"evidence_class": "sealed-engine"},
+            "schema_version": 1,
+            "panel_id": "task10-test",
+            "panel_sha256": definition_identity["panel_sha256"],
+            "seed_banks_sha256": definition_identity["seed_banks_sha256"],
+            "scenario_sha256": stable_scenario["source_sha256"],
+            "runtime_scenario_sha256": stable_scenario["runtime_sha256"],
+            "contract_hash": stable_contract["contract_hash"],
+            "encoding_hash": stable_contract["encoding_hash"],
+            "repository": repository,
+            "starting_learner": {
+                "schema_version": 1,
+                "source_kind": "snapshot",
+                "controller": baseline_controller_payload,
+                "checkpoint_sha256": _sha256(baseline_checkpoint),
+            },
+            "learner_source_manifest_sha256": _sha256(
+                baseline_run / "run.json"
+            ),
+            "original_dataset": {
+                **{
+                    name: stable_dataset[name]
+                    for name in (
+                        "manifest_sha256", "contract_hash", "encoding_hash",
+                        "scenario_hash", "content_sha256", "file_count", "byte_size",
+                    )
+                },
+                "audit": {"games": 1, "teacher_labels": 1},
+            },
+            "profiles": [],
+            "oracle_candidates": [oracle.to_dict()],
+            "preflight": {},
+            "teacher_schedule": [],
+            "teacher_schedule_sha256": "6" * 64,
+        }),
     )
 
     def open_test_preflight(root: Path) -> object:
@@ -5329,11 +5516,67 @@ def _task10_physical_source_chain(
         },
     )
     pipeline_root = tmp_path / "physical-task9"
+    prepared_root = pipeline_root / "definition"
+    prepared_root.mkdir(parents=True)
+    (prepared_root / "panel.json").write_bytes(panel_bytes)
+    (prepared_root / "seed-banks.json").write_bytes(seed_banks_bytes)
+    prepared_identity = {
+        "definition": definition_identity,
+        "repository": repository,
+    }
+    prepared_manifest = {
+        "schema_version": 1,
+        "status": "completed",
+        "identity": prepared_identity,
+        "artifacts": {
+            "panel": {
+                "path": "panel.json",
+                "sha256": definition_identity["panel_sha256"],
+                "byte_size": definition_identity["panel_byte_size"],
+            },
+            "seed_banks": {
+                "path": "seed-banks.json",
+                "sha256": definition_identity["seed_banks_sha256"],
+                "byte_size": definition_identity["seed_banks_byte_size"],
+            },
+        },
+    }
+    prepared_manifest["content_identity"] = _content_identity(prepared_manifest)
+    _rewrite(prepared_root / "manifest.json", prepared_manifest)
+    validated_root = pipeline_root / "validation"
+    validated_root.mkdir()
+    validation_identity = {
+        "prepared_content_identity": prepared_manifest["content_identity"],
+        "physical": {
+            "starting_learner": {
+                "checkpoint_path": str(baseline_checkpoint),
+                "checkpoint_sha256": _sha256(baseline_checkpoint),
+                "source_run": str(baseline_run),
+                "source_manifest_sha256": _sha256(baseline_run / "run.json"),
+            },
+            "base_dataset": stable_dataset,
+            "scenario": stable_scenario,
+            "contract": stable_contract,
+            "seed_isolation": {
+                "definition_count": 6,
+                "overlap_count": 0,
+                "final_bank_touched": False,
+            },
+        },
+        "runtime": stable_runtime,
+    }
+    validation_manifest = {
+        "schema_version": 1,
+        "status": "completed",
+        "identity": validation_identity,
+    }
+    validation_manifest["content_identity"] = _content_identity(validation_manifest)
+    _rewrite(validated_root / "manifest.json", validation_manifest)
     iterations_root = pipeline_root / "iterations"
     iterations_root.mkdir(parents=True)
     harness = _PhysicalIterationHarness(pipeline_root, runner)
     harness.contract = compact_contract.to_dict()
-    harness.repository = _repository_provider(ROOT)
+    harness.repository = repository
     harness.oracle = {
         "spec": oracle.to_dict(),
         "evidence_root": str(preflight_root.resolve()),
@@ -5405,7 +5648,7 @@ def _task10_physical_source_chain(
             original_dataset=original_dataset,
             scenario_hash="2" * 64,
             repository_hash=repository_hash,
-            panel_hash="1" * 64,
+            panel_hash=definition_identity["panel_sha256"],
             schedule_hash="4" * 64,
         )
         validation, _ = seal_pair(
@@ -5421,7 +5664,7 @@ def _task10_physical_source_chain(
             original_dataset=original_dataset,
             scenario_hash="2" * 64,
             repository_hash=repository_hash,
-            panel_hash="1" * 64,
+            panel_hash=definition_identity["panel_sha256"],
             schedule_hash="4" * 64,
         )
 
@@ -5504,7 +5747,7 @@ def _task10_physical_source_chain(
             train_overlays=tuple(cumulative_train),
             validation_overlays=tuple(cumulative_validation),
         )
-        identity["definition"]["panel_sha256"] = train.definition.panel_hash
+        identity["definition"] = dict(definition_identity)
         identity["scenario"]["runtime_sha256"] = train.definition.scenario_hash
         identity["base_dataset"]["manifest_sha256"] = (
             train.definition.original_dataset.manifest_sha256
@@ -5549,6 +5792,17 @@ def _task10_physical_source_chain(
         iteration_roots=tuple(iteration_roots),
         sources=tuple(sources),
         contract=baseline_contract,
+        panel_hash=definition_identity["panel_sha256"],
+        stable_identity={
+            "definition": definition_identity,
+            "repository": repository,
+            "scenario": stable_scenario,
+            "contract": stable_contract,
+            "base_dataset": stable_dataset,
+            "selected_oracle": harness.oracle,
+            "optimizer": optimizer,
+            "runtime": stable_runtime,
+        },
     )
 
 
@@ -5742,7 +5996,7 @@ def test_task10_definition_builder_authenticates_real_task7_task9_chain(
         preflight_root=chain.preflight_root,
         baseline_root=chain.baseline_root,
         iteration_roots=chain.iteration_roots,
-        panel_hash="1" * 64,
+        panel_hash=chain.panel_hash,
         scenario_hash="2" * 64,
         contract_hash=chain.contract.contract_hash,
         encoding_hash=chain.contract.encoding_hash,
@@ -5766,6 +6020,50 @@ def test_task10_definition_builder_authenticates_real_task7_task9_chain(
         chain.sources[index].validation_overlay_prefix[-1]
         for index in (1, 2, 3)
     )
+
+
+def test_task10_definition_builder_rejects_resealed_k1_stable_dataset_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-consistent k1-k3 reseal cannot invent Task 9's stable base identity."""
+
+    import run_annihilation_selective_dagger as runner
+
+    chain = _task10_physical_source_chain(tmp_path, runner, monkeypatch)
+    forged_content_sha256 = "f" * 64
+    predecessor_content_identity = None
+    for iteration, root in enumerate(chain.iteration_roots, start=1):
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["identity"]["base_dataset"]["content_sha256"] = (
+            forged_content_sha256
+        )
+        if iteration > 1:
+            manifest["identity"]["predecessor"]["content_identity"] = (
+                predecessor_content_identity
+            )
+        manifest["content_identity"] = _content_identity(manifest)
+        dagger_module.IterationManifest.from_dict(manifest)
+        _rewrite(manifest_path, manifest)
+        predecessor_content_identity = manifest["content_identity"]
+
+    with pytest.raises(
+        ValueError, match="base dataset|stable identity|Task 8|Task 9",
+    ):
+        runner.build_development_evaluation_definition(
+            preflight_root=chain.preflight_root,
+            baseline_root=chain.baseline_root,
+            iteration_roots=chain.iteration_roots,
+            panel_hash=chain.panel_hash,
+            scenario_hash="2" * 64,
+            contract_hash=chain.contract.contract_hash,
+            encoding_hash=chain.contract.encoding_hash,
+            repository_root=ROOT,
+            reopen_preflight=None,
+            reopen_baseline=None,
+            reopen_iteration=None,
+            repository_identity_provider=_repository_provider,
+        )
 
 
 @pytest.mark.parametrize(
@@ -5924,7 +6222,7 @@ def test_task10_definition_builder_rejects_deep_physical_source_mutation(
             preflight_root=chain.preflight_root,
             baseline_root=chain.baseline_root,
             iteration_roots=chain.iteration_roots,
-            panel_hash="1" * 64,
+            panel_hash=chain.panel_hash,
             scenario_hash="2" * 64,
             contract_hash=chain.contract.contract_hash,
             encoding_hash=chain.contract.encoding_hash,
@@ -5951,7 +6249,7 @@ def test_task10_iteration_evidence_rejects_manifest_change_during_reopen(
         preflight_root=chain.preflight_root,
         baseline_root=chain.baseline_root,
         iteration_roots=chain.iteration_roots,
-        panel_hash="1" * 64,
+        panel_hash=chain.panel_hash,
         scenario_hash="2" * 64,
         contract_hash=chain.contract.contract_hash,
         encoding_hash=chain.contract.encoding_hash,
@@ -6663,6 +6961,65 @@ def test_task10_supervised_rejects_overlay_shard_mutated_during_metrics(
         )
 
 
+def test_task10_supervised_rejects_overlay_shard_mutated_on_fourth_evidence_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No local evidence reread may occur after the final overlay stability guard."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    result = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=1,
+        heldout_overlay_roots=(overlays[0].root,),
+        output_root=tmp_path / "supervised-overlay-fourth-evidence-read",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    )
+    overlay_manifest = json.loads(
+        (overlays[0].root / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_game = json.loads(
+        (
+            overlays[0].root / overlay_manifest["games"][0]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    shard = overlays[0].root / first_game["shard"]["path"]
+    evidence_path = result.result.root / "evidence.json"
+    original_read_bytes = Path.read_bytes
+    evidence_reads = 0
+
+    def mutate_shard_on_fourth_evidence_read(path: Path) -> bytes:
+        nonlocal evidence_reads
+        raw = original_read_bytes(path)
+        if path == evidence_path:
+            evidence_reads += 1
+            if evidence_reads == 4:
+                shard.write_bytes(b"corrupted-after-overlay-stability-guard")
+        return raw
+
+    monkeypatch.setattr(Path, "read_bytes", mutate_shard_on_fourth_evidence_read)
+    with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
+        runner._open_development_supervised_evaluation_from_physical_bytes(
+            result.result.root,
+            definition=definition,
+            iteration=1,
+        )
+
+
 def test_task10_supervised_rejects_reparse_overlay_root(
     tmp_path: Path,
 ) -> None:
@@ -6876,6 +7233,50 @@ def _task10_fast_aggregate_fixture(
         starting_learner_source_content_identity=(
             definition.candidates[0].source_publication["content_identity"]
         ),
+        publication_identity=runner._freeze_json({
+            "execution_trust": {"evidence_class": "sealed-engine"},
+            "schema_version": 1,
+            "panel_id": "task10-test",
+            "panel_sha256": definition.stable_iteration_identity[
+                "definition"
+            ]["panel_sha256"],
+            "seed_banks_sha256": definition.stable_iteration_identity[
+                "definition"
+            ]["seed_banks_sha256"],
+            "scenario_sha256": definition.stable_iteration_identity[
+                "scenario"
+            ]["source_sha256"],
+            "runtime_scenario_sha256": definition.stable_iteration_identity[
+                "scenario"
+            ]["runtime_sha256"],
+            "contract_hash": definition.contract_hash,
+            "encoding_hash": definition.encoding_hash,
+            "repository": dict(definition.repository),
+            "starting_learner": {
+                "schema_version": 1,
+                "source_kind": "snapshot",
+                "controller": json.loads(definition.candidates[0].controller),
+                "checkpoint_sha256": definition.candidates[0].checkpoint_sha256,
+            },
+            "learner_source_manifest_sha256": definition.candidates[0].source_publication[
+                "run_manifest_sha256"
+            ],
+            "original_dataset": {
+                **{
+                    name: definition.stable_iteration_identity["base_dataset"][name]
+                    for name in (
+                        "manifest_sha256", "contract_hash", "encoding_hash",
+                        "scenario_hash", "content_sha256", "file_count", "byte_size",
+                    )
+                },
+                "audit": {"games": 1, "teacher_labels": 1},
+            },
+            "profiles": [],
+            "oracle_candidates": [oracle.to_dict()],
+            "preflight": {},
+            "teacher_schedule": [],
+            "teacher_schedule_sha256": "8" * 64,
+        }),
     )
     iteration_roots = tuple(tmp_path / f"aggregate-matrix-iteration-{i}" for i in (1, 2, 3))
     iterations = []
@@ -7182,7 +7583,7 @@ def test_task10_aggregate_internally_authenticates_task8_task9_sources(
         preflight_root=chain.preflight_root,
         baseline_root=chain.baseline_root,
         iteration_roots=chain.iteration_roots,
-        panel_hash="1" * 64,
+        panel_hash=chain.panel_hash,
         scenario_hash="2" * 64,
         contract_hash=chain.contract.contract_hash,
         encoding_hash=chain.contract.encoding_hash,

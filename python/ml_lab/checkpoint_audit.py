@@ -402,6 +402,63 @@ _AUDITED_CONTRACT_FIELDS = frozenset({
     "action_size", "board", "contract_hash", "encoding_hash", "environment",
     "observation_size", "reward", "roster", "semantics", "version",
 })
+_AUDITED_BOARD_INT_FIELDS = frozenset({
+    "width", "height", "max_elevation", "max_steps", "zone_depth",
+    "plains_weight", "forest_weight", "rough_weight", "water_weight",
+    "starting_points", "generator_cost", "generator_output", "generator_health",
+    "damage_floor", "dmg_high_ground_bonus", "range_high_ground_bonus",
+    "round_cap", "design_fee", "actions_per_turn", "win_conditions",
+    "capture_cost", "economy_win_threshold", "score_kills", "score_points",
+    "score_army", "score_territory", "territory_income",
+})
+_AUDITED_BOARD_NUMBER_FIELDS = frozenset({
+    "flat_chance", "bounty_rate", "deploy_cost_multiplier", "upkeep_factor",
+    "capture_factor", "build_factor", "point_decay",
+})
+_AUDITED_BOARD_BOOL_FIELDS = frozenset({
+    "biomes_enabled", "territory_mode", "claim_ends_turn", "build_anywhere",
+    "generators_enabled", "fog_of_war",
+})
+_AUDITED_TERRAIN_FIELDS = frozenset({
+    "move_cost", "concealment", "defense", "passable",
+})
+_AUDITED_BOARD_FIELDS = frozenset({
+    *_AUDITED_BOARD_INT_FIELDS,
+    *_AUDITED_BOARD_NUMBER_FIELDS,
+    *_AUDITED_BOARD_BOOL_FIELDS,
+    "turn_policy", "environment_kind", "plains", "forest", "rough", "water",
+})
+_AUDITED_REWARD_FIELDS = frozenset({
+    "shape_scale", "step_penalty", "closing_weight", "draw_credit_weight",
+    "points_weight", "terminal_win", "terminal_loss",
+})
+_AUDITED_SEMANTICS_FIELDS = frozenset({
+    "contract_version", "environment_kind", "starting_unit_count",
+    "max_controllable_units", "placement_policy", "templates",
+    "action_regions", "observation_channels", "action_size",
+    "observation_size", "board",
+})
+_AUDITED_PROFILED_SEMANTICS_FIELDS = frozenset({
+    *_AUDITED_SEMANTICS_FIELDS, "start_profiles", "start_distribution",
+})
+_AUDITED_TEMPLATE_FIELDS = frozenset({"id", "name", "stats", "cost"})
+_AUDITED_REGION_FIELDS = frozenset({"offset", "count"})
+_AUDITED_START_PROFILE_FIELDS = frozenset({
+    "id", "learner_units", "opponent_units", "separation",
+})
+_AUDITED_START_DISTRIBUTION_FIELDS = frozenset({"profile_id", "basis_points"})
+_AUDITED_PROFILE_CATALOG = (
+    ("standard-3v3", 3, 3, "legacy-mirrored"),
+    ("conversion-3v1-near", 3, 1, "near"),
+    ("conversion-3v1-medium", 3, 1, "medium"),
+    ("conversion-3v1-far", 3, 1, "far"),
+    ("conversion-2v1-near", 2, 1, "near"),
+    ("conversion-2v1-medium", 2, 1, "medium"),
+    ("conversion-2v1-far", 2, 1, "far"),
+    ("conversion-1v1-near", 1, 1, "near"),
+    ("conversion-1v1-medium", 1, 1, "medium"),
+    ("conversion-1v1-far", 1, 1, "far"),
+)
 _AUDITED_TRAINING_DEVICE_FIELDS = frozenset({
     "cuda_runtime", "device_index", "device_name", "requested", "resolved",
     "torch_version",
@@ -466,6 +523,228 @@ def _audited_number(
     return result
 
 
+def _validate_audited_board(
+    value: object, *, environment_kind: str, label: str,
+) -> Mapping[str, Any]:
+    board = _exact_object(value, _AUDITED_BOARD_FIELDS, label=label)
+    for field in _AUDITED_BOARD_INT_FIELDS:
+        minimum = -1 if field == "actions_per_turn" else 0
+        _audited_int(board[field], label=f"{label} {field}", minimum=minimum)
+    for field in ("width", "height", "max_steps", "round_cap"):
+        _audited_int(board[field], label=f"{label} {field}", minimum=1)
+    for field in _AUDITED_BOARD_NUMBER_FIELDS:
+        maximum = 1.0 if field == "flat_chance" else None
+        _audited_number(
+            board[field], label=f"{label} {field}", minimum=0.0, maximum=maximum,
+        )
+    for field in _AUDITED_BOARD_BOOL_FIELDS:
+        if type(board[field]) is not bool:
+            raise ValueError(f"{label} {field} must be a boolean")
+    _require_string(board["turn_policy"], label=f"{label} turn policy")
+    if board["environment_kind"] != environment_kind:
+        raise ValueError(f"{label} environment kind does not match semantics")
+    for terrain_name in ("plains", "forest", "rough", "water"):
+        terrain = _exact_object(
+            board[terrain_name], _AUDITED_TERRAIN_FIELDS,
+            label=f"{label} {terrain_name}",
+        )
+        for field in ("move_cost", "concealment", "defense"):
+            _audited_int(
+                terrain[field], label=f"{label} {terrain_name} {field}",
+            )
+        if type(terrain["passable"]) is not bool:
+            raise ValueError(f"{label} {terrain_name} passable must be a boolean")
+    return board
+
+
+def _validate_audited_profiles(
+    semantics: Mapping[str, Any], *, label: str,
+) -> None:
+    profiles = semantics["start_profiles"]
+    if type(profiles) is not list:
+        raise ValueError(f"{label} start profiles schema is invalid")
+    actual_profiles: list[tuple[str, int, int, str]] = []
+    for index, value in enumerate(profiles):
+        profile = _exact_object(
+            value, _AUDITED_START_PROFILE_FIELDS,
+            label=f"{label} start profile {index}",
+        )
+        profile_id = _require_string(
+            profile["id"], label=f"{label} start profile {index} id",
+        )
+        learner_units = _audited_int(
+            profile["learner_units"],
+            label=f"{label} start profile {index} learner units", minimum=1,
+        )
+        opponent_units = _audited_int(
+            profile["opponent_units"],
+            label=f"{label} start profile {index} opponent units", minimum=1,
+        )
+        separation = _require_string(
+            profile["separation"],
+            label=f"{label} start profile {index} separation",
+        )
+        actual_profiles.append(
+            (profile_id, learner_units, opponent_units, separation)
+        )
+    if tuple(actual_profiles) != _AUDITED_PROFILE_CATALOG:
+        raise ValueError(f"{label} start profile catalog is invalid")
+
+    distribution = semantics["start_distribution"]
+    if type(distribution) is not list:
+        raise ValueError(f"{label} start distribution schema is invalid")
+    declared = {profile[0] for profile in _AUDITED_PROFILE_CATALOG}
+    seen: set[str] = set()
+    total = 0
+    for index, value in enumerate(distribution):
+        weight = _exact_object(
+            value, _AUDITED_START_DISTRIBUTION_FIELDS,
+            label=f"{label} start distribution {index}",
+        )
+        profile_id = _require_string(
+            weight["profile_id"],
+            label=f"{label} start distribution {index} profile id",
+        )
+        basis_points = _audited_int(
+            weight["basis_points"],
+            label=f"{label} start distribution {index} basis points",
+        )
+        if (
+            profile_id not in declared
+            or profile_id in seen
+            or basis_points > 10_000
+        ):
+            raise ValueError(f"{label} start distribution is invalid")
+        seen.add(profile_id)
+        total += basis_points
+    if seen != declared or total != 10_000:
+        raise ValueError(f"{label} start distribution is invalid")
+
+
+def _validate_audited_semantics(
+    value: object,
+    *,
+    board: Mapping[str, Any],
+    roster: list[object],
+    action_size: int,
+    observation_size: int,
+    environment_kind: str,
+    label: str,
+) -> Mapping[str, Any]:
+    semantics = _require_mapping(value, label=label)
+    placement_policy = semantics.get("placement_policy")
+    expected_fields = (
+        _AUDITED_PROFILED_SEMANTICS_FIELDS
+        if placement_policy == "profiled-seeded-v1"
+        else _AUDITED_SEMANTICS_FIELDS
+    )
+    semantics = _exact_object(semantics, expected_fields, label=label)
+    if (
+        semantics["contract_version"] != "tactical-v2"
+        or semantics["environment_kind"] != environment_kind
+        or placement_policy not in {"profiled-seeded-v1", "symmetric-random-v1"}
+    ):
+        raise ValueError(f"{label} identity is invalid")
+    starting_units = _audited_int(
+        semantics["starting_unit_count"],
+        label=f"{label} starting unit count", minimum=1,
+    )
+    max_units = _audited_int(
+        semantics["max_controllable_units"],
+        label=f"{label} max controllable units", minimum=1,
+    )
+    if not 1 <= starting_units <= 12 or max_units != starting_units:
+        raise ValueError(f"{label} unit counts are invalid")
+    if placement_policy == "profiled-seeded-v1":
+        if starting_units != 3:
+            raise ValueError(f"{label} profiled unit count is invalid")
+        _validate_audited_profiles(semantics, label=label)
+
+    templates = semantics["templates"]
+    if type(templates) is not list or not templates:
+        raise ValueError(f"{label} templates schema is invalid")
+    expected_roster: list[str] = []
+    seen_ids: set[str] = set()
+    for index, value in enumerate(templates):
+        template = _exact_object(
+            value, _AUDITED_TEMPLATE_FIELDS, label=f"{label} template {index}",
+        )
+        template_id = _require_string(
+            template["id"], label=f"{label} template {index} id",
+        )
+        name = _require_string(
+            template["name"], label=f"{label} template {index} name",
+        )
+        if template_id in seen_ids:
+            raise ValueError(f"{label} template ids must be unique")
+        seen_ids.add(template_id)
+        stats = template["stats"]
+        if (
+            type(stats) is not list
+            or len(stats) != 9
+            or any(type(stat) is not int for stat in stats)
+        ):
+            raise ValueError(f"{label} template {index} stats are invalid")
+        _audited_int(
+            template["cost"], label=f"{label} template {index} cost",
+        )
+        expected_roster.append(
+            f"{template_id}:{name}:{','.join(str(stat) for stat in stats)}"
+        )
+    if roster != expected_roster:
+        raise ValueError(f"{label} roster does not match templates")
+
+    cell_count = board["width"] * board["height"]
+    expected_regions = {
+        "move": {"offset": 1, "count": starting_units * cell_count},
+        "attack": {
+            "offset": 1 + starting_units * cell_count,
+            "count": starting_units * cell_count,
+        },
+        "deploy": {
+            "offset": 1 + 2 * starting_units * cell_count,
+            "count": len(templates) * cell_count,
+        },
+    }
+    regions = _exact_object(
+        semantics["action_regions"], frozenset(expected_regions),
+        label=f"{label} action regions",
+    )
+    for name, expected in expected_regions.items():
+        region = _exact_object(
+            regions[name], _AUDITED_REGION_FIELDS,
+            label=f"{label} action region {name}",
+        )
+        for field in _AUDITED_REGION_FIELDS:
+            _audited_int(
+                region[field], label=f"{label} action region {name} {field}",
+            )
+        if dict(region) != expected:
+            raise ValueError(f"{label} action region {name} is invalid")
+
+    expected_channels = [
+        *(f"friendly_role_hp_{index}" for index in range(len(templates))),
+        *(f"visible_enemy_role_hp_{index}" for index in range(len(templates))),
+        "elevation",
+    ]
+    if semantics["observation_channels"] != expected_channels:
+        raise ValueError(f"{label} observation channels are invalid")
+    expected_action_size = 1 + (
+        2 * starting_units + len(templates)
+    ) * cell_count
+    expected_observation_size = len(expected_channels) * cell_count + 5
+    if (
+        action_size != expected_action_size
+        or semantics["action_size"] != action_size
+        or observation_size != expected_observation_size
+        or semantics["observation_size"] != observation_size
+    ):
+        raise ValueError(f"{label} geometry is invalid")
+    if semantics["board"] != board:
+        raise ValueError(f"{label} board does not match contract board")
+    return semantics
+
+
 def _validate_audited_contract(value: object, *, label: str) -> Mapping[str, Any]:
     contract = _exact_object(value, _AUDITED_CONTRACT_FIELDS, label=label)
     if contract["environment"] != "tactical-v2" or contract["version"] != "tactical-v2":
@@ -475,15 +754,37 @@ def _validate_audited_contract(value: object, *, label: str) -> Mapping[str, Any
     _audited_int(contract["observation_size"], label=f"{label} observation size", minimum=1)
     _audited_int(contract["action_size"], label=f"{label} action size", minimum=1)
     if (
-        not isinstance(contract["board"], Mapping)
-        or not isinstance(contract["reward"], Mapping)
-        or type(contract["roster"]) is not list
-        or any(not isinstance(item, str) or not item for item in contract["roster"])
+        type(contract["roster"]) is not list
+        or not contract["roster"]
+        or any(type(item) is not str or not item for item in contract["roster"])
     ):
-        raise ValueError(f"{label} structure is invalid")
-    semantics = _require_mapping(contract["semantics"], label=f"{label} semantics")
+        raise ValueError(f"{label} roster is invalid")
+    reward = _exact_object(
+        contract["reward"], _AUDITED_REWARD_FIELDS, label=f"{label} reward",
+    )
+    for field in _AUDITED_REWARD_FIELDS:
+        _audited_number(reward[field], label=f"{label} reward {field}")
+    preliminary_semantics = _require_mapping(
+        contract["semantics"], label=f"{label} semantics",
+    )
     environment_kind = _require_string(
-        semantics.get("environment_kind"), label=f"{label} environment kind",
+        preliminary_semantics.get("environment_kind"),
+        label=f"{label} environment kind",
+    )
+    if environment_kind not in {"tactical", "duel"}:
+        raise ValueError(f"{label} environment kind is invalid")
+    board = _validate_audited_board(
+        contract["board"], environment_kind=environment_kind,
+        label=f"{label} board",
+    )
+    semantics = _validate_audited_semantics(
+        preliminary_semantics,
+        board=board,
+        roster=contract["roster"],
+        action_size=contract["action_size"],
+        observation_size=contract["observation_size"],
+        environment_kind=environment_kind,
+        label=f"{label} semantics",
     )
     canonical = json.dumps(
         {

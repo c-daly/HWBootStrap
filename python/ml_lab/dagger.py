@@ -6899,6 +6899,176 @@ class DevelopmentCandidate:
         }
 
 
+_DEVELOPMENT_STABLE_ITERATION_IDENTITY_FIELDS = frozenset({
+    "definition", "repository", "scenario", "contract", "base_dataset",
+    "selected_oracle", "optimizer", "runtime",
+})
+
+
+def _development_stable_iteration_identity(
+    value: Any,
+    *,
+    panel_hash: str,
+    scenario_hash: str,
+    contract_hash: str,
+    encoding_hash: str,
+    repository: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    fields = _strict_fields(
+        value,
+        _DEVELOPMENT_STABLE_ITERATION_IDENTITY_FIELDS,
+        "development stable iteration identity",
+    )
+    definition = _strict_fields(
+        fields["definition"],
+        frozenset({
+            "panel_sha256", "panel_byte_size", "seed_banks_sha256",
+            "seed_banks_byte_size",
+        }),
+        "development stable definition identity",
+    )
+    for name in ("panel_sha256", "seed_banks_sha256"):
+        _hash(definition[name], f"development stable {name}")
+    for name in ("panel_byte_size", "seed_banks_byte_size"):
+        _strict_int(
+            definition[name], f"development stable {name}", minimum=1,
+        )
+    stable_repository = _strict_fields(
+        fields["repository"],
+        frozenset({"root", "commit", "source_tree", "dirty"}),
+        "development stable repository identity",
+    )
+    _strict_string(stable_repository["root"], "development stable repository root")
+    _git_object_id(stable_repository["commit"], "development stable repository commit")
+    _git_object_id(
+        stable_repository["source_tree"], "development stable repository source tree",
+    )
+    if stable_repository["dirty"] is not False:
+        raise ValueError("development stable repository identity must be clean")
+    scenario = _strict_fields(
+        fields["scenario"],
+        frozenset({"source_sha256", "runtime_sha256"}),
+        "development stable scenario identity",
+    )
+    _hash(scenario["source_sha256"], "development stable scenario source")
+    _hash(scenario["runtime_sha256"], "development stable scenario runtime")
+    contract = _strict_fields(
+        fields["contract"],
+        frozenset({
+            "version", "contract_hash", "encoding_hash", "observation_size",
+            "action_size", "action_regions",
+        }),
+        "development stable contract identity",
+    )
+    if contract["version"] != "tactical-v2":
+        raise ValueError("development stable contract must be tactical-v2")
+    _hash(contract["contract_hash"], "development stable contract hash")
+    _hash(contract["encoding_hash"], "development stable encoding hash")
+    _strict_int(
+        contract["observation_size"],
+        "development stable observation size", minimum=1,
+    )
+    _strict_int(
+        contract["action_size"], "development stable action size", minimum=1,
+    )
+    regions = _strict_fields(
+        contract["action_regions"], frozenset({"move", "attack", "deploy"}),
+        "development stable action regions",
+    )
+    for name in ("move", "attack", "deploy"):
+        region = _strict_fields(
+            regions[name], frozenset({"offset", "count"}),
+            f"development stable {name} region",
+        )
+        _strict_int(region["offset"], f"development stable {name} offset")
+        _strict_int(
+            region["count"], f"development stable {name} count", minimum=1,
+        )
+    dataset = _strict_fields(
+        fields["base_dataset"],
+        frozenset({
+            "root", "manifest_sha256", "content_sha256", "file_count",
+            "byte_size", "contract_hash", "encoding_hash", "scenario_hash",
+        }),
+        "development stable base dataset identity",
+    )
+    _strict_string(dataset["root"], "development stable base dataset root")
+    for name in (
+        "manifest_sha256", "content_sha256", "contract_hash", "encoding_hash",
+        "scenario_hash",
+    ):
+        _hash(dataset[name], f"development stable base dataset {name}")
+    for name in ("file_count", "byte_size"):
+        _strict_int(
+            dataset[name], f"development stable base dataset {name}", minimum=1,
+        )
+    selected = _strict_fields(
+        fields["selected_oracle"],
+        frozenset({
+            "spec", "evidence_root", "evidence_content_identity", "evidence_class",
+        }),
+        "development stable selected oracle identity",
+    )
+    OracleSpec.from_dict(selected["spec"])
+    _strict_string(
+        selected["evidence_root"], "development stable oracle evidence root",
+    )
+    _hash(
+        selected["evidence_content_identity"],
+        "development stable oracle evidence content identity",
+    )
+    if selected["evidence_class"] != "sealed-engine":
+        raise ValueError("development stable oracle evidence must be sealed-engine")
+    _exact_json(
+        fields["optimizer"], _ITERATION_OPTIMIZER,
+        "development stable optimizer identity",
+    )
+    runtime = _strict_fields(
+        fields["runtime"], frozenset({"hardware", "software"}),
+        "development stable runtime identity",
+    )
+    hardware = _strict_fields(
+        runtime["hardware"],
+        frozenset({
+            "training_device", "publication_device", "cuda_available",
+            "device_index", "device_name", "cuda_runtime",
+        }),
+        "development stable runtime hardware",
+    )
+    software = _strict_fields(
+        runtime["software"],
+        frozenset({
+            "python", "implementation", "platform", "executable", "numpy",
+            "torch", "stable_baselines3", "sb3_contrib",
+        }),
+        "development stable runtime software",
+    )
+    _strict_int(
+        hardware["device_index"], "development stable runtime device index",
+    )
+    if (
+        not isinstance(hardware["training_device"], str)
+        or not hardware["training_device"].startswith("cuda")
+        or hardware["publication_device"] != "cpu"
+        or hardware["cuda_available"] is not True
+        or any(
+            not isinstance(hardware[name], str) or not hardware[name]
+            for name in ("device_name", "cuda_runtime")
+        )
+        or any(not isinstance(software[name], str) or not software[name] for name in software)
+    ):
+        raise ValueError("development stable runtime identity is invalid")
+    if (
+        definition["panel_sha256"] != panel_hash
+        or scenario["runtime_sha256"] != scenario_hash
+        or contract["contract_hash"] != contract_hash
+        or contract["encoding_hash"] != encoding_hash
+        or not _same_exact_json(stable_repository, repository)
+    ):
+        raise ValueError("development stable iteration identity projections changed")
+    return _freeze_contract_value(fields, "development stable iteration identity")
+
+
 @dataclass(frozen=True)
 class DevelopmentEvaluationDefinition:
     candidates: tuple[DevelopmentCandidate, ...]
@@ -6912,6 +7082,7 @@ class DevelopmentEvaluationDefinition:
     contract_hash: str
     encoding_hash: str
     repository: Mapping[str, Any]
+    stable_iteration_identity: Mapping[str, Any]
 
     @classmethod
     def create(
@@ -6923,6 +7094,7 @@ class DevelopmentEvaluationDefinition:
         contract_hash: str,
         encoding_hash: str,
         repository: Mapping[str, Any],
+        stable_iteration_identity: Mapping[str, Any],
     ) -> "DevelopmentEvaluationDefinition":
         if type(candidates) not in {list, tuple} or len(candidates) != 4:
             raise ValueError("development definition requires exactly four candidates")
@@ -6990,6 +7162,20 @@ class DevelopmentEvaluationDefinition:
             for seed in range(20_000_000, 20_000_100)
             for seat in (0, 1)
         )
+        frozen_repository = MappingProxyType({
+            "root": root,
+            "commit": commit,
+            "source_tree": source_tree,
+            "dirty": False,
+        })
+        frozen_stable_identity = _development_stable_iteration_identity(
+            stable_iteration_identity,
+            panel_hash=panel_hash,
+            scenario_hash=scenario_hash,
+            contract_hash=contract_hash,
+            encoding_hash=encoding_hash,
+            repository=frozen_repository,
+        )
         return cls(
             candidates=tuple(parsed),
             schedule=schedule,
@@ -7001,12 +7187,8 @@ class DevelopmentEvaluationDefinition:
             scenario_hash=_hash(scenario_hash, "development scenario hash"),
             contract_hash=_hash(contract_hash, "development contract hash"),
             encoding_hash=_hash(encoding_hash, "development encoding hash"),
-            repository=MappingProxyType({
-                "root": root,
-                "commit": commit,
-                "source_tree": source_tree,
-                "dirty": False,
-            }),
+            repository=frozen_repository,
+            stable_iteration_identity=frozen_stable_identity,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -7022,6 +7204,9 @@ class DevelopmentEvaluationDefinition:
             "contract_hash": self.contract_hash,
             "encoding_hash": self.encoding_hash,
             "repository": dict(self.repository),
+            "stable_iteration_identity": _mutable_json_value(
+                self.stable_iteration_identity
+            ),
         }
 
 

@@ -53,8 +53,94 @@ def _contract(*, contract_hash: str = "c" * 64, **changes: object) -> dict[str, 
 def _sealed_test_contract(*, environment_kind: str) -> dict[str, object]:
     """Build a tiny contract whose hash is derived from the engine's public format."""
 
-    result = _contract(contract_hash="0" * 64)
-    result["semantics"]["environment_kind"] = environment_kind
+    board = {
+        "width": 2,
+        "height": 1,
+        "max_elevation": 4,
+        "max_steps": 100,
+        "zone_depth": 1,
+        "plains_weight": 70,
+        "forest_weight": 15,
+        "rough_weight": 10,
+        "water_weight": 5,
+        "starting_points": 12,
+        "generator_cost": 2,
+        "generator_output": 1,
+        "generator_health": 3,
+        "damage_floor": 0,
+        "dmg_high_ground_bonus": 1,
+        "range_high_ground_bonus": 1,
+        "round_cap": 100,
+        "design_fee": 0,
+        "actions_per_turn": -1,
+        "win_conditions": 1,
+        "capture_cost": 2_147_483_647,
+        "economy_win_threshold": 200,
+        "score_kills": 1,
+        "score_points": 1,
+        "score_army": 1,
+        "score_territory": 1,
+        "territory_income": 0,
+        "flat_chance": 0.6,
+        "bounty_rate": 0.5,
+        "deploy_cost_multiplier": 1.0,
+        "upkeep_factor": 0.25,
+        "capture_factor": 4.0,
+        "build_factor": 4.0,
+        "point_decay": 0.0,
+        "biomes_enabled": False,
+        "territory_mode": False,
+        "claim_ends_turn": True,
+        "build_anywhere": False,
+        "generators_enabled": False,
+        "fog_of_war": False,
+        "turn_policy": "HexWars.Engine.AllUnitsPolicy",
+        "environment_kind": environment_kind,
+        "plains": {"move_cost": 1, "concealment": 0, "defense": 0, "passable": True},
+        "forest": {"move_cost": 1, "concealment": 0, "defense": 0, "passable": True},
+        "rough": {"move_cost": 1, "concealment": 0, "defense": 0, "passable": True},
+        "water": {"move_cost": 1, "concealment": 0, "defense": 0, "passable": True},
+    }
+    stats = [1, 0, 0, 1, 1, 0, 0, 1, 1]
+    semantics = {
+        "contract_version": "tactical-v2",
+        "environment_kind": environment_kind,
+        "starting_unit_count": 1,
+        "max_controllable_units": 1,
+        "placement_policy": "symmetric-random-v1",
+        "templates": [{"id": "one", "name": "One", "stats": stats, "cost": 1}],
+        "action_regions": {
+            "move": {"offset": 1, "count": 2},
+            "attack": {"offset": 3, "count": 2},
+            "deploy": {"offset": 5, "count": 2},
+        },
+        "observation_channels": [
+            "friendly_role_hp_0", "visible_enemy_role_hp_0", "elevation",
+        ],
+        "action_size": 7,
+        "observation_size": 11,
+        "board": board,
+    }
+    result = {
+        "environment": "tactical-v2",
+        "version": "tactical-v2",
+        "contract_hash": "0" * 64,
+        "encoding_hash": ENCODING_HASH,
+        "observation_size": 11,
+        "action_size": 7,
+        "board": board,
+        "roster": [f"one:One:{','.join(str(value) for value in stats)}"],
+        "reward": {
+            "shape_scale": 0.01,
+            "step_penalty": 0.005,
+            "closing_weight": 0.0,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "terminal_win": 1.0,
+            "terminal_loss": -1.0,
+        },
+        "semantics": semantics,
+    }
     document = {
         "action_size": result["action_size"],
         "contract_version": result["version"],
@@ -438,6 +524,35 @@ def test_audited_baseline_validator_accepts_real_locked_step_38912_run() -> None
         "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
     )
     assert publication.contract["contract_hash"] == LOCKED_BASELINE_CONTRACT_HASH
+
+
+def test_audited_baseline_validator_rejects_mutated_real_contract_board(
+    tmp_path: Path,
+) -> None:
+    common_git_dir = Path(subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True,
+    ).strip())
+    retained = common_git_dir.parent / "python" / "runs" / (
+        "bc227-ppo-random-s227-20260802-v2"
+    )
+    if not retained.is_dir():
+        pytest.skip("real locked baseline publication is not retained")
+    baseline = tmp_path / "baseline"
+    shutil.copytree(retained, baseline)
+    run_path = baseline / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    run["contract"]["board"]["width"] += 1
+    _write_json(run_path, run)
+
+    with pytest.raises(ValueError, match="board|contract|baseline"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=(
+                "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+            ),
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
 
 
 @pytest.mark.parametrize("mutation", ("invalid-initialization", "extra-file"))

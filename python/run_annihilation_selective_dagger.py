@@ -2290,6 +2290,9 @@ def _open_development_supervised_evaluation(
     iteration: int,
     overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
     examples: Sequence[Mapping[str, Any]],
+    source_snapshots: Sequence[tuple[Path, bytes]] = (),
+    expected_content_identity: str | None = None,
+    require_overlay_stability: bool = True,
 ) -> DevelopmentSupervisedEvidence:
     supplied_root = Path(root)
     root_junction = getattr(supplied_root, "is_junction", None)
@@ -2403,13 +2406,7 @@ def _open_development_supervised_evaluation(
         actual.add(path.name)
     if actual != {"evidence.json", "predictions.json", "metrics.json", "manifest.json"}:
         raise ValueError("development supervised publication contains unowned files")
-    if (
-        manifest_path.read_bytes() != manifest_bytes
-        or any(path.read_bytes() != raw for path, raw in artifact_snapshots.items())
-    ):
-        raise ValueError("development supervised bytes changed while reopening")
-    _require_supervised_overlay_stability(overlays)
-    return DevelopmentSupervisedEvidence(
+    result = DevelopmentSupervisedEvidence(
         root=publication_root,
         iteration=iteration,
         content_identity=manifest["content_identity"],
@@ -2419,6 +2416,20 @@ def _open_development_supervised_evaluation(
         trained_candidate_id=definition.candidates[iteration].candidate_id,
         metrics=_freeze_json(metrics),
     )
+    if (
+        manifest_path.read_bytes() != manifest_bytes
+        or any(path.read_bytes() != raw for path, raw in artifact_snapshots.items())
+        or any(path.read_bytes() != raw for path, raw in source_snapshots)
+    ):
+        raise ValueError("development supervised bytes changed while reopening")
+    if (
+        expected_content_identity is not None
+        and result.content_identity != expected_content_identity
+    ):
+        raise ValueError("development supervised publication changed")
+    if require_overlay_stability:
+        _require_supervised_overlay_stability(overlays)
+    return result
 
 
 def _open_development_supervised_evaluation_from_physical_bytes(
@@ -2490,19 +2501,14 @@ def _open_development_supervised_evaluation_from_physical_bytes(
         roots=roots,
         reopen=lambda _root: None,
     )
-    result = _open_development_supervised_evaluation(
+    return _open_development_supervised_evaluation(
         publication_root,
         definition=definition,
         iteration=iteration,
         overlays=overlays,
         examples=examples,
+        source_snapshots=((manifest_path, manifest_bytes), (evidence_path, raw)),
     )
-    if (
-        manifest_path.read_bytes() != manifest_bytes
-        or evidence_path.read_bytes() != raw
-    ):
-        raise ValueError("development supervised bytes changed while reopening")
-    return result
 
 
 def reopen_development_supervised_evaluation(
@@ -2526,16 +2532,15 @@ def reopen_development_supervised_evaluation(
         reopen=reopen_heldout_overlay,
     )
     _require_supervised_checkpoints(definition, iteration)
-    result = _open_development_supervised_evaluation(
+    _require_supervised_checkpoints(definition, iteration)
+    _require_development_repository(definition, repository_identity_provider)
+    return _open_development_supervised_evaluation(
         root,
         definition=definition,
         iteration=iteration,
         overlays=overlays,
         examples=examples,
     )
-    _require_supervised_checkpoints(definition, iteration)
-    _require_development_repository(definition, repository_identity_provider)
-    return result
 
 
 def run_development_supervised_evaluation(
@@ -2567,6 +2572,8 @@ def run_development_supervised_evaluation(
     if destination.exists():
         if staging.exists():
             raise ValueError("development supervised destination and staging are ambiguous")
+        _require_supervised_checkpoints(definition, iteration)
+        _require_development_repository(definition, repository_identity_provider)
         reopened = _open_development_supervised_evaluation(
             destination,
             definition=definition,
@@ -2574,8 +2581,6 @@ def run_development_supervised_evaluation(
             overlays=overlays,
             examples=examples,
         )
-        _require_supervised_checkpoints(definition, iteration)
-        _require_development_repository(definition, repository_identity_provider)
         return DevelopmentSupervisedRun(
             new_inferences=0, reused=True, result=reopened,
         )
@@ -2649,23 +2654,23 @@ def run_development_supervised_evaluation(
         iteration=iteration,
         overlays=overlays,
         examples=examples,
+        require_overlay_stability=False,
     )
     _require_supervised_checkpoints(definition, iteration)
     _require_development_repository(definition, repository_identity_provider)
     os.replace(staging, destination)
     try:
+        _require_supervised_checkpoints(definition, iteration)
+        _require_development_repository(
+            definition, repository_identity_provider
+        )
         published = _open_development_supervised_evaluation(
             destination,
             definition=definition,
             iteration=iteration,
             overlays=overlays,
             examples=examples,
-        )
-        if published.content_identity != staged.content_identity:
-            raise ValueError("development supervised publication changed")
-        _require_supervised_checkpoints(definition, iteration)
-        _require_development_repository(
-            definition, repository_identity_provider
+            expected_content_identity=staged.content_identity,
         )
     except BaseException:
         if destination.exists() and not staging.exists():
@@ -2691,6 +2696,7 @@ class DevelopmentPreflightEvidence:
     starting_learner_model_seed: int
     starting_learner_step: int
     starting_learner_source_content_identity: str
+    publication_identity: Mapping[str, Any]
 
 
 def _open_development_preflight_evidence(
@@ -2969,6 +2975,139 @@ def _task9_repository_hash(repository: Mapping[str, Any]) -> str:
     ).encode("utf-8"))
 
 
+def _task10_retained_stable_iteration_identity(
+    iteration_roots: Sequence[Path],
+    *,
+    preflight: DevelopmentPreflightEvidence,
+    repository: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Derive k1's stable identity from retained Task 8/9 physical evidence."""
+
+    if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
+        raise ValueError("development Task 9 requires exactly three iteration roots")
+    canonical_roots: list[Path] = []
+    for iteration, supplied in enumerate(iteration_roots, start=1):
+        path = Path(supplied)
+        junction = getattr(path, "is_junction", None)
+        if path.is_symlink() or bool(junction is not None and junction()):
+            raise ValueError("development Task 9 iteration root is a reparse point")
+        canonical = path.resolve(strict=True)
+        if canonical.name != f"iteration-{iteration}":
+            raise ValueError("development Task 9 iteration root layout changed")
+        canonical_roots.append(canonical)
+    iterations_root = canonical_roots[0].parent
+    if (
+        iterations_root.name != "iterations"
+        or any(root.parent != iterations_root for root in canonical_roots)
+    ):
+        raise ValueError("development Task 9 iteration roots do not share one pipeline")
+    pipeline_root = iterations_root.parent
+    for path in (pipeline_root, iterations_root):
+        junction = getattr(path, "is_junction", None)
+        if path.is_symlink() or bool(junction is not None and junction()):
+            raise ValueError("development Task 9 pipeline root is a reparse point")
+
+    prepared_root = pipeline_root / "definition"
+    validated_root = pipeline_root / "validation"
+    for path in (prepared_root, validated_root):
+        junction = getattr(path, "is_junction", None)
+        if path.is_symlink() or bool(junction is not None and junction()):
+            raise ValueError("development Task 9 retained stage is a reparse point")
+        if path.resolve(strict=True).parent != pipeline_root:
+            raise ValueError("development Task 9 retained stage escaped its pipeline")
+    prepared = _open_prepared_stage(prepared_root)
+    validated = _open_validated_stage(validated_root, prepared=prepared)
+    if not _same_json(prepared.identity["repository"], repository):
+        raise ValueError("development Task 9 retained repository identity changed")
+
+    try:
+        panel_bytes = prepared.panel_path.read_bytes()
+        seed_banks_bytes = prepared.seed_banks_path.read_bytes()
+        panel = json.loads(panel_bytes.decode("utf-8"))
+        optimizer = panel["training"]
+    except (OSError, KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("development Task 9 retained panel is invalid") from exc
+    if not isinstance(panel, Mapping) or not isinstance(optimizer, Mapping):
+        raise ValueError("development Task 9 retained optimizer identity is invalid")
+
+    task8 = preflight.publication_identity
+    if not isinstance(task8, Mapping):
+        raise ValueError("development Task 8 physical publication identity is missing")
+    definition = prepared.identity["definition"]
+    physical = validated.physical
+    task8_dataset = task8.get("original_dataset")
+    task8_learner = task8.get("starting_learner")
+    task8_controller = (
+        task8_learner.get("controller")
+        if isinstance(task8_learner, Mapping)
+        else None
+    )
+    expected_dataset = {
+        name: physical["base_dataset"][name]
+        for name in (
+            "manifest_sha256", "content_sha256", "file_count", "byte_size",
+            "contract_hash", "encoding_hash", "scenario_hash",
+        )
+    }
+    expected_learner = physical["starting_learner"]
+    if (
+        task8.get("panel_sha256") != definition["panel_sha256"]
+        or task8.get("seed_banks_sha256") != definition["seed_banks_sha256"]
+        or not _same_json(task8.get("repository"), repository)
+        or task8.get("scenario_sha256")
+        != physical["scenario"]["source_sha256"]
+        or task8.get("runtime_scenario_sha256")
+        != physical["scenario"]["runtime_sha256"]
+        or task8.get("contract_hash")
+        != physical["contract"]["contract_hash"]
+        or task8.get("encoding_hash")
+        != physical["contract"]["encoding_hash"]
+        or not isinstance(task8_dataset, Mapping)
+        or not _same_json(
+            {name: task8_dataset.get(name) for name in expected_dataset},
+            expected_dataset,
+        )
+        or not isinstance(task8_controller, Mapping)
+        or task8_controller.get("path") != expected_learner["checkpoint_path"]
+        or task8_controller.get("source_run") != expected_learner["source_run"]
+        or task8_learner.get("checkpoint_sha256")
+        != expected_learner["checkpoint_sha256"]
+        or task8.get("learner_source_manifest_sha256")
+        != expected_learner["source_manifest_sha256"]
+    ):
+        raise ValueError("development Task 8 and retained Task 9 identities differ")
+
+    stable_identity = _freeze_json({
+        "definition": definition,
+        "repository": repository,
+        "scenario": physical["scenario"],
+        "contract": physical["contract"],
+        "base_dataset": physical["base_dataset"],
+        "selected_oracle": {
+            "spec": preflight.selected_oracle.to_dict(),
+            "evidence_root": str(Path(preflight.evidence_root)),
+            "evidence_content_identity": preflight.content_identity,
+            "evidence_class": preflight.evidence_class,
+        },
+        "optimizer": optimizer,
+        "runtime": validated.runtime,
+    })
+    reopened_prepared = _open_prepared_stage(
+        prepared_root, expected_identity=prepared.identity,
+    )
+    reopened_validated = _open_validated_stage(
+        validated_root, prepared=reopened_prepared, expected_identity=validated.identity,
+    )
+    if (
+        reopened_prepared.content_identity != prepared.content_identity
+        or reopened_validated.content_identity != validated.content_identity
+        or reopened_prepared.panel_path.read_bytes() != panel_bytes
+        or reopened_prepared.seed_banks_path.read_bytes() != seed_banks_bytes
+    ):
+        raise ValueError("development Task 9 retained stages changed while reopening")
+    return stable_identity
+
+
 def _require_task10_iteration_causal_identity(
     manifest: IterationManifest,
     *,
@@ -3121,22 +3260,12 @@ def _require_task10_iteration_causal_identity(
     )
 
     if frozen_identity is not None:
-        expected_frozen = {
-            "panel_hash": frozen_identity["panel_hash"],
-            "scenario_hash": frozen_identity["scenario_hash"],
-            "repository": frozen_identity["repository"],
-            "contract_hash": frozen_identity["contract_hash"],
-            "encoding_hash": frozen_identity["encoding_hash"],
-        }
-        actual_frozen = {
-            "panel_hash": manifest.identity["definition"]["panel_sha256"],
-            "scenario_hash": manifest.identity["scenario"]["runtime_sha256"],
-            "repository": manifest.identity["repository"],
-            "contract_hash": manifest.identity["contract"]["contract_hash"],
-            "encoding_hash": manifest.identity["contract"]["encoding_hash"],
-        }
-        if not _same_json(actual_frozen, expected_frozen):
-            raise ValueError("development Task 9 frozen causal identity changed")
+        for field in _PREDECESSOR_STABLE_IDENTITY_FIELDS:
+            if not _same_json(manifest.identity[field], frozen_identity[field]):
+                raise ValueError(
+                    "development Task 9 stable identity changed: "
+                    f"{field.replace('_', ' ')}"
+                )
     return predecessor, predecessor_bytes
 
 
@@ -3615,19 +3744,22 @@ def build_development_evaluation_definition(
         "development preflight starting source identity",
     )
     dagger_domain.OracleSpec.from_dict(preflight.selected_oracle.to_dict())
-    roots = (
-        Path(baseline_root).resolve(strict=True),
-        *(Path(root).resolve(strict=True) for root in iteration_roots),
+    canonical_iteration_roots = tuple(
+        Path(root).resolve(strict=True) for root in iteration_roots
     )
+    roots = (Path(baseline_root).resolve(strict=True), *canonical_iteration_roots)
     candidates: list[dagger_domain.DevelopmentCandidate] = []
     sources: list[DevelopmentSourcePublicationEvidence] = []
-    frozen_identity = {
-        "panel_hash": panel_hash,
-        "scenario_hash": scenario_hash,
-        "contract_hash": contract_hash,
-        "encoding_hash": encoding_hash,
-        "repository": repository,
-    }
+    frozen_identity = _task10_retained_stable_iteration_identity(
+        canonical_iteration_roots, preflight=preflight, repository=repository,
+    )
+    if (
+        frozen_identity["definition"]["panel_sha256"] != panel_hash
+        or frozen_identity["scenario"]["runtime_sha256"] != scenario_hash
+        or frozen_identity["contract"]["contract_hash"] != contract_hash
+        or frozen_identity["contract"]["encoding_hash"] != encoding_hash
+    ):
+        raise ValueError("development definition claims differ from retained Task 9 identity")
     for iteration, root in enumerate(roots):
         reopened = (
             _open_development_source_publication_claim(root, preflight=preflight)
@@ -3671,6 +3803,11 @@ def build_development_evaluation_definition(
             raise ValueError("development baseline does not match preflight starting learner")
         sources.append(source)
         candidates.append(candidate)
+    final_frozen_identity = _task10_retained_stable_iteration_identity(
+        canonical_iteration_roots, preflight=preflight, repository=repository,
+    )
+    if not _same_json(final_frozen_identity, frozen_identity):
+        raise ValueError("development retained Task 9 identity changed while reopening")
     return dagger_domain.DevelopmentEvaluationDefinition.create(
         candidates=candidates,
         panel_hash=panel_hash,
@@ -3678,6 +3815,7 @@ def build_development_evaluation_definition(
         contract_hash=contract_hash,
         encoding_hash=encoding_hash,
         repository=repository,
+        stable_iteration_identity=frozen_identity,
     )
 
 
@@ -3898,13 +4036,7 @@ def _open_development_iteration_evidence_from_physical_bytes(
         iteration=iteration,
         preflight=preflight,
         previous=previous,
-        frozen_identity={
-            "panel_hash": definition.panel_hash,
-            "scenario_hash": definition.scenario_hash,
-            "contract_hash": definition.contract_hash,
-            "encoding_hash": definition.encoding_hash,
-            "repository": definition.repository,
-        },
+        frozen_identity=definition.stable_iteration_identity,
     )
     expected = definition.candidates[iteration]
     if not _same_json(
