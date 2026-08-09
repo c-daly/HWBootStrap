@@ -40,7 +40,7 @@ namespace HexWars.GymServer
             if (request == null) throw new ArgumentNullException(nameof(request));
             if (runtime == null) throw new ArgumentNullException(nameof(runtime));
             request.Validate(runtime);
-            string sessionId = Sha256(Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N") + request.Nonce));
+            string sessionId = Sha256(Encoding.UTF8.GetBytes("gymserver-evidence-v1|" + request.Nonce));
             byte[] body = CanonicalBegin(request, runtime, sessionId);
             string initial = Sha256(body);
             return new OracleEvidenceBeginResponse(new OracleEvidenceSession(request, runtime, sessionId, initial),
