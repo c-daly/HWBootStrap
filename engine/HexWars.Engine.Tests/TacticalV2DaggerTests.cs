@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using HexWars.Engine;
@@ -535,6 +537,35 @@ namespace HexWars.Engine.Tests
 
 
         [Test]
+        public void GymServer_EvidenceSessionEchoesNonceAndRejectsSecondBegin()
+        {
+            string scenario = WriteProfiledScenario(fogOfWar: false);
+            try
+            {
+                using var server = new DaggerServerProcess(
+                    "--environment", "tactical-v2", "--scenario-file", scenario);
+                using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+                object begin = EvidenceBeginRequest(spaces.RootElement, scenario);
+
+                using JsonDocument acknowledged = server.Exchange(begin);
+                Assert.Multiple(() =>
+                {
+                    Assert.That(acknowledged.RootElement.GetProperty("schema_version").GetInt32(),
+                        Is.EqualTo(1));
+                    Assert.That(acknowledged.RootElement.GetProperty("nonce").GetString(),
+                        Is.EqualTo(EvidenceNonce));
+                    Assert.That(acknowledged.RootElement.GetProperty("sequence").GetInt32(),
+                        Is.Zero);
+                    Assert.That(acknowledged.RootElement.GetProperty("initial_chain_sha256").GetString(),
+                        Has.Length.EqualTo(64));
+                });
+                Assert.That(server.ExchangeFailure(begin), Does.Contain("active"));
+            }
+            finally
+            {
+                File.Delete(scenario);
+            }
+        }
         public void OraclePreflightActionOracle_QueriesTwiceAndReturnsFirstWithoutMutatingState()
         {
             var inner = new CountingOracle(context => OracleDecision(0,
@@ -849,6 +880,44 @@ namespace HexWars.Engine.Tests
             return path;
         }
 
+        private const string EvidenceNonce =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        private static object EvidenceBeginRequest(JsonElement spaces, string scenario)
+        {
+            var candidate = new
+            {
+                oracle_type = "bounded-search", depth = 4, expansion_budget = 512,
+                use_heuristic = true, heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+                code_hash = "5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061",
+            };
+            var scheduled = new
+            {
+                schedule_index = 0, map_seed = 1, episode_seed = 1,
+                profile = "conversion-3v1-near", reference_seat = 0, learner_seat = 0,
+            };
+            string scheduleBody =
+                "[{\"episode_seed\":1,\"learner_seat\":0,\"map_seed\":1,\"profile\":\"conversion-3v1-near\",\"reference_seat\":0,\"schedule_index\":0}]";
+            return new
+            {
+                cmd = "duel_evidence_begin", schema_version = 1, purpose = "oracle-preflight",
+                nonce = EvidenceNonce, panel_sha256 = new string('a', 64),
+                repository = new { commit = new string('b', 40), source_tree = new string('c', 40), dirty = false },
+                scenario_sha256 = Sha256(File.ReadAllBytes(scenario)),
+                contract_hash = spaces.GetProperty("contract_hash").GetString(),
+                encoding_hash = spaces.GetProperty("encoding_hash").GetString(),
+                oracle = new { oracle_type = candidate.oracle_type, heuristic_identity = candidate.heuristic_identity, code_hash = candidate.code_hash },
+                candidates = new[] { candidate }, preflight_schedule = new[] { scheduled },
+                preflight_schedule_sha256 = Sha256(Encoding.UTF8.GetBytes(scheduleBody)),
+                candidates_by_schedule = new[] { new { candidate_index = 0, game_index = 0, oracle = candidate, scheduled_duel = scheduled } },
+            };
+        }
+
+        private static string Sha256(byte[] bytes)
+        {
+            using var sha = SHA256.Create();
+            return Convert.ToHexString(sha.ComputeHash(bytes)).ToLowerInvariant();
+        }
         private sealed class DaggerServerProcess : IDisposable
         {
             private readonly Process _process;

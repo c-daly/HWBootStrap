@@ -1,13 +1,16 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using HexWars.GymServer;
 
 // Headless RL bridge: wraps a TacticalEnv and speaks one JSON object per line over stdin/stdout, so a
-// Python gymnasium.Env can drive it as a subprocess. Cross-platform (.NET 8) — built for WSL2/Linux.
+// Python gymnasium.Env can drive it as a subprocess. Cross-platform (.NET 8) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â built for WSL2/Linux.
 //
 //   stdin  {"cmd":"spaces"}                 -> {"obs_len":N,"n_actions":M}
 //          {"cmd":"reset","seed":123}       -> {"obs":[...],"mask":[...]}
@@ -67,7 +70,23 @@ var tacticalV2Demonstrations = new BufferedTacticalV2DemonstrationSink();
 var tacticalV2Dagger = new BufferedTacticalV2DaggerSink();
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
-TacticalV2DuelEnv? tacticalV2Duel = null;
+TacticalV2DuelEnv? tacticalV2Duel = null;var tacticalV2Preflight = new BufferedOraclePreflightBenchmarkSink();
+OracleEvidenceSession? evidenceSession = null;
+const string EvidenceOracleCodeSha256 = "5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061";
+string evidenceScenarioSha256 = scenarioFile == null ? OracleEvidenceSession.Sha256(Encoding.UTF8.GetBytes(scenario.Id + "|" + scenario.SchemaVersion)) : OracleEvidenceSession.Sha256(File.ReadAllBytes(scenarioFile));
+OracleEvidenceRuntimeIdentity EvidenceRuntime()
+{
+    MlContract contract = MlContract.CreateTacticalV2(tacticalV2Config!, MlEnvironmentKind.Duel);
+    return new OracleEvidenceRuntimeIdentity(environment, evidenceScenarioSha256, contract.ContractHash, contract.EncodingHash, EvidenceOracleCodeSha256);
+}
+void InstallEvidenceObserver(OracleEvidenceScheduleItem item)
+{
+    tacticalV2Duel ??= new TacticalV2DuelEnv(tacticalV2Config!, tacticalV2Trace, tacticalV2Demonstrations);
+    tacticalV2Dagger.Enabled = true;
+    tacticalV2Duel.DecisionObserver = new SelectiveDaggerObserver(new OraclePreflightActionOracle(
+        new BoundedSearchActionOracle(tacticalV2Config!.Game, item.Oracle.ExpansionBudget, item.Oracle.Depth, BoundedSearchAgent.HeuristicIdentity), tacticalV2Preflight, Stopwatch.GetTimestamp, Stopwatch.Frequency), tacticalV2Dagger);
+}
+
 var output = Console.Out;
 
 void Send(object payload)
@@ -362,7 +381,15 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2");
             if (startProfile != null && !hasReferenceSeat)
                 throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
-            if (environment == "tactical-v1")
+            if (evidenceSession != null && !evidenceSession.Ended)
+            {
+                OracleEvidenceScheduleItem expectedEvidence = evidenceSession.Expected ?? throw new InvalidDataException("evidence schedule is complete");
+                OracleEvidenceScheduledDuel scheduled = expectedEvidence.Duel;
+                if (p0 != "external" || p1 != "external" || seed != scheduled.EpisodeSeed || learner != scheduled.LearnerSeat || startProfile != scheduled.Profile || !hasReferenceSeat || referenceSeat != scheduled.ReferenceSeat)
+                    throw new InvalidDataException("duel_reset does not match the expected evidence schedule");
+                tacticalV2Preflight.Drain();
+                tacticalV2Dagger.Drain();
+            }            if (environment == "tactical-v1")
             {
                 duel ??= new DuelEnv(tacticalConfig);
                 var v = duel.Reset(seed, MakeController(p0, seed * 2 + 1), MakeController(p1, seed * 2 + 2),
@@ -549,6 +576,47 @@ while ((line = Console.ReadLine()) != null)
         }
 
 
+        case "duel_evidence_begin":
+        {
+            if (environment != "tactical-v2") throw new InvalidDataException("evidence sessions are supported only for tactical-v2");
+            if (evidenceSession != null) throw new InvalidDataException("an evidence session is already active");
+            OracleEvidenceBeginResponse begin = OracleEvidenceSession.Begin(OracleEvidenceSession.ParseBegin(root), EvidenceRuntime());
+            evidenceSession = begin.Session;
+            tacticalV2Trace.Enabled = true; tacticalV2Trace.Drain(); tacticalV2Dagger.Drain(); tacticalV2Preflight.Drain();
+            InstallEvidenceObserver(evidenceSession.Expected!);
+            Send(begin);
+            break;
+        }
+
+        case "duel_evidence_game_close":
+        {
+            if (evidenceSession == null || evidenceSession.Ended) throw new InvalidDataException("no active evidence session");
+            string[] fields = { "cmd", "schema_version", "session_id", "nonce", "candidate_index", "game_index" };
+            if (!root.EnumerateObject().Select(p => p.Name).OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(fields.OrderBy(x => x, StringComparer.Ordinal))) throw new InvalidDataException("evidence game close has unknown or missing fields");
+            if (root.GetProperty("schema_version").GetInt32() != 1 || tacticalV2Duel == null || !tacticalV2Duel.State.IsGameOver) throw new InvalidDataException("evidence game close requires a terminal game");
+            OracleEvidenceScheduleItem item = evidenceSession.Expected ?? throw new InvalidDataException("evidence schedule is complete");
+            IReadOnlyList<DuelTransition> transitions = tacticalV2Trace.Drain();
+            IReadOnlyList<OraclePreflightBenchmarkRecord> benchmarks = tacticalV2Preflight.Drain();
+            byte[] trace = JsonSerializer.SerializeToUtf8Bytes(new { schema_version = 1, transitions = transitions.Select(TacticalEvaluationTrace.Project).ToArray() });
+            byte[] replay = Encoding.UTF8.GetBytes(tacticalV2Duel.ToReplay());
+            byte[] benchmark = JsonSerializer.SerializeToUtf8Bytes(new { schema_version = 1, records = benchmarks });
+            int expansions = benchmarks.Sum(row => row.First.ActualExpansionCount + row.Second.ActualExpansionCount);
+            string outcome = !tacticalV2Duel.State.Winner.HasValue ? "draw" : tacticalV2Duel.State.Winner.Value == (item.Duel.LearnerSeat == 1 ? PlayerId.Player1 : PlayerId.Player0) ? "win" : "loss";
+            var context = new OracleEvidenceGameContext(root.GetProperty("session_id").GetString() ?? "", root.GetProperty("nonce").GetString() ?? "", root.GetProperty("candidate_index").GetInt32(), root.GetProperty("game_index").GetInt32(), outcome, tacticalV2Duel.State.Winner.HasValue ? (int)tacticalV2Duel.State.Winner.Value : null, transitions.Count, benchmarks.Count, expansions);
+            OracleEvidenceGameResponse closed = evidenceSession.CloseGame(context, trace, replay, benchmark);
+            JsonElement receipt = JsonDocument.Parse(closed.Receipt.Utf8).RootElement.Clone();
+            Send(new { receipt, trace = new { utf8_base64 = Convert.ToBase64String(closed.Trace.Bytes), sha256 = closed.Trace.Sha256, byte_size = closed.Trace.Bytes.Length }, replay = new { utf8_base64 = Convert.ToBase64String(closed.Replay.Bytes), sha256 = closed.Replay.Sha256, byte_size = closed.Replay.Bytes.Length }, benchmark = new { utf8_base64 = Convert.ToBase64String(closed.Benchmark.Bytes), sha256 = closed.Benchmark.Sha256, byte_size = closed.Benchmark.Bytes.Length } });
+            if (evidenceSession.Expected != null) InstallEvidenceObserver(evidenceSession.Expected);
+            break;
+        }
+
+        case "duel_evidence_end":
+        {
+            if (evidenceSession == null) throw new InvalidDataException("no active evidence session");
+            (string sessionId, string nonce) = OracleEvidenceSession.ParseSessionRequest(root, "duel_evidence_end");
+            Send(evidenceSession.End(sessionId, nonce));
+            break;
+        }
         case "duel_save":
         {
             string path = root.TryGetProperty("path", out var pp) ? (pp.GetString() ?? "duel.replay") : "duel.replay";
