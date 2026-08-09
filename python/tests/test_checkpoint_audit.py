@@ -555,6 +555,52 @@ def test_audited_baseline_validator_rejects_mutated_real_contract_board(
         )
 
 
+def test_audited_baseline_validator_rejects_nested_board_bool_integer_alias(
+    tmp_path: Path,
+) -> None:
+    common_git_dir = Path(subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        text=True,
+    ).strip())
+    retained = common_git_dir.parent / "python" / "runs" / (
+        "bc227-ppo-random-s227-20260802-v2"
+    )
+    if not retained.is_dir():
+        pytest.skip("real locked baseline publication is not retained")
+    baseline = tmp_path / "baseline"
+    shutil.copytree(retained, baseline)
+    run_path = baseline / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    contract = run["contract"]
+    contract["semantics"]["board"]["score_kills"] = True
+    canonical = json.dumps(
+        {
+            "action_size": contract["action_size"],
+            "contract_version": contract["version"],
+            "environment_kind": contract["semantics"]["environment_kind"],
+            "observation_size": contract["observation_size"],
+            "reward": contract["reward"],
+            "roster": contract["roster"],
+            "semantics": contract["semantics"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    contract["contract_hash"] = hashlib.sha256(canonical).hexdigest()
+    _write_json(run_path, run)
+
+    with pytest.raises(ValueError, match="board|contract|semantics"):
+        audit_module.validate_audited_baseline_publication(
+            baseline,
+            expected_checkpoint_sha256=(
+                "ec20df88d980b4ec80d68d704eafa134600b87ee947019fd64e2b7cc84974561"
+            ),
+            expected_checkpoint_steps=(14_336, 26_624, 38_912),
+        )
+
+
 @pytest.mark.parametrize("mutation", ("invalid-initialization", "extra-file"))
 def test_audited_baseline_validator_rejects_unauthenticated_publication(
     tmp_path: Path,

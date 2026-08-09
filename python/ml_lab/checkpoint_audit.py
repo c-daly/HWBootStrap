@@ -495,6 +495,24 @@ def _exact_object(
     return value
 
 
+def _json_values_match_exactly(left: object, right: object) -> bool:
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (
+            isinstance(left, Mapping)
+            and isinstance(right, Mapping)
+            and set(left) == set(right)
+            and all(_json_values_match_exactly(left[key], right[key]) for key in left)
+        )
+    if type(left) is list or type(right) is list:
+        return (
+            type(left) is list
+            and type(right) is list
+            and len(left) == len(right)
+            and all(_json_values_match_exactly(*pair) for pair in zip(left, right))
+        )
+    return type(left) is type(right) and left == right
+
+
 def _audited_sha256(value: object, *, label: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValueError(f"{label} must be a lowercase SHA-256 digest")
@@ -740,7 +758,7 @@ def _validate_audited_semantics(
         or semantics["observation_size"] != observation_size
     ):
         raise ValueError(f"{label} geometry is invalid")
-    if semantics["board"] != board:
+    if not _json_values_match_exactly(semantics["board"], board):
         raise ValueError(f"{label} board does not match contract board")
     return semantics
 
