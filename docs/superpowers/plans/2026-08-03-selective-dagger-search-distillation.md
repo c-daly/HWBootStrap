@@ -758,6 +758,11 @@ git commit -m "feat: evaluate selective DAgger outcomes"
 
 ### Task 11: Complete the CLI, logging, and operator safeguards
 
+> **Authoritative expanded procedure:** Implement this task with
+> `docs/superpowers/plans/2026-08-09-task11-sealed-engine-preflight.md`.
+> That plan adds the approved GymServer provenance boundary required by Task 10
+> while preserving the command set, logging, reuse, and recovery goals below.
+
 **Files:**
 
 - Modify: `python/run_annihilation_selective_dagger.py`
