@@ -7518,6 +7518,67 @@ def test_task10_supervised_owned_bundle_rejects_wrong_content_identity(
         )
 
 
+def test_task10_supervised_owned_bundle_rejects_noncanonical_entry_order(
+    tmp_path: Path,
+) -> None:
+    """A semantic ZIP clone is invalid unless its complete bytes are canonical."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlay = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )[0]
+    prefix = f"1-{overlay.content_identity}/"
+    source_paths = tuple(sorted(overlay.root.rglob("*")))
+    tree_directories = tuple(
+        path.relative_to(overlay.root).as_posix()
+        for path in source_paths if path.is_dir()
+    )
+    tree_files = tuple(
+        (path.relative_to(overlay.root).as_posix(), path.read_bytes())
+        for path in source_paths if path.is_file()
+    )
+    claims = ({
+        "source_root": str(overlay.root),
+        "content_identity": overlay.content_identity,
+        "bundle_prefix": prefix,
+        "tree_directories": list(tree_directories),
+        "tree_files": [
+            {
+                "path": path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_size": len(payload),
+            }
+            for path, payload in tree_files
+        ],
+    },)
+    entries = [(prefix, b"", stat.S_IFDIR | 0o755)]
+    entries.extend(
+        (f"{prefix}{path}/", b"", stat.S_IFDIR | 0o755)
+        for path in tree_directories
+    )
+    entries.extend(
+        (f"{prefix}{path}", payload, stat.S_IFREG | 0o644)
+        for path, payload in tree_files
+    )
+    raw = _task10_manual_owned_archive(tuple(reversed(entries)))
+    malicious_root = tmp_path / "independent-owned-reordered"
+    malicious_root.mkdir()
+    descriptor = _task10_manual_bundle_descriptor(
+        malicious_root, raw, claims,
+    )
+
+    with pytest.raises(ValueError, match="bundle|archive|canonical|encoding|order"):
+        runner._open_owned_overlay_bundle(
+            malicious_root,
+            descriptor=descriptor,
+            claims=claims,
+            definition=definition,
+            iteration=1,
+        )
+
+
 def test_task10_supervised_owned_bundle_rejects_reparse_archive_encoding(
     tmp_path: Path,
 ) -> None:
@@ -7878,6 +7939,10 @@ def _task10_fast_aggregate_fixture(
     iterations = []
     for iteration, root in enumerate(iteration_roots, start=1):
         root.mkdir()
+        shutil.copytree(
+            tmp_path / f"heldout-overlay-{iteration}",
+            root / "validation-overlay",
+        )
         actor_root = Path(json.loads(definition.candidates[iteration].controller)["source_run"])
         event = {
             "schema_version": 1, "model_seed": 227, "device": "cuda",
@@ -7971,8 +8036,9 @@ def _task10_fast_aggregate_fixture(
     supervised_root = tmp_path / "aggregate-matrix-supervised"
     supervised = {}
     for iteration in (1, 2, 3):
-        overlays = _task10_heldout_overlays(
-            runner, definition=definition, tmp_path=tmp_path, iteration=iteration,
+        overlay_roots = tuple(
+            iteration_roots[index - 1] / "validation-overlay"
+            for index in range(1, iteration + 1)
         )
 
         def predict_actions(
@@ -7989,7 +8055,7 @@ def _task10_fast_aggregate_fixture(
         supervised[iteration] = runner.run_development_supervised_evaluation(
             definition=definition,
             iteration=iteration,
-            heldout_overlay_roots=tuple(item.root for item in overlays),
+            heldout_overlay_roots=overlay_roots,
             output_root=supervised_root,
             reopen_heldout_overlay=None,
             predict_actions=predict_actions,
@@ -8158,10 +8224,14 @@ def test_task10_aggregate_rejects_owned_bundle_mutation_between_supervised_passe
         *,
         definition: object,
         iteration: int,
+        expected_source_roots: tuple[Path, ...] | None = None,
     ) -> object:
         nonlocal first_iteration_opens
         value = original_open(
-            root, definition=definition, iteration=iteration,
+            root,
+            definition=definition,
+            iteration=iteration,
+            expected_source_roots=expected_source_roots,
         )
         if iteration == 1:
             first_iteration_opens += 1
@@ -8183,6 +8253,45 @@ def test_task10_aggregate_rejects_owned_bundle_mutation_between_supervised_passe
             repository_identity_provider=_repository_provider,
         )
     assert first_iteration_opens == 1
+
+
+def test_task10_aggregate_rejects_coherently_rehashed_supervised_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aggregate binds claims to authenticated Task 9 roots without reading them."""
+
+    import run_annihilation_selective_dagger as runner
+
+    fixture = _task10_fast_aggregate_fixture(tmp_path, runner, monkeypatch)
+    supervised_root = fixture.supervised[3].root
+    evidence_path = supervised_root / "evidence.json"
+    manifest_path = supervised_root / "manifest.json"
+    evidence = json.loads(evidence_path.read_bytes())
+    manifest = json.loads(manifest_path.read_bytes())
+    forged_roots = [
+        str((tmp_path / f"forged-validation-overlay-{index}").resolve())
+        for index in range(1, 4)
+    ]
+    for claim, forged_root in zip(
+        evidence["overlays"], forged_roots, strict=True,
+    ):
+        claim["source_root"] = forged_root
+    _rewrite(evidence_path, evidence)
+    manifest["artifacts"]["evidence"]["sha256"] = _sha256(evidence_path)
+    manifest["artifacts"]["evidence"]["byte_size"] = evidence_path.stat().st_size
+    manifest["identity"]["heldout_overlay_roots"] = forged_roots
+    manifest["content_identity"] = _content_identity(manifest)
+    _rewrite(manifest_path, manifest)
+    destination = tmp_path / "aggregate-forged-supervised-provenance"
+
+    with pytest.raises(ValueError, match="provenance|root|supervised"):
+        runner.publish_development_aggregate(
+            **fixture.kwargs,
+            output_root=destination,
+            repository_identity_provider=_repository_provider,
+        )
+    assert not destination.exists()
 
 
 def test_task10_aggregate_ignores_forged_candidate_and_supervised_dtos(
@@ -8366,7 +8475,11 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
         calls = defaultdict(int)
 
         def open_supervised(
-            root: Path, *, definition: object, iteration: int,
+            root: Path,
+            *,
+            definition: object,
+            iteration: int,
+            expected_source_roots: tuple[Path, ...] | None = None,
         ) -> object:
             calls[str(iteration)] += 1
             if iteration == 2 and calls[str(iteration)] == 2:
@@ -8374,7 +8487,10 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
                     b"changed-between-aggregate-passes"
                 )
             return original(
-                root, definition=definition, iteration=iteration,
+                root,
+                definition=definition,
+                iteration=iteration,
+                expected_source_roots=expected_source_roots,
             )
 
         monkeypatch.setattr(

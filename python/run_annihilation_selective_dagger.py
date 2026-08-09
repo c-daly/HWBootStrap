@@ -2256,6 +2256,36 @@ def _owned_overlay_zip_info(name: str, *, directory: bool) -> zipfile.ZipInfo:
     return info
 
 
+def _canonical_owned_overlay_bundle_bytes(
+    *,
+    claims: Sequence[Mapping[str, Any]],
+    payloads: Mapping[str, bytes],
+) -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(
+        stream, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True,
+    ) as archive:
+        for claim in claims:
+            prefix = claim["bundle_prefix"]
+            archive.writestr(
+                _owned_overlay_zip_info(prefix, directory=True), b"",
+            )
+            for relative in claim["tree_directories"]:
+                archive.writestr(
+                    _owned_overlay_zip_info(
+                        f"{prefix}{relative}/", directory=True,
+                    ),
+                    b"",
+                )
+            for file_claim in claim["tree_files"]:
+                name = f"{prefix}{file_claim['path']}"
+                archive.writestr(
+                    _owned_overlay_zip_info(name, directory=False),
+                    payloads[name],
+                )
+    return stream.getvalue()
+
+
 def _write_owned_overlay_bundle(
     root: Path,
     *,
@@ -2265,32 +2295,15 @@ def _write_owned_overlay_bundle(
     owned_root = Path(root) / "owned-overlays"
     owned_root.mkdir()
     staging = owned_root / ".bundle.staging"
-    with zipfile.ZipFile(
-        staging, mode="x", compression=zipfile.ZIP_STORED, allowZip64=True,
-    ) as archive:
-        for item, claim in zip(overlays, claims, strict=True):
-            prefix = claim["bundle_prefix"]
-            archive.writestr(
-                _owned_overlay_zip_info(prefix, directory=True), b"",
-            )
-            for relative in item.tree_directories:
-                archive.writestr(
-                    _owned_overlay_zip_info(
-                        f"{prefix}{relative}/", directory=True,
-                    ),
-                    b"",
-                )
-            for relative, payload in item.tree_files:
-                archive.writestr(
-                    _owned_overlay_zip_info(
-                        f"{prefix}{relative}", directory=False,
-                    ),
-                    payload,
-                )
-    with staging.open("r+b") as stream:
-        stream.flush()
-        os.fsync(stream.fileno())
-    raw = staging.read_bytes()
+    payloads = {
+        f"{claim['bundle_prefix']}{relative}": payload
+        for item, claim in zip(overlays, claims, strict=True)
+        for relative, payload in item.tree_files
+    }
+    raw = _canonical_owned_overlay_bundle_bytes(
+        claims=claims, payloads=payloads,
+    )
+    _write_exact_file(staging, raw)
     sha256 = _sha256_bytes(raw)
     destination = owned_root / f"{sha256}.zip"
     os.replace(staging, destination)
@@ -2398,6 +2411,12 @@ def _open_owned_overlay_bundle(
                     payloads[info.filename] = payload
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise ValueError("development owned overlay archive is invalid") from exc
+    if raw != _canonical_owned_overlay_bundle_bytes(
+        claims=claims, payloads=payloads,
+    ):
+        raise ValueError(
+            "development owned overlay archive encoding is not canonical"
+        )
 
     opened = []
     examples = []
@@ -2814,10 +2833,12 @@ def _open_development_supervised_evaluation(
         )
     ):
         raise ValueError("development supervised owned bundle identity changed")
-    source_roots = tuple(Path(item["source_root"]) for item in claims)
+    source_root_claims = tuple(item["source_root"] for item in claims)
+    source_roots = tuple(Path(item) for item in source_root_claims)
     if (
         expected_source_roots is not None
-        and source_roots != tuple(Path(item) for item in expected_source_roots)
+        and source_root_claims
+        != tuple(str(Path(item)) for item in expected_source_roots)
     ):
         raise ValueError("development supervised source provenance changed")
     bundle = _open_owned_overlay_bundle(
@@ -2900,11 +2921,15 @@ def _open_development_supervised_evaluation_from_physical_bytes(
     *,
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     iteration: int,
+    expected_source_roots: Sequence[Path] | None = None,
 ) -> DevelopmentSupervisedEvidence:
     """Reopen schema-2 supervised evidence only from its owned bundle."""
 
     return _open_development_supervised_evaluation(
-        root, definition=definition, iteration=iteration,
+        root,
+        definition=definition,
+        iteration=iteration,
+        expected_source_roots=expected_source_roots,
     )
 
 
@@ -4844,6 +4869,9 @@ def publish_development_aggregate(
     canonical_supervised_roots = tuple(
         Path(root).resolve(strict=True) for root in supervised_roots
     )
+    expected_supervised_source_roots = tuple(
+        root / "validation-overlay" for root in canonical_iteration_roots
+    )
     supervised_values: list[DevelopmentSupervisedEvidence] = []
     for iteration, root in enumerate(canonical_supervised_roots, start=1):
         supervised_values.append(
@@ -4851,6 +4879,9 @@ def publish_development_aggregate(
                 root,
                 definition=definition,
                 iteration=iteration,
+                expected_source_roots=(
+                    expected_supervised_source_roots[:iteration]
+                ),
             )
         )
         _require_development_repository(definition, repository_identity_provider)
@@ -5009,6 +5040,7 @@ def publish_development_aggregate(
             root,
             definition=definition,
             iteration=iteration,
+            expected_source_roots=expected_supervised_source_roots[:iteration],
         )
         if not _same_json(
             _development_supervised_snapshot(reopened),
