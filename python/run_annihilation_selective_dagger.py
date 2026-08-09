@@ -2048,14 +2048,20 @@ def _supervised_overlay_tree_snapshot(
 def _require_supervised_overlay_stability(
     overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
 ) -> None:
-    for item in overlays:
-        if _supervised_overlay_tree_snapshot(item.root) != (
+    initial_snapshots = tuple(
+        _supervised_overlay_tree_snapshot(item.root) for item in overlays
+    )
+    for item, initial_snapshot in zip(overlays, initial_snapshots):
+        if initial_snapshot != (
             item.tree_directories,
             item.tree_files,
         ):
             raise ValueError(
                 "development heldout overlay physical bytes changed during evaluation"
             )
+
+    reopened_overlays = []
+    for item in overlays:
         try:
             reopened = dagger_domain.open_dagger_overlay(item.root)
             reopened_examples = dagger_domain.dagger_overlay_supervised_examples(reopened)
@@ -2063,6 +2069,9 @@ def _require_supervised_overlay_stability(
             raise ValueError(
                 "development heldout overlay final physical reopen failed"
             ) from exc
+        reopened_overlays.append((reopened, reopened_examples))
+
+    for item, (reopened, reopened_examples) in zip(overlays, reopened_overlays):
         if (
             reopened.partition != "validation"
             or reopened.content_identity != item.content_identity
@@ -2071,9 +2080,17 @@ def _require_supervised_overlay_stability(
             raise ValueError(
                 "development heldout overlay physical rows changed during evaluation"
             )
-        if _supervised_overlay_tree_snapshot(item.root) != (
-            item.tree_directories,
-            item.tree_files,
+
+    final_snapshots = tuple(
+        _supervised_overlay_tree_snapshot(item.root) for item in overlays
+    )
+    for item, initial_snapshot, final_snapshot in zip(
+        overlays, initial_snapshots, final_snapshots
+    ):
+        frozen_snapshot = (item.tree_directories, item.tree_files)
+        if (
+            final_snapshot != initial_snapshot
+            or final_snapshot != frozen_snapshot
         ):
             raise ValueError(
                 "development heldout overlay physical bytes changed during final reopen"
