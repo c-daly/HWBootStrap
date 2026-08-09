@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -558,6 +559,10 @@ namespace HexWars.Engine.Tests
                         Is.Zero);
                     Assert.That(acknowledged.RootElement.GetProperty("initial_chain_sha256").GetString(),
                         Has.Length.EqualTo(64));
+                    Assert.That(acknowledged.RootElement.GetProperty("scenario_sha256").GetString(), Is.EqualTo(Sha256(File.ReadAllBytes(scenario))));
+                    Assert.That(acknowledged.RootElement.GetProperty("contract_hash").GetString(), Is.EqualTo(spaces.RootElement.GetProperty("contract_hash").GetString()));
+                    Assert.That(acknowledged.RootElement.GetProperty("encoding_hash").GetString(), Is.EqualTo(spaces.RootElement.GetProperty("encoding_hash").GetString()));
+                    Assert.That(acknowledged.RootElement.GetProperty("oracle_code_sha256").GetString(), Is.EqualTo("5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061"));
                 });
                 Assert.That(server.ExchangeFailure(begin), Does.Contain("active"));
             }
@@ -615,13 +620,13 @@ namespace HexWars.Engine.Tests
             using var server = DaggerServerProcess.Profiled();
             using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
             using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
-            using JsonDocument reset = server.Exchange(new { cmd = "duel_reset", seed = 1, p0 = "external", p1 = "external", learner = 0, start_profile = "conversion-3v1-near", reference_seat = 0 });
-            using JsonDocument step = server.Exchange(new { cmd = "duel_step", action = 0 });
-            Assert.That(server.ExchangeFailure(new { cmd = "duel_trace_drain" }),
-                Does.Contain("owns buffers"));
-        }
-
-        [Test]
+            RunEvidenceGame(server);
+            using JsonDocument close = CloseEvidenceGame(server, begin.RootElement);
+            using JsonDocument trace = JsonDocument.Parse(Convert.FromBase64String(close.RootElement.GetProperty("trace").GetProperty("utf8_base64").GetString()!));
+            using JsonDocument benchmark = JsonDocument.Parse(Convert.FromBase64String(close.RootElement.GetProperty("benchmark").GetProperty("utf8_base64").GetString()!));
+            Assert.That(trace.RootElement.GetProperty("transitions")[0].GetProperty("Command").GetProperty("Kind").GetString(), Is.EqualTo("end_turn"));
+            Assert.That(benchmark.RootElement.GetProperty("records")[0].GetProperty("First").GetProperty("Action").GetInt32(), Is.Not.EqualTo(0));
+        }        [Test]
         public void OraclePreflightActionOracle_RejectsDifferentRepeatedDecisions()
         {
             Fixture fixture = Fixture.Create(Units(2), Units(2));
@@ -934,23 +939,153 @@ namespace HexWars.Engine.Tests
         [Test]
         public void GymServer_EvidenceSessionPinsGoldenBeginAndReceiptHashVectors()
         {
+            Assembly assembly = Assembly.LoadFrom(DaggerServerProcess.GymServerDll);
+            Type session = assembly.GetType("HexWars.GymServer.OracleEvidenceSession", throwOnError: true)!;
+            string[] bodies = (string[])session.GetMethod("CanonicalGoldenVectorBodies", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, null)!;
+            TestContext.WriteLine("BEGIN=" + bodies[0]);
+            TestContext.WriteLine("RECEIPT=" + bodies[1]);
+            Assert.That(Sha256(Encoding.UTF8.GetBytes(bodies[0])), Is.EqualTo("9c9deb61e8f60b1ff1d5ef8fe31033d60d58fabbfe0af8fe050d223777afa338"));
+            Assert.That(Sha256(Encoding.UTF8.GetBytes(bodies[1])), Is.EqualTo("58c7ce2615d335b4c888c7ff9935fd23275a0391e13d884fdf4b181e253eae42"));
+        }
+        [Test]
+        public void GymServer_EvidenceSessionBindsPanelRepositoryCandidatesAndExpandedScheduleIntoBeginChain()
+        {
+            using var first = DaggerServerProcess.Profiled();
+            using JsonDocument firstSpaces = first.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument firstBegin = first.Exchange(EvidenceBeginRequest(firstSpaces.RootElement, first.ScenarioPath));
+            using var second = DaggerServerProcess.Profiled();
+            using JsonDocument secondSpaces = second.Exchange(new { cmd = "duel_spaces" });
+            JsonObject altered = JsonNode.Parse(JsonSerializer.Serialize(EvidenceBeginRequest(secondSpaces.RootElement, second.ScenarioPath)))!.AsObject();
+            altered["panel_sha256"] = new string('d', 64);
+            altered["repository"]!["commit"] = new string('e', 40);
+            altered["candidates"]![0]!["expansion_budget"] = 1024;
+            altered["candidates_by_schedule"]![0]!["oracle"]!["expansion_budget"] = 1024;
+            using JsonDocument secondBegin = second.ExchangeRaw(altered.ToJsonString());
+            Assert.That(secondBegin.RootElement.GetProperty("begin_content_sha256").GetString(),
+                Is.Not.EqualTo(firstBegin.RootElement.GetProperty("begin_content_sha256").GetString()));
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsCandidateThatDoesNotIdentifyRuntimeOracle()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            JsonObject request = JsonNode.Parse(JsonSerializer.Serialize(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath)))!.AsObject();
+            request["candidates"]![0]!["code_hash"] = new string('f', 64);
+            request["candidates_by_schedule"]![0]!["oracle"]!["code_hash"] = new string('f', 64);
+            Assert.That(server.ExchangeFailureRaw(request.ToJsonString()), Does.Contain("identity"));
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsResetWhileGameIsOpenBeforeItCanDrainEvidence()
+        {
             using var server = DaggerServerProcess.Profiled();
             using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
             using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
-            Assert.That(begin.RootElement.GetProperty("session_id").GetString(),
-                Is.EqualTo("f955153c3f6ac070466ffdd98e89fc4114c8c0af38c7c0e95cf599cddec0b384"));
-            Assert.That(begin.RootElement.GetProperty("begin_content_sha256").GetString(),
-                Is.EqualTo("817f0da95ec1c56256513aa87a03fec781fa9d2fd5481164e41fd7ca80ca5bd9"));            RunEvidenceGame(server);
-            using JsonDocument close = server.Exchange(new { cmd = "duel_evidence_game_close", schema_version = 1, session_id = begin.RootElement.GetProperty("session_id").GetString(), nonce = EvidenceNonce, candidate_index = 0, game_index = 0 });
-            Assert.That(close.RootElement.GetProperty("receipt").GetProperty("sequence").GetInt32(), Is.EqualTo(1));
-            const string receiptBody = "{\"schema_version\":1,\"session_id\":\"f955153c3f6ac070466ffdd98e89fc4114c8c0af38c7c0e95cf599cddec0b384\",\"nonce\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"sequence\":1,\"previous_receipt_sha256\":\"817f0da95ec1c56256513aa87a03fec781fa9d2fd5481164e41fd7ca80ca5bd9\",\"candidate_index\":0,\"game_index\":0}";
-            Assert.That(Sha256(Encoding.UTF8.GetBytes(receiptBody)),
-                Is.EqualTo("fe428c86aad3a623b5913f5e3a3fdd27fd2dcda917cced615d886a50c51592d0"));
+            using JsonDocument reset = server.Exchange(EvidenceReset());
+            using JsonDocument step = server.Exchange(new { cmd = "duel_step", action = 0 });
+            Assert.That(server.ExchangeFailure(EvidenceReset()), Does.Contain("open"));
         }
+
+        [Test]
+        public void GymServer_EvidenceSessionReturnsReceiptDigestAndExactArtifactBytes()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
+            RunEvidenceGame(server);
+            using JsonDocument close = CloseEvidenceGame(server, begin.RootElement);
+            JsonElement response = close.RootElement;
+            Assert.That(response.GetProperty("receipt_sha256").GetString(),
+                Is.EqualTo(Sha256(Convert.FromBase64String(response.GetProperty("receipt_utf8_base64").GetString()!))));
+            foreach (string artifact in new[] { "trace", "replay", "benchmark" })
+            {
+                JsonElement descriptor = response.GetProperty(artifact);
+                byte[] bytes = Convert.FromBase64String(descriptor.GetProperty("utf8_base64").GetString()!);
+                Assert.That(bytes.Length, Is.EqualTo(descriptor.GetProperty("byte_size").GetInt32()));
+                Assert.That(Sha256(bytes), Is.EqualTo(descriptor.GetProperty("sha256").GetString()));
+            }
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsWrongNonceAfterTerminalGameAndSecondClose()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
+            RunEvidenceGame(server);
+            object wrong = new { cmd = "duel_evidence_game_close", schema_version = 1,
+                session_id = begin.RootElement.GetProperty("session_id").GetString(), nonce = new string('e', 64), candidate_index = 0, game_index = 0 };
+            Assert.That(server.ExchangeFailure(wrong), Does.Contain("context"));
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsSecondCloseAndPostCloseCommandsAfterActualClose()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
+            RunEvidenceGame(server);
+            using JsonDocument close = CloseEvidenceGame(server, begin.RootElement);
+            Assert.That(server.ExchangeFailure(new { cmd = "duel_evidence_game_close", schema_version = 1,
+                session_id = begin.RootElement.GetProperty("session_id").GetString(), nonce = EvidenceNonce, candidate_index = 0, game_index = 0 }), Does.Contain("terminal"));
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsDuplicateAndSkippedScheduleEntries()
+        {
+            using (var duplicate = DaggerServerProcess.Profiled())
+            {
+                using JsonDocument spaces = duplicate.Exchange(new { cmd = "duel_spaces" });
+                JsonObject request = JsonNode.Parse(JsonSerializer.Serialize(EvidenceBeginRequest(spaces.RootElement, duplicate.ScenarioPath)))!.AsObject();
+                JsonArray expanded = request["candidates_by_schedule"]!.AsArray();
+                expanded.Add(expanded[0]!.DeepClone());
+                Assert.That(duplicate.ExchangeFailureRaw(request.ToJsonString()), Does.Contain("schedule"));
+            }
+            using (var skipped = DaggerServerProcess.Profiled())
+            {
+                using JsonDocument spaces = skipped.Exchange(new { cmd = "duel_spaces" });
+                JsonObject request = JsonNode.Parse(JsonSerializer.Serialize(EvidenceBeginRequest(spaces.RootElement, skipped.ScenarioPath)))!.AsObject();
+                request["candidates_by_schedule"]![0]!["game_index"] = 1;
+                Assert.That(skipped.ExchangeFailureRaw(request.ToJsonString()), Does.Contain("schedule"));
+            }
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionRejectsOversizedArtifactAtAuthoritativeBoundary()
+        {
+            Assembly assembly = Assembly.LoadFrom(DaggerServerProcess.GymServerDll);
+            Type session = assembly.GetType("HexWars.GymServer.OracleEvidenceSession", throwOnError: true)!;
+            MethodInfo validate = session.GetMethod("ValidateArtifact", BindingFlags.Static | BindingFlags.NonPublic)!;
+            TargetInvocationException error = Assert.Throws<TargetInvocationException>(() =>
+                validate.Invoke(null, new object[] { new byte[64 * 1024 * 1024 + 1], "trace" }))!;
+            Assert.That(error.InnerException, Is.TypeOf<InvalidDataException>());
+        }
+
+        [Test]
+        public void GymServer_EvidenceSessionExitWithoutEndReturnsNoClosureAcknowledgement()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
+            Assert.That(server.CloseWithoutEnd(), Is.Null);
+        }
+        [Test]
+        public void GymServer_EvidenceSessionRejectsOrdinaryDrainWhileGameIsOpen()
+        {
+            using var server = DaggerServerProcess.Profiled();
+            using JsonDocument spaces = server.Exchange(new { cmd = "duel_spaces" });
+            using JsonDocument begin = server.Exchange(EvidenceBeginRequest(spaces.RootElement, server.ScenarioPath));
+            using JsonDocument reset = server.Exchange(EvidenceReset());
+            Assert.That(server.ExchangeFailure(new { cmd = "duel_trace_drain" }), Does.Contain("owns buffers"));
+        }
+        private static object EvidenceReset() => new { cmd = "duel_reset", seed = 1, p0 = "external", p1 = "external", learner = 0, start_profile = "conversion-3v1-near", reference_seat = 0 };
+
+        private static JsonDocument CloseEvidenceGame(DaggerServerProcess server, JsonElement begin) => server.Exchange(new { cmd = "duel_evidence_game_close", schema_version = 1, session_id = begin.GetProperty("session_id").GetString(), nonce = EvidenceNonce, candidate_index = 0, game_index = 0 });
 
         private static void RunEvidenceGame(DaggerServerProcess server)
         {
-            using JsonDocument reset = server.Exchange(new { cmd = "duel_reset", seed = 1, p0 = "external", p1 = "external", learner = 0, start_profile = "conversion-3v1-near", reference_seat = 0 });
+            using JsonDocument reset = server.Exchange(EvidenceReset());
             for (int action = 0; action < 1000; action++)
             {
                 using JsonDocument step = server.Exchange(new { cmd = "duel_step", action = 0 });
@@ -975,7 +1110,7 @@ namespace HexWars.Engine.Tests
         {            private readonly Process _process;
             private readonly string? _ownedScenario;
             public string ScenarioPath => _ownedScenario ?? throw new InvalidOperationException("server does not own a scenario");
-            private static string ServerDll => Path.GetFullPath(Path.Combine(
+            public static string GymServerDll => Path.GetFullPath(Path.Combine(
                 TestContext.CurrentContext.TestDirectory,
                 "..", "..", "..", "..", "HexWars.GymServer", "bin", "Debug", "net8.0",
                 "HexWars.GymServer.dll"));
@@ -997,9 +1132,9 @@ namespace HexWars.Engine.Tests
 
             public DaggerServerProcess(params string[] args)
             {
-                Assert.That(File.Exists(ServerDll), Is.True,
-                    $"GymServer was not built at {ServerDll}");
-                string arguments = $"\"{ServerDll}\" " +
+                Assert.That(File.Exists(GymServerDll), Is.True,
+                    $"GymServer was not built at {GymServerDll}");
+                string arguments = $"\"{GymServerDll}\" " +
                     string.Join(" ", args.Select(value => $"\"{value}\""));
                 _process = Process.Start(new ProcessStartInfo("dotnet", arguments)
                 {
@@ -1041,6 +1176,13 @@ namespace HexWars.Engine.Tests
                 return _process.StandardError.ReadToEnd();
             }
 
+            public string? CloseWithoutEnd()
+            {
+                _process.StandardInput.WriteLine("{\"cmd\":\"close\"}");
+                _process.StandardInput.Flush();
+                Assert.That(_process.WaitForExit(5000), Is.True, "GymServer did not exit after close");
+                return _process.StandardOutput.ReadLine();
+            }
             public void Dispose()
             {
                 if (_process.HasExited)

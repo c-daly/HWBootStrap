@@ -384,6 +384,8 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
             if (evidenceSession != null && !evidenceSession.Ended)
             {
+                if (evidenceGameOpen)
+                    throw new InvalidDataException("evidence game is already open; close it before reset");
                 OracleEvidenceScheduleItem expectedEvidence = evidenceSession.Expected ?? throw new InvalidDataException("evidence schedule is complete");
                 OracleEvidenceScheduledDuel scheduled = expectedEvidence.Duel;
                 if (p0 != "external" || p1 != "external" || seed != scheduled.EpisodeSeed || learner != scheduled.LearnerSeat || startProfile != scheduled.Profile || !hasReferenceSeat || referenceSeat != scheduled.ReferenceSeat)
@@ -614,7 +616,7 @@ while ((line = Console.ReadLine()) != null)
             OracleEvidenceGameResponse closed = evidenceSession.CloseGame(context, trace, replay, benchmark);
             evidenceGameOpen = false;
             JsonElement receipt = JsonDocument.Parse(closed.Receipt.Utf8).RootElement.Clone();
-            Send(new { receipt, trace = new { utf8_base64 = Convert.ToBase64String(closed.Trace.Bytes), sha256 = closed.Trace.Sha256, byte_size = closed.Trace.Bytes.Length }, replay = new { utf8_base64 = Convert.ToBase64String(closed.Replay.Bytes), sha256 = closed.Replay.Sha256, byte_size = closed.Replay.Bytes.Length }, benchmark = new { utf8_base64 = Convert.ToBase64String(closed.Benchmark.Bytes), sha256 = closed.Benchmark.Sha256, byte_size = closed.Benchmark.Bytes.Length } });
+            Send(new { receipt, receipt_sha256 = closed.Receipt.ReceiptSha256, receipt_utf8_base64 = Convert.ToBase64String(closed.Receipt.Utf8), trace = new { utf8_base64 = Convert.ToBase64String(closed.Trace.Bytes), sha256 = closed.Trace.Sha256, byte_size = closed.Trace.Bytes.Length }, replay = new { utf8_base64 = Convert.ToBase64String(closed.Replay.Bytes), sha256 = closed.Replay.Sha256, byte_size = closed.Replay.Bytes.Length }, benchmark = new { utf8_base64 = Convert.ToBase64String(closed.Benchmark.Bytes), sha256 = closed.Benchmark.Sha256, byte_size = closed.Benchmark.Bytes.Length } });
             if (evidenceSession.Expected != null) InstallEvidenceObserver(evidenceSession.Expected);
             break;
         }
