@@ -7579,6 +7579,81 @@ def test_task10_supervised_owned_bundle_rejects_noncanonical_entry_order(
         )
 
 
+def test_task10_supervised_owned_bundle_rejects_nested_drive_without_external_write(
+    tmp_path: Path,
+) -> None:
+    """Every Windows component is contained before any materialization write."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    content_identity = definition.candidates[1].source_publication[
+        "validation_overlay_prefix"
+    ][0]
+    prefix = f"1-{content_identity}/"
+    external_name = (
+        "task10-nested-drive-"
+        + hashlib.sha256(str(tmp_path).encode()).hexdigest()
+        + ".bin"
+    )
+    if os.name != "nt":
+        pytest.skip("nested Windows drive materialization is Windows-specific")
+    external_drive = next(
+        (
+            f"{letter}:"
+            for letter in "DEFGHIJKLMNOPQRSTUVWXYZ"
+            if f"{letter}:" != Path.cwd().drive
+            and Path(f"{letter}:/").is_dir()
+        ),
+        None,
+    )
+    if external_drive is None:
+        pytest.skip("a second Windows filesystem drive is required")
+    external_path = Path(f"{external_drive}/") / external_name
+    assert not external_path.exists()
+    relative = f"safe/{external_drive}/{external_name}"
+    payload = b"must-never-escape-private-materialization"
+    claims = [{
+        "source_root": str((tmp_path / "heldout-overlay-1").resolve()),
+        "content_identity": content_identity,
+        "bundle_prefix": prefix,
+        "tree_directories": [],
+        "tree_files": [{
+            "path": relative,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload),
+        }],
+    }]
+    raw = runner._canonical_owned_overlay_bundle_bytes(
+        claims=claims,
+        payloads={f"{prefix}{relative}": payload},
+    )
+    malicious_root = tmp_path / "independent-owned-nested-drive"
+    malicious_root.mkdir()
+    descriptor = _task10_manual_bundle_descriptor(
+        malicious_root, raw, tuple(claims),
+    )
+
+    try:
+        with pytest.raises(
+            ValueError, match="bundle|archive|path|unsafe|contained|inventory",
+        ):
+            validated_claims = runner._validated_owned_overlay_claims(
+                claims, definition=definition, iteration=1,
+            )
+            runner._open_owned_overlay_bundle(
+                malicious_root,
+                descriptor=descriptor,
+                claims=validated_claims,
+                definition=definition,
+                iteration=1,
+            )
+        assert not external_path.exists()
+    finally:
+        if external_path.exists():
+            external_path.unlink()
+
+
 def test_task10_supervised_owned_bundle_rejects_reparse_archive_encoding(
     tmp_path: Path,
 ) -> None:
@@ -8225,6 +8300,7 @@ def test_task10_aggregate_rejects_owned_bundle_mutation_between_supervised_passe
         definition: object,
         iteration: int,
         expected_source_roots: tuple[Path, ...] | None = None,
+        _owned_validation_overlays: list[object] | None = None,
     ) -> object:
         nonlocal first_iteration_opens
         value = original_open(
@@ -8232,6 +8308,7 @@ def test_task10_aggregate_rejects_owned_bundle_mutation_between_supervised_passe
             definition=definition,
             iteration=iteration,
             expected_source_roots=expected_source_roots,
+            _owned_validation_overlays=_owned_validation_overlays,
         )
         if iteration == 1:
             first_iteration_opens += 1
@@ -8322,10 +8399,10 @@ def test_task10_aggregate_ignores_forged_candidate_and_supervised_dtos(
     )
 
 
-def test_task10_aggregate_internally_authenticates_task8_task9_sources(
+def test_task10_aggregate_uses_owned_validation_after_physical_sources_deleted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Neither aggregate pass invokes preflight/iteration DTO reopen callbacks."""
+    """Both aggregate passes and reuse replace deleted validation sources."""
 
     import run_annihilation_selective_dagger as runner
 
@@ -8391,13 +8468,29 @@ def test_task10_aggregate_internally_authenticates_task8_task9_sources(
                 repository_identity_provider=_repository_provider,
             ).result.root
         )
+    for iteration_root in chain.iteration_roots:
+        shutil.rmtree(iteration_root / "validation-overlay")
+    output_root = tmp_path / "source-independent-aggregate"
     publication = runner.publish_development_aggregate(
         definition=definition,
         preflight_root=chain.preflight_root,
         iteration_roots=chain.iteration_roots,
         evaluations_root=evaluations_root,
         supervised_roots=tuple(supervised_roots),
-        output_root=tmp_path / "source-auth-aggregate",
+        output_root=output_root,
+        reopen_preflight=lambda *_args: pytest.fail("preflight DTO callback"),
+        reopen_iteration=lambda *_args: pytest.fail("iteration DTO callback"),
+        reopen_evaluation=lambda *_args: pytest.fail("evaluation DTO callback"),
+        reopen_supervised=lambda *_args: pytest.fail("supervised DTO callback"),
+        repository_identity_provider=_repository_provider,
+    )
+    reused = runner.publish_development_aggregate(
+        definition=definition,
+        preflight_root=chain.preflight_root,
+        iteration_roots=chain.iteration_roots,
+        evaluations_root=evaluations_root,
+        supervised_roots=tuple(supervised_roots),
+        output_root=output_root,
         reopen_preflight=lambda *_args: pytest.fail("preflight DTO callback"),
         reopen_iteration=lambda *_args: pytest.fail("iteration DTO callback"),
         reopen_evaluation=lambda *_args: pytest.fail("evaluation DTO callback"),
@@ -8410,6 +8503,8 @@ def test_task10_aggregate_internally_authenticates_task8_task9_sources(
     assert publication.aggregate["evidence_identity"]["iterations"] == tuple(
         source.content_identity for source in chain.sources[1:]
     )
+    assert reused.content_identity == publication.content_identity
+    assert reused.aggregate == publication.aggregate
 
 
 @pytest.mark.parametrize(
@@ -8480,6 +8575,7 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
             definition: object,
             iteration: int,
             expected_source_roots: tuple[Path, ...] | None = None,
+            _owned_validation_overlays: list[object] | None = None,
         ) -> object:
             calls[str(iteration)] += 1
             if iteration == 2 and calls[str(iteration)] == 2:
@@ -8491,6 +8587,7 @@ def test_task10_aggregate_internal_second_pass_rejects_physical_byte_mutation(
                 definition=definition,
                 iteration=iteration,
                 expected_source_roots=expected_source_roots,
+                _owned_validation_overlays=_owned_validation_overlays,
             )
 
         monkeypatch.setattr(

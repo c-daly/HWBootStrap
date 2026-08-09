@@ -6,6 +6,7 @@ import json
 import hashlib
 import io
 import math
+import ntpath
 import os
 import stat
 import subprocess
@@ -14,7 +15,7 @@ import time
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any
 
@@ -1999,12 +2000,22 @@ class DevelopmentSupervisedRun:
 
 
 @dataclass(frozen=True)
+class _DevelopmentOwnedValidationOverlay:
+    source_root: Path
+    overlay: dagger_domain.DaggerOverlay
+    collection_metrics: Mapping[str, Any]
+    tree_directories: tuple[str, ...]
+    tree_files: tuple[tuple[str, bytes], ...]
+
+
+@dataclass(frozen=True)
 class _DevelopmentOwnedOverlayBundle:
     path: Path
     sha256: str
     byte_size: int
     prefixes: tuple[str, ...]
     overlays: tuple[DevelopmentHeldoutOverlayEvidence, ...]
+    validation_overlays: tuple[_DevelopmentOwnedValidationOverlay, ...]
     examples: tuple[Mapping[str, Any], ...]
     raw: bytes
 
@@ -2079,12 +2090,40 @@ def _owned_overlay_relative_path(value: object, label: str) -> str:
     path = PurePosixPath(value)
     if (
         path.is_absolute()
+        or value != path.as_posix()
         or value.endswith("/")
         or any(part in {"", ".", ".."} for part in path.parts)
-        or (path.parts and ":" in path.parts[0])
+        or any(
+            (
+                PureWindowsPath(part).drive
+                or PureWindowsPath(part).root
+                or PureWindowsPath(part).anchor
+                or ntpath.isreserved(part)
+            )
+            for part in path.parts
+        )
     ):
         raise ValueError(f"development owned overlay {label} is unsafe")
     return path.as_posix()
+
+
+def _owned_overlay_materialized_path(
+    overlay_root: Path,
+    relative: str,
+) -> Path:
+    target = overlay_root.joinpath(*PurePosixPath(relative).parts)
+    try:
+        canonical_root = overlay_root.resolve(strict=True)
+        canonical_target = target.resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(
+            "development owned overlay materialized path is invalid"
+        ) from exc
+    if not canonical_target.is_relative_to(canonical_root):
+        raise ValueError(
+            "development owned overlay materialized path escaped its root"
+        )
+    return target
 
 
 def _owned_overlay_claims_from_sources(
@@ -2419,6 +2458,7 @@ def _open_owned_overlay_bundle(
         )
 
     opened = []
+    validation_overlays = []
     examples = []
     sample_ids: set[str] = set()
     action_size = definition.candidates[iteration].controller_identity["action_size"]
@@ -2431,14 +2471,18 @@ def _open_owned_overlay_bundle(
             overlay_root = temporary_root / prefix[:-1]
             overlay_root.mkdir()
             for relative in claim["tree_directories"]:
-                (overlay_root / Path(*PurePosixPath(relative).parts)).mkdir(
+                _owned_overlay_materialized_path(
+                    overlay_root, relative,
+                ).mkdir(
                     parents=True, exist_ok=False,
                 )
             tree_files = []
             for file_claim in claim["tree_files"]:
                 relative = file_claim["path"]
                 payload = payloads[f"{prefix}{relative}"]
-                target = overlay_root / Path(*PurePosixPath(relative).parts)
+                target = _owned_overlay_materialized_path(
+                    overlay_root, relative,
+                )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 _write_exact_file(target, payload)
                 tree_files.append((relative, payload))
@@ -2502,6 +2546,15 @@ def _open_owned_overlay_bundle(
                 })
                 frozen_examples.append(frozen)
                 examples.append(frozen)
+            validation_overlays.append(_DevelopmentOwnedValidationOverlay(
+                source_root=Path(claim["source_root"]),
+                overlay=physical,
+                collection_metrics=_freeze_json(
+                    dagger_domain.dagger_overlay_collection_metrics(physical)
+                ),
+                tree_directories=tuple(claim["tree_directories"]),
+                tree_files=tuple(tree_files),
+            ))
             opened.append(DevelopmentHeldoutOverlayEvidence(
                 root=Path(claim["source_root"]),
                 content_identity=claim["content_identity"],
@@ -2515,6 +2568,7 @@ def _open_owned_overlay_bundle(
         byte_size=descriptor["byte_size"],
         prefixes=tuple(claim["bundle_prefix"] for claim in claims),
         overlays=tuple(opened),
+        validation_overlays=tuple(validation_overlays),
         examples=tuple(examples),
         raw=raw,
     )
@@ -2732,6 +2786,7 @@ def _open_development_supervised_evaluation(
     iteration: int,
     expected_source_roots: Sequence[Path] | None = None,
     expected_content_identity: str | None = None,
+    _owned_validation_overlays: list[_DevelopmentOwnedValidationOverlay] | None = None,
 ) -> DevelopmentSupervisedEvidence:
     supplied_root = Path(root)
     root_junction = getattr(supplied_root, "is_junction", None)
@@ -2913,6 +2968,8 @@ def _open_development_supervised_evaluation(
         and result.content_identity != expected_content_identity
     ):
         raise ValueError("development supervised publication changed")
+    if _owned_validation_overlays is not None:
+        _owned_validation_overlays.extend(bundle.validation_overlays)
     return result
 
 
@@ -2922,6 +2979,7 @@ def _open_development_supervised_evaluation_from_physical_bytes(
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     iteration: int,
     expected_source_roots: Sequence[Path] | None = None,
+    _owned_validation_overlays: list[_DevelopmentOwnedValidationOverlay] | None = None,
 ) -> DevelopmentSupervisedEvidence:
     """Reopen schema-2 supervised evidence only from its owned bundle."""
 
@@ -2930,6 +2988,7 @@ def _open_development_supervised_evaluation_from_physical_bytes(
         definition=definition,
         iteration=iteration,
         expected_source_roots=expected_source_roots,
+        _owned_validation_overlays=_owned_validation_overlays,
     )
 
 
@@ -3738,6 +3797,7 @@ def _open_development_iteration_source(
     preflight: DevelopmentPreflightEvidence,
     previous: DevelopmentSourcePublicationEvidence,
     frozen_identity: Mapping[str, Any] | None = None,
+    validation_replacement: _DevelopmentOwnedValidationOverlay | None = None,
 ) -> DevelopmentSourcePublicationEvidence:
     """Authenticate one Task 9 manifest, both overlays, and its Task 7 actor."""
 
@@ -3747,9 +3807,17 @@ def _open_development_iteration_source(
     manifest = _read_iteration_manifest(manifest_path)
     if manifest.iteration != iteration:
         raise ValueError("development Task 9 iteration number changed")
-    if {path.name for path in canonical.iterdir()} != {
-        "manifest.json", "train-overlay", "validation-overlay", "actor",
-    }:
+    actual_entries = frozenset(path.name for path in canonical.iterdir())
+    required_entries = frozenset({"manifest.json", "train-overlay", "actor"})
+    allowed_entries = (
+        (required_entries | {"validation-overlay"},)
+        if validation_replacement is None
+        else (
+            required_entries,
+            required_entries | {"validation-overlay"},
+        )
+    )
+    if actual_entries not in allowed_entries:
         raise ValueError("development Task 9 publication contains unowned entries")
     predecessor, predecessor_bytes = _require_task10_iteration_causal_identity(
         manifest,
@@ -3769,14 +3837,24 @@ def _open_development_iteration_source(
     for partition in ("train", "validation"):
         descriptor = manifest.artifacts[f"{partition}_overlay"]
         relative = descriptor["path"]
-        overlay_root = (canonical / relative).resolve(strict=True)
-        if (
-            relative != f"{partition}-overlay"
-            or not overlay_root.is_relative_to(canonical)
-            or overlay_root.parent != canonical
-        ):
+        if relative != f"{partition}-overlay":
             raise ValueError("development Task 9 overlay escaped its publication")
-        overlay = dagger_domain.open_dagger_overlay(overlay_root)
+        if partition == "validation" and validation_replacement is not None:
+            if str(validation_replacement.source_root) != str(
+                canonical / "validation-overlay"
+            ):
+                raise ValueError(
+                    "development Task 9 owned validation provenance changed"
+                )
+            overlay = validation_replacement.overlay
+        else:
+            overlay_root = (canonical / relative).resolve(strict=True)
+            if (
+                not overlay_root.is_relative_to(canonical)
+                or overlay_root.parent != canonical
+            ):
+                raise ValueError("development Task 9 overlay escaped its publication")
+            overlay = dagger_domain.open_dagger_overlay(overlay_root)
         if (
             overlay.partition != partition
             or overlay.iteration != iteration
@@ -3842,7 +3920,11 @@ def _open_development_iteration_source(
                     or (("learner",) if learner_mismatch else ("original_dataset",))
                 )
             )
-        physical_metrics = dagger_domain.dagger_overlay_collection_metrics(overlay)
+        physical_metrics = (
+            validation_replacement.collection_metrics
+            if partition == "validation" and validation_replacement is not None
+            else dagger_domain.dagger_overlay_collection_metrics(overlay)
+        )
         if not _same_json(
             physical_metrics, manifest.metrics[f"{partition}_collection"],
         ):
@@ -3975,8 +4057,23 @@ def _open_development_iteration_source(
     if _task7_actor_snapshot(actor_root) != actor_snapshot:
         raise ValueError("development Task 7 actor changed during authentication")
     for partition, original in opened_overlays.items():
-        reopened = dagger_domain.open_dagger_overlay(
-            canonical / f"{partition}-overlay"
+        if partition == "validation" and validation_replacement is not None:
+            if (
+                original.content_identity
+                != validation_replacement.overlay.content_identity
+                or not _same_json(
+                    recomputed_metrics[partition],
+                    validation_replacement.collection_metrics,
+                )
+            ):
+                raise ValueError(
+                    "development Task 9 owned validation changed during authentication"
+                )
+            continue
+        reopened = (
+            dagger_domain.open_dagger_overlay(
+                canonical / f"{partition}-overlay"
+            )
         )
         if (
             reopened.content_identity != original.content_identity
@@ -4491,6 +4588,7 @@ def _open_development_iteration_evidence_from_physical_bytes(
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     preflight: DevelopmentPreflightEvidence,
     previous: DevelopmentSourcePublicationEvidence,
+    validation_replacement: _DevelopmentOwnedValidationOverlay | None = None,
 ) -> tuple[DevelopmentIterationEvidence, DevelopmentSourcePublicationEvidence]:
     canonical = Path(root).resolve(strict=True)
     source = _open_development_iteration_source(
@@ -4499,6 +4597,7 @@ def _open_development_iteration_evidence_from_physical_bytes(
         preflight=preflight,
         previous=previous,
         frozen_identity=definition.stable_iteration_identity,
+        validation_replacement=validation_replacement,
     )
     expected = definition.candidates[iteration]
     if not _same_json(
@@ -4512,12 +4611,18 @@ def _open_development_iteration_evidence_from_physical_bytes(
     if manifest.content_identity != source.content_identity:
         raise ValueError("development aggregate Task 9 manifest identity changed")
     physical_collection_metrics = {
-        partition: dagger_domain.dagger_overlay_collection_metrics(
-            dagger_domain.open_dagger_overlay(
-                canonical / f"{partition}-overlay"
+        "train": dagger_domain.dagger_overlay_collection_metrics(
+            dagger_domain.open_dagger_overlay(canonical / "train-overlay")
+        ),
+        "validation": (
+            validation_replacement.collection_metrics
+            if validation_replacement is not None
+            else dagger_domain.dagger_overlay_collection_metrics(
+                dagger_domain.open_dagger_overlay(
+                    canonical / "validation-overlay"
+                )
             )
-        )
-        for partition in ("train", "validation")
+        ),
     }
     if any(
         not _same_json(
@@ -4784,6 +4889,73 @@ def _open_development_aggregate_publication(
     )
 
 
+def _owned_validation_overlay_snapshot(
+    value: _DevelopmentOwnedValidationOverlay,
+) -> Mapping[str, Any]:
+    return {
+        "source_root": str(value.source_root),
+        "content_identity": value.overlay.content_identity,
+        "row_count": value.overlay.row_count,
+        "definition": value.overlay.definition.to_dict(),
+        "collection_metrics": value.collection_metrics,
+        "tree_directories": value.tree_directories,
+        "tree_files": [
+            {
+                "path": relative,
+                "sha256": _sha256_bytes(payload),
+                "byte_size": len(payload),
+            }
+            for relative, payload in value.tree_files
+        ],
+    }
+
+
+def _open_development_aggregate_supervised_sources(
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    roots: Sequence[Path],
+    expected_source_roots: Sequence[Path],
+    after_open: Callable[[], None] | None = None,
+) -> tuple[
+    tuple[DevelopmentSupervisedEvidence, ...],
+    tuple[_DevelopmentOwnedValidationOverlay, ...],
+]:
+    supervised = []
+    replacements: list[_DevelopmentOwnedValidationOverlay] = []
+    for iteration, root in enumerate(roots, start=1):
+        captured: list[_DevelopmentOwnedValidationOverlay] = []
+        supervised.append(
+            _open_development_supervised_evaluation_from_physical_bytes(
+                root,
+                definition=definition,
+                iteration=iteration,
+                expected_source_roots=expected_source_roots[:iteration],
+                _owned_validation_overlays=captured,
+            )
+        )
+        if len(captured) != iteration:
+            raise ValueError(
+                "development aggregate owned validation chain is incomplete"
+            )
+        for index, replacement in enumerate(captured):
+            if index == len(replacements):
+                replacements.append(replacement)
+            elif not _same_json(
+                _owned_validation_overlay_snapshot(replacement),
+                _owned_validation_overlay_snapshot(replacements[index]),
+            ):
+                raise ValueError(
+                    "development aggregate owned validation chain changed"
+                )
+        if after_open is not None:
+            after_open()
+    if len(replacements) != len(roots):
+        raise ValueError(
+            "development aggregate owned validation replacements are incomplete"
+        )
+    return tuple(supervised), tuple(replacements)
+
+
 def publish_development_aggregate(
     *,
     definition: dagger_domain.DevelopmentEvaluationDefinition,
@@ -4807,6 +4979,29 @@ def publish_development_aggregate(
     _development_definition_identity(definition)
     _require_development_definition_checkpoints(definition)
     _require_development_repository(definition, repository_identity_provider)
+    if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
+        raise ValueError("development aggregate requires three physical iterations")
+    canonical_iteration_roots = tuple(
+        Path(root).resolve(strict=True) for root in iteration_roots
+    )
+    if type(supervised_roots) not in {list, tuple} or len(supervised_roots) != 3:
+        raise ValueError("development aggregate requires three physical supervised evidences")
+    canonical_supervised_roots = tuple(
+        Path(root).resolve(strict=True) for root in supervised_roots
+    )
+    expected_supervised_source_roots = tuple(
+        root / "validation-overlay" for root in canonical_iteration_roots
+    )
+    supervised, validation_replacements = (
+        _open_development_aggregate_supervised_sources(
+            definition=definition,
+            roots=canonical_supervised_roots,
+            expected_source_roots=expected_supervised_source_roots,
+            after_open=lambda: _require_development_repository(
+                definition, repository_identity_provider,
+            ),
+        )
+    )
     canonical_preflight_root = Path(preflight_root).resolve(strict=True)
     preflight = _validated_development_preflight(
         _open_development_preflight_evidence(canonical_preflight_root),
@@ -4814,11 +5009,6 @@ def publish_development_aggregate(
         definition=definition,
     )
     _require_development_repository(definition, repository_identity_provider)
-    if type(iteration_roots) not in {list, tuple} or len(iteration_roots) != 3:
-        raise ValueError("development aggregate requires three physical iterations")
-    canonical_iteration_roots = tuple(
-        Path(root).resolve(strict=True) for root in iteration_roots
-    )
     iteration_values: list[DevelopmentIterationEvidence] = []
     canonical_baseline_root = Path(
         definition.candidates[0].source_publication["source_run"]
@@ -4845,6 +5035,7 @@ def publish_development_aggregate(
                 definition=definition,
                 preflight=preflight,
                 previous=previous_source,
+                validation_replacement=validation_replacements[iteration - 1],
             )
         )
         iteration_values.append(evidence)
@@ -4864,28 +5055,6 @@ def publish_development_aggregate(
         ))
         _require_development_repository(definition, repository_identity_provider)
     evaluations = tuple(evaluation_values)
-    if type(supervised_roots) not in {list, tuple} or len(supervised_roots) != 3:
-        raise ValueError("development aggregate requires three physical supervised evidences")
-    canonical_supervised_roots = tuple(
-        Path(root).resolve(strict=True) for root in supervised_roots
-    )
-    expected_supervised_source_roots = tuple(
-        root / "validation-overlay" for root in canonical_iteration_roots
-    )
-    supervised_values: list[DevelopmentSupervisedEvidence] = []
-    for iteration, root in enumerate(canonical_supervised_roots, start=1):
-        supervised_values.append(
-            _open_development_supervised_evaluation_from_physical_bytes(
-                root,
-                definition=definition,
-                iteration=iteration,
-                expected_source_roots=(
-                    expected_supervised_source_roots[:iteration]
-                ),
-            )
-        )
-        _require_development_repository(definition, repository_identity_provider)
-    supervised = tuple(supervised_values)
     baseline = definition.candidates[0]
     if (
         evaluations[0].controller != preflight.starting_learner_controller
@@ -4978,6 +5147,23 @@ def publish_development_aggregate(
     ]
     report = dagger_domain.render_development_report(aggregate)
 
+    reopened_supervised, reopened_validation_replacements = (
+        _open_development_aggregate_supervised_sources(
+            definition=definition,
+            roots=canonical_supervised_roots,
+            expected_source_roots=expected_supervised_source_roots,
+        )
+    )
+    if any(
+        not _same_json(
+            _development_supervised_snapshot(reopened),
+            _development_supervised_snapshot(original),
+        )
+        for reopened, original in zip(
+            reopened_supervised, supervised, strict=True,
+        )
+    ):
+        raise ValueError("development aggregate supervised source identity changed")
     reopened_preflight = _validated_development_preflight(
         _open_development_preflight_evidence(canonical_preflight_root),
         root=canonical_preflight_root,
@@ -5009,8 +5195,11 @@ def publish_development_aggregate(
                 root,
                 iteration=iteration,
                 definition=definition,
-                preflight=preflight,
+                preflight=reopened_preflight,
                 previous=previous_source,
+                validation_replacement=(
+                    reopened_validation_replacements[iteration - 1]
+                ),
             )
         )
         if not _same_json(
@@ -5035,18 +5224,6 @@ def publish_development_aggregate(
             _development_evaluation_snapshot(original),
         ):
             raise ValueError("development aggregate evaluation source identity changed")
-    for iteration, root in enumerate(canonical_supervised_roots, start=1):
-        reopened = _open_development_supervised_evaluation_from_physical_bytes(
-            root,
-            definition=definition,
-            iteration=iteration,
-            expected_source_roots=expected_supervised_source_roots[:iteration],
-        )
-        if not _same_json(
-            _development_supervised_snapshot(reopened),
-            _development_supervised_snapshot(supervised[iteration - 1]),
-        ):
-            raise ValueError("development aggregate supervised source identity changed")
     _require_development_definition_checkpoints(definition)
     _require_development_repository(definition, repository_identity_provider)
 
