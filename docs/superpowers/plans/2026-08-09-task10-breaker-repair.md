@@ -4,13 +4,13 @@
 
 **Goal:** Close the two load-bearing Task 10 defects that remained after the original selective-DAgger plan's five-round breaker, without changing the accepted experiment design or beginning Task 11.
 
-**Architecture:** Preserve the existing physical-evidence validators and add two narrow last-mile invariants. Audited contracts compare the duplicated board document with JSON-type-exact semantics, and supervised evaluation ends with a group-level stability barrier over every held-out overlay so no earlier overlay can change while a later overlay is being reopened.
+**Architecture:** Preserve the existing physical-evidence validators and add two narrow last-mile invariants. Audited contracts compare the duplicated board document with JSON-type-exact semantics. Supervised evaluation captures authenticated Task 9 inventories into one deterministic evaluator-owned, content-addressed bundle and reconstructs all rows and metrics from that retained artifact.
 
 **Tech Stack:** Python 3.11, pytest, immutable JSON publications, `pathlib`, HexWars DAgger physical evidence validators.
 
 ## Governing design
 
-This repair implements the already-approved design in `docs/superpowers/specs/2026-08-03-selective-dagger-search-distillation-design.md`. The original SDD ledger remains historical evidence that Task 10 exhausted its five repair rounds. The user explicitly authorized this new two-defect plan on 2026-08-09; this plan has its own ledger and review breaker.
+This repair implements the already-approved design in `docs/superpowers/specs/2026-08-03-selective-dagger-search-distillation-design.md` plus the approved ownership amendment in `docs/superpowers/specs/2026-08-09-task10-owned-overlay-evidence-design.md`. The original SDD ledger remains historical evidence that Task 10 exhausted its five repair rounds. The user explicitly authorized this new two-defect plan and the evaluator-owned-copy amendment on 2026-08-09; this plan has its own ledger and review breaker.
 
 ## Global Constraints
 
@@ -18,9 +18,11 @@ This repair implements the already-approved design in `docs/superpowers/specs/20
 - Do not begin Task 11 until both tasks below pass task review, combined verification, and an independent whole-plan review.
 - Preserve arbitrary valid board dimensions, unit templates, rosters, and scenario configuration; never pin the retained baseline's concrete values as general rules.
 - JSON equality at the audited boundary is type-sensitive: booleans are not integers, and integer/float aliases are distinct unless the schema explicitly normalizes them.
-- The supervised-evaluation physical overlay barrier must be the absolute-final filesystem operation before return. After it begins, no callback, provider, local-publication read, checkpoint read, or repository probe may run.
-- The final barrier covers the full overlay set as one group: snapshot all roots, reopen/validate all roots, snapshot all roots again, compare every result, then return immediately.
-- Keep pre-resolution reparse/junction rejection and exact physical overlay inventory checks. Windows symbolic-link tests may skip only for WinError 1314.
+- The supervised evaluator owns one deterministic bundle containing every cumulative held-out overlay inventory. Its relative filename includes its SHA-256; manifest and evidence schema version 2 bind its path, hash, size, ordered source provenance, overlay content identities, and archive prefixes.
+- Build the bundle only from authenticated in-memory tree snapshots. Reopen it through a strict archive decoder and the existing first-party DAgger overlay opener; predictions, metrics, reuse, and aggregate evidence use only owned rows.
+- Reuse and aggregate physical reopening must not require original Task 9 roots to exist. Caller-supplied source roots remain ordered provenance claims, not physical authorities.
+- The archive and publication enforce exact inventory, containment, no duplicate/absolute/parent-traversal entries, and no symlink/reparse encodings. Windows symbolic-link tests may skip only for WinError 1314.
+- Atomic rename makes the supervised publication the sole authorized bundle writer. A direct external write is corruption detected on the next open; the reader returns a hash-bound byte snapshot and does not claim to prevent writes after its last read.
 - Use strict TDD: each production change follows a focused failing regression whose failure is observed and recorded.
 - Run Python verification only through the pinned environment:
 
@@ -94,55 +96,54 @@ This repair implements the already-approved design in `docs/superpowers/specs/20
 
 ---
 
-### Task 2: Make all held-out overlays stable as one final group
+### Task 2: Publish evaluator-owned content-addressed overlay evidence
 
 **Files:**
-- Modify: `python/run_annihilation_selective_dagger.py:2017-2080`
-- Test: `python/tests/test_annihilation_selective_dagger.py:6911-7047`
+- Modify: `python/run_annihilation_selective_dagger.py:1960-2700,4150-4243,4470-4507`
+- Test: `python/tests/test_annihilation_selective_dagger.py:6700-7350`
 
 **Interfaces:**
-- Consumes: immutable `DevelopmentHeldoutOverlayEvidence` objects, `_supervised_overlay_tree_snapshot`, `dagger_domain.open_dagger_overlay`, and `dagger_domain.dagger_overlay_supervised_examples`.
-- Produces: the same `DevelopmentSupervisedEvidence`; no public signature or publication schema changes.
+- Consumes: authenticated `DevelopmentHeldoutOverlayEvidence` objects containing exact source tree bytes, `dagger_domain.open_dagger_overlay`, and `dagger_domain.dagger_overlay_supervised_examples`.
+- Produces: schema-2 `DevelopmentSupervisedEvidence` bound to a contained `owned-overlays/<sha256>.zip` artifact, with ordered source-root provenance and unchanged overlay content-identity prefix.
 
-- [ ] **Step 1: Write the failing two-overlay race regression**
+- [ ] **Step 1: Replace the impossible race assertion with ownership REDs**
 
-  Add `test_task10_supervised_rejects_first_overlay_mutated_while_second_overlay_is_finalized`. Build a physical Task 10 definition at iteration 2, publish supervised evaluation over both cumulative validation overlays, and identify a shard in overlay 1. Instrument a real finalization boundary for overlay 2 (for example, wrap the physical overlay opener and mutate overlay 1 only when overlay 2 is reopened during the final stability phase). Reopen the published supervised evaluation and require `ValueError` matching `overlay|shard|physical|changed`.
-
-  The mutation trigger must be deterministic, must occur after overlay 1's old per-item final snapshot, and must exercise real physical overlay parsing rather than asserting mock calls.
-
-- [ ] **Step 2: Run the regression and verify RED**
-
-  ```powershell
-  uv run --active --no-project python -m pytest python/tests/test_annihilation_selective_dagger.py::test_task10_supervised_rejects_first_overlay_mutated_while_second_overlay_is_finalized -q
-  ```
-
-  Expected: FAIL with `DID NOT RAISE ValueError`. A malformed overlay or incomplete fixture is not an acceptable RED.
-
-- [ ] **Step 3: Implement the group-level final barrier**
-
-  Refactor `_require_supervised_overlay_stability` so its ordering is globally phased rather than per-item:
+  Retain the two source-race tests as historical evidence of why foreign-root stability is impossible, but change their desired contract to owned-copy isolation. Add:
 
   ```text
-  initial_snapshots = snapshot every overlay root
-  compare every initial snapshot to its frozen evidence
-  reopened = physically open and project every overlay
-  compare every reopened identity/partition/examples to frozen evidence
-  final_snapshots = snapshot every overlay root
-  compare every final snapshot to both its initial snapshot and frozen evidence
-  return immediately
+  test_task10_supervised_reopens_from_owned_bundle_after_source_overlays_are_deleted
+  test_task10_supervised_owned_bundle_isolated_from_late_source_mutation
   ```
 
-  Do not interleave `snapshot -> reopen -> snapshot` per overlay. Preserve canonical unresolved-root and reparse checks. Ensure `_open_development_supervised_evaluation` constructs its result and completes all local publication, checkpoint, repository, and expected-content checks before invoking this barrier, then returns immediately afterward.
+  Publish iteration 2 over real physical overlays, then delete or mutate the original roots. Reopen from the completed supervised publication and require identical prefix, rows-derived metrics, and content identity. Instrument original roots so any reuse/open attempt fails, proving the owned artifact is authoritative.
 
-- [ ] **Step 4: Verify GREEN and prior race coverage**
-
-  Run the new two-overlay regression together with the mid-metrics mutation, fourth-evidence-read mutation, reparse-root test, and supervised transactional/reuse tests:
+- [ ] **Step 2: Run the ownership tests and verify RED**
 
   ```powershell
-  uv run --active --no-project python -m pytest python/tests/test_annihilation_selective_dagger.py -k "first_overlay_mutated_while_second_overlay_is_finalized or overlay_shard_mutated_during_metrics or overlay_shard_mutated_on_fourth_evidence_read or reparse_overlay_root or task10_supervised_evaluation_is_transactional" -q
+  uv run --active --no-project python -m pytest python/tests/test_annihilation_selective_dagger.py -k "owned_bundle_after_source_overlays_are_deleted or owned_bundle_isolated_from_late_source_mutation" -q
   ```
 
-  Expected: PASS; only the existing WinError-1314 symbolic-link case may skip.
+  Expected: fail because schema 1 records and physically reopens the deleted or mutated source roots. A failure before initial publication is not an acceptable RED.
+
+- [ ] **Step 3: Implement the deterministic owned bundle**
+
+  Add a focused internal bundle DTO and writer/opener. The writer uses sorted `tree_directories` and `tree_files`, fixed ZIP metadata, ordered prefixes `<iteration>-<content_identity>/`, and no source rereads. Write a staging bundle, fsync it, hash it, and rename it to `owned-overlays/<sha256>.zip`.
+
+  The opener reads and hashes the contained regular bundle artifact; rejects duplicate, absolute, `..`, undeclared, and reparse entries; manually materializes it under a fresh private temporary directory; and invokes `open_dagger_overlay` plus `dagger_overlay_supervised_examples` for every prefix. Exact-compare content identities, partitions, iterations, action size, rows, and inventory against schema-2 evidence and the frozen definition.
+
+  Advance supervised manifest and evidence schemas to 2. Store source roots only as provenance strings. Bind bundle path, hash, size, ordered prefixes, and source identities into the manifest identity and evidence. Update `DevelopmentSupervisedEvidence`, aggregate validation/snapshots/report payloads, and exact publication inventory. Remove the foreign-root final-stability barrier from successful reopen paths.
+
+  Build and validate the bundle before either predictor call; derive predictor inputs and metrics from owned rows. On reuse and aggregate passes, physically open only the completed publication bundle and local artifacts. Preserve transactional staging, atomic rename, checkpoint/repository probes, and post-rename rollback.
+
+- [ ] **Step 4: Add adversarial bundle verification and verify GREEN**
+
+  Add focused tests for bundle-byte mutation, duplicate or `..` archive entries, unowned top-level entries, bundle symlink/reparse replacement, bundle mutation between aggregate passes, zero-inference reuse, and zero original-root reads. Construct malicious archives independently; do not use the production writer to derive expected structures.
+
+  ```powershell
+  uv run --active --no-project python -m pytest python/tests/test_annihilation_selective_dagger.py -k "owned_bundle or supervised_evaluation_is_transactional or supervised_post_rename or aggregate and supervised" -q
+  ```
+
+  Expected: PASS; only an explicit WinError-1314 reparse test may skip.
 
 - [ ] **Step 5: Run bounded Task 10 verification**
 
@@ -154,11 +155,11 @@ This repair implements the already-approved design in `docs/superpowers/specs/20
 
 - [ ] **Step 6: Self-review and commit**
 
-  Audit the final return path to prove no read/provider/callback occurs after the group barrier. Confirm the regression fails if the loop is reverted to per-overlay snapshot/reopen/snapshot ordering. Run `git diff --check`, then commit only the Task 2 production/test files:
+  Audit that source roots are read only during initial capture, owned rows feed predictions and metrics, reuse and aggregate depend only on the bundle, archive extraction is contained and exact, and the publication is never mutated after atomic rename. Run `git diff --check`, then commit only the Task 2 production/test files:
 
   ```powershell
   git add python/run_annihilation_selective_dagger.py python/tests/test_annihilation_selective_dagger.py
-  git commit -m "fix: seal supervised overlays as a final group"
+  git commit -m "fix: own supervised overlay evidence"
   ```
 
 ---
@@ -170,5 +171,5 @@ After both task-scoped reviews pass:
 1. Run the combined focused A/B regressions and the full `test_checkpoint_audit.py` suite.
 2. Run the bounded Task 10 selector from Task 2.
 3. Run `git diff --check` and verify the worktree contains no generated bytecode changes.
-4. Dispatch an independent whole-plan reviewer over this plan's complete commit range. The reviewer must pressure-test JSON scalar aliases and multi-overlay final-read ordering, not merely inspect the happy paths.
+4. Dispatch an independent whole-plan reviewer over this plan's complete commit range. The reviewer must pressure-test JSON scalar aliases, deterministic bundle identity, archive containment and inventory, source deletion after capture, zero-source reuse, and aggregate pass-two bundle mutation.
 5. Only a clean whole-plan verdict permits appending an acceptance entry to the original Task 10 ledger and beginning Task 11. Preserve the original five-round BLOCKED history; append the superseding repair-plan evidence rather than rewriting it.
