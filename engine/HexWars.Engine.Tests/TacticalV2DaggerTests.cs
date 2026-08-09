@@ -537,8 +537,9 @@ namespace HexWars.Engine.Tests
         [Test]
         public void OraclePreflightActionOracle_QueriesTwiceAndReturnsFirstWithoutMutatingState()
         {
-            var inner = new CountingOracle(context => OracleDecision(
-                context.LearnerAction, context.LearnerCommand));
+            var inner = new CountingOracle(context => OracleDecision(0,
+                TacticalV2Coding.Decode(0, context.State, context.Seat, context.Layout,
+                    context.OwnRegistry)));
             var sink = new BufferedOraclePreflightBenchmarkSink();
             var timestamps = new Queue<long>(new[] { 100L, 111L, 200L, 223L });
             var preflight = new OraclePreflightActionOracle(inner, sink,
@@ -561,7 +562,8 @@ namespace HexWars.Engine.Tests
                 Assert.That(inner.DecisionCount, Is.EqualTo(2));
                 Assert.That(JsonSerializer.Serialize(observer.Before),
                     Is.EqualTo(JsonSerializer.Serialize(observer.After)));
-                Assert.That(observer.Result!.Action, Is.EqualTo(learnerAction));
+                Assert.That(observer.Result!.Action, Is.Not.EqualTo(learnerAction));
+                Assert.That(record.First.Action, Is.Not.EqualTo(learnerAction));
                 Assert.That(applied.Command, Is.EqualTo(observer.Context!.LearnerCommand));
                 Assert.That(record.FirstElapsedTicks, Is.EqualTo(11));
                 Assert.That(record.SecondElapsedTicks, Is.EqualTo(23));
@@ -612,6 +614,35 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void OraclePreflightActionOracle_RevalidatesAgainstPreQueryIndependentStateSnapshot()
+        {
+            var terrain = Enum.GetValues(typeof(TerrainType)).Cast<TerrainType>()
+                .ToDictionary(type => type, type => new TerrainDef(1, 0, 0, passable: true));
+            TacticalV2Config config = TacticalV2Config.Default();
+            config.Game = new GameConfig(terrain, biomesEnabled: true);
+            var layout = new TacticalV2Layout(config);
+            TacticalV2Start start = layout.NewGame(91);
+            TacticalV2UnitRegistry own = start.Slots0;
+            bool[] mask = TacticalV2Coding.Mask(start.State, PlayerId.Player0, layout, own);
+            int action = Enumerable.Range(0, mask.Length).First(candidate => mask[candidate]
+                && TacticalV2Coding.Decode(candidate, start.State, PlayerId.Player0, layout, own)
+                    is MoveUnit);
+            TacticalV2DecisionContext context = Context(start, layout, action);
+            var inner = new SequenceOracle((decision, count) =>
+            {
+                if (count == 1)
+                    foreach (TerrainType type in terrain.Keys.ToArray())
+                        terrain[type] = new TerrainDef(99, 0, 0, passable: true);
+                return OracleDecision(decision.LearnerAction, decision.LearnerCommand);
+            });
+            var preflight = new OraclePreflightActionOracle(inner,
+                new BufferedOraclePreflightBenchmarkSink(), () => 1L, clockFrequency: 1);
+
+            Assert.That(() => preflight.Decide(context), Throws.TypeOf<InvalidOperationException>());
+            Assert.That(inner.DecisionCount, Is.EqualTo(1));
+        }
+
+        [Test]
         public void OraclePreflightBenchmarkRecord_DefensivelyCopiesObservationMaskStateAndCommands()
         {
             Fixture fixture = Fixture.Create(Units(2), Units(2));
@@ -622,7 +653,8 @@ namespace HexWars.Engine.Tests
                 new DuelTransition(context.State, context.LearnerCommand, context.State)).Before;
             TacticalV2OracleDecision first = OracleDecision(context.LearnerAction,
                 context.LearnerCommand);
-            var record = new OraclePreflightBenchmarkRecord("state", context.DecisionIndex,
+            var record = new OraclePreflightBenchmarkRecord(context.State, context.Seat,
+                context.Layout, context.OwnRegistry, context.DecisionIndex,
                 observation, mask, state, first, first, 1L, 2L, 1_000L);
 
             observation[0] = observation[0] + 1f;
@@ -637,6 +669,23 @@ namespace HexWars.Engine.Tests
                 Assert.That(record.First.Command, Is.Not.SameAs(first.Command));
                 Assert.That(record.Second.Command, Is.Not.SameAs(first.Command));
             });
+        }
+
+        [Test]
+        public void OraclePreflightBenchmarkRecord_RejectsChangedCanonicalStateEvidence()
+        {
+            Fixture fixture = Fixture.Create(Units(2), Units(2));
+            TacticalV2DecisionContext context = fixture.Context(fixture.FirstProductiveAction);
+            TacticalTraceState state = TacticalEvaluationTrace.Project(
+                new DuelTransition(context.State, context.LearnerCommand, context.State)).Before;
+            state.Seats[0].Points++;
+            TacticalV2OracleDecision decision = OracleDecision(context.LearnerAction,
+                context.LearnerCommand);
+
+            Assert.That(() => new OraclePreflightBenchmarkRecord(context.State, context.Seat,
+                context.Layout, context.OwnRegistry, context.DecisionIndex,
+                context.Observation, context.LegalMask, state, decision, decision,
+                1L, 2L, 1_000L), Throws.TypeOf<ArgumentException>());
         }
 
         private static int FirstLegalNonEndTurn(bool[] mask)

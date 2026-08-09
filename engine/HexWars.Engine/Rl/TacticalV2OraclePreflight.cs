@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -40,13 +41,15 @@ namespace HexWars.Engine.Rl
         private readonly TacticalV2OracleDecision _first;
         private readonly TacticalV2OracleDecision _second;
 
-        public OraclePreflightBenchmarkRecord(string stateHash, int decisionIndex,
+        public OraclePreflightBenchmarkRecord(GameState authoritativeState, PlayerId seat,
+            TacticalV2Layout layout, TacticalV2UnitRegistry registry, int decisionIndex,
             float[] observation, bool[] legalMask, TacticalTraceState state,
             TacticalV2OracleDecision first, TacticalV2OracleDecision second,
             long firstElapsedTicks, long secondElapsedTicks, long clockFrequency)
         {
-            if (string.IsNullOrWhiteSpace(stateHash))
-                throw new ArgumentException("state hash must not be empty", nameof(stateHash));
+            if (authoritativeState == null) throw new ArgumentNullException(nameof(authoritativeState));
+            if (layout == null) throw new ArgumentNullException(nameof(layout));
+            if (registry == null) throw new ArgumentNullException(nameof(registry));
             if (decisionIndex < 0) throw new ArgumentOutOfRangeException(nameof(decisionIndex));
             if (observation == null) throw new ArgumentNullException(nameof(observation));
             if (legalMask == null) throw new ArgumentNullException(nameof(legalMask));
@@ -60,12 +63,26 @@ namespace HexWars.Engine.Rl
                 throw new ArgumentException("repeated oracle decisions must be identical", nameof(second));
             if (first.Action >= legalMask.Length || !legalMask[first.Action])
                 throw new ArgumentException("oracle action is masked", nameof(first));
+            GameState frozenState = FreezeGameState(authoritativeState);
+            TacticalTraceState canonicalState = TacticalEvaluationTrace.ProjectState(frozenState);
+            TacticalTraceState evidenceState = CopyState(state);
+            if (!string.Equals(StateKey(evidenceState), StateKey(canonicalState), StringComparison.Ordinal))
+                throw new ArgumentException("state projection changed from the authoritative snapshot",
+                    nameof(state));
+            bool[] canonicalMask = TacticalV2Coding.Mask(frozenState, seat, layout, registry);
+            if (!legalMask.SequenceEqual(canonicalMask))
+                throw new ArgumentException("legal mask changed from the authoritative snapshot",
+                    nameof(legalMask));
+            ValidateDecision(frozenState, seat, layout, registry, legalMask, first,
+                "first oracle decision");
+            ValidateDecision(frozenState, seat, layout, registry, legalMask, second,
+                "second oracle decision");
 
-            StateHash = stateHash;
+            StateHash = HashState(canonicalState);
             DecisionIndex = decisionIndex;
             _observation = (float[])observation.Clone();
             _legalMask = (bool[])legalMask.Clone();
-            _state = CopyState(state);
+            _state = CopyState(canonicalState);
             _first = CopyDecision(first);
             _second = CopyDecision(second);
             FirstElapsedTicks = firstElapsedTicks;
@@ -114,6 +131,100 @@ namespace HexWars.Engine.Rl
                 EndTurn end => new EndTurn(end.Issuer),
                 _ => throw new ArgumentException("unsupported command type", nameof(source)),
             };
+        }
+
+        internal static GameState FreezeGameState(GameState source)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            var control = source.Board.Tiles
+                .Select(tile => new { tile.Coord, Owner = source.Board.Controller(tile.Coord) })
+                .Where(item => item.Owner.HasValue)
+                .ToDictionary(item => item.Coord, item => item.Owner!.Value);
+            var board = new Board(source.Board.Tiles.ToArray(),
+                source.Board.DeploymentZone(PlayerId.Player0).ToArray(),
+                source.Board.DeploymentZone(PlayerId.Player1).ToArray(), control);
+            PlayerState[] players = source.Players.Select(player => new PlayerState(player.Id,
+                player.Points, player.Barracks.ToArray(), player.UnitsOnBoard.ToArray(),
+                player.Generators.ToArray(), player.DestroyedValue)).ToArray();
+            return new GameState(board, CopyGameConfig(source.Config), players, source.ActivePlayer, source.Round,
+                source.NextEntityId, source.IsGameOver, source.Winner,
+                source.MovedUnitIds.ToArray(), source.AttackedUnitIds.ToArray(),
+                new Dictionary<int, (int H, int V)>(source.MovementSpent));
+        }
+
+        private static GameConfig CopyGameConfig(GameConfig source)
+        {
+            var terrain = Enum.GetValues(typeof(TerrainType)).Cast<TerrainType>()
+                .ToDictionary(type => type, type => source.Terrain(type));
+            return new GameConfig(terrain, source.StartingPoints, source.BountyRate,
+                source.GeneratorCost, source.GeneratorOutput, source.GeneratorHealth,
+                source.DamageFloor, source.DmgHighGroundBonus, source.RangeHighGroundBonus,
+                source.RoundCap, source.DesignFee, source.DeployCostMultiplier, source.TurnPolicy,
+                source.BiomesEnabled, source.WinConditions, source.CaptureCost,
+                source.EconomyWinThreshold, source.ScoreKills, source.ScorePoints,
+                source.ScoreArmy, source.ScoreTerritory, source.UpkeepFactor, source.CaptureFactor,
+                source.BuildFactor, source.TerritoryMode, source.ClaimEndsTurn,
+                source.BuildAnywhere, source.TerritoryIncome, source.GeneratorsEnabled,
+                source.PointDecay, source.FogOfWar, source.MaxDesignPointCost,
+                source.FixedTemplateCount, source.TemplateSlotCount);
+        }
+
+        internal static void ValidateDecision(GameState authoritativeState, PlayerId seat,
+            TacticalV2Layout layout, TacticalV2UnitRegistry registry, bool[] legalMask,
+            TacticalV2OracleDecision decision, string owner)
+        {
+            if (decision.Action < 0 || decision.Action >= legalMask.Length ||
+                !legalMask[decision.Action])
+                throw new InvalidOperationException(owner + " action is masked");
+            GameState state = FreezeGameState(authoritativeState);
+            if (!TacticalV2Coding.TryEncode(decision.Command, state, layout, registry,
+                out int encoded) || encoded != decision.Action)
+                throw new InvalidOperationException(owner + " command does not encode to its action");
+            Command decoded = TacticalV2Coding.Decode(decision.Action, state, seat, layout, registry);
+            if (!decoded.Equals(decision.Command))
+                throw new InvalidOperationException(owner + " command failed codec round-trip");
+            if (!GameEngine.Apply(state, decision.Command).Success)
+                throw new InvalidOperationException(owner + " command failed authoritative legality");
+        }
+
+        internal static string HashState(TacticalTraceState state)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(StateKey(state));
+            using SHA256 sha = SHA256.Create();
+            return BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+        }
+
+        private static string StateKey(TacticalTraceState state)
+        {
+            var builder = new StringBuilder();
+            builder.Append(state.Round).Append('|').Append(state.ActiveSeat).Append('|')
+                .Append(state.IsGameOver ? 1 : 0).Append('|').Append(state.Winner)
+                .Append('|').Append(state.ProductiveLegalActions);
+            foreach (TacticalTraceSeat seat in state.Seats)
+            {
+                builder.Append("|S,").Append(seat.Seat).Append(',').Append(seat.Points)
+                    .Append(',').Append(seat.DestroyedValue).Append(',').Append(seat.AliveUnits)
+                    .Append(',').Append(seat.CurrentHitPoints).Append(',')
+                    .Append(seat.MaximumHitPoints).Append(',')
+                    .Append(BitConverter.DoubleToInt64Bits(seat.HealthAdjustedMaterial))
+                    .Append(',').Append(seat.CanDamageEnemy ? 1 : 0).Append(',')
+                    .Append(seat.CanCurrentlyAttackEnemy ? 1 : 0).Append(',')
+                    .Append(seat.CanMove ? 1 : 0);
+                foreach (TacticalTraceUnit unit in seat.Units)
+                    builder.Append("|U,").Append(unit.Id).Append(',').Append(unit.Q)
+                        .Append(',').Append(unit.R).Append(',').Append(unit.CurrentHp)
+                        .Append(',').Append(unit.MaximumHp).Append(',').Append(unit.PointCost)
+                        .Append(',').Append(unit.Damage).Append(',').Append(unit.Defense)
+                        .Append(',').Append(unit.Movement).Append(',')
+                        .Append(unit.VerticalMovement).Append(',').Append(unit.Range)
+                        .Append(',').Append(unit.Moved ? 1 : 0).Append(',')
+                        .Append(unit.Attacked ? 1 : 0).Append(',')
+                        .Append(unit.MovementSpentH).Append(',').Append(unit.MovementSpentV);
+            }
+            foreach (TacticalTraceControl control in state.ControlledHexes)
+                builder.Append("|C,").Append(control.Q).Append(',').Append(control.R)
+                    .Append(',').Append(control.Controller);
+            return builder.ToString();
         }
 
         internal static TacticalTraceState CopyState(TacticalTraceState source)
@@ -226,9 +337,10 @@ namespace HexWars.Engine.Rl
 
             Revalidate(context, before, first, "first oracle decision");
             Revalidate(context, before, second, "second oracle decision");
-            _sink.Accepted(new OraclePreflightBenchmarkRecord(before.StateHash,
-                context.DecisionIndex, before.Observation, before.LegalMask, before.State,
-                first, second, firstTicks, secondTicks, _clockFrequency));
+            _sink.Accepted(new OraclePreflightBenchmarkRecord(before.AuthoritativeState,
+                context.Seat, context.Layout, before.OwnRegistry, context.DecisionIndex,
+                before.Observation, before.LegalMask, before.State, first, second,
+                firstTicks, secondTicks, _clockFrequency));
             return OraclePreflightBenchmarkRecord.CopyDecision(first);
         }
 
@@ -259,29 +371,24 @@ namespace HexWars.Engine.Rl
                 !snapshot.LegalMask[decision.Action])
                 throw new InvalidOperationException(owner + " action is masked");
 
-            GameState state = context.State.Clone();
-            TacticalV2UnitRegistry registry = context.OwnRegistry;
-            if (!TacticalV2Coding.TryEncode(decision.Command, state, context.Layout, registry,
-                out int encoded) || encoded != decision.Action)
-                throw new InvalidOperationException(owner + " command does not encode to its action");
-            Command decoded = TacticalV2Coding.Decode(decision.Action, state, context.Seat,
-                context.Layout, registry);
-            if (!decoded.Equals(decision.Command))
-                throw new InvalidOperationException(owner + " command failed codec round-trip");
-            if (!GameEngine.Apply(state, decision.Command).Success)
-                throw new InvalidOperationException(owner + " command failed authoritative legality");
+            OraclePreflightBenchmarkRecord.ValidateDecision(snapshot.AuthoritativeState,
+                context.Seat, context.Layout, snapshot.OwnRegistry, snapshot.LegalMask,
+                decision, owner);
         }
 
         private sealed class Snapshot
         {
             private Snapshot(string stateHash, string fingerprint, float[] observation,
-                bool[] legalMask, TacticalTraceState state)
+                bool[] legalMask, TacticalTraceState state, GameState authoritativeState,
+                TacticalV2UnitRegistry ownRegistry)
             {
                 StateHash = stateHash;
                 Fingerprint = fingerprint;
                 Observation = observation;
                 LegalMask = legalMask;
                 State = state;
+                AuthoritativeState = authoritativeState;
+                OwnRegistry = ownRegistry;
             }
 
             public string StateHash { get; }
@@ -289,16 +396,21 @@ namespace HexWars.Engine.Rl
             public float[] Observation { get; }
             public bool[] LegalMask { get; }
             public TacticalTraceState State { get; }
+            public GameState AuthoritativeState { get; }
+            public TacticalV2UnitRegistry OwnRegistry { get; }
 
             public static Snapshot Capture(TacticalV2DecisionContext context)
             {
                 float[] observation = context.Observation;
                 bool[] legalMask = context.LegalMask;
-                TacticalTraceState state = TacticalEvaluationTrace.ProjectState(context.State);
-                string stateHash = Hash(StateKey(state));
+                GameState authoritativeState = OraclePreflightBenchmarkRecord.FreezeGameState(context.State);
+                TacticalV2UnitRegistry ownRegistry = context.OwnRegistry;
+                TacticalTraceState state = TacticalEvaluationTrace.ProjectState(authoritativeState);
+                string stateHash = OraclePreflightBenchmarkRecord.HashState(state);
                 string fingerprint = Hash(stateHash + "|" + ObservationKey(observation) + "|" +
                     MaskKey(legalMask));
-                return new Snapshot(stateHash, fingerprint, observation, legalMask, state);
+                return new Snapshot(stateHash, fingerprint, observation, legalMask, state,
+                    authoritativeState, ownRegistry);
             }
 
             private static string ObservationKey(float[] observation)
