@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import csv
+import hashlib
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -183,6 +186,109 @@ def _episode_trace(winner: int) -> EpisodeTrace:
         ),
     )
 
+
+_EVIDENCE_NONCE = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+_EVIDENCE_SESSION = hashlib.sha256(
+    f"gymserver-evidence-v1|{_EVIDENCE_NONCE}".encode("utf-8")
+).hexdigest()
+_EVIDENCE_SCHEDULE_BODY = (
+    b'[{"episode_seed":1,"learner_seat":0,"map_seed":1,'
+    b'"profile":"conversion-3v1-near","reference_seat":0,"schedule_index":0}]'
+)
+_EVIDENCE_SCHEDULE_SHA256 = hashlib.sha256(_EVIDENCE_SCHEDULE_BODY).hexdigest()
+
+
+def _evidence_begin_request() -> dict[str, object]:
+    candidate = {"oracle_type": "bounded-search", "depth": 4, "expansion_budget": 512, "use_heuristic": True, "heuristic_identity": "material-plus-pursuit-v1", "code_hash": "1" * 64}
+    scheduled = {"schedule_index": 0, "map_seed": 1, "episode_seed": 1, "profile": "conversion-3v1-near", "reference_seat": 0, "learner_seat": 0}
+    return {"cmd": "duel_evidence_begin", "schema_version": 1, "purpose": "oracle-preflight", "nonce": _EVIDENCE_NONCE, "panel_sha256": "a" * 64, "repository": {"commit": "b" * 40, "source_tree": "c" * 40, "dirty": False}, "scenario_sha256": "d" * 64, "contract_hash": "e" * 64, "encoding_hash": "f" * 64, "oracle": {"oracle_type": "bounded-search", "heuristic_identity": "material-plus-pursuit-v1", "code_hash": "1" * 64}, "candidates": [candidate], "preflight_schedule": [scheduled], "preflight_schedule_sha256": _EVIDENCE_SCHEDULE_SHA256, "candidates_by_schedule": [{"candidate_index": 0, "game_index": 0, "oracle": candidate, "scheduled_duel": scheduled}]}
+
+
+def _evidence_begin_body() -> bytes:
+    request = _evidence_begin_request()
+    body = {"schema_version": 1, "purpose": "oracle-preflight", "nonce": _EVIDENCE_NONCE, "session_id": _EVIDENCE_SESSION, "panel_sha256": request["panel_sha256"], "repository": request["repository"], "environment": "tactical-v2", "scenario_sha256": request["scenario_sha256"], "contract_hash": request["contract_hash"], "encoding_hash": request["encoding_hash"], "oracle": request["candidates"][0], "candidates": request["candidates"], "preflight_schedule": request["preflight_schedule"], "preflight_schedule_sha256": request["preflight_schedule_sha256"], "candidates_by_schedule": request["candidates_by_schedule"]}
+    return json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+
+_EVIDENCE_BEGIN_BODY = _evidence_begin_body()
+_EVIDENCE_BEGIN_SHA256 = hashlib.sha256(_EVIDENCE_BEGIN_BODY).hexdigest()
+
+
+def _evidence_begin_ack() -> dict[str, object]:
+    return {"schema_version": 1, "nonce": _EVIDENCE_NONCE, "session_id": _EVIDENCE_SESSION, "schedule_sha256": _EVIDENCE_SCHEDULE_SHA256, "environment": "tactical-v2", "scenario_sha256": "d" * 64, "contract_hash": "e" * 64, "encoding_hash": "f" * 64, "oracle_type": "bounded-search", "oracle_heuristic_identity": "material-plus-pursuit-v1", "oracle_code_sha256": "1" * 64, "sequence": 0, "initial_chain_sha256": _EVIDENCE_BEGIN_SHA256, "begin_content_sha256": _EVIDENCE_BEGIN_SHA256, "canonical_body_utf8_base64": base64.b64encode(_EVIDENCE_BEGIN_BODY).decode("ascii")}
+
+
+def _evidence_receipt_body(trace: bytes, replay: bytes, benchmark: bytes) -> bytes:
+    request = _evidence_begin_request()
+    body = {"schema_version": 1, "session_id": _EVIDENCE_SESSION, "nonce": _EVIDENCE_NONCE, "sequence": 1, "previous_receipt_sha256": _EVIDENCE_BEGIN_SHA256, "begin_content_sha256": _EVIDENCE_BEGIN_SHA256, "panel_sha256": request["panel_sha256"], "repository": request["repository"], "candidate_index": 0, "game_index": 0, "scheduled_duel": request["preflight_schedule"][0], "oracle": request["candidates"][0], "candidates": request["candidates"], "preflight_schedule": request["preflight_schedule"], "preflight_schedule_sha256": request["preflight_schedule_sha256"], "candidates_by_schedule": request["candidates_by_schedule"], "environment": "tactical-v2", "scenario_sha256": request["scenario_sha256"], "contract_hash": request["contract_hash"], "encoding_hash": request["encoding_hash"], "engine_protocol": "gymserver-evidence-v1", "outcome": "draw", "winner": None, "transition_count": 1, "benchmark_sample_count": 1, "expansion_total": 2, "trace": {"sha256": hashlib.sha256(trace).hexdigest(), "byte_size": len(trace)}, "replay": {"sha256": hashlib.sha256(replay).hexdigest(), "byte_size": len(replay)}, "benchmark": {"sha256": hashlib.sha256(benchmark).hexdigest(), "byte_size": len(benchmark)}}
+    return json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+
+def _evidence_game_response(trace: bytes = b"trace", replay: bytes = b"replay", benchmark: bytes = b"benchmark") -> dict[str, object]:
+    receipt_utf8 = _evidence_receipt_body(trace, replay, benchmark)
+    def artifact(payload: bytes) -> dict[str, object]:
+        return {"utf8_base64": base64.b64encode(payload).decode("ascii"), "sha256": hashlib.sha256(payload).hexdigest(), "byte_size": len(payload)}
+    return {"receipt": json.loads(receipt_utf8), "receipt_sha256": hashlib.sha256(receipt_utf8).hexdigest(), "receipt_utf8_base64": base64.b64encode(receipt_utf8).decode("ascii"), "trace": artifact(trace), "replay": artifact(replay), "benchmark": artifact(benchmark)}
+
+
+def test_engine_evidence_client_sends_exact_begin_and_validates_ack() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    client = object.__new__(EngineEvidenceDuelClient)
+    captured: list[dict[str, object]] = []
+    client._rpc = lambda request: (captured.append(request), _evidence_begin_ack())[1]
+    acknowledgement = client.begin_evidence(_evidence_begin_request())
+    assert captured == [_evidence_begin_request()]
+    assert dict(acknowledgement) == _evidence_begin_ack()
+    with pytest.raises(TypeError): acknowledgement["nonce"] = "x"  # type: ignore[index]
+
+
+def test_engine_evidence_client_decodes_exact_artifact_bytes_and_receipt() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    trace, replay, benchmark = b"literal trace", b"literal replay", b"literal benchmark"
+    response = _evidence_game_response(trace, replay, benchmark)
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda request: _evidence_begin_ack() if request["cmd"] == "duel_evidence_begin" else response
+    client.begin_evidence(_evidence_begin_request())
+    game = client.close_evidence_game()
+    assert game.trace.payload == trace
+    assert game.replay.payload == replay
+    assert game.benchmark.payload == benchmark
+    assert game.receipt_utf8 == _evidence_receipt_body(trace, replay, benchmark)
+    with pytest.raises(TypeError): game.receipt["sequence"] = 2  # type: ignore[index]
+
+
+@pytest.mark.parametrize("mutation", ["nonce", "sequence", "hash", "unknown"])
+def test_engine_evidence_client_rejects_wrong_nonce_sequence_hash_and_unknown_fields(mutation: str) -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    response = _evidence_game_response()
+    if mutation == "nonce": response["receipt"]["nonce"] = "0" * 64  # type: ignore[index]
+    elif mutation == "sequence":
+        response["receipt"]["sequence"] = True  # type: ignore[index]
+        receipt_utf8 = json.dumps(response["receipt"], separators=(",", ":")).encode("utf-8")  # type: ignore[arg-type]
+        response["receipt_utf8_base64"] = base64.b64encode(receipt_utf8).decode("ascii")
+        response["receipt_sha256"] = hashlib.sha256(receipt_utf8).hexdigest()
+    elif mutation == "hash": response["trace"]["sha256"] = "0" * 64  # type: ignore[index]
+    else: response["unexpected"] = True
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda request: _evidence_begin_ack() if request["cmd"] == "duel_evidence_begin" else response
+    client.begin_evidence(_evidence_begin_request())
+    with pytest.raises(ValueError): client.close_evidence_game()
+
+
+def test_engine_evidence_client_requires_close_before_success() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda _request: _evidence_begin_ack()
+    client.close = lambda: None
+    client.begin_evidence(_evidence_begin_request())
+    client.close()
+    assert not hasattr(client, "closure")
+    with pytest.raises(ValueError, match="incomplete"): client.end_evidence()
+
+
+def test_engine_evidence_hash_vectors_match_gymserver_golden_values() -> None:
+    assert hashlib.sha256(_EVIDENCE_BEGIN_BODY).hexdigest() == "9c9deb61e8f60b1ff1d5ef8fe31033d60d58fabbfe0af8fe050d223777afa338"
+    assert hashlib.sha256(_evidence_receipt_body(b"trace", b"replay", b"benchmark")).hexdigest() == "58c7ce2615d335b4c888c7ff9935fd23275a0391e13d884fdf4b181e253eae42"
 
 def _trace_evaluation_fixture(
     tmp_path: Path, *, outcomes: tuple[str, ...]
