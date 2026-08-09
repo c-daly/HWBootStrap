@@ -534,6 +534,183 @@ namespace HexWars.Engine.Tests
         }
 
 
+        [Test]
+        public void OraclePreflightActionOracle_QueriesTwiceAndReturnsFirstWithoutMutatingState()
+        {
+            var inner = new CountingOracle(context => OracleDecision(
+                context.LearnerAction, context.LearnerCommand));
+            var sink = new BufferedOraclePreflightBenchmarkSink();
+            var timestamps = new Queue<long>(new[] { 100L, 111L, 200L, 223L });
+            var preflight = new OraclePreflightActionOracle(inner, sink,
+                () => timestamps.Dequeue(), clockFrequency: 1_000);
+            var observer = new PreflightObserver(preflight);
+            var env = new TacticalV2DuelEnv(TacticalV2Config.Default())
+            {
+                CaptureTransitions = true,
+                DecisionObserver = observer,
+            };
+            TacticalV2DuelEnv.View view = env.Reset(91, null, null);
+            int learnerAction = FirstLegalNonEndTurn(view.ActionMask);
+
+            env.Step(learnerAction);
+
+            OraclePreflightBenchmarkRecord record = sink.Drain().Single();
+            DuelTransition applied = env.DrainTransitions().Single();
+            Assert.Multiple(() =>
+            {
+                Assert.That(inner.DecisionCount, Is.EqualTo(2));
+                Assert.That(JsonSerializer.Serialize(observer.Before),
+                    Is.EqualTo(JsonSerializer.Serialize(observer.After)));
+                Assert.That(observer.Result!.Action, Is.EqualTo(learnerAction));
+                Assert.That(applied.Command, Is.EqualTo(observer.Context!.LearnerCommand));
+                Assert.That(record.FirstElapsedTicks, Is.EqualTo(11));
+                Assert.That(record.SecondElapsedTicks, Is.EqualTo(23));
+            });
+        }
+
+        [Test]
+        public void OraclePreflightActionOracle_RejectsDifferentRepeatedDecisions()
+        {
+            Fixture fixture = Fixture.Create(Units(2), Units(2));
+            TacticalV2DecisionContext context = fixture.Context(fixture.FirstProductiveAction);
+            var inner = new SequenceOracle((decision, count) => count == 1
+                ? OracleDecision(decision.LearnerAction, decision.LearnerCommand)
+                : OracleDecision(0, TacticalV2Coding.Decode(0, decision.State,
+                    decision.Seat, decision.Layout, decision.OwnRegistry)));
+            var preflight = new OraclePreflightActionOracle(inner,
+                new BufferedOraclePreflightBenchmarkSink(), () => 1L, clockFrequency: 1);
+
+            Assert.That(() => preflight.Decide(context), Throws.TypeOf<InvalidOperationException>());
+            Assert.That(inner.DecisionCount, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void OraclePreflightActionOracle_RejectsContextMutationBetweenQueries()
+        {
+            Fixture fixture = Fixture.Create(Units(2), Units(2));
+            var moved = new List<int>();
+            var state = new GameState(fixture.State.Board, fixture.State.Config,
+                fixture.State.Players, fixture.State.ActivePlayer, fixture.State.Round,
+                fixture.State.NextEntityId, movedUnitIds: moved);
+            bool[] mask = TacticalV2Coding.Mask(state, PlayerId.Player0, fixture.Layout, fixture.Slots0);
+            int action = fixture.FirstProductiveAction;
+            var context = new TacticalV2DecisionContext(state, PlayerId.Player0, 0,
+                TacticalV2Coding.Observe(state, PlayerId.Player0, fixture.Layout,
+                    fixture.Slots0, fixture.Slots1),
+                mask, action, TacticalV2Coding.Decode(action, state, PlayerId.Player0,
+                    fixture.Layout, fixture.Slots0), fixture.Slots0, fixture.Slots1, fixture.Layout);
+            var inner = new SequenceOracle((decision, count) =>
+            {
+                if (count == 1) moved.Add(1);
+                return OracleDecision(decision.LearnerAction, decision.LearnerCommand);
+            });
+            var preflight = new OraclePreflightActionOracle(inner,
+                new BufferedOraclePreflightBenchmarkSink(), () => 1L, clockFrequency: 1);
+
+            Assert.That(() => preflight.Decide(context), Throws.TypeOf<InvalidOperationException>());
+            Assert.That(inner.DecisionCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void OraclePreflightBenchmarkRecord_DefensivelyCopiesObservationMaskStateAndCommands()
+        {
+            Fixture fixture = Fixture.Create(Units(2), Units(2));
+            TacticalV2DecisionContext context = fixture.Context(fixture.FirstProductiveAction);
+            float[] observation = context.Observation;
+            bool[] mask = context.LegalMask;
+            TacticalTraceState state = TacticalEvaluationTrace.Project(
+                new DuelTransition(context.State, context.LearnerCommand, context.State)).Before;
+            TacticalV2OracleDecision first = OracleDecision(context.LearnerAction,
+                context.LearnerCommand);
+            var record = new OraclePreflightBenchmarkRecord("state", context.DecisionIndex,
+                observation, mask, state, first, first, 1L, 2L, 1_000L);
+
+            observation[0] = observation[0] + 1f;
+            mask[context.LearnerAction] = !mask[context.LearnerAction];
+            state.Seats[0].Points = 99;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(record.Observation[0], Is.Not.EqualTo(observation[0]));
+                Assert.That(record.LegalMask[context.LearnerAction], Is.True);
+                Assert.That(record.State.Seats[0].Points, Is.Not.EqualTo(99));
+                Assert.That(record.First.Command, Is.Not.SameAs(first.Command));
+                Assert.That(record.Second.Command, Is.Not.SameAs(first.Command));
+            });
+        }
+
+        private static int FirstLegalNonEndTurn(bool[] mask)
+        {
+            for (int action = 1; action < mask.Length; action++)
+                if (mask[action]) return action;
+            Assert.Fail("test requires a legal non-EndTurn action");
+            return -1;
+        }
+
+        private sealed class CountingOracle : IActionOracle
+        {
+            private readonly Func<TacticalV2DecisionContext, TacticalV2OracleDecision> _decide;
+
+            public CountingOracle(Func<TacticalV2DecisionContext, TacticalV2OracleDecision> decide)
+            {
+                _decide = decide;
+            }
+
+            public int DecisionCount { get; private set; }
+
+            public TacticalV2OracleDecision Decide(TacticalV2DecisionContext context)
+            {
+                DecisionCount++;
+                return _decide(context);
+            }
+        }
+
+        private sealed class SequenceOracle : IActionOracle
+        {
+            private readonly Func<TacticalV2DecisionContext, int, TacticalV2OracleDecision> _decide;
+
+            public SequenceOracle(
+                Func<TacticalV2DecisionContext, int, TacticalV2OracleDecision> decide)
+            {
+                _decide = decide;
+            }
+
+            public int DecisionCount { get; private set; }
+
+            public TacticalV2OracleDecision Decide(TacticalV2DecisionContext context)
+            {
+                DecisionCount++;
+                return _decide(context, DecisionCount);
+            }
+        }
+
+        private sealed class PreflightObserver : ITacticalV2DecisionObserver
+        {
+            private readonly OraclePreflightActionOracle _preflight;
+
+            public PreflightObserver(OraclePreflightActionOracle preflight)
+            {
+                _preflight = preflight;
+            }
+
+            public TacticalV2DecisionContext? Context { get; private set; }
+            public TacticalV2OracleDecision? Result { get; private set; }
+            public TacticalTraceState? Before { get; private set; }
+            public TacticalTraceState? After { get; private set; }
+
+            public void Reset(TacticalV2EpisodeContext episode) { }
+
+            public void Observe(TacticalV2DecisionContext decision)
+            {
+                Context = decision;
+                Before = TacticalEvaluationTrace.Project(
+                    new DuelTransition(decision.State, decision.LearnerCommand, decision.State)).Before;
+                Result = _preflight.Decide(decision);
+                After = TacticalEvaluationTrace.Project(
+                    new DuelTransition(decision.State, decision.LearnerCommand, decision.State)).Before;
+            }
+        }
+
         private static TacticalV2DaggerDecision ObserveOnce(Fixture fixture, int learnerAction)
         {
             var sink = new BufferedTacticalV2DaggerSink { Enabled = true };
