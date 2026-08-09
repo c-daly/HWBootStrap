@@ -7083,6 +7083,72 @@ def test_task10_supervised_rejects_first_overlay_mutated_while_second_overlay_is
     assert shard.read_bytes() == mutation
 
 
+def test_task10_supervised_rejects_first_overlay_mutated_during_second_final_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later final snapshot cannot invalidate an earlier cached snapshot."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    result = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=tmp_path / "supervised-overlay-final-snapshot-race",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    )
+    overlay_manifest = json.loads(
+        (overlays[0].root / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_game = json.loads(
+        (
+            overlays[0].root / overlay_manifest["games"][0]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    shard = overlays[0].root / first_game["shard"]["path"]
+    mutation = b"corrupted-during-second-overlay-final-snapshot"
+    original_snapshot = runner._supervised_overlay_tree_snapshot
+    second_overlay_snapshots = 0
+
+    def mutate_first_overlay_during_second_snapshot(root: Path) -> object:
+        nonlocal second_overlay_snapshots
+        snapshot = original_snapshot(root)
+        if Path(root) == overlays[1].root:
+            second_overlay_snapshots += 1
+            if second_overlay_snapshots == 3:
+                shard.write_bytes(mutation)
+        return snapshot
+
+    monkeypatch.setattr(
+        runner,
+        "_supervised_overlay_tree_snapshot",
+        mutate_first_overlay_during_second_snapshot,
+    )
+    try:
+        with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
+            runner._open_development_supervised_evaluation_from_physical_bytes(
+                result.result.root,
+                definition=definition,
+                iteration=2,
+            )
+    finally:
+        assert shard.read_bytes() == mutation
+
+
 def test_task10_supervised_rejects_reparse_overlay_root(
     tmp_path: Path,
 ) -> None:
