@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import inspect
 import json
 import os
 import shutil
+import stat
 import subprocess
+import zipfile
 from collections import Counter, defaultdict
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -6764,14 +6767,25 @@ def test_task10_supervised_evaluation_is_transactional_and_reuse_runs_zero_infer
     }
     assert {path.name for path in first.result.root.iterdir()} == {
         "evidence.json", "predictions.json", "metrics.json", "manifest.json",
+        "owned-overlays",
     }
+    assert first.result.owned_overlay_bundle_path.parent == (
+        first.result.root / "owned-overlays"
+    )
+    assert first.result.owned_overlay_bundle_path.name == (
+        f"{first.result.owned_overlay_bundle_sha256}.zip"
+    )
 
+    for item in overlays:
+        shutil.rmtree(item.root)
     second = runner.run_development_supervised_evaluation(
         definition=definition,
         iteration=2,
         heldout_overlay_roots=tuple(item.root for item in overlays),
         output_root=output_root,
-        reopen_heldout_overlay=lambda root: by_root[Path(root)],
+        reopen_heldout_overlay=lambda _root: pytest.fail(
+            "reuse must not reopen original held-out overlay roots"
+        ),
         predict_actions=predict_actions,
         repository_identity_provider=_repository_provider,
     )
@@ -6787,7 +6801,9 @@ def test_task10_supervised_evaluation_is_transactional_and_reuse_runs_zero_infer
             iteration=2,
             heldout_overlay_roots=tuple(item.root for item in overlays),
             output_root=output_root,
-            reopen_heldout_overlay=lambda root: by_root[Path(root)],
+            reopen_heldout_overlay=lambda _root: pytest.fail(
+                "corrupt reuse must not reopen original held-out overlay roots"
+            ),
             predict_actions=predict_actions,
             repository_identity_provider=_repository_provider,
         )
@@ -6908,11 +6924,11 @@ def test_task10_supervised_rejects_local_toctou_and_reparse_artifacts(
         )
 
 
-def test_task10_supervised_rejects_overlay_shard_mutated_during_metrics(
+def test_task10_supervised_owned_bundle_isolated_from_source_mutation_during_metrics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A post-row-extraction shard mutation must fail the final physical reopen."""
+    """Metrics remain bound to owned rows after a late source mutation."""
 
     import run_annihilation_selective_dagger as runner
 
@@ -6953,19 +6969,21 @@ def test_task10_supervised_rejects_overlay_shard_mutated_during_metrics(
         return metrics
 
     monkeypatch.setattr(runner, "_supervised_metrics", mutate_shard)
-    with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
-        runner._open_development_supervised_evaluation_from_physical_bytes(
-            result.result.root,
-            definition=definition,
-            iteration=1,
-        )
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        result.result.root,
+        definition=definition,
+        iteration=1,
+    )
+    assert reopened.metrics == result.result.metrics
+    assert reopened.content_identity == result.result.content_identity
+    assert shard.read_bytes() == b"corrupted-after-row-extraction"
 
 
-def test_task10_supervised_rejects_overlay_shard_mutated_on_fourth_evidence_read(
+def test_task10_supervised_owned_bundle_isolated_from_source_mutation_during_evidence_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No local evidence reread may occur after the final overlay stability guard."""
+    """Owned evidence reads never return to a mutable source shard."""
 
     import run_annihilation_selective_dagger as runner
 
@@ -7007,24 +7025,26 @@ def test_task10_supervised_rejects_overlay_shard_mutated_on_fourth_evidence_read
         raw = original_read_bytes(path)
         if path == evidence_path:
             evidence_reads += 1
-            if evidence_reads == 4:
+            if evidence_reads == 1:
                 shard.write_bytes(b"corrupted-after-overlay-stability-guard")
         return raw
 
     monkeypatch.setattr(Path, "read_bytes", mutate_shard_on_fourth_evidence_read)
-    with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
-        runner._open_development_supervised_evaluation_from_physical_bytes(
-            result.result.root,
-            definition=definition,
-            iteration=1,
-        )
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        result.result.root,
+        definition=definition,
+        iteration=1,
+    )
+    assert reopened.metrics == result.result.metrics
+    assert evidence_reads >= 1
+    assert shard.read_bytes() == b"corrupted-after-overlay-stability-guard"
 
 
-def test_task10_supervised_rejects_first_overlay_mutated_while_second_overlay_is_finalized(
+def test_task10_supervised_owned_bundle_isolated_when_first_source_mutates_during_second_owned_reopen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """All cumulative overlays must remain stable through one final group barrier."""
+    """A source mutation during later owned parsing cannot alter the bundle."""
 
     import run_annihilation_selective_dagger as runner
 
@@ -7059,35 +7079,36 @@ def test_task10_supervised_rejects_first_overlay_mutated_while_second_overlay_is
     shard = overlays[0].root / first_game["shard"]["path"]
     mutation = b"corrupted-while-second-overlay-is-finalized"
     original_open = runner.dagger_domain.open_dagger_overlay
-    second_overlay_opens = 0
+    mutation_count = 0
 
     def mutate_first_overlay_during_second_final_open(root: Path) -> object:
-        nonlocal second_overlay_opens
-        if Path(root) == overlays[1].root:
-            second_overlay_opens += 1
-            if second_overlay_opens == 2:
-                shard.write_bytes(mutation)
-        return original_open(root)
+        nonlocal mutation_count
+        physical = original_open(root)
+        if physical.partition == "validation" and physical.iteration == 2:
+            mutation_count += 1
+            shard.write_bytes(mutation)
+        return physical
 
     monkeypatch.setattr(
         runner.dagger_domain,
         "open_dagger_overlay",
         mutate_first_overlay_during_second_final_open,
     )
-    with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
-        runner._open_development_supervised_evaluation_from_physical_bytes(
-            result.result.root,
-            definition=definition,
-            iteration=2,
-        )
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        result.result.root,
+        definition=definition,
+        iteration=2,
+    )
+    assert reopened.metrics == result.result.metrics
+    assert mutation_count == 1
     assert shard.read_bytes() == mutation
 
 
-def test_task10_supervised_rejects_first_overlay_mutated_during_second_final_snapshot(
+def test_task10_supervised_owned_bundle_isolated_when_first_source_mutates_during_second_owned_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later final snapshot cannot invalidate an earlier cached snapshot."""
+    """Owned snapshot sequencing has no authority over mutable source roots."""
 
     import run_annihilation_selective_dagger as runner
 
@@ -7122,15 +7143,15 @@ def test_task10_supervised_rejects_first_overlay_mutated_during_second_final_sna
     shard = overlays[0].root / first_game["shard"]["path"]
     mutation = b"corrupted-during-second-overlay-final-snapshot"
     original_snapshot = runner._supervised_overlay_tree_snapshot
-    second_overlay_snapshots = 0
+    second_prefix = f"2-{overlays[1].content_identity}"
+    mutation_count = 0
 
     def mutate_first_overlay_during_second_snapshot(root: Path) -> object:
-        nonlocal second_overlay_snapshots
+        nonlocal mutation_count
         snapshot = original_snapshot(root)
-        if Path(root) == overlays[1].root:
-            second_overlay_snapshots += 1
-            if second_overlay_snapshots == 3:
-                shard.write_bytes(mutation)
+        if Path(root).name == second_prefix:
+            mutation_count += 1
+            shard.write_bytes(mutation)
         return snapshot
 
     monkeypatch.setattr(
@@ -7138,15 +7159,461 @@ def test_task10_supervised_rejects_first_overlay_mutated_during_second_final_sna
         "_supervised_overlay_tree_snapshot",
         mutate_first_overlay_during_second_snapshot,
     )
-    try:
-        with pytest.raises(ValueError, match="overlay|shard|physical|changed"):
-            runner._open_development_supervised_evaluation_from_physical_bytes(
-                result.result.root,
-                definition=definition,
-                iteration=2,
-            )
-    finally:
-        assert shard.read_bytes() == mutation
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        result.result.root,
+        definition=definition,
+        iteration=2,
+    )
+    assert reopened.metrics == result.result.metrics
+    assert mutation_count == 1
+    assert shard.read_bytes() == mutation
+
+
+def test_task10_supervised_reopens_from_owned_bundle_after_source_overlays_are_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed supervised evidence remains physical without its Task 9 roots."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    published = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=tmp_path / "supervised-owned-deleted-sources",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    ).result
+    source_roots = {item.root for item in overlays}
+    for source_root in source_roots:
+        shutil.rmtree(source_root)
+    original_open = runner.dagger_domain.open_dagger_overlay
+
+    def reject_source_open(root: Path) -> object:
+        if Path(root) in source_roots:
+            raise AssertionError("original held-out overlay root was reopened")
+        return original_open(root)
+
+    monkeypatch.setattr(
+        runner.dagger_domain, "open_dagger_overlay", reject_source_open,
+    )
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        published.root,
+        definition=definition,
+        iteration=2,
+    )
+    assert reopened.heldout_overlay_prefix == published.heldout_overlay_prefix
+    assert reopened.metrics == published.metrics
+    assert reopened.content_identity == published.content_identity
+
+
+def test_task10_supervised_owned_bundle_isolated_from_late_source_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late Task 9 mutation cannot alter evaluator-owned rows or metrics."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    published = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=tmp_path / "supervised-owned-mutated-source",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    ).result
+    overlay_manifest = json.loads(
+        (overlays[0].root / "manifest.json").read_text(encoding="utf-8")
+    )
+    first_game = json.loads(
+        (
+            overlays[0].root / overlay_manifest["games"][0]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    shard = overlays[0].root / first_game["shard"]["path"]
+    shard.write_bytes(b"late-source-corruption-after-owned-capture")
+    source_roots = {item.root for item in overlays}
+    original_open = runner.dagger_domain.open_dagger_overlay
+
+    def reject_source_open(root: Path) -> object:
+        if Path(root) in source_roots:
+            raise AssertionError("original held-out overlay root was reopened")
+        return original_open(root)
+
+    monkeypatch.setattr(
+        runner.dagger_domain, "open_dagger_overlay", reject_source_open,
+    )
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        published.root,
+        definition=definition,
+        iteration=2,
+    )
+    assert reopened.heldout_overlay_prefix == published.heldout_overlay_prefix
+    assert reopened.metrics == published.metrics
+    assert reopened.content_identity == published.content_identity
+
+
+def test_task10_supervised_owned_bundle_feeds_both_predictors_after_source_deletion(
+    tmp_path: Path,
+) -> None:
+    """The owned bundle is validated before either inference callback."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+    predictor_examples = []
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        predictor_examples.append(examples)
+        if len(predictor_examples) == 1:
+            for item in overlays:
+                shutil.rmtree(item.root)
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    published = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=2,
+        heldout_overlay_roots=tuple(item.root for item in overlays),
+        output_root=tmp_path / "supervised-owned-predictor-source-deletion",
+        reopen_heldout_overlay=None,
+        predict_actions=predict,
+        repository_identity_provider=_repository_provider,
+    ).result
+    assert len(predictor_examples) == 2
+    assert predictor_examples[0] == predictor_examples[1]
+    reopened = runner._open_development_supervised_evaluation_from_physical_bytes(
+        published.root, definition=definition, iteration=2,
+    )
+    assert reopened.metrics == published.metrics
+    assert reopened.content_identity == published.content_identity
+
+
+def test_task10_supervised_owned_bundle_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=2,
+    )
+
+    def predict(*, examples: tuple[object, ...], **_kwargs: Any) -> object:
+        return tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        )
+
+    publications = tuple(
+        runner.run_development_supervised_evaluation(
+            definition=definition,
+            iteration=2,
+            heldout_overlay_roots=tuple(item.root for item in overlays),
+            output_root=tmp_path / f"supervised-owned-deterministic-{index}",
+            reopen_heldout_overlay=None,
+            predict_actions=predict,
+            repository_identity_provider=_repository_provider,
+        ).result
+        for index in (1, 2)
+    )
+    assert (
+        publications[0].owned_overlay_bundle_sha256
+        == publications[1].owned_overlay_bundle_sha256
+    )
+    assert (
+        publications[0].owned_overlay_bundle_path.read_bytes()
+        == publications[1].owned_overlay_bundle_path.read_bytes()
+    )
+
+
+def _task10_manual_owned_archive(
+    entries: tuple[tuple[str, bytes, int], ...],
+) -> bytes:
+    stream = io.BytesIO()
+    with zipfile.ZipFile(
+        stream, mode="w", compression=zipfile.ZIP_STORED,
+    ) as archive:
+        for name, payload, mode in entries:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = mode << 16
+            archive.writestr(info, payload)
+    return stream.getvalue()
+
+
+def _task10_manual_bundle_descriptor(
+    root: Path,
+    raw: bytes,
+    claims: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    sha256 = hashlib.sha256(raw).hexdigest()
+    owned_root = root / "owned-overlays"
+    owned_root.mkdir(parents=True)
+    (owned_root / f"{sha256}.zip").write_bytes(raw)
+    return {
+        "path": f"owned-overlays/{sha256}.zip",
+        "sha256": sha256,
+        "byte_size": len(raw),
+        "prefixes": [item["bundle_prefix"] for item in claims],
+        "source_content_identities": [
+            item["content_identity"] for item in claims
+        ],
+    }
+
+
+def test_task10_supervised_owned_bundle_rejects_byte_mutation(
+    tmp_path: Path,
+) -> None:
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    published = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=1,
+        heldout_overlay_roots=(overlays[0].root,),
+        output_root=tmp_path / "supervised-owned-byte-mutation",
+        reopen_heldout_overlay=None,
+        predict_actions=lambda *, examples, **_kwargs: tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        ),
+        repository_identity_provider=_repository_provider,
+    ).result
+    published.owned_overlay_bundle_path.write_bytes(b"mutated-owned-bundle")
+
+    with pytest.raises(ValueError, match="bundle|archive|hash|bytes|changed"):
+        runner._open_development_supervised_evaluation_from_physical_bytes(
+            published.root, definition=definition, iteration=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "entries"),
+    (
+        (
+            "duplicate",
+            (
+                ("1-" + "a" * 64 + "/", b"", stat.S_IFDIR | 0o755),
+                ("1-" + "a" * 64 + "/", b"", stat.S_IFDIR | 0o755),
+            ),
+        ),
+        ("absolute", (("/absolute", b"x", stat.S_IFREG | 0o644),)),
+        ("traversal", (("../escape", b"x", stat.S_IFREG | 0o644),)),
+        ("unowned", (("unowned/file", b"x", stat.S_IFREG | 0o644),)),
+    ),
+)
+def test_task10_supervised_owned_bundle_rejects_independent_malicious_archive(
+    tmp_path: Path,
+    mutation: str,
+    entries: tuple[tuple[str, bytes, int], ...],
+) -> None:
+    """Archive rejection is independent of the production bundle writer."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    claims = ({
+        "source_root": str(overlays[0].root),
+        "content_identity": overlays[0].content_identity,
+        "bundle_prefix": f"1-{overlays[0].content_identity}/",
+        "tree_directories": list(overlays[0].tree_directories),
+        "tree_files": [
+            {
+                "path": path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_size": len(payload),
+            }
+            for path, payload in overlays[0].tree_files
+        ],
+    },)
+    malicious_root = tmp_path / f"independent-owned-{mutation}"
+    malicious_root.mkdir()
+    if mutation == "duplicate":
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            raw = _task10_manual_owned_archive(entries)
+    else:
+        raw = _task10_manual_owned_archive(entries)
+    descriptor = _task10_manual_bundle_descriptor(
+        malicious_root, raw, claims,
+    )
+
+    with pytest.raises(ValueError, match="bundle|archive|inventory|unsafe|duplicate"):
+        runner._open_owned_overlay_bundle(
+            malicious_root,
+            descriptor=descriptor,
+            claims=claims,
+            definition=definition,
+            iteration=1,
+        )
+
+
+def test_task10_supervised_owned_bundle_rejects_wrong_content_identity(
+    tmp_path: Path,
+) -> None:
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    overlay = overlays[0]
+    wrong_identity = "f" * 64
+    claims = [{
+        "source_root": str(overlay.root),
+        "content_identity": wrong_identity,
+        "bundle_prefix": f"1-{wrong_identity}/",
+        "tree_directories": list(overlay.tree_directories),
+        "tree_files": [
+            {
+                "path": path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_size": len(payload),
+            }
+            for path, payload in overlay.tree_files
+        ],
+    }]
+
+    with pytest.raises(ValueError, match="identity"):
+        runner._validated_owned_overlay_claims(
+            claims, definition=definition, iteration=1,
+        )
+
+
+def test_task10_supervised_owned_bundle_rejects_reparse_archive_encoding(
+    tmp_path: Path,
+) -> None:
+    """A manually authored symlink entry cannot materialize."""
+
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    overlay = overlays[0]
+    prefix = f"1-{overlay.content_identity}/"
+    source_paths = tuple(sorted(overlay.root.rglob("*")))
+    tree_directories = tuple(
+        path.relative_to(overlay.root).as_posix()
+        for path in source_paths if path.is_dir()
+    )
+    tree_files = tuple(
+        (path.relative_to(overlay.root).as_posix(), path.read_bytes())
+        for path in source_paths if path.is_file()
+    )
+    claims = ({
+        "source_root": str(overlay.root),
+        "content_identity": overlay.content_identity,
+        "bundle_prefix": prefix,
+        "tree_directories": list(tree_directories),
+        "tree_files": [
+            {
+                "path": path,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "byte_size": len(payload),
+            }
+            for path, payload in tree_files
+        ],
+    },)
+    entries = [(prefix, b"", stat.S_IFDIR | 0o755)]
+    entries.extend(
+        (f"{prefix}{path}/", b"", stat.S_IFDIR | 0o755)
+        for path in tree_directories
+    )
+    for index, (path, payload) in enumerate(tree_files):
+        mode = (
+            stat.S_IFLNK | 0o777
+            if index == 0
+            else stat.S_IFREG | 0o644
+        )
+        entries.append((f"{prefix}{path}", payload, mode))
+    raw = _task10_manual_owned_archive(tuple(entries))
+    malicious_root = tmp_path / "independent-owned-reparse"
+    malicious_root.mkdir()
+    descriptor = _task10_manual_bundle_descriptor(
+        malicious_root, raw, claims,
+    )
+
+    with pytest.raises(ValueError, match="bundle|archive|metadata|reparse"):
+        runner._open_owned_overlay_bundle(
+            malicious_root,
+            descriptor=descriptor,
+            claims=claims,
+            definition=definition,
+            iteration=1,
+        )
+
+
+def test_task10_supervised_owned_bundle_rejects_bundle_reparse_replacement(
+    tmp_path: Path,
+) -> None:
+    import run_annihilation_selective_dagger as runner
+
+    definition = _task10_definition(tmp_path, physical_overlays=True)
+    overlays = _task10_heldout_overlays(
+        runner, definition=definition, tmp_path=tmp_path, iteration=1,
+    )
+    published = runner.run_development_supervised_evaluation(
+        definition=definition,
+        iteration=1,
+        heldout_overlay_roots=(overlays[0].root,),
+        output_root=tmp_path / "supervised-owned-reparse",
+        reopen_heldout_overlay=None,
+        predict_actions=lambda *, examples, **_kwargs: tuple(
+            {"sample_id": item["sample_id"], "action": item["oracle_action"]}
+            for item in examples
+        ),
+        repository_identity_provider=_repository_provider,
+    ).result
+    bundle = published.owned_overlay_bundle_path
+    external = tmp_path / "external-owned-bundle.zip"
+    external.write_bytes(bundle.read_bytes())
+    bundle.unlink()
+    _symlink_or_skip_windows_privilege(bundle, external)
+
+    with pytest.raises(ValueError, match="bundle|reparse|contained|regular"):
+        runner._open_development_supervised_evaluation_from_physical_bytes(
+            published.root, definition=definition, iteration=1,
+        )
 
 
 def test_task10_supervised_rejects_reparse_overlay_root(
@@ -7670,6 +8137,52 @@ def test_task10_aggregate_success_reopens_every_source_twice_and_probes_reposito
     )
     assert fixture.callback_counts == {}
     assert repository_calls == 15
+
+
+def test_task10_aggregate_rejects_owned_bundle_mutation_between_supervised_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aggregate pass two must reread the exact owned bundle bytes."""
+
+    import run_annihilation_selective_dagger as runner
+
+    fixture = _task10_fast_aggregate_fixture(tmp_path, runner, monkeypatch)
+    original_open = (
+        runner._open_development_supervised_evaluation_from_physical_bytes
+    )
+    first_iteration_opens = 0
+
+    def mutate_after_first_supervised_pass(
+        root: Path,
+        *,
+        definition: object,
+        iteration: int,
+    ) -> object:
+        nonlocal first_iteration_opens
+        value = original_open(
+            root, definition=definition, iteration=iteration,
+        )
+        if iteration == 1:
+            first_iteration_opens += 1
+            if first_iteration_opens == 1:
+                value.owned_overlay_bundle_path.write_bytes(
+                    b"mutated-between-aggregate-supervised-passes"
+                )
+        return value
+
+    monkeypatch.setattr(
+        runner,
+        "_open_development_supervised_evaluation_from_physical_bytes",
+        mutate_after_first_supervised_pass,
+    )
+    with pytest.raises(ValueError, match="bundle|supervised|hash|bytes|changed"):
+        runner.publish_development_aggregate(
+            **fixture.kwargs,
+            output_root=tmp_path / "aggregate-owned-bundle-mutation",
+            repository_identity_provider=_repository_provider,
+        )
+    assert first_iteration_opens == 1
 
 
 def test_task10_aggregate_ignores_forged_candidate_and_supervised_dtos(

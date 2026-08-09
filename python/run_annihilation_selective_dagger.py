@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import math
 import os
+import stat
 import subprocess
+import tempfile
 import time
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -1978,6 +1982,10 @@ class DevelopmentSupervisedEvidence:
     content_identity: str
     heldout_overlay_roots: tuple[Path, ...]
     heldout_overlay_prefix: tuple[str, ...]
+    owned_overlay_bundle_path: Path
+    owned_overlay_bundle_sha256: str
+    owned_overlay_bundle_byte_size: int
+    owned_overlay_prefixes: tuple[str, ...]
     incoming_candidate_id: str
     trained_candidate_id: str
     metrics: Mapping[str, Any]
@@ -1988,6 +1996,17 @@ class DevelopmentSupervisedRun:
     new_inferences: int
     reused: bool
     result: DevelopmentSupervisedEvidence
+
+
+@dataclass(frozen=True)
+class _DevelopmentOwnedOverlayBundle:
+    path: Path
+    sha256: str
+    byte_size: int
+    prefixes: tuple[str, ...]
+    overlays: tuple[DevelopmentHeldoutOverlayEvidence, ...]
+    examples: tuple[Mapping[str, Any], ...]
+    raw: bytes
 
 
 def _canonical_unresolved_overlay_root(raw_root: Path) -> Path:
@@ -2045,56 +2064,441 @@ def _supervised_overlay_tree_snapshot(
     )
 
 
-def _require_supervised_overlay_stability(
-    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
-) -> None:
-    initial_snapshots = tuple(
-        _supervised_overlay_tree_snapshot(item.root) for item in overlays
-    )
-    for item, initial_snapshot in zip(overlays, initial_snapshots):
-        if initial_snapshot != (
-            item.tree_directories,
-            item.tree_files,
-        ):
-            raise ValueError(
-                "development heldout overlay physical bytes changed during evaluation"
-            )
+_OWNED_OVERLAY_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+_OWNED_OVERLAY_DIRECTORY_MODE = stat.S_IFDIR | 0o755
+_OWNED_OVERLAY_FILE_MODE = stat.S_IFREG | 0o644
 
-    reopened_overlays = []
-    for item in overlays:
-        try:
-            reopened = dagger_domain.open_dagger_overlay(item.root)
-            reopened_examples = dagger_domain.dagger_overlay_supervised_examples(reopened)
-        except (OSError, TypeError, ValueError) as exc:
-            raise ValueError(
-                "development heldout overlay final physical reopen failed"
-            ) from exc
-        reopened_overlays.append((reopened, reopened_examples))
 
-    for item, (reopened, reopened_examples) in zip(overlays, reopened_overlays):
-        if (
-            reopened.partition != "validation"
-            or reopened.content_identity != item.content_identity
-            or not _same_json(reopened_examples, item.examples)
-        ):
-            raise ValueError(
-                "development heldout overlay physical rows changed during evaluation"
-            )
+def _owned_overlay_prefix(index: int, content_identity: str) -> str:
+    return f"{index}-{content_identity}/"
 
-    final_snapshots = tuple(
-        _supervised_overlay_tree_snapshot(item.root) for item in overlays
-    )
-    for item, initial_snapshot, final_snapshot in zip(
-        overlays, initial_snapshots, final_snapshots
+
+def _owned_overlay_relative_path(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ValueError(f"development owned overlay {label} is invalid")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or value.endswith("/")
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or (path.parts and ":" in path.parts[0])
     ):
-        frozen_snapshot = (item.tree_directories, item.tree_files)
+        raise ValueError(f"development owned overlay {label} is unsafe")
+    return path.as_posix()
+
+
+def _owned_overlay_claims_from_sources(
+    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+) -> tuple[Mapping[str, Any], ...]:
+    claims = []
+    for index, item in enumerate(overlays, start=1):
+        directories = [
+            _owned_overlay_relative_path(path, "directory")
+            for path in item.tree_directories
+        ]
+        files = [
+            {
+                "path": _owned_overlay_relative_path(path, "file"),
+                "sha256": _sha256_bytes(raw),
+                "byte_size": len(raw),
+            }
+            for path, raw in item.tree_files
+        ]
         if (
-            final_snapshot != initial_snapshot
-            or final_snapshot != frozen_snapshot
+            directories != sorted(set(directories))
+            or [entry["path"] for entry in files]
+            != sorted({entry["path"] for entry in files})
+            or set(directories) & {entry["path"] for entry in files}
+        ):
+            raise ValueError("development owned overlay source inventory is invalid")
+        claims.append(_freeze_json({
+            "source_root": str(Path(item.root)),
+            "content_identity": item.content_identity,
+            "bundle_prefix": _owned_overlay_prefix(index, item.content_identity),
+            "tree_directories": directories,
+            "tree_files": files,
+        }))
+    return tuple(claims)
+
+
+def _validated_owned_overlay_claims(
+    value: object,
+    *,
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+) -> tuple[Mapping[str, Any], ...]:
+    expected_identities = tuple(
+        definition.candidates[iteration].source_publication[
+            "validation_overlay_prefix"
+        ]
+    )
+    if type(value) is not list or len(value) != iteration:
+        raise ValueError("development owned overlay claims are incomplete")
+    claims = []
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "source_root", "content_identity", "bundle_prefix",
+            "tree_directories", "tree_files",
+        }:
+            raise ValueError("development owned overlay claim fields are invalid")
+        source_root = raw["source_root"]
+        if (
+            not isinstance(source_root, str)
+            or not Path(source_root).is_absolute()
+            or ".." in Path(source_root).parts
+        ):
+            raise ValueError("development owned overlay source provenance is invalid")
+        content_identity = _require_sha256(
+            raw["content_identity"], "development owned overlay content identity",
+        )
+        expected_prefix = _owned_overlay_prefix(index, content_identity)
+        if (
+            content_identity != expected_identities[index - 1]
+            or raw["bundle_prefix"] != expected_prefix
+        ):
+            raise ValueError("development owned overlay prefix identity changed")
+        directories_raw = raw["tree_directories"]
+        files_raw = raw["tree_files"]
+        if type(directories_raw) is not list or type(files_raw) is not list:
+            raise ValueError("development owned overlay inventory is invalid")
+        directories = [
+            _owned_overlay_relative_path(path, "directory")
+            for path in directories_raw
+        ]
+        files = []
+        for descriptor in files_raw:
+            if not isinstance(descriptor, Mapping) or set(descriptor) != {
+                "path", "sha256", "byte_size",
+            }:
+                raise ValueError("development owned overlay file claim is invalid")
+            path = _owned_overlay_relative_path(descriptor["path"], "file")
+            sha256 = _require_sha256(
+                descriptor["sha256"], "development owned overlay file sha256",
+            )
+            byte_size = descriptor["byte_size"]
+            if type(byte_size) is not int or byte_size < 0:
+                raise ValueError("development owned overlay file size is invalid")
+            files.append({
+                "path": path, "sha256": sha256, "byte_size": byte_size,
+            })
+        if (
+            directories != sorted(set(directories))
+            or [entry["path"] for entry in files]
+            != sorted({entry["path"] for entry in files})
+            or set(directories) & {entry["path"] for entry in files}
+        ):
+            raise ValueError("development owned overlay inventory is not canonical")
+        claims.append(_freeze_json({
+            "source_root": source_root,
+            "content_identity": content_identity,
+            "bundle_prefix": expected_prefix,
+            "tree_directories": directories,
+            "tree_files": files,
+        }))
+    return tuple(claims)
+
+
+def _owned_overlay_bundle_descriptor(
+    *,
+    path: str,
+    sha256: str,
+    byte_size: int,
+    claims: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "sha256": sha256,
+        "byte_size": byte_size,
+        "prefixes": [item["bundle_prefix"] for item in claims],
+        "source_content_identities": [
+            item["content_identity"] for item in claims
+        ],
+    }
+
+
+def _validated_owned_overlay_bundle_descriptor(
+    value: object,
+    *,
+    claims: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "path", "sha256", "byte_size", "prefixes",
+        "source_content_identities",
+    }:
+        raise ValueError("development owned overlay bundle descriptor is invalid")
+    sha256 = _require_sha256(
+        value["sha256"], "development owned overlay bundle sha256",
+    )
+    byte_size = value["byte_size"]
+    expected = _owned_overlay_bundle_descriptor(
+        path=f"owned-overlays/{sha256}.zip",
+        sha256=sha256,
+        byte_size=byte_size,
+        claims=claims,
+    )
+    if (
+        type(byte_size) is not int
+        or byte_size < 1
+        or not _same_json(value, expected)
+    ):
+        raise ValueError("development owned overlay bundle identity changed")
+    return _freeze_json(expected)
+
+
+def _owned_overlay_zip_info(name: str, *, directory: bool) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=_OWNED_OVERLAY_ZIP_DATE)
+    info.compress_type = zipfile.ZIP_STORED
+    info.create_system = 3
+    info.external_attr = (
+        _OWNED_OVERLAY_DIRECTORY_MODE if directory
+        else _OWNED_OVERLAY_FILE_MODE
+    ) << 16
+    return info
+
+
+def _write_owned_overlay_bundle(
+    root: Path,
+    *,
+    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+    claims: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    owned_root = Path(root) / "owned-overlays"
+    owned_root.mkdir()
+    staging = owned_root / ".bundle.staging"
+    with zipfile.ZipFile(
+        staging, mode="x", compression=zipfile.ZIP_STORED, allowZip64=True,
+    ) as archive:
+        for item, claim in zip(overlays, claims, strict=True):
+            prefix = claim["bundle_prefix"]
+            archive.writestr(
+                _owned_overlay_zip_info(prefix, directory=True), b"",
+            )
+            for relative in item.tree_directories:
+                archive.writestr(
+                    _owned_overlay_zip_info(
+                        f"{prefix}{relative}/", directory=True,
+                    ),
+                    b"",
+                )
+            for relative, payload in item.tree_files:
+                archive.writestr(
+                    _owned_overlay_zip_info(
+                        f"{prefix}{relative}", directory=False,
+                    ),
+                    payload,
+                )
+    with staging.open("r+b") as stream:
+        stream.flush()
+        os.fsync(stream.fileno())
+    raw = staging.read_bytes()
+    sha256 = _sha256_bytes(raw)
+    destination = owned_root / f"{sha256}.zip"
+    os.replace(staging, destination)
+    return _freeze_json(_owned_overlay_bundle_descriptor(
+        path=f"owned-overlays/{sha256}.zip",
+        sha256=sha256,
+        byte_size=len(raw),
+        claims=claims,
+    ))
+
+
+def _open_owned_overlay_bundle(
+    publication_root: Path,
+    *,
+    descriptor: Mapping[str, Any],
+    claims: Sequence[Mapping[str, Any]],
+    definition: dagger_domain.DevelopmentEvaluationDefinition,
+    iteration: int,
+) -> _DevelopmentOwnedOverlayBundle:
+    owned_root = publication_root / "owned-overlays"
+    bundle_path = publication_root / descriptor["path"]
+    owned_junction = getattr(owned_root, "is_junction", None)
+    bundle_junction = getattr(bundle_path, "is_junction", None)
+    try:
+        canonical_owned_root = owned_root.resolve(strict=True)
+        canonical_bundle = bundle_path.resolve(strict=True)
+        if (
+            owned_root.is_symlink()
+            or bool(owned_junction is not None and owned_junction())
+            or bundle_path.is_symlink()
+            or bool(bundle_junction is not None and bundle_junction())
+            or canonical_owned_root.parent != publication_root
+            or canonical_bundle.parent != canonical_owned_root
+            or not canonical_bundle.is_file()
         ):
             raise ValueError(
-                "development heldout overlay physical bytes changed during final reopen"
+                "development owned overlay bundle is not a contained regular file"
             )
+        raw = canonical_bundle.read_bytes()
+    except OSError as exc:
+        raise ValueError("development owned overlay bundle is unreadable") from exc
+    if (
+        len(raw) != descriptor["byte_size"]
+        or _sha256_bytes(raw) != descriptor["sha256"]
+    ):
+        raise ValueError("development owned overlay bundle bytes changed")
+
+    expected_entries: dict[str, tuple[str, Mapping[str, Any] | None]] = {}
+    for claim in claims:
+        prefix = claim["bundle_prefix"]
+        expected_entries[prefix] = ("directory", None)
+        for relative in claim["tree_directories"]:
+            expected_entries[f"{prefix}{relative}/"] = ("directory", None)
+        for file_claim in claim["tree_files"]:
+            expected_entries[f"{prefix}{file_claim['path']}"] = (
+                "file", file_claim,
+            )
+    payloads: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw), mode="r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or set(names) != set(expected_entries):
+                raise ValueError(
+                    "development owned overlay archive inventory changed"
+                )
+            for info in infos:
+                expected_kind, file_claim = expected_entries[info.filename]
+                expected_mode = (
+                    _OWNED_OVERLAY_DIRECTORY_MODE
+                    if expected_kind == "directory"
+                    else _OWNED_OVERLAY_FILE_MODE
+                )
+                if (
+                    info.date_time != _OWNED_OVERLAY_ZIP_DATE
+                    or info.compress_type != zipfile.ZIP_STORED
+                    or info.create_system != 3
+                    or info.external_attr != expected_mode << 16
+                    or info.extra
+                    or info.comment
+                    or info.flag_bits & 1
+                    or bool(info.external_attr & 0x400)
+                    or info.is_dir() != (expected_kind == "directory")
+                ):
+                    raise ValueError(
+                        "development owned overlay archive metadata changed"
+                    )
+                name = info.filename[:-1] if info.is_dir() else info.filename
+                _owned_overlay_relative_path(name, "archive entry")
+                payload = archive.read(info)
+                if expected_kind == "directory":
+                    if payload:
+                        raise ValueError(
+                            "development owned overlay directory has bytes"
+                        )
+                else:
+                    assert file_claim is not None
+                    if (
+                        len(payload) != file_claim["byte_size"]
+                        or _sha256_bytes(payload) != file_claim["sha256"]
+                    ):
+                        raise ValueError(
+                            "development owned overlay file bytes changed"
+                        )
+                    payloads[info.filename] = payload
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ValueError("development owned overlay archive is invalid") from exc
+
+    opened = []
+    examples = []
+    sample_ids: set[str] = set()
+    action_size = definition.candidates[iteration].controller_identity["action_size"]
+    with tempfile.TemporaryDirectory(
+        prefix="hexwars-owned-overlays-",
+    ) as temporary:
+        temporary_root = Path(temporary)
+        for index, claim in enumerate(claims, start=1):
+            prefix = claim["bundle_prefix"]
+            overlay_root = temporary_root / prefix[:-1]
+            overlay_root.mkdir()
+            for relative in claim["tree_directories"]:
+                (overlay_root / Path(*PurePosixPath(relative).parts)).mkdir(
+                    parents=True, exist_ok=False,
+                )
+            tree_files = []
+            for file_claim in claim["tree_files"]:
+                relative = file_claim["path"]
+                payload = payloads[f"{prefix}{relative}"]
+                target = overlay_root / Path(*PurePosixPath(relative).parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_exact_file(target, payload)
+                tree_files.append((relative, payload))
+            if _supervised_overlay_tree_snapshot(overlay_root) != (
+                tuple(claim["tree_directories"]), tuple(tree_files),
+            ):
+                raise ValueError(
+                    "development owned overlay materialized inventory changed"
+                )
+            try:
+                physical = dagger_domain.open_dagger_overlay(overlay_root)
+                physical_examples = (
+                    dagger_domain.dagger_overlay_supervised_examples(physical)
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "development owned overlay physical rows are invalid"
+                ) from exc
+            if (
+                physical.partition != "validation"
+                or physical.iteration != index
+                or physical.content_identity != claim["content_identity"]
+                or physical.definition.action_size != action_size
+            ):
+                raise ValueError(
+                    "development owned overlay physical identity changed"
+                )
+            frozen_examples = []
+            for raw_example in physical_examples:
+                if not isinstance(raw_example, Mapping) or set(raw_example) != {
+                    "sample_id", "oracle_action", "reasons",
+                }:
+                    raise ValueError(
+                        "development owned overlay sample fields are invalid"
+                    )
+                sample_id = raw_example["sample_id"]
+                action = raw_example["oracle_action"]
+                reasons = raw_example["reasons"]
+                if (
+                    not isinstance(sample_id, str)
+                    or not sample_id
+                    or sample_id in sample_ids
+                    or type(action) is not int
+                    or not 0 <= action < action_size
+                    or type(reasons) not in {list, tuple}
+                    or not reasons
+                    or len(set(reasons)) != len(reasons)
+                    or any(
+                        reason not in _DEVELOPMENT_SUPERVISED_REASONS
+                        for reason in reasons
+                    )
+                ):
+                    raise ValueError(
+                        "development owned overlay sample identity is invalid"
+                    )
+                sample_ids.add(sample_id)
+                frozen = _freeze_json({
+                    "sample_id": sample_id,
+                    "oracle_action": action,
+                    "reasons": list(reasons),
+                })
+                frozen_examples.append(frozen)
+                examples.append(frozen)
+            opened.append(DevelopmentHeldoutOverlayEvidence(
+                root=Path(claim["source_root"]),
+                content_identity=claim["content_identity"],
+                examples=tuple(frozen_examples),
+                tree_directories=tuple(claim["tree_directories"]),
+                tree_files=tuple(tree_files),
+            ))
+    return _DevelopmentOwnedOverlayBundle(
+        path=canonical_bundle,
+        sha256=descriptor["sha256"],
+        byte_size=descriptor["byte_size"],
+        prefixes=tuple(claim["bundle_prefix"] for claim in claims),
+        overlays=tuple(opened),
+        examples=tuple(examples),
+        raw=raw,
+    )
 
 
 def _validated_supervised_overlays(
@@ -2266,13 +2670,15 @@ def _supervised_identity(
     *,
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     iteration: int,
-    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
+    claims: Sequence[Mapping[str, Any]],
+    bundle_descriptor: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "definition": _development_definition_identity(definition),
         "iteration": iteration,
-        "heldout_overlay_roots": [str(Path(item.root)) for item in overlays],
-        "heldout_overlay_prefix": [item.content_identity for item in overlays],
+        "heldout_overlay_roots": [item["source_root"] for item in claims],
+        "heldout_overlay_prefix": [item["content_identity"] for item in claims],
+        "owned_overlay_bundle": _mutable_stage_json(bundle_descriptor),
         "incoming_candidate": definition.candidates[iteration - 1].to_dict(),
         "trained_candidate": definition.candidates[iteration].to_dict(),
     }
@@ -2305,11 +2711,8 @@ def _open_development_supervised_evaluation(
     *,
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     iteration: int,
-    overlays: Sequence[DevelopmentHeldoutOverlayEvidence],
-    examples: Sequence[Mapping[str, Any]],
-    source_snapshots: Sequence[tuple[Path, bytes]] = (),
+    expected_source_roots: Sequence[Path] | None = None,
     expected_content_identity: str | None = None,
-    require_overlay_stability: bool = True,
 ) -> DevelopmentSupervisedEvidence:
     supplied_root = Path(root)
     root_junction = getattr(supplied_root, "is_junction", None)
@@ -2329,20 +2732,14 @@ def _open_development_supervised_evaluation(
         or set(manifest) != {
             "schema_version", "status", "identity", "artifacts", "content_identity",
         }
-        or manifest["schema_version"] != 1
+        or manifest["schema_version"] != 2
         or manifest["status"] != "completed"
-        or not _same_json(
-            manifest["identity"],
-            _supervised_identity(
-                definition=definition, iteration=iteration, overlays=overlays,
-            ),
-        )
         or _content_identity(manifest) != manifest["content_identity"]
     ):
         raise ValueError("development supervised publication identity changed")
     artifacts = manifest["artifacts"]
     if not isinstance(artifacts, Mapping) or set(artifacts) != {
-        "evidence", "predictions", "metrics",
+        "evidence", "predictions", "metrics", "owned_overlays",
     }:
         raise ValueError("development supervised artifact descriptors are invalid")
     payloads: dict[str, Any] = {}
@@ -2384,20 +2781,55 @@ def _open_development_supervised_evaluation(
             raise ValueError(f"development supervised {name} artifact hash changed")
         payloads[name] = payload
         artifact_snapshots[artifact_path] = raw
-    expected_evidence = {
-        "schema_version": 1,
-        "iteration": iteration,
-        "overlays": [
-            {
-                "root": str(Path(item.root)),
-                "content_identity": item.content_identity,
-            }
-            for item in overlays
-        ],
-        "examples": _mutable_stage_json(examples),
-    }
-    if not _same_json(payloads["evidence"], expected_evidence):
-        raise ValueError("development supervised evidence bytes changed")
+    evidence = payloads["evidence"]
+    if (
+        not isinstance(evidence, Mapping)
+        or set(evidence) != {
+            "schema_version", "iteration", "overlays",
+            "owned_overlay_bundle", "examples",
+        }
+        or evidence["schema_version"] != 2
+        or evidence["iteration"] != iteration
+    ):
+        raise ValueError("development supervised evidence fields are invalid")
+    claims = _validated_owned_overlay_claims(
+        evidence["overlays"], definition=definition, iteration=iteration,
+    )
+    bundle_descriptor = _validated_owned_overlay_bundle_descriptor(
+        evidence["owned_overlay_bundle"], claims=claims,
+    )
+    manifest_bundle_descriptor = _validated_owned_overlay_bundle_descriptor(
+        artifacts["owned_overlays"], claims=claims,
+    )
+    if (
+        not _same_json(bundle_descriptor, manifest_bundle_descriptor)
+        or not _same_json(
+            manifest["identity"],
+            _supervised_identity(
+                definition=definition,
+                iteration=iteration,
+                claims=claims,
+                bundle_descriptor=bundle_descriptor,
+            ),
+        )
+    ):
+        raise ValueError("development supervised owned bundle identity changed")
+    source_roots = tuple(Path(item["source_root"]) for item in claims)
+    if (
+        expected_source_roots is not None
+        and source_roots != tuple(Path(item) for item in expected_source_roots)
+    ):
+        raise ValueError("development supervised source provenance changed")
+    bundle = _open_owned_overlay_bundle(
+        publication_root,
+        descriptor=bundle_descriptor,
+        claims=claims,
+        definition=definition,
+        iteration=iteration,
+    )
+    examples = bundle.examples
+    if not _same_json(evidence["examples"], examples):
+        raise ValueError("development supervised owned rows changed")
     predictions = payloads["predictions"]
     if not isinstance(predictions, Mapping) or set(predictions) != {
         "schema_version", "iteration", "pre", "post",
@@ -2421,14 +2853,30 @@ def _open_development_supervised_evaluation(
                 "development supervised publication contains a reparse point"
             )
         actual.add(path.name)
-    if actual != {"evidence.json", "predictions.json", "metrics.json", "manifest.json"}:
+    if actual != {
+        "evidence.json", "predictions.json", "metrics.json", "manifest.json",
+        "owned-overlays",
+    }:
         raise ValueError("development supervised publication contains unowned files")
+    owned_entries = tuple((publication_root / "owned-overlays").iterdir())
+    if (
+        len(owned_entries) != 1
+        or owned_entries[0] != bundle.path
+        or owned_entries[0].name != f"{bundle.sha256}.zip"
+    ):
+        raise ValueError("development supervised owned bundle inventory changed")
     result = DevelopmentSupervisedEvidence(
         root=publication_root,
         iteration=iteration,
         content_identity=manifest["content_identity"],
-        heldout_overlay_roots=tuple(Path(item.root) for item in overlays),
-        heldout_overlay_prefix=tuple(item.content_identity for item in overlays),
+        heldout_overlay_roots=source_roots,
+        heldout_overlay_prefix=tuple(
+            item["content_identity"] for item in claims
+        ),
+        owned_overlay_bundle_path=bundle.path,
+        owned_overlay_bundle_sha256=bundle.sha256,
+        owned_overlay_bundle_byte_size=bundle.byte_size,
+        owned_overlay_prefixes=bundle.prefixes,
         incoming_candidate_id=definition.candidates[iteration - 1].candidate_id,
         trained_candidate_id=definition.candidates[iteration].candidate_id,
         metrics=_freeze_json(metrics),
@@ -2436,7 +2884,7 @@ def _open_development_supervised_evaluation(
     if (
         manifest_path.read_bytes() != manifest_bytes
         or any(path.read_bytes() != raw for path, raw in artifact_snapshots.items())
-        or any(path.read_bytes() != raw for path, raw in source_snapshots)
+        or bundle.path.read_bytes() != bundle.raw
     ):
         raise ValueError("development supervised bytes changed while reopening")
     if (
@@ -2444,8 +2892,6 @@ def _open_development_supervised_evaluation(
         and result.content_identity != expected_content_identity
     ):
         raise ValueError("development supervised publication changed")
-    if require_overlay_stability:
-        _require_supervised_overlay_stability(overlays)
     return result
 
 
@@ -2455,77 +2901,25 @@ def _open_development_supervised_evaluation_from_physical_bytes(
     definition: dagger_domain.DevelopmentEvaluationDefinition,
     iteration: int,
 ) -> DevelopmentSupervisedEvidence:
-    """Discover overlay roots from the owned evidence artifact, then reopen all."""
+    """Reopen schema-2 supervised evidence only from its owned bundle."""
 
-    supplied_root = Path(root)
-    root_junction = getattr(supplied_root, "is_junction", None)
-    if supplied_root.is_symlink() or bool(
-        root_junction is not None and root_junction()
-    ):
-        raise ValueError("development supervised root is a reparse point")
-    publication_root = supplied_root.resolve(strict=True)
-    manifest_path = publication_root / "manifest.json"
-    try:
-        manifest_bytes = manifest_path.read_bytes()
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
-        descriptor = manifest["artifacts"]["evidence"]
-        if (
-            descriptor["path"] != "evidence.json"
-            or set(descriptor) != {"path", "sha256", "byte_size"}
-        ):
-            raise ValueError("development supervised evidence descriptor changed")
-        supplied_evidence_path = publication_root / descriptor["path"]
-        evidence_junction = getattr(supplied_evidence_path, "is_junction", None)
-        evidence_path = supplied_evidence_path.resolve(strict=True)
-        if (
-            supplied_evidence_path.is_symlink()
-            or bool(evidence_junction is not None and evidence_junction())
-            or not evidence_path.is_relative_to(publication_root)
-            or evidence_path.parent != publication_root
-        ):
-            raise ValueError("development supervised evidence escaped publication")
-        raw = evidence_path.read_bytes()
-        evidence = json.loads(raw.decode("utf-8"))
-    except (OSError, KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            "development supervised physical evidence is unreadable"
-        ) from exc
-    if (
-        len(raw) != descriptor["byte_size"]
-        or _sha256_bytes(raw) != descriptor["sha256"]
-        or not isinstance(evidence, Mapping)
-        or set(evidence) != {
-            "schema_version", "iteration", "overlays", "examples",
-        }
-        or evidence["schema_version"] != 1
-        or evidence["iteration"] != iteration
-        or type(evidence["overlays"]) is not list
-        or len(evidence["overlays"]) != iteration
-    ):
-        raise ValueError("development supervised physical evidence identity changed")
-    roots: list[Path] = []
-    for item in evidence["overlays"]:
-        if (
-            not isinstance(item, Mapping)
-            or set(item) != {"root", "content_identity"}
-            or not isinstance(item["root"], str)
-        ):
-            raise ValueError("development supervised overlay descriptor changed")
-        roots.append(Path(item["root"]))
-    overlays, examples = _validated_supervised_overlays(
-        definition=definition,
-        iteration=iteration,
-        roots=roots,
-        reopen=lambda _root: None,
-    )
     return _open_development_supervised_evaluation(
-        publication_root,
-        definition=definition,
-        iteration=iteration,
-        overlays=overlays,
-        examples=examples,
-        source_snapshots=((manifest_path, manifest_bytes), (evidence_path, raw)),
+        root, definition=definition, iteration=iteration,
     )
+
+
+def _declared_supervised_source_roots(
+    roots: Sequence[Path], *, iteration: int,
+) -> tuple[Path, ...]:
+    if type(roots) not in {list, tuple} or len(roots) != iteration:
+        raise ValueError("development supervised source provenance is incomplete")
+    declared = tuple(Path(root) for root in roots)
+    if any(
+        not root.is_absolute() or ".." in root.parts
+        for root in declared
+    ):
+        raise ValueError("development supervised source provenance is invalid")
+    return declared
 
 
 def reopen_development_supervised_evaluation(
@@ -2539,14 +2933,11 @@ def reopen_development_supervised_evaluation(
         [Path], Mapping[str, Any]
     ] = _git_repository_identity,
 ) -> DevelopmentSupervisedEvidence:
-    """Reopen every source and byte of a completed Task 10 supervised stage."""
+    """Reopen a completed Task 10 stage from evaluator-owned physical bytes."""
 
     _require_development_repository(definition, repository_identity_provider)
-    overlays, examples = _validated_supervised_overlays(
-        definition=definition,
-        iteration=iteration,
-        roots=heldout_overlay_roots,
-        reopen=reopen_heldout_overlay,
+    source_roots = _declared_supervised_source_roots(
+        heldout_overlay_roots, iteration=iteration,
     )
     _require_supervised_checkpoints(definition, iteration)
     _require_supervised_checkpoints(definition, iteration)
@@ -2555,8 +2946,7 @@ def reopen_development_supervised_evaluation(
         root,
         definition=definition,
         iteration=iteration,
-        overlays=overlays,
-        examples=examples,
+        expected_source_roots=source_roots,
     )
 
 
@@ -2575,13 +2965,9 @@ def run_development_supervised_evaluation(
     """Run ordered pre/post held-out predictions or exactly reuse their publication."""
 
     _require_development_repository(definition, repository_identity_provider)
-    overlays, examples = _validated_supervised_overlays(
-        definition=definition,
-        iteration=iteration,
-        roots=heldout_overlay_roots,
-        reopen=reopen_heldout_overlay,
+    source_roots = _declared_supervised_source_roots(
+        heldout_overlay_roots, iteration=iteration,
     )
-    _require_supervised_checkpoints(definition, iteration)
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     destination = root / f"iteration-{iteration}"
@@ -2595,8 +2981,7 @@ def run_development_supervised_evaluation(
             destination,
             definition=definition,
             iteration=iteration,
-            overlays=overlays,
-            examples=examples,
+            expected_source_roots=source_roots,
         )
         return DevelopmentSupervisedRun(
             new_inferences=0, reused=True, result=reopened,
@@ -2607,6 +2992,41 @@ def run_development_supervised_evaluation(
         raise RuntimeError(
             "development supervised predictor is unavailable until the Task 11 adapter is injected"
         )
+    overlays, source_examples = _validated_supervised_overlays(
+        definition=definition,
+        iteration=iteration,
+        roots=source_roots,
+        reopen=reopen_heldout_overlay,
+    )
+    _require_supervised_checkpoints(definition, iteration)
+    claims = _owned_overlay_claims_from_sources(overlays)
+    staging.mkdir()
+    bundle_descriptor = _write_owned_overlay_bundle(
+        staging, overlays=overlays, claims=claims,
+    )
+    owned_bundle = _open_owned_overlay_bundle(
+        staging,
+        descriptor=bundle_descriptor,
+        claims=claims,
+        definition=definition,
+        iteration=iteration,
+    )
+    if (
+        not _same_json(owned_bundle.examples, source_examples)
+        or any(
+            owned.content_identity != source.content_identity
+            or owned.tree_directories != source.tree_directories
+            or owned.tree_files != source.tree_files
+            or not _same_json(owned.examples, source.examples)
+            for owned, source in zip(
+                owned_bundle.overlays, overlays, strict=True,
+            )
+        )
+    ):
+        raise ValueError(
+            "development owned overlay bundle differs from authenticated sources"
+        )
+    examples = owned_bundle.examples
     action_size = definition.candidates[iteration].controller_identity["action_size"]
     incoming = definition.candidates[iteration - 1]
     trained = definition.candidates[iteration]
@@ -2632,14 +3052,11 @@ def run_development_supervised_evaluation(
     post = _validated_supervised_predictions(
         post_raw, examples=examples, action_size=action_size, label="post",
     )
-    staging.mkdir()
     evidence = {
-        "schema_version": 1,
+        "schema_version": 2,
         "iteration": iteration,
-        "overlays": [
-            {"root": str(Path(item.root)), "content_identity": item.content_identity}
-            for item in overlays
-        ],
+        "overlays": _mutable_stage_json(claims),
+        "owned_overlay_bundle": _mutable_stage_json(bundle_descriptor),
         "examples": _mutable_stage_json(examples),
     }
     predictions = {
@@ -2653,25 +3070,29 @@ def run_development_supervised_evaluation(
     atomic_write_json(staging / "predictions.json", predictions)
     atomic_write_json(staging / "metrics.json", metrics)
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "completed",
         "identity": _supervised_identity(
-            definition=definition, iteration=iteration, overlays=overlays,
+            definition=definition,
+            iteration=iteration,
+            claims=claims,
+            bundle_descriptor=bundle_descriptor,
         ),
         "artifacts": {
             name: _supervised_artifact_descriptor(staging / f"{name}.json", f"{name}.json")
             for name in ("evidence", "predictions", "metrics")
         },
     }
+    manifest["artifacts"]["owned_overlays"] = _mutable_stage_json(
+        bundle_descriptor
+    )
     manifest["content_identity"] = _content_identity(manifest)
     atomic_write_json(staging / "manifest.json", manifest)
     staged = _open_development_supervised_evaluation(
         staging,
         definition=definition,
         iteration=iteration,
-        overlays=overlays,
-        examples=examples,
-        require_overlay_stability=False,
+        expected_source_roots=source_roots,
     )
     _require_supervised_checkpoints(definition, iteration)
     _require_development_repository(definition, repository_identity_provider)
@@ -2685,8 +3106,7 @@ def run_development_supervised_evaluation(
             destination,
             definition=definition,
             iteration=iteration,
-            overlays=overlays,
-            examples=examples,
+            expected_source_roots=source_roots,
             expected_content_identity=staged.content_identity,
         )
     except BaseException:
@@ -4172,8 +4592,20 @@ def _validated_development_supervised_evidence(
         or value.heldout_overlay_prefix != expected_prefix
         or type(value.heldout_overlay_roots) is not tuple
         or len(value.heldout_overlay_roots) != iteration
-        or any(not Path(item).resolve(strict=True).is_dir()
-               for item in value.heldout_overlay_roots)
+        or any(
+            not Path(item).is_absolute() or ".." in Path(item).parts
+            for item in value.heldout_overlay_roots
+        )
+        or Path(value.owned_overlay_bundle_path).resolve(strict=True).parent
+        != canonical / "owned-overlays"
+        or value.owned_overlay_bundle_sha256
+        != Path(value.owned_overlay_bundle_path).stem
+        or type(value.owned_overlay_bundle_byte_size) is not int
+        or value.owned_overlay_bundle_byte_size < 1
+        or value.owned_overlay_prefixes != tuple(
+            _owned_overlay_prefix(index, identity)
+            for index, identity in enumerate(expected_prefix, start=1)
+        )
         or not isinstance(value.metrics, Mapping)
     ):
         raise ValueError("development physical supervised evidence identity changed")
@@ -4237,6 +4669,10 @@ def _development_supervised_snapshot(value: DevelopmentSupervisedEvidence) -> Ma
         "content_identity": value.content_identity,
         "heldout_overlay_roots": [str(root) for root in value.heldout_overlay_roots],
         "heldout_overlay_prefix": value.heldout_overlay_prefix,
+        "owned_overlay_bundle_path": str(value.owned_overlay_bundle_path),
+        "owned_overlay_bundle_sha256": value.owned_overlay_bundle_sha256,
+        "owned_overlay_bundle_byte_size": value.owned_overlay_bundle_byte_size,
+        "owned_overlay_prefixes": value.owned_overlay_prefixes,
         "incoming_candidate_id": value.incoming_candidate_id,
         "trained_candidate_id": value.trained_candidate_id,
         "metrics": value.metrics,
@@ -4499,6 +4935,10 @@ def publish_development_aggregate(
                 str(root) for root in item.heldout_overlay_roots
             ],
             "heldout_overlay_prefix": list(item.heldout_overlay_prefix),
+            "owned_overlay_bundle_path": str(item.owned_overlay_bundle_path),
+            "owned_overlay_bundle_sha256": item.owned_overlay_bundle_sha256,
+            "owned_overlay_bundle_byte_size": item.owned_overlay_bundle_byte_size,
+            "owned_overlay_prefixes": list(item.owned_overlay_prefixes),
             "incoming_candidate_id": item.incoming_candidate_id,
             "trained_candidate_id": item.trained_candidate_id,
             "metrics": _mutable_stage_json(item.metrics),
