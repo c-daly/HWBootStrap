@@ -281,9 +281,10 @@ namespace HexWars.Engine.Rl
             foreach (HexCoord cell in _layout.Cells)
             {
                 Tile tile = state.Board.TileAt(cell);
+                HexCoord featureCell = seat == PlayerId.Player0 ? cell : _layout.MirrorCell(cell);
                 cellIndex.Add(cell, cellRows.Count);
                 PlayerId? controller = state.Board.Controller(cell);
-                cellRows.Add(new TacticalV3CellToken(cell.Q, cell.R, tile.Terrain, tile.Elevation,
+                cellRows.Add(new TacticalV3CellToken(featureCell.Q, featureCell.R, tile.Terrain, tile.Elevation,
                     state.Board.IsInDeploymentZone(seat, cell), state.Board.IsInDeploymentZone(opponent, cell),
                     controller.HasValue ? Relative(controller.Value, seat) : (TacticalV3RelativeOwner?)null,
                     cell.Neighbors().Any(neighbor => !state.Board.Contains(neighbor)), true, false));

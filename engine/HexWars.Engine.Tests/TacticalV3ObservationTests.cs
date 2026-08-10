@@ -94,20 +94,28 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Observe_SwapsRelativeOwnershipAndPointsWithoutChangingAuthoritativeState()
+        public void Observe_ReflectsPlayer1CoordinatesAndDoesNotMutateAuthoritativeState()
         {
             TacticalV3Fixture fixture = TacticalV3Fixture.Standard(seed: 17);
+            TacticalV2Layout layout = new TacticalV2Layout(TacticalV3Fixtures.Config().Match);
+            string before = AuthoritativeStateFingerprint(fixture.State);
+
             TacticalV3Observation observation = fixture.Source.Observe(
                 fixture.State, PlayerId.Player1, EmptyObservationMemory.Instance);
 
+            Assert.That(observation.Cells.Select(cell => (cell.Q, cell.R)), Is.EqualTo(
+                layout.Cells.Select(cell =>
+                {
+                    HexCoord reflected = layout.MirrorCell(cell);
+                    return (reflected.Q, reflected.R);
+                })));
             Assert.That(observation.Units.Take(3).Select(unit => unit.Owner),
                 Is.All.EqualTo(TacticalV3RelativeOwner.Self));
             Assert.That(Rule(observation, TacticalV3RuleKind.SelfPoints).IntValue,
                 Is.EqualTo(fixture.State.Player(PlayerId.Player1).Points));
             Assert.That(Rule(observation, TacticalV3RuleKind.OpponentPoints).IntValue,
                 Is.EqualTo(fixture.State.Player(PlayerId.Player0).Points));
-            Assert.That(fixture.State.Player(PlayerId.Player0).Id, Is.EqualTo(PlayerId.Player0));
-            Assert.That(fixture.State.Player(PlayerId.Player1).Id, Is.EqualTo(PlayerId.Player1));
+            Assert.That(AuthoritativeStateFingerprint(fixture.State), Is.EqualTo(before));
         }
 
         [Test]
@@ -145,6 +153,32 @@ namespace HexWars.Engine.Tests
             Assert.That(observation.CapabilityAllocations.Count,
                 Is.EqualTo(9 * (observation.Units.Count + observation.Templates.Count)));
         }
+
+        private static string AuthoritativeStateFingerprint(GameState state)
+        {
+            string tiles = string.Join(";", state.Board.Tiles.OrderBy(tile => tile.Coord.Q).ThenBy(tile => tile.Coord.R)
+                .Select(tile => $"{tile.Coord.Q},{tile.Coord.R},{tile.Terrain},{tile.Elevation},{state.Board.Controller(tile.Coord)}"));
+            string zones = string.Join(";", new[] { PlayerId.Player0, PlayerId.Player1 }.Select(player =>
+                $"{player}:{string.Join(",", state.Board.DeploymentZone(player).OrderBy(cell => cell.Q).ThenBy(cell => cell.R))}"));
+            string players = string.Join(";", state.Players.Select(player =>
+                $"{player.Id},{player.Points},{player.DestroyedValue}|" +
+                string.Join(",", player.Barracks.Select(template => $"{template.Name}:{StatsFingerprint(template.Stats)}")) + "|" +
+                string.Join(",", player.UnitsOnBoard.Select(unit =>
+                    $"{unit.Id},{unit.Owner},{unit.Cell.Q},{unit.Cell.R},{unit.Elevation},{unit.CurrentHp},{unit.Name}:{StatsFingerprint(unit.Stats)}")) + "|" +
+                string.Join(",", player.Generators.Select(generator =>
+                    $"{generator.Id},{generator.Owner},{generator.Cell.Q},{generator.Cell.R},{generator.Elevation},{generator.CurrentHp},{generator.Strength}"))));
+            string movement = string.Join(";", state.MovementSpent.OrderBy(item => item.Key)
+                .Select(item => $"{item.Key}:{item.Value.H},{item.Value.V}"));
+            return $"{tiles}|{zones}|{players}|{state.ActivePlayer}|{state.Round}|{state.NextEntityId}|" +
+                $"{state.IsGameOver}|{state.Winner}|{string.Join(",", state.MovedUnitIds.OrderBy(id => id))}|" +
+                $"{string.Join(",", state.AttackedUnitIds.OrderBy(id => id))}|{movement}";
+        }
+
+        private static string StatsFingerprint(UnitStats stats) => string.Join(",", new[]
+        {
+            stats.Health, stats.Damage, stats.Defense, stats.Movement, stats.VerticalMovement,
+            stats.Range, stats.RangeArc, stats.Vision, stats.VisionArc,
+        });
 
         private static TacticalV3RuleToken Rule(TacticalV3Observation observation, TacticalV3RuleKind kind) =>
             observation.Rules.Single(rule => rule.Kind == kind);
