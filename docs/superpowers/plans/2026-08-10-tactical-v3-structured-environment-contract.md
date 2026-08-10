@@ -138,12 +138,12 @@ internal static class TacticalV3Fixtures
     public static GameConfig CloneGame(GameConfig source, bool? fogOfWar = null);
     public static TacticalV3CapacityProfile ExperimentalCapacity(
         int? maxCells = null, int? maxCandidates = null);
-    public static TacticalV2Config Match(int width = 13, int height = 9, int seed = 17);
-    public static TacticalV3Config Config(int width = 13, int height = 9, int seed = 17);
+    public static TacticalV2Config Match(int width = 13, int height = 9);
+    public static TacticalV3Config Config(int width = 13, int height = 9);
 }
 ```
 
-Later tasks extend this test-only file with focused state, terminal-state, reward-tracker, candidate, and environment builders. Production code must not reference it.
+Configuration builders intentionally accept no seed because neither `TacticalV2Config` nor `BoardGenConfig` stores one. Task 2's `TacticalV3Fixtures.Standard(int seed)` consumes the seed when it creates state through `TacticalV2Layout.NewGame(seed)`. Later tasks extend this test-only file with focused state, terminal-state, reward-tracker, candidate, and environment builders. Production code must not reference it.
 
 - [ ] **Step 1: Write the failing configuration and schema tests**
 
