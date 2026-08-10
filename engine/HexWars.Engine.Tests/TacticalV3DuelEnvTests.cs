@@ -20,7 +20,7 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(StateText(second.State), Is.EqualTo(StateText(first.State)));
+                Assert.That(StateSignature(second.State), Is.EqualTo(StateSignature(first.State)));
                 Assert.That(secondView.Decision.DecisionId, Is.EqualTo(0));
                 Assert.That(secondView.Decision.DecisionId, Is.EqualTo(firstView.Decision.DecisionId));
                 Assert.That(secondView.Seat, Is.EqualTo(firstView.Seat));
@@ -77,8 +77,15 @@ namespace HexWars.Engine.Tests
             TacticalV3View view = env.Reset(31, null, null);
             TacticalV3Candidate selected = view.Decision.Candidates.First(candidate =>
                 candidate.Kind == TacticalV3CandidateKind.Move);
-            Command expected = new TacticalV3ActionResolver().Resolve(
-                view.Decision, view.Decision.DecisionId, selected.CandidateId, env.State);
+            GameState before = env.State;
+            Unit expectedActor = before.Player(view.Seat).UnitsOnBoard
+                .Where(unit => unit.IsAlive)
+                .OrderBy(unit => unit.Id)
+                .ElementAt(selected.Actor!.Value.Row);
+            TacticalV3CellToken expectedCell =
+                view.Decision.Observation.Cells[selected.Cell!.Value.Row];
+            Command expected = new MoveUnit(view.Seat, expectedActor.Id,
+                new HexCoord(expectedCell.Q, expectedCell.R));
 
             TacticalV3View after = env.Step(view.Decision.DecisionId, selected.CandidateId);
             ReplayData replay = ReplayFile.Read(env.ToReplay());
@@ -94,36 +101,14 @@ namespace HexWars.Engine.Tests
         [Test]
         public void DeployCandidate_CanReinforceBeyondTacticalV2RegistryCapacity()
         {
-            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
-            TacticalV3View view = env.Reset(2, null, new ApproachAgent());
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.Game = NonDefaultGame(config.Match.Game, deployCostMultiplier: 0.0);
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env(config);
+            TacticalV3View view = env.Reset(2, null, null);
+            TacticalV3Candidate deploy = view.Decision.Candidates.First(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.Deploy);
 
-            Assert.That(env.State.Player(PlayerId.Player0).Points, Is.EqualTo(0));
-            TacticalV3Candidate? deploy = null;
-            for (int step = 0; step < 600 && deploy == null; step++)
-            {
-                deploy = view.Decision.Candidates.FirstOrDefault(candidate =>
-                    candidate.Kind == TacticalV3CandidateKind.Deploy);
-                if (deploy == null)
-                {
-                    Assert.That(view.Terminated || view.Truncated, Is.False,
-                        "the learner must earn reinforcement points before the episode ends");
-                    TacticalV3Candidate progress = ProgressTowardOpponent(view);
-                    view = env.Step(view.Decision.DecisionId, progress.CandidateId);
-                }
-            }
-
-            deploy = deploy ?? throw new AssertionException(
-                "default tactical rules did not expose an earned reinforcement within 600 decisions; " +
-                "points=" + env.State.Player(PlayerId.Player0).Points +
-                ", round=" + env.State.Round +
-                ", ownUnits=" + env.State.Player(PlayerId.Player0).UnitsOnBoard.Count +
-                ", opponentUnits=" + env.State.Player(PlayerId.Player1).UnitsOnBoard.Count +
-                ", candidates=" + string.Join(",", view.Decision.Candidates.Select(item => item.Kind)));
-            Assert.Multiple(() =>
-            {
-                Assert.That(env.State.Player(PlayerId.Player0).Points, Is.GreaterThan(0));
-                Assert.That(env.State.Player(PlayerId.Player0).UnitsOnBoard, Has.Count.EqualTo(3));
-            });
+            Assert.That(env.State.Player(PlayerId.Player0).UnitsOnBoard, Has.Count.EqualTo(3));
 
             view = env.Step(view.Decision.DecisionId, deploy.CandidateId);
             ReplayData data = ReplayFile.Read(env.ToReplay());
@@ -164,6 +149,175 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void ExternalTerminalCommand_ReturnsFreshNonActionableTerminalFrame()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.ProfiledConfig("conversion-3v1-near");
+            config.Match.MaxSteps = 2000;
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env(config);
+            TacticalV3View view = env.Reset(6_000_005, null, new ApproachAgent(),
+                "conversion-3v1-near", PlayerId.Player0);
+
+            for (int step = 0; step < config.Match.MaxSteps && !view.Terminated && !view.Truncated; step++)
+            {
+                TacticalV3Candidate progress = ProgressTowardOpponent(view);
+                view = env.Step(view.Decision.DecisionId, progress.CandidateId);
+            }
+
+            Assert.That(view.Terminated, Is.True, "the external attack policy must reach annihilation");
+            AssertTerminalFrameMatchesState(view, env.State, ReplayFile.Read(env.ToReplay()).Commands.Count);
+        }
+
+        [Test]
+        public void AllInternalReset_ReturnsFreshNonActionableTerminalFrame()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.ProfiledConfig("conversion-1v1-near");
+            config.Match.MaxSteps = 2000;
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env(config);
+
+            TacticalV3View view = env.Reset(6_000_005, new AggressiveAgent(), new AggressiveAgent(),
+                "conversion-1v1-near", PlayerId.Player0);
+
+            Assert.That(view.Terminated, Is.True, "internal combat agents must reach annihilation");
+            Assert.That(env.InternalFallbackCount, Is.Zero);
+            AssertTerminalFrameMatchesState(view, env.State, ReplayFile.Read(env.ToReplay()).Commands.Count);
+        }
+
+        [Test]
+        public void StateBeforeReset_Throws()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+
+            Assert.Throws<InvalidOperationException>(() => { _ = env.State; });
+        }
+
+        [Test]
+        public void StateSnapshotMutation_CannotChangeEpisodeReplayOrResolverFreshness()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View view = env.Reset(31, null, null);
+            string before = StateSignature(env.State);
+            string replayBefore = env.ToReplay();
+            TacticalV3Candidate selected = view.Decision.Candidates.First(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.Move);
+
+            GameState exposed = env.State;
+            IList<PlayerState> players = (IList<PlayerState>)exposed.Players;
+            players[0] = new PlayerState(PlayerId.Player0, 999);
+            ((HashSet<HexCoord>)exposed.Board.DeploymentZone(PlayerId.Player0)).Clear();
+
+            Assert.That(StateSignature(env.State), Is.EqualTo(before));
+            Assert.That(env.ToReplay(), Is.EqualTo(replayBefore));
+
+            TacticalV3View after = env.Step(view.Decision.DecisionId, selected.CandidateId);
+            ReplayData replay = ReplayFile.Read(env.ToReplay());
+            Assert.Multiple(() =>
+            {
+                Assert.That(after.Decision.DecisionId, Is.EqualTo(1));
+                Assert.That(replay.Commands, Has.Count.EqualTo(1));
+                Assert.That(StateSignature(replay.Start), Is.EqualTo(
+                    StateSignature(ReplayFile.Read(replayBefore).Start)));
+            });
+        }
+
+        [Test]
+        public void CallerOwnedTerrainDictionary_CannotMutateEnvironmentAfterConstruction()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.Game = NonDefaultGame(config.Match.Game, deployCostMultiplier: 1.0);
+            var terrain = new Dictionary<TerrainType, TerrainDef>();
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+                terrain.Add(terrainType, config.Match.Game.Terrain(terrainType));
+            int expectedMoveCost = terrain[TerrainType.Plains].MoveCost;
+            config.Match.Game = GameWithTerrain(config.Match.Game, terrain);
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env(config);
+
+            terrain[TerrainType.Plains] = new TerrainDef(99, 8, 7, true);
+            env.Reset(31, null, null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(env.State.Config.Terrain(TerrainType.Plains).MoveCost,
+                    Is.EqualTo(expectedMoveCost));
+                Assert.That(ReplayFile.Read(env.ToReplay()).Start.Config
+                    .Terrain(TerrainType.Plains).MoveCost, Is.EqualTo(expectedMoveCost));
+            });
+        }
+
+        [Test]
+        public void MutatingScriptedAgent_CannotAlterAuthoritativeStateOutsideTransition()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View view = env.Reset(31, new MutatingAgent(), null);
+
+            ReplayData replay = ReplayFile.Read(env.ToReplay());
+            Assert.Multiple(() =>
+            {
+                Assert.That(view.Terminated, Is.False);
+                Assert.That(view.Seat, Is.EqualTo(PlayerId.Player1));
+                Assert.That(env.State.Player(PlayerId.Player0).Points, Is.EqualTo(0));
+                Assert.That(env.State.Player(PlayerId.Player0).UnitsOnBoard, Has.Count.EqualTo(3));
+                Assert.That(env.State.Board.DeploymentZone(PlayerId.Player0), Is.Not.Empty);
+                Assert.That(replay.Commands, Is.EqualTo(new Command[]
+                {
+                    new EndTurn(PlayerId.Player0),
+                }));
+                Assert.That(env.InternalFallbackCount, Is.Zero);
+            });
+        }
+
+        [Test]
+        public void MixedExternalAndScriptedCommands_TruncateAtExactGlobalMaxSteps()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.MaxSteps = 5;
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env(config);
+            TacticalV3View view = env.Reset(31, null, new EndTurnAgent());
+
+            while (!view.Terminated && !view.Truncated)
+                view = EndTurn(env, view);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(view.Terminated, Is.False);
+                Assert.That(view.Truncated, Is.True);
+                Assert.That(view.Decision.DecisionId, Is.EqualTo(config.Match.MaxSteps));
+                Assert.That(ReplayFile.Read(env.ToReplay()).Commands,
+                    Has.Count.EqualTo(config.Match.MaxSteps));
+                Assert.That(env.InternalFallbackCount, Is.Zero);
+            });
+        }
+
+        private static void AssertTerminalFrameMatchesState(
+            TacticalV3View view, GameState state, int expectedCommandCount)
+        {
+            IEnumerable<string> ExpectedRows(PlayerId owner, TacticalV3RelativeOwner relative) =>
+                state.Player(owner).UnitsOnBoard
+                    .Where(unit => unit.IsAlive)
+                    .OrderBy(unit => unit.Id)
+                    .Select(unit => relative + "|" + unit.CurrentHp + "|" + unit.Stats.Health + "|" +
+                        unit.Elevation + "|" + unit.Stats.PointCost);
+            string[] expectedUnits = ExpectedRows(view.Seat, TacticalV3RelativeOwner.Self)
+                .Concat(ExpectedRows(Other(view.Seat), TacticalV3RelativeOwner.Opponent))
+                .ToArray();
+            string[] actualUnits = view.Decision.Observation.Units.Select(unit =>
+                unit.Owner + "|" + unit.CurrentHp + "|" + unit.MaxHp + "|" +
+                unit.Elevation + "|" + unit.PointCost).ToArray();
+            TacticalV3RuleToken round = view.Decision.Observation.Rules.Single(rule =>
+                rule.Kind == TacticalV3RuleKind.Round);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(view.Decision.DecisionId, Is.EqualTo(expectedCommandCount));
+                Assert.That(view.Seat, Is.EqualTo(state.ActivePlayer));
+                Assert.That(view.Decision.Seat, Is.EqualTo(state.ActivePlayer));
+                Assert.That(view.Decision.Candidates, Is.Empty);
+                Assert.That(actualUnits, Is.EqualTo(expectedUnits));
+                Assert.That(round.IntValue, Is.EqualTo(state.Round));
+                Assert.That(view.Reward.Finalized, Is.True);
+            });
+        }
+
+        [Test]
         public void InvalidCandidate_DoesNotBecomeEndTurnOrMutateState()
         {
             TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
@@ -176,7 +330,7 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(env.State, Is.SameAs(before));
+                Assert.That(StateSignature(env.State), Is.EqualTo(StateSignature(before)));
                 Assert.That(env.ToReplay(), Is.EqualTo(replayBefore));
             });
         }
@@ -194,7 +348,7 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(env.State, Is.SameAs(before));
+                Assert.That(StateSignature(env.State), Is.EqualTo(StateSignature(before)));
                 Assert.That(env.ToReplay(), Is.EqualTo(replayBefore));
                 Assert.That(ReplayFile.Read(env.ToReplay()).Commands,
                     Has.Count.EqualTo(view.Decision.DecisionId));
@@ -232,11 +386,13 @@ namespace HexWars.Engine.Tests
             });
         }
 
-        [Test]
-        public void SingleLearnerEnv_SelectsProfileRelativeToLearnerAndReturnsAfterOpponentTurn()
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void SingleLearnerEnv_SelectsProfileRelativeToLearnerAndReturnsAfterOpponentTurn(
+            PlayerId learnerSeat)
         {
             TacticalV3Config config = TacticalV3Fixtures.ProfiledConfig("conversion-2v1-far");
-            var env = new TacticalV3Env(_ => new EndTurnAgent(), PlayerId.Player1, config);
+            var env = new TacticalV3Env(_ => new EndTurnAgent(), learnerSeat, config);
 
             TacticalV3View first = env.Reset(6_000_005);
             TacticalV3View second = env.Step(first.Decision.DecisionId,
@@ -245,15 +401,16 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(first.Seat, Is.EqualTo(PlayerId.Player1));
+                Assert.That(first.Seat, Is.EqualTo(learnerSeat));
                 Assert.That(first.StartProfileId, Is.EqualTo("conversion-2v1-far"));
-                Assert.That(first.ReferenceSeat, Is.EqualTo(PlayerId.Player1));
+                Assert.That(first.ReferenceSeat, Is.EqualTo(learnerSeat));
                 Assert.That(first.Decision.Observation.Units.Count(unit =>
                     unit.Owner == TacticalV3RelativeOwner.Self), Is.EqualTo(2));
                 Assert.That(first.Decision.Observation.Units.Count(unit =>
                     unit.Owner == TacticalV3RelativeOwner.Opponent), Is.EqualTo(1));
-                Assert.That(second.Seat, Is.EqualTo(PlayerId.Player1));
-                Assert.That(second.Decision.DecisionId, Is.EqualTo(3));
+                Assert.That(second.Seat, Is.EqualTo(learnerSeat));
+                Assert.That(second.Decision.DecisionId,
+                    Is.EqualTo(learnerSeat == PlayerId.Player0 ? 2 : 3));
             });
         }
 
@@ -325,17 +482,128 @@ namespace HexWars.Engine.Tests
                 .Min();
         }
 
+        private static GameConfig NonDefaultGame(
+            GameConfig source, double deployCostMultiplier)
+        {
+            var terrain = new Dictionary<TerrainType, TerrainDef>();
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+                terrain.Add(terrainType, source.Terrain(terrainType));
+            terrain[TerrainType.Forest] = new TerrainDef(
+                moveCost: 3, concealment: 4, defense: 2, passable: true);
+
+            return new GameConfig(
+                terrain,
+                startingPoints: 19,
+                bountyRate: 0.75,
+                generatorCost: 7,
+                generatorOutput: 3,
+                generatorHealth: 11,
+                damageFloor: 2,
+                dmgHighGroundBonus: 4,
+                rangeHighGroundBonus: 3,
+                roundCap: 17,
+                designFee: source.DesignFee,
+                deployCostMultiplier: deployCostMultiplier,
+                turnPolicy: source.TurnPolicy,
+                biomesEnabled: true,
+                winConditions: source.WinConditions,
+                captureCost: source.CaptureCost,
+                economyWinThreshold: source.EconomyWinThreshold,
+                scoreKills: source.ScoreKills,
+                scorePoints: source.ScorePoints,
+                scoreArmy: source.ScoreArmy,
+                scoreTerritory: source.ScoreTerritory,
+                upkeepFactor: source.UpkeepFactor,
+                captureFactor: source.CaptureFactor,
+                buildFactor: source.BuildFactor,
+                territoryMode: source.TerritoryMode,
+                claimEndsTurn: source.ClaimEndsTurn,
+                buildAnywhere: source.BuildAnywhere,
+                territoryIncome: source.TerritoryIncome,
+                generatorsEnabled: source.GeneratorsEnabled,
+                pointDecay: source.PointDecay,
+                fogOfWar: source.FogOfWar,
+                maxDesignPointCost: source.MaxDesignPointCost,
+                fixedTemplateCount: source.FixedTemplateCount,
+                templateSlotCount: source.TemplateSlotCount);
+        }
+
+        private static GameConfig GameWithTerrain(
+            GameConfig source, IReadOnlyDictionary<TerrainType, TerrainDef> terrain) =>
+            new GameConfig(
+                terrain,
+                startingPoints: source.StartingPoints,
+                bountyRate: source.BountyRate,
+                generatorCost: source.GeneratorCost,
+                generatorOutput: source.GeneratorOutput,
+                generatorHealth: source.GeneratorHealth,
+                damageFloor: source.DamageFloor,
+                dmgHighGroundBonus: source.DmgHighGroundBonus,
+                rangeHighGroundBonus: source.RangeHighGroundBonus,
+                roundCap: source.RoundCap,
+                designFee: source.DesignFee,
+                deployCostMultiplier: source.DeployCostMultiplier,
+                turnPolicy: source.TurnPolicy,
+                biomesEnabled: source.BiomesEnabled,
+                winConditions: source.WinConditions,
+                captureCost: source.CaptureCost,
+                economyWinThreshold: source.EconomyWinThreshold,
+                scoreKills: source.ScoreKills,
+                scorePoints: source.ScorePoints,
+                scoreArmy: source.ScoreArmy,
+                scoreTerritory: source.ScoreTerritory,
+                upkeepFactor: source.UpkeepFactor,
+                captureFactor: source.CaptureFactor,
+                buildFactor: source.BuildFactor,
+                territoryMode: source.TerritoryMode,
+                claimEndsTurn: source.ClaimEndsTurn,
+                buildAnywhere: source.BuildAnywhere,
+                territoryIncome: source.TerritoryIncome,
+                generatorsEnabled: source.GeneratorsEnabled,
+                pointDecay: source.PointDecay,
+                fogOfWar: source.FogOfWar,
+                maxDesignPointCost: source.MaxDesignPointCost,
+                fixedTemplateCount: source.FixedTemplateCount,
+                templateSlotCount: source.TemplateSlotCount);
+
         private static string StateSignature(GameState state)
         {
             var rows = new List<string>
             {
                 state.ActivePlayer + "|" + state.Round + "|" + state.NextEntityId + "|" +
                 state.IsGameOver + "|" + (state.Winner.HasValue ? state.Winner.Value.ToString() : "-"),
-                "rules|" + state.Config.BountyRate + "|" + state.Config.DeployCostMultiplier + "|" +
-                state.Config.DamageFloor + "|" + state.Config.RoundCap,
+                "rules|" + state.Config.TurnPolicy.GetType().FullName + "|" +
+                state.Config.StartingPoints + "|" + state.Config.BountyRate + "|" +
+                state.Config.GeneratorCost + "|" + state.Config.GeneratorOutput + "|" +
+                state.Config.GeneratorHealth + "|" + state.Config.DamageFloor + "|" +
+                state.Config.DmgHighGroundBonus + "|" + state.Config.RangeHighGroundBonus + "|" +
+                state.Config.RoundCap + "|" + state.Config.DesignFee + "|" +
+                state.Config.MaxDesignPointCost + "|" + state.Config.FixedTemplateCount + "|" +
+                state.Config.TemplateSlotCount + "|" + state.Config.DeployCostMultiplier + "|" +
+                (state.Config.TurnPolicy.ActionsPerTurn ?? -1) + "|" + state.Config.BiomesEnabled + "|" +
+                state.Config.WinConditions + "|" + state.Config.CaptureCost + "|" +
+                state.Config.EconomyWinThreshold + "|" + state.Config.ScoreKills + "|" +
+                state.Config.ScorePoints + "|" + state.Config.ScoreArmy + "|" +
+                state.Config.ScoreTerritory + "|" + state.Config.UpkeepFactor + "|" +
+                state.Config.CaptureFactor + "|" + state.Config.BuildFactor + "|" +
+                state.Config.TerritoryMode + "|" + state.Config.ClaimEndsTurn + "|" +
+                state.Config.BuildAnywhere + "|" + state.Config.TerritoryIncome + "|" +
+                state.Config.GeneratorsEnabled + "|" + state.Config.PointDecay + "|" +
+                state.Config.FogOfWar,
             };
 
-            foreach (Tile tile in state.Board.Tiles)
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+            {
+                TerrainDef terrain = state.Config.Terrain(terrainType);
+                rows.Add("terrain|" + terrainType + "|" + terrain.MoveCost + "|" +
+                    terrain.Concealment + "|" + terrain.Defense + "|" + terrain.Passable);
+            }
+            foreach (PlayerId seat in new[] { PlayerId.Player0, PlayerId.Player1 })
+                rows.Add("zone|" + seat + "|" + string.Join(",", state.Board.DeploymentZone(seat)
+                    .OrderBy(cell => cell.Q).ThenBy(cell => cell.R)
+                    .Select(cell => cell.Q + ":" + cell.R)));
+
+            foreach (Tile tile in state.Board.Tiles.OrderBy(item => item.Coord.Q).ThenBy(item => item.Coord.R))
                 rows.Add("tile|" + tile.Coord.Q + "|" + tile.Coord.R + "|" + tile.Elevation + "|" +
                     tile.Terrain + "|" + (state.Board.Controller(tile.Coord)?.ToString() ?? "-"));
             foreach (PlayerId seat in new[] { PlayerId.Player0, PlayerId.Player1 })
@@ -349,7 +617,9 @@ namespace HexWars.Engine.Tests
                 foreach (Generator generator in player.Generators.OrderBy(item => item.Id))
                     rows.Add("generator|" + generator.Id + "|" + generator.Owner + "|" +
                         generator.CurrentHp + "|" + generator.Cell.Q + "|" + generator.Cell.R + "|" +
-                        generator.Elevation);
+                        generator.Elevation + "|" + generator.Strength);
+                foreach (UnitTemplate template in player.Barracks)
+                    rows.Add("barracks|" + seat + "|" + template.Name + "|" + Stats(template.Stats));
             }
 
             rows.Add("moved|" + string.Join(",", state.MovedUnitIds.OrderBy(id => id)));
@@ -387,8 +657,6 @@ namespace HexWars.Engine.Tests
             ? token.Value.Table + ":" + token.Value.Row
             : "-";
 
-        private static string StateText(GameState state) =>
-            ReplayFile.Write(state, Array.Empty<Command>());
 
         private static PlayerId Other(PlayerId seat) =>
             seat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
@@ -408,6 +676,41 @@ namespace HexWars.Engine.Tests
                     .ThenBy(command => command.Dest.R)
                     .FirstOrDefault();
                 return move != null ? move : new EndTurn(state.ActivePlayer);
+            }
+        }
+
+        private sealed class AggressiveAgent : IAgent
+        {
+            public Command Decide(GameState state)
+            {
+                IReadOnlyList<Command> legal = LegalMoves.For(state);
+                AttackUnit? attack = legal.OfType<AttackUnit>()
+                    .OrderBy(command => command.TargetId)
+                    .ThenBy(command => command.AttackerId)
+                    .FirstOrDefault();
+                if (attack != null) return attack;
+
+                PlayerState opponent = state.Opponent(state.ActivePlayer);
+                MoveUnit? move = legal.OfType<MoveUnit>()
+                    .OrderBy(command => opponent.UnitsOnBoard
+                        .Where(unit => unit.IsAlive)
+                        .Min(unit => HexCoord.Distance(command.Dest, unit.Cell)))
+                    .ThenBy(command => command.UnitId)
+                    .ThenBy(command => command.Dest.Q)
+                    .ThenBy(command => command.Dest.R)
+                    .FirstOrDefault();
+                return move != null ? move : new EndTurn(state.ActivePlayer);
+            }
+        }
+
+        private sealed class MutatingAgent : IAgent
+        {
+            public Command Decide(GameState state)
+            {
+                IList<PlayerState> players = (IList<PlayerState>)state.Players;
+                players[(int)state.ActivePlayer] = new PlayerState(state.ActivePlayer, 999);
+                ((HashSet<HexCoord>)state.Board.DeploymentZone(state.ActivePlayer)).Clear();
+                return new EndTurn(state.ActivePlayer);
             }
         }
 

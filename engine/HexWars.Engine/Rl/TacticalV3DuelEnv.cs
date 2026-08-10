@@ -9,6 +9,7 @@ namespace HexWars.Engine.Rl
         private readonly TacticalV3Config _config;
         private readonly TacticalV2Layout _layout;
         private readonly ILegalCandidateSource _candidates;
+        private readonly ISeatObservationSource _observations;
         private readonly IActionResolver _resolver;
         private readonly IRewardContract _reward;
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
@@ -25,15 +26,22 @@ namespace HexWars.Engine.Rl
 
         public TacticalV3DuelEnv(TacticalV3Config config)
         {
-            _config = config ?? throw new ArgumentNullException(nameof(config));
+            _config = SnapshotConfig(config ?? throw new ArgumentNullException(nameof(config)));
             _layout = new TacticalV2Layout(_config.Match);
-            var observations = new TacticalV3SeatObservationSource(_config);
-            _candidates = new TacticalV3LegalCandidateSource(observations, _config.Capacity);
+            _observations = new TacticalV3SeatObservationSource(_config);
+            _candidates = new TacticalV3LegalCandidateSource(_observations, _config.Capacity);
             _resolver = new TacticalV3ActionResolver();
             _reward = new TacticalV3Reward(_config.Reward);
         }
 
-        public GameState State => _state;
+        public GameState State
+        {
+            get
+            {
+                RequireReset();
+                return Snapshot(_state);
+            }
+        }
         public int InternalFallbackCount { get; private set; }
 
         public TacticalV3View Reset(
@@ -144,7 +152,7 @@ namespace HexWars.Engine.Rl
             while (!IsFinished && Controller(_state.ActivePlayer) != null && guard++ < 8000)
             {
                 PlayerId seat = _state.ActivePlayer;
-                Command command = Controller(seat)!.Decide(_state);
+                Command command = Controller(seat)!.Decide(Snapshot(_state));
                 if (TryApplyAccepted(command)) continue;
 
                 if (TryApplyAccepted(new EndTurn(seat)))
@@ -161,7 +169,15 @@ namespace HexWars.Engine.Rl
 
         private void RefreshFrame()
         {
-            if (_state.IsGameOver) return;
+            if (_state.IsGameOver)
+            {
+                TacticalV3Observation observation = _observations.Observe(
+                    _state, _state.ActivePlayer, EmptyObservationMemory.Instance);
+                _frame = new TacticalV3DecisionFrame(
+                    _state, _transitions.Count, _state.ActivePlayer, observation,
+                    Array.Empty<TacticalV3Candidate>(), Array.Empty<Command>());
+                return;
+            }
             _frame = _candidates.CreateFrame(
                 _state,
                 _state.ActivePlayer,
@@ -179,12 +195,123 @@ namespace HexWars.Engine.Rl
             return new TacticalV3View(
                 _frame,
                 _reward.Evaluate(_state, terminated, truncated),
-                _state.ActivePlayer,
+                _frame.Seat,
                 winner,
                 terminated,
                 truncated,
                 _startProfileId,
                 _referenceSeat);
+        }
+
+        private static TacticalV3Config SnapshotConfig(TacticalV3Config source)
+        {
+            TacticalV2Config match = source.Match;
+            var matchSnapshot = new TacticalV2Config
+            {
+                BoardGen = match.BoardGen,
+                Game = SnapshotGameConfig(match.Game),
+                Templates = Array.AsReadOnly(match.Templates.ToArray()),
+                StartingUnitCount = match.StartingUnitCount,
+                MaxControllableUnits = match.MaxControllableUnits,
+                MaxSteps = match.MaxSteps,
+                ShapeScale = match.ShapeScale,
+                StepPenalty = match.StepPenalty,
+                ClosingWeight = match.ClosingWeight,
+                DrawCreditWeight = match.DrawCreditWeight,
+                PointsWeight = match.PointsWeight,
+                PlacementPolicy = match.PlacementPolicy,
+                StartProfiles = Array.AsReadOnly(match.StartProfiles.ToArray()),
+                StartDistribution = match.StartDistribution,
+            };
+            return new TacticalV3Config(matchSnapshot, source.Capacity, source.Reward);
+        }
+
+        private static GameConfig SnapshotGameConfig(GameConfig source)
+        {
+            var terrain = new Dictionary<TerrainType, TerrainDef>();
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+            {
+                try
+                {
+                    terrain.Add(terrainType, source.Terrain(terrainType));
+                }
+                catch (KeyNotFoundException)
+                {
+                    // Sparse configs are valid when the omitted terrain never appears on their board.
+                }
+            }
+
+            return new GameConfig(
+                terrain,
+                startingPoints: source.StartingPoints,
+                bountyRate: source.BountyRate,
+                generatorCost: source.GeneratorCost,
+                generatorOutput: source.GeneratorOutput,
+                generatorHealth: source.GeneratorHealth,
+                damageFloor: source.DamageFloor,
+                dmgHighGroundBonus: source.DmgHighGroundBonus,
+                rangeHighGroundBonus: source.RangeHighGroundBonus,
+                roundCap: source.RoundCap,
+                designFee: source.DesignFee,
+                deployCostMultiplier: source.DeployCostMultiplier,
+                turnPolicy: source.TurnPolicy,
+                biomesEnabled: source.BiomesEnabled,
+                winConditions: source.WinConditions,
+                captureCost: source.CaptureCost,
+                economyWinThreshold: source.EconomyWinThreshold,
+                scoreKills: source.ScoreKills,
+                scorePoints: source.ScorePoints,
+                scoreArmy: source.ScoreArmy,
+                scoreTerritory: source.ScoreTerritory,
+                upkeepFactor: source.UpkeepFactor,
+                captureFactor: source.CaptureFactor,
+                buildFactor: source.BuildFactor,
+                territoryMode: source.TerritoryMode,
+                claimEndsTurn: source.ClaimEndsTurn,
+                buildAnywhere: source.BuildAnywhere,
+                territoryIncome: source.TerritoryIncome,
+                generatorsEnabled: source.GeneratorsEnabled,
+                pointDecay: source.PointDecay,
+                fogOfWar: source.FogOfWar,
+                maxDesignPointCost: source.MaxDesignPointCost,
+                fixedTemplateCount: source.FixedTemplateCount,
+                templateSlotCount: source.TemplateSlotCount);
+        }
+
+        private static GameState Snapshot(GameState source)
+        {
+            var control = new Dictionary<HexCoord, PlayerId>();
+            foreach (Tile tile in source.Board.Tiles)
+            {
+                PlayerId? owner = source.Board.Controller(tile.Coord);
+                if (owner.HasValue) control.Add(tile.Coord, owner.Value);
+            }
+
+            var board = new Board(
+                source.Board.Tiles.ToArray(),
+                source.Board.DeploymentZone(PlayerId.Player0).ToArray(),
+                source.Board.DeploymentZone(PlayerId.Player1).ToArray(),
+                control);
+            PlayerState[] players = source.Players.Select(player =>
+                new PlayerState(
+                    player.Id,
+                    player.Points,
+                    player.Barracks.ToArray(),
+                    player.UnitsOnBoard.ToArray(),
+                    player.Generators.ToArray(),
+                    player.DestroyedValue)).ToArray();
+            return new GameState(
+                board,
+                source.Config,
+                players,
+                source.ActivePlayer,
+                source.Round,
+                source.NextEntityId,
+                source.IsGameOver,
+                source.Winner,
+                new HashSet<int>(source.MovedUnitIds),
+                new HashSet<int>(source.AttackedUnitIds),
+                new Dictionary<int, (int H, int V)>(source.MovementSpent));
         }
 
         private bool IsFinished =>

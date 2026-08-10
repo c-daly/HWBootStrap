@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using HexWars.Engine;
 using NUnit.Framework;
 
@@ -55,6 +56,26 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void OneActionTurnPolicy_RoundTripsWithoutBecomingKActionsPolicy()
+        {
+            GameState baseState = AgentGame();
+            var start = new GameState(
+                baseState.Board,
+                GameConfig.Default(turnPolicy: new OneActionPolicy()),
+                baseState.Players,
+                baseState.ActivePlayer,
+                baseState.Round,
+                baseState.NextEntityId);
+
+            GameConfig actual = ReplayFile.Read(
+                ReplayFile.Write(start, new List<Command>())).Start.Config;
+
+            Assert.That(actual.TurnPolicy, Is.TypeOf<OneActionPolicy>());
+            Assert.That(actual.TurnPolicy.ActionsPerTurn, Is.EqualTo(1));
+        }
+
+
+        [Test]
         public void EffectiveConfig_RoundTrips_ThroughTheWire()
         {
             // The START message online must carry the rules: otherwise the client re-simulates the
@@ -75,9 +96,133 @@ namespace HexWars.Engine.Tests
             Assert.That(s.Config.PointDecay, Is.EqualTo(start.Config.PointDecay), "point decay");
             Assert.That(s.Config.TurnPolicy.ActionsPerTurn, Is.EqualTo(3), "pace");
         }
+        [Test]
+        public void SparseTerrainConfig_RoundTripsPresentTerrainWithoutRequiringUnusedDefinitions()
+        {
+            var terrain = new Dictionary<TerrainType, TerrainDef>
+            {
+                { TerrainType.Plains, new TerrainDef(3, 2, 1, true) },
+            };
+            GameState baseState = AgentGame();
+            var start = new GameState(
+                baseState.Board,
+                new GameConfig(terrain),
+                baseState.Players,
+                baseState.ActivePlayer,
+                baseState.Round,
+                baseState.NextEntityId);
+
+            GameState actual = ReplayFile.Read(
+                ReplayFile.Write(start, new List<Command>())).Start;
+
+            Assert.That(actual.Config.Terrain(TerrainType.Plains).MoveCost, Is.EqualTo(3));
+        }
 
         [Test]
-        public void OldConfigWithoutDesignKeys_UsesBackwardCompatibleDefaults()
+        public void AllAuthoritativeGameplayRules_RoundTrip()
+        {
+            var terrain = new Dictionary<TerrainType, TerrainDef>
+            {
+                { TerrainType.Plains, new TerrainDef(2, 1, 3, true) },
+                { TerrainType.Forest, new TerrainDef(4, 5, 6, true) },
+                { TerrainType.Rough, new TerrainDef(7, 8, 9, false) },
+                { TerrainType.Water, new TerrainDef(10, 11, 12, true) },
+            };
+            var expected = new GameConfig(
+                terrain,
+                startingPoints: 23,
+                bountyRate: 0.75,
+                generatorCost: 7,
+                generatorOutput: 5,
+                generatorHealth: 13,
+                damageFloor: 2,
+                dmgHighGroundBonus: 4,
+                rangeHighGroundBonus: 3,
+                roundCap: 17,
+                designFee: 6,
+                deployCostMultiplier: 0.25,
+                turnPolicy: new KActionsPolicy(3),
+                biomesEnabled: true,
+                winConditions: WinBy.Annihilation | WinBy.Economy | WinBy.Score,
+                captureCost: 9,
+                economyWinThreshold: 123,
+                scoreKills: 2,
+                scorePoints: 3,
+                scoreArmy: 4,
+                scoreTerritory: 5,
+                upkeepFactor: 0.33,
+                captureFactor: 2.5,
+                buildFactor: 7.25,
+                territoryMode: true,
+                claimEndsTurn: false,
+                buildAnywhere: true,
+                territoryIncome: 8,
+                generatorsEnabled: false,
+                pointDecay: 0.125,
+                fogOfWar: true,
+                maxDesignPointCost: 41,
+                fixedTemplateCount: 2,
+                templateSlotCount: 7);
+            GameState baseState = AgentGame();
+            var start = new GameState(baseState.Board, expected, baseState.Players,
+                baseState.ActivePlayer, baseState.Round, baseState.NextEntityId);
+
+            GameConfig actual = ReplayFile.Read(
+                ReplayFile.Write(start, new List<Command>())).Start.Config;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.StartingPoints, Is.EqualTo(expected.StartingPoints));
+                Assert.That(actual.BountyRate, Is.EqualTo(expected.BountyRate));
+                Assert.That(actual.GeneratorCost, Is.EqualTo(expected.GeneratorCost));
+                Assert.That(actual.GeneratorOutput, Is.EqualTo(expected.GeneratorOutput));
+                Assert.That(actual.GeneratorHealth, Is.EqualTo(expected.GeneratorHealth));
+                Assert.That(actual.DamageFloor, Is.EqualTo(expected.DamageFloor));
+                Assert.That(actual.DmgHighGroundBonus, Is.EqualTo(expected.DmgHighGroundBonus));
+                Assert.That(actual.RangeHighGroundBonus, Is.EqualTo(expected.RangeHighGroundBonus));
+                Assert.That(actual.RoundCap, Is.EqualTo(expected.RoundCap));
+                Assert.That(actual.DesignFee, Is.EqualTo(expected.DesignFee));
+                Assert.That(actual.DeployCostMultiplier, Is.EqualTo(expected.DeployCostMultiplier));
+                Assert.That(actual.TurnPolicy.ActionsPerTurn, Is.EqualTo(3));
+                Assert.That(actual.BiomesEnabled, Is.EqualTo(expected.BiomesEnabled));
+                Assert.That(actual.WinConditions, Is.EqualTo(expected.WinConditions));
+                Assert.That(actual.CaptureCost, Is.EqualTo(expected.CaptureCost));
+                Assert.That(actual.EconomyWinThreshold, Is.EqualTo(expected.EconomyWinThreshold));
+                Assert.That(actual.ScoreKills, Is.EqualTo(expected.ScoreKills));
+                Assert.That(actual.ScorePoints, Is.EqualTo(expected.ScorePoints));
+                Assert.That(actual.ScoreArmy, Is.EqualTo(expected.ScoreArmy));
+                Assert.That(actual.ScoreTerritory, Is.EqualTo(expected.ScoreTerritory));
+                Assert.That(actual.UpkeepFactor, Is.EqualTo(expected.UpkeepFactor));
+                Assert.That(actual.CaptureFactor, Is.EqualTo(expected.CaptureFactor));
+                Assert.That(actual.BuildFactor, Is.EqualTo(expected.BuildFactor));
+                Assert.That(actual.TerritoryMode, Is.EqualTo(expected.TerritoryMode));
+                Assert.That(actual.ClaimEndsTurn, Is.EqualTo(expected.ClaimEndsTurn));
+                Assert.That(actual.BuildAnywhere, Is.EqualTo(expected.BuildAnywhere));
+                Assert.That(actual.TerritoryIncome, Is.EqualTo(expected.TerritoryIncome));
+                Assert.That(actual.GeneratorsEnabled, Is.EqualTo(expected.GeneratorsEnabled));
+                Assert.That(actual.PointDecay, Is.EqualTo(expected.PointDecay));
+                Assert.That(actual.FogOfWar, Is.EqualTo(expected.FogOfWar));
+                Assert.That(actual.MaxDesignPointCost, Is.EqualTo(expected.MaxDesignPointCost));
+                Assert.That(actual.FixedTemplateCount, Is.EqualTo(expected.FixedTemplateCount));
+                Assert.That(actual.TemplateSlotCount, Is.EqualTo(expected.TemplateSlotCount));
+            });
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+            {
+                TerrainDef expectedTerrain = expected.Terrain(terrainType);
+                TerrainDef actualTerrain = actual.Terrain(terrainType);
+                Assert.Multiple(() =>
+                {
+                    Assert.That(actualTerrain.MoveCost, Is.EqualTo(expectedTerrain.MoveCost), terrainType.ToString());
+                    Assert.That(actualTerrain.Concealment, Is.EqualTo(expectedTerrain.Concealment), terrainType.ToString());
+                    Assert.That(actualTerrain.Defense, Is.EqualTo(expectedTerrain.Defense), terrainType.ToString());
+                    Assert.That(actualTerrain.Passable, Is.EqualTo(expectedTerrain.Passable), terrainType.ToString());
+                });
+            }
+        }
+
+
+        [Test]
+        public void OldConfigWithoutNewRuleKeys_UsesBackwardCompatibleDefaults()
         {
             string modern = ReplayFile.Write(AgentGame(), new List<Command>());
             string old = modern
@@ -85,13 +230,57 @@ namespace HexWars.Engine.Tests
                 .Replace(" maxDesignCost=0", "")
                 .Replace(" fixedTemplates=0", "")
                 .Replace(" templateSlots=0", "");
+            old = string.Join("\n", old.Replace("\r\n", "\n").Split('\n').Select(line =>
+                line.StartsWith("CONFIG", StringComparison.Ordinal)
+                    ? string.Join(" ", line.Split(' ').Where(token =>
+                        !token.StartsWith("bounty=", StringComparison.Ordinal) &&
+                        !token.StartsWith("genCost=", StringComparison.Ordinal) &&
+                        !token.StartsWith("genHealth=", StringComparison.Ordinal) &&
+                        !token.StartsWith("dmgHigh=", StringComparison.Ordinal) &&
+                        !token.StartsWith("rangeHigh=", StringComparison.Ordinal) &&
+                        !token.StartsWith("roundCap=", StringComparison.Ordinal) &&
+                        !token.StartsWith("deployMultiplier=", StringComparison.Ordinal) &&
+                        !token.StartsWith("terrain", StringComparison.Ordinal))) : line));
 
             var s = ReplayFile.Read(old).Start;
 
             Assert.That(s.Config.DesignFee, Is.EqualTo(0));
             Assert.That(s.Config.MaxDesignPointCost, Is.EqualTo(0));
             Assert.That(s.Config.FixedTemplateCount, Is.EqualTo(0));
+            Assert.That(s.Config.BountyRate, Is.EqualTo(0.5));
+            Assert.That(s.Config.GeneratorCost, Is.EqualTo(2));
+            Assert.That(s.Config.GeneratorHealth, Is.EqualTo(3));
+            Assert.That(s.Config.DmgHighGroundBonus, Is.EqualTo(1));
+            Assert.That(s.Config.RangeHighGroundBonus, Is.EqualTo(1));
+            Assert.That(s.Config.RoundCap, Is.EqualTo(GameConfig.DefaultRoundCap));
+            Assert.That(s.Config.DeployCostMultiplier, Is.EqualTo(1.0));
+            Assert.That(s.Config.Terrain(TerrainType.Forest).MoveCost, Is.EqualTo(2));
             Assert.That(s.Config.TemplateSlotCount, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void LegacyReplayWithoutConfigLine_UsesHistoricalDefaults()
+        {
+            const string legacy =
+                "HEXWARS-REPLAY 1\n" +
+                "META 1 0 1\n" +
+                "TILES 1\n" +
+                "0 0 0 0\n" +
+                "ZONE0 1 0 0\n" +
+                "ZONE1 0\n" +
+                "PLAYER 0 10 0 0 0\n" +
+                "PLAYER 1 10 0 0 0\n" +
+                "CMDS 0\n";
+
+            GameState state = ReplayFile.Read(legacy).Start;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(state.Config.StartingPoints, Is.EqualTo(12));
+                Assert.That(state.Config.BountyRate, Is.EqualTo(0.5));
+                Assert.That(state.Config.RoundCap, Is.EqualTo(GameConfig.DefaultRoundCap));
+                Assert.That(state.Config.TurnPolicy, Is.TypeOf<AllUnitsPolicy>());
+            });
         }
 
         [Test]
