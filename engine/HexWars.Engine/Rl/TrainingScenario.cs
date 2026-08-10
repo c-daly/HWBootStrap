@@ -20,11 +20,13 @@ namespace HexWars.Engine.Rl
         public AdaptiveRewardConfig AdaptiveReward = null!;
         public TrainingAdaptiveConfig Adaptive = null!;
         public TrainingTacticalV2Config TacticalV2 = null!;
+        public TrainingTacticalV3RewardConfig TacticalV3Reward = null!;
+        public TrainingTacticalV3Config TacticalV3 = null!;
 
         public static TrainingScenario CreateStandard(string environment, string id = "legacy-default")
         {
             if (environment != MlContract.CurrentVersion && environment != MlContract.AdaptiveVersion
-                && environment != MlContract.TacticalV2Version)
+                && environment != MlContract.TacticalV2Version && environment != MlContract.TacticalV3Version)
                 throw new ArgumentException($"unsupported environment '{environment}'", nameof(environment));
 
             var scenario = new TrainingScenario
@@ -46,7 +48,7 @@ namespace HexWars.Engine.Rl
                 scenario.AdaptiveReward = new AdaptiveRewardConfig();
                 scenario.Adaptive = new TrainingAdaptiveConfig();
             }
-            else
+            else if (environment == MlContract.TacticalV2Version)
             {
                 scenario.Rules.FogOfWar = false;
                 scenario.TacticalReward = new TacticalRewardConfig();
@@ -61,6 +63,20 @@ namespace HexWars.Engine.Rl
                 // round-cap backstop (see GameConfig.DefaultRoundCap / TacticalV2Config.DefaultMaxSteps).
                 scenario.Episode.MaxSteps = TacticalV2Config.DefaultMaxSteps(
                     scenario.TacticalV2.StartingUnitCount, scenario.Rules.RoundCap);
+            }
+            else
+            {
+                scenario.Rules.FogOfWar = false;
+                scenario.TacticalV3Reward = new TrainingTacticalV3RewardConfig();
+                scenario.TacticalV3 = new TrainingTacticalV3Config
+                {
+                    StartingUnitCount = 3,
+                    MaxControllableUnits = 3,
+                    PlacementPolicy = "symmetric-random-v1",
+                    Templates = DefaultTacticalV2Templates(),
+                };
+                scenario.Episode.MaxSteps = TacticalV2Config.DefaultMaxSteps(
+                    scenario.TacticalV3.StartingUnitCount, scenario.Rules.RoundCap);
             }
 
             return scenario;
@@ -101,8 +117,9 @@ namespace HexWars.Engine.Rl
             bool tactical = Environment == MlContract.CurrentVersion;
             bool adaptive = Environment == MlContract.AdaptiveVersion;
             bool tacticalV2 = Environment == MlContract.TacticalV2Version;
-            if (!tactical && !adaptive && !tacticalV2)
-                errors.Add("environment must be tactical-v1, tactical-v2, or adaptive-v1");
+            bool tacticalV3 = Environment == MlContract.TacticalV3Version;
+            if (!tactical && !adaptive && !tacticalV2 && !tacticalV3)
+                errors.Add("environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1");
 
             ValidateBoard(errors);
             ValidateRules(errors);
@@ -114,6 +131,8 @@ namespace HexWars.Engine.Rl
                 if (AdaptiveReward != null) errors.Add("adaptive reward section is not valid for tactical-v1");
                 if (Adaptive != null) errors.Add("adaptive section is not valid for tactical-v1");
                 if (TacticalV2 != null) errors.Add("tactical-v2 section is not valid for tactical-v1");
+                if (TacticalV3Reward != null) errors.Add("tactical-v3 reward section is not valid for tactical-v1");
+                if (TacticalV3 != null) errors.Add("tactical-v3 section is not valid for tactical-v1");
             }
             else if (adaptive)
             {
@@ -122,6 +141,8 @@ namespace HexWars.Engine.Rl
                 if (Adaptive == null) errors.Add("adaptive-v1 requires an adaptive section");
                 if (Adaptive != null) ValidateAdaptive(errors, Adaptive);
                 if (TacticalV2 != null) errors.Add("tactical-v2 section is not valid for adaptive-v1");
+                if (TacticalV3Reward != null) errors.Add("tactical-v3 reward section is not valid for adaptive-v1");
+                if (TacticalV3 != null) errors.Add("tactical-v3 section is not valid for adaptive-v1");
             }
             else if (tacticalV2)
             {
@@ -130,6 +151,19 @@ namespace HexWars.Engine.Rl
                 if (Adaptive != null) errors.Add("adaptive section is not valid for tactical-v2");
                 if (TacticalV2 == null) errors.Add("tactical-v2 requires a tactical-v2 section");
                 if (TacticalV2 != null) ValidateTacticalV2(errors, TacticalV2);
+                if (TacticalV3Reward != null) errors.Add("tactical-v3 reward section is not valid for tactical-v2");
+                if (TacticalV3 != null) errors.Add("tactical-v3 section is not valid for tactical-v2");
+            }
+            else if (tacticalV3)
+            {
+                if (TacticalReward != null) errors.Add("tactical reward section is not valid for tactical-v3");
+                if (AdaptiveReward != null) errors.Add("adaptive reward section is not valid for tactical-v3");
+                if (Adaptive != null) errors.Add("adaptive section is not valid for tactical-v3");
+                if (TacticalV2 != null) errors.Add("tactical-v2 section is not valid for tactical-v3");
+                if (TacticalV3Reward == null) errors.Add("tactical-v3 requires a tactical-v3 reward section");
+                if (TacticalV3 == null) errors.Add("tactical-v3 requires a tactical-v3 section");
+                if (TacticalV3Reward != null) ValidateTacticalV3Reward(errors, TacticalV3Reward);
+                if (TacticalV3 != null) ValidateTacticalV3(errors, TacticalV3);
             }
 
             return errors;
@@ -221,16 +255,60 @@ namespace HexWars.Engine.Rl
                 throw new ArgumentException("scenario environment must be tactical-v2", nameof(Environment));
 
             TacticalRewardConfig reward = TacticalReward!;
-            TrainingTacticalV2Config tacticalV2 = TacticalV2!;
-            var templates = new List<TacticalV2Template>(tacticalV2.Templates.Count);
-            foreach (TrainingUnitTemplateConfig item in tacticalV2.Templates)
+            return BuildTacticalMatch(TacticalV2!, reward.PointsWeight, reward.ShapeScale,
+                reward.StepPenalty, reward.ClosingWeight, reward.DrawCreditWeight);
+        }
+
+        public TacticalV3Config BuildTacticalV3()
+        {
+            ThrowIfInvalid();
+            if (Environment != MlContract.TacticalV3Version)
+                throw new ArgumentException("scenario environment must be tactical-v3", nameof(Environment));
+
+            TrainingTacticalV3Config source = TacticalV3!;
+            TrainingTacticalV3RewardConfig reward = TacticalV3Reward!;
+            TacticalV2Config match = BuildTacticalMatch(source, reward.PointsWeight, 0f, 0f, 0f, 0f);
+            var capacity = new TacticalV3CapacityProfile(
+                source.Capacity.MaxCells, source.Capacity.MaxUnits, source.Capacity.MaxTemplates,
+                source.Capacity.MaxCapabilityDefinitions, source.Capacity.MaxCapabilityAllocations,
+                source.Capacity.MaxRules, source.Capacity.MaxMemoryRecords, source.Capacity.MaxRelations,
+                source.Capacity.MaxCandidates);
+            var runtimeReward = new TacticalV3RewardConfig(
+                reward.TerminalWin, reward.TerminalNonWin, reward.MaterialAdjustmentBound,
+                reward.TimePressureBound, reward.PointsWeight);
+            return new TacticalV3Config(match, capacity, runtimeReward);
+        }
+
+        private TacticalV2Config BuildTacticalMatch(
+            TrainingTacticalV2Config source, float pointsWeight, float shapeScale, float stepPenalty,
+            float closingWeight, float drawCreditWeight) =>
+            BuildTacticalMatch(source.StartingUnitCount, source.MaxControllableUnits, source.PlacementPolicy,
+                source.Templates, source.StartProfiles, source.StartDistribution, pointsWeight, shapeScale,
+                stepPenalty, closingWeight, drawCreditWeight);
+
+        private TacticalV2Config BuildTacticalMatch(
+            TrainingTacticalV3Config source, float pointsWeight, float shapeScale, float stepPenalty,
+            float closingWeight, float drawCreditWeight) =>
+            BuildTacticalMatch(source.StartingUnitCount, source.MaxControllableUnits, source.PlacementPolicy,
+                source.Templates, source.StartProfiles, source.StartDistribution, pointsWeight, shapeScale,
+                stepPenalty, closingWeight, drawCreditWeight);
+
+        private TacticalV2Config BuildTacticalMatch(
+            int startingUnitCount, int maxControllableUnits, string placementPolicy,
+            List<TrainingUnitTemplateConfig> sourceTemplates, List<TacticalV2StartProfile> startProfiles,
+            List<TacticalV2StartWeight> startDistribution, float pointsWeight, float shapeScale,
+            float stepPenalty, float closingWeight, float drawCreditWeight)
+        {
+            var templates = new List<TacticalV2Template>(sourceTemplates.Count);
+            foreach (TrainingUnitTemplateConfig item in sourceTemplates)
             {
                 var stats = new UnitStats(
                     item.Health, item.Damage, item.Defense,
                     item.Movement, item.VerticalMovement,
                     item.Range, item.RangeArc,
                     item.Vision, item.VisionArc);
-                templates.Add(new TacticalV2Template(item.Id, new UnitTemplate(UnitTemplate.Sanitize(item.Name), stats)));
+                templates.Add(new TacticalV2Template(item.Id,
+                    new UnitTemplate(UnitTemplate.Sanitize(item.Name), stats)));
             }
 
             return new TacticalV2Config
@@ -242,17 +320,17 @@ namespace HexWars.Engine.Rl
                     captureCost: int.MaxValue,
                     generatorsEnabled: false),
                 Templates = templates.AsReadOnly(),
-                StartingUnitCount = tacticalV2.StartingUnitCount,
-                MaxControllableUnits = tacticalV2.MaxControllableUnits,
+                StartingUnitCount = startingUnitCount,
+                MaxControllableUnits = maxControllableUnits,
                 MaxSteps = Episode.MaxSteps,
-                ShapeScale = reward.ShapeScale,
-                StepPenalty = reward.StepPenalty,
-                ClosingWeight = reward.ClosingWeight,
-                DrawCreditWeight = reward.DrawCreditWeight,
-                PointsWeight = reward.PointsWeight,
-                PlacementPolicy = tacticalV2.PlacementPolicy,
-                StartProfiles = tacticalV2.StartProfiles.AsReadOnly(),
-                StartDistribution = new TacticalV2StartDistribution(tacticalV2.StartDistribution),
+                ShapeScale = shapeScale,
+                StepPenalty = stepPenalty,
+                ClosingWeight = closingWeight,
+                DrawCreditWeight = drawCreditWeight,
+                PointsWeight = pointsWeight,
+                PlacementPolicy = placementPolicy,
+                StartProfiles = startProfiles.AsReadOnly(),
+                StartDistribution = new TacticalV2StartDistribution(startDistribution),
             };
         }
 
@@ -331,55 +409,127 @@ namespace HexWars.Engine.Rl
         /// <see cref="ValidateAdaptive"/>'s — so a scenario can never reach <see cref="TacticalV2Layout"/>
         /// with a controllable-unit cap the board or the starting roster can't honor (the crash surface
         /// is <see cref="TacticalV2UnitRegistry"/>, which throws rather than silently truncating).</summary>
-        private void ValidateTacticalV2(List<string> errors, TrainingTacticalV2Config tacticalV2)
+        private void ValidateTacticalV2(List<string> errors, TrainingTacticalV2Config tacticalV2) =>
+            ValidateTacticalMatch(errors, "tactical-v2", tacticalV2.StartingUnitCount,
+                tacticalV2.MaxControllableUnits, tacticalV2.PlacementPolicy, tacticalV2.Templates,
+                tacticalV2.StartProfiles, tacticalV2.StartDistribution);
+
+        private void ValidateTacticalV3(List<string> errors, TrainingTacticalV3Config tacticalV3)
         {
-            if (tacticalV2.StartingUnitCount < 1 || tacticalV2.StartingUnitCount > 12)
-                errors.Add("tactical-v2 starting unit count must be between 1 and 12");
-            if (tacticalV2.MaxControllableUnits != tacticalV2.StartingUnitCount)
-                errors.Add("tactical-v2 max controllable units must equal starting unit count");
-            if (tacticalV2.PlacementPolicy == "profiled-seeded-v1")
+            ValidateTacticalMatch(errors, "tactical-v3", tacticalV3.StartingUnitCount,
+                tacticalV3.MaxControllableUnits, tacticalV3.PlacementPolicy, tacticalV3.Templates,
+                tacticalV3.StartProfiles, tacticalV3.StartDistribution);
+
+            if (Rules != null && Rules.FogOfWar)
+                errors.Add("tactical-v3 stage one requires fog_of_war=false");
+            if (Rules != null && Episode != null && tacticalV3.StartingUnitCount > 0 &&
+                Episode.MaxSteps < TacticalV2Config.MinimumMaxSteps(tacticalV3.StartingUnitCount, Rules.RoundCap))
+                errors.Add("tactical-v3 episode max steps are insufficient to reach the round cap");
+
+            TrainingTacticalV3CapacityConfig? capacity = tacticalV3.Capacity;
+            if (capacity == null)
+            {
+                errors.Add("tactical-v3 capacity section is required");
+                return;
+            }
+
+            int[] values =
+            {
+                capacity.MaxCells, capacity.MaxUnits, capacity.MaxTemplates,
+                capacity.MaxCapabilityDefinitions, capacity.MaxCapabilityAllocations,
+                capacity.MaxRules, capacity.MaxMemoryRecords, capacity.MaxRelations,
+                capacity.MaxCandidates,
+            };
+            if (values.Any(value => value <= 0))
+                errors.Add("tactical-v3 capacity values must be positive");
+
+            long cellCount = Board == null ? 0 : (long)Board.Width * Board.Height;
+            int profileUnits = tacticalV3.StartProfiles == null || tacticalV3.StartProfiles.Count == 0
+                ? tacticalV3.StartingUnitCount * 2
+                : tacticalV3.StartProfiles.Max(profile =>
+                    profile.LearnerUnitCount + profile.OpponentUnitCount);
+            int templateRows = tacticalV3.Templates == null ? 0 : tacticalV3.Templates.Count * 2;
+            int definitions = TacticalV3Capabilities.All.Count;
+            long allocations = (long)(profileUnits + templateRows) * definitions;
+            if (capacity.MaxCells < cellCount)
+                errors.Add("tactical-v3 max cells capacity is smaller than the board");
+            if (capacity.MaxUnits < profileUnits)
+                errors.Add("tactical-v3 max units capacity is smaller than a declared start profile");
+            if (capacity.MaxTemplates < templateRows)
+                errors.Add("tactical-v3 max templates capacity is smaller than both template catalogs");
+            if (capacity.MaxCapabilityDefinitions < definitions)
+                errors.Add("tactical-v3 max capability definitions capacity is undersized");
+            if (capacity.MaxCapabilityAllocations < allocations)
+                errors.Add("tactical-v3 max capability allocations capacity is undersized");
+            if (capacity.MaxRules < 15)
+                errors.Add("tactical-v3 max rules capacity is undersized");
+            if (capacity.MaxMemoryRecords < profileUnits)
+                errors.Add("tactical-v3 max memory records capacity is undersized");
+        }
+
+        private static void ValidateTacticalV3Reward(
+            List<string> errors, TrainingTacticalV3RewardConfig reward)
+        {
+            if (reward.TerminalWin != 1f || reward.TerminalNonWin != -1f)
+                errors.Add("tactical-v3 terminal rewards must be +1/-1");
+            if (reward.MaterialAdjustmentBound != 0.2f || reward.TimePressureBound != 0.05f)
+                errors.Add("tactical-v3 shaping bounds must be 0.20/0.05");
+            if (reward.PointsWeight != 0.5f)
+                errors.Add("tactical-v3 points weight must be 0.5");
+        }
+
+        private void ValidateTacticalMatch(
+            List<string> errors, string version, int startingUnitCount, int maxControllableUnits,
+            string placementPolicy, List<TrainingUnitTemplateConfig> templates,
+            List<TacticalV2StartProfile> startProfiles, List<TacticalV2StartWeight> startDistribution)
+        {
+            if (startingUnitCount < 1 || startingUnitCount > 12)
+                errors.Add(version + " starting unit count must be between 1 and 12");
+            if (maxControllableUnits != startingUnitCount)
+                errors.Add(version + " max controllable units must equal starting unit count");
+            if (placementPolicy == "profiled-seeded-v1")
             {
                 TacticalV2Config profiled = TacticalV2Config.Default();
-                profiled.StartingUnitCount = tacticalV2.StartingUnitCount;
-                profiled.MaxControllableUnits = tacticalV2.MaxControllableUnits;
-                profiled.PlacementPolicy = tacticalV2.PlacementPolicy;
-                profiled.StartProfiles = tacticalV2.StartProfiles.AsReadOnly();
-                profiled.StartDistribution = new TacticalV2StartDistribution(tacticalV2.StartDistribution);
+                profiled.StartingUnitCount = startingUnitCount;
+                profiled.MaxControllableUnits = maxControllableUnits;
+                profiled.PlacementPolicy = placementPolicy;
+                profiled.StartProfiles = startProfiles.AsReadOnly();
+                profiled.StartDistribution = new TacticalV2StartDistribution(startDistribution);
                 foreach (string error in profiled.Validate())
                     if (error.Contains("profile") || error.Contains("start distribution") ||
                         error.Contains("starting unit count and max controllable units"))
-                        errors.Add("tactical-v2 " + error);
+                        errors.Add(version + " " + error);
             }
-            else if (tacticalV2.PlacementPolicy != "symmetric-random-v1")
-                errors.Add("tactical-v2 placement policy must be 'symmetric-random-v1'");
+            else if (placementPolicy != "symmetric-random-v1")
+                errors.Add(version + " placement policy must be 'symmetric-random-v1'");
 
-            if (tacticalV2.Templates == null || tacticalV2.Templates.Count == 0)
+            if (templates == null || templates.Count == 0)
             {
-                errors.Add("tactical-v2 template catalog must not be empty");
+                errors.Add(version + " template catalog must not be empty");
             }
             else
             {
                 var seenIds = new HashSet<string>(StringComparer.Ordinal);
-                foreach (TrainingUnitTemplateConfig template in tacticalV2.Templates)
+                foreach (TrainingUnitTemplateConfig template in templates)
                 {
                     if (string.IsNullOrEmpty(template.Id))
-                        errors.Add("tactical-v2 template ids must not be empty");
+                        errors.Add(version + " template ids must not be empty");
                     else if (!seenIds.Add(template.Id))
-                        errors.Add($"duplicate tactical-v2 template id '{template.Id}'");
+                        errors.Add($"duplicate {version} template id '{template.Id}'");
 
                     if (template.Health < 0 || template.Damage < 0 || template.Defense < 0
                         || template.Movement < 0 || template.VerticalMovement < 0
                         || template.Range < 0 || template.RangeArc < 0
                         || template.Vision < 0 || template.VisionArc < 0)
-                        errors.Add($"tactical-v2 template '{template.Id}' has an invalid stat");
+                        errors.Add($"{version} template '{template.Id}' has an invalid stat");
                 }
             }
 
             if (Board != null && Board.Height > 0 && Board.ZoneDepth > 0)
             {
                 long cellsPerSeat = (long)Board.Height * Board.ZoneDepth;
-                if (cellsPerSeat < tacticalV2.StartingUnitCount)
-                    errors.Add("tactical-v2 deployment cells must cover the starting unit count");
+                if (cellsPerSeat < startingUnitCount)
+                    errors.Add(version + " deployment cells must cover the starting unit count");
             }
         }
 
@@ -501,6 +651,16 @@ namespace HexWars.Engine.Rl
     }
 
     [Serializable]
+    public sealed class TrainingTacticalV3RewardConfig
+    {
+        public float TerminalWin = 1f;
+        public float TerminalNonWin = -1f;
+        public float MaterialAdjustmentBound = 0.2f;
+        public float TimePressureBound = 0.05f;
+        public float PointsWeight = 0.5f;
+    }
+
+    [Serializable]
     public sealed class AdaptiveRewardConfig
     {
         public float IntermediateDecisionPenalty = 0.001f;
@@ -524,6 +684,32 @@ namespace HexWars.Engine.Rl
         public int MaxControllableUnits = 3;
         public string PlacementPolicy = "symmetric-random-v1";
         public List<TrainingUnitTemplateConfig> Templates = new List<TrainingUnitTemplateConfig>();
+    }
+
+    [Serializable]
+    public sealed class TrainingTacticalV3Config
+    {
+        public int StartingUnitCount = 3;
+        public List<TacticalV2StartProfile> StartProfiles = new List<TacticalV2StartProfile>();
+        public List<TacticalV2StartWeight> StartDistribution = new List<TacticalV2StartWeight>();
+        public int MaxControllableUnits = 3;
+        public string PlacementPolicy = "symmetric-random-v1";
+        public List<TrainingUnitTemplateConfig> Templates = new List<TrainingUnitTemplateConfig>();
+        public TrainingTacticalV3CapacityConfig Capacity = new TrainingTacticalV3CapacityConfig();
+    }
+
+    [Serializable]
+    public sealed class TrainingTacticalV3CapacityConfig
+    {
+        public int MaxCells = 512;
+        public int MaxUnits = 64;
+        public int MaxTemplates = 32;
+        public int MaxCapabilityDefinitions = 128;
+        public int MaxCapabilityAllocations = 2048;
+        public int MaxRules = 128;
+        public int MaxMemoryRecords = 64;
+        public int MaxRelations = 65536;
+        public int MaxCandidates = 32768;
     }
 
     [Serializable]

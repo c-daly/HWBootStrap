@@ -27,6 +27,7 @@ namespace HexWars.Engine.Rl
         public const string CurrentVersion = "tactical-v1";
         public const string AdaptiveVersion = "adaptive-v1";
         public const string TacticalV2Version = "tactical-v2";
+        public const string TacticalV3Version = "tactical-v3";
 
         private static readonly IReadOnlyList<string> AdaptivePhases = Array.AsReadOnly(new[]
         {
