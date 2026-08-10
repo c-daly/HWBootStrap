@@ -22,7 +22,9 @@ namespace HexWars.GymServer
             ScenarioWire? wire;
             try
             {
-                wire = JsonSerializer.Deserialize<ScenarioWire>(File.ReadAllText(path), Options);
+                string json = File.ReadAllText(path);
+                ValidateNoDuplicateProperties(json);
+                wire = JsonSerializer.Deserialize<ScenarioWire>(json, Options);
             }
             catch (JsonException exception)
             {
@@ -50,6 +52,41 @@ namespace HexWars.GymServer
             if (errors.Count > 0) throw new InvalidDataException(string.Join("; ", errors));
 
             return scenario;
+        }
+
+        private static void ValidateNoDuplicateProperties(string json)
+        {
+            using JsonDocument document = JsonDocument.Parse(json, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Disallow,
+            });
+            ValidateNoDuplicateProperties(document.RootElement, "$");
+        }
+
+        private static void ValidateNoDuplicateProperties(JsonElement element, string path)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (!names.Add(property.Name))
+                        throw new JsonException(
+                            $"duplicate JSON property '{property.Name}' at {path}");
+
+                    ValidateNoDuplicateProperties(
+                        property.Value, path + "." + property.Name);
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                int index = 0;
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    ValidateNoDuplicateProperties(item, $"{path}[{index}]");
+                    index++;
+                }
+            }
         }
 
         private static void ValidateRequiredFields(ScenarioWire wire, List<string> errors)
@@ -154,6 +191,11 @@ namespace HexWars.GymServer
                             for (int i = 0; i < wire.TacticalV2.StartProfiles.Count; i++)
                             {
                                 TacticalV2Wire.TacticalV2StartProfileWire profile = wire.TacticalV2.StartProfiles[i];
+                                if (profile == null)
+                                {
+                                    errors.Add($"tactical_v2.start_profiles[{i}] is required");
+                                    continue;
+                                }
                                 RequireText(profile.Id, $"tactical_v2.start_profiles[{i}].id", errors);
                                 Require(profile.LearnerUnitCount, $"tactical_v2.start_profiles[{i}].learner_units", errors);
                                 Require(profile.OpponentUnitCount, $"tactical_v2.start_profiles[{i}].opponent_units", errors);
@@ -161,7 +203,16 @@ namespace HexWars.GymServer
                             }
                         if (wire.TacticalV2.StartDistribution != null)
                             for (int i = 0; i < wire.TacticalV2.StartDistribution.Count; i++)
-                                ValidateTacticalV2StartWeightWire(wire.TacticalV2.StartDistribution[i], i, errors);
+                            {
+                                TacticalV2Wire.TacticalV2StartWeightWire weight =
+                                    wire.TacticalV2.StartDistribution[i];
+                                if (weight == null)
+                                {
+                                    errors.Add($"tactical_v2.start_distribution[{i}] is required");
+                                    continue;
+                                }
+                                ValidateTacticalV2StartWeightWire(weight, i, errors);
+                            }
 
                     }
                     if (wire.TacticalV2.Templates == null || wire.TacticalV2.Templates.Count == 0)
@@ -171,7 +222,15 @@ namespace HexWars.GymServer
                     else
                     {
                         for (int i = 0; i < wire.TacticalV2.Templates.Count; i++)
-                            ValidateTacticalV2TemplateWire(wire.TacticalV2.Templates[i], $"tactical_v2.templates[{i}]", errors);
+                        {
+                            TacticalV2TemplateWire template = wire.TacticalV2.Templates[i];
+                            if (template == null)
+                            {
+                                errors.Add($"tactical_v2.templates[{i}] is required");
+                                continue;
+                            }
+                            ValidateTacticalV2TemplateWire(template, $"tactical_v2.templates[{i}]", errors);
+                        }
                     }
                 }
             }
@@ -202,6 +261,11 @@ namespace HexWars.GymServer
                         for (int i = 0; i < source.StartProfiles.Count; i++)
                         {
                             TacticalV2Wire.TacticalV2StartProfileWire profile = source.StartProfiles[i];
+                            if (profile == null)
+                            {
+                                errors.Add($"tactical_v3.start_profiles[{i}] is required");
+                                continue;
+                            }
                             RequireText(profile.Id, $"tactical_v3.start_profiles[{i}].id", errors);
                             Require(profile.LearnerUnitCount, $"tactical_v3.start_profiles[{i}].learner_units", errors);
                             Require(profile.OpponentUnitCount, $"tactical_v3.start_profiles[{i}].opponent_units", errors);
@@ -211,6 +275,11 @@ namespace HexWars.GymServer
                         for (int i = 0; i < source.StartDistribution.Count; i++)
                         {
                             TacticalV2Wire.TacticalV2StartWeightWire weight = source.StartDistribution[i];
+                            if (weight == null)
+                            {
+                                errors.Add($"tactical_v3.start_distribution[{i}] is required");
+                                continue;
+                            }
                             RequireText(weight.ProfileId, $"tactical_v3.start_distribution[{i}].profile_id", errors);
                             Require(weight.BasisPoints, $"tactical_v3.start_distribution[{i}].basis_points", errors);
                         }
@@ -222,8 +291,16 @@ namespace HexWars.GymServer
                     else
                     {
                         for (int i = 0; i < source.Templates.Count; i++)
+                        {
+                            TacticalV2TemplateWire template = source.Templates[i];
+                            if (template == null)
+                            {
+                                errors.Add($"tactical_v3.templates[{i}] is required");
+                                continue;
+                            }
                             ValidateTacticalV2TemplateWire(
-                                source.Templates[i], $"tactical_v3.templates[{i}]", errors);
+                                template, $"tactical_v3.templates[{i}]", errors);
+                        }
                     }
 
                     Require(source.Capacity, "tactical_v3.capacity", errors);

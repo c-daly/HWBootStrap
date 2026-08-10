@@ -423,8 +423,20 @@ namespace HexWars.Engine.Rl
             if (Rules != null && Rules.FogOfWar)
                 errors.Add("tactical-v3 stage one requires fog_of_war=false");
             if (Rules != null && Episode != null && tacticalV3.StartingUnitCount > 0 &&
-                Episode.MaxSteps < TacticalV2Config.MinimumMaxSteps(tacticalV3.StartingUnitCount, Rules.RoundCap))
-                errors.Add("tactical-v3 episode max steps are insufficient to reach the round cap");
+                Rules.RoundCap > 0)
+            {
+                long actionsPerRound = checked(2L * (tacticalV3.StartingUnitCount + 1L));
+                long minimumMaxSteps = checked(actionsPerRound * Rules.RoundCap);
+                if (Episode.MaxSteps < minimumMaxSteps)
+                    errors.Add("tactical-v3 episode max steps are insufficient to reach the round cap");
+            }
+            if (tacticalV3.PlacementPolicy == "symmetric-random-v1" &&
+                ((tacticalV3.StartProfiles != null && tacticalV3.StartProfiles.Count != 0) ||
+                 (tacticalV3.StartDistribution != null && tacticalV3.StartDistribution.Count != 0)))
+            {
+                errors.Add(
+                    "tactical-v3 symmetric-random-v1 must not declare start profiles or a start distribution");
+            }
 
             TrainingTacticalV3CapacityConfig? capacity = tacticalV3.Capacity;
             if (capacity == null)
@@ -443,28 +455,76 @@ namespace HexWars.Engine.Rl
             if (values.Any(value => value <= 0))
                 errors.Add("tactical-v3 capacity values must be positive");
 
-            long cellCount = Board == null ? 0 : (long)Board.Width * Board.Height;
-            int profileUnits = tacticalV3.StartProfiles == null || tacticalV3.StartProfiles.Count == 0
-                ? tacticalV3.StartingUnitCount * 2
-                : tacticalV3.StartProfiles.Max(profile =>
-                    profile.LearnerUnitCount + profile.OpponentUnitCount);
-            int templateRows = tacticalV3.Templates == null ? 0 : tacticalV3.Templates.Count * 2;
-            int definitions = TacticalV3Capabilities.All.Count;
-            long allocations = (long)(profileUnits + templateRows) * definitions;
+            long cellCount;
+            long maximumTotalUnits = checked((long)tacticalV3.StartingUnitCount * 2);
+            long maximumSeatUnits = tacticalV3.StartingUnitCount;
+            long maximumAttackPairs = checked(
+                (long)tacticalV3.StartingUnitCount * tacticalV3.StartingUnitCount);
+            if (tacticalV3.PlacementPolicy == "profiled-seeded-v1" &&
+                tacticalV3.StartProfiles != null)
+            {
+                foreach (TacticalV2StartProfile profile in tacticalV3.StartProfiles)
+                {
+                    if (profile == null) continue;
+                    long total = checked((long)profile.LearnerUnitCount + profile.OpponentUnitCount);
+                    maximumTotalUnits = Math.Max(maximumTotalUnits, total);
+                    maximumSeatUnits = Math.Max(maximumSeatUnits,
+                        Math.Max((long)profile.LearnerUnitCount, profile.OpponentUnitCount));
+                    maximumAttackPairs = Math.Max(maximumAttackPairs,
+                        checked((long)profile.LearnerUnitCount * profile.OpponentUnitCount));
+                }
+            }
+
+            long templateCount = tacticalV3.Templates == null ? 0 : tacticalV3.Templates.Count;
+            long templateRows;
+            long allocations;
+            long minimumRelations;
+            long minimumCandidates;
+            try
+            {
+                cellCount = checked((long)(Board == null ? 0 : Board.Width) *
+                    (Board == null ? 0 : Board.Height));
+                templateRows = checked(templateCount * 2);
+                int definitions = TacticalV3Capabilities.All.Count;
+                allocations = checked((maximumTotalUnits + templateRows) * definitions);
+
+                // Relations contain at most six directed neighbors per cell, one occupancy per unit,
+                // and one has-capability edge per capability allocation.
+                minimumRelations = checked(checked(6L * cellCount) + maximumTotalUnits + allocations);
+
+                // LegalMoves can emit deploys for every template/deployment cell, moves for every
+                // active-unit/cell pair, every cross-seat attack pair, and one end-turn.
+                long deploymentCells = checked((long)(Board == null ? 0 : Board.Height) *
+                    (Board == null ? 0 : Board.ZoneDepth));
+                minimumCandidates = checked(
+                    checked(templateCount * deploymentCells) +
+                    checked(maximumSeatUnits * cellCount) +
+                    maximumAttackPairs + 1);
+            }
+            catch (OverflowException)
+            {
+                errors.Add("tactical-v3 static capacity requirements overflow Int64");
+                return;
+            }
+
             if (capacity.MaxCells < cellCount)
                 errors.Add("tactical-v3 max cells capacity is smaller than the board");
-            if (capacity.MaxUnits < profileUnits)
+            if (capacity.MaxUnits < maximumTotalUnits)
                 errors.Add("tactical-v3 max units capacity is smaller than a declared start profile");
             if (capacity.MaxTemplates < templateRows)
                 errors.Add("tactical-v3 max templates capacity is smaller than both template catalogs");
-            if (capacity.MaxCapabilityDefinitions < definitions)
+            if (capacity.MaxCapabilityDefinitions < TacticalV3Capabilities.All.Count)
                 errors.Add("tactical-v3 max capability definitions capacity is undersized");
             if (capacity.MaxCapabilityAllocations < allocations)
                 errors.Add("tactical-v3 max capability allocations capacity is undersized");
             if (capacity.MaxRules < 15)
                 errors.Add("tactical-v3 max rules capacity is undersized");
-            if (capacity.MaxMemoryRecords < profileUnits)
+            if (capacity.MaxMemoryRecords < maximumTotalUnits)
                 errors.Add("tactical-v3 max memory records capacity is undersized");
+            if (capacity.MaxRelations < minimumRelations)
+                errors.Add("tactical-v3 max relations capacity is undersized");
+            if (capacity.MaxCandidates < minimumCandidates)
+                errors.Add("tactical-v3 max candidates capacity is undersized");
         }
 
         private static void ValidateTacticalV3Reward(
@@ -487,14 +547,36 @@ namespace HexWars.Engine.Rl
                 errors.Add(version + " starting unit count must be between 1 and 12");
             if (maxControllableUnits != startingUnitCount)
                 errors.Add(version + " max controllable units must equal starting unit count");
-            if (placementPolicy == "profiled-seeded-v1")
+            bool validProfileCollections = true;
+            if (startProfiles == null)
+            {
+                errors.Add(version + " start profiles collection is required");
+                validProfileCollections = false;
+            }
+            else if (startProfiles.Any(profile => profile == null))
+            {
+                errors.Add(version + " start profiles contain a null element");
+                validProfileCollections = false;
+            }
+            if (startDistribution == null)
+            {
+                errors.Add(version + " start distribution collection is required");
+                validProfileCollections = false;
+            }
+            else if (startDistribution.Any(weight => weight == null))
+            {
+                errors.Add(version + " start distribution contains a null element");
+                validProfileCollections = false;
+            }
+
+            if (placementPolicy == "profiled-seeded-v1" && validProfileCollections)
             {
                 TacticalV2Config profiled = TacticalV2Config.Default();
                 profiled.StartingUnitCount = startingUnitCount;
                 profiled.MaxControllableUnits = maxControllableUnits;
                 profiled.PlacementPolicy = placementPolicy;
-                profiled.StartProfiles = startProfiles.AsReadOnly();
-                profiled.StartDistribution = new TacticalV2StartDistribution(startDistribution);
+                profiled.StartProfiles = startProfiles!.AsReadOnly();
+                profiled.StartDistribution = new TacticalV2StartDistribution(startDistribution!);
                 foreach (string error in profiled.Validate())
                     if (error.Contains("profile") || error.Contains("start distribution") ||
                         error.Contains("starting unit count and max controllable units"))
@@ -503,7 +585,11 @@ namespace HexWars.Engine.Rl
             else if (placementPolicy != "symmetric-random-v1")
                 errors.Add(version + " placement policy must be 'symmetric-random-v1'");
 
-            if (templates == null || templates.Count == 0)
+            if (templates == null)
+            {
+                errors.Add(version + " template catalog is required");
+            }
+            else if (templates.Count == 0)
             {
                 errors.Add(version + " template catalog must not be empty");
             }
@@ -512,6 +598,12 @@ namespace HexWars.Engine.Rl
                 var seenIds = new HashSet<string>(StringComparer.Ordinal);
                 foreach (TrainingUnitTemplateConfig template in templates)
                 {
+                    if (template == null)
+                    {
+                        errors.Add(version + " template catalog contains a null element");
+                        continue;
+                    }
+
                     if (string.IsNullOrEmpty(template.Id))
                         errors.Add(version + " template ids must not be empty");
                     else if (!seenIds.Add(template.Id))

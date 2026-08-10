@@ -30,26 +30,66 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
+                Assert.That(scenario.SchemaVersion, Is.EqualTo(1));
                 Assert.That(scenario.Id, Is.EqualTo("annihilation-structured-imitation-v1"));
+                Assert.That(scenario.Name, Is.EqualTo("Annihilation structured imitation 70/30"));
                 Assert.That(scenario.Environment, Is.EqualTo("tactical-v3"));
                 Assert.That(config.Validate(), Is.Empty);
-                Assert.That(config.Match.BoardGen.Width, Is.EqualTo(13));
-                Assert.That(config.Match.BoardGen.Height, Is.EqualTo(9));
+                Assert.That((
+                    scenario.Board.Width, scenario.Board.Height, scenario.Board.MaxElevation,
+                    scenario.Board.ZoneDepth, scenario.Board.FlatChance, scenario.Board.PlainsWeight,
+                    scenario.Board.ForestWeight, scenario.Board.RoughWeight, scenario.Board.WaterWeight),
+                    Is.EqualTo((13, 9, 4, 3, 0.6, 70, 15, 10, 5)));
+                Assert.That((
+                    config.Match.BoardGen.Width, config.Match.BoardGen.Height,
+                    config.Match.BoardGen.MaxElevation, config.Match.BoardGen.ZoneDepth,
+                    config.Match.BoardGen.FlatChance, config.Match.BoardGen.PlainsWeight,
+                    config.Match.BoardGen.ForestWeight, config.Match.BoardGen.RoughWeight,
+                    config.Match.BoardGen.WaterWeight), Is.EqualTo((13, 9, 4, 3, 0.6, 70, 15, 10, 5)));
+                Assert.That((
+                    scenario.Rules.ActionsPerTurn, scenario.Rules.RoundCap,
+                    scenario.Rules.StartingPoints, scenario.Rules.FogOfWar,
+                    scenario.Rules.BiomesEnabled, scenario.Rules.BountyRate,
+                    scenario.Rules.DeployCostMultiplier, scenario.Rules.GeneratorCost,
+                    scenario.Rules.GeneratorOutput, scenario.Rules.GeneratorHealth),
+                    Is.EqualTo((0, 100, 12, false, false, 0.5, 1.0, 2, 1, 3)));
+                Assert.That((
+                    config.Match.Game.StartingPoints, config.Match.Game.RoundCap,
+                    config.Match.Game.FogOfWar, config.Match.Game.BiomesEnabled,
+                    config.Match.Game.BountyRate, config.Match.Game.DeployCostMultiplier,
+                    config.Match.Game.GeneratorCost, config.Match.Game.GeneratorOutput,
+                    config.Match.Game.GeneratorHealth, config.Match.Game.GeneratorsEnabled),
+                    Is.EqualTo((12, 100, false, false, 0.5, 1.0, 2, 1, 3, false)));
+                Assert.That(config.Match.Game.TurnPolicy, Is.TypeOf<AllUnitsPolicy>());
+                Assert.That(config.Match.Game.WinConditions, Is.EqualTo(WinBy.Annihilation));
                 Assert.That(config.Match.MaxSteps, Is.EqualTo(808));
-                Assert.That(config.Match.Game.FogOfWar, Is.False);
-                Assert.That(config.Match.Game.GeneratorsEnabled, Is.False);
-                Assert.That(config.Match.Templates.Select(template => template.Id), Is.EqualTo(new[]
+                Assert.That(config.Match.Templates.Select(template => (
+                    template.Id, template.Template.Name,
+                    template.Template.Stats.Health, template.Template.Stats.Damage,
+                    template.Template.Stats.Defense, template.Template.Stats.Movement,
+                    template.Template.Stats.VerticalMovement, template.Template.Stats.Range,
+                    template.Template.Stats.RangeArc, template.Template.Stats.Vision,
+                    template.Template.Stats.VisionArc)), Is.EqualTo(new[]
                 {
-                    "brute-85597320", "striker-0d7b6999", "sniper-d065c02a",
-                    "artillery-27c01722", "scout-d3503dfa",
+                    ("brute-85597320", "Brute", 7, 2, 2, 3, 2, 1, 1, 2, 1),
+                    ("striker-0d7b6999", "Striker", 2, 6, 0, 3, 2, 2, 1, 3, 1),
+                    ("sniper-d065c02a", "Sniper", 2, 2, 0, 2, 2, 6, 1, 4, 1),
+                    ("artillery-27c01722", "Artillery", 3, 6, 0, 0, 0, 5, 2, 2, 1),
+                    ("scout-d3503dfa", "Scout", 2, 0, 0, 4, 3, 0, 0, 7, 2),
                 }));
                 Assert.That(config.Match.PlacementPolicy, Is.EqualTo("profiled-seeded-v1"));
-                Assert.That(config.Match.StartProfiles.Select(profile => profile.Id), Is.EqualTo(new[]
+                Assert.That(config.Match.StartingUnitCount, Is.EqualTo(3));
+                Assert.That(config.Match.MaxControllableUnits, Is.EqualTo(3));
+                Assert.That(config.Match.StartProfiles.Select(profile => (
+                    profile.Id, profile.LearnerUnitCount, profile.OpponentUnitCount,
+                    profile.Separation)), Is.EqualTo(new[]
                 {
-                    "standard-3v3",
-                    "conversion-3v1-near", "conversion-3v1-medium", "conversion-3v1-far",
-                    "conversion-2v1-near", "conversion-2v1-medium", "conversion-2v1-far",
-                    "conversion-1v1-near", "conversion-1v1-medium", "conversion-1v1-far",
+                    ("standard-3v3", 3, 3, "legacy-mirrored"),
+                    ("conversion-3v1-near", 3, 1, "near"), ("conversion-3v1-medium", 3, 1, "medium"),
+                    ("conversion-3v1-far", 3, 1, "far"), ("conversion-2v1-near", 2, 1, "near"),
+                    ("conversion-2v1-medium", 2, 1, "medium"), ("conversion-2v1-far", 2, 1, "far"),
+                    ("conversion-1v1-near", 1, 1, "near"), ("conversion-1v1-medium", 1, 1, "medium"),
+                    ("conversion-1v1-far", 1, 1, "far"),
                 }));
                 Assert.That(config.Match.StartDistribution.Weights.Select(weight =>
                     (weight.ProfileId, weight.BasisPoints)), Is.EqualTo(new[]
@@ -158,6 +198,137 @@ namespace HexWars.Engine.Tests
             AssertRejected(scenario);
         }
 
+        [TestCase("root")]
+        [TestCase("nested")]
+        public void TacticalV3Scenario_RejectsDuplicateJsonProperties(string level)
+        {
+            string json = ValidTacticalV3Json().ToJsonString();
+            if (level == "root")
+                json = json.Replace(
+                    "\"schema_version\":1", "\"schema_version\":1,\"schema_version\":1");
+            else
+                json = json.Replace(
+                    "\"points_weight\":0.5", "\"points_weight\":0.5,\"points_weight\":0.5");
+
+            Assert.Throws<InvalidDataException>(() => LoadTemporary(json));
+        }
+
+        [TestCase("template")]
+        [TestCase("profile")]
+        [TestCase("distribution")]
+        public void TacticalV3Scenario_JsonRejectsNullCollectionElements(string collection)
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
+            string property = collection == "template" ? "templates" :
+                collection == "profile" ? "start_profiles" : "start_distribution";
+            ((JsonArray)tacticalV3[property]!)[0] = null;
+
+            AssertRejected(scenario);
+        }
+
+        [TestCase("config")]
+        [TestCase("reward")]
+        public void TacticalV3Scenario_DirectApiRejectsNullSections(string section)
+        {
+            TrainingScenario scenario =
+                TrainingScenario.CreateStandard(MlContract.TacticalV3Version);
+            if (section == "config") scenario.TacticalV3 = null!;
+            else scenario.TacticalV3Reward = null!;
+
+            Assert.That(scenario.Validate(),
+                Has.Some.Contains("requires a tactical-v3"));
+            Assert.Throws<ArgumentException>(() => scenario.BuildTacticalV3());
+        }
+
+        [TestCase("templates")]
+        [TestCase("start_profiles")]
+        [TestCase("start_distribution")]
+        public void TacticalV3Scenario_DirectApiRejectsNullCollections(string collection)
+        {
+            TrainingScenario scenario = LoadCheckedIn("annihilation-structured-imitation-v1.json");
+            if (collection == "templates") scenario.TacticalV3.Templates = null!;
+            else if (collection == "start_profiles") scenario.TacticalV3.StartProfiles = null!;
+            else scenario.TacticalV3.StartDistribution = null!;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("required"));
+            Assert.Throws<ArgumentException>(() => scenario.BuildTacticalV3());
+        }
+
+        [TestCase("template")]
+        [TestCase("profile")]
+        [TestCase("distribution")]
+        public void TacticalV3Scenario_DirectApiRejectsNullCollectionElements(string collection)
+        {
+            TrainingScenario scenario = LoadCheckedIn("annihilation-structured-imitation-v1.json");
+            if (collection == "template") scenario.TacticalV3.Templates[0] = null!;
+            else if (collection == "profile") scenario.TacticalV3.StartProfiles[0] = null!;
+            else scenario.TacticalV3.StartDistribution[0] = null!;
+
+            Assert.That(scenario.Validate(), Has.Some.Contains("null"));
+            Assert.Throws<ArgumentException>(() => scenario.BuildTacticalV3());
+        }
+
+        [Test]
+        public void TacticalV3Scenario_JsonRejectsSemanticallyInvalidProfileCounts()
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
+            ((JsonObject)((JsonArray)tacticalV3["start_profiles"]!)[0]!)["learner_units"] = 0;
+
+            AssertRejected(scenario);
+        }
+
+
+        [Test]
+        public void TacticalV3Scenario_RejectsOverflowedStepBudget()
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            ((JsonObject)scenario["rules"]!)["round_cap"] = 268435456;
+            ((JsonObject)scenario["episode"]!)["max_steps"] = 1;
+
+            AssertRejected(scenario);
+        }
+
+        [Test]
+        public void TacticalV3Scenario_DirectApiRejectsOverflowingProfilesOnSymmetricPlacement()
+        {
+            TrainingScenario scenario = TrainingScenario.CreateStandard(MlContract.TacticalV3Version);
+            scenario.TacticalV3.StartProfiles.Add(
+                new TacticalV2StartProfile("overflow", int.MaxValue, 1, "near"));
+            scenario.TacticalV3.StartDistribution.Add(
+                new TacticalV2StartWeight("overflow", 10000));
+
+            Assert.That(scenario.Validate(),
+                Has.Some.Contains("symmetric-random-v1").And.Contains("start profile"));
+            Assert.Throws<ArgumentException>(() => scenario.BuildTacticalV3());
+        }
+
+        [Test]
+        public void TacticalV3Scenario_JsonRejectsProfileDataOnSymmetricPlacement()
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            ((JsonObject)scenario["tactical_v3"]!)["placement_policy"] = "symmetric-random-v1";
+
+            AssertRejected(scenario);
+        }
+
+
+        [TestCase("max_relations", 851)]
+        [TestCase("max_candidates", 495)]
+        public void TacticalV3Scenario_RejectsStaticallyUndersizedRelationalCapacity(
+            string field, int value)
+        {
+            // Conservative relation bound: 6*117 cells + 6 units + 9*(6 units + 10 template rows) = 852.
+            // Conservative candidate bound: 5*27 deploys + 3*117 moves + 3*3 attacks + end = 496.
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
+            ((JsonObject)tacticalV3["capacity"]!)[field] = value;
+
+            AssertRejected(scenario);
+        }
+
+
         [TestCase("fog")]
         [TestCase("generators")]
         [TestCase("overlapping_zones")]
@@ -247,35 +418,56 @@ namespace HexWars.Engine.Tests
 
         private static JsonObject ValidTacticalV3Json()
         {
-            JsonObject scenario = (JsonObject)JsonNode.Parse(
-                File.ReadAllText(ConfigPath("annihilation-imitation-v1.json")))!;
-            scenario["id"] = "valid-tactical-v3";
-            scenario["name"] = "Valid Tactical V3";
-            scenario["environment"] = "tactical-v3";
-            scenario["reward"] = new JsonObject
-            {
-                ["terminal_win"] = 1.0,
-                ["terminal_non_win"] = -1.0,
-                ["material_adjustment_bound"] = 0.2,
-                ["time_pressure_bound"] = 0.05,
-                ["points_weight"] = 0.5,
-            };
-            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v2"]!.DeepClone();
-            tacticalV3["capacity"] = new JsonObject
-            {
-                ["max_cells"] = 512,
-                ["max_units"] = 64,
-                ["max_templates"] = 32,
-                ["max_capability_definitions"] = 128,
-                ["max_capability_allocations"] = 2048,
-                ["max_rules"] = 128,
-                ["max_memory_records"] = 64,
-                ["max_relations"] = 65536,
-                ["max_candidates"] = 32768,
-            };
-            scenario.Remove("tactical_v2");
-            scenario["tactical_v3"] = tacticalV3;
-            return scenario;
+            return (JsonObject)JsonNode.Parse(
+                """
+                {
+                  "schema_version": 1,
+                  "id": "valid-tactical-v3",
+                  "name": "Valid Tactical V3",
+                  "environment": "tactical-v3",
+                  "board": {"width":13,"height":9,"max_elevation":4,"zone_depth":3,"flat_chance":0.6,"plains_weight":70,"forest_weight":15,"rough_weight":10,"water_weight":5},
+                  "rules": {"actions_per_turn":0,"round_cap":100,"starting_points":12,"fog_of_war":false,"biomes_enabled":false,"bounty_rate":0.5,"deploy_cost_multiplier":1.0,"generator_cost":2,"generator_output":1,"generator_health":3},
+                  "episode": {"max_steps":808},
+                  "reward": {"terminal_win":1.0,"terminal_non_win":-1.0,"material_adjustment_bound":0.2,"time_pressure_bound":0.05,"points_weight":0.5},
+                  "tactical_v3": {
+                    "starting_unit_count": 3,
+                    "max_controllable_units": 3,
+                    "placement_policy": "profiled-seeded-v1",
+                    "capacity": {"max_cells":512,"max_units":64,"max_templates":32,"max_capability_definitions":128,"max_capability_allocations":2048,"max_rules":128,"max_memory_records":64,"max_relations":65536,"max_candidates":32768},
+                    "templates": [
+                      {"id":"brute-85597320","name":"Brute","stats":{"health":7,"damage":2,"defense":2,"movement":3,"vertical_movement":2,"range":1,"range_arc":1,"vision":2,"vision_arc":1}},
+                      {"id":"striker-0d7b6999","name":"Striker","stats":{"health":2,"damage":6,"defense":0,"movement":3,"vertical_movement":2,"range":2,"range_arc":1,"vision":3,"vision_arc":1}},
+                      {"id":"sniper-d065c02a","name":"Sniper","stats":{"health":2,"damage":2,"defense":0,"movement":2,"vertical_movement":2,"range":6,"range_arc":1,"vision":4,"vision_arc":1}},
+                      {"id":"artillery-27c01722","name":"Artillery","stats":{"health":3,"damage":6,"defense":0,"movement":0,"vertical_movement":0,"range":5,"range_arc":2,"vision":2,"vision_arc":1}},
+                      {"id":"scout-d3503dfa","name":"Scout","stats":{"health":2,"damage":0,"defense":0,"movement":4,"vertical_movement":3,"range":0,"range_arc":0,"vision":7,"vision_arc":2}}
+                    ],
+                    "start_profiles": [
+                      {"id":"standard-3v3","learner_units":3,"opponent_units":3,"separation":"legacy-mirrored"},
+                      {"id":"conversion-3v1-near","learner_units":3,"opponent_units":1,"separation":"near"},
+                      {"id":"conversion-3v1-medium","learner_units":3,"opponent_units":1,"separation":"medium"},
+                      {"id":"conversion-3v1-far","learner_units":3,"opponent_units":1,"separation":"far"},
+                      {"id":"conversion-2v1-near","learner_units":2,"opponent_units":1,"separation":"near"},
+                      {"id":"conversion-2v1-medium","learner_units":2,"opponent_units":1,"separation":"medium"},
+                      {"id":"conversion-2v1-far","learner_units":2,"opponent_units":1,"separation":"far"},
+                      {"id":"conversion-1v1-near","learner_units":1,"opponent_units":1,"separation":"near"},
+                      {"id":"conversion-1v1-medium","learner_units":1,"opponent_units":1,"separation":"medium"},
+                      {"id":"conversion-1v1-far","learner_units":1,"opponent_units":1,"separation":"far"}
+                    ],
+                    "start_distribution": [
+                      {"profile_id":"standard-3v3","basis_points":7000},
+                      {"profile_id":"conversion-3v1-near","basis_points":500},
+                      {"profile_id":"conversion-3v1-medium","basis_points":0},
+                      {"profile_id":"conversion-3v1-far","basis_points":500},
+                      {"profile_id":"conversion-2v1-near","basis_points":500},
+                      {"profile_id":"conversion-2v1-medium","basis_points":0},
+                      {"profile_id":"conversion-2v1-far","basis_points":500},
+                      {"profile_id":"conversion-1v1-near","basis_points":500},
+                      {"profile_id":"conversion-1v1-medium","basis_points":0},
+                      {"profile_id":"conversion-1v1-far","basis_points":500}
+                    ]
+                  }
+                }
+                """)!;
         }
 
         private static int[] CapacityValues(TacticalV3CapacityProfile capacity) => new[]
