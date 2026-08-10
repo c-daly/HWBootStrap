@@ -107,7 +107,11 @@ namespace HexWars.Engine.Rl
 
     public interface IActionResolver
     {
-        Command Resolve(TacticalV3DecisionFrame frame, int candidateId, GameState currentState);
+        Command Resolve(
+            TacticalV3DecisionFrame frame,
+            long decisionId,
+            int candidateId,
+            GameState currentState);
     }
 
     public sealed class TacticalV3DecisionFrame
@@ -185,9 +189,10 @@ namespace HexWars.Engine.Rl
             }
             else if (command is AttackUnit attack)
             {
+                Unit attacker = FindLivingUnit(state.Player(seat), attack.AttackerId);
                 Unit victim = FindLivingUnit(state.Opponent(seat), attack.TargetId);
                 target = references.Unit(attack.TargetId);
-                sourceCell = references.Cell(victim.Cell);
+                sourceCell = references.Cell(attacker.Cell);
                 int afterHp = FindUnitOrZero(after.Opponent(seat), attack.TargetId);
                 targetHpDelta = afterHp - victim.CurrentHp;
                 damage = victim.CurrentHp - afterHp;
@@ -347,13 +352,15 @@ namespace HexWars.Engine.Rl
             {
                 int byActor = references.Unit(leftMove.UnitId).Row.CompareTo(
                     references.Unit(rightMove.UnitId).Row);
-                return byActor != 0 ? byActor : CompareCell(leftMove.Dest, rightMove.Dest);
+                return byActor != 0 ? byActor : references.Cell(leftMove.Dest).Row.CompareTo(
+                    references.Cell(rightMove.Dest).Row);
             }
             if (left is DeployUnit leftDeploy && right is DeployUnit rightDeploy)
             {
                 int byTemplate = references.Template(leftDeploy.TemplateIndex).Row.CompareTo(
                     references.Template(rightDeploy.TemplateIndex).Row);
-                return byTemplate != 0 ? byTemplate : CompareCell(leftDeploy.Cell, rightDeploy.Cell);
+                return byTemplate != 0 ? byTemplate : references.Cell(leftDeploy.Cell).Row.CompareTo(
+                    references.Cell(rightDeploy.Cell).Row);
             }
             return 0;
         }
@@ -368,16 +375,15 @@ namespace HexWars.Engine.Rl
                 "tactical-v3 does not support legal command type " + command.GetType().Name);
         }
 
-        private static int CompareCell(HexCoord left, HexCoord right)
-        {
-            int byQ = left.Q.CompareTo(right.Q);
-            return byQ != 0 ? byQ : left.R.CompareTo(right.R);
-        }
     }
 
     public sealed class TacticalV3ActionResolver : IActionResolver
     {
-        public Command Resolve(TacticalV3DecisionFrame frame, int candidateId, GameState currentState)
+        public Command Resolve(
+            TacticalV3DecisionFrame frame,
+            long decisionId,
+            int candidateId,
+            GameState currentState)
         {
             if (frame == null) throw new ArgumentNullException(nameof(frame));
             if (currentState == null) throw new ArgumentNullException(nameof(currentState));
@@ -385,6 +391,8 @@ namespace HexWars.Engine.Rl
                 throw new InvalidOperationException("tactical-v3 candidate frame is stale");
             if (candidateId < 0 || candidateId >= frame.Candidates.Count)
                 throw new ArgumentOutOfRangeException(nameof(candidateId));
+            if (decisionId != frame.DecisionId)
+                throw new InvalidOperationException("tactical-v3 decision id is stale");
 
             TacticalV3Candidate candidate = frame.Candidates[candidateId];
             if (candidate.CandidateId != candidateId || candidate.DecisionId != frame.DecisionId)
@@ -394,15 +402,6 @@ namespace HexWars.Engine.Rl
             if (!LegalMoves.For(currentState).Contains(command))
                 throw new InvalidOperationException("tactical-v3 candidate no longer round-trips");
             return command;
-        }
-
-        public Command Resolve(
-            TacticalV3DecisionFrame frame, long decisionId, int candidateId, GameState currentState)
-        {
-            if (frame == null) throw new ArgumentNullException(nameof(frame));
-            if (decisionId != frame.DecisionId)
-                throw new InvalidOperationException("tactical-v3 decision id is stale");
-            return Resolve(frame, candidateId, currentState);
         }
     }
 

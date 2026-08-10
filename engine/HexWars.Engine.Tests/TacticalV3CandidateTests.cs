@@ -22,9 +22,11 @@ namespace HexWars.Engine.Tests
             Assert.That(frame.Candidates.Select(candidate => candidate.DecisionId), Is.All.EqualTo(7));
             Assert.That(frame.Candidates.Select(candidate => candidate.Kind), Is.Ordered);
 
-            var resolved = new HashSet<Command>(frame.Candidates.Select(candidate =>
-                f.Resolver.Resolve(frame, candidate.CandidateId, f.State)));
-            Assert.That(resolved.SetEquals(LegalMoves.For(f.State)), Is.True);
+            Command[] resolved = frame.Candidates.Select(candidate =>
+                f.Resolver.Resolve(frame, frame.DecisionId, candidate.CandidateId, f.State)).ToArray();
+            Command[] expected = ExpectedCommands(f.State);
+            Assert.That(resolved, Is.EqualTo(expected));
+            Assert.That(resolved.Length, Is.EqualTo(expected.Length));
         }
 
         [Test]
@@ -55,7 +57,7 @@ namespace HexWars.Engine.Tests
                 new EndTurn(f.State.ActivePlayer)).NewState;
 
             Assert.Throws<InvalidOperationException>(() =>
-                f.Resolver.Resolve(frame, 0, changed));
+                f.Resolver.Resolve(frame, frame.DecisionId, 0, changed));
         }
 
         [Test]
@@ -65,9 +67,10 @@ namespace HexWars.Engine.Tests
             TacticalV3DecisionFrame frame = f.Candidates.CreateFrame(
                 f.State, f.State.ActivePlayer, EmptyObservationMemory.Instance, 7);
 
-            Assert.Throws<ArgumentOutOfRangeException>(() => f.Resolver.Resolve(frame, -1, f.State));
             Assert.Throws<ArgumentOutOfRangeException>(() =>
-                f.Resolver.Resolve(frame, frame.Candidates.Count, f.State));
+                f.Resolver.Resolve(frame, frame.DecisionId, -1, f.State));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                f.Resolver.Resolve(frame, frame.DecisionId, frame.Candidates.Count, f.State));
         }
 
         [Test]
@@ -102,6 +105,8 @@ namespace HexWars.Engine.Tests
 
             Assert.Multiple(() =>
             {
+                Assert.That(delta.SourceCell, Is.EqualTo(
+                    new TacticalV3TokenRef(TacticalV3TableKind.Cells, 0)));
                 Assert.That(delta.TargetHpDelta, Is.EqualTo(-3));
                 Assert.That(delta.Damage, Is.EqualTo(3));
                 Assert.That(delta.IsLethal, Is.True);
@@ -168,9 +173,133 @@ namespace HexWars.Engine.Tests
             TacticalV3DecisionFrame frame = f.Candidates.CreateFrame(
                 f.State, f.State.ActivePlayer, EmptyObservationMemory.Instance, 7);
 
+            IActionResolver resolver = f.Resolver;
             Assert.Throws<InvalidOperationException>(() =>
-                new TacticalV3ActionResolver().Resolve(frame, 8, 0, f.State));
+                resolver.Resolve(frame, 8, 0, f.State));
         }
+
+        [Test]
+        public void CreateFrame_OrdersWithinKindsByDecisionLocalRows()
+        {
+            GameState state = OrderingState();
+            var source = new TacticalV3LegalCandidateSource(
+                new FixedObservationSource(Observation(6, 4, 2)),
+                TacticalV3Fixtures.ExperimentalCapacity());
+            TacticalV3DecisionFrame frame = source.CreateFrame(
+                state, PlayerId.Player0, EmptyObservationMemory.Instance, 11);
+
+            Command[] resolved = frame.Candidates.Select(candidate =>
+                new TacticalV3ActionResolver().Resolve(
+                    frame, frame.DecisionId, candidate.CandidateId, state)).ToArray();
+
+            Assert.That(resolved, Is.EqualTo(ExpectedCommands(state)));
+            Assert.That(frame.Candidates.Where(candidate => candidate.Kind == TacticalV3CandidateKind.Move)
+                .Select(candidate => candidate.Actor!.Value.Row + ":" + candidate.Cell!.Value.Row),
+                Is.EqualTo(new[] { "0:0", "1:3" }));
+            Assert.That(frame.Candidates.Where(candidate => candidate.Kind == TacticalV3CandidateKind.Deploy)
+                .Select(candidate => candidate.Template!.Value.Row + ":" + candidate.Cell!.Value.Row),
+                Is.EqualTo(new[] { "0:0", "0:3", "1:0", "1:3" }));
+        }
+
+        [Test]
+        public void CandidateSurface_ExposesOnlyDecisionLocalReferencesAndFacts()
+        {
+            string[] forbiddenNames =
+            {
+                "EngineId", "UnitId", "Name", "DisplayName",
+            };
+            Type[] surfaceTypes =
+            {
+                typeof(TacticalV3Candidate),
+                typeof(TacticalV3ProjectedDelta),
+            };
+
+            foreach (Type surfaceType in surfaceTypes)
+            foreach (System.Reflection.PropertyInfo property in surfaceType.GetProperties())
+            {
+                Type propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+                Assert.That(forbiddenNames, Does.Not.Contain(property.Name), surfaceType.Name + "." + property.Name);
+                Assert.That(propertyType, Is.Not.EqualTo(typeof(Command)), surfaceType.Name + "." + property.Name);
+                Assert.That(propertyType, Is.Not.EqualTo(typeof(PlayerId)), surfaceType.Name + "." + property.Name);
+            }
+        }
+
+        private static Command[] ExpectedCommands(GameState state)
+        {
+            var unitRows = new Dictionary<int, int>();
+            int unitRow = 0;
+            foreach (Unit unit in state.Player(PlayerId.Player0).UnitsOnBoard
+                .Where(unit => unit.IsAlive).OrderBy(unit => unit.Id))
+                unitRows.Add(unit.Id, unitRow++);
+            foreach (Unit unit in state.Player(PlayerId.Player1).UnitsOnBoard
+                .Where(unit => unit.IsAlive).OrderBy(unit => unit.Id))
+                unitRows.Add(unit.Id, unitRow++);
+
+            var cellRows = new Dictionary<HexCoord, int>();
+            int cellRow = 0;
+            foreach (Tile tile in state.Board.Tiles)
+                cellRows.Add(tile.Coord, cellRow++);
+
+            return LegalMoves.For(state)
+                .OrderBy(CommandKind)
+                .ThenBy(command => PrimaryRow(command, unitRows))
+                .ThenBy(command => SecondaryRow(command, unitRows, cellRows))
+                .ToArray();
+        }
+
+        private static int CommandKind(Command command) =>
+            command is AttackUnit ? 0 :
+            command is MoveUnit ? 1 :
+            command is DeployUnit ? 2 :
+            command is EndTurn ? 3 :
+            throw new AssertionException("unexpected legal command " + command.GetType().Name);
+
+        private static int PrimaryRow(Command command, IReadOnlyDictionary<int, int> unitRows) =>
+            command is AttackUnit attack ? unitRows[attack.AttackerId] :
+            command is MoveUnit move ? unitRows[move.UnitId] :
+            command is DeployUnit deploy ? deploy.TemplateIndex : -1;
+
+        private static int SecondaryRow(
+            Command command,
+            IReadOnlyDictionary<int, int> unitRows,
+            IReadOnlyDictionary<HexCoord, int> cellRows) =>
+            command is AttackUnit attack ? unitRows[attack.TargetId] :
+            command is MoveUnit move ? cellRows[move.Dest] :
+            command is DeployUnit deploy ? cellRows[deploy.Cell] : -1;
+
+        private static GameState OrderingState()
+        {
+            var board = new Board(new[]
+            {
+                new Tile(new HexCoord(3, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(1, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(5, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(0, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(4, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(2, 0), 0, TerrainType.Plains),
+            }, zone0: new[] { new HexCoord(0, 0), new HexCoord(3, 0) });
+            UnitStats stats = TestStates.Stats(health: 2, damage: 1, movement: 1, range: 5, vision: 5);
+            return new GameState(board, GameConfig.Default(captureCost: int.MaxValue), new[]
+            {
+                new PlayerState(PlayerId.Player0, 20,
+                    barracks: new[]
+                    {
+                        new UnitTemplate("", TestStates.Cost(3)),
+                        new UnitTemplate("", TestStates.Cost(4)),
+                    },
+                    unitsOnBoard: new[]
+                    {
+                        new Unit(20, PlayerId.Player0, stats, new HexCoord(1, 0), 0),
+                        new Unit(10, PlayerId.Player0, stats, new HexCoord(2, 0), 0),
+                    }),
+                new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[]
+                {
+                    new Unit(50, PlayerId.Player1, TestStates.Stats(health: 3), new HexCoord(5, 0), 0),
+                    new Unit(40, PlayerId.Player1, TestStates.Stats(health: 3), new HexCoord(4, 0), 0),
+                }),
+            }, PlayerId.Player0, 1, 51);
+        }
+
 
         private static TacticalV3Observation Observation(int cells, int units, int templates)
         {
