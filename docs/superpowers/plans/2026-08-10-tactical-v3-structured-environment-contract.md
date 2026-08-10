@@ -187,7 +187,7 @@ public void CapabilityCatalog_IsStableAndContainsNoRosterIdentity()
 Run:
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3SchemaTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3SchemaTests" --no-restore
 ```
 
 Expected: compilation fails because tactical-v3 schema/config types do not exist.
@@ -300,7 +300,7 @@ public void Observe_RepresentsMechanicsNotRosterNamesOrEngineIds()
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ObservationTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ObservationTests" --no-restore
 ```
 
 Expected: compilation fails because the observation source and token aggregates do not exist.
@@ -324,7 +324,7 @@ Engine IDs may be used only in private dictionaries while constructing reference
 - [ ] **Step 4: Run focused tests, existing board determinism, and compile check**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ObservationTests|FullyQualifiedName~BoardGenerationTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ObservationTests|FullyQualifiedName~BoardGenerationTests" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`; expected: no errors.
@@ -414,7 +414,7 @@ public void Resolver_RejectsStaleFrameInsteadOfEndingTurn()
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3CandidateTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3CandidateTests" --no-restore
 ```
 
 Expected: compilation fails because the candidate interfaces and implementations do not exist.
@@ -439,7 +439,7 @@ return command;
 - [ ] **Step 4: Run focused tests, engine legality tests, and compile check**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3CandidateTests|FullyQualifiedName~LegalMovesTests|FullyQualifiedName~CombatResolverTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3CandidateTests|FullyQualifiedName~LegalMovesTests|FullyQualifiedName~CombatResolverTests" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`.
@@ -505,7 +505,7 @@ public void TerminalBase_UsesWinVersusNonWinOrdering(
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3RewardTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3RewardTests" --no-restore
 ```
 
 Expected: compilation fails because the reward contract does not exist.
@@ -620,7 +620,7 @@ public void InvalidCandidate_DoesNotBecomeEndTurnOrMutateState()
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3DuelEnvTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3DuelEnvTests" --no-restore
 ```
 
 Expected: compilation fails because tactical-v3 environments do not exist.
@@ -643,7 +643,7 @@ An invalid internal scripted command may use an explicitly logged recovery `EndT
 - [ ] **Step 4: Run focused, replay, and determinism tests**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3DuelEnvTests|FullyQualifiedName~TacticalV2DuelEnvTests|FullyQualifiedName~ReplayTests|FullyQualifiedName~ReplayFileTests|FullyQualifiedName~BoardGenerationTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3DuelEnvTests|FullyQualifiedName~TacticalV2DuelEnvTests|FullyQualifiedName~ReplayTests|FullyQualifiedName~ReplayFileTests|FullyQualifiedName~BoardGenerationTests" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`.
@@ -709,7 +709,7 @@ public void CheckedInScenario_BuildsStageOneStructuredConfig()
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ScenarioTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ScenarioTests" --no-restore
 ```
 
 Expected: parser rejects unknown `tactical-v3` environment/fields.
@@ -758,7 +758,7 @@ private TacticalV2Config BuildTacticalMatch(
 `BuildTacticalV2()` calls it with the existing tactical-v2 reward values. `BuildTacticalV3()` calls it with the tactical-v3 points weight and zeros for the four legacy tactical-v2 shaping fields, then wraps the result in `TacticalV3Config`. This avoids calling the public `BuildTacticalV2()` environment guard and prevents old reward shaping from leaking into tactical-v3.
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ScenarioTests|FullyQualifiedName~TrainingScenarioTests|FullyQualifiedName~AdaptiveDuelEnvTests.GymServer_" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ScenarioTests|FullyQualifiedName~TrainingScenarioTests|FullyQualifiedName~AdaptiveDuelEnvTests.GymServer_" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`.
@@ -829,7 +829,7 @@ public void BoardSizeChangesMatchButNotEncodingIdentity()
 - [ ] **Step 2: Run tests and capture RED**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ContractTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ContractTests" --no-restore
 ```
 
 Expected: compilation fails because `TacticalV3Contract` does not exist.
@@ -849,7 +849,7 @@ capacity_hash = nine capacity integers only
 - [ ] **Step 4: Run focused and existing contract tests; compile check**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3ContractTests|FullyQualifiedName~MlContractTests|FullyQualifiedName~AdaptiveContractTests" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3ContractTests|FullyQualifiedName~MlContractTests|FullyQualifiedName~AdaptiveContractTests" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`.
@@ -917,7 +917,7 @@ Use reflection to call internal wire helpers as existing GymServer tests do. Ass
 
 ```powershell
 dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj --no-restore
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3GymServerTests.Wire" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3GymServerTests.Wire" --no-restore
 ```
 
 Expected: test fails because `TacticalV3Wire` is missing.
@@ -993,7 +993,7 @@ public void Process_StructuredStepRequiresCurrentDecisionIdentity()
 
 ```powershell
 dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj --no-restore
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3GymServerTests.Process" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3GymServerTests.Process" --no-restore
 ```
 
 Expected: GymServer exits with unsupported environment `tactical-v3`.
@@ -1018,7 +1018,7 @@ Route tactical-v3 before the existing tactical-v2 final `else` branches so null-
 
 ```powershell
 dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj --no-restore
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3GymServerTests|FullyQualifiedName~AdaptiveDuelEnvTests.GymServer_|FullyQualifiedName~TacticalV2DaggerTests.GymServer_" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3GymServerTests|FullyQualifiedName~AdaptiveDuelEnvTests.GymServer_|FullyQualifiedName~TacticalV2DaggerTests.GymServer_" --no-restore
 ```
 
 Then run Coplay `check_compile_errors`.
@@ -1063,7 +1063,7 @@ Add tests that do not reuse production comparison helpers to establish:
 
 ```powershell
 dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj --no-restore
-dotnet test physical-checkpoint-audit.slnx --filter "FullyQualifiedName~TacticalV3" --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter "FullyQualifiedName~TacticalV3" --no-restore
 ```
 
 Expected: all tactical-v3 tests pass with zero failures.
@@ -1071,7 +1071,7 @@ Expected: all tactical-v3 tests pass with zero failures.
 - [ ] **Step 3: Run full engine/GymServer regression and determinism-sensitive tests**
 
 ```powershell
-dotnet test physical-checkpoint-audit.slnx --no-restore
+dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --no-restore
 ```
 
 Expected: all tests pass. Do not substitute a filtered suite for this command.
