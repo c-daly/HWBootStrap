@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 
@@ -94,6 +95,20 @@ namespace HexWars.Engine.Tests
                 ExperimentalCapacity(),
 
                 new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
+
+        public static TacticalV3DuelEnv Env(TacticalV3Config? config = null) =>
+            new TacticalV3DuelEnv(config ?? Config());
+
+        public static TacticalV3Config ProfiledConfig(string selectedProfileId = "standard-3v3")
+        {
+            TacticalV2Config match = Match();
+            match.PlacementPolicy = "profiled-seeded-v1";
+            match.StartProfiles = TacticalV2StartCatalog.ProfiledSeededV1();
+            match.StartDistribution = new TacticalV2StartDistribution(match.StartProfiles.Select(profile =>
+                new TacticalV2StartWeight(profile.Id, profile.Id == selectedProfileId ? 10000 : 0)));
+            return new TacticalV3Config(match, ExperimentalCapacity(),
+                new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
+        }
 
         public static TacticalV3Fixture Standard(int seed)
         {
