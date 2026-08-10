@@ -6,14 +6,19 @@ namespace HexWars.Engine.Tests
 {
     internal sealed class TacticalV3Fixture
     {
-        public TacticalV3Fixture(GameState state, TacticalV3SeatObservationSource source)
+        public TacticalV3Fixture(GameState state, TacticalV3SeatObservationSource source,
+            ILegalCandidateSource candidates, IActionResolver resolver)
         {
             State = state;
             Source = source;
+            Candidates = candidates;
+            Resolver = resolver;
         }
 
         public GameState State { get; }
         public TacticalV3SeatObservationSource Source { get; }
+        public ILegalCandidateSource Candidates { get; }
+        public IActionResolver Resolver { get; }
 
         public static TacticalV3Fixture Standard(int seed) => TacticalV3Fixtures.Standard(seed);
     }
@@ -94,8 +99,11 @@ namespace HexWars.Engine.Tests
         {
             TacticalV3Config config = Config();
             TacticalV2Layout layout = new TacticalV2Layout(config.Match);
-            return new TacticalV3Fixture(layout.NewGame(seed).State,
-                new TacticalV3SeatObservationSource(config));
+            TacticalV3SeatObservationSource source = new TacticalV3SeatObservationSource(config);
+            var projector = new TacticalV3CandidateProjector();
+            return new TacticalV3Fixture(layout.NewGame(seed).State, source,
+                new TacticalV3LegalCandidateSource(source, projector, config.Capacity),
+                new TacticalV3ActionResolver());
         }
     }
 }
