@@ -314,18 +314,43 @@ namespace HexWars.Engine.Tests
         }
 
 
-        [TestCase("max_relations", 851)]
-        [TestCase("max_candidates", 495)]
-        public void TacticalV3Scenario_RejectsStaticallyUndersizedRelationalCapacity(
+        [Test]
+        public void TacticalV3Scenario_AcceptsExactStructuralCapacityForSixUnits()
+        {
+            // 616 adjacency + 6 occupancy + 9*(6 unit + 10 template rows) = 766 relations.
+            // 1 end + 5*27 deploy + 6*117 move + 6*5 ordered attack = 868 candidates.
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
+            JsonObject capacity = (JsonObject)tacticalV3["capacity"]!;
+            capacity["max_units"] = 6;
+            capacity["max_relations"] = 766;
+            capacity["max_candidates"] = 868;
+
+            Assert.That(LoadTemporary(scenario.ToJsonString()).BuildTacticalV3().Validate(), Is.Empty);
+        }
+
+        [TestCase("max_relations", 1345)]
+        [TestCase("max_candidates", 11655)]
+        public void TacticalV3Scenario_RejectsOneBelowCheckedInStructuralCapacity(
             string field, int value)
         {
-            // Conservative relation bound: 6*117 cells + 6 units + 9*(6 units + 10 template rows) = 852.
-            // Conservative candidate bound: 5*27 deploys + 3*117 moves + 3*3 attacks + end = 496.
             JsonObject scenario = ValidTacticalV3Json();
             JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
             ((JsonObject)tacticalV3["capacity"]!)[field] = value;
 
             AssertRejected(scenario);
+        }
+
+        [TestCase("max_relations", 1346)]
+        [TestCase("max_candidates", 11656)]
+        public void TacticalV3Scenario_AcceptsExactCheckedInStructuralCapacity(
+            string field, int value)
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonObject tacticalV3 = (JsonObject)scenario["tactical_v3"]!;
+            ((JsonObject)tacticalV3["capacity"]!)[field] = value;
+
+            Assert.That(LoadTemporary(scenario.ToJsonString()).BuildTacticalV3().Validate(), Is.Empty);
         }
 
 

@@ -70,16 +70,19 @@ namespace HexWars.Engine.Tests
         }
 
         public static TacticalV3CapacityProfile ExperimentalCapacity(
-            int? maxCells = null, int? maxCandidates = null) =>
+            int? maxCells = null,
+            int? maxUnits = null,
+            int? maxRelations = null,
+            int? maxCandidates = null) =>
             new TacticalV3CapacityProfile(
                 maxCells ?? 512,
-                maxUnits: 64,
+                maxUnits: maxUnits ?? 64,
                 maxTemplates: 32,
                 maxCapabilityDefinitions: 128,
                 maxCapabilityAllocations: 2048,
                 maxRules: 128,
                 maxMemoryRecords: 64,
-                maxRelations: 65536,
+                maxRelations: maxRelations ?? 65536,
                 maxCandidates: maxCandidates ?? 32768);
 
         public static TacticalV2Config Match(int width = 13, int height = 9)
@@ -95,6 +98,56 @@ namespace HexWars.Engine.Tests
                 ExperimentalCapacity(),
 
                 new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
+
+        public static TacticalV3Config CapacityBoundConfig()
+        {
+            TacticalV3Config source = Config();
+            return new TacticalV3Config(
+                source.Match,
+                ExperimentalCapacity(maxUnits: 64, maxRelations: 1346, maxCandidates: 11656),
+                source.Reward);
+        }
+
+        public static GameState DenseCapacityState(
+            TacticalV3Config config, int totalUnits = 64, int seed = 31)
+        {
+            TacticalV2Start start = new TacticalV2Layout(config.Match).NewGame(seed);
+            var learnerZone = new HashSet<HexCoord>(
+                start.State.Board.DeploymentZone(PlayerId.Player0));
+            HexCoord[] cells = start.State.Board.Tiles
+                .Select(tile => tile.Coord)
+                .OrderBy(cell => learnerZone.Contains(cell) ? 1 : 0)
+                .ThenBy(cell => cell.Q)
+                .ThenBy(cell => cell.R)
+                .Take(totalUnits)
+                .ToArray();
+            UnitTemplate[] templates = config.Match.Templates
+                .Select(template => template.Template)
+                .ToArray();
+            UnitStats stats = TestStates.Stats(
+                health: 2, damage: 1, movement: 20, verticalMovement: 20,
+                range: 20, rangeArc: 20, vision: 20, visionArc: 20);
+            int learnerUnits = totalUnits / 2;
+            Unit[] player0Units = Enumerable.Range(0, learnerUnits)
+                .Select(index => new Unit(
+                    index + 1, PlayerId.Player0, stats, cells[index],
+                    start.State.Board.TileAt(cells[index]).Elevation))
+                .ToArray();
+            Unit[] player1Units = Enumerable.Range(learnerUnits, totalUnits - learnerUnits)
+                .Select(index => new Unit(
+                    index + 1, PlayerId.Player1, stats, cells[index],
+                    start.State.Board.TileAt(cells[index]).Elevation))
+                .ToArray();
+            var players = new[]
+            {
+                new PlayerState(PlayerId.Player0, 1000, templates, player0Units),
+                new PlayerState(PlayerId.Player1, 1000, templates, player1Units),
+            };
+            return new GameState(
+                start.State.Board, config.Match.Game, players,
+                PlayerId.Player0, round: 1, nextEntityId: totalUnits + 1);
+        }
+
 
         public static TacticalV3DuelEnv Env(TacticalV3Config? config = null) =>
             new TacticalV3DuelEnv(config ?? Config());

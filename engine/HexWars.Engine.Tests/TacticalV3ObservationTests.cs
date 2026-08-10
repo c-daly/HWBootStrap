@@ -154,6 +154,54 @@ namespace HexWars.Engine.Tests
                 Is.EqualTo(9 * (observation.Units.Count + observation.Templates.Count)));
         }
 
+        [Test]
+        public void Observe_RelationsStayWithinIndependentBoundAcrossProfilesSeedsAndDenseCapacity()
+        {
+            var cases = new[]
+            {
+                (Profile: "standard-3v3", Seed: 17),
+                (Profile: "conversion-1v1-near", Seed: 6_000_005),
+                (Profile: "conversion-1v1-medium", Seed: 6_000_005),
+                (Profile: "conversion-1v1-far", Seed: 6_000_005),
+                (Profile: "conversion-2v1-far", Seed: 6_000_005),
+            };
+            foreach ((string profileId, int seed) in cases)
+            {
+                TacticalV3Config config = TacticalV3Fixtures.ProfiledConfig(profileId);
+                TacticalV2StartProfile profile = config.Match.StartProfiles.Single(
+                    item => item.Id == profileId);
+                GameState state = new TacticalV2Layout(config.Match)
+                    .NewGame(seed, profile, PlayerId.Player0).State;
+                TacticalV3Observation observation = new TacticalV3SeatObservationSource(config)
+                    .Observe(state, PlayerId.Player0, EmptyObservationMemory.Instance);
+
+                Assert.That(observation.Relations.Count(
+                    relation => relation.Kind == TacticalV3RelationKind.Neighbor),
+                    Is.EqualTo(616), profileId);
+                Assert.That(observation.Relations.Count, Is.LessThanOrEqualTo(1346), profileId);
+            }
+
+            TacticalV3Config denseConfig = TacticalV3Fixtures.CapacityBoundConfig();
+            var denseSource = new TacticalV3SeatObservationSource(denseConfig);
+            TacticalV3Observation dense = denseSource.Observe(
+                TacticalV3Fixtures.DenseCapacityState(denseConfig),
+                PlayerId.Player0, EmptyObservationMemory.Instance);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(dense.Units, Has.Count.EqualTo(64));
+                Assert.That(dense.Templates, Has.Count.EqualTo(10));
+                Assert.That(dense.CapabilityAllocations, Has.Count.EqualTo(666));
+                Assert.That(dense.Relations.Count(
+                    relation => relation.Kind == TacticalV3RelationKind.Neighbor),
+                    Is.EqualTo(616));
+                Assert.That(dense.Relations, Has.Count.EqualTo(1346));
+            });
+            Assert.Throws<InvalidOperationException>(() => denseSource.Observe(
+                TacticalV3Fixtures.DenseCapacityState(denseConfig, totalUnits: 65),
+                PlayerId.Player0, EmptyObservationMemory.Instance));
+        }
+
         private static string AuthoritativeStateFingerprint(GameState state)
         {
             string tiles = string.Join(";", state.Board.Tiles.OrderBy(tile => tile.Coord.Q).ThenBy(tile => tile.Coord.R)

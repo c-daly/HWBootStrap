@@ -457,9 +457,6 @@ namespace HexWars.Engine.Rl
 
             long cellCount;
             long maximumTotalUnits = checked((long)tacticalV3.StartingUnitCount * 2);
-            long maximumSeatUnits = tacticalV3.StartingUnitCount;
-            long maximumAttackPairs = checked(
-                (long)tacticalV3.StartingUnitCount * tacticalV3.StartingUnitCount);
             if (tacticalV3.PlacementPolicy == "profiled-seeded-v1" &&
                 tacticalV3.StartProfiles != null)
             {
@@ -468,10 +465,6 @@ namespace HexWars.Engine.Rl
                     if (profile == null) continue;
                     long total = checked((long)profile.LearnerUnitCount + profile.OpponentUnitCount);
                     maximumTotalUnits = Math.Max(maximumTotalUnits, total);
-                    maximumSeatUnits = Math.Max(maximumSeatUnits,
-                        Math.Max((long)profile.LearnerUnitCount, profile.OpponentUnitCount));
-                    maximumAttackPairs = Math.Max(maximumAttackPairs,
-                        checked((long)profile.LearnerUnitCount * profile.OpponentUnitCount));
                 }
             }
 
@@ -479,27 +472,38 @@ namespace HexWars.Engine.Rl
             long templateRows;
             long allocations;
             long minimumRelations;
-            long minimumCandidates;
+            long candidateCapacityRequirement;
             try
             {
-                cellCount = checked((long)(Board == null ? 0 : Board.Width) *
-                    (Board == null ? 0 : Board.Height));
+                long width = Math.Max(0L, Board == null ? 0L : Board.Width);
+                long height = Math.Max(0L, Board == null ? 0L : Board.Height);
+                long declaredUnitCapacity = Math.Max(0L, capacity.MaxUnits);
+                cellCount = checked(width * height);
                 templateRows = checked(templateCount * 2);
                 int definitions = TacticalV3Capabilities.All.Count;
-                allocations = checked((maximumTotalUnits + templateRows) * definitions);
+                allocations = checked((declaredUnitCapacity + templateRows) * definitions);
 
-                // Relations contain at most six directed neighbors per cell, one occupancy per unit,
-                // and one has-capability edge per capability allocation.
-                minimumRelations = checked(checked(6L * cellCount) + maximumTotalUnits + allocations);
+                // An even-q width-by-height rectangle has height-1 vertical edges per column and
+                // 2*height-1 edges across each adjacent column pair. Relations store both directions.
+                long directedAdjacency = width == 0 || height == 0 ? 0 : checked(2L * checked(
+                    checked(width * (height - 1L)) +
+                    checked((width - 1L) * checked(2L * height - 1L))));
 
-                // LegalMoves can emit deploys for every template/deployment cell, moves for every
-                // active-unit/cell pair, every cross-seat attack pair, and one end-turn.
-                long deploymentCells = checked((long)(Board == null ? 0 : Board.Height) *
-                    (Board == null ? 0 : Board.ZoneDepth));
-                minimumCandidates = checked(
+                // Every live unit contributes one occupancy and nine capability-allocation relations;
+                // both seat-relative template catalogs contribute exactly two rows per template.
+                minimumRelations = checked(directedAdjacency + declaredUnitCapacity + allocations);
+
+                // This is a safe structural upper-bound capacity requirement, not an exact LegalMoves
+                // count: one end turn, every template/deployment-cell deploy, every unit/cell move,
+                // and every ordered distinct unit pair as a possible active-seat attack.
+                long deploymentCells = checked(height *
+                    Math.Max(0L, Board == null ? 0L : Board.ZoneDepth));
+                long orderedAttackPairs = checked(
+                    declaredUnitCapacity * Math.Max(0L, declaredUnitCapacity - 1L));
+                candidateCapacityRequirement = checked(
                     checked(templateCount * deploymentCells) +
-                    checked(maximumSeatUnits * cellCount) +
-                    maximumAttackPairs + 1);
+                    checked(declaredUnitCapacity * cellCount) +
+                    orderedAttackPairs + 1L);
             }
             catch (OverflowException)
             {
@@ -523,7 +527,7 @@ namespace HexWars.Engine.Rl
                 errors.Add("tactical-v3 max memory records capacity is undersized");
             if (capacity.MaxRelations < minimumRelations)
                 errors.Add("tactical-v3 max relations capacity is undersized");
-            if (capacity.MaxCandidates < minimumCandidates)
+            if (capacity.MaxCandidates < candidateCapacityRequirement)
                 errors.Add("tactical-v3 max candidates capacity is undersized");
         }
 

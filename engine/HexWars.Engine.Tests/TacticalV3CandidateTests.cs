@@ -83,6 +83,52 @@ namespace HexWars.Engine.Tests
             Assert.Throws<InvalidOperationException>(() => source.CreateFrame(
                 f.State, f.State.ActivePlayer, EmptyObservationMemory.Instance, 7));
         }
+
+        [Test]
+        public void CreateFrame_CandidatesStayWithinIndependentUpperBoundAcrossProfilesSeedsAndUnitCapacity()
+        {
+            var cases = new[]
+            {
+                (Profile: "standard-3v3", Seed: 17),
+                (Profile: "conversion-1v1-near", Seed: 6_000_005),
+                (Profile: "conversion-1v1-medium", Seed: 6_000_005),
+                (Profile: "conversion-1v1-far", Seed: 6_000_005),
+                (Profile: "conversion-2v1-far", Seed: 6_000_005),
+            };
+            foreach ((string profileId, int seed) in cases)
+            {
+                TacticalV3Config config = TacticalV3Fixtures.ProfiledConfig(profileId);
+                TacticalV2StartProfile profile = config.Match.StartProfiles.Single(
+                    item => item.Id == profileId);
+                GameState state = new TacticalV2Layout(config.Match)
+                    .NewGame(seed, profile, PlayerId.Player0).State;
+                var observations = new TacticalV3SeatObservationSource(config);
+                var candidates = new TacticalV3LegalCandidateSource(
+                    observations, new TacticalV3CandidateProjector(), config.Capacity);
+
+                TacticalV3DecisionFrame frame = candidates.CreateFrame(
+                    state, PlayerId.Player0, EmptyObservationMemory.Instance, 1);
+                Assert.That(frame.Candidates.Count, Is.LessThanOrEqualTo(11656), profileId);
+            }
+
+            TacticalV3Config denseConfig = TacticalV3Fixtures.CapacityBoundConfig();
+            GameState denseState = TacticalV3Fixtures.DenseCapacityState(denseConfig);
+            var denseObservations = new TacticalV3SeatObservationSource(denseConfig);
+            var denseCandidates = new TacticalV3LegalCandidateSource(
+                denseObservations, new TacticalV3CandidateProjector(), denseConfig.Capacity);
+            TacticalV3DecisionFrame denseFrame = denseCandidates.CreateFrame(
+                denseState, PlayerId.Player0, EmptyObservationMemory.Instance, 2);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(denseFrame.Observation.Units, Has.Count.EqualTo(64));
+                Assert.That(denseFrame.Candidates.Count, Is.GreaterThan(496));
+                Assert.That(denseFrame.Candidates.Count, Is.LessThanOrEqualTo(11656));
+                Assert.That(denseFrame.Candidates.Any(
+                    candidate => candidate.Kind == TacticalV3CandidateKind.Deploy), Is.True);
+            });
+        }
+
         [Test]
         public void Project_AttackReportsFactualDamageLethalityAndBountyWithoutMutatingState()
         {
