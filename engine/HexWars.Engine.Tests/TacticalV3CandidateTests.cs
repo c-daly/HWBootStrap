@@ -202,27 +202,99 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void CandidateSurface_ExposesOnlyDecisionLocalReferencesAndFacts()
+        public void CandidateSurface_ExposesOnlyApprovedDecisionLocalFacts()
+        {
+            AssertPublicSurface(typeof(TacticalV3Candidate), CandidatePropertyContract());
+            AssertPublicSurface(typeof(TacticalV3ProjectedDelta), ProjectedDeltaPropertyContract());
+        }
+
+        [Test]
+        public void PublicSurfaceGuard_RejectsCommandSubtypesAndUnexpectedProperties()
+        {
+            Assert.That(LegacySurfaceGuardAccepts(typeof(LeakyCandidateSurface)), Is.True);
+            Assert.Throws<AssertionException>(() =>
+                AssertPublicSurface(typeof(LeakyCandidateSurface), CandidatePropertyContract()));
+        }
+
+        private static IReadOnlyDictionary<string, Type> CandidatePropertyContract() =>
+            new Dictionary<string, Type>
+            {
+                ["CandidateId"] = typeof(int),
+                ["DecisionId"] = typeof(long),
+                ["Kind"] = typeof(TacticalV3CandidateKind),
+                ["Actor"] = typeof(TacticalV3TokenRef?),
+                ["Target"] = typeof(TacticalV3TokenRef?),
+                ["Template"] = typeof(TacticalV3TokenRef?),
+                ["Cell"] = typeof(TacticalV3TokenRef?),
+                ["Projection"] = typeof(TacticalV3ProjectedDelta),
+            };
+
+        private static IReadOnlyDictionary<string, Type> ProjectedDeltaPropertyContract() =>
+            new Dictionary<string, Type>
+            {
+                ["SourceCell"] = typeof(TacticalV3TokenRef?),
+                ["DestinationCell"] = typeof(TacticalV3TokenRef?),
+                ["Template"] = typeof(TacticalV3TokenRef?),
+                ["Target"] = typeof(TacticalV3TokenRef?),
+                ["HorizontalMovementSpent"] = typeof(int),
+                ["VerticalMovementSpent"] = typeof(int),
+                ["TargetHpDelta"] = typeof(int),
+                ["Damage"] = typeof(int),
+                ["IsLethal"] = typeof(bool),
+                ["BountyDelta"] = typeof(int),
+                ["PointsDelta"] = typeof(int),
+                ["RoundDelta"] = typeof(int),
+                ["IsTerminal"] = typeof(bool),
+            };
+
+        private static void AssertPublicSurface(
+            Type surfaceType, IReadOnlyDictionary<string, Type> expectedProperties)
+        {
+            System.Reflection.PropertyInfo[] properties = surfaceType.GetProperties(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+            Assert.That(properties.Select(property => property.Name).OrderBy(name => name),
+                Is.EqualTo(expectedProperties.Keys.OrderBy(name => name)));
+
+            foreach (System.Reflection.PropertyInfo property in properties)
+            {
+                Assert.That(expectedProperties.TryGetValue(property.Name, out Type? expectedType), Is.True,
+                    surfaceType.Name + "." + property.Name);
+                Assert.That(property.PropertyType, Is.EqualTo(expectedType),
+                    surfaceType.Name + "." + property.Name);
+
+                Type unwrapped = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+                Assert.That(typeof(Command).IsAssignableFrom(unwrapped), Is.False,
+                    surfaceType.Name + "." + property.Name);
+                Assert.That(unwrapped, Is.Not.EqualTo(typeof(PlayerId)),
+                    surfaceType.Name + "." + property.Name);
+            }
+        }
+
+
+        private static bool LegacySurfaceGuardAccepts(Type surfaceType)
         {
             string[] forbiddenNames =
             {
                 "EngineId", "UnitId", "Name", "DisplayName",
             };
-            Type[] surfaceTypes =
-            {
-                typeof(TacticalV3Candidate),
-                typeof(TacticalV3ProjectedDelta),
-            };
 
-            foreach (Type surfaceType in surfaceTypes)
             foreach (System.Reflection.PropertyInfo property in surfaceType.GetProperties())
             {
                 Type propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-                Assert.That(forbiddenNames, Does.Not.Contain(property.Name), surfaceType.Name + "." + property.Name);
-                Assert.That(propertyType, Is.Not.EqualTo(typeof(Command)), surfaceType.Name + "." + property.Name);
-                Assert.That(propertyType, Is.Not.EqualTo(typeof(PlayerId)), surfaceType.Name + "." + property.Name);
+                if (forbiddenNames.Contains(property.Name) ||
+                    propertyType == typeof(Command) ||
+                    propertyType == typeof(PlayerId))
+                    return false;
             }
+            return true;
         }
+
+        private sealed class LeakyCandidateSurface
+        {
+            public AttackUnit Attack { get; } = new AttackUnit(PlayerId.Player0, 1, 2);
+            public int UnexpectedFutureProperty { get; } = 1;
+        }
+
 
         private static Command[] ExpectedCommands(GameState state)
         {
