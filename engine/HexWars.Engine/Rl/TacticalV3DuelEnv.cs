@@ -55,6 +55,28 @@ namespace HexWars.Engine.Rl
                 start, controller0, controller1, learnerSeat, referenceSeat: learnerSeat);
         }
 
+        internal TacticalV3View ResetSelectedProfile(
+            int seed,
+            IAgent? controller0,
+            IAgent? controller1,
+            PlayerId learnerSeat)
+        {
+            if (_config.Match.PlacementPolicy != "profiled-seeded-v1")
+                return Reset(seed, controller0, controller1, learnerSeat);
+
+            if (_config.Match.StartDistribution == null)
+                throw new InvalidOperationException(
+                    "profiled tactical-v3 reset requires a start distribution");
+            string profileId = _config.Match.StartDistribution.Select(seed);
+            if (!_config.Match.StartProfiles.Any(profile => profile.Id == profileId))
+                throw new InvalidOperationException(
+                    "selected start profile '" + profileId +
+                    "' is not declared by the tactical-v3 configuration");
+
+            return Reset(
+                seed, controller0, controller1, profileId, learnerSeat, learnerSeat);
+        }
+
         public TacticalV3View Reset(
             int seed,
             IAgent? controller0,

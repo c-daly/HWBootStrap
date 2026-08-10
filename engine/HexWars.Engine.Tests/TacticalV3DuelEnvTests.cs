@@ -415,6 +415,48 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void SingleLearnerEnv_ResetUsesConstructionTimeProfileSnapshotAfterCallerMutation()
+        {
+            const int seed = 6_000_005;
+            TacticalV3Config callerConfig =
+                TacticalV3Fixtures.ProfiledConfig("conversion-2v1-far");
+            var env = new TacticalV3Env(
+                _ => new EndTurnAgent(), PlayerId.Player1, callerConfig);
+            var control = new TacticalV3Env(
+                _ => new EndTurnAgent(), PlayerId.Player1,
+                TacticalV3Fixtures.ProfiledConfig("conversion-2v1-far"));
+
+            callerConfig.Match.StartProfiles = Array.AsReadOnly(new[]
+            {
+                TacticalV2StartCatalog.ProfiledSeededV1().Single(profile =>
+                    profile.Id == "conversion-1v1-near"),
+            });
+            callerConfig.Match.StartDistribution = new TacticalV2StartDistribution(new[]
+            {
+                new TacticalV2StartWeight("conversion-1v1-near", 10000),
+            });
+
+            TacticalV3View expected = control.Reset(seed);
+            TacticalV3View first = env.Reset(seed);
+            TacticalV3View second = env.Reset(seed);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(first.StartProfileId, Is.EqualTo("conversion-2v1-far"));
+                Assert.That(first.StartProfileId, Is.EqualTo(expected.StartProfileId));
+                Assert.That(first.Decision.Observation.Units.Count(unit =>
+                    unit.Owner == TacticalV3RelativeOwner.Self), Is.EqualTo(2));
+                Assert.That(first.Decision.Observation.Units.Count(unit =>
+                    unit.Owner == TacticalV3RelativeOwner.Opponent), Is.EqualTo(1));
+                Assert.That(first.Decision.Candidates.Select(CandidateKey),
+                    Is.EqualTo(expected.Decision.Candidates.Select(CandidateKey)));
+                Assert.That(second.StartProfileId, Is.EqualTo(first.StartProfileId));
+                Assert.That(second.Decision.Candidates.Select(CandidateKey),
+                    Is.EqualTo(first.Decision.Candidates.Select(CandidateKey)));
+            });
+        }
+
+        [Test]
         public void InvalidScriptedCommand_LogsOneEndTurnRecoveryAndFallbackCount()
         {
             TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
