@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 
@@ -26,7 +29,8 @@ namespace HexWars.Engine.Tests
 
     internal static class TacticalV3Fixtures
     {
-        public static GameConfig CloneGame(GameConfig source, bool? fogOfWar = null)
+        public static GameConfig CloneGame(
+            GameConfig source, bool? fogOfWar = null, int? startingPoints = null)
         {
             var terrain = new Dictionary<TerrainType, TerrainDef>();
             foreach (TerrainType terrainType in System.Enum.GetValues(typeof(TerrainType)))
@@ -34,7 +38,7 @@ namespace HexWars.Engine.Tests
 
             return new GameConfig(
                 terrain,
-                startingPoints: source.StartingPoints,
+                startingPoints: startingPoints ?? source.StartingPoints,
                 bountyRate: source.BountyRate,
                 generatorCost: source.GeneratorCost,
                 generatorOutput: source.GeneratorOutput,
@@ -72,18 +76,71 @@ namespace HexWars.Engine.Tests
         public static TacticalV3CapacityProfile ExperimentalCapacity(
             int? maxCells = null,
             int? maxUnits = null,
+            int? maxTemplates = null,
+            int? maxCapabilityDefinitions = null,
+            int? maxCapabilityAllocations = null,
+            int? maxRules = null,
+            int? maxMemoryRecords = null,
             int? maxRelations = null,
             int? maxCandidates = null) =>
             new TacticalV3CapacityProfile(
                 maxCells ?? 512,
                 maxUnits: maxUnits ?? 64,
-                maxTemplates: 32,
-                maxCapabilityDefinitions: 128,
-                maxCapabilityAllocations: 2048,
-                maxRules: 128,
-                maxMemoryRecords: 64,
+                maxTemplates: maxTemplates ?? 32,
+                maxCapabilityDefinitions: maxCapabilityDefinitions ?? 128,
+                maxCapabilityAllocations: maxCapabilityAllocations ?? 2048,
+                maxRules: maxRules ?? 128,
+                maxMemoryRecords: maxMemoryRecords ?? 64,
                 maxRelations: maxRelations ?? 65536,
                 maxCandidates: maxCandidates ?? 32768);
+
+        public static TacticalV2Config CloneMatch(
+            TacticalV2Config source,
+            BoardGenConfig? board = null,
+            GameConfig? game = null,
+            IReadOnlyList<TacticalV2Template>? templates = null) =>
+            new TacticalV2Config
+            {
+                BoardGen = board ?? source.BoardGen,
+                Game = game ?? source.Game,
+                Templates = templates ?? source.Templates,
+                StartingUnitCount = source.StartingUnitCount,
+                MaxControllableUnits = source.MaxControllableUnits,
+                MaxSteps = source.MaxSteps,
+                ShapeScale = source.ShapeScale,
+                StepPenalty = source.StepPenalty,
+                ClosingWeight = source.ClosingWeight,
+                DrawCreditWeight = source.DrawCreditWeight,
+                PointsWeight = source.PointsWeight,
+                PlacementPolicy = source.PlacementPolicy,
+                StartProfiles = source.StartProfiles,
+                StartDistribution = source.StartDistribution,
+            };
+
+        public static TacticalV3RewardConfig UncheckedReward(
+            float terminalWin = 1f,
+            float terminalNonWin = -1f,
+            float materialAdjustmentBound = 0.20f,
+            float timePressureBound = 0.05f,
+            float pointsWeight = 0.5f)
+        {
+            var reward = (TacticalV3RewardConfig)RuntimeHelpers.GetUninitializedObject(
+                typeof(TacticalV3RewardConfig));
+            SetAutoProperty(reward, nameof(TacticalV3RewardConfig.TerminalWin), terminalWin);
+            SetAutoProperty(reward, nameof(TacticalV3RewardConfig.TerminalNonWin), terminalNonWin);
+            SetAutoProperty(reward, nameof(TacticalV3RewardConfig.MaterialAdjustmentBound), materialAdjustmentBound);
+            SetAutoProperty(reward, nameof(TacticalV3RewardConfig.TimePressureBound), timePressureBound);
+            SetAutoProperty(reward, nameof(TacticalV3RewardConfig.PointsWeight), pointsWeight);
+            return reward;
+        }
+
+        private static void SetAutoProperty<T>(object target, string propertyName, T value)
+        {
+            FieldInfo? field = target.GetType().GetField(
+                $"<{propertyName}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (field == null) throw new MissingFieldException(target.GetType().FullName, propertyName);
+            field.SetValue(target, value);
+        }
 
         public static TacticalV2Config Match(int width = 13, int height = 9)
         {
