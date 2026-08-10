@@ -105,5 +105,60 @@ namespace HexWars.Engine.Tests
                 new TacticalV3LegalCandidateSource(source, projector, config.Capacity),
                 new TacticalV3ActionResolver());
         }
+        public static GameState RewardStart(int unitCost = 10, int round = 1)
+
+        {
+            var board = new Board(new[]
+            {
+                new Tile(new HexCoord(0, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(1, 0), 0, TerrainType.Plains),
+            });
+            return new GameState(board, GameConfig.Default(), new[]
+            {
+                new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[]
+                {
+                    new Unit(1, PlayerId.Player0, TestStates.Cost(unitCost), new HexCoord(0, 0), 0),
+                }),
+                new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[]
+                {
+                    new Unit(2, PlayerId.Player1, TestStates.Cost(unitCost), new HexCoord(1, 0), 0),
+                }),
+            }, PlayerId.Player0, round, 3);
+        }
+
+        public static GameState Terminal(PlayerId? winner)
+        {
+            GameState start = RewardStart();
+            return new GameState(start.Board, start.Config, start.Players, start.ActivePlayer,
+                start.Round, start.NextEntityId, isGameOver: true, winner: winner);
+        }
+
+        public static GameState WithDamage(GameState source, PlayerId player, int damage)
+        {
+            PlayerState original = source.Player(player);
+            Unit[] units = new Unit[original.UnitsOnBoard.Count];
+            for (int index = 0; index < units.Length; index++)
+                units[index] = original.UnitsOnBoard[index].WithDamage(damage);
+            var replacement = new PlayerState(player, original.Points, original.Barracks, units,
+                original.Generators, original.DestroyedValue);
+            var players = new[] { source.Player(PlayerId.Player0), source.Player(PlayerId.Player1) };
+            players[(int)player] = replacement;
+            return new GameState(source.Board, source.Config, players, source.ActivePlayer, source.Round,
+                source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
+                source.AttackedUnitIds, source.MovementSpent);
+        }
+
+        public static GameState AtRound(GameState source, int round) =>
+            new GameState(source.Board, source.Config, source.Players, source.ActivePlayer, round,
+                source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
+                source.AttackedUnitIds, source.MovementSpent);
+
+        public static TacticalV3Reward Tracker(GameState initialState, PlayerId learnerSeat)
+        {
+            var tracker = new TacticalV3Reward(Config().Reward);
+            tracker.Reset(initialState, learnerSeat);
+            return tracker;
+        }
+
     }
 }
