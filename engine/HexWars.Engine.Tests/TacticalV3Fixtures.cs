@@ -62,16 +62,16 @@ namespace HexWars.Engine.Tests
                 maxRelations: 65536,
                 maxCandidates: maxCandidates ?? 32768);
 
-        public static TacticalV2Config Match(int width = 13, int height = 9, int seed = 17)
+        public static TacticalV2Config Match(int width = 13, int height = 9)
         {
             TacticalV2Config match = TacticalV2Config.Default();
             match.BoardGen = new BoardGenConfig(width: width, height: height);
             return match;
         }
 
-        public static TacticalV3Config Config(int width = 13, int height = 9, int seed = 17) =>
+        public static TacticalV3Config Config(int width = 13, int height = 9) =>
             new TacticalV3Config(
-                Match(width, height, seed),
+                Match(width, height),
                 ExperimentalCapacity(),
                 new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
     }

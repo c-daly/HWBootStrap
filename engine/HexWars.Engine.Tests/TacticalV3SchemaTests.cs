@@ -9,19 +9,32 @@ namespace HexWars.Engine.Tests
 {
     public class TacticalV3SchemaTests
     {
-        [Test]
-        public void CapacityProfile_RejectsEveryNonPositiveBound()
+        [TestCase(0, 0)]
+        [TestCase(0, -1)]
+        [TestCase(1, 0)]
+        [TestCase(1, -1)]
+        [TestCase(2, 0)]
+        [TestCase(2, -1)]
+        [TestCase(3, 0)]
+        [TestCase(3, -1)]
+        [TestCase(4, 0)]
+        [TestCase(4, -1)]
+        [TestCase(5, 0)]
+        [TestCase(5, -1)]
+        [TestCase(6, 0)]
+        [TestCase(6, -1)]
+        [TestCase(7, 0)]
+        [TestCase(7, -1)]
+        [TestCase(8, 0)]
+        [TestCase(8, -1)]
+        public void CapacityProfile_RejectsEveryNonPositiveBound(int invalidIndex, int invalidValue)
         {
+            var capacities = new[] { 512, 64, 32, 128, 2048, 128, 64, 65536, 32768 };
+            capacities[invalidIndex] = invalidValue;
+
             Assert.Throws<ArgumentOutOfRangeException>(() => new TacticalV3CapacityProfile(
-                maxCells: 0,
-                maxUnits: 64,
-                maxTemplates: 32,
-                maxCapabilityDefinitions: 128,
-                maxCapabilityAllocations: 2048,
-                maxRules: 128,
-                maxMemoryRecords: 64,
-                maxRelations: 65536,
-                maxCandidates: 32768));
+                capacities[0], capacities[1], capacities[2], capacities[3], capacities[4],
+                capacities[5], capacities[6], capacities[7], capacities[8]));
         }
 
         [Test]
@@ -33,8 +46,11 @@ namespace HexWars.Engine.Tests
                 new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
 
             Assert.That(config.Validate(), Has.Some.Contains("fog_of_war=false"));
-            Assert.Throws<ArgumentException>(() =>
-                new TacticalV3RewardConfig(+1f, -0.5f, 0.20f, 0.05f, 0.5f));
+            Assert.Throws<ArgumentException>(() => new TacticalV3RewardConfig(+0.9f, -1f, 0.20f, 0.05f, 0.5f));
+            Assert.Throws<ArgumentException>(() => new TacticalV3RewardConfig(+1f, -0.5f, 0.20f, 0.05f, 0.5f));
+            Assert.Throws<ArgumentException>(() => new TacticalV3RewardConfig(+1f, -1f, 0.19f, 0.05f, 0.5f));
+            Assert.Throws<ArgumentException>(() => new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.04f, 0.5f));
+            Assert.Throws<ArgumentException>(() => new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.4f));
         }
 
         [Test]
