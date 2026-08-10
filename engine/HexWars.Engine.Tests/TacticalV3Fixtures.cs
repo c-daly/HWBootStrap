@@ -4,6 +4,20 @@ using HexWars.Engine.Rl;
 
 namespace HexWars.Engine.Tests
 {
+    internal sealed class TacticalV3Fixture
+    {
+        public TacticalV3Fixture(GameState state, TacticalV3SeatObservationSource source)
+        {
+            State = state;
+            Source = source;
+        }
+
+        public GameState State { get; }
+        public TacticalV3SeatObservationSource Source { get; }
+
+        public static TacticalV3Fixture Standard(int seed) => TacticalV3Fixtures.Standard(seed);
+    }
+
     internal static class TacticalV3Fixtures
     {
         public static GameConfig CloneGame(GameConfig source, bool? fogOfWar = null)
@@ -73,6 +87,15 @@ namespace HexWars.Engine.Tests
             new TacticalV3Config(
                 Match(width, height),
                 ExperimentalCapacity(),
+
                 new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
+
+        public static TacticalV3Fixture Standard(int seed)
+        {
+            TacticalV3Config config = Config();
+            TacticalV2Layout layout = new TacticalV2Layout(config.Match);
+            return new TacticalV3Fixture(layout.NewGame(seed).State,
+                new TacticalV3SeatObservationSource(config));
+        }
     }
 }
