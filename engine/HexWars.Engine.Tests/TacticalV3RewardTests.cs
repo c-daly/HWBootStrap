@@ -52,13 +52,13 @@ namespace HexWars.Engine.Tests
         public void TerminalPartialDamage_UsesHealthAdjustedMaterialProgressBeforeAKill()
         {
             GameState initial = TacticalV3Fixtures.RewardStart(unitCost: 10);
-            GameState final = TacticalV3Fixtures.WithDamage(initial, PlayerId.Player1, damage: 5);
+            GameState final = TacticalV3Fixtures.WithDamage(initial, PlayerId.Player1, damage: 2);
             TacticalV3RewardBreakdown value = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0)
                 .Evaluate(final, terminated: false, truncated: true);
 
-            Assert.That(value.KnownHealthAdjustedMaterialProgress, Is.EqualTo(0.20f));
+            Assert.That(value.KnownHealthAdjustedMaterialProgress, Is.EqualTo(0.10f));
             Assert.That(value.PublicResourceProgress, Is.Zero);
-            Assert.That(value.Total, Is.EqualTo(-0.80f));
+            Assert.That(value.Total, Is.EqualTo(-0.90f));
         }
 
         [Test]
@@ -90,17 +90,71 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void TerminalReward_ClampsEveryComponentAndTheAbsoluteTotalBounds()
+        public void TerminalReward_ReachesBothAbsoluteTotalBounds()
         {
             GameState initial = TacticalV3Fixtures.RewardStart(unitCost: 10);
-            GameState final = TacticalV3Fixtures.AtRound(
-                TacticalV3Fixtures.WithDamage(initial, PlayerId.Player1, damage: 10), initial.Config.RoundCap);
-            TacticalV3RewardBreakdown value = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0)
-                .Evaluate(final, terminated: true, truncated: false);
+            GameState win = TacticalV3Fixtures.WithTerminal(
+                TacticalV3Fixtures.WithDamage(initial, PlayerId.Player1, damage: 10), PlayerId.Player0);
+            GameState loss = TacticalV3Fixtures.WithTerminal(
+                TacticalV3Fixtures.AtRound(
+                    TacticalV3Fixtures.WithDamage(initial, PlayerId.Player0, damage: 10),
+                    initial.Config.RoundCap + 1),
+                PlayerId.Player1);
 
-            Assert.That(value.KnownHealthAdjustedMaterialProgress, Is.EqualTo(0.20f));
-            Assert.That(value.TimePressure, Is.EqualTo(-0.0495f));
-            Assert.That(value.Total, Is.InRange(-1.25f, 1.20f));
+            TacticalV3RewardBreakdown winValue = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0)
+                .Evaluate(win, terminated: true, truncated: false);
+            TacticalV3RewardBreakdown lossValue = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0)
+                .Evaluate(loss, terminated: true, truncated: false);
+
+            Assert.That(winValue.Total, Is.EqualTo(1.20f));
+            Assert.That(lossValue.Total, Is.EqualTo(-1.25f));
+        }
+
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        public void FinalEvaluation_FreezesTheFirstBreakdownUntilReset(
+            bool firstTerminated, bool firstTruncated)
+        {
+            GameState initial = TacticalV3Fixtures.RewardStart();
+            TacticalV3Reward reward = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0);
+            GameState firstState = firstTerminated
+                ? TacticalV3Fixtures.Terminal(PlayerId.Player0)
+                : initial;
+
+            TacticalV3RewardBreakdown first = reward.Evaluate(
+                firstState, terminated: firstTerminated, truncated: firstTruncated);
+            TacticalV3RewardBreakdown repeated = reward.Evaluate(
+                TacticalV3Fixtures.Terminal(PlayerId.Player1), terminated: true, truncated: true);
+
+            Assert.That(repeated, Is.SameAs(first));
+            Assert.That(repeated.TerminalOutcome, Is.EqualTo(firstTerminated ? 1f : -1f));
+        }
+
+        [Test]
+        public void Reset_StartsANewEpisodeAfterAFrozenTerminalEvaluation()
+        {
+            GameState initial = TacticalV3Fixtures.RewardStart();
+            TacticalV3Reward reward = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0);
+            TacticalV3RewardBreakdown first = reward.Evaluate(
+                TacticalV3Fixtures.Terminal(PlayerId.Player0), terminated: true, truncated: false);
+
+            reward.Reset(initial, PlayerId.Player0);
+            TacticalV3RewardBreakdown second = reward.Evaluate(
+                TacticalV3Fixtures.Terminal(PlayerId.Player1), terminated: true, truncated: false);
+
+            Assert.That(second, Is.Not.SameAs(first));
+            Assert.That(second.TerminalOutcome, Is.EqualTo(-1f));
+        }
+
+        [TestCase(PlayerId.Player1, 1f)]
+        [TestCase(PlayerId.Player0, -1f)]
+        public void Player1Learner_UsesRelativeWinnerOrdering(PlayerId winner, float expected)
+        {
+            GameState initial = TacticalV3Fixtures.RewardStart();
+            TacticalV3RewardBreakdown value = TacticalV3Fixtures.Tracker(initial, PlayerId.Player1)
+                .Evaluate(TacticalV3Fixtures.Terminal(winner), terminated: true, truncated: false);
+
+            Assert.That(value.TerminalOutcome, Is.EqualTo(expected));
         }
     }
 }

@@ -41,6 +41,7 @@ namespace HexWars.Engine.Rl
         private PlayerId _learnerSeat;
         private float _initialAdvantage;
         private float _initialTotalValue;
+        private TacticalV3RewardBreakdown? _finalBreakdown;
         private bool _hasReset;
 
         public TacticalV3Reward(TacticalV3RewardConfig config)
@@ -55,6 +56,7 @@ namespace HexWars.Engine.Rl
             _learnerSeat = learnerSeat;
             _initialAdvantage = Advantage(initialState, learnerSeat);
             _initialTotalValue = TotalValue(initialState);
+            _finalBreakdown = null;
             _hasReset = true;
         }
 
@@ -62,6 +64,7 @@ namespace HexWars.Engine.Rl
         {
             if (state == null) throw new ArgumentNullException(nameof(state));
             if (!_hasReset) throw new InvalidOperationException("reward contract must be reset before evaluation");
+            if (_finalBreakdown != null) return _finalBreakdown;
             if (!terminated && !truncated) return Zero();
 
             float material = Clamp(
@@ -76,8 +79,9 @@ namespace HexWars.Engine.Rl
                 : _config.TerminalNonWin;
             float total = terminal + material + time;
 
-            return new TacticalV3RewardBreakdown(
+            _finalBreakdown = new TacticalV3RewardBreakdown(
                 terminal, material, 0f, time, total, finalized: true);
+            return _finalBreakdown;
         }
 
         private static TacticalV3RewardBreakdown Zero() =>

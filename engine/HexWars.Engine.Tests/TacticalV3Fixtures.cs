@@ -153,6 +153,12 @@ namespace HexWars.Engine.Tests
                 source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
                 source.AttackedUnitIds, source.MovementSpent);
 
+        public static GameState WithTerminal(GameState source, PlayerId? winner) =>
+            new GameState(source.Board, source.Config, source.Players, source.ActivePlayer, source.Round,
+                source.NextEntityId, isGameOver: true, winner: winner,
+                movedUnitIds: source.MovedUnitIds, attackedUnitIds: source.AttackedUnitIds,
+                movementSpent: source.MovementSpent);
+
         public static TacticalV3Reward Tracker(GameState initialState, PlayerId learnerSeat)
         {
             var tracker = new TacticalV3Reward(Config().Reward);
