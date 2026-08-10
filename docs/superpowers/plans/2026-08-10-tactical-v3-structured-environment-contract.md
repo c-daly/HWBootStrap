@@ -364,7 +364,11 @@ public interface ILegalCandidateSource
 
 public interface IActionResolver
 {
-    Command Resolve(TacticalV3DecisionFrame frame, int candidateId, GameState currentState);
+    Command Resolve(
+        TacticalV3DecisionFrame frame,
+        long decisionId,
+        int candidateId,
+        GameState currentState);
 }
 
 public sealed class TacticalV3DecisionFrame
@@ -407,7 +411,7 @@ public void Resolver_RejectsStaleFrameInsteadOfEndingTurn()
         new EndTurn(f.State.ActivePlayer)).NewState;
 
     Assert.Throws<InvalidOperationException>(() =>
-        f.Resolver.Resolve(frame, 0, changed));
+        f.Resolver.Resolve(frame, frame.DecisionId, 0, changed));
 }
 ```
 
@@ -430,6 +434,8 @@ if (!ReferenceEquals(frame.SourceState, currentState))
     throw new InvalidOperationException("tactical-v3 candidate frame is stale");
 if (candidateId < 0 || candidateId >= frame.Candidates.Count)
     throw new ArgumentOutOfRangeException(nameof(candidateId));
+if (decisionId != frame.DecisionId)
+    throw new InvalidOperationException("tactical-v3 decision id is stale");
 Command command = frame.CommandAt(candidateId);
 if (!LegalMoves.For(currentState).Contains(command))
     throw new InvalidOperationException("tactical-v3 candidate no longer round-trips");
@@ -632,7 +638,7 @@ Use `TacticalV2Layout(config.Match).NewGame(seed, profile, learnerSeat)` only at
 ```csharp
 if (decisionId != _frame.DecisionId)
     throw new InvalidOperationException("tactical-v3 decision id is stale");
-Command command = _resolver.Resolve(_frame, candidateId, _state);
+Command command = _resolver.Resolve(_frame, decisionId, candidateId, _state);
 ApplyAccepted(command);
 AdvancePastInternalControllers();
 return MakeView();
