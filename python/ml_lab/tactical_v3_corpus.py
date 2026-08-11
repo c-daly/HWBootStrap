@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -31,6 +33,7 @@ _TINY_TEACHER = ("tiny-fixture-policy-v1", 0, 0, 0, "none", None)
 _TINY_PROFILE = "standard-3v3"
 _TRAIN_SEEDS = (4101, 4102)
 _VALIDATION_SEEDS = (5101,)
+_EXPECTED_TINY_CORPUS_IDENTITY = "cc4ebbbd5c230c8797c84155c542e9cbf39074fa03f04fd521c316649b04c123"
 _INVENTORY = frozenset({"manifest.json", "train.jsonl", "validation.jsonl"})
 _MANIFEST_FIELDS = frozenset({
     "corpus_schema_version", "identity", "label_source", "scenario_id", "contract_hash",
@@ -158,10 +161,31 @@ def _require_inventory(root: Path) -> None:
             raise ValueError(f"corpus inventory entry {name!r} must be a plain file")
 
 
+def _physical_snapshot(root: Path) -> tuple[tuple[str, bytes], ...]:
+    _require_inventory(root)
+    return tuple((name, (root / name).read_bytes()) for name in sorted(_INVENTORY))
+
+
+def _reject_duplicate_object_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSON contains duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def _decode_json(data: bytes, label: str) -> object:
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_object_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"{label} is not valid JSON without duplicate keys") from error
+
+
 def _read_json(path: Path, label: str) -> object:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return _decode_json(path.read_bytes(), label)
+    except OSError as error:
         raise ValueError(f"{label} is not valid UTF-8 JSON") from error
 
 
@@ -172,12 +196,17 @@ def _manifest_without_identity(manifest: Mapping[str, object]) -> dict[str, obje
 def _validate_manifest(
     root: Path, expected: TacticalV3SemanticIdentity,
 ) -> tuple[str, tuple[Mapping[str, object], Mapping[str, object]]]:
-    manifest = _exact_mapping(_read_json(root / "manifest.json", "manifest"), _MANIFEST_FIELDS, "manifest")
+    manifest_bytes = (root / "manifest.json").read_bytes()
+    manifest = _exact_mapping(_decode_json(manifest_bytes, "manifest"), _MANIFEST_FIELDS, "manifest")
+    if manifest_bytes != _canonical_bytes(manifest):
+        raise ValueError("canonical manifest must be compact JSON with exactly one newline")
     if _int(manifest["corpus_schema_version"], "manifest.corpus_schema_version") != _CORPUS_SCHEMA_VERSION:
         raise ValueError("manifest corpus_schema_version is unsupported")
     identity = _hash(manifest["identity"], "manifest.identity")
     if identity != canonical_sha256(_manifest_without_identity(manifest)):
         raise ValueError("manifest identity does not content-address the manifest")
+    if identity != _EXPECTED_TINY_CORPUS_IDENTITY:
+        raise ValueError("manifest identity is not the authenticated tiny corpus identity")
     if manifest["label_source"] != _LABEL_SOURCE:
         raise ValueError("manifest label_source is not the tiny fixture policy")
     for field, actual, wanted in (
@@ -317,14 +346,31 @@ def _validate_partitions(train: tuple[StructuredExample, ...], validation: tuple
     validation_seeds = {row.episode_seed for row in validation}
     if train_seeds & validation_seeds:
         raise ValueError("cross-partition episode seed reuse is forbidden")
+    if train_seeds != set(_TRAIN_SEEDS) or validation_seeds != set(_VALIDATION_SEEDS):
+        raise ValueError("tiny corpus partition seed catalog is not exact")
+    decision_identities: set[str] = set()
+    for row in (*train, *validation):
+        if row.profile_id != _TINY_PROFILE:
+            raise ValueError("tiny corpus profile must be standard-3v3")
+        if row.learner_seat != 0 or row.decision.seat != 0:
+            raise ValueError("tiny corpus learner seat must be 0")
+        if row.target.teacher_candidate_id != _select_tiny_candidate(row.decision.candidates).candidate_id:
+            raise ValueError("tiny corpus target does not match the fixed policy candidate")
+        decision_identity = canonical_sha256(asdict(row.decision))
+        if decision_identity in decision_identities:
+            raise ValueError("tiny corpus contains a duplicate decision across partitions")
+        decision_identities.add(decision_identity)
     for partition, rows in (("train", train), ("validation", validation)):
         by_seed: dict[int, list[StructuredExample]] = defaultdict(list)
         for row in rows:
             by_seed[row.episode_seed].append(row)
         for seed, examples in by_seed.items():
-            indices = tuple(sorted(row.target.trajectory_index for row in examples))
-            if indices != tuple(range(len(examples))):
-                raise ValueError(f"{partition} seed {seed} trajectory indices must be contiguous")
+            indices = tuple(row.target.trajectory_index for row in examples)
+            if len(examples) != 4 or indices != (0, 1, 2, 3):
+                raise ValueError(f"{partition} seed {seed} must retain exactly four ordered decisions")
+            decision_ids = tuple(row.decision.decision_id for row in examples)
+            if decision_ids != tuple(sorted(decision_ids)) or len(set(decision_ids)) != 4:
+                raise ValueError(f"{partition} seed {seed} decision ids must be strictly increasing")
             outcomes = {row.target.terminal_outcome for row in examples}
             truncations = {row.target.truncated for row in examples}
             if len(outcomes) != 1 or len(truncations) != 1:
@@ -338,11 +384,17 @@ def load_corpus(root: Path, expected: TacticalV3SemanticIdentity) -> StructuredC
     if type(expected) is not TacticalV3SemanticIdentity:
         raise TypeError("expected must be a TacticalV3SemanticIdentity")
     root = Path(root)
-    _require_inventory(root)
+    initial_snapshot = _physical_snapshot(root)
     identity, files = _validate_manifest(root, expected)
     train = _read_partition(root, files[0], expected)
     validation = _read_partition(root, files[1], expected)
     _validate_partitions(train, validation)
+    try:
+        final_snapshot = _physical_snapshot(root)
+    except ValueError as error:
+        raise ValueError("corpus changed while it was being authenticated") from error
+    if final_snapshot != initial_snapshot:
+        raise ValueError("corpus changed while it was being authenticated")
     return StructuredCorpus(root, identity, train, validation)
 
 
@@ -358,16 +410,38 @@ def _write_fsynced(path: Path, data: bytes) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
+    if os.name == "nt":
         return
+    descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
-    except OSError:
-        pass
     finally:
         os.close(descriptor)
+
+
+def _publish_no_replace(source: Path, destination: Path) -> None:
+    """Atomically move a finished directory only when its destination does not exist."""
+    if os.name == "nt":
+        move = ctypes.windll.kernel32.MoveFileW
+        move.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
+        move.restype = ctypes.c_int
+        if not move(str(source), str(destination)):
+            code = ctypes.get_last_error()
+            if code in {80, 183}:
+                raise FileExistsError(f"refusing to overwrite existing corpus output {destination}")
+            raise OSError(code, "MoveFileW no-replace publication failed", str(destination))
+        return
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as error:
+        raise OSError("atomic no-replace directory publication is unsupported on this POSIX host") from error
+    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) != 0:
+        code = ctypes.get_errno()
+        if code == errno.EEXIST:
+            raise FileExistsError(f"refusing to overwrite existing corpus output {destination}")
+        raise OSError(code, "renameat2 no-replace publication failed", str(destination))
 
 
 def _outcome(view, learner_seat: int) -> Literal["win", "loss", "draw"]:
@@ -484,7 +558,7 @@ def create_tiny_corpus(output: Path, server_cmd: Sequence[str]) -> StructuredCor
         load_corpus(temporary, identity)
         if output.exists() or _is_reparse(output):
             raise FileExistsError(f"refusing to overwrite existing corpus output {output}")
-        os.rename(temporary, output)
+        _publish_no_replace(temporary, output)
         temporary = None
         _fsync_directory(parent)
         return load_corpus(output, identity)

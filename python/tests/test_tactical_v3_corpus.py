@@ -39,6 +39,93 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _write_canonical_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.write_bytes(b"".join((json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8") for row in rows))
+
+
+def _reseal(root: Path) -> None:
+    from ml_lab.tactical_v3_schema import canonical_sha256
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    for item in manifest["files"]:
+        path = root / item["path"]
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        data = path.read_bytes()
+        item.update(byte_length=len(data), sha256=hashlib.sha256(data).hexdigest(), row_count=len(rows), seeds=sorted({row["episode_seed"] for row in rows}))
+    unsigned = dict(manifest); unsigned.pop("identity", None)
+    manifest["identity"] = canonical_sha256(unsigned)
+    (root / "manifest.json").write_bytes((json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8"))
+
+
+def _resealed_copy(tmp_path: Path) -> Path:
+    copied = tmp_path / "tiny-corpus"
+    shutil.copytree(FIXTURE, copied)
+    return copied
+
+
+@pytest.mark.parametrize("mutation", ("profile", "seed", "seat", "three_rows", "candidate", "outcome"))
+def test_loader_rejects_resealed_wrong_tiny_semantics(tmp_path: Path, expected_identity, mutation: str) -> None:
+    copied = _resealed_copy(tmp_path)
+    train_path = copied / "train.jsonl"
+    rows = [json.loads(line) for line in train_path.read_text(encoding="utf-8").splitlines()]
+    if mutation == "profile": rows[0]["profile_id"] = "conversion-1v1-near"
+    elif mutation == "seed":
+        for row in rows[:4]: row["episode_seed"] = 4103
+    elif mutation == "seat":
+        for row in rows[:4]: row["learner_seat"] = row["decision"]["seat"] = 1
+    elif mutation == "three_rows": rows.pop(3)
+    elif mutation == "candidate": rows[0]["target"]["teacher_candidate_id"] = rows[0]["decision"]["candidates"][-1]["candidate_id"]
+    elif mutation == "outcome":
+        for row in rows[:4]: row["target"].update(terminal_outcome="loss", remaining_turns_to_victory=None)
+    _write_canonical_jsonl(train_path, rows); _reseal(copied)
+    with pytest.raises(ValueError, match="identity|seed|seat|profile|four|candidate"):
+        load_corpus(copied, expected_identity)
+
+
+def test_loader_rejects_resealed_duplicate_decision_across_partitions(tmp_path: Path, expected_identity, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ml_lab.tactical_v3_corpus as module
+    copied = _resealed_copy(tmp_path)
+    train = [json.loads(line) for line in (copied / "train.jsonl").read_text(encoding="utf-8").splitlines()]
+    path = copied / "validation.jsonl"
+    validation = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    validation[0]["decision"] = train[0]["decision"]
+    _write_canonical_jsonl(path, validation); _reseal(copied)
+    manifest = json.loads((copied / "manifest.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(module, "_EXPECTED_TINY_CORPUS_IDENTITY", manifest["identity"], raising=False)
+    with pytest.raises(ValueError, match="duplicate decision"):
+        load_corpus(copied, expected_identity)
+
+
+def test_loader_rejects_duplicate_manifest_key_and_noncanonical_manifest(tmp_path: Path, expected_identity) -> None:
+    copied = _resealed_copy(tmp_path)
+    raw = (copied / "manifest.json").read_text(encoding="utf-8")
+    (copied / "manifest.json").write_text(raw.replace('"label_source":', '"label_source":"wrong","label_source":', 1), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate"):
+        load_corpus(copied, expected_identity)
+    copied = _resealed_copy(tmp_path / "second")
+    path = copied / "manifest.json"
+    path.write_text(json.dumps(json.loads(path.read_text(encoding="utf-8")), indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="canonical manifest"):
+        load_corpus(copied, expected_identity)
+
+
+@pytest.mark.parametrize("mutation", ("extra", "replace_partition"))
+def test_loader_rejects_corpus_mutation_after_initial_snapshot(
+    tmp_path: Path, expected_identity, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    import ml_lab.tactical_v3_corpus as module
+    copied = _resealed_copy(tmp_path)
+    original = module._validate_partitions
+    def mutate(train, validation):
+        original(train, validation)
+        if mutation == "extra":
+            (copied / "surprise.json").write_bytes(b"{}\n")
+        else:
+            (copied / "train.jsonl").write_bytes((copied / "validation.jsonl").read_bytes())
+    monkeypatch.setattr(module, "_validate_partitions", mutate)
+    with pytest.raises(ValueError, match="changed while"):
+        load_corpus(copied, expected_identity)
+
+
 def test_tiny_policy_selects_first_non_end_turn_or_the_only_end_turn() -> None:
     assert _select_tiny_candidate((
         SimpleNamespace(kind="end_turn", candidate_id=0),
@@ -143,9 +230,7 @@ def test_loader_rejects_extra_inventory_and_cross_partition_seed(
     identity_input = dict(manifest)
     identity_input.pop("identity")
     manifest["identity"] = canonical_sha256(identity_input)
-    manifest_path.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="seed"):
+    manifest_path.write_bytes(
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8"))
+    with pytest.raises(ValueError, match="identity|seed"):
         load_corpus(copied, expected_identity)
