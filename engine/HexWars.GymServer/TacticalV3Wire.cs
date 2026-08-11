@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using HexWars.Engine.Rl;
 
@@ -13,7 +15,10 @@ namespace HexWars.GymServer
 
             // Re-run scenario and capacity validation at the serialization boundary. The returned
             // config is intentionally not serialized; the canonical contract is the wire authority.
-            scenario.BuildTacticalV3();
+            TacticalV3Config config = scenario.BuildTacticalV3();
+            MlEnvironmentKind environmentKind = ParseEnvironmentKind(contract.EnvironmentKind);
+            TacticalV3Contract expected = TacticalV3Contract.Create(config, environmentKind);
+            RequireContractEvidence(contract, expected);
             return new
             {
                 scenario_id = scenario.Id,
@@ -28,6 +33,81 @@ namespace HexWars.GymServer
                 capacity = contract.Capacity,
             };
         }
+
+        private static MlEnvironmentKind ParseEnvironmentKind(string environmentKind) =>
+            environmentKind switch
+            {
+                "tactical" => MlEnvironmentKind.Tactical,
+                "duel" => MlEnvironmentKind.Duel,
+                _ => throw ContractEvidenceError(
+                    "environment role must be exactly tactical or duel"),
+            };
+
+        private static void RequireContractEvidence(
+            TacticalV3Contract supplied, TacticalV3Contract expected)
+        {
+            if (supplied.Version != expected.Version ||
+                supplied.EnvironmentKind != expected.EnvironmentKind ||
+                supplied.ContractHash != expected.ContractHash ||
+                supplied.EncodingHash != expected.EncodingHash ||
+                supplied.CapacityHash != expected.CapacityHash ||
+                !ExactValue(supplied.Match, expected.Match) ||
+                !ExactValue(supplied.Encoding, expected.Encoding) ||
+                !ExactValue(supplied.Capacity, expected.Capacity))
+            {
+                throw ContractEvidenceError(
+                    "supplied identity does not match the validated scenario and environment role");
+            }
+        }
+
+        private static bool ExactValue(object? supplied, object? expected)
+        {
+            if (ReferenceEquals(supplied, expected)) return true;
+            if (supplied == null || expected == null) return false;
+            if (supplied is string suppliedString && expected is string expectedString)
+                return suppliedString == expectedString;
+            if (supplied is bool suppliedBool && expected is bool expectedBool)
+                return suppliedBool == expectedBool;
+            if (supplied is int suppliedInt && expected is int expectedInt)
+                return suppliedInt == expectedInt;
+            if (supplied is long suppliedLong && expected is long expectedLong)
+                return suppliedLong == expectedLong;
+            if (supplied is float suppliedFloat && expected is float expectedFloat)
+                return suppliedFloat.Equals(expectedFloat);
+            if (supplied is double suppliedDouble && expected is double expectedDouble)
+                return suppliedDouble.Equals(expectedDouble);
+            if (supplied is IReadOnlyDictionary<string, object> suppliedMap &&
+                expected is IReadOnlyDictionary<string, object> expectedMap)
+            {
+                if (suppliedMap.Count != expectedMap.Count) return false;
+                foreach (KeyValuePair<string, object> item in expectedMap)
+                {
+                    if (!suppliedMap.TryGetValue(item.Key, out object? suppliedValue) ||
+                        !ExactValue(suppliedValue, item.Value))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            if (supplied is IEnumerable suppliedSequence && expected is IEnumerable expectedSequence)
+            {
+                IEnumerator suppliedItems = suppliedSequence.GetEnumerator();
+                IEnumerator expectedItems = expectedSequence.GetEnumerator();
+                while (true)
+                {
+                    bool suppliedNext = suppliedItems.MoveNext();
+                    bool expectedNext = expectedItems.MoveNext();
+                    if (suppliedNext != expectedNext) return false;
+                    if (!suppliedNext) return true;
+                    if (!ExactValue(suppliedItems.Current, expectedItems.Current)) return false;
+                }
+            }
+            return false;
+        }
+
+        private static InvalidOperationException ContractEvidenceError(string message) =>
+            new InvalidOperationException("tactical-v3 contract evidence mismatch: " + message);
 
         public static object View(TacticalV3View view)
         {
@@ -179,43 +259,156 @@ namespace HexWars.GymServer
             int candidateCount = view.Decision.Candidates.Count;
 
             foreach (TacticalV3UnitToken unit in observation.Units)
-                Validate(unit.Cell, observation, candidateCount);
+                RequireReference(unit.Cell, TacticalV3TableKind.Cells,
+                    observation, candidateCount, "unit.cell");
             foreach (TacticalV3CapabilityAllocationToken allocation in observation.CapabilityAllocations)
             {
-                Validate(allocation.Owner, observation, candidateCount);
-                Validate(allocation.Definition, observation, candidateCount);
+                RequireReference(allocation.Owner,
+                    new[] { TacticalV3TableKind.Units, TacticalV3TableKind.Templates },
+                    observation, candidateCount, "capability_allocation.owner");
+                TacticalV3TokenRef definition = RequireReference(
+                    allocation.Definition, TacticalV3TableKind.CapabilityDefinitions,
+                    observation, candidateCount, "capability_allocation.definition");
+                if (observation.CapabilityDefinitions[definition.Row].Kind != allocation.Capability)
+                    throw SemanticError(
+                        "capability_allocation.capability does not match its definition");
             }
             foreach (TacticalV3MemoryToken memory in observation.Memory)
-                Validate(memory.Cell, observation, candidateCount);
+                RequireReference(memory.Cell, TacticalV3TableKind.Cells,
+                    observation, candidateCount, "memory.cell");
             foreach (TacticalV3RelationToken relation in observation.Relations)
-            {
-                Validate(relation.Source, observation, candidateCount);
-                Validate(relation.Target, observation, candidateCount);
-            }
+                ValidateRelation(relation, observation, candidateCount);
             foreach (TacticalV3Candidate candidate in view.Decision.Candidates)
+                ValidateCandidate(candidate, observation, candidateCount);
+        }
+
+        private static void ValidateRelation(
+            TacticalV3RelationToken relation,
+            TacticalV3Observation observation,
+            int candidateCount)
+        {
+            switch (relation.Kind)
             {
-                Validate(candidate.Actor, observation, candidateCount);
-                Validate(candidate.Target, observation, candidateCount);
-                Validate(candidate.Template, observation, candidateCount);
-                Validate(candidate.Cell, observation, candidateCount);
-                TacticalV3ProjectedDelta projection = candidate.Projection;
-                Validate(projection.SourceCell, observation, candidateCount);
-                Validate(projection.DestinationCell, observation, candidateCount);
-                Validate(projection.Template, observation, candidateCount);
-                Validate(projection.Target, observation, candidateCount);
+                case TacticalV3RelationKind.Neighbor:
+                    RequireReference(relation.Source, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "neighbor.source");
+                    RequireReference(relation.Target, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "neighbor.target");
+                    break;
+                case TacticalV3RelationKind.Occupies:
+                    RequireReference(relation.Source, TacticalV3TableKind.Units,
+                        observation, candidateCount, "occupies.source");
+                    RequireReference(relation.Target, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "occupies.target");
+                    break;
+                case TacticalV3RelationKind.HasCapability:
+                    RequireReference(relation.Source,
+                        new[] { TacticalV3TableKind.Units, TacticalV3TableKind.Templates },
+                        observation, candidateCount, "has_capability.source");
+                    RequireReference(relation.Target, TacticalV3TableKind.CapabilityDefinitions,
+                        observation, candidateCount, "has_capability.target");
+                    break;
+                default:
+                    throw SemanticError("relation.kind is unknown");
             }
         }
 
-        private static void Validate(
-            TacticalV3TokenRef? reference, TacticalV3Observation observation, int candidateCount)
+        private static void ValidateCandidate(
+            TacticalV3Candidate candidate,
+            TacticalV3Observation observation,
+            int candidateCount)
         {
-            if (reference.HasValue) Validate(reference.Value, observation, candidateCount);
+            TacticalV3ProjectedDelta projection = candidate.Projection;
+            switch (candidate.Kind)
+            {
+                case TacticalV3CandidateKind.Attack:
+                    RequireReference(candidate.Actor, TacticalV3TableKind.Units,
+                        observation, candidateCount, "attack.actor");
+                    RequireReference(candidate.Target, TacticalV3TableKind.Units,
+                        observation, candidateCount, "attack.target");
+                    RequireNull(candidate.Template, "attack.template");
+                    RequireNull(candidate.Cell, "attack.cell");
+                    RequireReference(projection.SourceCell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "attack.projection.source_cell");
+                    RequireNull(projection.DestinationCell, "attack.projection.destination_cell");
+                    RequireNull(projection.Template, "attack.projection.template");
+                    RequireReference(projection.Target, TacticalV3TableKind.Units,
+                        observation, candidateCount, "attack.projection.target");
+                    break;
+                case TacticalV3CandidateKind.Move:
+                    RequireReference(candidate.Actor, TacticalV3TableKind.Units,
+                        observation, candidateCount, "move.actor");
+                    RequireNull(candidate.Target, "move.target");
+                    RequireNull(candidate.Template, "move.template");
+                    RequireReference(candidate.Cell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "move.cell");
+                    RequireReference(projection.SourceCell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "move.projection.source_cell");
+                    RequireReference(projection.DestinationCell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "move.projection.destination_cell");
+                    RequireNull(projection.Template, "move.projection.template");
+                    RequireNull(projection.Target, "move.projection.target");
+                    break;
+                case TacticalV3CandidateKind.Deploy:
+                    RequireNull(candidate.Actor, "deploy.actor");
+                    RequireNull(candidate.Target, "deploy.target");
+                    RequireReference(candidate.Template, TacticalV3TableKind.Templates,
+                        observation, candidateCount, "deploy.template");
+                    RequireReference(candidate.Cell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "deploy.cell");
+                    RequireNull(projection.SourceCell, "deploy.projection.source_cell");
+                    RequireReference(projection.DestinationCell, TacticalV3TableKind.Cells,
+                        observation, candidateCount, "deploy.projection.destination_cell");
+                    RequireReference(projection.Template, TacticalV3TableKind.Templates,
+                        observation, candidateCount, "deploy.projection.template");
+                    RequireNull(projection.Target, "deploy.projection.target");
+                    break;
+                case TacticalV3CandidateKind.EndTurn:
+                    RequireNull(candidate.Actor, "end_turn.actor");
+                    RequireNull(candidate.Target, "end_turn.target");
+                    RequireNull(candidate.Template, "end_turn.template");
+                    RequireNull(candidate.Cell, "end_turn.cell");
+                    RequireNull(projection.SourceCell, "end_turn.projection.source_cell");
+                    RequireNull(projection.DestinationCell, "end_turn.projection.destination_cell");
+                    RequireNull(projection.Template, "end_turn.projection.template");
+                    RequireNull(projection.Target, "end_turn.projection.target");
+                    break;
+                default:
+                    throw SemanticError("candidate.kind is unknown");
+            }
         }
 
-        private static void Validate(
-            TacticalV3TokenRef reference, TacticalV3Observation observation, int candidateCount)
+        private static TacticalV3TokenRef RequireReference(
+            TacticalV3TokenRef? reference, TacticalV3TableKind expected,
+            TacticalV3Observation observation, int candidateCount, string field)
         {
-            int length = reference.Table switch
+            if (!reference.HasValue) throw SemanticError(field + " is required");
+            return RequireReference(reference.Value, expected, observation, candidateCount, field);
+        }
+
+        private static TacticalV3TokenRef RequireReference(
+            TacticalV3TokenRef reference, TacticalV3TableKind expected,
+            TacticalV3Observation observation, int candidateCount, string field) =>
+            RequireReference(reference, new[] { expected }, observation, candidateCount, field);
+
+        private static TacticalV3TokenRef RequireReference(
+            TacticalV3TokenRef reference, IReadOnlyCollection<TacticalV3TableKind> expected,
+            TacticalV3Observation observation, int candidateCount, string field)
+        {
+            if (!expected.Contains(reference.Table))
+                throw SemanticError(field + " references incompatible table " + reference.Table +
+                    " instead of " + string.Join(" or ", expected.Select(Table)));
+            int length = TableLength(reference.Table, observation, candidateCount);
+            if (reference.Row < 0 || reference.Row >= length)
+                throw new InvalidOperationException(
+                    "tactical-v3 token reference is outside table length: " +
+                    Table(reference.Table) + "[" + reference.Row + "] of " + length);
+            return reference;
+        }
+
+        private static int TableLength(
+            TacticalV3TableKind table, TacticalV3Observation observation, int candidateCount) =>
+            table switch
             {
                 TacticalV3TableKind.Cells => observation.Cells.Count,
                 TacticalV3TableKind.Units => observation.Units.Count,
@@ -226,14 +419,16 @@ namespace HexWars.GymServer
                 TacticalV3TableKind.MemoryRecords => observation.Memory.Count,
                 TacticalV3TableKind.Relations => observation.Relations.Count,
                 TacticalV3TableKind.Candidates => candidateCount,
-                _ => throw new InvalidOperationException(
-                    "tactical-v3 token reference has an unknown table"),
+                _ => throw SemanticError("token reference has an unknown table"),
             };
-            if (reference.Row < 0 || reference.Row >= length)
-                throw new InvalidOperationException(
-                    "tactical-v3 token reference is outside table length: " +
-                    Table(reference.Table) + "[" + reference.Row + "] of " + length);
+
+        private static void RequireNull(TacticalV3TokenRef? reference, string field)
+        {
+            if (reference.HasValue) throw SemanticError(field + " must be null");
         }
+
+        private static InvalidOperationException SemanticError(string message) =>
+            new InvalidOperationException("tactical-v3 token semantic mismatch: " + message);
 
         private static string Table(TacticalV3TableKind value) => value switch
         {
