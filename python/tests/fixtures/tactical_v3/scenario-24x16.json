@@ -1,0 +1,236 @@
+{
+  "board": {
+    "flat_chance": 0.6,
+    "forest_weight": 15,
+    "height": 16,
+    "max_elevation": 4,
+    "plains_weight": 70,
+    "rough_weight": 10,
+    "water_weight": 5,
+    "width": 24,
+    "zone_depth": 3
+  },
+  "environment": "tactical-v3",
+  "episode": {
+    "max_steps": 808
+  },
+  "id": "annihilation-structured-imitation-24x16",
+  "name": "Annihilation Structured Imitation 24x16",
+  "reward": {
+    "material_adjustment_bound": 0.2,
+    "points_weight": 0.5,
+    "terminal_non_win": -1.0,
+    "terminal_win": 1.0,
+    "time_pressure_bound": 0.05
+  },
+  "rules": {
+    "actions_per_turn": 0,
+    "biomes_enabled": false,
+    "bounty_rate": 0.5,
+    "deploy_cost_multiplier": 1.0,
+    "fog_of_war": false,
+    "generator_cost": 2,
+    "generator_health": 3,
+    "generator_output": 1,
+    "round_cap": 100,
+    "starting_points": 12
+  },
+  "schema_version": 1,
+  "tactical_v3": {
+    "capacity": {
+      "max_candidates": 32768,
+      "max_capability_allocations": 2048,
+      "max_capability_definitions": 128,
+      "max_cells": 512,
+      "max_memory_records": 64,
+      "max_relations": 65536,
+      "max_rules": 128,
+      "max_templates": 32,
+      "max_units": 64
+    },
+    "max_controllable_units": 3,
+    "placement_policy": "profiled-seeded-v1",
+    "start_distribution": [
+      {
+        "basis_points": 7000,
+        "profile_id": "standard-3v3"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-3v1-near"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-3v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-3v1-far"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-2v1-near"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-2v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-2v1-far"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-1v1-near"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-1v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-1v1-far"
+      }
+    ],
+    "start_profiles": [
+      {
+        "id": "standard-3v3",
+        "learner_units": 3,
+        "opponent_units": 3,
+        "separation": "legacy-mirrored"
+      },
+      {
+        "id": "conversion-3v1-near",
+        "learner_units": 3,
+        "opponent_units": 1,
+        "separation": "near"
+      },
+      {
+        "id": "conversion-3v1-medium",
+        "learner_units": 3,
+        "opponent_units": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-3v1-far",
+        "learner_units": 3,
+        "opponent_units": 1,
+        "separation": "far"
+      },
+      {
+        "id": "conversion-2v1-near",
+        "learner_units": 2,
+        "opponent_units": 1,
+        "separation": "near"
+      },
+      {
+        "id": "conversion-2v1-medium",
+        "learner_units": 2,
+        "opponent_units": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-2v1-far",
+        "learner_units": 2,
+        "opponent_units": 1,
+        "separation": "far"
+      },
+      {
+        "id": "conversion-1v1-near",
+        "learner_units": 1,
+        "opponent_units": 1,
+        "separation": "near"
+      },
+      {
+        "id": "conversion-1v1-medium",
+        "learner_units": 1,
+        "opponent_units": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-1v1-far",
+        "learner_units": 1,
+        "opponent_units": 1,
+        "separation": "far"
+      }
+    ],
+    "starting_unit_count": 3,
+    "templates": [
+      {
+        "id": "brute-85597320",
+        "name": "Brute",
+        "stats": {
+          "damage": 2,
+          "defense": 2,
+          "health": 7,
+          "movement": 3,
+          "range": 1,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 2,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "striker-0d7b6999",
+        "name": "Striker",
+        "stats": {
+          "damage": 6,
+          "defense": 0,
+          "health": 2,
+          "movement": 3,
+          "range": 2,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 3,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "sniper-d065c02a",
+        "name": "Sniper",
+        "stats": {
+          "damage": 2,
+          "defense": 0,
+          "health": 2,
+          "movement": 2,
+          "range": 6,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 4,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "artillery-27c01722",
+        "name": "Artillery",
+        "stats": {
+          "damage": 6,
+          "defense": 0,
+          "health": 3,
+          "movement": 0,
+          "range": 5,
+          "range_arc": 2,
+          "vertical_movement": 0,
+          "vision": 2,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "scout-d3503dfa",
+        "name": "Scout",
+        "stats": {
+          "damage": 0,
+          "defense": 0,
+          "health": 2,
+          "movement": 4,
+          "range": 0,
+          "range_arc": 0,
+          "vertical_movement": 3,
+          "vision": 7,
+          "vision_arc": 2
+        }
+      }
+    ]
+  }
+}
