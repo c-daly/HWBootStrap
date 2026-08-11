@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from hexwars_gym.env import no_window_creationflags
+
 import pytest
 
 
@@ -29,6 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[2])
+sys.path.insert(0, sys.argv[3])
 from test_tactical_v3_schema import minimal_spaces_payload, minimal_view_payload
 
 requests_path = Path(sys.argv[1])
@@ -55,7 +58,7 @@ for line in sys.stdin:
         encoding="utf-8",
     )
     return _FakeServer(
-        [sys.executable, str(script_path), str(requests_path), str(Path(__file__).parent)],
+        [sys.executable, str(script_path), str(requests_path), str(Path(__file__).parent), str(Path(__file__).resolve().parents[1])],
         requests_path,
     )
 
@@ -139,7 +142,7 @@ def _capture_fixtures() -> None:
     assert {key for key in large if large[key] != standard[key]} == {"id", "name", "board"}
     assert {key for key in large["board"] if large["board"][key] != standard["board"][key]} == {"width", "height"}
     _write_fixture(SCENARIO_24X16, large)
-    process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(CHECKED_IN_SCENARIO), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(CHECKED_IN_SCENARIO), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", creationflags=no_window_creationflags())
     try:
         _write_fixture(SPACES_FIXTURE, _raw_request(process, {"cmd": "spaces"}))
         _write_fixture(DECISION_FIXTURE, _raw_request(process, {"cmd": "reset", "seed": 41}))
@@ -149,7 +152,12 @@ def _capture_fixtures() -> None:
     finally:
         if process.stdin is not None:
             process.stdin.close()
-        process.wait(timeout=2)
+        try: process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try: process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=2)
 
 
 def _spaces_for(scenario: Path):
