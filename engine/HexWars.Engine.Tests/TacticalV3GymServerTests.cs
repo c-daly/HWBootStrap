@@ -726,6 +726,63 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        [TestCase("spaces", "cmd", "null", "a non-empty string")]
+        [TestCase("spaces", "cmd", "\"\"", "a non-empty string")]
+        [TestCase("reset", "seed", "\"1\"", "an Int32 number")]
+        [TestCase("reset", "seed", "2147483648", "an Int32 number")]
+        [TestCase("step", "decision_id", "9223372036854775808", "an Int64 number")]
+        [TestCase("step", "candidate_id", "false", "an Int32 number")]
+        [TestCase("step", "candidate_id", "2147483648", "an Int32 number")]
+        [TestCase("duel_spaces", "cmd", "[]", "a non-empty string")]
+        [TestCase("duel_reset", "seed", "{}", "an Int32 number")]
+        [TestCase("duel_reset", "p0", "null", "a non-empty string")]
+        [TestCase("duel_reset", "p0", "\"\"", "a non-empty string")]
+        [TestCase("duel_reset", "p1", "null", "a non-empty string")]
+        [TestCase("duel_reset", "learner", "1.5", "an Int32 number")]
+        [TestCase("duel_reset", "start_profile", "null", "a non-empty string")]
+        [TestCase("duel_reset", "start_profile", "\"\"", "a non-empty string")]
+        [TestCase("duel_reset", "start_profile", "[]", "a non-empty string")]
+        [TestCase("duel_reset", "reference_seat", "\"0\"", "an Int32 number")]
+        [TestCase("duel_step", "decision_id", "{}", "an Int64 number")]
+        [TestCase("duel_step", "candidate_id", "null", "an Int32 number")]
+        [TestCase("duel_save", "path", "null", "a non-empty string")]
+        [TestCase("duel_save", "path", "{}", "a non-empty string")]
+        [TestCase("duel_save", "path", "\"\"", "a non-empty string")]
+        [TestCase("close", "cmd", "false", "a non-empty string")]
+        public void Process_TacticalV3RejectsNullAndWrongKindFieldValues(
+            string command, string field, string invalidJson, string expectedType)
+        {
+            string workDirectory = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "invalid-field-kind-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workDirectory);
+            try
+            {
+                using var server = TacticalV3ServerProcess.StartInWorkingDirectory(
+                    CheckedInScenario, workDirectory);
+                string savePath = Path.Combine(workDirectory, "explicit.replay");
+                string valid = TacticalV3CommandRequest(server, command, savePath);
+                string malformed = ReplaceRootFieldValue(valid, field, invalidJson);
+
+                string error = server.RejectCommand(malformed);
+
+                string expected = field == "cmd"
+                    ? $"tactical-v3 field 'cmd' must be {expectedType}"
+                    : $"tactical-v3 {command} field '{field}' must be {expectedType}";
+                Assert.Multiple(() =>
+                {
+                    Assert.That(error, Does.Contain(expected));
+                    Assert.That(Directory.EnumerateFiles(workDirectory, "*.replay",
+                        SearchOption.AllDirectories), Is.Empty,
+                        "invalid field values must not create a replay");
+                });
+            }
+            finally
+            {
+                if (Directory.Exists(workDirectory))
+                    Directory.Delete(workDirectory, recursive: true);
+            }
+        }
+
         [Test]
         public void Process_TacticalV3RejectsUnknownCommandWithoutResponse()
         {
@@ -840,6 +897,16 @@ namespace HexWars.Engine.Tests
                 Assert.That(terminal.GetProperty("reward").GetProperty("terminal_outcome")
                     .GetSingle(), Is.EqualTo(winner == learner ? 1f : -1f));
             });
+        }
+
+        private static string ReplaceRootFieldValue(
+            string requestJson, string field, string invalidJson)
+        {
+            var request = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                requestJson)!;
+            using JsonDocument invalid = JsonDocument.Parse(invalidJson);
+            request[field] = invalid.RootElement.Clone();
+            return JsonSerializer.Serialize(request);
         }
 
         private static string TacticalV3CommandRequest(
@@ -1781,7 +1848,7 @@ namespace HexWars.Engine.Tests
                 "..", "..", "..", "..", "HexWars.GymServer", "bin", "Debug", "net8.0",
                 "HexWars.GymServer.dll"));
 
-            private TacticalV3ServerProcess(params string[] args)
+            private TacticalV3ServerProcess(string? workingDirectory, params string[] args)
             {
                 Assert.That(File.Exists(ServerDll), Is.True,
                     $"GymServer was not built at {ServerDll}");
@@ -1793,18 +1860,26 @@ namespace HexWars.Engine.Tests
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
+                if (workingDirectory != null)
+                    start.WorkingDirectory = workingDirectory;
                 start.ArgumentList.Add(ServerDll);
                 foreach (string argument in args) start.ArgumentList.Add(argument);
                 _process = Process.Start(start)!;
             }
 
             public static TacticalV3ServerProcess Start(string scenario) =>
-                new TacticalV3ServerProcess(
+                new TacticalV3ServerProcess(null,
+                    "--environment", MlContract.TacticalV3Version,
+                    "--scenario-file", scenario);
+
+            public static TacticalV3ServerProcess StartInWorkingDirectory(
+                string scenario, string workingDirectory) =>
+                new TacticalV3ServerProcess(workingDirectory,
                     "--environment", MlContract.TacticalV3Version,
                     "--scenario-file", scenario);
 
             public static TacticalV3ServerProcess StartEnvironment(string environment) =>
-                new TacticalV3ServerProcess("--environment", environment);
+                new TacticalV3ServerProcess(null, "--environment", environment);
 
             public static string RejectStartup(params string[] args)
             {

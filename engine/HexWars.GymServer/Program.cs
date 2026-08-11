@@ -141,6 +141,39 @@ int RequirePositiveDaggerInteger(JsonElement element, string field, string label
     return parsed;
 }
 
+void RequireTacticalV3FieldValue(JsonProperty property, string? command)
+{
+    string label = command == null ? "tactical-v3" : $"tactical-v3 {command}";
+    switch (property.Name)
+    {
+        case "cmd":
+        case "p0":
+        case "p1":
+        case "start_profile":
+        case "path":
+            if (property.Value.ValueKind != JsonValueKind.String ||
+                string.IsNullOrEmpty(property.Value.GetString()))
+                throw new InvalidDataException(
+                    $"{label} field '{property.Name}' must be a non-empty string");
+            break;
+        case "seed":
+        case "learner":
+        case "reference_seat":
+        case "candidate_id":
+            if (property.Value.ValueKind != JsonValueKind.Number ||
+                !property.Value.TryGetInt32(out _))
+                throw new InvalidDataException(
+                    $"{label} field '{property.Name}' must be an Int32 number");
+            break;
+        case "decision_id":
+            if (property.Value.ValueKind != JsonValueKind.Number ||
+                !property.Value.TryGetInt64(out _))
+                throw new InvalidDataException(
+                    $"{label} field 'decision_id' must be an Int64 number");
+            break;
+    }
+}
+
 string RequireTacticalV3Command(JsonElement element)
 {
     if (element.ValueKind != JsonValueKind.Object)
@@ -153,10 +186,8 @@ string RequireTacticalV3Command(JsonElement element)
         throw new InvalidDataException("tactical-v3 request is missing cmd field");
     if (commandProperties.Length != 1)
         throw new InvalidDataException("tactical-v3 request has duplicate cmd field");
-    if (commandProperties[0].Value.ValueKind != JsonValueKind.String)
-        throw new InvalidDataException("tactical-v3 cmd field must be a string");
-
-    string command = commandProperties[0].Value.GetString() ?? "";
+    RequireTacticalV3FieldValue(commandProperties[0], command: null);
+    string command = commandProperties[0].Value.GetString()!;
     string[]? allowed = command switch
     {
         "spaces" => new[] { "cmd" },
@@ -196,6 +227,9 @@ string RequireTacticalV3Command(JsonElement element)
             !allowed.Contains(property.Name, StringComparer.Ordinal)))
         throw new InvalidDataException(
             $"tactical-v3 {command} has unknown or missing fields");
+    foreach (JsonProperty property in properties)
+        if (property.Name != "cmd")
+            RequireTacticalV3FieldValue(property, command);
 
     string[] required = command switch
     {
@@ -502,7 +536,8 @@ while ((line = Console.ReadLine()) != null)
             string? p0 = root.TryGetProperty("p0", out var a) ? a.GetString() : null; // "external"(default)/greedy/random
             string? p1 = root.TryGetProperty("p1", out var b) ? b.GetString() : null;
             int learner = root.TryGetProperty("learner", out var lr) ? lr.GetInt32() : 0; // reward perspective
-            string? startProfile = root.TryGetProperty("start_profile", out var sp)
+            bool hasStartProfile = root.TryGetProperty("start_profile", out var sp);
+            string? startProfile = hasStartProfile
                 ? sp.GetString()
                 : null;
             bool hasReferenceSeat = root.TryGetProperty("reference_seat", out var rs);
@@ -515,10 +550,11 @@ while ((line = Console.ReadLine()) != null)
                 environment != MlContract.TacticalV3Version &&
                 (startProfile != null || hasReferenceSeat))
                 throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2/tactical-v3");
-            if (startProfile != null && !hasReferenceSeat)
+            if ((environment == MlContract.TacticalV3Version
+                    ? hasStartProfile : startProfile != null) && !hasReferenceSeat)
                 throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
             if (environment == MlContract.TacticalV3Version &&
-                startProfile == null && hasReferenceSeat)
+                !hasStartProfile && hasReferenceSeat)
                 throw new InvalidDataException("tactical-v3 duel_reset reference_seat requires start_profile");
             if (environment == MlContract.TacticalV3Version)
             {
