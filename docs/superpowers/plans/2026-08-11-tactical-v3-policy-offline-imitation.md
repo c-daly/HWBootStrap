@@ -166,11 +166,120 @@ rule_kind = win_conditions, round, round_cap, actions_per_turn, starting_points,
 ```python
 TableName = Literal["cells", "units", "templates", "capability_definitions",
     "capability_allocations", "rules", "memory_records", "relations", "candidates"]
+RelativeOwner = Literal["self", "opponent"]
+TerrainTypeName = Literal["plains", "forest", "rough", "water"]
+RelationKind = Literal["neighbor", "occupies", "has_capability"]
+CandidateKind = Literal["attack", "move", "deploy", "end_turn"]
+CapabilityKind = Literal["health", "damage", "defense", "movement",
+    "vertical_movement", "range", "range_arc", "vision", "vision_arc"]
+RuleKind = Literal["win_conditions", "round", "round_cap", "actions_per_turn",
+    "starting_points", "self_points", "opponent_points", "damage_floor",
+    "damage_high_ground_bonus", "range_high_ground_bonus", "bounty_rate",
+    "deploy_cost_multiplier", "fog_of_war", "max_design_point_cost", "design_fee"]
 
 @dataclass(frozen=True, slots=True)
 class TokenRef:
     table: TableName
     row: int
+
+@dataclass(frozen=True, slots=True)
+class CellToken:
+    q: int
+    r: int
+    terrain: TerrainTypeName
+    elevation: int
+    self_deployment_zone: bool
+    opponent_deployment_zone: bool
+    controller: RelativeOwner | None
+    is_boundary: bool
+    currently_visible: bool
+    previously_observed: bool
+
+@dataclass(frozen=True, slots=True)
+class UnitToken:
+    owner: RelativeOwner
+    current_hp: int
+    max_hp: int
+    cell: TokenRef
+    elevation: int
+    moved: bool
+    attacked: bool
+    horizontal_movement_spent: int
+    vertical_movement_spent: int
+    point_cost: int
+    deploy_cost: int
+    currently_visible: bool
+
+@dataclass(frozen=True, slots=True)
+class TemplateToken:
+    owner: RelativeOwner
+    point_cost: int
+    deploy_cost: int
+    is_fixed: bool
+    is_deployable: bool
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDefinitionToken:
+    kind: CapabilityKind
+
+@dataclass(frozen=True, slots=True)
+class CapabilityAllocationToken:
+    owner: TokenRef
+    definition: TokenRef
+    capability: CapabilityKind
+    purchased_level: int
+    effective_value: int
+
+@dataclass(frozen=True, slots=True)
+class RuleToken:
+    kind: RuleKind
+    int_value: int
+    float_value: float
+    bool_value: bool
+
+@dataclass(frozen=True, slots=True)
+class MemoryToken:
+    cell: TokenRef
+    last_seen_round: int
+    observation_age: int
+    last_known_current_hp: int
+    currently_visible: bool
+
+@dataclass(frozen=True, slots=True)
+class RelationToken:
+    kind: RelationKind
+    source: TokenRef
+    target: TokenRef
+    int_feature: int
+    float_feature: float
+    bool_feature: bool
+
+@dataclass(frozen=True, slots=True)
+class ProjectedDelta:
+    source_cell: TokenRef | None
+    destination_cell: TokenRef | None
+    template: TokenRef | None
+    target: TokenRef | None
+    horizontal_movement_spent: int
+    vertical_movement_spent: int
+    target_hp_delta: int
+    damage: int
+    is_lethal: bool
+    bounty_delta: int
+    points_delta: int
+    round_delta: int
+    is_terminal: bool
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    candidate_id: int
+    decision_id: int
+    kind: CandidateKind
+    actor: TokenRef | None
+    target: TokenRef | None
+    template: TokenRef | None
+    cell: TokenRef | None
+    projection: ProjectedDelta
 
 @dataclass(frozen=True, slots=True)
 class TacticalV3Observation:
@@ -191,6 +300,29 @@ class TacticalV3Decision:
     candidates: tuple[Candidate, ...]
 
 @dataclass(frozen=True, slots=True)
+class TacticalV3Reward:
+    terminal_outcome: float
+    known_health_adjusted_material_progress: float
+    public_resource_progress: float
+    time_pressure: float
+    total: float
+    finalized: bool
+
+@dataclass(frozen=True, slots=True)
+class TacticalV3View:
+    decision: TacticalV3Decision
+    reward: TacticalV3Reward
+    winner: int
+    terminated: bool
+    truncated: bool
+    start_profile: str
+    reference_seat: int
+
+    @property
+    def seat(self) -> int:
+        return self.decision.seat
+
+@dataclass(frozen=True, slots=True)
 class TacticalV3SemanticIdentity:
     scenario_id: str
     scenario_schema_version: int
@@ -209,24 +341,173 @@ def parse_decision(payload: object, identity: TacticalV3SemanticIdentity) -> Tac
 def canonical_sha256(value: object) -> str
 ```
 
+The in-memory identity below deliberately proves strict shape, hash, reference, and freezing behavior without reading artifacts owned by a later task. Task 2 is the first gate against canonical Project A fixture bytes.
+
 - [ ] **Step 1: Write failing exact-shape, type, immutability, hash, and reference tests**
 
 ```python
+def raw_canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+def minimal_spaces_payload() -> dict[str, object]:
+    encoding = {
+        "schema_version": 1,
+        "version": "tactical-v3",
+        "hex_offset_layout": "odd-q",
+        "token_reference_schema": ["table:table_kind", "row:int32"],
+    }
+    capacity = {
+        "max_cells": 4,
+        "max_units": 4,
+        "max_templates": 4,
+        "max_capability_definitions": 9,
+        "max_capability_allocations": 16,
+        "max_rules": 16,
+        "max_memory_records": 4,
+        "max_relations": 16,
+        "max_candidates": 16,
+    }
+    return {
+        "scenario_id": "in-memory-schema-test",
+        "scenario_schema_version": 1,
+        "contract_version": "tactical-v3",
+        "contract_hash": "a" * 64,
+        "encoding_hash": raw_canonical_sha256(encoding),
+        "capacity_hash": raw_canonical_sha256(capacity),
+        "environment_kind": "tactical",
+        "match": {"board": {"width": 1, "height": 1}, "max_steps": 8},
+        "encoding": encoding,
+        "capacity": capacity,
+    }
+
+def minimal_view_payload() -> dict[str, object]:
+    cell_ref = {"table": "cells", "row": 0}
+    unit_ref = {"table": "units", "row": 0}
+    definition_ref = {"table": "capability_definitions", "row": 0}
+    projection = {
+        "source_cell": cell_ref.copy(),
+        "destination_cell": cell_ref.copy(),
+        "template": None,
+        "target": None,
+        "horizontal_movement_spent": 1,
+        "vertical_movement_spent": 0,
+        "target_hp_delta": 0,
+        "damage": 0,
+        "is_lethal": False,
+        "bounty_delta": 0,
+        "points_delta": 0,
+        "round_delta": 0,
+        "is_terminal": False,
+    }
+    return {
+        "decision_id": 7,
+        "seat": 0,
+        "observation": {
+            "cells": [{
+                "q": 0, "r": 0, "terrain": "plains", "elevation": 0,
+                "self_deployment_zone": True, "opponent_deployment_zone": False,
+                "controller": "self", "is_boundary": True,
+                "currently_visible": True, "previously_observed": True,
+            }],
+            "units": [{
+                "owner": "self", "current_hp": 2, "max_hp": 2,
+                "cell": cell_ref.copy(), "elevation": 0,
+                "moved": False, "attacked": False,
+                "horizontal_movement_spent": 0, "vertical_movement_spent": 0,
+                "point_cost": 3, "deploy_cost": 3, "currently_visible": True,
+            }],
+            "templates": [{
+                "owner": "self", "point_cost": 3, "deploy_cost": 3,
+                "is_fixed": True, "is_deployable": True,
+            }],
+            "capability_definitions": [{"kind": "health"}],
+            "capability_allocations": [{
+                "owner": unit_ref.copy(), "definition": definition_ref,
+                "capability": "health", "purchased_level": 2, "effective_value": 2,
+            }],
+            "rules": [{
+                "kind": "round", "int_value": 1,
+                "float_value": 0.0, "bool_value": False,
+            }],
+            "memory": [],
+            "relations": [{
+                "kind": "occupies", "source": unit_ref.copy(), "target": cell_ref.copy(),
+                "int_feature": 0, "float_feature": 0.0, "bool_feature": False,
+            }],
+        },
+        "candidates": [{
+            "candidate_id": 0, "decision_id": 7, "kind": "move",
+            "actor": unit_ref.copy(), "target": None, "template": None,
+            "cell": cell_ref.copy(), "projection": projection,
+        }],
+        "reward": {
+            "terminal_outcome": 0.0,
+            "known_health_adjusted_material_progress": 0.0,
+            "public_resource_progress": 0.0,
+            "time_pressure": 0.0,
+            "total": 0.0,
+            "finalized": False,
+        },
+        "winner": -1,
+        "terminated": False,
+        "truncated": False,
+        "start_profile": "in-memory-1v1",
+        "reference_seat": 0,
+    }
+
+EXPECTED_ERRORS = {
+    "unknown_field": "view fields",
+    "bool_candidate_id": "candidate_id must be an int32",
+    "nan_rule_float": "rules\\[0\\].float_value must be finite",
+    "wrong_ref_table": "move.actor references incompatible table",
+    "ref_row_equal_to_length": "cells\\[1\\] of 1",
+    "duplicate_candidate_id": "candidate ids must be exactly",
+    "stale_candidate_decision": "candidate decision_id does not match",
+}
+
+def mutated_payload(mutation: str) -> tuple[dict[str, object], dict[str, object]]:
+    spaces = minimal_spaces_payload()
+    view = minimal_view_payload()
+    if mutation == "unknown_field":
+        view["extra"] = 1
+    elif mutation == "bool_candidate_id":
+        view["candidates"][0]["candidate_id"] = True
+    elif mutation == "nan_rule_float":
+        view["observation"]["rules"][0]["float_value"] = float("nan")
+    elif mutation == "wrong_ref_table":
+        view["candidates"][0]["actor"] = {"table": "cells", "row": 0}
+    elif mutation == "ref_row_equal_to_length":
+        view["observation"]["units"][0]["cell"] = {"table": "cells", "row": 1}
+    elif mutation == "duplicate_candidate_id":
+        view["candidates"].append(copy.deepcopy(view["candidates"][0]))
+    elif mutation == "stale_candidate_decision":
+        view["candidates"][0]["decision_id"] = 8
+    else:
+        raise AssertionError(f"unknown mutation {mutation}")
+    return spaces, view
+
 def test_spaces_and_view_parse_to_deeply_immutable_semantic_values() -> None:
-    identity = parse_spaces(load_fixture("seed-41-spaces.json"))
-    view = parse_view(load_fixture("seed-41-decision.json"), identity)
-    assert identity.encoding_hash == canonical_sha256(identity.encoding)
-    assert identity.capacity_hash == canonical_sha256(identity.capacity)
-    assert view.decision.candidates[0].decision_id == view.decision.decision_id
+    spaces_payload = minimal_spaces_payload()
+    view_payload = minimal_view_payload()
+    identity = parse_spaces(spaces_payload)
+    view = parse_view(view_payload, identity)
+    assert identity.encoding_hash == raw_canonical_sha256(spaces_payload["encoding"])
+    assert identity.capacity_hash == raw_canonical_sha256(spaces_payload["capacity"])
+    assert view.seat == view.decision.seat == 0
+    assert view.decision == parse_decision(view_payload, identity)
+    assert view.decision.candidates[0].decision_id == view.decision.decision_id == 7
+    assert view.reward.finalized is False
     with pytest.raises(TypeError):
         identity.capacity["max_cells"] = 1
+    with pytest.raises(AttributeError):
+        view.decision.candidates.append(view.decision.candidates[0])
 
-@pytest.mark.parametrize("mutation", [
-    "unknown_field", "bool_candidate_id", "nan_rule_float", "wrong_ref_table",
-    "ref_row_equal_to_length", "duplicate_candidate_id", "stale_candidate_decision",
-])
+@pytest.mark.parametrize("mutation", tuple(EXPECTED_ERRORS))
 def test_parser_rejects_malformed_wire_before_numeric_coercion(mutation: str) -> None:
-    spaces, view = mutated_fixture(mutation)
+    spaces, view = mutated_payload(mutation)
     with pytest.raises((TypeError, ValueError), match=EXPECTED_ERRORS[mutation]):
         parse_view(view, parse_spaces(spaces))
 ```
@@ -555,6 +836,7 @@ class RaggedBatch:
     horizon_target_mask: torch.Tensor
     remaining_turns: torch.Tensor
     remaining_turns_mask: torch.Tensor
+def collate_decisions(decisions: Sequence[TacticalV3Decision], horizons: tuple[int, ...]) -> RaggedBatch
 
 def collate_examples(examples: Sequence[StructuredExample], horizons: tuple[int, ...]) -> RaggedBatch
 ```
@@ -575,6 +857,35 @@ def test_collate_remaps_every_reference_into_masked_global_nodes() -> None:
 
 @pytest.mark.parametrize("failure", ["invalid_ref", "teacher_missing", "nan", "all_masked"])
 def test_collate_fails_closed_before_returning_tensors(failure: str) -> None:
+
+def assert_tensor_fields_equal(left: object, right: object) -> None:
+    assert type(left) is type(right)
+    for field in dataclasses.fields(left):
+        left_value = getattr(left, field.name)
+        right_value = getattr(right, field.name)
+        if isinstance(left_value, Mapping):
+            assert left_value.keys() == right_value.keys()
+            for key in left_value:
+                torch.testing.assert_close(left_value[key], right_value[key], rtol=0.0, atol=0.0)
+        else:
+            torch.testing.assert_close(left_value, right_value, rtol=0.0, atol=0.0)
+
+def test_collate_decisions_matches_features_without_fabricating_targets() -> None:
+    supervised = collate_examples([EXAMPLE_13X9], horizons=(4, 8, 16))
+    inference = collate_decisions([EXAMPLE_13X9.decision], horizons=(4, 8, 16))
+    assert supervised.tables.keys() == inference.tables.keys()
+    for table_name in supervised.tables:
+        assert_tensor_fields_equal(supervised.tables[table_name], inference.tables[table_name])
+    assert supervised.table_slices == inference.table_slices
+    torch.testing.assert_close(supervised.node_mask, inference.node_mask, rtol=0.0, atol=0.0)
+    assert_tensor_fields_equal(supervised.neighborhoods, inference.neighborhoods)
+    assert_tensor_fields_equal(supervised.candidates, inference.candidates)
+    assert inference.teacher_candidate_index.tolist() == [-1]
+    assert inference.terminal_outcome.tolist() == [-1]
+    assert not inference.horizon_target_mask.any()
+    assert not inference.remaining_turns_mask.any()
+    assert torch.count_nonzero(inference.horizon_targets) == 0
+    assert torch.count_nonzero(inference.remaining_turns) == 0
     with pytest.raises(ValueError, match=FAILURE_TEXT[failure]):
         collate_examples([broken_example(failure)], horizons=(4, 8, 16))
 ```
@@ -597,7 +908,9 @@ Sort edges by `(destination_global_index, relation_kind, source_global_index, in
 
 - [ ] **Step 5: Encode targets and run GREEN**
 
-Map candidate identity to its row only after proving an exact unique match. Outcome indices are `loss=0, draw=1, win=2`. For horizon `h`, set a valid binary target only when the episode result and censoring permit it. Set `remaining_turns_mask=True` exactly for nontruncated wins with a defined positive remaining value.
+Share one state/candidate collation path between `collate_examples` and `collate_decisions`. Map candidate identity to its row only after proving an exact unique match. Outcome indices are `loss=0, draw=1, win=2`. For horizon `h`, set a valid binary target only when the episode result and censoring permit it. Set `remaining_turns_mask=True` exactly for nontruncated wins with a defined positive remaining value.
+
+`collate_decisions` is target-free: use `teacher_candidate_index=-1`, `terminal_outcome=-1`, zero target values, and all-false target masks. It must still perform the same reference, finiteness, and nonempty-candidate validation as supervised collation. `structured_imitation_loss` rejects a batch containing either sentinel, so inference cannot accidentally enter training.
 
 ```powershell
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_batching.py -q
@@ -657,13 +970,85 @@ The table encoder owns distinct categorical embeddings and numeric projections p
 - [ ] **Step 1: Write the failing encoder tests**
 
 ```python
-def test_centered_coordinates_are_translation_invariant() -> None: ...
-def test_local_hex_layer_is_equivariant_to_cell_row_permutation() -> None: ...
-def test_relational_layer_is_equivariant_to_typed_table_row_permutations() -> None: ...
-def test_padding_cannot_change_any_valid_node_embedding() -> None: ...
-def test_masked_neighbors_cannot_change_any_valid_destination() -> None: ...
-def test_every_layer_rejects_nonfinite_inputs_before_attention() -> None: ...
+COORDINATE_FEATURE_SLICE = slice(0, 2)
+
+def test_centered_coordinates_are_translation_invariant() -> None:
+    base = canonical_example("13x9")
+    shifted = translate_cell_coordinates(base, dq=17, dr=-9)
+    left = collate_examples((base,), horizons=(4, 8, 16))
+    right = collate_examples((shifted,), horizons=(4, 8, 16))
+    torch.testing.assert_close(
+        left.tables["cells"].numeric[..., COORDINATE_FEATURE_SLICE],
+        right.tables["cells"].numeric[..., COORDINATE_FEATURE_SLICE],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+def test_local_hex_layer_is_equivariant_to_cell_row_permutation() -> None:
+    case = make_layer_case(seed=19)
+    permuted, inverse = permute_table_and_remap(case.batch, "cells", seed=23)
+    actual = run_local_stack(case, permuted)
+    restored = undo_table_rows(actual, permuted.table_slices["cells"], inverse)
+    torch.testing.assert_close(
+        restored[:, case.batch.table_slices["cells"]],
+        run_local_stack(case, case.batch)[:, case.batch.table_slices["cells"]],
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+def test_relational_layer_is_equivariant_to_typed_table_row_permutations() -> None:
+    case = make_layer_case(seed=29)
+    for table in ("units", "templates", "capability_definitions", "capability_allocations"):
+        permuted, inverse = permute_table_and_remap(case.batch, table, seed=31)
+        actual = run_encoder_stack(case, permuted)
+        restored = undo_table_rows(actual, permuted.table_slices[table], inverse)
+        torch.testing.assert_close(
+            restored[:, case.batch.table_slices[table]],
+            run_encoder_stack(case, case.batch)[:, case.batch.table_slices[table]],
+            rtol=0.0,
+            atol=1e-6,
+        )
+
+def test_padding_cannot_change_any_valid_node_embedding() -> None:
+    case = make_layer_case(seed=37)
+    padded = append_masked_padding(case.batch, fill=1_000_000.0)
+    expected = run_encoder_stack(case, case.batch)
+    actual = run_encoder_stack(case, padded)[:, : expected.shape[1]]
+    torch.testing.assert_close(actual[case.batch.node_mask], expected[case.batch.node_mask],
+                               rtol=0.0, atol=1e-6)
+
+def test_masked_neighbors_cannot_change_any_valid_destination() -> None:
+    case = make_layer_case(seed=41)
+    mutated = replace_masked_neighbor_payload(case.batch, fill=1_000_000.0)
+    torch.testing.assert_close(
+        run_encoder_stack(case, mutated)[case.batch.node_mask],
+        run_encoder_stack(case, case.batch)[case.batch.node_mask],
+        rtol=0.0,
+        atol=1e-6,
+    )
+
+def test_every_layer_rejects_nonfinite_inputs_before_attention() -> None:
+    case = make_layer_case(seed=43)
+    bad = replace_first_valid_numeric(case.batch, value=float("nan"))
+    with pytest.raises(FloatingPointError, match="nonfinite.*tables.cells.numeric"):
+        run_encoder_stack(case, bad)
 ```
+Helper contracts for this test file:
+
+```python
+def canonical_example(size: Literal["13x9"]) -> StructuredExample: ...
+def translate_cell_coordinates(example: StructuredExample, dq: int, dr: int) -> StructuredExample: ...
+def make_layer_case(seed: int) -> LayerTestCase: ...
+def permute_table_and_remap(batch: RaggedBatch, table: str, seed: int) -> tuple[RaggedBatch, Tensor]: ...
+def undo_table_rows(state: Tensor, table_slice: slice, inverse: Tensor) -> Tensor: ...
+def run_local_stack(case: LayerTestCase, batch: RaggedBatch) -> Tensor: ...
+def run_encoder_stack(case: LayerTestCase, batch: RaggedBatch) -> Tensor: ...
+def append_masked_padding(batch: RaggedBatch, fill: float) -> RaggedBatch: ...
+def replace_masked_neighbor_payload(batch: RaggedBatch, fill: float) -> RaggedBatch: ...
+def replace_first_valid_numeric(batch: RaggedBatch, value: float) -> RaggedBatch: ...
+```
+
+`canonical_example` loads the immutable seed-41 example through the real corpus/schema loaders. `translate_cell_coordinates` replaces every cell `q/r` by `q+dq/r+dr` without changing rows or references. `make_layer_case` seeds Torch, constructs the default config and all three eval-mode layers, and owns one canonical batch. `permute_table_and_remap` uses `torch.randperm(..., generator=torch.Generator().manual_seed(seed))` over valid rows, moves their feature rows, and remaps table slices, neighborhoods, relations, allocations, and all candidate/projection references; its returned inverse restores physical row order. `run_local_stack` is typed encoding followed by local hex rounds; `run_encoder_stack` adds relational rounds. The padding helpers rebuild frozen batches, set every added row/neighbor mask false, and alter only false-masked payloads. `replace_first_valid_numeric` changes the first true-masked cell numeric value and records that field name in the expected exception.
 
 Build each permuted batch by permuting the row and every reference to that row together. Run identical weights, undo the output permutation, and compare valid rows with `torch.testing.assert_close(..., rtol=0.0, atol=1e-6)`. For padding invariance, append extreme finite values under false masks; valid outputs must remain within the same tolerance.
 
@@ -725,16 +1110,116 @@ class TacticalV3Policy(nn.Module):
 - [ ] **Step 1: Write failing policy tests**
 
 ```python
-def test_candidate_permutation_permutes_logits_and_preserves_identity_selection() -> None: ...
-def test_candidate_padding_cannot_change_valid_logits_or_argmax() -> None: ...
-def test_batching_beside_24x16_cannot_change_13x9_logits_or_action() -> None: ...
-def test_softmax_probability_is_zero_on_padding_and_sums_to_one_on_valid_rows() -> None: ...
-def test_state_table_permutations_leave_candidate_logits_unchanged() -> None: ...
-def test_projection_reference_changes_affect_only_the_referenced_candidate_path() -> None: ...
-def test_all_masked_candidate_rows_raise_before_argmax() -> None: ...
-def test_nonfinite_logits_raise_before_selection() -> None: ...
-def test_selected_candidate_is_an_exact_member_of_each_input_candidate_set() -> None: ...
+def test_candidate_permutation_permutes_logits_and_preserves_identity_selection() -> None:
+    case = make_policy_case(candidate_counts=(1, 3, 19), seed=53)
+    permuted, inverse = permute_candidate_rows(case.batch, seed=59)
+    expected = case.policy(case.batch).candidate_logits
+    actual = restore_candidate_rows(case.policy(permuted).candidate_logits, inverse)
+    torch.testing.assert_close(actual[case.batch.candidates.mask],
+                               expected[case.batch.candidates.mask], rtol=0.0, atol=1e-6)
+    assert case.policy.select(permuted) == case.policy.select(case.batch)
+
+def test_candidate_padding_cannot_change_valid_logits_or_argmax() -> None:
+    case = make_policy_case(candidate_counts=(1, 3, 19), seed=61)
+    padded = append_candidate_padding(case.batch, rows=11, fill=1_000_000.0)
+    expected = case.policy(case.batch)
+    actual = case.policy(padded)
+    torch.testing.assert_close(
+        actual.candidate_logits[:, : expected.candidate_logits.shape[1]][case.batch.candidates.mask],
+        expected.candidate_logits[case.batch.candidates.mask],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert case.policy.select(padded) == case.policy.select(case.batch)
+
+def test_batching_beside_24x16_cannot_change_13x9_logits_or_action() -> None:
+    example = canonical_model_example()
+    large = expand_cells(example, total_cells=384)
+    policy = seeded_policy(seed=67)
+    single = collate_examples((example,), horizons=policy.config.horizon_turns)
+    mixed = collate_examples((example, large), horizons=policy.config.horizon_turns)
+    expected = policy(single)
+    actual = policy(mixed)
+    torch.testing.assert_close(
+        actual.candidate_logits[0, : single.candidates.mask.shape[1]],
+        expected.candidate_logits[0],
+        rtol=0.0,
+        atol=1e-6,
+    )
+    assert policy.select(mixed)[0] == policy.select(single)[0]
+
+def test_softmax_probability_is_zero_on_padding_and_sums_to_one_on_valid_rows() -> None:
+    case = make_policy_case(candidate_counts=(1, 3, 19), seed=71)
+    probabilities = torch.softmax(case.policy(case.batch).candidate_logits, dim=-1)
+    assert torch.equal(probabilities[~case.batch.candidates.mask],
+                       torch.zeros_like(probabilities[~case.batch.candidates.mask]))
+    torch.testing.assert_close(probabilities.sum(dim=1), torch.ones(3),
+                               rtol=0.0, atol=1e-7)
+
+def test_state_table_permutations_leave_candidate_logits_unchanged() -> None:
+    case = make_policy_case(candidate_counts=(19,), seed=73)
+    expected = case.policy(case.batch).candidate_logits
+    for table in ("cells", "units", "templates", "capability_definitions",
+                  "capability_allocations", "rules", "relations"):
+        permuted, _inverse = permute_model_table_and_remap(case.batch, table, seed=79)
+        torch.testing.assert_close(case.policy(permuted).candidate_logits, expected,
+                                   rtol=0.0, atol=1e-6)
+
+def test_projection_reference_changes_affect_only_the_referenced_candidate_path() -> None:
+    case = make_reference_sensitive_policy_case(seed=83)
+    candidate_row, alternate_cell = movable_projection_case(case.batch)
+    changed = retarget_projection(case.batch, candidate_row, alternate_cell)
+    before = case.policy(case.batch).candidate_logits[0]
+    after = case.policy(changed).candidate_logits[0]
+    other = case.batch.candidates.mask[0].clone()
+    other[candidate_row] = False
+    torch.testing.assert_close(after[other], before[other], rtol=0.0, atol=0.0)
+    assert not torch.equal(after[candidate_row], before[candidate_row])
+
+def test_all_masked_candidate_rows_raise_before_argmax() -> None:
+    case = make_policy_case(candidate_counts=(3,), seed=89)
+    with pytest.raises(ValueError, match="sample 0 has no valid candidates"):
+        case.policy.select(mask_all_candidates(case.batch))
+
+def test_nonfinite_logits_raise_before_selection() -> None:
+    case = make_policy_case(candidate_counts=(3,), seed=97)
+    handle = inject_nan_into_first_valid_score(case.policy)
+    try:
+        with pytest.raises(FloatingPointError, match="candidate_logits"):
+            case.policy(case.batch)
+    finally:
+        handle.remove()
+
+def test_selected_candidate_is_an_exact_member_of_each_input_candidate_set() -> None:
+    case = make_policy_case(candidate_counts=(1, 3, 19), seed=101)
+    force_equal_candidate_logits(case.policy)
+    selections = case.policy.select(case.batch)
+    for sample, selection in enumerate(selections):
+        legal = legal_identity_set(case.batch, sample)
+        assert (selection.decision_id, selection.candidate_id) in legal
+        assert selection.candidate_id == min(candidate_id for _, candidate_id in legal)
 ```
+Helper contracts for this test file:
+
+```python
+def canonical_model_example() -> StructuredExample: ...
+def make_policy_case(candidate_counts: tuple[int, ...], seed: int) -> PolicyTestCase: ...
+def seeded_policy(seed: int) -> TacticalV3Policy: ...
+def expand_cells(example: StructuredExample, total_cells: int) -> StructuredExample: ...
+def permute_candidate_rows(batch: RaggedBatch, seed: int) -> tuple[RaggedBatch, tuple[Tensor, ...]]: ...
+def restore_candidate_rows(logits: Tensor, inverse: tuple[Tensor, ...]) -> Tensor: ...
+def append_candidate_padding(batch: RaggedBatch, rows: int, fill: float) -> RaggedBatch: ...
+def permute_model_table_and_remap(batch: RaggedBatch, table: str, seed: int) -> tuple[RaggedBatch, Tensor]: ...
+def make_reference_sensitive_policy_case(seed: int) -> PolicyTestCase: ...
+def movable_projection_case(batch: RaggedBatch) -> tuple[int, int]: ...
+def retarget_projection(batch: RaggedBatch, candidate_row: int, cell_row: int) -> RaggedBatch: ...
+def mask_all_candidates(batch: RaggedBatch) -> RaggedBatch: ...
+def inject_nan_into_first_valid_score(policy: TacticalV3Policy) -> RemovableHandle: ...
+def force_equal_candidate_logits(policy: TacticalV3Policy) -> None: ...
+def legal_identity_set(batch: RaggedBatch, sample: int) -> set[tuple[int, int]]: ...
+```
+
+The canonical loader uses the immutable seed-41 example. `make_policy_case` clones it once per requested count, keeps candidates `0..count-1`, selects candidate zero as the valid target, collates the samples, and returns one CPU eval-mode policy created after `torch.manual_seed(seed)`. `expand_cells` appends unreferenced, visible=false plains cells with unique `(1000+i,-1000-i)` coordinates until the exact requested total; all original tokens/candidates remain unchanged. Candidate/table permutation helpers use private seeded generators, remap every dependent reference, and return inverse row orders. Padding adds only false-masked rows. The reference-sensitive case sets the projection-destination coordinate path and final scorer weight to one and other scorer weights to zero; `movable_projection_case` returns the first move plus a different valid cell. The NaN helper installs a removable forward hook on the scorer's last linear layer and changes only the first valid score. Equal-logit setup zeros that layer's weight and bias. `legal_identity_set` reads only true-masked rows and returns their exact integer decision/candidate pairs.
 
 Use a deterministic tie and require the smallest `candidate_id`, not the first padded row, as the tie-break. Exercise candidate counts 1, 3, and 19 in one batch; no constructor argument may encode a maximum action count.
 
@@ -797,15 +1282,91 @@ def structured_imitation_loss(
 - [ ] **Step 1: Write failing objective tests**
 
 ```python
-def test_auxiliary_coefficient_sum_must_not_exceed_policy_coefficient() -> None: ...
-def test_policy_loss_ignores_padding_and_matches_manual_cross_entropy() -> None: ...
-def test_outcome_loss_uses_loss_draw_win_target_order() -> None: ...
-def test_horizon_loss_uses_only_uncensored_target_mask() -> None: ...
-def test_remaining_turns_loss_uses_only_nontruncated_wins() -> None: ...
-def test_empty_auxiliary_masks_produce_differentiable_finite_zeroes() -> None: ...
-def test_nonfinite_component_or_total_raises() -> None: ...
-def test_default_loss_backpropagates_finite_scorer_and_encoder_gradients() -> None: ...
+def test_auxiliary_coefficient_sum_must_not_exceed_policy_coefficient() -> None:
+    default = ObjectiveConfig()
+    assert (default.outcome_coefficient + default.horizon_coefficient
+            + default.remaining_turns_coefficient) == pytest.approx(0.5)
+    for kwargs in (
+        {"policy_coefficient": 0.0},
+        {"outcome_coefficient": -0.1},
+        {"horizon_coefficient": float("nan")},
+        {"outcome_coefficient": 0.6, "horizon_coefficient": 0.3,
+         "remaining_turns_coefficient": 0.2},
+    ):
+        with pytest.raises(ValueError):
+            ObjectiveConfig(**kwargs)
+
+def test_policy_loss_ignores_padding_and_matches_manual_cross_entropy() -> None:
+    output, batch = make_objective_case()
+    changed = replace_padded_candidate_logits(output, value=1_000_000.0)
+    expected = F.cross_entropy(valid_candidate_matrix(output, batch),
+                               batch.teacher_candidate_index)
+    actual = structured_imitation_loss(changed, batch, ObjectiveConfig())
+    torch.testing.assert_close(actual.policy, expected, rtol=0.0, atol=1e-7)
+
+def test_outcome_loss_uses_loss_draw_win_target_order() -> None:
+    output, batch = make_objective_case()
+    expected = F.cross_entropy(output.outcome_logits, torch.tensor([0, 2]))
+    actual = structured_imitation_loss(output, batch, ObjectiveConfig())
+    torch.testing.assert_close(actual.outcome, expected, rtol=0.0, atol=1e-7)
+
+def test_horizon_loss_uses_only_uncensored_target_mask() -> None:
+    output, batch = make_objective_case()
+    expected = F.binary_cross_entropy_with_logits(
+        output.horizon_logits[batch.horizon_target_mask],
+        batch.horizon_targets[batch.horizon_target_mask],
+    )
+    actual = structured_imitation_loss(output, batch, ObjectiveConfig())
+    torch.testing.assert_close(actual.horizon, expected, rtol=0.0, atol=1e-7)
+
+def test_remaining_turns_loss_uses_only_nontruncated_wins() -> None:
+    output, batch = make_objective_case()
+    expected = F.smooth_l1_loss(
+        output.remaining_turns[batch.remaining_turns_mask],
+        batch.remaining_turns[batch.remaining_turns_mask],
+    )
+    actual = structured_imitation_loss(output, batch, ObjectiveConfig())
+    torch.testing.assert_close(actual.remaining_turns, expected, rtol=0.0, atol=1e-7)
+
+def test_empty_auxiliary_masks_produce_differentiable_finite_zeroes() -> None:
+    output, batch = make_objective_case()
+    empty = clear_auxiliary_masks(batch)
+    actual = structured_imitation_loss(output, empty, ObjectiveConfig())
+    assert actual.horizon.item() == 0.0
+    assert actual.remaining_turns.item() == 0.0
+    assert actual.horizon.requires_grad and actual.remaining_turns.requires_grad
+    (actual.horizon + actual.remaining_turns).backward()
+    assert torch.isfinite(output.horizon_logits.grad).all()
+    assert torch.isfinite(output.remaining_turns.grad).all()
+
+def test_nonfinite_component_or_total_raises() -> None:
+    output, batch = make_objective_case()
+    bad = replace_first_valid_candidate_logit(output, float("nan"))
+    with pytest.raises(FloatingPointError, match="policy"):
+        structured_imitation_loss(bad, batch, ObjectiveConfig())
+
+def test_default_loss_backpropagates_finite_scorer_and_encoder_gradients() -> None:
+    model, batch = make_gradient_case(seed=103)
+    loss = structured_imitation_loss(model(batch), batch, ObjectiveConfig()).total
+    loss.backward()
+    gradients = named_required_gradients(model, prefixes=("encoders.", "candidate_scorer."))
+    assert gradients
+    assert all(gradient is not None and torch.isfinite(gradient).all()
+               for gradient in gradients.values())
 ```
+Helper contracts for this test file:
+
+```python
+def make_objective_case() -> tuple[PolicyOutput, RaggedBatch]: ...
+def replace_padded_candidate_logits(output: PolicyOutput, value: float) -> PolicyOutput: ...
+def valid_candidate_matrix(output: PolicyOutput, batch: RaggedBatch) -> Tensor: ...
+def clear_auxiliary_masks(batch: RaggedBatch) -> RaggedBatch: ...
+def replace_first_valid_candidate_logit(output: PolicyOutput, value: float) -> PolicyOutput: ...
+def make_gradient_case(seed: int) -> tuple[TacticalV3Policy, RaggedBatch]: ...
+def named_required_gradients(model: nn.Module, prefixes: tuple[str, ...]) -> dict[str, Tensor | None]: ...
+```
+
+`make_objective_case` returns two samples with candidate logits `[[2,0,-inf],[0,1,2]]`, masks `[[T,T,F],[T,T,T]]`, and targets `[0,2]`; outcome logits `[[2,1,0],[0,1,2]]` with targets `[loss,win]`; horizon logits `[[0,2,-2],[1,-1,3]]`, targets `[[1,0,0],[0,1,1]]`, and mask `[[T,F,F],[F,T,F]]`; remaining predictions `[4,7]`, targets `[5,9]`, and mask `[T,F]`. All output tensors are independent `requires_grad=True` leaves. Replacement helpers use `dataclasses.replace`, mutate only the named masked/valid positions, and leave the source frozen values unchanged. `valid_candidate_matrix` clones logits and restores `-inf` at false masks. `make_gradient_case` collates two immutable corpus rows and constructs the default seeded CPU model; `named_required_gradients` returns every trainable parameter whose name begins with either exact prefix.
 
 Assert the default auxiliary coefficient sum is `0.5 <= 1.0`. Reject negative or nonfinite coefficients, a nonpositive policy coefficient, and `outcome + horizon + remaining_turns > policy`.
 
@@ -878,17 +1439,103 @@ def train_offline(
 - [ ] **Step 1: Write failing trainer tests**
 
 ```python
-def test_two_cpu_runs_have_identical_history_weights_logits_and_actions() -> None: ...
-def test_validation_examples_are_never_seen_by_optimizer_or_shuffle() -> None: ...
-def test_best_validation_policy_nll_state_is_restored() -> None: ...
-def test_patience_stops_after_exact_number_of_nonimproving_epochs() -> None: ...
-def test_nonfinite_loss_fails_before_backward() -> None: ...
-def test_nonfinite_gradient_fails_before_optimizer_step() -> None: ...
-def test_nonfinite_parameter_fails_immediately_after_optimizer_step() -> None: ...
-def test_train_rejects_empty_or_overlapping_splits() -> None: ...
+def test_two_cpu_runs_have_identical_history_weights_logits_and_actions() -> None:
+    case = make_trainer_case()
+    first = run_training_case(case)
+    second = run_training_case(case)
+    assert first.history == second.history
+    assert first.best_epoch == second.best_epoch
+    assert_state_dict_equal(first.model.state_dict(), second.model.state_dict())
+    batch = collate_examples(case.validation, case.model_config.horizon_turns)
+    torch.testing.assert_close(first.model(batch).candidate_logits,
+                               second.model(batch).candidate_logits, rtol=0.0, atol=0.0)
+    assert first.model.select(batch) == second.model.select(batch)
+
+def test_validation_examples_are_never_seen_by_optimizer_or_shuffle() -> None:
+    case = make_trainer_case()
+    trace = TrainingTrace()
+    with capture_training_trace(trace):
+        run_training_case(case)
+    train_ids = {stable_example_identity(row) for row in case.train}
+    validation_ids = tuple(stable_example_identity(row) for row in case.validation)
+    assert trace.optimizer_example_ids
+    assert all(set(batch_ids) <= train_ids for batch_ids in trace.optimizer_example_ids)
+    assert trace.validation_epoch_orders
+    assert all(order == validation_ids for order in trace.validation_epoch_orders)
+    assert train_ids.isdisjoint(validation_ids)
+
+def test_best_validation_policy_nll_state_is_restored() -> None:
+    case = make_scripted_validation_case(losses=(0.8, 0.2, 0.4, 0.6))
+    result, epoch_states = run_scripted_validation_case(case)
+    assert result.best_epoch == 1
+    assert state_dict_sha256(result.model.state_dict()) == epoch_states[1]
+    assert state_dict_sha256(result.model.state_dict()) != epoch_states[3]
+
+def test_patience_stops_after_exact_number_of_nonimproving_epochs() -> None:
+    case = make_scripted_validation_case(losses=(0.5, 0.4, 0.4, 0.4, 0.4),
+                                         patience_epochs=3)
+    result, _states = run_scripted_validation_case(case)
+    assert result.stopped_early is True
+    assert result.best_epoch == 1
+    assert tuple(metric.epoch for metric in result.history) == (0, 1, 2, 3, 4)
+
+def test_nonfinite_loss_fails_before_backward() -> None:
+    fault = run_fault_case("loss")
+    assert isinstance(fault.error, FloatingPointError)
+    assert "epoch=0 batch=0 loss.total" in str(fault.error)
+    assert fault.optimizer_steps == 0
+    assert fault.before_state_sha256 == fault.after_state_sha256
+
+def test_nonfinite_gradient_fails_before_optimizer_step() -> None:
+    fault = run_fault_case("gradient")
+    assert isinstance(fault.error, FloatingPointError)
+    assert "epoch=0 batch=0 gradient=" in str(fault.error)
+    assert fault.optimizer_steps == 0
+    assert fault.before_state_sha256 == fault.after_state_sha256
+
+def test_nonfinite_parameter_fails_immediately_after_optimizer_step() -> None:
+    fault = run_fault_case("parameter")
+    assert isinstance(fault.error, FloatingPointError)
+    assert "epoch=0 batch=0 parameter=" in str(fault.error)
+    assert fault.optimizer_steps == 1
+    assert fault.result is None
+
+def test_train_rejects_empty_or_overlapping_splits() -> None:
+    case = make_trainer_case()
+    with pytest.raises(ValueError, match="training split must not be empty"):
+        run_training_case(dataclasses.replace(case, train=()))
+    with pytest.raises(ValueError, match="validation split must not be empty"):
+        run_training_case(dataclasses.replace(case, validation=()))
+    with pytest.raises(ValueError, match="splits overlap"):
+        run_training_case(dataclasses.replace(case, validation=(case.train[0],)))
 ```
 
-Instrument a tiny model/optimizer in the finite tests and assert its parameters are byte-identical before and after every rejected step. Compare two independent successful CPU runs with exact history dictionaries and `torch.equal` state tensors; compare logits and selected identities too.
+Helper contracts for this test file:
+
+```python
+@dataclass
+class TrainingTrace:
+    optimizer_example_ids: list[tuple[str, ...]] = field(default_factory=list)
+    validation_epoch_orders: list[tuple[str, ...]] = field(default_factory=list)
+
+def make_trainer_case() -> TrainerTestCase: ...
+def run_training_case(case: TrainerTestCase) -> TrainingResult: ...
+def assert_state_dict_equal(left: Mapping[str, Tensor], right: Mapping[str, Tensor]) -> None: ...
+def stable_example_identity(example: StructuredExample) -> str: ...
+@contextmanager
+def capture_training_trace(trace: TrainingTrace) -> Iterator[None]: ...
+def make_scripted_validation_case(
+    losses: tuple[float, ...],
+    patience_epochs: int = 100,
+) -> ScriptedValidationCase: ...
+def run_scripted_validation_case(
+    case: ScriptedValidationCase,
+) -> tuple[TrainingResult, dict[int, str]]: ...
+def state_dict_sha256(state: Mapping[str, Tensor]) -> str: ...
+def run_fault_case(stage: Literal["loss", "gradient", "parameter"]) -> FaultResult: ...
+```
+
+`make_trainer_case` loads the immutable train/validation tuples, default model/objective config, and `TrainerConfig(seed=227, batch_size=4, max_epochs=6, patience_epochs=6, device="cpu")`; each run reconstructs every object so no RNG/model state is shared. Stable example identity is the canonical SHA-256 of scenario, seed, seat, profile, and decision id. The trace context wraps collation, validation, and `AdamW.step`: it records the most recent collated identities at every optimizer step and each validation order without changing values. Scripted validation returns the supplied NLL by epoch while recording the CPU state hash at that exact evaluation boundary. `run_fault_case` snapshots the initial state; for `loss` it replaces total loss with NaN, for `gradient` it registers a NaN gradient hook, and for `parameter` it wraps the first real optimizer step then writes infinity to its first parameter. It catches and returns the exact exception, step count, before/after hashes, and optional result. Loss/gradient faults must leave state unchanged; the post-step fault is required to abort before returning a result, not to roll back the already-detected invalid step.
 
 - [ ] **Step 2: Run RED**
 
@@ -980,16 +1627,140 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy: ...
 - [ ] **Step 1: Write failing checkpoint and publication tests**
 
 ```python
-def test_checkpoint_contains_only_whitelisted_plain_values_and_cpu_tensors() -> None: ...
-def test_load_uses_weights_only_and_rejects_unknown_missing_or_wrong_typed_keys() -> None: ...
-def test_load_rejects_wrong_encoding_capacity_corpus_or_state_hash() -> None: ...
-def test_two_cpu_saves_are_semantically_identical_after_strict_load() -> None: ...
-def test_cpu_save_load_preserves_logits_and_actions_exactly() -> None: ...
+def test_checkpoint_contains_only_whitelisted_plain_values_and_cpu_tensors(
+    tmp_path: Path,
+) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    path = save_checkpoint_case(case, tmp_path / "model.pt")
+    raw = torch.load(path, map_location="cpu", weights_only=True)
+    assert set(raw) == {"format_version", "metadata", "state_dict", "inference_fixture"}
+    assert_checkpoint_value_whitelist(raw)
+    assert all(tensor.device.type == "cpu" and tensor.is_contiguous()
+               for tensor in raw["state_dict"].values())
+
+def test_load_uses_weights_only_and_rejects_unknown_missing_or_wrong_typed_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    path = save_checkpoint_case(case, tmp_path / "model.pt")
+    calls = spy_torch_load(monkeypatch)
+    load_structured_checkpoint(path, case.identity.encoding_hash,
+                               case.identity.capacity_hash)
+    assert calls == [{"map_location": "cpu", "weights_only": True}]
+    for mutation, message in (
+        ("unknown_top_level", "checkpoint fields"),
+        ("missing_state_dict", "checkpoint fields"),
+        ("bool_best_epoch", "metadata.best_epoch"),
+    ):
+        bad = write_checkpoint_variant(path, tmp_path / f"{mutation}.pt", mutation)
+        with pytest.raises((TypeError, ValueError), match=message):
+            load_structured_checkpoint(bad, case.identity.encoding_hash,
+                                       case.identity.capacity_hash)
+
+def test_load_rejects_wrong_encoding_capacity_corpus_or_state_hash(tmp_path: Path) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    path = save_checkpoint_case(case, tmp_path / "model.pt")
+    with pytest.raises(ValueError, match="encoding hash"):
+        load_structured_checkpoint(path, "0" * 64, case.identity.capacity_hash)
+    with pytest.raises(ValueError, match="capacity hash"):
+        load_structured_checkpoint(path, case.identity.encoding_hash, "0" * 64)
+    state_bad = write_checkpoint_variant(path, tmp_path / "state-bad.pt", "state_tensor")
+    with pytest.raises(ValueError, match="model state SHA-256"):
+        load_structured_checkpoint(state_bad, case.identity.encoding_hash,
+                                   case.identity.capacity_hash)
+    run_dir = publish_checkpoint_case(case, tmp_path / "run")
+    mutate_json_field(run_dir / "run.json", "dataset_manifest_sha256", "0" * 64)
+    with pytest.raises(ValueError, match="corpus SHA-256"):
+        validate_structured_run(run_dir)
+
+def test_two_cpu_saves_are_semantically_identical_after_strict_load(tmp_path: Path) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    first = load_checkpoint_case(case, save_checkpoint_case(case, tmp_path / "a.pt"))
+    second = load_checkpoint_case(case, save_checkpoint_case(case, tmp_path / "b.pt"))
+    assert first.metadata == second.metadata
+    assert first.fixture == second.fixture
+    assert_state_dict_equal(first.model.state_dict(), second.model.state_dict())
+
+def test_cpu_save_load_preserves_logits_and_actions_exactly(tmp_path: Path) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    loaded = load_checkpoint_case(case, save_checkpoint_case(case, tmp_path / "model.pt"))
+    logits, actions = fixture_logits_and_actions(loaded.model, case.fixture_examples)
+    for actual, expected in zip(logits, case.fixture_logits, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    assert actions == case.fixture_actions
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-def test_gpu_training_publication_matches_cpu_within_declared_tolerance() -> None: ...
-def test_publish_is_atomic_refuses_overwrite_and_leaves_run_unsealed() -> None: ...
-def test_validate_run_replays_immutable_inference_fixture() -> None: ...
+def test_gpu_training_publication_matches_cpu_within_declared_tolerance(
+    tmp_path: Path,
+) -> None:
+    case = make_checkpoint_case(tmp_path, device="cuda")
+    loaded = load_checkpoint_case(case, save_checkpoint_case(case, tmp_path / "model.pt"))
+    assert next(loaded.model.parameters()).device.type == "cpu"
+    logits, actions = fixture_logits_and_actions(loaded.model, case.fixture_examples)
+    for actual, expected in zip(logits, case.fixture_logits, strict=True):
+        torch.testing.assert_close(actual, expected.cpu(), rtol=1e-5, atol=1e-6)
+    assert actions == case.fixture_actions
+
+def test_publish_is_atomic_refuses_overwrite_and_leaves_run_unsealed(
+    tmp_path: Path,
+) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    failed = tmp_path / "failed-run"
+    with inject_publish_failure("after_checkpoint"):
+        with pytest.raises(RuntimeError, match="injected after_checkpoint"):
+            publish_checkpoint_case(case, failed)
+    assert not failed.exists()
+    assert not tuple(tmp_path.glob(".failed-run.tmp-*"))
+    run_dir = publish_checkpoint_case(case, tmp_path / "run")
+    manifest = read_json(run_dir / "run.json")
+    assert manifest["evidence_status"] == "unsealed-experimental"
+    assert manifest["config"]["algorithm"] == "structured_imitation"
+    with pytest.raises(FileExistsError):
+        publish_checkpoint_case(case, run_dir)
+
+def test_validate_run_replays_immutable_inference_fixture(tmp_path: Path) -> None:
+    case = make_checkpoint_case(tmp_path, device="cpu")
+    run_dir = publish_checkpoint_case(case, tmp_path / "run")
+    before = sha256_tree(run_dir)
+    loaded = validate_structured_run(run_dir)
+    logits, actions = fixture_logits_and_actions(loaded.model, case.fixture_examples)
+    assert tuple(tuple(row.tolist()) for row in logits) == loaded.fixture.valid_candidate_logits
+    assert actions == loaded.fixture.selected_identities
+    assert sha256_tree(run_dir) == before
 ```
+Helper contracts for this test file:
+
+```python
+@dataclass(frozen=True, slots=True)
+class CheckpointTestCase:
+    identity: TacticalV3SemanticIdentity
+    result: TrainingResult
+    corpus: StructuredCorpus
+    scenario_path: Path
+    metadata: StructuredCheckpointMetadata
+    fixture_examples: tuple[StructuredExample, ...]
+    fixture_logits: tuple[Tensor, ...]
+    fixture_actions: tuple[CandidateIdentity, ...]
+
+def make_checkpoint_case(tmp_path: Path, device: Literal["cpu", "cuda"]) -> CheckpointTestCase: ...
+def save_checkpoint_case(case: CheckpointTestCase, path: Path) -> Path: ...
+def load_checkpoint_case(case: CheckpointTestCase, path: Path) -> LoadedStructuredPolicy: ...
+def publish_checkpoint_case(case: CheckpointTestCase, run_dir: Path) -> Path: ...
+def assert_checkpoint_value_whitelist(value: object) -> None: ...
+def spy_torch_load(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]: ...
+def write_checkpoint_variant(source: Path, destination: Path, mutation: str) -> Path: ...
+def mutate_json_field(path: Path, field: str, value: object) -> None: ...
+def assert_state_dict_equal(left: Mapping[str, Tensor], right: Mapping[str, Tensor]) -> None: ...
+def fixture_logits_and_actions(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+) -> tuple[tuple[Tensor, ...], tuple[CandidateIdentity, ...]]: ...
+@contextmanager
+def inject_publish_failure(stage: Literal["after_checkpoint"]) -> Iterator[None]: ...
+def sha256_tree(root: Path) -> tuple[tuple[str, str], ...]: ...
+```
+
+The case loader trains the immutable tiny corpus with seed 227 on the requested device, selects the first two canonical validation rows as fixtures, computes valid-only logits and identities before publication, and builds metadata from the real corpus/state/semantic hashes. Save/load/publish helpers call only the public interfaces in this task with the case's exact expected identities. The whitelist recursively permits plain JSON scalars/lists/dicts outside `state_dict` and contiguous tensors only inside it. The load spy delegates to the original function and records only `map_location` and `weights_only`. Variant mutations respectively add a top-level key, remove `state_dict`, replace `best_epoch` with `True`, or add one to the first tensor without changing its recorded hash. JSON mutation rewrites one top-level field atomically for a deliberate tamper test. The injected publication failure fires after temporary checkpoint creation and requires cleanup before rethrow. Tree hashing returns sorted relative paths plus SHA-256 and never follows links.
 
 The CUDA test trains the same tiny corpus on CUDA, publishes CPU tensors, and compares CPU-reloaded valid logits with `rtol=1e-5, atol=1e-6`; selected candidate identities must be exact. CPU round trips require `rtol=0.0, atol=0.0` and exact actions.
 
@@ -1090,13 +1861,93 @@ Add focused tests for manifest-only loading, `.pt` containment, exact encoding/c
 Add policy-server subprocess tests for:
 
 ```python
-def test_tactical_v3_requires_expected_capacity_hash() -> None: ...
-def test_legacy_expectation_rejects_capacity_hash() -> None: ...
-def test_tactical_v3_request_returns_decision_and_candidate_identity() -> None: ...
-def test_tactical_v3_request_rejects_flat_or_mixed_payloads() -> None: ...
-def test_structured_response_is_deterministic_across_server_restarts() -> None: ...
-def test_wrong_encoding_or_capacity_fails_before_ready() -> None: ...
+def test_tactical_v3_requires_expected_capacity_hash(tmp_path: Path) -> None:
+    case = make_policy_server_case(tmp_path)
+    args = without_argument(case.args, "--expected-capacity-hash")
+    result = run_policy_server_until_exit(args)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "--expected-capacity-hash is required for tactical-v3" in result.stderr
+
+def test_legacy_expectation_rejects_capacity_hash() -> None:
+    with pytest.raises(ValueError, match="capacity hash is valid only for tactical-v3"):
+        PolicyExpectation(
+            environment="tactical-v1",
+            version="tactical-v1",
+            encoding_hash="a" * 64,
+            capacity_hash="b" * 64,
+        )
+
+def test_tactical_v3_request_returns_decision_and_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    case = make_policy_server_case(tmp_path)
+    with start_policy_server(case.args) as server:
+        assert server.ready["ready"] is True
+        response = server.request({"seat": case.seat, "decision": case.view_payload})
+    assert set(response) == {"decision_id", "candidate_id"}
+    assert response["decision_id"] == case.view_payload["decision_id"]
+    assert (response["decision_id"], response["candidate_id"]) in case.legal_identities
+
+def test_tactical_v3_request_rejects_flat_or_mixed_payloads(tmp_path: Path) -> None:
+    case = make_policy_server_case(tmp_path)
+    invalid = (
+        {"seat": case.seat, "obs": [0.0], "mask": [True]},
+        {"seat": case.seat, "decision": case.view_payload,
+         "obs": [0.0], "mask": [True]},
+        {"seat": case.seat, "decision": case.view_payload, "extra": 1},
+    )
+    with start_policy_server(case.args) as server:
+        for request in invalid:
+            response = server.request(request)
+            assert set(response) == {"error"}
+            assert "structured policy request fields" in response["error"]
+
+def test_structured_response_is_deterministic_across_server_restarts(
+    tmp_path: Path,
+) -> None:
+    case = make_policy_server_case(tmp_path)
+    first = request_once(case.args, {"seat": case.seat, "decision": case.view_payload})
+    second = request_once(case.args, {"seat": case.seat, "decision": case.view_payload})
+    assert first == second
+    assert (first["decision_id"], first["candidate_id"]) in case.legal_identities
+
+def test_wrong_encoding_or_capacity_fails_before_ready(tmp_path: Path) -> None:
+    case = make_policy_server_case(tmp_path)
+    for flag in ("--expected-encoding-hash", "--expected-capacity-hash"):
+        args = replace_argument(case.args, flag, "0" * 64)
+        result = run_policy_server_until_exit(args)
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert "does not match expected" in result.stderr
 ```
+Helper contracts for this test file:
+
+```python
+@dataclass(frozen=True, slots=True)
+class PolicyServerCase:
+    args: tuple[str, ...]
+    seat: int
+    view_payload: Mapping[str, object]
+    legal_identities: frozenset[tuple[int, int]]
+
+class PolicyServerProcess(AbstractContextManager["PolicyServerProcess"]):
+    ready: Mapping[str, object]
+    def request(self, payload: Mapping[str, object]) -> Mapping[str, object]: ...
+    def close(self) -> None: ...
+
+def make_policy_server_case(tmp_path: Path) -> PolicyServerCase: ...
+def without_argument(args: tuple[str, ...], flag: str) -> tuple[str, ...]: ...
+def replace_argument(args: tuple[str, ...], flag: str, value: str) -> tuple[str, ...]: ...
+def run_policy_server_until_exit(args: tuple[str, ...]) -> subprocess.CompletedProcess[str]: ...
+def start_policy_server(args: tuple[str, ...]) -> PolicyServerProcess: ...
+def request_once(
+    args: tuple[str, ...],
+    payload: Mapping[str, object],
+) -> Mapping[str, object]: ...
+```
+
+The case helper publishes a minimal valid CPU structured run through Task 9's public publication path, thaws the canonical seed-41 view, derives legal identities from its exact candidates, and builds argv with `sys.executable`, `python/policy_server.py`, `--p0 run:PATH`, and all four exact expectation flags. Argument helpers require the named flag exactly once and remove or replace its following value. The exit helper uses UTF-8 text pipes, a 30-second timeout, and returns captured stdout/stderr. The context helper starts the same command, reads exactly one JSON ready line, exposes request/reply JSONL, bounds stderr, and always sends close then terminates/reaps in `__exit__`. `request_once` opens that context, requires ready, sends one payload, returns its decoded reply, and closes.
 
 The structured input has exactly `{"seat": int, "decision": object}`; the output has exactly `{"decision_id": int, "candidate_id": int}`. Legacy input/output remain exactly `{"seat","obs","mask"}` and `{"action"}`.
 
@@ -1204,7 +2055,7 @@ public static class TacticalV3PolicyPayload
 public PolicyCandidateResult ActStructured(int seat, TacticalV3ViewDto decision);
 ```
 
-`TacticalV3ObservationDto`, candidate/projection DTOs, and reward DTO use the exact snake_case fields and scalar/array types enumerated in ?Resolved Project A Wire Contract?; there is no generic dictionary, reflection serializer, flattened observation, or mask.
+`TacticalV3ObservationDto`, candidate/projection DTOs, and reward DTO use the exact snake_case fields and scalar/array types enumerated in `Resolved Project A Wire Contract`; there is no generic dictionary, reflection serializer, flattened observation, or mask.
 
 - [ ] **Step 1: Write engine and Unity RED tests**
 
@@ -1329,7 +2180,7 @@ Map every property explicitly into Project A's `TrainingScenario.TacticalV3` and
 
 - [ ] **Step 4: Load structured runs only into Arena**
 
-Extend Arena manifest DTOs with `algorithm`, `contract_hash`, and `capacity_hash`. Resolve the selected run's contained `scenario.json` and `checkpoints/best.pt`, require unsealed experimental state, and compare environment/version/contract/encoding/capacity identities before altering the active configuration. Pass the unchanged `run:PATH` controller spec to `PolicyBridge`. Display ?variable structured candidates? and the three semantic hashes.
+Extend Arena manifest DTOs with `algorithm`, `contract_hash`, and `capacity_hash`. Resolve the selected run's contained `scenario.json` and `checkpoints/best.pt`, require unsealed experimental state, and compare environment/version/contract/encoding/capacity identities before altering the active configuration. Pass the unchanged `run:PATH` controller spec to `PolicyBridge`. Display "variable structured candidates" and the three semantic hashes.
 
 Keep tactical-v3 out of SB3 Train-tab environment/algorithm choices. If an imported config requests it, show a specific offline-imitation instruction and throw before any process launch. Do not add corpus collection, teacher selection, DAgger, curriculum, or win-rate controls.
 
@@ -1358,11 +2209,12 @@ def overfit_metrics(
 ) -> Mapping[str, float]: ...
 # Required keys: policy_nll, policy_accuracy, finite_logit_count.
 
-def assert_gymserver_identity_round_trip(
+def round_trip_via_policy_server(
     client: TacticalV3GymClient,
-    controller: StructuredController,
+    run_dir: Path,
+    identity: TacticalV3SemanticIdentity,
     seed: int,
-) -> CandidateIdentity: ...
+) -> tuple[CandidateIdentity, TacticalV3View, TacticalV3View]: ...
 ```
 
 Keep these as test helpers, not production API. They use the same strict parser, batcher, controller, and GymServer client as publication.
@@ -1370,11 +2222,112 @@ Keep these as test helpers, not production API. They use the same strict parser,
 - [ ] **Step 1: Write the failing end-to-end tests**
 
 ```python
-def test_tiny_corpus_overfits_deterministically() -> None: ...
-def test_13x9_gymserver_policy_server_candidate_identity_round_trip() -> None: ...
-def test_same_checkpoint_infers_legally_on_24x16_without_rebuild() -> None: ...
-def test_two_publications_reload_with_identical_logits_and_actions() -> None: ...
+def test_tiny_corpus_overfits_deterministically(
+    tmp_path: Path, server_dll: Path,
+) -> None:
+    case = make_end_to_end_case(tmp_path, server_dll)
+    assert case.first_result.history == case.second_result.history
+    assert state_dict_sha256(case.first_result.model.state_dict()) == state_dict_sha256(
+        case.second_result.model.state_dict()
+    )
+    for examples in (case.corpus.train, case.corpus.validation):
+        first = overfit_metrics(case.first_controller, examples)
+        second = overfit_metrics(case.second_controller, examples)
+        assert first == second
+        assert first["policy_accuracy"] == 1.0
+        assert first["policy_nll"] < 0.02
+        assert first["finite_logit_count"] == total_valid_candidates(examples)
+
+def test_13x9_gymserver_policy_server_candidate_identity_round_trip(
+    tmp_path: Path, server_dll: Path,
+) -> None:
+    case = make_end_to_end_case(tmp_path, server_dll)
+    command = gymserver_command(server_dll, CHECKED_IN_SCENARIO, role="tactical")
+    with TacticalV3GymClient(command, environment_kind="tactical") as client:
+        selection, before, after = round_trip_via_policy_server(
+            client, case.first_run_dir, case.identity, seed=41
+        )
+    matches = [candidate for candidate in before.decision.candidates
+               if candidate.candidate_id == selection.candidate_id]
+    assert len(matches) == 1
+    assert selection.decision_id == before.decision.decision_id
+    assert after.terminated or after.truncated or (
+        after.decision.decision_id != before.decision.decision_id
+    )
+
+def test_same_checkpoint_infers_legally_on_24x16_without_rebuild(
+    tmp_path: Path, server_dll: Path,
+) -> None:
+    case = make_end_to_end_case(tmp_path, server_dll)
+    before_parameter_count = sum(parameter.numel()
+                                 for parameter in case.first_controller.policy.parameters())
+    command = gymserver_command(server_dll, SCENARIO_24X16, role="tactical")
+    with TacticalV3GymClient(command, environment_kind="tactical") as client:
+        view = client.reset(41)
+        assert client.identity.encoding_hash == case.identity.encoding_hash
+        assert client.identity.capacity_hash == case.identity.capacity_hash
+        assert client.identity.contract_hash != case.identity.contract_hash
+        logits, selection = controller_logits_and_selection(case.first_controller, view)
+    assert torch.isfinite(logits).all()
+    assert selection.candidate_id in {
+        candidate.candidate_id for candidate in view.decision.candidates
+    }
+    assert sum(parameter.numel()
+               for parameter in case.first_controller.policy.parameters()) == before_parameter_count
+    assert case.first_controller.policy.config == case.second_controller.policy.config
+
+def test_two_publications_reload_with_identical_logits_and_actions(
+    tmp_path: Path, server_dll: Path,
+) -> None:
+    case = make_end_to_end_case(tmp_path, server_dll)
+    first = validate_structured_run(case.first_run_dir)
+    second = validate_structured_run(case.second_run_dir)
+    assert first.metadata.model_state_sha256 == second.metadata.model_state_sha256
+    for examples in (case.corpus.train, case.corpus.validation):
+        first_logits, first_actions = controller_fixture_outputs(first.model, examples)
+        second_logits, second_actions = controller_fixture_outputs(second.model, examples)
+        for left, right in zip(first_logits, second_logits, strict=True):
+            torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
+        assert first_actions == second_actions
 ```
+Helper contracts for this test file:
+
+```python
+@dataclass(frozen=True, slots=True)
+class EndToEndCase:
+    corpus: StructuredCorpus
+    identity: TacticalV3SemanticIdentity
+    first_result: TrainingResult
+    second_result: TrainingResult
+    first_run_dir: Path
+    second_run_dir: Path
+    first_controller: StructuredController
+    second_controller: StructuredController
+
+def make_end_to_end_case(tmp_path: Path, server_dll: Path) -> EndToEndCase: ...
+def total_valid_candidates(examples: tuple[StructuredExample, ...]) -> int: ...
+def gymserver_command(
+    server_dll: Path,
+    scenario: Path,
+    role: Literal["tactical", "duel"],
+) -> tuple[str, ...]: ...
+def round_trip_via_policy_server(
+    client: TacticalV3GymClient,
+    run_dir: Path,
+    identity: TacticalV3SemanticIdentity,
+    seed: int,
+) -> tuple[CandidateIdentity, TacticalV3View, TacticalV3View]: ...
+def controller_logits_and_selection(
+    controller: StructuredController,
+    view: TacticalV3View,
+) -> tuple[Tensor, CandidateIdentity]: ...
+def controller_fixture_outputs(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+) -> tuple[tuple[Tensor, ...], tuple[CandidateIdentity, ...]]: ...
+```
+
+`make_end_to_end_case` builds/loads the checked-in corpus, runs `train_offline` twice from freshly constructed seed-227 CPU configs, publishes to two absent sibling directories, validates both runs, and loads both structured controllers with exact encoding/capacity hashes. `overfit_metrics` collates examples in canonical order, runs eval/inference mode, and returns mean target NLL, exact target-row accuracy, and the number of finite true-masked logits. The GymServer argv is exactly `(dotnet, server_dll, --scenario, scenario, --environment, tactical-v3, --role, role)`. The round-trip helper resets the real client, projects the frozen view back to the exact Task 1 wire fields, starts the real policy server with all expectation flags, sends one structured request, requires an exact identity reply, converts it to `CandidateSelection`, and calls the real client step before closing both processes. Controller logit helpers use `collate_decisions` for target-free inference, return valid-only CPU logits, and preserve exact candidate identities.
 
 Train two independent CPU models from the frozen tiny corpus and seed 227. Require identical histories, state hashes, CPU logits, and selected identities. On both train and validation examples require `policy_accuracy == 1.0`, `policy_nll < 0.02`, and all valid logits finite. These are fixture-overfit checks only.
 
@@ -1427,7 +2380,7 @@ dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --no-restore
 powershell -ExecutionPolicy Bypass -File engine/build-to-unity.ps1
 ```
 
-Use Coplay against this worktree in order: `set_unity_project_root`; wait for import; `check_compile_errors`; run the six affected EditMode classes from Tasks 11?12; run the ML Lab selected-run test with `python/runs/tactical-v3-policy-project-b-acceptance`; `get_unity_logs`; then `check_compile_errors` again. Expected: full .NET green, zero Unity compilation/test errors, the selected structured run loads into Arena with its capacity identity, and no new exceptions/errors in logs. If the Editor is unavailable, report the missing gate and do not claim completion.
+Use Coplay against this worktree in order: `set_unity_project_root`; wait for import; `check_compile_errors`; run the six affected EditMode classes from Tasks 11-12; run the ML Lab selected-run test with `python/runs/tactical-v3-policy-project-b-acceptance`; `get_unity_logs`; then `check_compile_errors` again. Expected: full .NET green, zero Unity compilation/test errors, the selected structured run loads into Arena with its capacity identity, and no new exceptions/errors in logs. If the Editor is unavailable, report the missing gate and do not claim completion.
 
 - [ ] **Step 7: Write the Project B evidence report**
 
