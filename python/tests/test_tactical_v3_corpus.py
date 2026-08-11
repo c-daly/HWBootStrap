@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
@@ -122,8 +124,41 @@ def test_loader_rejects_corpus_mutation_after_initial_snapshot(
         else:
             (copied / "train.jsonl").write_bytes((copied / "validation.jsonl").read_bytes())
     monkeypatch.setattr(module, "_validate_partitions", mutate)
-    with pytest.raises(ValueError, match="changed while"):
+    with pytest.raises((ValueError, PermissionError), match="changed while|denied"):
         load_corpus(copied, expected_identity)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction lease is a Windows security boundary")
+def test_loader_root_lease_blocks_junction_swap_after_initial_inventory(
+    tmp_path: Path, expected_identity, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_corpus as module
+    copied = _resealed_copy(tmp_path)
+    original = module._file_leases
+    attacked = False
+    @contextmanager
+    def attack(root: Path):
+        nonlocal attacked
+        with original(root) as evidence:
+            if not attacked:
+                attacked = True
+                with pytest.raises(PermissionError):
+                    os.rename(copied, tmp_path / "moved-real-corpus")
+            yield evidence
+    monkeypatch.setattr(module, "_file_leases", attack)
+    assert load_corpus(copied, expected_identity).root == copied
+    assert attacked
+
+
+def test_loader_uses_leased_artifact_bytes_not_path_reads(tmp_path: Path, expected_identity, monkeypatch: pytest.MonkeyPatch) -> None:
+    copied = _resealed_copy(tmp_path)
+    original = Path.read_bytes
+    def reject_artifact_path_reads(path: Path) -> bytes:
+        if path.parent == copied and path.name in {"manifest.json", "train.jsonl", "validation.jsonl"}:
+            raise AssertionError("artifact path read bypassed the authenticated lease")
+        return original(path)
+    monkeypatch.setattr(Path, "read_bytes", reject_artifact_path_reads)
+    assert load_corpus(copied, expected_identity).root == copied
 
 
 def test_tiny_policy_selects_first_non_end_turn_or_the_only_end_turn() -> None:
@@ -138,6 +173,17 @@ def test_tiny_policy_selects_first_non_end_turn_or_the_only_end_turn() -> None:
             SimpleNamespace(kind="end_turn", candidate_id=0),
             SimpleNamespace(kind="end_turn", candidate_id=1),
         ))
+
+
+def test_publish_no_replace_reports_raced_destination(tmp_path: Path) -> None:
+    import ml_lab.tactical_v3_corpus as module
+    source = tmp_path / "completed"
+    destination = tmp_path / "corpus"
+    source.mkdir()
+    destination.mkdir()
+    with pytest.raises(FileExistsError, match="overwrite existing corpus output"):
+        module._publish_no_replace(source, destination)
+    assert source.is_dir() and destination.is_dir()
 
 
 def test_tiny_corpus_is_exclusive_content_addressed_and_partitioned(

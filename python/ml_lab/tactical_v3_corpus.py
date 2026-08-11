@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import ctypes
 import errno
@@ -151,6 +152,118 @@ def _require_plain_directory(root: Path) -> None:
         raise ValueError("corpus root must be a plain directory, not a symlink or reparse point")
 
 
+@contextmanager
+def _root_lease(root: Path):
+    """Hold the corpus directory itself against rename/delete for authentication."""
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(root, flags)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("corpus root lease is not a directory")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                       ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+    create.restype = ctypes.c_void_p
+    close = kernel32.CloseHandle
+    close.argtypes = (ctypes.c_void_p,)
+    close.restype = ctypes.c_int
+    handle = create(str(root), 0x80000000, 0x00000001, None, 3, 0x02200000, None)
+    invalid = ctypes.c_void_p(-1).value
+    if handle == invalid:
+        raise OSError(ctypes.get_last_error(), "CreateFileW corpus root lease failed", str(root))
+    class _Info(ctypes.Structure):
+        _fields_ = [("attributes", ctypes.c_uint32), ("_creation", ctypes.c_uint64),
+                    ("_access", ctypes.c_uint64), ("_write", ctypes.c_uint64),
+                    ("volume", ctypes.c_uint32), ("size_high", ctypes.c_uint32),
+                    ("size_low", ctypes.c_uint32), ("links", ctypes.c_uint32),
+                    ("index_high", ctypes.c_uint32), ("index_low", ctypes.c_uint32)]
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = (ctypes.c_void_p, ctypes.POINTER(_Info))
+    get_info.restype = ctypes.c_int
+    info = _Info()
+    if not get_info(handle, ctypes.byref(info)):
+        code = ctypes.get_last_error(); close(handle)
+        raise OSError(code, "GetFileInformationByHandle corpus root lease failed", str(root))
+    if info.attributes & 0x400 or not info.attributes & 0x10:
+        close(handle)
+        raise ValueError("corpus root lease is a reparse point or not a directory")
+    try:
+        yield (info.volume, info.index_high, info.index_low)
+    finally:
+        if not close(handle):
+            raise OSError(ctypes.get_last_error(), "CloseHandle corpus root lease failed", str(root))
+
+
+@contextmanager
+def _file_leases(root: Path):
+    """Hold every corpus file read-only/no-delete and prove its bytes are stable."""
+    if os.name != "nt":
+        root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        descriptors: dict[str, int] = {}
+        initial: dict[str, tuple[tuple[int, int, int], bytes]] = {}
+        try:
+            if set(os.listdir(root_fd)) != _INVENTORY:
+                raise ValueError("corpus inventory must contain exactly manifest.json, train.jsonl, validation.jsonl")
+            for name in sorted(_INVENTORY):
+                descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode):
+                    os.close(descriptor); raise ValueError(f"corpus file {name!r} is not regular")
+                descriptors[name] = descriptor
+                initial[name] = ((info.st_dev, info.st_ino, info.st_size), _read_descriptor(descriptor))
+            yield {name: item[1] for name, item in initial.items()}
+            for name, descriptor in descriptors.items():
+                info = os.fstat(descriptor)
+                if (info.st_dev, info.st_ino, info.st_size) != initial[name][0] or _read_descriptor(descriptor) != initial[name][1]:
+                    raise ValueError(f"corpus file {name} changed while it was being authenticated")
+        finally:
+            for descriptor in descriptors.values(): os.close(descriptor)
+            os.close(root_fd)
+        return
+    import msvcrt
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+    create.restype = ctypes.c_void_p
+    invalid = ctypes.c_void_p(-1).value
+    descriptors: dict[str, int] = {}
+    initial: dict[str, bytes] = {}
+    try:
+        if {entry.name for entry in root.iterdir()} != _INVENTORY:
+            raise ValueError("corpus inventory must contain exactly manifest.json, train.jsonl, validation.jsonl")
+        for name in sorted(_INVENTORY):
+            handle = create(str(root / name), 0x80000000, 0x00000001, None, 3, 0x00200000, None)
+            if handle == invalid:
+                raise OSError(ctypes.get_last_error(), "CreateFileW corpus file lease failed", name)
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+            descriptors[name] = descriptor
+            initial[name] = _read_descriptor(descriptor)
+        yield initial
+        if {entry.name for entry in root.iterdir()} != _INVENTORY:
+            raise ValueError("corpus inventory changed while it was being authenticated")
+        for name, descriptor in descriptors.items():
+            if _read_descriptor(descriptor) != initial[name]:
+                raise ValueError(f"corpus file {name} changed while it was being authenticated")
+    finally:
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+
+
+def _read_descriptor(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _require_inventory(root: Path) -> None:
     _require_plain_directory(root)
     entries = {entry.name: entry for entry in root.iterdir()}
@@ -194,9 +307,9 @@ def _manifest_without_identity(manifest: Mapping[str, object]) -> dict[str, obje
 
 
 def _validate_manifest(
-    root: Path, expected: TacticalV3SemanticIdentity,
+    root: Path, expected: TacticalV3SemanticIdentity, manifest_bytes: bytes | None = None,
 ) -> tuple[str, tuple[Mapping[str, object], Mapping[str, object]]]:
-    manifest_bytes = (root / "manifest.json").read_bytes()
+    manifest_bytes = (root / "manifest.json").read_bytes() if manifest_bytes is None else manifest_bytes
     manifest = _exact_mapping(_decode_json(manifest_bytes, "manifest"), _MANIFEST_FIELDS, "manifest")
     if manifest_bytes != _canonical_bytes(manifest):
         raise ValueError("canonical manifest must be compact JSON with exactly one newline")
@@ -305,10 +418,10 @@ def _parse_row(value: object, expected: TacticalV3SemanticIdentity) -> Structure
 
 
 def _read_partition(
-    root: Path, metadata: Mapping[str, object], expected: TacticalV3SemanticIdentity,
+    root: Path, metadata: Mapping[str, object], expected: TacticalV3SemanticIdentity, data: bytes | None = None,
 ) -> tuple[StructuredExample, ...]:
     path = root / str(metadata["path"])
-    data = path.read_bytes()
+    data = path.read_bytes() if data is None else data
     if _sha256_bytes(data) != metadata["sha256"]:
         raise ValueError(f"{path.name} SHA-256 does not match manifest")
     if len(data) != metadata["byte_length"]:
@@ -379,7 +492,7 @@ def _validate_partitions(train: tuple[StructuredExample, ...], validation: tuple
                 raise ValueError(f"{partition} seed {seed} contains duplicate decision examples")
 
 
-def load_corpus(root: Path, expected: TacticalV3SemanticIdentity) -> StructuredCorpus:
+def _load_corpus_unleased(root: Path, expected: TacticalV3SemanticIdentity) -> StructuredCorpus:
     """Load and physically authenticate the exact tiny corpus without mutating it."""
     if type(expected) is not TacticalV3SemanticIdentity:
         raise TypeError("expected must be a TacticalV3SemanticIdentity")
@@ -396,6 +509,20 @@ def load_corpus(root: Path, expected: TacticalV3SemanticIdentity) -> StructuredC
     if final_snapshot != initial_snapshot:
         raise ValueError("corpus changed while it was being authenticated")
     return StructuredCorpus(root, identity, train, validation)
+
+
+def load_corpus(root: Path, expected: TacticalV3SemanticIdentity) -> StructuredCorpus:
+    """Load after leasing the actual corpus root against reparse/rename swaps."""
+    if type(expected) is not TacticalV3SemanticIdentity:
+        raise TypeError("expected must be a TacticalV3SemanticIdentity")
+    root = Path(root)
+    with _root_lease(root):
+        with _file_leases(root) as evidence:
+            identity, files = _validate_manifest(root, expected, evidence["manifest.json"])
+            train = _read_partition(root, files[0], expected, evidence["train.jsonl"])
+            validation = _read_partition(root, files[1], expected, evidence["validation.jsonl"])
+            _validate_partitions(train, validation)
+            return StructuredCorpus(root, identity, train, validation)
 
 
 def _row_wire(example: StructuredExample) -> dict[str, object]:
@@ -422,7 +549,7 @@ def _fsync_directory(path: Path) -> None:
 def _publish_no_replace(source: Path, destination: Path) -> None:
     """Atomically move a finished directory only when its destination does not exist."""
     if os.name == "nt":
-        move = ctypes.windll.kernel32.MoveFileW
+        move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileW
         move.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p)
         move.restype = ctypes.c_int
         if not move(str(source), str(destination)):
