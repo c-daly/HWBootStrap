@@ -1045,7 +1045,7 @@ git commit -m "feat: expose tactical-v3 through GymServer"
 - Modify: `engine/HexWars.Engine.Tests/TacticalV3CandidateTests.cs`
 - Modify: `engine/HexWars.Engine.Tests/TacticalV3DuelEnvTests.cs`
 - Modify: `engine/HexWars.Engine.Tests/TacticalV3GymServerTests.cs`
-- Create: `.superpowers/sdd/2026-08-10-generalizable-structured-imitation/project-a-report.md`
+- Create: `docs/superpowers/reports/2026-08-10-generalizable-structured-imitation-project-a.md`
 
 **Interfaces:**
 - Consumes: complete Project-A tactical-v3 contract.
@@ -1106,7 +1106,7 @@ Send `spaces`, `reset`, one legal `step`, and `close` as JSONL. Confirm structur
 
 - [ ] **Step 6: Write the Project-A completion report**
 
-Create `.superpowers/sdd/2026-08-10-generalizable-structured-imitation/project-a-report.md` with:
+Create `docs/superpowers/reports/2026-08-10-generalizable-structured-imitation-project-a.md` with:
 
 ```text
 commits
@@ -1122,7 +1122,7 @@ known limitations: no model, no fog, no design, no DAgger, unsealed experimental
 - [ ] **Step 7: Commit final conformance/report changes**
 
 ```powershell
-git add engine/HexWars.Engine.Tests/TacticalV3ObservationTests.cs engine/HexWars.Engine.Tests/TacticalV3CandidateTests.cs engine/HexWars.Engine.Tests/TacticalV3DuelEnvTests.cs engine/HexWars.Engine.Tests/TacticalV3GymServerTests.cs .superpowers/sdd/2026-08-10-generalizable-structured-imitation/project-a-report.md
+git add engine/HexWars.Engine.Tests/TacticalV3ObservationTests.cs engine/HexWars.Engine.Tests/TacticalV3CandidateTests.cs engine/HexWars.Engine.Tests/TacticalV3DuelEnvTests.cs engine/HexWars.Engine.Tests/TacticalV3GymServerTests.cs docs/superpowers/reports/2026-08-10-generalizable-structured-imitation-project-a.md
 git commit -m "test: complete tactical-v3 contract gate"
 ```
 
