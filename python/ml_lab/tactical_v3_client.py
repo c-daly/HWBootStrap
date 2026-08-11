@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from collections import deque
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import queue
 import subprocess
+import threading
 from typing import Any, Literal
 
 from hexwars_gym.env import no_window_creationflags
@@ -20,6 +23,7 @@ from .tactical_v3_schema import (
 
 _STDERR_TAIL_LIMIT = 8192
 _REAP_TIMEOUT_SECONDS = 2
+_REPLY_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,8 @@ class TacticalV3GymClient:
         self._closed = False
         self._view: TacticalV3View | None = None
         self._stderr_tail = ""
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stderr_chunks: deque[str] = deque()
         self.proc = subprocess.Popen(
             [*server_cmd, "--environment", "tactical-v3"],
             stdin=subprocess.PIPE,
@@ -56,6 +62,10 @@ class TacticalV3GymClient:
             bufsize=1,
             creationflags=no_window_creationflags(),
         )
+        self._stdout_thread = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stdout_thread.start()
+        self._stderr_thread.start()
         try:
             self._identity = parse_spaces(
                 self._rpc({"cmd": "spaces" if environment_kind == "tactical" else "duel_spaces"})
@@ -161,9 +171,12 @@ class TacticalV3GymClient:
             encoded = json.dumps(request, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             self.proc.stdin.write(encoded + "\n")
             self.proc.stdin.flush()
-            line = self.proc.stdout.readline()
         except BaseException as error:
             self._raise_after_protocol_error(error)
+        try:
+            line = self._stdout_lines.get(timeout=_REPLY_TIMEOUT_SECONDS)
+        except queue.Empty:
+            self._raise_after_protocol_error(RuntimeError("GymServer reply timed out"))
         if not line:
             self._raise_after_protocol_error(RuntimeError("GymServer closed unexpectedly"))
         if not line.strip():
@@ -210,11 +223,23 @@ class TacticalV3GymClient:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=_REAP_TIMEOUT_SECONDS)
-        if proc.stderr is not None:
-            try:
-                self._stderr_tail = proc.stderr.read()[-_STDERR_TAIL_LIMIT:]
-            except OSError:
-                pass
+        self._stdout_thread.join(timeout=_REAP_TIMEOUT_SECONDS)
+        self._stderr_thread.join(timeout=_REAP_TIMEOUT_SECONDS)
+        self._stderr_tail = "".join(self._stderr_chunks)[-_STDERR_TAIL_LIMIT:]
+
+    def _drain_stdout(self) -> None:
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            self._stdout_lines.put(line)
+        self._stdout_lines.put(None)
+
+    def _drain_stderr(self) -> None:
+        assert self.proc.stderr is not None
+        while chunk := self.proc.stderr.read(1024):
+            self._stderr_chunks.append(chunk)
+            size = sum(map(len, self._stderr_chunks))
+            while size > _STDERR_TAIL_LIMIT:
+                size -= len(self._stderr_chunks.popleft())
 
     def _require_kind(self, expected: Literal["tactical", "duel"]) -> None:
         if self._environment_kind != expected:
