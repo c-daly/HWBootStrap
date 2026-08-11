@@ -1,10 +1,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -14,6 +17,12 @@ namespace HexWars.Engine.Tests
 {
     public sealed class TacticalV3GymServerTests
     {
+        private static string CheckedInScenario => RepositoryPath(
+            "python", "config", "annihilation-structured-imitation-v1.json");
+
+        private static string MismatchedScenario => RepositoryPath(
+            "python", "config", "annihilation-imitation-v1.json");
+
         public enum WrongReferenceFamily
         {
             UnitCell,
@@ -334,6 +343,447 @@ namespace HexWars.Engine.Tests
                 () => InvokeWire("Spaces", scenario, contract))!;
             Assert.That(exception.InnerException, Is.TypeOf<ArgumentException>());
             Assert.That(exception.InnerException!.Message, Does.Contain("capacity"));
+        }
+
+        [Test]
+        public void Process_TacticalV3RejectsOmittedScenarioBeforeReadingCommands()
+        {
+            string error = TacticalV3ServerProcess.RejectStartup(
+                "--environment", MlContract.TacticalV3Version);
+
+            Assert.That(error, Does.Contain("tactical-v3 requires --scenario-file"));
+        }
+
+        [Test]
+        public void Process_TacticalV3RejectsMismatchedScenarioBeforeReadingCommands()
+        {
+            string error = TacticalV3ServerProcess.RejectStartup(
+                "--environment", MlContract.TacticalV3Version,
+                "--scenario-file", MismatchedScenario);
+
+            Assert.That(error, Does.Contain("scenario environment does not match --environment"));
+        }
+
+        [Test]
+        public void Process_SpacesReportsStructuredSchemasWithoutFlatGeometry()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+
+            JsonElement spaces = server.Request("{\"cmd\":\"spaces\"}");
+
+            AssertProperties(spaces,
+                "scenario_id", "scenario_schema_version", "contract_version",
+                "contract_hash", "encoding_hash", "capacity_hash", "environment_kind",
+                "match", "encoding", "capacity");
+            Assert.That(spaces.GetProperty("contract_version").GetString(),
+                Is.EqualTo(MlContract.TacticalV3Version));
+            Assert.That(spaces.GetProperty("environment_kind").GetString(), Is.EqualTo("tactical"));
+            Assert.That(spaces.GetProperty("encoding").GetProperty("tables").ValueKind,
+                Is.EqualTo(JsonValueKind.Object));
+            Assert.That(spaces.GetProperty("encoding").GetProperty("candidate_schema").ValueKind,
+                Is.EqualTo(JsonValueKind.Object));
+            Assert.That(spaces.TryGetProperty("obs_len", out _), Is.False);
+            Assert.That(spaces.TryGetProperty("n_actions", out _), Is.False);
+            Assert.That(spaces.TryGetProperty("channels", out _), Is.False);
+            Assert.That(spaces.TryGetProperty("board_h", out _), Is.False);
+            Assert.That(spaces.TryGetProperty("board_w", out _), Is.False);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Process_ResetAndStepViewsCarryDecisionAndCandidateIdentity(bool duel)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = duel
+                ? server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_reset", seed = 41, p0 = "external", p1 = "external",
+                    learner = 0, start_profile = "standard-3v3", reference_seat = 0,
+                }))
+                : server.Request("{\"cmd\":\"reset\",\"seed\":41}");
+            AssertViewIdentities(reset);
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            int candidateId = reset.GetProperty("candidates")[0]
+                .GetProperty("candidate_id").GetInt32();
+
+            JsonElement next = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = duel ? "duel_step" : "step",
+                decision_id = decisionId,
+                candidate_id = candidateId,
+            }));
+
+            AssertViewIdentities(next);
+        }
+
+        [TestCase("step", "decision_id")]
+        [TestCase("step", "candidate_id")]
+        [TestCase("step", "unknown")]
+        [TestCase("duel_step", "decision_id")]
+        [TestCase("duel_step", "candidate_id")]
+        [TestCase("duel_step", "unknown")]
+        public void Process_StructuredSelectionsRequireExactIdentityFields(
+            string command, string mutation)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = ResetForSelection(server, command);
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            int candidateId = reset.GetProperty("candidates")[0]
+                .GetProperty("candidate_id").GetInt32();
+            string request = mutation switch
+            {
+                "decision_id" => JsonSerializer.Serialize(new { cmd = command, candidate_id = candidateId }),
+                "candidate_id" => JsonSerializer.Serialize(new { cmd = command, decision_id = decisionId }),
+                "unknown" => JsonSerializer.Serialize(new
+                {
+                    cmd = command, decision_id = decisionId, candidate_id = candidateId, extra = 1,
+                }),
+                _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+            };
+
+            string error = server.Reject(request);
+
+            Assert.That(error, Does.Contain("unknown or missing fields"));
+        }
+
+        [TestCase("step", "stale")]
+        [TestCase("step", "negative")]
+        [TestCase("step", "out_of_range")]
+        [TestCase("duel_step", "stale")]
+        [TestCase("duel_step", "negative")]
+        [TestCase("duel_step", "out_of_range")]
+        public void Process_InvalidStructuredSelectionEmitsNamedErrorWithoutSuccessorView(
+            string command, string mutation)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = ResetForSelection(server, command);
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            int candidateId = reset.GetProperty("candidates")[0]
+                .GetProperty("candidate_id").GetInt32();
+            int candidateCount = reset.GetProperty("candidates").GetArrayLength();
+            if (mutation == "stale") decisionId--;
+            else if (mutation == "negative") candidateId = -1;
+            else if (mutation == "out_of_range") candidateId = candidateCount;
+            else throw new ArgumentOutOfRangeException(nameof(mutation));
+
+            string error = server.Reject(JsonSerializer.Serialize(new
+            {
+                cmd = command, decision_id = decisionId, candidate_id = candidateId,
+            }));
+
+            Assert.That(error, mutation == "stale"
+                ? Does.Contain("decision id is stale")
+                : Does.Contain("candidate id is out of range"));
+        }
+
+        [TestCase("step")]
+        [TestCase("duel_step")]
+        public void Process_StructuredSelectionParsesDecisionIdentityAsInt64(string command)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = ResetForSelection(server, command);
+            int candidateId = reset.GetProperty("candidates")[0]
+                .GetProperty("candidate_id").GetInt32();
+
+            string error = server.Reject(JsonSerializer.Serialize(new
+            {
+                cmd = command, decision_id = (long)int.MaxValue + 1L,
+                candidate_id = candidateId,
+            }));
+
+            Assert.That(error, Does.Contain("decision id is stale"));
+        }
+
+        [TestCase("step")]
+        [TestCase("duel_step")]
+        public void Process_StructuredSelectionRejectsCandidateIdentityOutsideInt32(string command)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = ResetForSelection(server, command);
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+
+            string error = server.Reject(JsonSerializer.Serialize(new
+            {
+                cmd = command,
+                decision_id = decisionId,
+                candidate_id = (long)int.MaxValue + 1L,
+            }));
+
+            Assert.That(error, Does.Contain("Int32"));
+        }
+
+        [Test]
+        public void Process_IdenticalSeedsAndCommandsEmitByteIdenticalJson()
+        {
+            using var first = TacticalV3ServerProcess.Start(CheckedInScenario);
+            using var second = TacticalV3ServerProcess.Start(CheckedInScenario);
+            AssertSameReply(first, second, "{\"cmd\":\"spaces\"}");
+            string reset = AssertSameReply(
+                first, second, "{\"cmd\":\"reset\",\"seed\":123}");
+            int endTurn = CandidateId(reset, "end_turn");
+            AssertSameReply(first, second, JsonSerializer.Serialize(new
+            {
+                cmd = "step", decision_id = 0L, candidate_id = endTurn,
+            }));
+            AssertSameReply(first, second, "{\"cmd\":\"duel_spaces\"}");
+            string duelReset = AssertSameReply(first, second, JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 123, p0 = "external", p1 = "random",
+                learner = 0, start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            int duelEndTurn = CandidateId(duelReset, "end_turn");
+            AssertSameReply(first, second, JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = 0L, candidate_id = duelEndTurn,
+            }));
+        }
+
+        [Test]
+        public void Process_SelectedCommandReconstructsSavedReplayFinalState()
+        {
+            string replayPath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "tactical-v3-process-" + Guid.NewGuid().ToString("N") + ".replay");
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+                JsonElement reset = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_reset", seed = 71, p0 = "external", p1 = "external",
+                    learner = 0, start_profile = "standard-3v3", reference_seat = 0,
+                }));
+                JsonElement selected = reset.GetProperty("candidates").EnumerateArray()
+                    .First(candidate => candidate.GetProperty("kind").GetString() == "move");
+                long decisionId = reset.GetProperty("decision_id").GetInt64();
+                int candidateId = selected.GetProperty("candidate_id").GetInt32();
+                JsonElement successor = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_step", decision_id = decisionId, candidate_id = candidateId,
+                }));
+                server.Request(JsonSerializer.Serialize(new { cmd = "duel_save", path = replayPath }));
+
+                ReplayData data = ReplayFile.Read(File.ReadAllText(replayPath));
+                var replay = new Replay(data.Start, data.Commands);
+                var command = (MoveUnit)data.Commands.Single();
+                Unit finalActor = replay.Final.Player(command.Issuer).UnitsOnBoard
+                    .Single(unit => unit.Id == command.UnitId);
+                JsonElement destinationReference = selected.GetProperty("projection")
+                    .GetProperty("destination_cell");
+                JsonElement destination = reset.GetProperty("observation").GetProperty("cells")
+                    [destinationReference.GetProperty("row").GetInt32()];
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(command.Dest.Q, Is.EqualTo(destination.GetProperty("q").GetInt32()));
+                    Assert.That(command.Dest.R, Is.EqualTo(destination.GetProperty("r").GetInt32()));
+                    Assert.That(finalActor.Cell, Is.EqualTo(command.Dest));
+                    Assert.That(data.Commands, Has.Count.EqualTo(1));
+                    Assert.That(successor.GetProperty("decision_id").GetInt64(), Is.EqualTo(1));
+                });
+            }
+            finally
+            {
+                if (File.Exists(replayPath)) File.Delete(replayPath);
+            }
+        }
+
+        [TestCase("standard-3v3", 0, 3, 3)]
+        [TestCase("standard-3v3", 1, 3, 3)]
+        [TestCase("conversion-3v1-near", 0, 3, 1)]
+        [TestCase("conversion-3v1-near", 1, 1, 3)]
+        public void Process_DuelProfilesWorkFromEitherLearnerSeat(
+            string profile, int learner, int expectedSelf, int expectedOpponent)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 83, p0 = "external", p1 = "external",
+                learner, start_profile = profile, reference_seat = learner,
+            }));
+            JsonElement units = reset.GetProperty("observation").GetProperty("units");
+            int self = units.EnumerateArray().Count(unit =>
+                unit.GetProperty("owner").GetString() == "self");
+            int opponent = units.EnumerateArray().Count(unit =>
+                unit.GetProperty("owner").GetString() == "opponent");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reset.GetProperty("start_profile").GetString(), Is.EqualTo(profile));
+                Assert.That(reset.GetProperty("reference_seat").GetInt32(), Is.EqualTo(learner));
+                Assert.That(self, Is.EqualTo(expectedSelf));
+                Assert.That(opponent, Is.EqualTo(expectedOpponent));
+            });
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            int candidateId = reset.GetProperty("candidates")[0]
+                .GetProperty("candidate_id").GetInt32();
+            AssertViewIdentities(server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId, candidate_id = candidateId,
+            })));
+        }
+
+        [TestCase("tactical-v1",
+            "c14020cd08e2ea02596939a55fb6235dfd6822d4de2cfc3445ecc14e78c1a0aa")]
+        [TestCase("adaptive-v1",
+            "f307cfec91605431175c36c1ed8e6a90b3442cacb8b9315720b01bad8a01e405")]
+        [TestCase("tactical-v2",
+            "09ab67ceba29b59208a93d6985ab90a1a7f93872ab0c82c058868ae3ed2ce01f")]
+        public void Process_LegacyEnvironmentPayloadShapesRemainCompatible(
+            string environment, string expectedShapeHash)
+        {
+            Assert.That(LegacySequenceShapeHash(environment),
+                Is.EqualTo(expectedShapeHash), environment);
+        }
+
+        [TestCase("duel_dagger_configure", "duel DAgger is supported only for tactical-v2")]
+        [TestCase("duel_dagger_drain", "duel DAgger is supported only for tactical-v2")]
+        [TestCase("duel_evidence_begin", "evidence sessions are supported only for tactical-v2")]
+        [TestCase("duel_evidence_game_close", "evidence sessions are supported only for tactical-v2")]
+        [TestCase("duel_evidence_end", "evidence sessions are supported only for tactical-v2")]
+        public void Process_TacticalV3ExplicitlyRejectsDaggerAndEvidenceRpcs(
+            string command, string expectedError)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            string request = command == "duel_dagger_configure"
+                ? JsonSerializer.Serialize(new
+                {
+                    cmd = command, enabled = true, depth = 4,
+                    expansion_budget = 512, use_heuristic = true,
+                })
+                : JsonSerializer.Serialize(new { cmd = command });
+
+            string error = server.Reject(request);
+
+            Assert.That(error, Does.Contain(expectedError));
+        }
+
+        private static JsonElement ResetForSelection(
+            TacticalV3ServerProcess server, string command) => command == "duel_step"
+            ? server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 41, p0 = "external", p1 = "external",
+                learner = 0, start_profile = "standard-3v3", reference_seat = 0,
+            }))
+            : server.Request("{\"cmd\":\"reset\",\"seed\":41}");
+
+        private static void AssertViewIdentities(JsonElement view)
+        {
+            long decisionId = view.GetProperty("decision_id").GetInt64();
+            Assert.That(view.GetProperty("decision_id").ValueKind, Is.EqualTo(JsonValueKind.Number));
+            Assert.That(view.GetProperty("candidates").GetArrayLength(), Is.GreaterThan(0));
+            foreach (JsonElement candidate in view.GetProperty("candidates").EnumerateArray())
+            {
+                Assert.That(candidate.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
+                Assert.That(candidate.GetProperty("candidate_id").TryGetInt32(out _), Is.True);
+            }
+        }
+
+        private static string AssertSameReply(
+            TacticalV3ServerProcess first, TacticalV3ServerProcess second, string request)
+        {
+            string firstReply = first.RequestRaw(request);
+            string secondReply = second.RequestRaw(request);
+            Assert.That(secondReply, Is.EqualTo(firstReply), request);
+            return firstReply;
+        }
+
+        private static int CandidateId(string view, string kind)
+        {
+            using JsonDocument parsed = JsonDocument.Parse(view);
+            return parsed.RootElement.GetProperty("candidates").EnumerateArray()
+                .Single(candidate => candidate.GetProperty("kind").GetString() == kind)
+                .GetProperty("candidate_id").GetInt32();
+        }
+
+        private static string LegacySequenceShapeHash(string environment)
+        {
+            using var server = TacticalV3ServerProcess.StartEnvironment(environment);
+            var replies = new List<JsonElement>
+            {
+                server.Request("{\"cmd\":\"spaces\"}"),
+            };
+
+            JsonElement reset = server.Request("{\"cmd\":\"reset\",\"seed\":29}");
+            replies.Add(reset);
+            replies.Add(server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "step",
+                action = FirstLegalAction(reset),
+            })));
+            replies.Add(server.Request("{\"cmd\":\"duel_spaces\"}"));
+            JsonElement duelReset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset",
+                seed = 31,
+                p0 = "external",
+                p1 = "external",
+                learner = 0,
+            }));
+            replies.Add(duelReset);
+            replies.Add(server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step",
+                action = FirstLegalAction(duelReset),
+            })));
+
+            string normalized = string.Join("\n", replies.Select(JsonShape));
+            byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        private static int FirstLegalAction(JsonElement view)
+        {
+            int action = 0;
+            foreach (JsonElement legal in view.GetProperty("mask").EnumerateArray())
+            {
+                if (legal.GetBoolean()) return action;
+                action++;
+            }
+
+            throw new InvalidDataException("legacy reset emitted no legal action");
+        }
+
+        private static string JsonShape(JsonElement value) => value.ValueKind switch
+        {
+            JsonValueKind.Object => "{" + string.Join(",",
+                value.EnumerateObject().Select(property =>
+                    property.Name + ":" + JsonShape(property.Value))) + "}",
+            JsonValueKind.Array => JsonArrayShape(value),
+            JsonValueKind.String => "string",
+            JsonValueKind.Number => "number",
+            JsonValueKind.True or JsonValueKind.False => "bool",
+            JsonValueKind.Null => "null",
+            _ => value.ValueKind.ToString(),
+        };
+
+        private static string JsonArrayShape(JsonElement value)
+        {
+            var runs = new List<string>();
+            string? current = null;
+            int count = 0;
+            foreach (JsonElement element in value.EnumerateArray())
+            {
+                string next = JsonShape(element);
+                if (current == next)
+                {
+                    count++;
+                    continue;
+                }
+
+                if (current != null) runs.Add(count + "*" + current);
+                current = next;
+                count = 1;
+            }
+
+            if (current != null) runs.Add(count + "*" + current);
+            return "[" + value.GetArrayLength() + ":" + string.Join(",", runs) + "]";
+        }
+
+        private static string RepositoryPath(params string[] parts)
+        {
+            string root = Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", ".."));
+            return Path.Combine(new[] { root }.Concat(parts).ToArray());
         }
 
         private static IEnumerable<WrongReferenceFamily> WrongReferenceFamilies =>
@@ -901,6 +1351,121 @@ namespace HexWars.Engine.Tests
             Assert.That(lengths.ContainsKey(table), Is.True, table);
             Assert.That(row, Is.GreaterThanOrEqualTo(0));
             Assert.That(row, Is.LessThan(lengths[table]), $"{table}[{row}]");
+        }
+
+        private sealed class TacticalV3ServerProcess : IDisposable
+        {
+            private readonly Process _process;
+
+            private static string ServerDll => Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "HexWars.GymServer", "bin", "Debug", "net8.0",
+                "HexWars.GymServer.dll"));
+
+            private TacticalV3ServerProcess(params string[] args)
+            {
+                Assert.That(File.Exists(ServerDll), Is.True,
+                    $"GymServer was not built at {ServerDll}");
+                var start = new ProcessStartInfo("dotnet")
+                {
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                start.ArgumentList.Add(ServerDll);
+                foreach (string argument in args) start.ArgumentList.Add(argument);
+                _process = Process.Start(start)!;
+            }
+
+            public static TacticalV3ServerProcess Start(string scenario) =>
+                new TacticalV3ServerProcess(
+                    "--environment", MlContract.TacticalV3Version,
+                    "--scenario-file", scenario);
+
+            public static TacticalV3ServerProcess StartEnvironment(string environment) =>
+                new TacticalV3ServerProcess("--environment", environment);
+
+            public static string RejectStartup(params string[] args)
+            {
+                Assert.That(File.Exists(ServerDll), Is.True,
+                    $"GymServer was not built at {ServerDll}");
+                var start = new ProcessStartInfo("dotnet")
+                {
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                start.ArgumentList.Add(ServerDll);
+                foreach (string argument in args) start.ArgumentList.Add(argument);
+                using Process process = Process.Start(start)!;
+                try
+                {
+                    Assert.That(process.WaitForExit(10000), Is.True,
+                        "GymServer should reject tactical-v3 startup before reading commands");
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    Assert.That(process.ExitCode, Is.Not.EqualTo(0));
+                    Assert.That(output, Is.Empty,
+                        "startup rejection must not emit a command response");
+                    return error;
+                }
+                finally
+                {
+                    if (!process.HasExited) process.Kill(entireProcessTree: true);
+                }
+            }
+
+            public JsonElement Request(string request)
+            {
+                using JsonDocument response = JsonDocument.Parse(RequestRaw(request));
+                return response.RootElement.Clone();
+            }
+
+            public string RequestRaw(string request)
+            {
+                _process.StandardInput.WriteLine(request);
+                _process.StandardInput.Flush();
+                var pending = _process.StandardOutput.ReadLineAsync();
+                if (!pending.Wait(TimeSpan.FromSeconds(10)))
+                    Assert.Fail("GymServer did not reply to the tactical-v3 request");
+                string? line = pending.Result;
+                if (line == null)
+                    Assert.Fail("GymServer exited without a reply: " +
+                        _process.StandardError.ReadToEnd());
+                return line!;
+            }
+
+            public string Reject(string request)
+            {
+                _process.StandardInput.WriteLine(request);
+                _process.StandardInput.Flush();
+                Assert.That(_process.WaitForExit(10000), Is.True,
+                    "GymServer did not reject the tactical-v3 request");
+                string output = _process.StandardOutput.ReadToEnd();
+                string error = _process.StandardError.ReadToEnd();
+                Assert.That(_process.ExitCode, Is.Not.EqualTo(0));
+                Assert.That(output, Is.Empty,
+                    "an invalid selection must not emit a successor view");
+                return error;
+            }
+
+            public void Dispose()
+            {
+                if (_process.HasExited)
+                {
+                    _process.Dispose();
+                    return;
+                }
+
+                _process.StandardInput.WriteLine("{\"cmd\":\"close\"}");
+                _process.StandardInput.Flush();
+                if (!_process.WaitForExit(5000)) _process.Kill(entireProcessTree: true);
+                _process.Dispose();
+            }
         }
 
         private static void AssertEveryRow(JsonElement rows, params string[] names)

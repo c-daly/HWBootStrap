@@ -34,12 +34,15 @@ for (int i = 0; i < args.Length; i++)
         scenarioFile = args[++i];
     }
 }
-if (environment != "tactical-v1" && environment != "adaptive-v1" && environment != "tactical-v2")
+if (environment != "tactical-v1" && environment != "adaptive-v1" &&
+    environment != "tactical-v2" && environment != MlContract.TacticalV3Version)
 {
     Console.Error.WriteLine($"unsupported environment '{environment}'");
     Environment.ExitCode = 2;
     return;
 }
+if (environment == MlContract.TacticalV3Version && scenarioFile == null)
+    throw new InvalidDataException("tactical-v3 requires --scenario-file");
 
 TrainingScenario scenario = scenarioFile == null
     ? TrainingScenario.CreateStandard(environment)
@@ -50,6 +53,9 @@ if (!string.Equals(scenario.Environment, environment, StringComparison.Ordinal))
 EnvConfig? tacticalConfig = environment == "tactical-v1" ? scenario.BuildTactical() : null;
 AdaptiveEnvConfig? adaptiveConfig = environment == "adaptive-v1" ? scenario.BuildAdaptive() : null;
 TacticalV2Config? tacticalV2Config = environment == "tactical-v2" ? scenario.BuildTacticalV2() : null;
+TacticalV3Config? tacticalV3Config = environment == MlContract.TacticalV3Version
+    ? scenario.BuildTacticalV3()
+    : null;
 
 Func<int, IAgent> opponentFactory = opponent == "random"
     ? (s => new RandomAgent(s))
@@ -65,12 +71,16 @@ AdaptiveTacticalEnv? adaptiveEnv = environment == "adaptive-v1"
 TacticalV2Env? tacticalV2Env = environment == "tactical-v2"
     ? new TacticalV2Env(opponentFactory, learningSeat, tacticalV2Config!)
     : null;
+TacticalV3Env? tacticalV3Env = tacticalV3Config == null
+    ? null
+    : new TacticalV3Env(opponentFactory, learningSeat, tacticalV3Config);
 var tacticalV2Trace = new BufferedDuelTransitionSink();
 var tacticalV2Demonstrations = new BufferedTacticalV2DemonstrationSink();
 var tacticalV2Dagger = new BufferedTacticalV2DaggerSink();
 DuelEnv? duel = null; // created on first duel_* command (two external controllers)
 AdaptiveDuelEnv? adaptiveDuel = null;
 TacticalV2DuelEnv? tacticalV2Duel = null;var tacticalV2Preflight = new BufferedOraclePreflightBenchmarkSink();
+TacticalV3DuelEnv? tacticalV3Duel = null;
 OracleEvidenceSession? evidenceSession = null;
 bool evidenceGameOpen = false;
 const string EvidenceOracleCodeSha256 = "5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061";
@@ -130,6 +140,34 @@ int RequirePositiveDaggerInteger(JsonElement element, string field, string label
     return parsed;
 }
 
+
+TacticalV3View SelectTacticalV3(
+    JsonElement element,
+    string command,
+    Func<long, int, TacticalV3View> select)
+{
+    string[] expected = { "cmd", "decision_id", "candidate_id" };
+    string[] actual = element.EnumerateObject()
+        .Select(property => property.Name)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    if (!actual.SequenceEqual(expected.OrderBy(name => name, StringComparer.Ordinal)))
+        throw new InvalidDataException(
+            $"tactical-v3 {command} has unknown or missing fields");
+
+    long decisionId = element.GetProperty("decision_id").GetInt64();
+    int candidateId = element.GetProperty("candidate_id").GetInt32();
+    try
+    {
+        return select(decisionId, candidateId);
+    }
+    catch (ArgumentOutOfRangeException exception)
+        when (exception.ParamName == "candidateId")
+    {
+        throw new InvalidDataException(
+            "tactical-v3 candidate id is out of range", exception);
+    }
+}
 
 IAgent? MakeController(string? spec, int agentSeed)
 {
@@ -283,6 +321,8 @@ while ((line = Console.ReadLine()) != null)
                 Send(Spaces(env.ObservationLength, env.ActionCount, env.ObsChannels, env.BoardH, env.BoardW, env.Config, MlEnvironmentKind.Tactical));
             else if (adaptiveEnv != null)
                 Send(AdaptiveSpaces(adaptiveEnv.Layout, adaptiveEnv.Config, adaptiveEnv.Contract));
+            else if (tacticalV3Env != null)
+                Send(TacticalV3Wire.Spaces(scenario, TacticalV3Contract.Create(tacticalV3Config!, MlEnvironmentKind.Tactical)));
             else
                 Send(TacticalV2Spaces(tacticalV2Env!.Layout, tacticalV2Env.Config, MlEnvironmentKind.Tactical));
             break;
@@ -306,6 +346,8 @@ while ((line = Console.ReadLine()) != null)
                     diagnostics = Diagnostics(adaptiveEnv.Diagnostics),
                 });
             }
+            else if (tacticalV3Env != null)
+                Send(TacticalV3Wire.View(tacticalV3Env.Reset(seed)));
             else
             {
                 var obs = tacticalV2Env!.Reset(seed);
@@ -316,8 +358,13 @@ while ((line = Console.ReadLine()) != null)
 
         case "step":
         {
-            int action = root.GetProperty("action").GetInt32();
-            if (env != null)
+            int action = tacticalV3Env == null ? root.GetProperty("action").GetInt32() : 0;
+            if (tacticalV3Env != null)
+            {
+                TacticalV3View view = SelectTacticalV3(root, "step", tacticalV3Env.Step);
+                Send(TacticalV3Wire.View(view));
+            }
+            else if (env != null)
             {
                 var r = env.Step(action);
                 Send(new { obs = r.Observation, reward = r.Reward, terminated = r.Terminated, truncated = r.Truncated, mask = r.ActionMask });
@@ -355,6 +402,12 @@ while ((line = Console.ReadLine()) != null)
                 adaptiveDuel ??= new AdaptiveDuelEnv(adaptiveConfig);
                 Send(AdaptiveSpaces(adaptiveDuel.Layout, adaptiveDuel.Config, adaptiveDuel.Contract));
             }
+            else if (environment == MlContract.TacticalV3Version)
+            {
+                tacticalV3Duel ??= new TacticalV3DuelEnv(tacticalV3Config!);
+                Send(TacticalV3Wire.Spaces(scenario,
+                    TacticalV3Contract.Create(tacticalV3Config!, MlEnvironmentKind.Duel)));
+            }
             else
             {
                 tacticalV2Duel ??= new TacticalV2DuelEnv(
@@ -378,8 +431,10 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException("duel_reset learner must be 0 or 1");
             if (hasReferenceSeat && referenceSeat is < 0 or > 1)
                 throw new InvalidDataException("duel_reset reference_seat must be 0 or 1");
-            if (environment != "tactical-v2" && (startProfile != null || hasReferenceSeat))
-                throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2");
+            if (environment != "tactical-v2" &&
+                environment != MlContract.TacticalV3Version &&
+                (startProfile != null || hasReferenceSeat))
+                throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2/tactical-v3");
             if (startProfile != null && !hasReferenceSeat)
                 throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
             if (evidenceSession != null && !evidenceSession.Ended)
@@ -415,6 +470,23 @@ while ((line = Console.ReadLine()) != null)
                     deployment_complete = v.DeploymentComplete, diagnostics = Diagnostics(v.Diagnostics),
                 });
             }
+            else if (environment == MlContract.TacticalV3Version)
+            {
+                tacticalV3Duel ??= new TacticalV3DuelEnv(tacticalV3Config!);
+                IAgent? controller0 = MakeController(p0, seed * 2 + 1);
+                IAgent? controller1 = MakeController(p1, seed * 2 + 2);
+                PlayerId learnerSeat = learner == 1 ? PlayerId.Player1 : PlayerId.Player0;
+                TacticalV3View view = startProfile == null
+                    ? tacticalV3Duel.Reset(seed, controller0, controller1, learnerSeat)
+                    : tacticalV3Duel.Reset(
+                        seed,
+                        controller0,
+                        controller1,
+                        startProfile,
+                        referenceSeat == 1 ? PlayerId.Player1 : PlayerId.Player0,
+                        learnerSeat);
+                Send(TacticalV3Wire.View(view));
+            }
             else
             {
                 tacticalV2Duel ??= new TacticalV2DuelEnv(
@@ -444,8 +516,15 @@ while ((line = Console.ReadLine()) != null)
 
         case "duel_step":
         {
-            int action = root.GetProperty("action").GetInt32();
-            if (environment == "tactical-v1")
+            int action = environment == MlContract.TacticalV3Version
+                ? 0
+                : root.GetProperty("action").GetInt32();
+            if (environment == MlContract.TacticalV3Version)
+            {
+                tacticalV3Duel ??= new TacticalV3DuelEnv(tacticalV3Config!);
+                Send(TacticalV3Wire.View(SelectTacticalV3(root, "duel_step", tacticalV3Duel.Step)));
+            }
+            else if (environment == "tactical-v1")
             {
                 duel ??= new DuelEnv(tacticalConfig);
                 var v = duel.Step(action);
@@ -600,6 +679,7 @@ while ((line = Console.ReadLine()) != null)
 
         case "duel_evidence_game_close":
         {
+            if (environment == MlContract.TacticalV3Version) throw new InvalidDataException("evidence sessions are supported only for tactical-v2");
             if (evidenceSession == null || evidenceSession.Ended) throw new InvalidDataException("no active evidence session");
             string[] fields = { "cmd", "schema_version", "session_id", "nonce", "candidate_index", "game_index" };
             if (!root.EnumerateObject().Select(p => p.Name).OrderBy(x => x, StringComparer.Ordinal).SequenceEqual(fields.OrderBy(x => x, StringComparer.Ordinal))) throw new InvalidDataException("evidence game close has unknown or missing fields");
@@ -623,6 +703,7 @@ while ((line = Console.ReadLine()) != null)
 
         case "duel_evidence_end":
         {
+            if (environment == MlContract.TacticalV3Version) throw new InvalidDataException("evidence sessions are supported only for tactical-v2");
             if (evidenceSession == null) throw new InvalidDataException("no active evidence session");
             (string sessionId, string nonce) = OracleEvidenceSession.ParseSessionRequest(root, "duel_evidence_end");
             Send(evidenceSession.End(sessionId, nonce));
@@ -631,7 +712,14 @@ while ((line = Console.ReadLine()) != null)
         case "duel_save":
         {
             string path = root.TryGetProperty("path", out var pp) ? (pp.GetString() ?? "duel.replay") : "duel.replay";
-            if (environment == "adaptive-v1" && adaptiveDuel != null)
+            if (environment == MlContract.TacticalV3Version && tacticalV3Duel != null)
+            {
+                var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, tacticalV3Duel.ToReplay());
+                Send(new { saved = path });
+            }
+            else if (environment == "adaptive-v1" && adaptiveDuel != null)
             {
                 var dir = Path.GetDirectoryName(Path.GetFullPath(path));
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
