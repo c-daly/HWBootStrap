@@ -117,6 +117,10 @@ RELATION_KIND_IDS: Mapping[str, int] = MappingProxyType({
     "owner_allocation": 7,
     "allocation_definition": 8,
     "definition_allocation": 9,
+    "unit_cell": 10,
+    "cell_unit": 11,
+    "memory_cell": 12,
+    "cell_memory": 13,
 })
 RELATION_KIND_COUNT = len(RELATION_KIND_IDS)
 
@@ -337,6 +341,8 @@ def _validate_decision(decision: TacticalV3Decision, sample: int) -> None:
         source_family, target_family = relation_families[relation.kind]
         _validate_ref(relation.source, counts, f"relations[{row}].source", source_family)
         _validate_ref(relation.target, counts, f"relations[{row}].target", target_family)
+        if relation.kind == "neighbor" and relation.source == relation.target:
+            raise ValueError("self-neighbor relation is not allowed")
         _int32(relation.int_feature, f"relations[{row}].int_feature")
         _finite(relation.float_feature, f"relations[{row}].float_feature")
         _boolean(relation.bool_feature, f"relations[{row}].bool_feature")
@@ -614,6 +620,20 @@ def _build_neighborhoods(
             ))
             edges.append((
                 source, RELATION_KIND_IDS[f"{relation.kind}_reverse"], destination, *feature
+            ))
+        for row, unit in enumerate(decision.observation.units):
+            unit_index = reference_map[(sample, "units", row)]
+            cell = _global_ref(sample, unit.cell, reference_map, node_mask)
+            edges.extend((
+                (cell, RELATION_KIND_IDS["unit_cell"], unit_index, 0, 0.0, False),
+                (unit_index, RELATION_KIND_IDS["cell_unit"], cell, 0, 0.0, False),
+            ))
+        for row, memory in enumerate(decision.observation.memory):
+            memory_index = reference_map[(sample, "memory_records", row)]
+            cell = _global_ref(sample, memory.cell, reference_map, node_mask)
+            edges.extend((
+                (cell, RELATION_KIND_IDS["memory_cell"], memory_index, 0, 0.0, False),
+                (memory_index, RELATION_KIND_IDS["cell_memory"], cell, 0, 0.0, False),
             ))
         for row, allocation in enumerate(decision.observation.capability_allocations):
             allocation_index = reference_map[(sample, "capability_allocations", row)]

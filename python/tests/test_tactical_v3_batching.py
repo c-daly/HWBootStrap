@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ from ml_lab.tactical_v3_batching import (
     collate_examples,
 )
 from ml_lab.tactical_v3_client import TacticalV3GymClient
-from ml_lab.tactical_v3_corpus import StructuredExample, StructuredTarget, load_corpus
+from ml_lab.tactical_v3_corpus import StructuredExample, StructuredTarget, TeacherEvidence, load_corpus
 from ml_lab.tactical_v3_schema import (
     Candidate,
     CapabilityAllocationToken,
@@ -34,6 +34,7 @@ from ml_lab.tactical_v3_schema import (
     RuleToken,
     TacticalV3Decision,
     TacticalV3Observation,
+    TacticalV3SemanticIdentity,
     TemplateToken,
     TokenRef,
     UnitToken,
@@ -57,24 +58,40 @@ def _canonical_example() -> StructuredExample:
     return load_corpus(CORPUS_ROOT, identity).train[0]
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveExample:
+    example: StructuredExample
+    identity: TacticalV3SemanticIdentity
+
+
 @pytest.fixture(scope="module")
 def example_13x9() -> StructuredExample:
     return _canonical_example()
 
 
 @pytest.fixture(scope="module")
-def example_24x16(example_13x9: StructuredExample) -> StructuredExample:
-    """Test-only label wrapper around a real Task 2 24x16 client decision."""
+def example_24x16() -> _LiveExample:
+    """Test-only example built entirely from one real Task 2 client reset."""
     with TacticalV3GymClient(
         ["dotnet", str(SERVER_DLL), "--scenario-file", str(SCENARIO_24X16)],
         environment_kind="tactical",
     ) as client:
+        identity = client.identity
         decision = client.reset(41).decision
-    target = replace(
-        example_13x9.target,
-        teacher_candidate_id=decision.candidates[0].candidate_id,
+    example = StructuredExample(
+        1,
+        decision,
+        StructuredTarget(decision.candidates[0].candidate_id, "draw", 0, None, False),
+        TeacherEvidence("test-live-client", 0, 0, 0, "none", None),
+        identity.scenario_id,
+        identity.contract_hash,
+        identity.encoding_hash,
+        identity.capacity_hash,
+        "test-seed-41-reset",
+        41,
+        decision.seat,
     )
-    return replace(example_13x9, decision=decision, target=target)
+    return _LiveExample(example, identity)
 
 
 def _rows(decision: TacticalV3Decision, table: str) -> tuple[object, ...]:
@@ -149,6 +166,31 @@ def _minimal_decision() -> TacticalV3Decision:
         ),
         (candidate,),
     )
+
+def _example_for_decision(decision: TacticalV3Decision) -> StructuredExample:
+    return StructuredExample(
+        1,
+        decision,
+        StructuredTarget(decision.candidates[0].candidate_id, "draw", 0, None, False),
+        TeacherEvidence("test-local", 0, 0, 0, "none", None),
+        "test-local",
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        "test-local",
+        1,
+        decision.seat,
+    )
+
+
+def _neighborhood_edge_set(batch: RaggedBatch) -> set[tuple[int, int, int]]:
+    return {
+        (batch.neighborhoods.source_index[0, destination, slot].item(), destination,
+         batch.neighborhoods.kind[0, destination, slot].item())
+        for destination in range(batch.node_mask.shape[1])
+        for slot in range(batch.neighborhoods.mask.shape[2])
+        if batch.neighborhoods.mask[0, destination, slot]
+    }
 
 
 def test_batch_contract_is_frozen_and_feature_schemas_are_explicit() -> None:
@@ -229,9 +271,18 @@ def test_batch_contract_is_frozen_and_feature_schemas_are_explicit() -> None:
 
 def test_collate_uses_only_batch_maxima_and_preserves_feature_types(
     example_13x9: StructuredExample,
-    example_24x16: StructuredExample,
+    example_24x16: _LiveExample,
 ) -> None:
-    examples = (example_13x9, example_24x16)
+    large = example_24x16.example
+    identity = example_24x16.identity
+    assert large.scenario_id == identity.scenario_id
+    assert large.contract_hash == identity.contract_hash
+    assert large.encoding_hash == identity.encoding_hash
+    assert large.capacity_hash == identity.capacity_hash
+    assert large.contract_hash != example_13x9.contract_hash
+    assert large.encoding_hash == example_13x9.encoding_hash
+    assert large.capacity_hash == example_13x9.capacity_hash
+    examples = (example_13x9, large)
     batch = collate_examples(examples, horizons=(4, 8, 16))
 
     assert tuple(batch.tables) == TABLE_ORDER
@@ -276,9 +327,9 @@ def test_collate_uses_only_batch_maxima_and_preserves_feature_types(
 
 def test_collate_remaps_every_reference_and_hex_neighbor_into_masked_global_nodes(
     example_13x9: StructuredExample,
-    example_24x16: StructuredExample,
+    example_24x16: _LiveExample,
 ) -> None:
-    examples = (example_13x9, example_24x16)
+    examples = (example_13x9, example_24x16.example)
     batch = collate_examples(examples, horizons=(4, 8, 16))
     assert batch.tables["cells"].mask.sum(dim=1).tolist() == [117, 384]
     cells_slice = batch.table_slices["cells"]
@@ -366,6 +417,10 @@ def test_generic_neighborhoods_have_explicit_reverse_and_allocation_edges() -> N
         "owner_allocation": 7,
         "allocation_definition": 8,
         "definition_allocation": 9,
+        "unit_cell": 10,
+        "cell_unit": 11,
+        "memory_cell": 12,
+        "cell_memory": 13,
     }
 
     def global_index(table: str, row: int) -> int:
@@ -387,17 +442,22 @@ def test_generic_neighborhoods_have_explicit_reverse_and_allocation_edges() -> N
     unit = global_index("units", 0)
     definition = global_index("capability_definitions", 0)
     allocation = global_index("capability_allocations", 0)
+    memory = global_index("memory_records", 0)
     assert actual == sorted([
         (unit, c0, RELATION_KIND_IDS["occupies"], 0, 0.0, False),
         (c1, c0, RELATION_KIND_IDS["neighbor_reverse"], 0, 0.0, False),
+        (unit, c0, RELATION_KIND_IDS["unit_cell"], 0, 0.0, False),
         (c0, c1, RELATION_KIND_IDS["neighbor"], 0, 0.0, False),
         (definition, unit, RELATION_KIND_IDS["has_capability_reverse"], 7, 1.5, True),
         (c0, unit, RELATION_KIND_IDS["occupies_reverse"], 0, 0.0, False),
         (allocation, unit, RELATION_KIND_IDS["allocation_owner"], 0, 0.0, False),
+        (c0, unit, RELATION_KIND_IDS["cell_unit"], 0, 0.0, False),
         (unit, definition, RELATION_KIND_IDS["has_capability"], 7, 1.5, True),
         (allocation, definition, RELATION_KIND_IDS["allocation_definition"], 0, 0.0, False),
         (unit, allocation, RELATION_KIND_IDS["owner_allocation"], 0, 0.0, False),
         (definition, allocation, RELATION_KIND_IDS["definition_allocation"], 0, 0.0, False),
+        (memory, c1, RELATION_KIND_IDS["memory_cell"], 0, 0.0, False),
+        (c1, memory, RELATION_KIND_IDS["cell_memory"], 0, 0.0, False),
     ], key=lambda edge: (edge[1], edge[2], edge[0], edge[3], edge[4], edge[5]))
     relation_node = global_index("relations", 0)
     assert not batch.neighborhoods.mask[0, relation_node].any()
@@ -406,6 +466,90 @@ def test_generic_neighborhoods_have_explicit_reverse_and_allocation_edges() -> N
     assert torch.all(batch.neighborhoods.int_feature[~batch.neighborhoods.mask] == 0)
     assert torch.all(batch.neighborhoods.float_feature[~batch.neighborhoods.mask] == 0)
     assert not batch.neighborhoods.bool_feature[~batch.neighborhoods.mask].any()
+
+
+def test_unit_cell_reference_changes_only_typed_neighborhood_edges() -> None:
+    decision = _minimal_decision()
+    changed_unit = replace(decision.observation.units[0], cell=TokenRef("cells", 1))
+    changed_observation = replace(decision.observation, units=(changed_unit,))
+    changed = replace(decision, observation=changed_observation)
+    baseline_batch = collate_decisions((decision,), horizons=(4,))
+    changed_batch = collate_decisions((changed,), horizons=(4,))
+
+    for table in TABLE_ORDER:
+        _assert_tensor_fields_equal(baseline_batch.tables[table], changed_batch.tables[table])
+    assert torch.equal(baseline_batch.cell_neighbor_index, changed_batch.cell_neighbor_index)
+    assert torch.equal(baseline_batch.cell_neighbor_mask, changed_batch.cell_neighbor_mask)
+
+    cells = baseline_batch.table_slices["cells"]
+    unit = baseline_batch.table_slices["units"].start
+    baseline_edges = _neighborhood_edge_set(baseline_batch)
+    changed_edges = _neighborhood_edge_set(changed_batch)
+    assert (unit, cells.start, RELATION_KIND_IDS["occupies"]) in baseline_edges
+    assert (unit, cells.start, RELATION_KIND_IDS["occupies"]) in changed_edges
+    assert (unit, cells.start, RELATION_KIND_IDS["unit_cell"]) in baseline_edges
+    assert (cells.start, unit, RELATION_KIND_IDS["cell_unit"]) in baseline_edges
+    assert (unit, cells.start + 1, RELATION_KIND_IDS["unit_cell"]) in changed_edges
+    assert (cells.start + 1, unit, RELATION_KIND_IDS["cell_unit"]) in changed_edges
+    assert baseline_edges != changed_edges
+
+
+def test_memory_cell_reference_changes_only_typed_neighborhood_edges() -> None:
+    decision = _minimal_decision()
+    changed_memory = replace(decision.observation.memory[0], cell=TokenRef("cells", 0))
+    changed_observation = replace(decision.observation, memory=(changed_memory,))
+    changed = replace(decision, observation=changed_observation)
+    baseline_batch = collate_decisions((decision,), horizons=(4,))
+    changed_batch = collate_decisions((changed,), horizons=(4,))
+
+    for table in TABLE_ORDER:
+        _assert_tensor_fields_equal(baseline_batch.tables[table], changed_batch.tables[table])
+    assert torch.equal(baseline_batch.cell_neighbor_index, changed_batch.cell_neighbor_index)
+    assert torch.equal(baseline_batch.cell_neighbor_mask, changed_batch.cell_neighbor_mask)
+
+    cells = baseline_batch.table_slices["cells"]
+    memory = baseline_batch.table_slices["memory_records"].start
+    baseline_edges = _neighborhood_edge_set(baseline_batch)
+    changed_edges = _neighborhood_edge_set(changed_batch)
+    assert (memory, cells.start + 1, RELATION_KIND_IDS["memory_cell"]) in baseline_edges
+    assert (cells.start + 1, memory, RELATION_KIND_IDS["cell_memory"]) in baseline_edges
+    assert (memory, cells.start, RELATION_KIND_IDS["memory_cell"]) in changed_edges
+    assert (cells.start, memory, RELATION_KIND_IDS["cell_memory"]) in changed_edges
+    assert baseline_edges != changed_edges
+
+
+@pytest.mark.parametrize("supervised", (False, True))
+def test_self_neighbor_is_rejected_by_the_shared_validation_path(supervised: bool) -> None:
+    decision = _minimal_decision()
+    self_neighbor = replace(
+        decision.observation.relations[0],
+        source=TokenRef("cells", 0),
+        target=TokenRef("cells", 0),
+    )
+    observation = replace(
+        decision.observation,
+        relations=(self_neighbor, *decision.observation.relations[1:]),
+    )
+    broken = replace(decision, observation=observation)
+    with pytest.raises(ValueError, match="self-neighbor"):
+        if supervised:
+            collate_examples((_example_for_decision(broken),), horizons=(4,))
+        else:
+            collate_decisions((broken,), horizons=(4,))
+
+
+def test_no_true_masked_local_or_generic_edge_is_a_self_edge() -> None:
+    batch = collate_decisions((_minimal_decision(),), horizons=(4,))
+    cells = batch.table_slices["cells"]
+    for destination in range(batch.cell_neighbor_mask.shape[1]):
+        mask = batch.cell_neighbor_mask[0, destination]
+        assert torch.all(
+            batch.cell_neighbor_index[0, destination][mask] != cells.start + destination
+        )
+    destinations = torch.arange(batch.node_mask.shape[1], dtype=torch.int64).unsqueeze(1)
+    destinations = destinations.expand_as(batch.neighborhoods.source_index[0])
+    mask = batch.neighborhoods.mask[0]
+    assert torch.all(batch.neighborhoods.source_index[0][mask] != destinations[mask])
 
 
 def test_candidate_reference_projection_and_supervised_targets_are_exact(
