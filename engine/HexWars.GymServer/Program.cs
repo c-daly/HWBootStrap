@@ -81,6 +81,7 @@ DuelEnv? duel = null; // created on first duel_* command (two external controlle
 AdaptiveDuelEnv? adaptiveDuel = null;
 TacticalV2DuelEnv? tacticalV2Duel = null;var tacticalV2Preflight = new BufferedOraclePreflightBenchmarkSink();
 TacticalV3DuelEnv? tacticalV3Duel = null;
+bool tacticalV3DuelHasReset = false;
 OracleEvidenceSession? evidenceSession = null;
 bool evidenceGameOpen = false;
 const string EvidenceOracleCodeSha256 = "5f03a7c8d0fda16497a9e6a2f1ad1ba4fcb920957b7a4b5fbc2545e0ae893061";
@@ -140,6 +141,75 @@ int RequirePositiveDaggerInteger(JsonElement element, string field, string label
     return parsed;
 }
 
+string RequireTacticalV3Command(JsonElement element)
+{
+    if (element.ValueKind != JsonValueKind.Object)
+        throw new InvalidDataException("tactical-v3 request must be an object");
+
+    JsonProperty[] properties = element.EnumerateObject().ToArray();
+    JsonProperty[] commandProperties = properties
+        .Where(property => property.Name == "cmd").ToArray();
+    if (commandProperties.Length == 0)
+        throw new InvalidDataException("tactical-v3 request is missing cmd field");
+    if (commandProperties.Length != 1)
+        throw new InvalidDataException("tactical-v3 request has duplicate cmd field");
+    if (commandProperties[0].Value.ValueKind != JsonValueKind.String)
+        throw new InvalidDataException("tactical-v3 cmd field must be a string");
+
+    string command = commandProperties[0].Value.GetString() ?? "";
+    string[]? allowed = command switch
+    {
+        "spaces" => new[] { "cmd" },
+        "reset" => new[] { "cmd", "seed" },
+        "step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_spaces" => new[] { "cmd" },
+        "duel_reset" => new[]
+        {
+            "cmd", "seed", "p0", "p1", "learner", "start_profile", "reference_seat",
+        },
+        "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_save" => new[] { "cmd", "path" },
+        "close" => new[] { "cmd" },
+        _ => null,
+    };
+    if (allowed == null)
+    {
+        string[] tacticalV2Only =
+        {
+            "duel_trace_enable", "duel_trace_drain",
+            "duel_demo_enable", "duel_demo_drain",
+            "duel_dagger_configure", "duel_dagger_drain",
+            "duel_evidence_begin", "duel_evidence_game_close", "duel_evidence_end",
+        };
+        if (tacticalV2Only.Contains(command, StringComparer.Ordinal)) return command;
+        throw new InvalidDataException($"tactical-v3 unknown command '{command}'");
+    }
+
+    string? duplicate = properties.GroupBy(property => property.Name, StringComparer.Ordinal)
+        .Where(group => group.Count() > 1)
+        .Select(group => group.Key)
+        .FirstOrDefault();
+    if (duplicate != null)
+        throw new InvalidDataException(
+            $"tactical-v3 {command} has duplicate field '{duplicate}'");
+    if (properties.Any(property =>
+            !allowed.Contains(property.Name, StringComparer.Ordinal)))
+        throw new InvalidDataException(
+            $"tactical-v3 {command} has unknown or missing fields");
+
+    string[] required = command switch
+    {
+        "step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        _ => new[] { "cmd" },
+    };
+    if (required.Any(field =>
+            !properties.Any(property => property.Name == field)))
+        throw new InvalidDataException(
+            $"tactical-v3 {command} has unknown or missing fields");
+    return command;
+}
+
 
 TacticalV3View SelectTacticalV3(
     JsonElement element,
@@ -180,6 +250,15 @@ IAgent? MakeController(string? spec, int agentSeed)
             useHeuristic: true);
     return null; // "external" / unset -> caller supplies this seat's actions
 }
+void RequireTacticalV3ControllerSpec(string? spec, string field)
+{
+    if (spec == null || spec == "external" || spec == "greedy" ||
+        spec == "random" || spec == "bounded-search")
+        return;
+    throw new InvalidDataException(
+        $"tactical-v3 duel_reset {field} controller '{spec}' is unsupported");
+}
+
 
 IDeploymentPolicy? MakeDeployment(string? spec, int deploymentSeed)
 {
@@ -312,7 +391,8 @@ while ((line = Console.ReadLine()) != null)
 
     using var doc = JsonDocument.Parse(line);
     var root = doc.RootElement;
-    string cmd = root.GetProperty("cmd").GetString() ?? "";
+    string cmd = environment == MlContract.TacticalV3Version
+        ? RequireTacticalV3Command(root) : root.GetProperty("cmd").GetString() ?? "";
 
     switch (cmd)
     {
@@ -437,6 +517,14 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException("duel_reset start_profile/reference_seat are supported only for tactical-v2/tactical-v3");
             if (startProfile != null && !hasReferenceSeat)
                 throw new InvalidDataException("duel_reset reference_seat is required when start_profile is supplied");
+            if (environment == MlContract.TacticalV3Version &&
+                startProfile == null && hasReferenceSeat)
+                throw new InvalidDataException("tactical-v3 duel_reset reference_seat requires start_profile");
+            if (environment == MlContract.TacticalV3Version)
+            {
+                RequireTacticalV3ControllerSpec(p0, "p0");
+                RequireTacticalV3ControllerSpec(p1, "p1");
+            }
             if (evidenceSession != null && !evidenceSession.Ended)
             {
                 if (evidenceGameOpen)
@@ -485,6 +573,7 @@ while ((line = Console.ReadLine()) != null)
                         startProfile,
                         referenceSeat == 1 ? PlayerId.Player1 : PlayerId.Player0,
                         learnerSeat);
+                tacticalV3DuelHasReset = true;
                 Send(TacticalV3Wire.View(view));
             }
             else
@@ -711,12 +800,14 @@ while ((line = Console.ReadLine()) != null)
         }
         case "duel_save":
         {
+            if (environment == MlContract.TacticalV3Version && !tacticalV3DuelHasReset)
+                throw new InvalidDataException("tactical-v3 duel_save requires a successful duel_reset");
             string path = root.TryGetProperty("path", out var pp) ? (pp.GetString() ?? "duel.replay") : "duel.replay";
-            if (environment == MlContract.TacticalV3Version && tacticalV3Duel != null)
+            if (environment == MlContract.TacticalV3Version)
             {
                 var dir = Path.GetDirectoryName(Path.GetFullPath(path));
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                File.WriteAllText(path, tacticalV3Duel.ToReplay());
+                File.WriteAllText(path, tacticalV3Duel!.ToReplay());
                 Send(new { saved = path });
             }
             else if (environment == "adaptive-v1" && adaptiveDuel != null)

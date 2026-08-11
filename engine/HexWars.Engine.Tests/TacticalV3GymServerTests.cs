@@ -460,10 +460,9 @@ namespace HexWars.Engine.Tests
             long decisionId = reset.GetProperty("decision_id").GetInt64();
             int candidateId = reset.GetProperty("candidates")[0]
                 .GetProperty("candidate_id").GetInt32();
-            int candidateCount = reset.GetProperty("candidates").GetArrayLength();
             if (mutation == "stale") decisionId--;
             else if (mutation == "negative") candidateId = -1;
-            else if (mutation == "out_of_range") candidateId = candidateCount;
+            else if (mutation == "out_of_range") candidateId = int.MaxValue;
             else throw new ArgumentOutOfRangeException(nameof(mutation));
 
             string error = server.Reject(JsonSerializer.Serialize(new
@@ -561,6 +560,16 @@ namespace HexWars.Engine.Tests
                 }));
                 server.Request(JsonSerializer.Serialize(new { cmd = "duel_save", path = replayPath }));
 
+                TacticalV3Config independentConfig = LoadStrictScenario().BuildTacticalV3();
+                var independent = new TacticalV3DuelEnv(independentConfig);
+                TacticalV3View independentReset = independent.Reset(
+                    71, null, null, "standard-3v3", PlayerId.Player0, PlayerId.Player0);
+                TacticalV3Candidate independentCandidate = independentReset.Decision.Candidates
+                    .Single(candidate => candidate.CandidateId == candidateId);
+                Assert.That(independentCandidate.Kind, Is.EqualTo(TacticalV3CandidateKind.Move));
+                TacticalV3View independentSuccessor = independent.Step(
+                    independentReset.Decision.DecisionId, independentCandidate.CandidateId);
+
                 ReplayData data = ReplayFile.Read(File.ReadAllText(replayPath));
                 var replay = new Replay(data.Start, data.Commands);
                 var command = (MoveUnit)data.Commands.Single();
@@ -578,7 +587,10 @@ namespace HexWars.Engine.Tests
                     Assert.That(finalActor.Cell, Is.EqualTo(command.Dest));
                     Assert.That(data.Commands, Has.Count.EqualTo(1));
                     Assert.That(successor.GetProperty("decision_id").GetInt64(), Is.EqualTo(1));
+                    Assert.That(independentSuccessor.Decision.DecisionId,
+                        Is.EqualTo(successor.GetProperty("decision_id").GetInt64()));
                 });
+                AssertAuthoritativeGameStatesEqual(independent.State, replay.Final);
             }
             finally
             {
@@ -656,6 +668,235 @@ namespace HexWars.Engine.Tests
             Assert.That(error, Does.Contain(expectedError));
         }
 
+        [TestCase("spaces")]
+        [TestCase("reset")]
+        [TestCase("step")]
+        [TestCase("duel_spaces")]
+        [TestCase("duel_reset")]
+        [TestCase("duel_step")]
+        [TestCase("duel_save")]
+        [TestCase("close")]
+        public void Process_TacticalV3EveryCommandRejectsUnknownFields(string command)
+        {
+            string savePath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "strict-command-" + Guid.NewGuid().ToString("N") + ".replay");
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+                string valid = TacticalV3CommandRequest(server, command, savePath);
+                string malformed = valid.Substring(0, valid.Length - 1) +
+                    ",\"unexpected\":true}";
+
+                string error = server.RejectCommand(malformed);
+
+                Assert.That(error, Does.Contain(
+                    $"tactical-v3 {command} has unknown or missing fields"));
+            }
+            finally
+            {
+                if (File.Exists(savePath)) File.Delete(savePath);
+            }
+        }
+
+        [TestCase("spaces")]
+        [TestCase("reset")]
+        [TestCase("step")]
+        [TestCase("duel_spaces")]
+        [TestCase("duel_reset")]
+        [TestCase("duel_step")]
+        [TestCase("duel_save")]
+        [TestCase("close")]
+        public void Process_TacticalV3EveryCommandRejectsDuplicateRootProperties(string command)
+        {
+            string savePath = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "duplicate-command-" + Guid.NewGuid().ToString("N") + ".replay");
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+                string valid = TacticalV3CommandRequest(server, command, savePath);
+                string malformed = "{\"cmd\":\"" + command + "\"," + valid.Substring(1);
+
+                string error = server.RejectCommand(malformed);
+
+                Assert.That(error, Does.Contain("duplicate"));
+            }
+            finally
+            {
+                if (File.Exists(savePath)) File.Delete(savePath);
+            }
+        }
+
+        [Test]
+        public void Process_TacticalV3RejectsUnknownCommandWithoutResponse()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+
+            string error = server.RejectCommand("{\"cmd\":\"not_a_command\"}");
+
+            Assert.That(error, Does.Contain("tactical-v3 unknown command 'not_a_command'"));
+        }
+
+        [TestCase(false, false, true)]
+        [TestCase(true, true, true)]
+        [TestCase(true, false, false)]
+        [TestCase(false, true, false)]
+        public void Process_DuelResetRequiresProfileAndReferenceSeatTogether(
+            bool includeProfile, bool includeReferenceSeat, bool accepted)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            var request = new Dictionary<string, object?>
+            {
+                ["cmd"] = "duel_reset", ["seed"] = 47,
+                ["p0"] = "external", ["p1"] = "external", ["learner"] = 0,
+            };
+            if (includeProfile) request["start_profile"] = "standard-3v3";
+            if (includeReferenceSeat) request["reference_seat"] = 0;
+            string json = JsonSerializer.Serialize(request);
+
+            if (accepted)
+            {
+                AssertViewIdentities(server.Request(json));
+                return;
+            }
+
+            string error = server.RejectCommand(json);
+            Assert.That(error, Does.Contain("reference_seat"));
+        }
+
+        [TestCase("p0")]
+        [TestCase("p1")]
+        public void Process_DuelResetRejectsUnknownControllerSpecPerSeat(string seat)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            var request = new Dictionary<string, object?>
+            {
+                ["cmd"] = "duel_reset", ["seed"] = 53,
+                ["p0"] = "external", ["p1"] = "external", ["learner"] = 0,
+                ["start_profile"] = "standard-3v3", ["reference_seat"] = 0,
+            };
+            request[seat] = "typo-controller";
+
+            string error = server.RejectCommand(JsonSerializer.Serialize(request));
+
+            Assert.That(error, Does.Contain(
+                $"tactical-v3 duel_reset {seat} controller 'typo-controller' is unsupported"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Process_DuelSaveBeforeSuccessfulResetRejectsWithoutFilesystemMutation(
+            bool querySpacesFirst)
+        {
+            string parent = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                "save-before-reset-" + Guid.NewGuid().ToString("N"));
+            string replayPath = Path.Combine(parent, "nested", "should-not-exist.replay");
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+                if (querySpacesFirst) server.Request("{\"cmd\":\"duel_spaces\"}");
+
+                string error = server.RejectCommand(JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_save", path = replayPath,
+                }));
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(error, Does.Contain(
+                        "tactical-v3 duel_save requires a successful duel_reset"));
+                    Assert.That(Directory.Exists(parent), Is.False);
+                    Assert.That(File.Exists(replayPath), Is.False);
+                });
+            }
+            finally
+            {
+                if (Directory.Exists(parent)) Directory.Delete(parent, recursive: true);
+            }
+        }
+
+        [Test]
+        public void Process_CloseExitsZeroWithoutResponse()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            server.CloseAndAssert();
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        public void Process_TerminalRewardIsRelativeToLearnerSeat(int learner)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement terminal = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 59, p0 = "greedy", p1 = "greedy",
+                learner, start_profile = "conversion-1v1-near", reference_seat = 0,
+            }));
+            int winner = terminal.GetProperty("winner").GetInt32();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(terminal.GetProperty("terminated").GetBoolean(), Is.True);
+                Assert.That(winner, Is.AnyOf(0, 1));
+                Assert.That(terminal.GetProperty("reward").GetProperty("terminal_outcome")
+                    .GetSingle(), Is.EqualTo(winner == learner ? 1f : -1f));
+            });
+        }
+
+        private static string TacticalV3CommandRequest(
+            TacticalV3ServerProcess server, string command, string savePath)
+        {
+            switch (command)
+            {
+                case "spaces":
+                    return "{\"cmd\":\"spaces\"}";
+                case "reset":
+                    return "{\"cmd\":\"reset\",\"seed\":43}";
+                case "step":
+                {
+                    JsonElement reset = server.Request("{\"cmd\":\"reset\",\"seed\":43}");
+                    return JsonSerializer.Serialize(new
+                    {
+                        cmd = "step",
+                        decision_id = reset.GetProperty("decision_id").GetInt64(),
+                        candidate_id = reset.GetProperty("candidates")[0]
+                            .GetProperty("candidate_id").GetInt32(),
+                    });
+                }
+                case "duel_spaces":
+                    return "{\"cmd\":\"duel_spaces\"}";
+                case "duel_reset":
+                    return JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_reset", seed = 43,
+                        p0 = "external", p1 = "external", learner = 0,
+                        start_profile = "standard-3v3", reference_seat = 0,
+                    });
+                case "duel_step":
+                {
+                    JsonElement reset = ResetForSelection(server, command);
+                    return JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_step",
+                        decision_id = reset.GetProperty("decision_id").GetInt64(),
+                        candidate_id = reset.GetProperty("candidates")[0]
+                            .GetProperty("candidate_id").GetInt32(),
+                    });
+                }
+                case "duel_save":
+                    server.Request(JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_reset", seed = 43,
+                        p0 = "external", p1 = "external", learner = 0,
+                        start_profile = "standard-3v3", reference_seat = 0,
+                    }));
+                    return JsonSerializer.Serialize(new { cmd = "duel_save", path = savePath });
+                case "close":
+                    return "{\"cmd\":\"close\"}";
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(command));
+            }
+        }
+
         private static JsonElement ResetForSelection(
             TacticalV3ServerProcess server, string command) => command == "duel_step"
             ? server.Request(JsonSerializer.Serialize(new
@@ -675,6 +916,170 @@ namespace HexWars.Engine.Tests
                 Assert.That(candidate.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
                 Assert.That(candidate.GetProperty("candidate_id").TryGetInt32(out _), Is.True);
             }
+        }
+
+        private static void AssertAuthoritativeGameStatesEqual(
+            GameState expected, GameState actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.ActivePlayer, Is.EqualTo(expected.ActivePlayer));
+                Assert.That(actual.Round, Is.EqualTo(expected.Round));
+                Assert.That(actual.NextEntityId, Is.EqualTo(expected.NextEntityId));
+                Assert.That(actual.IsGameOver, Is.EqualTo(expected.IsGameOver));
+                Assert.That(actual.Winner, Is.EqualTo(expected.Winner));
+                Assert.That(actual.MovedUnitIds.OrderBy(id => id),
+                    Is.EqualTo(expected.MovedUnitIds.OrderBy(id => id)));
+                Assert.That(actual.AttackedUnitIds.OrderBy(id => id),
+                    Is.EqualTo(expected.AttackedUnitIds.OrderBy(id => id)));
+                Assert.That(actual.MovementSpent.OrderBy(pair => pair.Key)
+                        .Select(pair => (pair.Key, pair.Value.H, pair.Value.V)),
+                    Is.EqualTo(expected.MovementSpent.OrderBy(pair => pair.Key)
+                        .Select(pair => (pair.Key, pair.Value.H, pair.Value.V))));
+
+                AssertGameConfigsEqual(expected.Config, actual.Config);
+                Assert.That(actual.Config.TurnPolicy.RemainingActions(actual),
+                    Is.EqualTo(expected.Config.TurnPolicy.RemainingActions(expected)));
+
+                Tile[] expectedTiles = expected.Board.Tiles
+                    .OrderBy(tile => tile.Coord.Q).ThenBy(tile => tile.Coord.R).ToArray();
+                Tile[] actualTiles = actual.Board.Tiles
+                    .OrderBy(tile => tile.Coord.Q).ThenBy(tile => tile.Coord.R).ToArray();
+                Assert.That(actualTiles.Length, Is.EqualTo(expectedTiles.Length));
+                for (int index = 0; index < expectedTiles.Length; index++)
+                {
+                    Assert.That(actualTiles[index].Coord, Is.EqualTo(expectedTiles[index].Coord));
+                    Assert.That(actualTiles[index].Elevation,
+                        Is.EqualTo(expectedTiles[index].Elevation));
+                    Assert.That(actualTiles[index].Terrain,
+                        Is.EqualTo(expectedTiles[index].Terrain));
+                    Assert.That(actual.Board.Controller(actualTiles[index].Coord),
+                        Is.EqualTo(expected.Board.Controller(expectedTiles[index].Coord)));
+                }
+
+                foreach (PlayerId seat in new[] { PlayerId.Player0, PlayerId.Player1 })
+                {
+                    Assert.That(actual.Board.DeploymentZone(seat),
+                        Is.EquivalentTo(expected.Board.DeploymentZone(seat)));
+                    AssertPlayersEqual(expected.Player(seat), actual.Player(seat));
+                }
+            });
+        }
+
+        private static void AssertGameConfigsEqual(GameConfig expected, GameConfig actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.StartingPoints, Is.EqualTo(expected.StartingPoints));
+                Assert.That(actual.BountyRate, Is.EqualTo(expected.BountyRate));
+                Assert.That(actual.GeneratorCost, Is.EqualTo(expected.GeneratorCost));
+                Assert.That(actual.GeneratorOutput, Is.EqualTo(expected.GeneratorOutput));
+                Assert.That(actual.GeneratorHealth, Is.EqualTo(expected.GeneratorHealth));
+                Assert.That(actual.DamageFloor, Is.EqualTo(expected.DamageFloor));
+                Assert.That(actual.DmgHighGroundBonus, Is.EqualTo(expected.DmgHighGroundBonus));
+                Assert.That(actual.RangeHighGroundBonus, Is.EqualTo(expected.RangeHighGroundBonus));
+                Assert.That(actual.RoundCap, Is.EqualTo(expected.RoundCap));
+                Assert.That(actual.DesignFee, Is.EqualTo(expected.DesignFee));
+                Assert.That(actual.MaxDesignPointCost, Is.EqualTo(expected.MaxDesignPointCost));
+                Assert.That(actual.FixedTemplateCount, Is.EqualTo(expected.FixedTemplateCount));
+                Assert.That(actual.TemplateSlotCount, Is.EqualTo(expected.TemplateSlotCount));
+                Assert.That(actual.DeployCostMultiplier, Is.EqualTo(expected.DeployCostMultiplier));
+                Assert.That(actual.TurnPolicy.GetType(), Is.EqualTo(expected.TurnPolicy.GetType()));
+                Assert.That(actual.TurnPolicy.ActionsPerTurn,
+                    Is.EqualTo(expected.TurnPolicy.ActionsPerTurn));
+                Assert.That(actual.BiomesEnabled, Is.EqualTo(expected.BiomesEnabled));
+                Assert.That(actual.WinConditions, Is.EqualTo(expected.WinConditions));
+                Assert.That(actual.CaptureCost, Is.EqualTo(expected.CaptureCost));
+                Assert.That(actual.EconomyWinThreshold, Is.EqualTo(expected.EconomyWinThreshold));
+                Assert.That(actual.ScoreKills, Is.EqualTo(expected.ScoreKills));
+                Assert.That(actual.ScorePoints, Is.EqualTo(expected.ScorePoints));
+                Assert.That(actual.ScoreArmy, Is.EqualTo(expected.ScoreArmy));
+                Assert.That(actual.ScoreTerritory, Is.EqualTo(expected.ScoreTerritory));
+                Assert.That(actual.UpkeepFactor, Is.EqualTo(expected.UpkeepFactor));
+                Assert.That(actual.CaptureFactor, Is.EqualTo(expected.CaptureFactor));
+                Assert.That(actual.BuildFactor, Is.EqualTo(expected.BuildFactor));
+                Assert.That(actual.TerritoryMode, Is.EqualTo(expected.TerritoryMode));
+                Assert.That(actual.ClaimEndsTurn, Is.EqualTo(expected.ClaimEndsTurn));
+                Assert.That(actual.BuildAnywhere, Is.EqualTo(expected.BuildAnywhere));
+                Assert.That(actual.TerritoryIncome, Is.EqualTo(expected.TerritoryIncome));
+                Assert.That(actual.GeneratorsEnabled, Is.EqualTo(expected.GeneratorsEnabled));
+                Assert.That(actual.PointDecay, Is.EqualTo(expected.PointDecay));
+                Assert.That(actual.FogOfWar, Is.EqualTo(expected.FogOfWar));
+                foreach (TerrainType terrain in Enum.GetValues(typeof(TerrainType)))
+                {
+                    TerrainDef expectedTerrain = expected.Terrain(terrain);
+                    TerrainDef actualTerrain = actual.Terrain(terrain);
+                    Assert.That(actualTerrain.MoveCost, Is.EqualTo(expectedTerrain.MoveCost));
+                    Assert.That(actualTerrain.Concealment,
+                        Is.EqualTo(expectedTerrain.Concealment));
+                    Assert.That(actualTerrain.Defense, Is.EqualTo(expectedTerrain.Defense));
+                    Assert.That(actualTerrain.Passable, Is.EqualTo(expectedTerrain.Passable));
+                }
+            });
+        }
+
+        private static void AssertPlayersEqual(PlayerState expected, PlayerState actual)
+        {
+            Assert.That(actual.Id, Is.EqualTo(expected.Id));
+            Assert.That(actual.Points, Is.EqualTo(expected.Points));
+            Assert.That(actual.DestroyedValue, Is.EqualTo(expected.DestroyedValue));
+            Assert.That(actual.Barracks.Count, Is.EqualTo(expected.Barracks.Count));
+            for (int index = 0; index < expected.Barracks.Count; index++)
+            {
+                Assert.That(actual.Barracks[index].Name,
+                    Is.EqualTo(expected.Barracks[index].Name));
+                AssertUnitStatsEqual(expected.Barracks[index].Stats,
+                    actual.Barracks[index].Stats);
+            }
+
+            Unit[] expectedUnits = expected.UnitsOnBoard.OrderBy(unit => unit.Id).ToArray();
+            Unit[] actualUnits = actual.UnitsOnBoard.OrderBy(unit => unit.Id).ToArray();
+            Assert.That(actualUnits.Length, Is.EqualTo(expectedUnits.Length));
+            for (int index = 0; index < expectedUnits.Length; index++)
+            {
+                Unit expectedUnit = expectedUnits[index];
+                Unit actualUnit = actualUnits[index];
+                Assert.That(actualUnit.Id, Is.EqualTo(expectedUnit.Id));
+                Assert.That(actualUnit.Owner, Is.EqualTo(expectedUnit.Owner));
+                Assert.That(actualUnit.Cell, Is.EqualTo(expectedUnit.Cell));
+                Assert.That(actualUnit.Elevation, Is.EqualTo(expectedUnit.Elevation));
+                Assert.That(actualUnit.CurrentHp, Is.EqualTo(expectedUnit.CurrentHp));
+                Assert.That(actualUnit.Name, Is.EqualTo(expectedUnit.Name));
+                AssertUnitStatsEqual(expectedUnit.Stats, actualUnit.Stats);
+            }
+
+            Generator[] expectedGenerators = expected.Generators
+                .OrderBy(generator => generator.Id).ToArray();
+            Generator[] actualGenerators = actual.Generators
+                .OrderBy(generator => generator.Id).ToArray();
+            Assert.That(actualGenerators.Length, Is.EqualTo(expectedGenerators.Length));
+            for (int index = 0; index < expectedGenerators.Length; index++)
+            {
+                Generator expectedGenerator = expectedGenerators[index];
+                Generator actualGenerator = actualGenerators[index];
+                Assert.That(actualGenerator.Id, Is.EqualTo(expectedGenerator.Id));
+                Assert.That(actualGenerator.Owner, Is.EqualTo(expectedGenerator.Owner));
+                Assert.That(actualGenerator.Cell, Is.EqualTo(expectedGenerator.Cell));
+                Assert.That(actualGenerator.Elevation, Is.EqualTo(expectedGenerator.Elevation));
+                Assert.That(actualGenerator.CurrentHp, Is.EqualTo(expectedGenerator.CurrentHp));
+                Assert.That(actualGenerator.Strength, Is.EqualTo(expectedGenerator.Strength));
+            }
+        }
+
+        private static void AssertUnitStatsEqual(UnitStats expected, UnitStats actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Health, Is.EqualTo(expected.Health));
+                Assert.That(actual.Damage, Is.EqualTo(expected.Damage));
+                Assert.That(actual.Defense, Is.EqualTo(expected.Defense));
+                Assert.That(actual.Movement, Is.EqualTo(expected.Movement));
+                Assert.That(actual.VerticalMovement, Is.EqualTo(expected.VerticalMovement));
+                Assert.That(actual.Range, Is.EqualTo(expected.Range));
+                Assert.That(actual.RangeArc, Is.EqualTo(expected.RangeArc));
+                Assert.That(actual.Vision, Is.EqualTo(expected.Vision));
+                Assert.That(actual.VisionArc, Is.EqualTo(expected.VisionArc));
+            });
         }
 
         private static string AssertSameReply(
@@ -952,6 +1357,20 @@ namespace HexWars.Engine.Tests
                     original.CapabilityDefinitions, original.CapabilityAllocations,
                     original.Rules, memory, original.Relations));
             return view;
+        }
+
+        private static TrainingScenario LoadStrictScenario()
+        {
+            string gymServerDll = Path.GetFullPath(Path.Combine(
+                TestContext.CurrentContext.TestDirectory,
+                "..", "..", "..", "..", "HexWars.GymServer", "bin", "Debug", "net8.0",
+                "HexWars.GymServer.dll"));
+            Assembly assembly = Assembly.LoadFrom(gymServerDll);
+            Type scenarioJson = assembly.GetType(
+                "HexWars.GymServer.ScenarioJson", throwOnError: true)!;
+            MethodInfo load = scenarioJson.GetMethod(
+                "Load", BindingFlags.Public | BindingFlags.Static)!;
+            return (TrainingScenario)load.Invoke(null, new object[] { CheckedInScenario })!;
         }
 
         private static object InvokeWire(string methodName, params object[] arguments)
@@ -1451,6 +1870,49 @@ namespace HexWars.Engine.Tests
                 Assert.That(output, Is.Empty,
                     "an invalid selection must not emit a successor view");
                 return error;
+            }
+
+            public string RejectCommand(string request)
+            {
+                _process.StandardInput.WriteLine(request);
+                _process.StandardInput.Flush();
+                var pending = _process.StandardOutput.ReadLineAsync();
+                if (pending.Wait(TimeSpan.FromSeconds(2)) && pending.Result != null)
+                    Assert.Fail("malformed tactical-v3 command emitted a response (" +
+                        pending.Result.Length + " bytes)");
+
+                Assert.That(_process.WaitForExit(10000), Is.True,
+                    "GymServer did not reject the malformed tactical-v3 command");
+                Assert.That(pending.Wait(TimeSpan.FromSeconds(1)), Is.True,
+                    "GymServer stdout did not close after rejecting the command");
+                string? line = pending.Result;
+                string output = _process.StandardOutput.ReadToEnd();
+                string error = _process.StandardError.ReadToEnd();
+                Assert.Multiple(() =>
+                {
+                    Assert.That(_process.ExitCode, Is.Not.EqualTo(0));
+                    Assert.That(line, Is.Null,
+                        "a malformed command must not emit a response line");
+                    Assert.That(output, Is.Empty,
+                        "a malformed command must not emit trailing output");
+                });
+                return error;
+            }
+
+            public void CloseAndAssert()
+            {
+                _process.StandardInput.WriteLine("{\"cmd\":\"close\"}");
+                _process.StandardInput.Flush();
+                Assert.That(_process.WaitForExit(5000), Is.True,
+                    "GymServer did not exit after close");
+                string output = _process.StandardOutput.ReadToEnd();
+                string error = _process.StandardError.ReadToEnd();
+                Assert.Multiple(() =>
+                {
+                    Assert.That(_process.ExitCode, Is.Zero);
+                    Assert.That(output, Is.Empty, "close must not emit a response");
+                    Assert.That(error, Is.Empty, "normal close must not emit an error");
+                });
             }
 
             public void Dispose()
