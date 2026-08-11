@@ -227,7 +227,7 @@ namespace HexWars.Engine.Tests
         [Test]
         public void CreateFrame_OrdersWithinKindsByDecisionLocalRows()
         {
-            GameState state = OrderingState();
+            GameState state = AsymmetricOrderingState();
             var source = new TacticalV3LegalCandidateSource(
                 new FixedObservationSource(Observation(6, 4, 2)),
                 TacticalV3Fixtures.ExperimentalCapacity());
@@ -263,14 +263,15 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Project_EveryLegalCandidateMatchesIndependentTransitionFromRecreatedState()
+        public void EveryLegalPublicCandidateMatchesHiddenResolverCommandAndProjectedSuccessor()
         {
-            GameState baseline = OrderingState();
+            GameState baseline = AsymmetricOrderingState();
             TacticalV3Observation observation = ProjectionObservation(baseline, PlayerId.Player0);
             var source = new TacticalV3LegalCandidateSource(
                 new FixedObservationSource(observation), TacticalV3Fixtures.ExperimentalCapacity());
             TacticalV3DecisionFrame frame = source.CreateFrame(
                 baseline, PlayerId.Player0, EmptyObservationMemory.Instance, 29);
+            var resolver = new TacticalV3ActionResolver();
 
             Assert.That(frame.Candidates.Select(candidate => candidate.Kind).Distinct(), Is.EquivalentTo(new[]
             {
@@ -281,17 +282,49 @@ namespace HexWars.Engine.Tests
             }));
             foreach (TacticalV3Candidate candidate in frame.Candidates)
             {
-                GameState independent = OrderingState();
-                TacticalV3Observation independentObservation =
-                    ProjectionObservation(independent, PlayerId.Player0);
-                AssertCandidateReferencesValid(candidate, independentObservation);
-                Command command = Reconstruct(candidate, independent, independentObservation);
-                Result applied = GameEngine.Apply(independent, command);
+                Command hiddenCommand = resolver.Resolve(
+                    frame, frame.DecisionId, candidate.CandidateId, baseline);
+                GameState hiddenBefore = AsymmetricOrderingState();
+                GameState publicBefore = AsymmetricOrderingState();
+                TacticalV3Observation publicObservation =
+                    ProjectionObservation(publicBefore, PlayerId.Player0);
+                AssertCandidateReferencesValid(candidate, publicObservation);
+                Command publicCommand = Reconstruct(candidate, publicBefore, publicObservation);
+                Result hiddenApplied = GameEngine.Apply(hiddenBefore, hiddenCommand);
+                Result publicApplied = GameEngine.Apply(publicBefore, publicCommand);
 
-                Assert.That(applied.Success, Is.True, candidate.CandidateId.ToString());
+                Assert.That(hiddenApplied.Success, Is.True, candidate.CandidateId.ToString());
+                Assert.That(publicApplied.Success, Is.True, candidate.CandidateId.ToString());
+                AssertCompleteGameStatesEqual(hiddenApplied.NewState, publicApplied.NewState);
                 AssertProjectionMatchesAuthoritativeTransition(
-                    candidate, command, independent, applied.NewState);
+                    candidate, publicCommand, publicBefore, hiddenApplied.NewState);
             }
+        }
+
+        [Test]
+        public void CompleteSuccessorOracle_RejectsDistinctLegalDestinations()
+        {
+            GameState baseline = AsymmetricOrderingState();
+            TacticalV3Observation observation = ProjectionObservation(baseline, PlayerId.Player0);
+            var source = new TacticalV3LegalCandidateSource(
+                new FixedObservationSource(observation), TacticalV3Fixtures.ExperimentalCapacity());
+            TacticalV3DecisionFrame frame = source.CreateFrame(
+                baseline, PlayerId.Player0, EmptyObservationMemory.Instance, 31);
+            TacticalV3Candidate[] moves = frame.Candidates
+                .Where(candidate => candidate.Kind == TacticalV3CandidateKind.Move)
+                .Take(2)
+                .ToArray();
+            Assert.That(moves, Has.Length.EqualTo(2));
+
+            Result first = GameEngine.Apply(
+                AsymmetricOrderingState(),
+                Reconstruct(moves[0], AsymmetricOrderingState(), observation));
+            Result second = GameEngine.Apply(
+                AsymmetricOrderingState(),
+                Reconstruct(moves[1], AsymmetricOrderingState(), observation));
+
+            Assert.That(() => AssertCompleteGameStatesEqual(first.NewState, second.NewState),
+                Throws.InstanceOf<MultipleAssertException>());
         }
 
         private static IReadOnlyDictionary<string, Type> CandidatePropertyContract() =>
@@ -516,6 +549,172 @@ namespace HexWars.Engine.Tests
             });
         }
 
+        private static void AssertCompleteGameStatesEqual(GameState expected, GameState actual)
+        {
+            AssertGameConfigsEqual(expected.Config, actual.Config);
+            Assert.That(actual.Config.TurnPolicy.RemainingActions(actual),
+                Is.EqualTo(expected.Config.TurnPolicy.RemainingActions(expected)));
+            AssertBoardsEqual(expected.Board, actual.Board);
+            Assert.That(actual.Players, Has.Count.EqualTo(expected.Players.Count));
+            for (int player = 0; player < expected.Players.Count; player++)
+                AssertPlayersEqual(expected.Players[player], actual.Players[player]);
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.ActivePlayer, Is.EqualTo(expected.ActivePlayer));
+                Assert.That(actual.Round, Is.EqualTo(expected.Round));
+                Assert.That(actual.NextEntityId, Is.EqualTo(expected.NextEntityId));
+                Assert.That(actual.IsGameOver, Is.EqualTo(expected.IsGameOver));
+                Assert.That(actual.Winner, Is.EqualTo(expected.Winner));
+                Assert.That(actual.MovedUnitIds.OrderBy(id => id),
+                    Is.EqualTo(expected.MovedUnitIds.OrderBy(id => id)));
+                Assert.That(actual.AttackedUnitIds.OrderBy(id => id),
+                    Is.EqualTo(expected.AttackedUnitIds.OrderBy(id => id)));
+                Assert.That(actual.MovementSpent.OrderBy(item => item.Key),
+                    Is.EqualTo(expected.MovementSpent.OrderBy(item => item.Key)));
+            });
+        }
+
+        private static void AssertBoardsEqual(Board expected, Board actual)
+        {
+            Tile[] expectedTiles = expected.Tiles.OrderBy(tile => tile.Coord.Q)
+                .ThenBy(tile => tile.Coord.R).ToArray();
+            Tile[] actualTiles = actual.Tiles.OrderBy(tile => tile.Coord.Q)
+                .ThenBy(tile => tile.Coord.R).ToArray();
+            Assert.That(actualTiles, Has.Length.EqualTo(expectedTiles.Length));
+            for (int row = 0; row < expectedTiles.Length; row++)
+            {
+                Assert.Multiple(() =>
+                {
+                    Assert.That(actualTiles[row].Coord, Is.EqualTo(expectedTiles[row].Coord));
+                    Assert.That(actualTiles[row].Terrain, Is.EqualTo(expectedTiles[row].Terrain));
+                    Assert.That(actualTiles[row].Elevation, Is.EqualTo(expectedTiles[row].Elevation));
+                    Assert.That(actual.Controller(actualTiles[row].Coord),
+                        Is.EqualTo(expected.Controller(expectedTiles[row].Coord)));
+                });
+            }
+            foreach (PlayerId player in new[] { PlayerId.Player0, PlayerId.Player1 })
+                Assert.That(actual.DeploymentZone(player).OrderBy(cell => cell.Q).ThenBy(cell => cell.R),
+                    Is.EqualTo(expected.DeploymentZone(player)
+                        .OrderBy(cell => cell.Q).ThenBy(cell => cell.R)));
+        }
+
+        private static void AssertPlayersEqual(PlayerState expected, PlayerState actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Id, Is.EqualTo(expected.Id));
+                Assert.That(actual.Points, Is.EqualTo(expected.Points));
+                Assert.That(actual.DestroyedValue, Is.EqualTo(expected.DestroyedValue));
+                Assert.That(actual.Barracks, Has.Count.EqualTo(expected.Barracks.Count));
+                Assert.That(actual.UnitsOnBoard, Has.Count.EqualTo(expected.UnitsOnBoard.Count));
+                Assert.That(actual.Generators, Has.Count.EqualTo(expected.Generators.Count));
+            });
+            for (int row = 0; row < expected.Barracks.Count; row++)
+            {
+                Assert.That(actual.Barracks[row].Name, Is.EqualTo(expected.Barracks[row].Name));
+                AssertUnitStatsEqual(expected.Barracks[row].Stats, actual.Barracks[row].Stats);
+            }
+            for (int row = 0; row < expected.UnitsOnBoard.Count; row++)
+            {
+                Unit expectedUnit = expected.UnitsOnBoard[row];
+                Unit actualUnit = actual.UnitsOnBoard[row];
+                Assert.Multiple(() =>
+                {
+                    Assert.That(actualUnit.Id, Is.EqualTo(expectedUnit.Id));
+                    Assert.That(actualUnit.Owner, Is.EqualTo(expectedUnit.Owner));
+                    Assert.That(actualUnit.Cell, Is.EqualTo(expectedUnit.Cell));
+                    Assert.That(actualUnit.Elevation, Is.EqualTo(expectedUnit.Elevation));
+                    Assert.That(actualUnit.CurrentHp, Is.EqualTo(expectedUnit.CurrentHp));
+                    Assert.That(actualUnit.Name, Is.EqualTo(expectedUnit.Name));
+                });
+                AssertUnitStatsEqual(expectedUnit.Stats, actualUnit.Stats);
+            }
+            for (int row = 0; row < expected.Generators.Count; row++)
+            {
+                Generator expectedGenerator = expected.Generators[row];
+                Generator actualGenerator = actual.Generators[row];
+                Assert.Multiple(() =>
+                {
+                    Assert.That(actualGenerator.Id, Is.EqualTo(expectedGenerator.Id));
+                    Assert.That(actualGenerator.Owner, Is.EqualTo(expectedGenerator.Owner));
+                    Assert.That(actualGenerator.Cell, Is.EqualTo(expectedGenerator.Cell));
+                    Assert.That(actualGenerator.Elevation, Is.EqualTo(expectedGenerator.Elevation));
+                    Assert.That(actualGenerator.CurrentHp, Is.EqualTo(expectedGenerator.CurrentHp));
+                    Assert.That(actualGenerator.Strength, Is.EqualTo(expectedGenerator.Strength));
+                });
+            }
+        }
+
+        private static void AssertGameConfigsEqual(GameConfig expected, GameConfig actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.StartingPoints, Is.EqualTo(expected.StartingPoints));
+                Assert.That(actual.BountyRate, Is.EqualTo(expected.BountyRate));
+                Assert.That(actual.GeneratorCost, Is.EqualTo(expected.GeneratorCost));
+                Assert.That(actual.GeneratorOutput, Is.EqualTo(expected.GeneratorOutput));
+                Assert.That(actual.GeneratorHealth, Is.EqualTo(expected.GeneratorHealth));
+                Assert.That(actual.DamageFloor, Is.EqualTo(expected.DamageFloor));
+                Assert.That(actual.DmgHighGroundBonus, Is.EqualTo(expected.DmgHighGroundBonus));
+                Assert.That(actual.RangeHighGroundBonus, Is.EqualTo(expected.RangeHighGroundBonus));
+                Assert.That(actual.RoundCap, Is.EqualTo(expected.RoundCap));
+                Assert.That(actual.DesignFee, Is.EqualTo(expected.DesignFee));
+                Assert.That(actual.MaxDesignPointCost, Is.EqualTo(expected.MaxDesignPointCost));
+                Assert.That(actual.FixedTemplateCount, Is.EqualTo(expected.FixedTemplateCount));
+                Assert.That(actual.TemplateSlotCount, Is.EqualTo(expected.TemplateSlotCount));
+                Assert.That(actual.DeployCostMultiplier, Is.EqualTo(expected.DeployCostMultiplier));
+                Assert.That(actual.TurnPolicy.GetType(), Is.SameAs(expected.TurnPolicy.GetType()));
+                Assert.That(actual.TurnPolicy.ActionsPerTurn,
+                    Is.EqualTo(expected.TurnPolicy.ActionsPerTurn));
+                Assert.That(actual.BiomesEnabled, Is.EqualTo(expected.BiomesEnabled));
+                Assert.That(actual.WinConditions, Is.EqualTo(expected.WinConditions));
+                Assert.That(actual.CaptureCost, Is.EqualTo(expected.CaptureCost));
+                Assert.That(actual.EconomyWinThreshold, Is.EqualTo(expected.EconomyWinThreshold));
+                Assert.That(actual.ScoreKills, Is.EqualTo(expected.ScoreKills));
+                Assert.That(actual.ScorePoints, Is.EqualTo(expected.ScorePoints));
+                Assert.That(actual.ScoreArmy, Is.EqualTo(expected.ScoreArmy));
+                Assert.That(actual.ScoreTerritory, Is.EqualTo(expected.ScoreTerritory));
+                Assert.That(actual.UpkeepFactor, Is.EqualTo(expected.UpkeepFactor));
+                Assert.That(actual.CaptureFactor, Is.EqualTo(expected.CaptureFactor));
+                Assert.That(actual.BuildFactor, Is.EqualTo(expected.BuildFactor));
+                Assert.That(actual.TerritoryMode, Is.EqualTo(expected.TerritoryMode));
+                Assert.That(actual.ClaimEndsTurn, Is.EqualTo(expected.ClaimEndsTurn));
+                Assert.That(actual.BuildAnywhere, Is.EqualTo(expected.BuildAnywhere));
+                Assert.That(actual.TerritoryIncome, Is.EqualTo(expected.TerritoryIncome));
+                Assert.That(actual.GeneratorsEnabled, Is.EqualTo(expected.GeneratorsEnabled));
+                Assert.That(actual.FogOfWar, Is.EqualTo(expected.FogOfWar));
+                Assert.That(actual.PointDecay, Is.EqualTo(expected.PointDecay));
+            });
+            foreach (TerrainType terrain in Enum.GetValues(typeof(TerrainType)))
+            {
+                TerrainDef expectedTerrain = expected.Terrain(terrain);
+                TerrainDef actualTerrain = actual.Terrain(terrain);
+                Assert.Multiple(() =>
+                {
+                    Assert.That(actualTerrain.MoveCost, Is.EqualTo(expectedTerrain.MoveCost));
+                    Assert.That(actualTerrain.Concealment, Is.EqualTo(expectedTerrain.Concealment));
+                    Assert.That(actualTerrain.Defense, Is.EqualTo(expectedTerrain.Defense));
+                    Assert.That(actualTerrain.Passable, Is.EqualTo(expectedTerrain.Passable));
+                });
+            }
+        }
+
+        private static void AssertUnitStatsEqual(UnitStats expected, UnitStats actual)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Health, Is.EqualTo(expected.Health));
+                Assert.That(actual.Damage, Is.EqualTo(expected.Damage));
+                Assert.That(actual.Defense, Is.EqualTo(expected.Defense));
+                Assert.That(actual.Movement, Is.EqualTo(expected.Movement));
+                Assert.That(actual.VerticalMovement, Is.EqualTo(expected.VerticalMovement));
+                Assert.That(actual.Range, Is.EqualTo(expected.Range));
+                Assert.That(actual.RangeArc, Is.EqualTo(expected.RangeArc));
+                Assert.That(actual.Vision, Is.EqualTo(expected.Vision));
+                Assert.That(actual.VisionArc, Is.EqualTo(expected.VisionArc));
+            });
+        }
+
         private static TacticalV3ProjectedDelta ExpectedProjection(
             TacticalV3Candidate candidate,
             Command command,
@@ -661,36 +860,54 @@ namespace HexWars.Engine.Tests
             command is MoveUnit move ? cellRows[move.Dest] :
             command is DeployUnit deploy ? cellRows[deploy.Cell] : -1;
 
-        private static GameState OrderingState()
+        private static GameState AsymmetricOrderingState()
         {
             var board = new Board(new[]
             {
                 new Tile(new HexCoord(3, 0), 0, TerrainType.Plains),
-                new Tile(new HexCoord(1, 0), 0, TerrainType.Plains),
-                new Tile(new HexCoord(5, 0), 0, TerrainType.Plains),
+                new Tile(new HexCoord(1, 0), 1, TerrainType.Forest),
+                new Tile(new HexCoord(5, 0), 3, TerrainType.Water),
                 new Tile(new HexCoord(0, 0), 0, TerrainType.Plains),
-                new Tile(new HexCoord(4, 0), 0, TerrainType.Plains),
-                new Tile(new HexCoord(2, 0), 0, TerrainType.Plains),
-            }, zone0: new[] { new HexCoord(0, 0), new HexCoord(3, 0) });
-            UnitStats stats = TestStates.Stats(health: 2, damage: 1, movement: 1, range: 5, vision: 5);
-            return new GameState(board, GameConfig.Default(captureCost: int.MaxValue), new[]
+                new Tile(new HexCoord(4, 0), 1, TerrainType.Rough),
+                new Tile(new HexCoord(2, 0), 2, TerrainType.Forest),
+            },
+                zone0: new[] { new HexCoord(0, 0), new HexCoord(3, 0) },
+                zone1: new[] { new HexCoord(4, 0), new HexCoord(5, 0) },
+                control: new Dictionary<HexCoord, PlayerId>
+                {
+                    [new HexCoord(0, 0)] = PlayerId.Player0,
+                    [new HexCoord(4, 0)] = PlayerId.Player1,
+                });
+            UnitStats actor20 = TestStates.Stats(
+                health: 2, damage: 1, movement: 1, verticalMovement: 3,
+                range: 5, rangeArc: 5, vision: 5, visionArc: 5);
+            UnitStats actor10 = TestStates.Stats(
+                health: 4, damage: 2, defense: 1, movement: 1, verticalMovement: 3,
+                range: 4, rangeArc: 4, vision: 6, visionArc: 4);
+            GameConfig config = GameConfig.Default(
+                turnPolicy: new KActionsPolicy(6), captureCost: int.MaxValue,
+                startingPoints: 17, damageFloor: 1);
+            return new GameState(board, config, new[]
             {
-                new PlayerState(PlayerId.Player0, 20,
+                new PlayerState(PlayerId.Player0, 23,
                     barracks: new[]
                     {
-                        new UnitTemplate("", TestStates.Cost(3)),
-                        new UnitTemplate("", TestStates.Cost(4)),
+                        new UnitTemplate("Scout", TestStates.Cost(3)),
+                        new UnitTemplate("Bulwark", TestStates.Stats(
+                            health: 2, defense: 2, movement: 1)),
                     },
                     unitsOnBoard: new[]
                     {
-                        new Unit(20, PlayerId.Player0, stats, new HexCoord(1, 0), 0),
-                        new Unit(10, PlayerId.Player0, stats, new HexCoord(2, 0), 0),
-                    }),
-                new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[]
+                        new Unit(20, PlayerId.Player0, actor20, new HexCoord(1, 0), 1, "Runner"),
+                        new Unit(10, PlayerId.Player0, actor10, new HexCoord(2, 0), 2, "Archer"),
+                    }, destroyedValue: 2),
+                new PlayerState(PlayerId.Player1, 7, unitsOnBoard: new[]
                 {
-                    new Unit(50, PlayerId.Player1, TestStates.Stats(health: 3), new HexCoord(5, 0), 0),
-                    new Unit(40, PlayerId.Player1, TestStates.Stats(health: 3), new HexCoord(4, 0), 0),
-                }),
+                    new Unit(50, PlayerId.Player1,
+                        TestStates.Stats(health: 5, defense: 1), new HexCoord(5, 0), 3, "Tower"),
+                    new Unit(40, PlayerId.Player1,
+                        TestStates.Stats(health: 3), new HexCoord(4, 0), 1, "Guard").WithDamage(1),
+                }, destroyedValue: 5),
             }, PlayerId.Player0, 1, 51);
         }
 

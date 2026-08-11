@@ -46,6 +46,10 @@ namespace HexWars.Engine.Tests
                 new TacticalV3TokenRef(
                     TacticalV3TableKind.Cells, first.Decision.Observation.Cells.Count),
                 RowCounts(first)));
+            Assert.Throws<AssertionException>(() => AssertReferenceValid(
+                new TacticalV3TokenRef(TacticalV3TableKind.Units, 0),
+                TacticalV3TableKind.Cells,
+                RowCounts(first)));
             int step = 0;
             while (!first.Terminated && !first.Truncated)
             {
@@ -58,6 +62,8 @@ namespace HexWars.Engine.Tests
 
                 first = firstEnv.Step(first.Decision.DecisionId, candidateId);
                 second = secondEnv.Step(second.Decision.DecisionId, candidateId);
+                AssertAllReferencesValid(first);
+                AssertAllReferencesValid(second);
                 ReplayData firstReplay = ReplayFile.Read(firstEnv.ToReplay());
                 ReplayData secondReplay = ReplayFile.Read(secondEnv.ToReplay());
                 Assert.That(firstReplay.Commands, Has.Count.EqualTo(step + 1));
@@ -67,8 +73,17 @@ namespace HexWars.Engine.Tests
 
             AssertDeterministicView(first, second);
             AssertAllReferencesValid(first);
-            Assert.That(first.Terminated || first.Truncated, Is.True);
-            Assert.That(firstEnv.ToReplay(), Is.EqualTo(secondEnv.ToReplay()));
+            AssertAllReferencesValid(second);
+            Assert.Multiple(() =>
+            {
+                Assert.That(step, Is.EqualTo(10).And.GreaterThan(0));
+                Assert.That(ReplayFile.Read(firstEnv.ToReplay()).Commands, Has.Count.EqualTo(10));
+                Assert.That(first.Terminated, Is.False);
+                Assert.That(first.Truncated, Is.True);
+                Assert.That(second.Terminated, Is.False);
+                Assert.That(second.Truncated, Is.True);
+                Assert.That(firstEnv.ToReplay(), Is.EqualTo(secondEnv.ToReplay()));
+            });
         }
 
         [Test]
@@ -384,21 +399,72 @@ namespace HexWars.Engine.Tests
             IReadOnlyDictionary<TacticalV3TableKind, int> counts = RowCounts(view);
             TacticalV3Observation observation = view.Decision.Observation;
             foreach (TacticalV3UnitToken unit in observation.Units)
-                AssertReferenceValid(unit.Cell, counts);
+                AssertReferenceValid(unit.Cell, TacticalV3TableKind.Cells, counts);
             foreach (TacticalV3CapabilityAllocationToken allocation in observation.CapabilityAllocations)
             {
-                AssertReferenceValid(allocation.Owner, counts);
-                AssertReferenceValid(allocation.Definition, counts);
+                AssertReferenceValid(allocation.Owner,
+                    new[] { TacticalV3TableKind.Units, TacticalV3TableKind.Templates }, counts);
+                AssertReferenceValid(
+                    allocation.Definition, TacticalV3TableKind.CapabilityDefinitions, counts);
             }
             foreach (TacticalV3MemoryToken memory in observation.Memory)
-                AssertReferenceValid(memory.Cell, counts);
+                AssertReferenceValid(memory.Cell, TacticalV3TableKind.Cells, counts);
             foreach (TacticalV3RelationToken relation in observation.Relations)
-            {
-                AssertReferenceValid(relation.Source, counts);
-                AssertReferenceValid(relation.Target, counts);
-            }
+                AssertRelationReferencesValid(relation, counts);
             foreach (TacticalV3Candidate candidate in view.Decision.Candidates)
                 AssertCandidateReferencesValid(candidate, counts);
+        }
+
+        private static void AssertRelationReferencesValid(
+            TacticalV3RelationToken relation,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            switch (relation.Kind)
+            {
+                case TacticalV3RelationKind.Neighbor:
+                    AssertReferenceValid(relation.Source, TacticalV3TableKind.Cells, counts);
+                    AssertReferenceValid(relation.Target, TacticalV3TableKind.Cells, counts);
+                    return;
+                case TacticalV3RelationKind.Occupies:
+                    AssertReferenceValid(relation.Source, TacticalV3TableKind.Units, counts);
+                    AssertReferenceValid(relation.Target, TacticalV3TableKind.Cells, counts);
+                    return;
+                case TacticalV3RelationKind.HasCapability:
+                    AssertReferenceValid(relation.Source,
+                        new[] { TacticalV3TableKind.Units, TacticalV3TableKind.Templates }, counts);
+                    AssertReferenceValid(
+                        relation.Target, TacticalV3TableKind.CapabilityDefinitions, counts);
+                    return;
+                default:
+                    throw new AssertionException("unexpected tactical-v3 relation kind " + relation.Kind);
+            }
+        }
+
+        private static void AssertReferenceValid(
+            TacticalV3TokenRef reference,
+            TacticalV3TableKind expectedTable,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            Assert.That(reference.Table, Is.EqualTo(expectedTable));
+            AssertReferenceValid(reference, counts);
+        }
+
+        private static void AssertReferenceValid(
+            TacticalV3TokenRef? reference,
+            TacticalV3TableKind expectedTable,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            if (reference.HasValue)
+                AssertReferenceValid(reference.Value, expectedTable, counts);
+        }
+
+        private static void AssertReferenceValid(
+            TacticalV3TokenRef reference,
+            IReadOnlyCollection<TacticalV3TableKind> expectedTables,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            Assert.That(expectedTables, Does.Contain(reference.Table));
+            AssertReferenceValid(reference, counts);
         }
 
         private static void AssertReferenceValid(
@@ -421,14 +487,18 @@ namespace HexWars.Engine.Tests
             TacticalV3Candidate candidate,
             IReadOnlyDictionary<TacticalV3TableKind, int> counts)
         {
-            AssertReferenceValid(candidate.Actor, counts);
-            AssertReferenceValid(candidate.Target, counts);
-            AssertReferenceValid(candidate.Template, counts);
-            AssertReferenceValid(candidate.Cell, counts);
-            AssertReferenceValid(candidate.Projection.SourceCell, counts);
-            AssertReferenceValid(candidate.Projection.DestinationCell, counts);
-            AssertReferenceValid(candidate.Projection.Template, counts);
-            AssertReferenceValid(candidate.Projection.Target, counts);
+            AssertReferenceValid(candidate.Actor, TacticalV3TableKind.Units, counts);
+            AssertReferenceValid(candidate.Target, TacticalV3TableKind.Units, counts);
+            AssertReferenceValid(candidate.Template, TacticalV3TableKind.Templates, counts);
+            AssertReferenceValid(candidate.Cell, TacticalV3TableKind.Cells, counts);
+            AssertReferenceValid(
+                candidate.Projection.SourceCell, TacticalV3TableKind.Cells, counts);
+            AssertReferenceValid(
+                candidate.Projection.DestinationCell, TacticalV3TableKind.Cells, counts);
+            AssertReferenceValid(
+                candidate.Projection.Template, TacticalV3TableKind.Templates, counts);
+            AssertReferenceValid(
+                candidate.Projection.Target, TacticalV3TableKind.Units, counts);
         }
 
         private static void AssertCommandsEqual(Command expected, Command actual)

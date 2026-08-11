@@ -30,13 +30,16 @@ Status: complete as unsealed experimental evidence. Project B may consume the st
 - `0e0375f` fix: harden tactical-v3 GymServer contract
 - `1dcc4e8` fix: validate tactical-v3 request value types
 - `3f675b3` docs: keep project-a report in tracked docs
-- Final acceptance: `test: complete tactical-v3 contract gate` (this commit).
+- `be92556073636d2f104c741390b00ec1605bf43c` test: complete tactical-v3 contract gate
+- Review hardening: `test: harden tactical-v3 conformance proofs` (the current commit; its hash is unavoidably self-referential here).
 
 ## Acceptance evidence
 
 - GymServer build: `dotnet build engine/HexWars.GymServer/HexWars.GymServer.csproj --no-restore` — succeeded with 0 warnings and 0 errors.
-- Complete tactical-v3 selector: `dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter FullyQualifiedName~TacticalV3 --no-restore` — 267 passed, 0 failed, 0 skipped.
-- Full engine/GymServer regression: `dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --no-restore` — 980 passed, 0 failed, 0 skipped.
+- Review-hardening selector: the six new/strengthened conformance tests passed 6, failed 0, skipped 0.
+- Complete tactical-v3 selector: `dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --filter FullyQualifiedName~TacticalV3 --no-restore` — 269 passed, 0 failed, 0 skipped.
+- Full engine/GymServer regression: `dotnet test engine/HexWars.Engine.Tests/HexWars.Engine.Tests.csproj --no-restore` — final exact run passed 982, failed 0, skipped 0.
+- Two prior exact full-suite runs each passed 980 and timed out in two different existing GymServer rejection cases at their fixed 10-second process-exit wait. Every named case passed when isolated (7/7 and 2/2), the tactical-v3 cases passed in the 269-test selector, and the final unchanged exact run passed 982/982. No timeout or production workaround was added.
 - Live Unity/Coplay root: `C:\Users\cddal\HexWars\.worktrees\physical-checkpoint-audit`.
 - Live Unity state: `playMode=false`, `hasCompilationErrors=false`.
 - Live Unity compile result: `No compile errors`.
@@ -60,13 +63,13 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 
 - The same `TacticalV3SeatObservationSource` and structured DTO schema produced 117 cell rows for 13x9 and 384 cell rows for 24x16.
 - The two sizes have the same encoding hash and capacity hash, while their match contract hashes differ.
-- Both seat views on a symmetric start were checked as coordinate reflections with self/opponent owner and deployment-zone swaps.
-- Every legal candidate in an all-four-kind state was reconstructed from public row references, applied to a freshly recreated state with `GameEngine.Apply`, and compared field-by-field with its projected delta.
-- All observation, relation, candidate, and projected-delta token references were range-checked after candidate projection and after every accepted environment step.
-- Two same-seed trajectories matched complete public observations, candidates, selected command fields, rewards, terminal/truncation state, and exact replay text.
-- Learned structured row DTOs are guarded against `Name`, `DisplayName`, `EngineId`, `UnitId`, and raw `PlayerId` features.
+- Both seat views on an asymmetric terrain/elevation/control/deployment sentinel board were checked with an independent odd-q offset/axial reflection oracle, plus self/opponent owner and deployment-zone swaps. Production `MirrorCell` is not used as expected authority.
+- For every legal candidate in a distinguishable asymmetric all-four-kind state, the hidden authoritative command was obtained through `IActionResolver.Resolve` and applied to one independently recreated state. A command reconstructed solely from public candidate/token rows was applied to another. Complete successor config, policy, terrain, board, control, zones, players, resources, barracks, units, generators, turn, bookkeeping, terminal, and winner fields matched before the public projected delta was independently checked against that successor.
+- Observation, relation, candidate, and projected-delta token references were range-checked and constrained to their semantic expected table families after projection and immediately after every accepted environment step.
+- Two seed-149 trajectories matched complete public observations, candidates, selected command fields, rewards, terminal/truncation state, and exact replay text for exactly 10 positive commands; both ended `terminated=false`, `truncated=true`.
+- A cycle-safe learned-DTO graph traversal rooted at observation, candidate, projection, and token-reference types inspects public instance properties and fields through nullable, array, collection, generic, and nested DTO paths. It rejects `Name`, `DisplayName`, `EngineId`, `UnitId`, and any raw `PlayerId`; adversarial and safe DTOs self-characterize every path.
 - A scenario with `max_cells=1` was rejected at startup with empty stdout, before reset payload publication.
-- Legacy payload-shape contract tests remained green for tactical-v1, adaptive-v1, and tactical-v2 as part of the 980-test suite.
+- Legacy payload-shape contract tests remained green for tactical-v1, adaptive-v1, and tactical-v2 as part of the final 982-test suite.
 
 ## Public interfaces
 
@@ -74,6 +77,7 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 - Observation: `TacticalV3Observation`, its eight structured token/definition tables, `IObservationMemory`, `ISeatObservationSource`, and `TacticalV3SeatObservationSource`.
 - Decisions: `TacticalV3Candidate`, `TacticalV3ProjectedDelta`, `TacticalV3DecisionFrame`, `ILegalCandidateSource`, `ICandidateProjector`, `IActionResolver`, and their tactical-v3 implementations.
 - Reward and environments: `TacticalV3RewardBreakdown`, `IRewardContract`, `TacticalV3Reward`, `TacticalV3DuelEnv`, `TacticalV3Env`, and `TacticalV3View`.
+- Learned-feature boundary: `TacticalV3View.Seat` remains control-plane envelope metadata and is explicitly outside the learned observation/candidate/projection/token graph.
 - Contract/configuration: `TacticalV3CapacityProfile`, `TacticalV3RewardConfig`, `TacticalV3Config`, and `TacticalV3Contract` with independent contract, encoding, and capacity hashes.
 - GymServer protocol: tactical-v3 `spaces`, `reset`, `step`, `duel_spaces`, `duel_reset`, `duel_step`, `duel_save`, and `close`; structured selections require exact decision/candidate identity.
 
@@ -92,3 +96,5 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 - No design: unit-design actions and design-time learning are outside Project A.
 - No DAgger: tactical-v3 explicitly rejects DAgger and evidence-session RPCs that remain tactical-v2-only.
 - Unsealed experimental: hashes and exact schemas fail closed on drift, but this contract is not a production-sealed compatibility promise.
+- Deferred Task 6–9 hardening: the production odd-q comment wording remains unchanged in this test-only gate; additional candidate-kind self-characterization, deeper nested-map mutation coverage, per-token-row golden hardening, and legacy golden-provenance documentation remain follow-up work.
+- Legacy harness timing: fixed 10-second GymServer rejection waits were intermittently exceeded during two full-suite attempts even though every rotated case passed in isolation and the final exact suite was green. The hardening commit does not claim that legacy timing concern is closed.

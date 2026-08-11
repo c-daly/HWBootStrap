@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using NUnit.Framework;
@@ -106,7 +108,10 @@ namespace HexWars.Engine.Tests
             Assert.That(observation.Cells.Select(cell => (cell.Q, cell.R)), Is.EqualTo(
                 layout.Cells.Select(cell =>
                 {
-                    HexCoord reflected = layout.MirrorCell(cell);
+                    HexCoord reflected = IndependentReflectCell(
+                        layout.BoardGen.Width,
+                        layout.BoardGen.Height,
+                        cell);
                     return (reflected.Q, reflected.R);
                 })));
             Assert.That(observation.Units.Take(3).Select(unit => unit.Owner),
@@ -238,59 +243,106 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
-        public void Observe_SymmetricStartPerspectivesReflectCoordinatesAndSwapOwners()
+        public void Observe_AsymmetricBoardPerspectivesReflectCoordinatesAndSwapOwners()
         {
             TacticalV3Config config = TacticalV3Fixtures.Config();
             var layout = new TacticalV2Layout(config.Match);
-            GameState state = layout.NewGame(101).State;
+            GameState state = AsymmetricPerspectiveState(layout, layout.NewGame(101).State);
             var source = new TacticalV3SeatObservationSource(config);
             TacticalV3Observation player0 = source.Observe(
                 state, PlayerId.Player0, EmptyObservationMemory.Instance);
             TacticalV3Observation player1 = source.Observe(
                 state, PlayerId.Player1, EmptyObservationMemory.Instance);
 
-            AssertMirroredCellRows(layout, player0, player1);
+            AssertMirroredCellRows(
+                config.Match.BoardGen.Width, config.Match.BoardGen.Height, player0, player1);
             AssertMirroredUnitRows(state, player0, player1);
             AssertMirroredTemplateRows(state, player0, player1);
+            Assert.Multiple(() =>
+            {
+                Assert.That(
+                    (player0.Cells[7].Terrain, player0.Cells[7].Elevation,
+                        player0.Cells[7].SelfDeploymentZone, player0.Cells[7].OpponentDeploymentZone),
+                    Is.EqualTo((TerrainType.Forest, 4, true, false)));
+                Assert.That(
+                    (player0.Cells[12].Terrain, player0.Cells[12].Elevation,
+                        player0.Cells[12].SelfDeploymentZone, player0.Cells[12].OpponentDeploymentZone),
+                    Is.EqualTo((TerrainType.Water, 1, false, true)));
+                Assert.That(player0.Cells[23].Controller,
+                    Is.EqualTo(TacticalV3RelativeOwner.Self));
+                Assert.That(player1.Cells[23].Controller,
+                    Is.EqualTo(TacticalV3RelativeOwner.Opponent));
+                Assert.That(player0.Cells[72].Controller,
+                    Is.EqualTo(TacticalV3RelativeOwner.Opponent));
+                Assert.That(player1.Cells[72].Controller,
+                    Is.EqualTo(TacticalV3RelativeOwner.Self));
+            });
         }
 
         [Test]
-        public void StructuredLearnedDtoRows_RejectPresentationEngineAndRawSeatIdentity()
+        public void IndependentOddQReflection_MatchesHandDerivedEvenAndOddColumnCases()
         {
-            Assert.That(LearnedRowSurfaceIsSafe(typeof(LeakyIdentityRow)), Is.False);
-            Assert.That(LearnedRowSurfaceIsSafe(typeof(LeakySeatRow)), Is.False);
-            Type[] learnedRowTypes =
+            Assert.That(IndependentReflectCell(13, 9, new HexCoord(0, 0)),
+                Is.EqualTo(new HexCoord(12, 2)));
+            Assert.That(IndependentReflectCell(13, 9, new HexCoord(1, 0)),
+                Is.EqualTo(new HexCoord(11, 3)));
+            Assert.That(IndependentReflectCell(13, 9, new HexCoord(11, 3)),
+                Is.EqualTo(new HexCoord(1, 0)));
+        }
+
+        [Test]
+        public void LearnedDtoGraph_RejectsPresentationEngineAndNestedRawSeatIdentity()
+        {
+            Type[] unsafeGraphs =
             {
-                typeof(TacticalV3TokenRef),
-                typeof(TacticalV3CellToken),
-                typeof(TacticalV3UnitToken),
-                typeof(TacticalV3TemplateToken),
-                typeof(TacticalV3CapabilityDefinition),
-                typeof(TacticalV3CapabilityAllocationToken),
-                typeof(TacticalV3RuleToken),
-                typeof(TacticalV3MemoryToken),
-                typeof(TacticalV3RelationToken),
+                typeof(LeakyNamePath),
+                typeof(LeakyDisplayNamePath),
+                typeof(LeakyEngineIdPath),
+                typeof(LeakyUnitIdPath),
+                typeof(LeakyPublicFieldPath),
+                typeof(LeakyDirectSeatPath),
+                typeof(LeakyNullableSeatPath),
+                typeof(LeakyCollectionSeatPath),
+                typeof(LeakyArraySeatPath),
+                typeof(LeakyGenericSeatPath),
+                typeof(LeakyNestedSeatPath),
+            };
+            foreach (Type unsafeGraph in unsafeGraphs)
+                Assert.That(LearnedRowSurfaceIsSafe(unsafeGraph), Is.False, unsafeGraph.Name);
+
+            Assert.That(LearnedRowSurfaceIsSafe(typeof(SafeLearnedRoot)), Is.True);
+
+            Type[] learnedRoots =
+            {
+                typeof(TacticalV3Observation),
                 typeof(TacticalV3Candidate),
                 typeof(TacticalV3ProjectedDelta),
-                typeof(TacticalV3RewardBreakdown),
+                typeof(TacticalV3TokenRef),
             };
-            foreach (Type rowType in learnedRowTypes)
-                Assert.That(LearnedRowSurfaceIsSafe(rowType), Is.True, rowType.FullName);
+            foreach (Type root in learnedRoots)
+                Assert.That(LearnedRowSurfaceIsSafe(root), Is.True, root.FullName);
+
+            // TacticalV3View is the environment envelope, not a learned feature root. Seat is
+            // intentionally retained there for control-plane routing and excluded from this graph.
+            Assert.That(typeof(TacticalV3View).GetProperty(nameof(TacticalV3View.Seat))!.PropertyType,
+                Is.EqualTo(typeof(PlayerId)));
+            Assert.That(learnedRoots, Does.Not.Contain(typeof(TacticalV3View)));
         }
 
         private static void AssertMirroredCellRows(
-            TacticalV2Layout layout,
+            int width,
+            int height,
             TacticalV3Observation player0,
             TacticalV3Observation player1)
         {
             for (int row = 0; row < player0.Cells.Count; row++)
-                AssertMirroredCell(layout, player0.Cells[row], player1.Cells[row], row);
+                AssertMirroredCell(width, height, player0.Cells[row], player1.Cells[row], row);
         }
 
         private static void AssertMirroredCell(
-            TacticalV2Layout layout, TacticalV3CellToken left, TacticalV3CellToken right, int row)
+            int width, int height, TacticalV3CellToken left, TacticalV3CellToken right, int row)
         {
-            HexCoord reflected = layout.MirrorCell(new HexCoord(left.Q, left.R));
+            HexCoord reflected = IndependentReflectCell(width, height, new HexCoord(left.Q, left.R));
             Assert.Multiple(() =>
             {
                 Assert.That((right.Q, right.R), Is.EqualTo((reflected.Q, reflected.R)));
@@ -303,6 +355,40 @@ namespace HexWars.Engine.Tests
                 Assert.That(right.CurrentlyVisible, Is.EqualTo(left.CurrentlyVisible));
                 Assert.That(right.PreviouslyObserved, Is.EqualTo(left.PreviouslyObserved));
             });
+        }
+
+        private static HexCoord IndependentReflectCell(int width, int height, HexCoord cell)
+        {
+            int sourceColumn = cell.Q;
+            int sourceOffsetRow = cell.R + (sourceColumn - (sourceColumn & 1)) / 2;
+            int reflectedColumn = width - 1 - sourceColumn;
+            int reflectedOffsetRow = height - 1 - sourceOffsetRow;
+            int reflectedAxialRow =
+                reflectedOffsetRow - (reflectedColumn - (reflectedColumn & 1)) / 2;
+            return new HexCoord(reflectedColumn, reflectedAxialRow);
+        }
+
+        private static GameState AsymmetricPerspectiveState(TacticalV2Layout layout, GameState source)
+        {
+            Tile[] tiles = source.Board.Tiles.Select(tile =>
+                tile.Coord == layout.Cells[7] ? new Tile(tile.Coord, 4, TerrainType.Forest) :
+                tile.Coord == layout.Cells[12] ? new Tile(tile.Coord, 1, TerrainType.Water) :
+                tile.Coord == layout.Cells[39] ? new Tile(tile.Coord, 3, TerrainType.Rough) :
+                tile).ToArray();
+            var control = new System.Collections.Generic.Dictionary<HexCoord, PlayerId>
+            {
+                [layout.Cells[23]] = PlayerId.Player0,
+                [layout.Cells[72]] = PlayerId.Player1,
+            };
+            var board = new Board(
+                tiles,
+                new[] { layout.Cells[7], layout.Cells[39] },
+                new[] { layout.Cells[12], layout.Cells[83] },
+                control);
+            return new GameState(
+                board, source.Config, source.Players, source.ActivePlayer, source.Round,
+                source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
+                source.AttackedUnitIds, source.MovementSpent);
         }
 
         private static TacticalV3RelativeOwner? SwapOwner(TacticalV3RelativeOwner? owner) =>
@@ -376,37 +462,94 @@ namespace HexWars.Engine.Tests
 
         private static bool LearnedRowSurfaceIsSafe(Type rowType)
         {
-            string[] forbiddenNames =
+            var forbiddenNames = new HashSet<string>(StringComparer.Ordinal)
             {
-                nameof(LeakyIdentityRow.Name),
-                nameof(LeakyIdentityRow.DisplayName),
-                nameof(LeakyIdentityRow.EngineId),
-                nameof(LeakyIdentityRow.UnitId),
-                nameof(LeakyIdentityRow.PlayerId),
+                "Name",
+                "DisplayName",
+                "EngineId",
+                "UnitId",
             };
-            foreach (System.Reflection.PropertyInfo property in rowType.GetProperties(
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
+            var visited = new HashSet<Type>();
+            var violations = new List<string>();
+
+            void Visit(Type type, string path)
             {
-                if (forbiddenNames.Contains(property.Name)) return false;
-                Type propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-                if (propertyType == typeof(PlayerId)) return false;
+                if (type == typeof(PlayerId))
+                {
+                    violations.Add(path + " uses raw PlayerId");
+                    return;
+                }
+
+                Type? nullable = Nullable.GetUnderlyingType(type);
+                if (nullable != null)
+                {
+                    Visit(nullable, path + "?");
+                    return;
+                }
+                if (type.IsArray)
+                {
+                    Visit(type.GetElementType()!, path + "[]");
+                    return;
+                }
+                if (type.IsGenericType)
+                    foreach (Type argument in type.GetGenericArguments())
+                        Visit(argument, path + "<" + argument.Name + ">");
+
+                if (type.IsPrimitive || type.IsEnum || type == typeof(string) ||
+                    type == typeof(decimal) || type.IsGenericParameter)
+                    return;
+                if (type.Namespace != null &&
+                    type.Namespace.StartsWith("System", StringComparison.Ordinal))
+                    return;
+                if (!visited.Add(type)) return;
+
+                const BindingFlags publicInstance = BindingFlags.Instance | BindingFlags.Public;
+                foreach (PropertyInfo property in type.GetProperties(publicInstance))
+                {
+                    string memberPath = path + "." + property.Name;
+                    if (forbiddenNames.Contains(property.Name))
+                        violations.Add(memberPath + " has forbidden learned member name");
+                    Visit(property.PropertyType, memberPath);
+                }
+                foreach (FieldInfo field in type.GetFields(publicInstance))
+                {
+                    string memberPath = path + "." + field.Name;
+                    if (forbiddenNames.Contains(field.Name))
+                        violations.Add(memberPath + " has forbidden learned member name");
+                    Visit(field.FieldType, memberPath);
+                }
             }
-            return true;
+
+            Visit(rowType, rowType.Name);
+            return violations.Count == 0;
         }
 
-        private sealed class LeakyIdentityRow
+        private sealed class LeakyNamePath { public int Name { get; } = 1; }
+        private sealed class LeakyDisplayNamePath { public int DisplayName { get; } = 1; }
+        private sealed class LeakyEngineIdPath { public int EngineId { get; } = 1; }
+        private sealed class LeakyUnitIdPath { public int UnitId { get; } = 1; }
+        private sealed class LeakyPublicFieldPath { public PlayerId Seat = PlayerId.Player0; }
+        private sealed class LeakyDirectSeatPath { public PlayerId Seat { get; } = PlayerId.Player0; }
+        private sealed class LeakyNullableSeatPath { public PlayerId? Seat { get; } = PlayerId.Player0; }
+        private sealed class LeakyCollectionSeatPath
         {
-            public int Name { get; } = 1;
-            public int DisplayName { get; } = 1;
-            public int EngineId { get; } = 1;
-            public int UnitId { get; } = 1;
-            public int PlayerId { get; } = 1;
+            public System.Collections.Generic.IReadOnlyList<PlayerId> Seats { get; } =
+                Array.Empty<PlayerId>();
         }
-
-        private sealed class LeakySeatRow
+        private sealed class LeakyArraySeatPath { public PlayerId[] Seats { get; } = Array.Empty<PlayerId>(); }
+        private sealed class LeakyGenericSeatPath
         {
-            public PlayerId Seat { get; } = PlayerId.Player0;
+            public GenericNode<PlayerId> Node { get; } = new GenericNode<PlayerId>();
         }
+        private sealed class LeakyNestedSeatPath { public NestedSeatNode Node { get; } = new NestedSeatNode(); }
+        private sealed class NestedSeatNode { public PlayerId Seat { get; } = PlayerId.Player0; }
+        private sealed class GenericNode<T> { public T? Value { get; set; } }
+        private sealed class SafeLearnedRoot
+        {
+            public SafeLearnedNode Node { get; } = new SafeLearnedNode();
+            public int[] Values { get; } = Array.Empty<int>();
+        }
+        private sealed class SafeLearnedNode { public int OwnerClass { get; } = 1; }
 
         private static string AuthoritativeStateFingerprint(GameState state)
         {
