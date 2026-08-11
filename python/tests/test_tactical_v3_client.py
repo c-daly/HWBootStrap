@@ -172,7 +172,51 @@ def test_checked_in_fixtures_are_canonical_project_a_wire_values() -> None:
     _capture_fixtures()
     spaces = json.loads(SPACES_FIXTURE.read_text(encoding="utf-8"))
     decision = json.loads(DECISION_FIXTURE.read_text(encoding="utf-8"))
-    assert json.loads(SPACES_FIXTURE.read_text(encoding="utf-8")) == spaces
+    process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(CHECKED_IN_SCENARIO), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    try:
+        assert _raw_request(process, {"cmd": "spaces"}) == spaces
+        assert _raw_request(process, {"cmd": "reset", "seed": 41}) == decision
+        assert process.stdin is not None
+        process.stdin.write('{"cmd":"close"}\n'); process.stdin.flush()
+    finally:
+        if process.stdin is not None: process.stdin.close()
+        process.wait(timeout=2)
     assert len(decision["observation"]["cells"]) == 117
     assert {"obs", "mask", "obs_len", "n_actions"}.isdisjoint(spaces)
     assert {"obs", "mask", "obs_len", "n_actions"}.isdisjoint(decision)
+
+    process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(SCENARIO_24X16), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+    try:
+        large_spaces = _raw_request(process, {"cmd": "spaces"})
+        large_view = _raw_request(process, {"cmd": "reset", "seed": 41})
+        assert large_spaces["scenario_id"] == "annihilation-structured-imitation-24x16"
+        assert large_spaces["match"]["board"]["width"] == 24 and large_spaces["match"]["board"]["height"] == 16
+        assert len(large_view["observation"]["cells"]) == 384
+        assert large_spaces["encoding_hash"] == spaces["encoding_hash"]
+        assert large_spaces["capacity_hash"] == spaces["capacity_hash"]
+        assert large_spaces["contract_hash"] != spaces["contract_hash"]
+        assert {"obs", "mask", "obs_len", "n_actions"}.isdisjoint(large_view)
+        assert process.stdin is not None
+        process.stdin.write('{"cmd":"close"}\n'); process.stdin.flush()
+    finally:
+        if process.stdin is not None: process.stdin.close()
+        process.wait(timeout=2)
+
+@pytest.mark.parametrize("reply, expected", [("not-json\\n", "not valid JSON"), ("", "closed unexpectedly")])
+def test_client_fails_closed_on_malformed_or_eof_handshake(tmp_path: Path, reply: str, expected: str) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    script = tmp_path / "bad.py"
+    script.write_text("import sys\nsys.stdin.readline()\nsys.stderr.write('x' * 20000)\nsys.stderr.flush()\nsys.stdout.write(" + repr(reply) + ")\nsys.stdout.flush()\n", encoding="utf-8")
+    with pytest.raises((ValueError, RuntimeError), match=expected) as raised:
+        TacticalV3GymClient([sys.executable, str(script)], environment_kind="tactical")
+    assert len(str(raised.value).split("GymServer stderr tail: ")[-1]) <= 8192
+
+
+def test_client_timeout_is_bounded_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ml_lab.tactical_v3_client as module
+    monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 0.05)
+    script = tmp_path / "hang.py"
+    script.write_text("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="timed out"):
+        module.TacticalV3GymClient([sys.executable, str(script)], environment_kind="tactical")

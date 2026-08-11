@@ -73,6 +73,7 @@ class TacticalV3GymClient:
             if self._identity.environment_kind != environment_kind:
                 raise ValueError("GymServer spaces environment_kind does not match client")
         except BaseException as error:
+            if self._closed: raise
             self._raise_after_protocol_error(error)
 
     @property
