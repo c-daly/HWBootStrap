@@ -171,6 +171,12 @@ def _exact_mapping(value: object, fields: frozenset[str], field: str) -> Mapping
     return value
 
 
+def _string_mapping(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or not all(type(key) is str for key in value):
+        raise TypeError(f"{field} must be a mapping with string keys")
+    return value
+
+
 def _list(value: object, field: str) -> list[object]:
     if type(value) is not list:
         raise TypeError(f"{field} must be a list")
@@ -180,6 +186,12 @@ def _list(value: object, field: str) -> list[object]:
 def _int32(value: object, field: str) -> int:
     if type(value) is not int or not -(2**31) <= value < 2**31:
         raise TypeError(f"{field} must be an int32")
+    return value
+
+
+def _int64(value: object, field: str) -> int:
+    if type(value) is not int or not -(2**63) <= value < 2**63:
+        raise TypeError(f"{field} must be an int64")
     return value
 
 
@@ -248,8 +260,8 @@ def canonical_sha256(value: object) -> str:
 
 def parse_spaces(payload: object) -> TacticalV3SemanticIdentity:
     data = _exact_mapping(payload, _SPACE_FIELDS, "spaces")
-    match = _freeze(data["match"], "match")
-    encoding = _freeze(data["encoding"], "encoding")
+    match = _freeze(_string_mapping(data["match"], "match"), "match")
+    encoding = _freeze(_string_mapping(data["encoding"], "encoding"), "encoding")
     raw_capacity = _exact_mapping(data["capacity"], _CAPACITY_FIELDS, "capacity")
     capacity = MappingProxyType({key: _int32(raw_capacity[key], f"capacity.{key}") for key in _CAPACITY_FIELDS})
     for key, value in capacity.items():
@@ -372,9 +384,9 @@ def parse_decision(payload: object, identity: TacticalV3SemanticIdentity) -> Tac
     data = _exact_mapping(payload, _VIEW_FIELDS, "view")
     observation = _observation(data["observation"])
     candidates = tuple(Candidate(
-        _int32(row["candidate_id"], f"candidates[{i}].candidate_id"), _int32(row["decision_id"], f"candidates[{i}].decision_id"), _literal(row["kind"], _CANDIDATES, f"candidates[{i}].kind"), _nullable_ref(row["actor"], f"candidates[{i}].actor"), _nullable_ref(row["target"], f"candidates[{i}].target"), _nullable_ref(row["template"], f"candidates[{i}].template"), _nullable_ref(row["cell"], f"candidates[{i}].cell"), _projection(row["projection"], f"candidates[{i}].projection"),
+        _int32(row["candidate_id"], f"candidates[{i}].candidate_id"), _int64(row["decision_id"], f"candidates[{i}].decision_id"), _literal(row["kind"], _CANDIDATES, f"candidates[{i}].kind"), _nullable_ref(row["actor"], f"candidates[{i}].actor"), _nullable_ref(row["target"], f"candidates[{i}].target"), _nullable_ref(row["template"], f"candidates[{i}].template"), _nullable_ref(row["cell"], f"candidates[{i}].cell"), _projection(row["projection"], f"candidates[{i}].projection"),
     ) for i, row in enumerate(_row(item, frozenset({"candidate_id", "decision_id", "kind", "actor", "target", "template", "cell", "projection"}), f"candidates[{i}]") for i, item in enumerate(_list(data["candidates"], "candidates"))))
-    decision = TacticalV3Decision(_int32(data["decision_id"], "decision_id"), _int32(data["seat"], "seat"), observation, candidates)
+    decision = TacticalV3Decision(_int64(data["decision_id"], "decision_id"), _int32(data["seat"], "seat"), observation, candidates)
     _validate_semantics(decision, _bool(data["terminated"], "terminated"), _bool(data["truncated"], "truncated"), identity)
     return decision
 

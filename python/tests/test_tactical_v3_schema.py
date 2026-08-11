@@ -229,3 +229,148 @@ def test_parser_enforces_capacity_and_terminal_candidate_rules() -> None:
     nonterminal["candidates"] = []
     with pytest.raises(ValueError, match="nonterminal decision must have candidates"):
         parse_view(nonterminal, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("value", (2**31, 2**63 - 1))
+def test_parser_accepts_int64_decision_ids(value: int) -> None:
+    spaces = minimal_spaces_payload()
+    view = minimal_view_payload()
+    view["decision_id"] = value
+    view["candidates"][0]["decision_id"] = value
+    parsed = parse_view(view, parse_spaces(spaces))
+    assert parsed.decision.decision_id == value
+    assert parsed.decision.candidates[0].decision_id == value
+
+@pytest.mark.parametrize("field,value", (("decision_id", -(2**63) - 1), ("decision_id", 2**63), ("candidate_decision_id", -(2**63) - 1), ("candidate_decision_id", 2**63), ("decision_id", True), ("candidate_decision_id", True)))
+def test_parser_rejects_out_of_range_or_bool_decision_ids(field: str, value: object) -> None:
+    view = minimal_view_payload()
+    if field == "decision_id":
+        view["decision_id"] = value
+        view["candidates"][0]["decision_id"] = value
+    else:
+        view["candidates"][0]["decision_id"] = value
+    with pytest.raises(TypeError, match="decision_id must be an int64"):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("field", ("match", "encoding"))
+def test_spaces_rejects_non_mapping_match_and_encoding(field: str) -> None:
+    spaces = minimal_spaces_payload()
+    spaces[field] = []
+    if field == "encoding":
+        spaces["encoding_hash"] = raw_canonical_sha256(spaces[field])
+    with pytest.raises(TypeError, match=f"{field} must be a mapping"):
+        parse_spaces(spaces)
+
+@pytest.mark.parametrize("hash_field", ("encoding_hash", "capacity_hash"))
+def test_spaces_rejects_self_inconsistent_hashes(hash_field: str) -> None:
+    spaces = minimal_spaces_payload()
+    spaces[hash_field] = "b" * 64
+    with pytest.raises(ValueError, match=f"{hash_field} does not match"):
+        parse_spaces(spaces)
+
+def test_spaces_do_not_alias_mutable_input_values() -> None:
+    spaces = minimal_spaces_payload()
+    identity = parse_spaces(spaces)
+    spaces["match"]["board"]["width"] = 99
+    spaces["encoding"]["token_reference_schema"].append("extra")
+    spaces["capacity"]["max_cells"] = 99
+    assert identity.match["board"]["width"] == 1
+    assert identity.encoding["token_reference_schema"] == ("table:table_kind", "row:int32")
+    assert identity.capacity["max_cells"] == 4
+
+@pytest.mark.parametrize("field", ("reward.total", "relations[0].float_feature"))
+def test_parser_rejects_infinite_float_fields(field: str) -> None:
+    view = minimal_view_payload()
+    if field == "reward.total":
+        view["reward"]["total"] = float("inf")
+    else:
+        view["observation"]["relations"][0]["float_feature"] = float("inf")
+    with pytest.raises(ValueError, match="must be finite"):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("capacity_field,table", (
+    ("max_cells", "cells"),
+    ("max_units", "units"),
+    ("max_templates", "templates"),
+    ("max_capability_definitions", "capability_definitions"),
+    ("max_capability_allocations", "capability_allocations"),
+    ("max_rules", "rules"),
+    ("max_memory_records", "memory_records"),
+    ("max_relations", "relations"),
+    ("max_candidates", "candidates"),
+))
+def test_parser_enforces_each_capacity_boundary(capacity_field: str, table: str) -> None:
+    spaces = minimal_spaces_payload()
+    view = minimal_view_payload()
+    view["observation"]["memory"] = [{
+        "cell": {"table": "cells", "row": 0}, "last_seen_round": 0,
+        "observation_age": 0, "last_known_current_hp": 2, "currently_visible": True,
+    }]
+    spaces["capacity"][capacity_field] = 0
+    spaces["capacity_hash"] = raw_canonical_sha256(spaces["capacity"])
+    with pytest.raises(ValueError, match=f"capacity exceeded for {table}"):
+        parse_view(view, parse_spaces(spaces))
+
+def test_parser_applies_truncated_terminal_candidate_rules() -> None:
+    truncated = minimal_view_payload()
+    truncated["truncated"] = True
+    truncated["candidates"] = []
+    assert parse_view(truncated, parse_spaces(minimal_spaces_payload())).truncated is True
+
+    invalid = minimal_view_payload()
+    invalid["truncated"] = True
+    with pytest.raises(ValueError, match="terminal decision must have no candidates"):
+        parse_view(invalid, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("candidate_ids", ((0, 2), (1, 0)))
+def test_parser_rejects_gapped_or_reordered_candidate_ids(candidate_ids: tuple[int, int]) -> None:
+    view = minimal_view_payload()
+    duplicate = copy.deepcopy(view["candidates"][0])
+    duplicate["candidate_id"] = candidate_ids[1]
+    view["candidates"][0]["candidate_id"] = candidate_ids[0]
+    view["candidates"].append(duplicate)
+    with pytest.raises(ValueError, match="candidate ids must be exactly"):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("mutation,expected", (
+    ("allocation_owner", "capability_allocation.owner references incompatible table"),
+    ("memory_cell", "memory.cell references incompatible table"),
+    ("neighbor", "neighbor.source references incompatible table"),
+    ("occupies", "occupies.target references incompatible table"),
+    ("has_capability", "has_capability.target references incompatible table"),
+    ("relation_row", "cells\\[1\\] of 1"),
+    ("projection_family", "move.projection.source_cell references incompatible table"),
+    ("projection_row", "cells\\[1\\] of 1"),
+))
+def test_parser_rejects_semantically_invalid_references(mutation: str, expected: str) -> None:
+    view = minimal_view_payload()
+    if mutation == "allocation_owner":
+        view["observation"]["capability_allocations"][0]["owner"] = {"table": "cells", "row": 0}
+    elif mutation == "memory_cell":
+        view["observation"]["memory"] = [{
+            "cell": {"table": "units", "row": 0}, "last_seen_round": 0,
+            "observation_age": 0, "last_known_current_hp": 2, "currently_visible": True,
+        }]
+    elif mutation == "neighbor":
+        view["observation"]["relations"][0].update({"kind": "neighbor", "source": {"table": "units", "row": 0}})
+    elif mutation == "occupies":
+        view["observation"]["relations"][0]["target"] = {"table": "units", "row": 0}
+    elif mutation == "has_capability":
+        view["observation"]["relations"][0].update({"kind": "has_capability", "target": {"table": "cells", "row": 0}})
+    elif mutation == "relation_row":
+        view["observation"]["relations"][0]["target"] = {"table": "cells", "row": 1}
+    elif mutation == "projection_family":
+        view["candidates"][0]["projection"]["source_cell"] = {"table": "units", "row": 0}
+    else:
+        view["candidates"][0]["projection"]["destination_cell"] = {"table": "cells", "row": 1}
+    with pytest.raises(ValueError, match=expected):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
+
+@pytest.mark.parametrize("field", ("seat", "reward.total"))
+def test_parser_rejects_bool_aliases_for_int_and_float_fields(field: str) -> None:
+    view = minimal_view_payload()
+    if field == "seat":
+        view["seat"] = True
+    else:
+        view["reward"]["total"] = True
+    with pytest.raises(TypeError, match="must be (an int32|a float32 number)"):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
