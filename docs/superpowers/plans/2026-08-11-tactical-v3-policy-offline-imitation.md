@@ -828,6 +828,8 @@ class RaggedBatch:
     tables: Mapping[str, TokenTableBatch]
     table_slices: Mapping[str, slice]
     node_mask: torch.Tensor
+    cell_neighbor_index: torch.Tensor  # int64 [B, Ncell, 6]
+    cell_neighbor_mask: torch.Tensor   # bool [B, Ncell, 6]
     neighborhoods: RelationNeighborhoodBatch
     candidates: CandidateBatch
     teacher_candidate_index: torch.Tensor
@@ -836,27 +838,54 @@ class RaggedBatch:
     horizon_target_mask: torch.Tensor
     remaining_turns: torch.Tensor
     remaining_turns_mask: torch.Tensor
-def collate_decisions(decisions: Sequence[TacticalV3Decision], horizons: tuple[int, ...]) -> RaggedBatch
+def collate_decisions(decisions: Sequence[TacticalV3Decision], horizons: tuple[int, ...]) -> RaggedBatch: ...
 
-def collate_examples(examples: Sequence[StructuredExample], horizons: tuple[int, ...]) -> RaggedBatch
+def collate_examples(examples: Sequence[StructuredExample], horizons: tuple[int, ...]) -> RaggedBatch: ...
 ```
 
 - [ ] **Step 1: Write failing mixed-size, remapping, padding, and malformed-target tests**
 
 ```python
-def test_collate_remaps_every_reference_into_masked_global_nodes() -> None:
-    batch = collate_examples([EXAMPLE_13X9, EXAMPLE_24X16], horizons=(4, 8, 16))
+def test_collate_remaps_every_reference_and_hex_neighbor_into_masked_global_nodes() -> None:
+    examples = (EXAMPLE_13X9, EXAMPLE_24X16)
+    batch = collate_examples(examples, horizons=(4, 8, 16))
     assert batch.tables["cells"].mask.sum(dim=1).tolist() == [117, 384]
-    for sample_index in range(2):
+    cells_slice = batch.table_slices["cells"]
+    assert batch.cell_neighbor_index.shape == (2, 384, 6)
+    assert batch.cell_neighbor_mask.shape == (2, 384, 6)
+    for sample_index, (example, cell_count) in enumerate(
+        zip(examples, (117, 384), strict=True)
+    ):
         valid = batch.candidates.reference_index[sample_index][
             batch.candidates.reference_mask[sample_index]
         ]
         assert torch.all(valid >= 0)
         assert torch.all(valid < batch.node_mask.shape[1])
         assert batch.node_mask[sample_index, valid].all()
+        neighbor_index = batch.cell_neighbor_index[sample_index]
+        neighbor_mask = batch.cell_neighbor_mask[sample_index]
+        valid_neighbors = neighbor_index[neighbor_mask]
+        assert torch.all(valid_neighbors >= cells_slice.start)
+        assert torch.all(valid_neighbors < cells_slice.stop)
+        assert batch.node_mask[sample_index, valid_neighbors].all()
+        assert not neighbor_mask[cell_count:].any()
+        assert torch.all(neighbor_index[~neighbor_mask] == 0)
+        for destination_row in range(cell_count):
+            actual_sources = neighbor_index[destination_row][
+                neighbor_mask[destination_row]
+            ].tolist()
+            expected_sources = sorted(
+                cells_slice.start + relation.source.row
+                for relation in example.decision.observation.relations
+                if relation.kind == "neighbor" and relation.target.row == destination_row
+            )
+            assert actual_sources == expected_sources
+            assert len(actual_sources) <= 6
 
 @pytest.mark.parametrize("failure", ["invalid_ref", "teacher_missing", "nan", "all_masked"])
 def test_collate_fails_closed_before_returning_tensors(failure: str) -> None:
+    with pytest.raises(ValueError, match=FAILURE_TEXT[failure]):
+        collate_examples([broken_example(failure)], horizons=(4, 8, 16))
 
 def assert_tensor_fields_equal(left: object, right: object) -> None:
     assert type(left) is type(right)
@@ -878,6 +907,8 @@ def test_collate_decisions_matches_features_without_fabricating_targets() -> Non
         assert_tensor_fields_equal(supervised.tables[table_name], inference.tables[table_name])
     assert supervised.table_slices == inference.table_slices
     torch.testing.assert_close(supervised.node_mask, inference.node_mask, rtol=0.0, atol=0.0)
+    assert torch.equal(supervised.cell_neighbor_index, inference.cell_neighbor_index)
+    assert torch.equal(supervised.cell_neighbor_mask, inference.cell_neighbor_mask)
     assert_tensor_fields_equal(supervised.neighborhoods, inference.neighborhoods)
     assert_tensor_fields_equal(supervised.candidates, inference.candidates)
     assert inference.teacher_candidate_index.tolist() == [-1]
@@ -886,8 +917,6 @@ def test_collate_decisions_matches_features_without_fabricating_targets() -> Non
     assert not inference.remaining_turns_mask.any()
     assert torch.count_nonzero(inference.horizon_targets) == 0
     assert torch.count_nonzero(inference.remaining_turns) == 0
-    with pytest.raises(ValueError, match=FAILURE_TEXT[failure]):
-        collate_examples([broken_example(failure)], horizons=(4, 8, 16))
 ```
 
 - [ ] **Step 2: Run tests and confirm RED**
@@ -904,7 +933,9 @@ Use batch-local padded maxima only. Concatenate table regions in the exact table
 
 - [ ] **Step 4: Build deterministic incoming neighborhoods without scatter**
 
-Sort edges by `(destination_global_index, relation_kind, source_global_index, int_feature, float_feature, bool_feature)`, add reverse kinds explicitly, add derived allocation-owner and allocation-definition edges, pad each destination's incoming list to batch maximum `K`, and retain a boolean mask. Valid zero-degree nodes receive one masked dummy slot, never a semantic self-edge.
+Consume only the schema-authenticated `neighbor: cells -> cells` relations for local topology. For each relation, append the remapped global source-cell index to its target cell row, require unique sources and at most six sources per valid destination, sort sources by global index, and pad to exactly six slots with `index=0, mask=False`. Padded destination rows contain six masked dummy slots. Every true-masked value must be in the canonical cells slice and point to `node_mask=True`; do not infer adjacency from coordinates or table row order.
+
+Independently sort relational-attention edges by `(destination_global_index, relation_kind, source_global_index, int_feature, float_feature, bool_feature)`, add reverse kinds explicitly, add derived allocation-owner and allocation-definition edges, pad each destination's incoming list to batch maximum `K`, and retain a boolean mask. Valid zero-degree nodes receive one masked dummy slot, never a semantic self-edge.
 
 - [ ] **Step 5: Encode targets and run GREEN**
 
@@ -949,6 +980,7 @@ class LocalHexMessagePassing(nn.Module):
         cell_neighbor_index: Tensor,
         cell_neighbor_mask: Tensor,
         node_mask: Tensor,
+        cells_slice: slice,
     ) -> Tensor: ...
 
 class TypedRelationalAttention(nn.Module):
@@ -965,7 +997,7 @@ class TypedRelationalAttention(nn.Module):
     ) -> Tensor: ...
 ```
 
-The table encoder owns distinct categorical embeddings and numeric projections per `TableKind`; booleans remain two-valued categories. `LocalHexMessagePassing` uses only the six topology neighbors supplied by the batch. `TypedRelationalAttention` gathers padded incoming sources, adds relation-kind and edge-feature encodings, and writes only valid destinations. Use stock PyTorch gather/reshape operations; do not add PyG, `torch_scatter`, or another graph dependency.
+The table encoder owns distinct categorical embeddings and numeric projections per `TableKind`; booleans remain two-valued categories. `LocalHexMessagePassing` receives `batch.cell_neighbor_index`, `batch.cell_neighbor_mask`, `batch.node_mask`, and `batch.table_slices["cells"]`; it gathers only those authenticated neighbors, returns a full `[B, Nnode, H]` state, and replaces only the canonical cells slice. `TypedRelationalAttention` gathers padded incoming sources, adds relation-kind and edge-feature encodings, and writes only valid destinations. Use stock PyTorch gather/reshape operations; do not add PyG, `torch_scatter`, or another graph dependency.
 
 - [ ] **Step 1: Write the failing encoder tests**
 
@@ -982,6 +1014,24 @@ def test_centered_coordinates_are_translation_invariant() -> None:
         right.tables["cells"].numeric[..., COORDINATE_FEATURE_SLICE],
         rtol=0.0,
         atol=0.0,
+    )
+
+
+def test_local_hex_reads_batch_neighbors_and_writes_only_the_cells_slice() -> None:
+    case = make_layer_case(seed=17)
+    encoded = case.token_encoders(case.batch)
+    actual = case.local_hex(
+        encoded,
+        case.batch.cell_neighbor_index,
+        case.batch.cell_neighbor_mask,
+        case.batch.node_mask,
+        case.batch.table_slices["cells"],
+    )
+    assert actual.shape == encoded.shape
+    non_cell_mask = case.batch.node_mask.clone()
+    non_cell_mask[:, case.batch.table_slices["cells"]] = False
+    torch.testing.assert_close(
+        actual[non_cell_mask], encoded[non_cell_mask], rtol=0.0, atol=0.0
     )
 
 def test_local_hex_layer_is_equivariant_to_cell_row_permutation() -> None:
@@ -1036,19 +1086,34 @@ def test_every_layer_rejects_nonfinite_inputs_before_attention() -> None:
 Helper contracts for this test file:
 
 ```python
+@dataclass(frozen=True, slots=True)
+class LayerTestCase:
+    batch: RaggedBatch
+    token_encoders: TypedTokenEncoders
+    local_hex: LocalHexMessagePassing
+    relational: TypedRelationalAttention
+
 def canonical_example(size: Literal["13x9"]) -> StructuredExample: ...
 def translate_cell_coordinates(example: StructuredExample, dq: int, dr: int) -> StructuredExample: ...
 def make_layer_case(seed: int) -> LayerTestCase: ...
 def permute_table_and_remap(batch: RaggedBatch, table: str, seed: int) -> tuple[RaggedBatch, Tensor]: ...
 def undo_table_rows(state: Tensor, table_slice: slice, inverse: Tensor) -> Tensor: ...
-def run_local_stack(case: LayerTestCase, batch: RaggedBatch) -> Tensor: ...
+def run_local_stack(case: LayerTestCase, batch: RaggedBatch) -> Tensor:
+    node_state = case.token_encoders(batch)
+    return case.local_hex(
+        node_state,
+        batch.cell_neighbor_index,
+        batch.cell_neighbor_mask,
+        batch.node_mask,
+        batch.table_slices["cells"],
+    )
 def run_encoder_stack(case: LayerTestCase, batch: RaggedBatch) -> Tensor: ...
 def append_masked_padding(batch: RaggedBatch, fill: float) -> RaggedBatch: ...
 def replace_masked_neighbor_payload(batch: RaggedBatch, fill: float) -> RaggedBatch: ...
 def replace_first_valid_numeric(batch: RaggedBatch, value: float) -> RaggedBatch: ...
 ```
 
-`canonical_example` loads the immutable seed-41 example through the real corpus/schema loaders. `translate_cell_coordinates` replaces every cell `q/r` by `q+dq/r+dr` without changing rows or references. `make_layer_case` seeds Torch, constructs the default config and all three eval-mode layers, and owns one canonical batch. `permute_table_and_remap` uses `torch.randperm(..., generator=torch.Generator().manual_seed(seed))` over valid rows, moves their feature rows, and remaps table slices, neighborhoods, relations, allocations, and all candidate/projection references; its returned inverse restores physical row order. `run_local_stack` is typed encoding followed by local hex rounds; `run_encoder_stack` adds relational rounds. The padding helpers rebuild frozen batches, set every added row/neighbor mask false, and alter only false-masked payloads. `replace_first_valid_numeric` changes the first true-masked cell numeric value and records that field name in the expected exception.
+`canonical_example` loads the immutable seed-41 example through the real corpus/schema loaders. `translate_cell_coordinates` replaces every cell `q/r` by `q+dq/r+dr` without changing rows or references. `make_layer_case` seeds Torch, constructs the default config and all three eval-mode layers, and owns one canonical batch. `permute_table_and_remap` uses `torch.randperm(..., generator=torch.Generator().manual_seed(seed))` over valid rows, moves their feature rows, remaps `cell_neighbor_index` destination rows and global source indices, and remaps table slices, relational neighborhoods, allocations, and candidate/projection references; its returned inverse restores physical row order. `run_local_stack` passes the two dedicated neighbor tensors and canonical cells slice directly to `LocalHexMessagePassing`; it never reconstructs board adjacency from row positions. `run_encoder_stack` adds relational rounds. The padding helpers rebuild frozen batches, set every added cell-neighbor and relational-neighbor mask false, use index zero only beneath false masks, and alter only false-masked payloads. `replace_masked_neighbor_payload` changes only payload values under `cell_neighbor_mask=False` or `neighborhoods.mask=False`, leaving both masks unchanged. `replace_first_valid_numeric` changes the first true-masked cell numeric value and records that field name in the expected exception.
 
 Build each permuted batch by permuting the row and every reference to that row together. Run identical weights, undo the output permutation, and compare valid rows with `torch.testing.assert_close(..., rtol=0.0, atol=1e-6)`. For padding invariance, append extreme finite values under false masks; valid outputs must remain within the same tolerance.
 
@@ -1066,7 +1131,7 @@ Create one path per `TableKind`, concatenate its fixed-width encoded fields, and
 
 - [ ] **Step 4: Implement local and relational updates**
 
-For each configured round, gather actual hex neighbors; compute safe masked mean/max summaries; update cell states with a shared residual MLP; gather typed incoming sources; add relation-kind and integer/float/bool edge encodings; apply masked multi-head attention and a masked feed-forward residual; then zero padded rows. An all-masked incoming set produces a finite zero message before the residual. Never use row-order board arithmetic, semantic dummy self-edges, in-place scatter, or fixed table capacities.
+For each configured round, pass the exact Task 4 `cell_neighbor_index` and `cell_neighbor_mask` tensors plus `batch.table_slices["cells"]` to the local layer, gather global neighbor states, compute safe masked mean/max summaries, and replace only `node_state[:, cells_slice, :]` through a shared residual MLP. Then gather typed incoming sources, add relation-kind and integer/float/bool edge encodings, apply masked multi-head attention and a masked feed-forward residual, and zero padded rows. An all-masked incoming set produces a finite zero message before the residual. Never reconstruct neighbors with row-order board arithmetic, create semantic dummy self-edges, use in-place scatter, or assume fixed table capacities.
 
 - [ ] **Step 5: Run GREEN and commit**
 
