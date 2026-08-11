@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using NUnit.Framework;
@@ -27,6 +28,47 @@ namespace HexWars.Engine.Tests
                 Assert.That(secondView.Decision.Candidates.Select(CandidateKey),
                     Is.EqualTo(firstView.Decision.Candidates.Select(CandidateKey)));
             });
+        }
+
+        [Test]
+        public void SameSeedTrajectoryMatchesObservationsCandidatesCommandsRewardsTerminalAndReplay()
+        {
+            TacticalV3Config firstConfig = TacticalV3Fixtures.Config();
+            TacticalV3Config secondConfig = TacticalV3Fixtures.Config();
+            firstConfig.Match.MaxSteps = 10;
+            secondConfig.Match.MaxSteps = 10;
+            var firstEnv = new TacticalV3DuelEnv(firstConfig);
+            var secondEnv = new TacticalV3DuelEnv(secondConfig);
+            TacticalV3View first = firstEnv.Reset(149, null, null);
+            TacticalV3View second = secondEnv.Reset(149, null, null);
+
+            Assert.Throws<AssertionException>(() => AssertReferenceValid(
+                new TacticalV3TokenRef(
+                    TacticalV3TableKind.Cells, first.Decision.Observation.Cells.Count),
+                RowCounts(first)));
+            int step = 0;
+            while (!first.Terminated && !first.Truncated)
+            {
+                AssertDeterministicView(first, second);
+                AssertAllReferencesValid(first);
+                AssertAllReferencesValid(second);
+                int candidateId = (step * 17 + 3) % first.Decision.Candidates.Count;
+                Assert.That(JsonSerializer.Serialize(second.Decision.Candidates[candidateId]),
+                    Is.EqualTo(JsonSerializer.Serialize(first.Decision.Candidates[candidateId])));
+
+                first = firstEnv.Step(first.Decision.DecisionId, candidateId);
+                second = secondEnv.Step(second.Decision.DecisionId, candidateId);
+                ReplayData firstReplay = ReplayFile.Read(firstEnv.ToReplay());
+                ReplayData secondReplay = ReplayFile.Read(secondEnv.ToReplay());
+                Assert.That(firstReplay.Commands, Has.Count.EqualTo(step + 1));
+                AssertCommandsEqual(firstReplay.Commands[step], secondReplay.Commands[step]);
+                step++;
+            }
+
+            AssertDeterministicView(first, second);
+            AssertAllReferencesValid(first);
+            Assert.That(first.Terminated || first.Truncated, Is.True);
+            Assert.That(firstEnv.ToReplay(), Is.EqualTo(secondEnv.ToReplay()));
         }
 
         [Test]
@@ -315,6 +357,106 @@ namespace HexWars.Engine.Tests
                 Assert.That(round.IntValue, Is.EqualTo(state.Round));
                 Assert.That(view.Reward.Finalized, Is.True);
             });
+        }
+
+        private static void AssertDeterministicView(TacticalV3View expected, TacticalV3View actual) =>
+            Assert.That(JsonSerializer.Serialize(actual),
+                Is.EqualTo(JsonSerializer.Serialize(expected)));
+
+        private static IReadOnlyDictionary<TacticalV3TableKind, int> RowCounts(TacticalV3View view) =>
+            new Dictionary<TacticalV3TableKind, int>
+            {
+                [TacticalV3TableKind.Cells] = view.Decision.Observation.Cells.Count,
+                [TacticalV3TableKind.Units] = view.Decision.Observation.Units.Count,
+                [TacticalV3TableKind.Templates] = view.Decision.Observation.Templates.Count,
+                [TacticalV3TableKind.CapabilityDefinitions] =
+                    view.Decision.Observation.CapabilityDefinitions.Count,
+                [TacticalV3TableKind.CapabilityAllocations] =
+                    view.Decision.Observation.CapabilityAllocations.Count,
+                [TacticalV3TableKind.Rules] = view.Decision.Observation.Rules.Count,
+                [TacticalV3TableKind.MemoryRecords] = view.Decision.Observation.Memory.Count,
+                [TacticalV3TableKind.Relations] = view.Decision.Observation.Relations.Count,
+                [TacticalV3TableKind.Candidates] = view.Decision.Candidates.Count,
+            };
+
+        private static void AssertAllReferencesValid(TacticalV3View view)
+        {
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts = RowCounts(view);
+            TacticalV3Observation observation = view.Decision.Observation;
+            foreach (TacticalV3UnitToken unit in observation.Units)
+                AssertReferenceValid(unit.Cell, counts);
+            foreach (TacticalV3CapabilityAllocationToken allocation in observation.CapabilityAllocations)
+            {
+                AssertReferenceValid(allocation.Owner, counts);
+                AssertReferenceValid(allocation.Definition, counts);
+            }
+            foreach (TacticalV3MemoryToken memory in observation.Memory)
+                AssertReferenceValid(memory.Cell, counts);
+            foreach (TacticalV3RelationToken relation in observation.Relations)
+            {
+                AssertReferenceValid(relation.Source, counts);
+                AssertReferenceValid(relation.Target, counts);
+            }
+            foreach (TacticalV3Candidate candidate in view.Decision.Candidates)
+                AssertCandidateReferencesValid(candidate, counts);
+        }
+
+        private static void AssertReferenceValid(
+            TacticalV3TokenRef? reference,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            if (reference.HasValue) AssertReferenceValid(reference.Value, counts);
+        }
+
+        private static void AssertReferenceValid(
+            TacticalV3TokenRef reference,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            Assert.That(counts.ContainsKey(reference.Table), Is.True);
+            Assert.That(reference.Row, Is.GreaterThanOrEqualTo(0));
+            Assert.That(reference.Row, Is.LessThan(counts[reference.Table]));
+        }
+
+        private static void AssertCandidateReferencesValid(
+            TacticalV3Candidate candidate,
+            IReadOnlyDictionary<TacticalV3TableKind, int> counts)
+        {
+            AssertReferenceValid(candidate.Actor, counts);
+            AssertReferenceValid(candidate.Target, counts);
+            AssertReferenceValid(candidate.Template, counts);
+            AssertReferenceValid(candidate.Cell, counts);
+            AssertReferenceValid(candidate.Projection.SourceCell, counts);
+            AssertReferenceValid(candidate.Projection.DestinationCell, counts);
+            AssertReferenceValid(candidate.Projection.Template, counts);
+            AssertReferenceValid(candidate.Projection.Target, counts);
+        }
+
+        private static void AssertCommandsEqual(Command expected, Command actual)
+        {
+            Assert.That(actual.GetType(), Is.SameAs(expected.GetType()));
+            Assert.That(actual.Issuer, Is.EqualTo(expected.Issuer));
+            if (expected is AttackUnit expectedAttack)
+            {
+                var actualAttack = (AttackUnit)actual;
+                Assert.That(actualAttack.AttackerId, Is.EqualTo(expectedAttack.AttackerId));
+                Assert.That(actualAttack.TargetId, Is.EqualTo(expectedAttack.TargetId));
+                return;
+            }
+            if (expected is MoveUnit expectedMove)
+            {
+                var actualMove = (MoveUnit)actual;
+                Assert.That(actualMove.UnitId, Is.EqualTo(expectedMove.UnitId));
+                Assert.That(actualMove.Dest, Is.EqualTo(expectedMove.Dest));
+                return;
+            }
+            if (expected is DeployUnit expectedDeploy)
+            {
+                var actualDeploy = (DeployUnit)actual;
+                Assert.That(actualDeploy.TemplateIndex, Is.EqualTo(expectedDeploy.TemplateIndex));
+                Assert.That(actualDeploy.Cell, Is.EqualTo(expectedDeploy.Cell));
+                return;
+            }
+            Assert.That(expected, Is.TypeOf<EndTurn>());
         }
 
         [Test]

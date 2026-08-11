@@ -202,6 +202,212 @@ namespace HexWars.Engine.Tests
                 PlayerId.Player0, EmptyObservationMemory.Instance));
         }
 
+        [Test]
+        public void Observe_OneStructuredSchemaHandles13x9And24x16WithStableEncodingIdentity()
+        {
+            TacticalV3Config standardConfig = TacticalV3Fixtures.Config(13, 9);
+            TacticalV3Config largeConfig = TacticalV3Fixtures.Config(24, 16);
+            var standardSource = new TacticalV3SeatObservationSource(standardConfig);
+            var largeSource = new TacticalV3SeatObservationSource(largeConfig);
+
+            TacticalV3Observation standard = standardSource.Observe(
+                new TacticalV2Layout(standardConfig.Match).NewGame(101).State,
+                PlayerId.Player0,
+                EmptyObservationMemory.Instance);
+            TacticalV3Observation large = largeSource.Observe(
+                new TacticalV2Layout(largeConfig.Match).NewGame(101).State,
+                PlayerId.Player0,
+                EmptyObservationMemory.Instance);
+            TacticalV3Contract standardContract = TacticalV3Contract.Create(
+                standardConfig, MlEnvironmentKind.Duel);
+            TacticalV3Contract largeContract = TacticalV3Contract.Create(
+                largeConfig, MlEnvironmentKind.Duel);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(standardSource.GetType(), Is.SameAs(largeSource.GetType()));
+                Assert.That(standard.GetType(), Is.SameAs(large.GetType()));
+                Assert.That(standard.Cells, Has.Count.EqualTo(13 * 9));
+                Assert.That(large.Cells, Has.Count.EqualTo(24 * 16));
+                Assert.That(standard.CapabilityDefinitions.Select(row => row.Kind),
+                    Is.EqualTo(large.CapabilityDefinitions.Select(row => row.Kind)));
+                Assert.That(largeContract.EncodingHash, Is.EqualTo(standardContract.EncodingHash));
+                Assert.That(largeContract.ContractHash, Is.Not.EqualTo(standardContract.ContractHash));
+                Assert.That(largeContract.CapacityHash, Is.EqualTo(standardContract.CapacityHash));
+            });
+        }
+
+        [Test]
+        public void Observe_SymmetricStartPerspectivesReflectCoordinatesAndSwapOwners()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            var layout = new TacticalV2Layout(config.Match);
+            GameState state = layout.NewGame(101).State;
+            var source = new TacticalV3SeatObservationSource(config);
+            TacticalV3Observation player0 = source.Observe(
+                state, PlayerId.Player0, EmptyObservationMemory.Instance);
+            TacticalV3Observation player1 = source.Observe(
+                state, PlayerId.Player1, EmptyObservationMemory.Instance);
+
+            AssertMirroredCellRows(layout, player0, player1);
+            AssertMirroredUnitRows(state, player0, player1);
+            AssertMirroredTemplateRows(state, player0, player1);
+        }
+
+        [Test]
+        public void StructuredLearnedDtoRows_RejectPresentationEngineAndRawSeatIdentity()
+        {
+            Assert.That(LearnedRowSurfaceIsSafe(typeof(LeakyIdentityRow)), Is.False);
+            Assert.That(LearnedRowSurfaceIsSafe(typeof(LeakySeatRow)), Is.False);
+            Type[] learnedRowTypes =
+            {
+                typeof(TacticalV3TokenRef),
+                typeof(TacticalV3CellToken),
+                typeof(TacticalV3UnitToken),
+                typeof(TacticalV3TemplateToken),
+                typeof(TacticalV3CapabilityDefinition),
+                typeof(TacticalV3CapabilityAllocationToken),
+                typeof(TacticalV3RuleToken),
+                typeof(TacticalV3MemoryToken),
+                typeof(TacticalV3RelationToken),
+                typeof(TacticalV3Candidate),
+                typeof(TacticalV3ProjectedDelta),
+                typeof(TacticalV3RewardBreakdown),
+            };
+            foreach (Type rowType in learnedRowTypes)
+                Assert.That(LearnedRowSurfaceIsSafe(rowType), Is.True, rowType.FullName);
+        }
+
+        private static void AssertMirroredCellRows(
+            TacticalV2Layout layout,
+            TacticalV3Observation player0,
+            TacticalV3Observation player1)
+        {
+            for (int row = 0; row < player0.Cells.Count; row++)
+                AssertMirroredCell(layout, player0.Cells[row], player1.Cells[row], row);
+        }
+
+        private static void AssertMirroredCell(
+            TacticalV2Layout layout, TacticalV3CellToken left, TacticalV3CellToken right, int row)
+        {
+            HexCoord reflected = layout.MirrorCell(new HexCoord(left.Q, left.R));
+            Assert.Multiple(() =>
+            {
+                Assert.That((right.Q, right.R), Is.EqualTo((reflected.Q, reflected.R)));
+                Assert.That(right.Terrain, Is.EqualTo(left.Terrain));
+                Assert.That(right.Elevation, Is.EqualTo(left.Elevation));
+                Assert.That(right.SelfDeploymentZone, Is.EqualTo(left.OpponentDeploymentZone));
+                Assert.That(right.OpponentDeploymentZone, Is.EqualTo(left.SelfDeploymentZone));
+                Assert.That(right.Controller, Is.EqualTo(SwapOwner(left.Controller)));
+                Assert.That(right.IsBoundary, Is.EqualTo(left.IsBoundary));
+                Assert.That(right.CurrentlyVisible, Is.EqualTo(left.CurrentlyVisible));
+                Assert.That(right.PreviouslyObserved, Is.EqualTo(left.PreviouslyObserved));
+            });
+        }
+
+        private static TacticalV3RelativeOwner? SwapOwner(TacticalV3RelativeOwner? owner) =>
+            !owner.HasValue ? (TacticalV3RelativeOwner?)null :
+            owner.Value == TacticalV3RelativeOwner.Self
+                ? TacticalV3RelativeOwner.Opponent
+                : TacticalV3RelativeOwner.Self;
+
+        private static void AssertMirroredUnitRows(
+            GameState state, TacticalV3Observation player0, TacticalV3Observation player1)
+        {
+            int player0Units = state.Player(PlayerId.Player0).UnitsOnBoard.Count(unit => unit.IsAlive);
+            int player1Units = state.Player(PlayerId.Player1).UnitsOnBoard.Count(unit => unit.IsAlive);
+            for (int row = 0; row < player0Units; row++)
+                AssertSameUnitFacts(player0.Units[row], player1.Units[player1Units + row],
+                    TacticalV3RelativeOwner.Opponent);
+            for (int row = 0; row < player1Units; row++)
+                AssertSameUnitFacts(player0.Units[player0Units + row], player1.Units[row],
+                    TacticalV3RelativeOwner.Self);
+        }
+
+        private static void AssertSameUnitFacts(
+            TacticalV3UnitToken expected,
+            TacticalV3UnitToken actual,
+            TacticalV3RelativeOwner expectedOwner)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Owner, Is.EqualTo(expectedOwner));
+                Assert.That(actual.CurrentHp, Is.EqualTo(expected.CurrentHp));
+                Assert.That(actual.MaxHp, Is.EqualTo(expected.MaxHp));
+                Assert.That(actual.Cell, Is.EqualTo(expected.Cell));
+                Assert.That(actual.Elevation, Is.EqualTo(expected.Elevation));
+                Assert.That(actual.Moved, Is.EqualTo(expected.Moved));
+                Assert.That(actual.Attacked, Is.EqualTo(expected.Attacked));
+                Assert.That(actual.HorizontalMovementSpent, Is.EqualTo(expected.HorizontalMovementSpent));
+                Assert.That(actual.VerticalMovementSpent, Is.EqualTo(expected.VerticalMovementSpent));
+                Assert.That(actual.PointCost, Is.EqualTo(expected.PointCost));
+                Assert.That(actual.DeployCost, Is.EqualTo(expected.DeployCost));
+                Assert.That(actual.CurrentlyVisible, Is.EqualTo(expected.CurrentlyVisible));
+            });
+        }
+
+        private static void AssertMirroredTemplateRows(
+            GameState state, TacticalV3Observation player0, TacticalV3Observation player1)
+        {
+            int rows = state.Player(PlayerId.Player0).Barracks.Count;
+            for (int row = 0; row < rows; row++)
+            {
+                AssertSameTemplateFacts(player0.Templates[row], player1.Templates[rows + row],
+                    TacticalV3RelativeOwner.Opponent);
+                AssertSameTemplateFacts(player0.Templates[rows + row], player1.Templates[row],
+                    TacticalV3RelativeOwner.Self);
+            }
+        }
+
+        private static void AssertSameTemplateFacts(
+            TacticalV3TemplateToken expected,
+            TacticalV3TemplateToken actual,
+            TacticalV3RelativeOwner expectedOwner)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(actual.Owner, Is.EqualTo(expectedOwner));
+                Assert.That(actual.PointCost, Is.EqualTo(expected.PointCost));
+                Assert.That(actual.DeployCost, Is.EqualTo(expected.DeployCost));
+                Assert.That(actual.IsFixed, Is.EqualTo(expected.IsFixed));
+                Assert.That(actual.IsDeployable, Is.EqualTo(expected.IsDeployable));
+            });
+        }
+
+        private static bool LearnedRowSurfaceIsSafe(Type rowType)
+        {
+            string[] forbiddenNames =
+            {
+                nameof(LeakyIdentityRow.Name),
+                nameof(LeakyIdentityRow.DisplayName),
+                nameof(LeakyIdentityRow.EngineId),
+                nameof(LeakyIdentityRow.UnitId),
+                nameof(LeakyIdentityRow.PlayerId),
+            };
+            foreach (System.Reflection.PropertyInfo property in rowType.GetProperties(
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
+            {
+                if (forbiddenNames.Contains(property.Name)) return false;
+                Type propertyType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+                if (propertyType == typeof(PlayerId)) return false;
+            }
+            return true;
+        }
+
+        private sealed class LeakyIdentityRow
+        {
+            public int Name { get; } = 1;
+            public int DisplayName { get; } = 1;
+            public int EngineId { get; } = 1;
+            public int UnitId { get; } = 1;
+            public int PlayerId { get; } = 1;
+        }
+
+        private sealed class LeakySeatRow
+        {
+            public PlayerId Seat { get; } = PlayerId.Player0;
+        }
+
         private static string AuthoritativeStateFingerprint(GameState state)
         {
             string tiles = string.Join(";", state.Board.Tiles.OrderBy(tile => tile.Coord.Q).ThenBy(tile => tile.Coord.R)

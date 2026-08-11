@@ -365,6 +365,34 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Process_TinyCapacityRejectsBeforeResetPayloadPublication()
+        {
+            string path = Path.Combine(
+                TestContext.CurrentContext.WorkDirectory,
+                "tactical-v3-tiny-capacity-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                string source = File.ReadAllText(CheckedInScenario);
+                string capacityMarker = (char)34 + "max_cells" + (char)34 + ": 512";
+                string tiny = source.Replace(
+                    capacityMarker, (char)34 + "max_cells" + (char)34 + ": 1");
+                Assert.That(tiny, Is.Not.EqualTo(source));
+                File.WriteAllText(path, tiny, new UTF8Encoding(false));
+
+                string error = TacticalV3ServerProcess.RejectStartup(
+                    "--environment", MlContract.TacticalV3Version,
+                    "--scenario-file", path);
+
+                Assert.That(error,
+                    Does.Contain("tactical-v3 max cells capacity is smaller than the board"));
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        [Test]
         public void Process_SpacesReportsStructuredSchemasWithoutFlatGeometry()
         {
             using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
@@ -387,6 +415,28 @@ namespace HexWars.Engine.Tests
             Assert.That(spaces.TryGetProperty("channels", out _), Is.False);
             Assert.That(spaces.TryGetProperty("board_h", out _), Is.False);
             Assert.That(spaces.TryGetProperty("board_w", out _), Is.False);
+        }
+
+        [Test]
+        public void Process_CheckedInProfiledScenarioPinsExactHashesAndProfileSchemas()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement spaces = server.Request(JsonSerializer.Serialize(new { cmd = "spaces" }));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(spaces.GetProperty("contract_hash").GetString(),
+                    Is.EqualTo("0ae48260cde97bce9ed75975874676a262588b3ed17963cdb41d09d09d3088ce"));
+                Assert.That(spaces.GetProperty("encoding_hash").GetString(),
+                    Is.EqualTo("e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"));
+                Assert.That(spaces.GetProperty("capacity_hash").GetString(),
+                    Is.EqualTo("7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364"));
+                Assert.That(spaces.GetProperty("match").GetProperty("board")
+                    .GetProperty("width").GetInt32(), Is.EqualTo(13));
+                Assert.That(spaces.GetProperty("match").GetProperty("board")
+                    .GetProperty("height").GetInt32(), Is.EqualTo(9));
+            });
+            AssertPinnedProfileSchemas(spaces.GetProperty("match"));
         }
 
         [TestCase(false)]
@@ -1669,6 +1719,66 @@ namespace HexWars.Engine.Tests
                     item.GetProperty("kind").GetString() + "|" +
                     item.GetProperty("target").GetString();
             }).ToArray(), Is.EqualTo(expected));
+        }
+
+        private static void AssertPinnedProfileSchemas(JsonElement match)
+        {
+            AssertPinnedStartProfiles(match.GetProperty("start_profiles"));
+            AssertPinnedStartDistribution(match.GetProperty("start_distribution"));
+        }
+
+        private static void AssertPinnedStartProfiles(JsonElement profiles)
+        {
+            foreach (JsonElement profile in profiles.EnumerateArray())
+            {
+                AssertProperties(profile,
+                    "id", "learner_unit_count", "opponent_unit_count", "separation");
+                Assert.That(profile.GetProperty("learner_unit_count").TryGetInt32(out _), Is.True);
+                Assert.That(profile.GetProperty("opponent_unit_count").TryGetInt32(out _), Is.True);
+            }
+            string[] actual = profiles.EnumerateArray().Select(profile =>
+                profile.GetProperty("id").GetString() + "|" +
+                profile.GetProperty("learner_unit_count").GetInt32() + "|" +
+                profile.GetProperty("opponent_unit_count").GetInt32() + "|" +
+                profile.GetProperty("separation").GetString()).ToArray();
+            Assert.That(actual, Is.EqualTo(new[]
+            {
+                "conversion-1v1-far|1|1|far",
+                "conversion-1v1-medium|1|1|medium",
+                "conversion-1v1-near|1|1|near",
+                "conversion-2v1-far|2|1|far",
+                "conversion-2v1-medium|2|1|medium",
+                "conversion-2v1-near|2|1|near",
+                "conversion-3v1-far|3|1|far",
+                "conversion-3v1-medium|3|1|medium",
+                "conversion-3v1-near|3|1|near",
+                "standard-3v3|3|3|legacy-mirrored",
+            }));
+        }
+
+        private static void AssertPinnedStartDistribution(JsonElement distribution)
+        {
+            foreach (JsonElement weight in distribution.EnumerateArray())
+            {
+                AssertProperties(weight, "profile_id", "basis_points");
+                Assert.That(weight.GetProperty("basis_points").TryGetInt32(out _), Is.True);
+            }
+            string[] actual = distribution.EnumerateArray().Select(weight =>
+                weight.GetProperty("profile_id").GetString() + "|" +
+                weight.GetProperty("basis_points").GetInt32()).ToArray();
+            Assert.That(actual, Is.EqualTo(new[]
+            {
+                "conversion-1v1-far|500",
+                "conversion-1v1-medium|0",
+                "conversion-1v1-near|500",
+                "conversion-2v1-far|500",
+                "conversion-2v1-medium|0",
+                "conversion-2v1-near|500",
+                "conversion-3v1-far|500",
+                "conversion-3v1-medium|0",
+                "conversion-3v1-near|500",
+                "standard-3v3|7000",
+            }));
         }
 
         private static void AssertNumericWireTypes(object wire)
