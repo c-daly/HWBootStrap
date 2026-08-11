@@ -51,6 +51,7 @@ _VIEW_FIELDS = frozenset({
     "decision_id", "seat", "observation", "candidates", "reward", "winner", "terminated",
     "truncated", "start_profile", "reference_seat",
 })
+_DECISION_FIELDS = frozenset({"decision_id", "seat", "observation", "candidates"})
 
 CANDIDATE_REFERENCE_FAMILIES: Mapping[str, Mapping[str, str | None]] = MappingProxyType({
     "attack": MappingProxyType({"actor": "units", "target": "units", "template": None, "cell": None}),
@@ -381,13 +382,22 @@ def _validate_semantics(decision: TacticalV3Decision, terminated: bool, truncate
 
 
 def parse_decision(payload: object, identity: TacticalV3SemanticIdentity) -> TacticalV3Decision:
-    data = _exact_mapping(payload, _VIEW_FIELDS, "view")
+    if isinstance(payload, Mapping) and frozenset(payload) == _DECISION_FIELDS and all(
+        type(key) is str for key in payload
+    ):
+        data = payload
+        terminated = False
+        truncated = False
+    else:
+        data = _exact_mapping(payload, _VIEW_FIELDS, "view")
+        terminated = _bool(data["terminated"], "terminated")
+        truncated = _bool(data["truncated"], "truncated")
     observation = _observation(data["observation"])
     candidates = tuple(Candidate(
         _int32(row["candidate_id"], f"candidates[{i}].candidate_id"), _int64(row["decision_id"], f"candidates[{i}].decision_id"), _literal(row["kind"], _CANDIDATES, f"candidates[{i}].kind"), _nullable_ref(row["actor"], f"candidates[{i}].actor"), _nullable_ref(row["target"], f"candidates[{i}].target"), _nullable_ref(row["template"], f"candidates[{i}].template"), _nullable_ref(row["cell"], f"candidates[{i}].cell"), _projection(row["projection"], f"candidates[{i}].projection"),
     ) for i, row in enumerate(_row(item, frozenset({"candidate_id", "decision_id", "kind", "actor", "target", "template", "cell", "projection"}), f"candidates[{i}]") for i, item in enumerate(_list(data["candidates"], "candidates"))))
     decision = TacticalV3Decision(_int64(data["decision_id"], "decision_id"), _int32(data["seat"], "seat"), observation, candidates)
-    _validate_semantics(decision, _bool(data["terminated"], "terminated"), _bool(data["truncated"], "truncated"), identity)
+    _validate_semantics(decision, terminated, truncated, identity)
     return decision
 
 

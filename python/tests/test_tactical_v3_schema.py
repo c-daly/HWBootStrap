@@ -179,6 +179,17 @@ def test_spaces_and_view_parse_to_deeply_immutable_semantic_values() -> None:
 
 
 
+def test_parse_decision_accepts_the_exact_serialized_decision_mapping() -> None:
+    """The public decision parser must not require unrelated full-view fields."""
+    identity = parse_spaces(minimal_spaces_payload())
+    payload = minimal_view_payload()
+    decision_payload = {
+        key: payload[key] for key in ("decision_id", "seat", "observation", "candidates")
+    }
+
+    assert parse_decision(decision_payload, identity) == parse_view(payload, identity).decision
+
+
 def test_spaces_preserves_finite_match_floats_immutably() -> None:
     spaces = minimal_spaces_payload()
     spaces["match"]["board"]["flat_chance"] = 0.25
