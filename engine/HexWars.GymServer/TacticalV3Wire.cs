@@ -109,9 +109,14 @@ namespace HexWars.GymServer
         private static InvalidOperationException ContractEvidenceError(string message) =>
             new InvalidOperationException("tactical-v3 contract evidence mismatch: " + message);
 
-        public static object View(TacticalV3View view)
+        public static object View(TacticalV3View view) =>
+            View(view, TacticalV3CapacityProfile.ExperimentalDefault());
+
+        public static object View(TacticalV3View view, TacticalV3CapacityProfile capacity)
         {
             if (view == null) throw new ArgumentNullException(nameof(view));
+            if (capacity == null) throw new ArgumentNullException(nameof(capacity));
+            ValidateCapacity(view.Decision, capacity);
             ValidateReferences(view);
 
             TacticalV3DecisionFrame decision = view.Decision;
@@ -252,6 +257,30 @@ namespace HexWars.GymServer
 
         private static object? NullableTokenReference(TacticalV3TokenRef? reference) =>
             reference.HasValue ? TokenReference(reference.Value) : null;
+
+        private static void ValidateCapacity(
+            TacticalV3DecisionFrame decision, TacticalV3CapacityProfile capacity)
+        {
+            TacticalV3Observation observation = decision.Observation;
+            RequireCapacity("cells", observation.Cells.Count, capacity.MaxCells);
+            RequireCapacity("units", observation.Units.Count, capacity.MaxUnits);
+            RequireCapacity("templates", observation.Templates.Count, capacity.MaxTemplates);
+            RequireCapacity("capability_definitions", observation.CapabilityDefinitions.Count,
+                capacity.MaxCapabilityDefinitions);
+            RequireCapacity("capability_allocations", observation.CapabilityAllocations.Count,
+                capacity.MaxCapabilityAllocations);
+            RequireCapacity("rules", observation.Rules.Count, capacity.MaxRules);
+            RequireCapacity("memory", observation.Memory.Count, capacity.MaxMemoryRecords);
+            RequireCapacity("relations", observation.Relations.Count, capacity.MaxRelations);
+            RequireCapacity("candidates", decision.Candidates.Count, capacity.MaxCandidates);
+        }
+
+        private static void RequireCapacity(string table, int count, int maximum)
+        {
+            if (count > maximum)
+                throw new InvalidOperationException(
+                    $"tactical-v3 wire capacity exceeded for {table}: {count} > {maximum}");
+        }
 
         private static void ValidateReferences(TacticalV3View view)
         {

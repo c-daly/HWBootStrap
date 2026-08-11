@@ -346,6 +346,47 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Wire_ViewRejectsEveryConfiguredTableCapacityOverflow()
+        {
+            TacticalV3View view = ViewWithMemory(seed: 47);
+            TacticalV3Observation original = view.Decision.Observation;
+            var memory = new[]
+            {
+                original.Memory[0],
+                new TacticalV3MemoryToken(
+                    new TacticalV3TokenRef(TacticalV3TableKind.Cells, 1),
+                    lastSeenRound: 1, observationAge: 0, lastKnownCurrentHp: 2,
+                    currentlyVisible: true),
+            };
+            ReplaceObservation(view, memory: memory);
+            original = view.Decision.Observation;
+            var cases = new[]
+            {
+                ("cells", TacticalV3Fixtures.ExperimentalCapacity(maxCells: original.Cells.Count - 1)),
+                ("units", TacticalV3Fixtures.ExperimentalCapacity(maxUnits: original.Units.Count - 1)),
+                ("templates", TacticalV3Fixtures.ExperimentalCapacity(maxTemplates: original.Templates.Count - 1)),
+                ("capability_definitions", TacticalV3Fixtures.ExperimentalCapacity(
+                    maxCapabilityDefinitions: original.CapabilityDefinitions.Count - 1)),
+                ("capability_allocations", TacticalV3Fixtures.ExperimentalCapacity(
+                    maxCapabilityAllocations: original.CapabilityAllocations.Count - 1)),
+                ("rules", TacticalV3Fixtures.ExperimentalCapacity(maxRules: original.Rules.Count - 1)),
+                ("memory", TacticalV3Fixtures.ExperimentalCapacity(maxMemoryRecords: original.Memory.Count - 1)),
+                ("relations", TacticalV3Fixtures.ExperimentalCapacity(maxRelations: original.Relations.Count - 1)),
+                ("candidates", TacticalV3Fixtures.ExperimentalCapacity(
+                    maxCandidates: view.Decision.Candidates.Count - 1)),
+            };
+
+            foreach ((string table, TacticalV3CapacityProfile capacity) in cases)
+            {
+                TargetInvocationException exception = Assert.Throws<TargetInvocationException>(
+                    () => InvokeWire("View", view, capacity), table)!;
+                Assert.That(exception.InnerException, Is.TypeOf<InvalidOperationException>(), table);
+                Assert.That(exception.InnerException!.Message,
+                    Does.Contain("capacity").And.Contain(table), table);
+            }
+        }
+
+        [Test]
         public void Process_TacticalV3RejectsOmittedScenarioBeforeReadingCommands()
         {
             string error = TacticalV3ServerProcess.RejectStartup(
@@ -1439,14 +1480,15 @@ namespace HexWars.Engine.Tests
         private static void ReplaceObservation(
             TacticalV3View view,
             IReadOnlyList<TacticalV3CellToken>? cells = null,
-            IReadOnlyList<TacticalV3RelationToken>? relations = null)
+            IReadOnlyList<TacticalV3RelationToken>? relations = null,
+            IReadOnlyList<TacticalV3MemoryToken>? memory = null)
         {
             TacticalV3Observation original = view.Decision.Observation;
             SetAutoProperty(view.Decision, nameof(TacticalV3DecisionFrame.Observation),
                 new TacticalV3Observation(
                     cells ?? original.Cells, original.Units, original.Templates,
                     original.CapabilityDefinitions, original.CapabilityAllocations,
-                    original.Rules, original.Memory, relations ?? original.Relations));
+                    original.Rules, memory ?? original.Memory, relations ?? original.Relations));
         }
 
         private static TacticalV3View ViewWithMemory(
@@ -1498,8 +1540,9 @@ namespace HexWars.Engine.Tests
                 "HexWars.GymServer.dll"));
             Assembly assembly = Assembly.LoadFrom(gymServerDll);
             Type wireType = assembly.GetType("HexWars.GymServer.TacticalV3Wire", throwOnError: true)!;
-            MethodInfo method = wireType.GetMethod(
-                methodName, BindingFlags.Public | BindingFlags.Static)!;
+            MethodInfo method = wireType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Single(candidate => candidate.Name == methodName &&
+                    candidate.GetParameters().Length == arguments.Length);
             return method.Invoke(null, arguments)!;
         }
 

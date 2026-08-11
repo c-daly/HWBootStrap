@@ -461,7 +461,7 @@ while ((line = Console.ReadLine()) != null)
                 });
             }
             else if (tacticalV3Env != null)
-                Send(TacticalV3Wire.View(tacticalV3Env.Reset(seed)));
+                Send(TacticalV3Wire.View(tacticalV3Env.Reset(seed), tacticalV3Config!.Capacity));
             else
             {
                 var obs = tacticalV2Env!.Reset(seed);
@@ -476,7 +476,7 @@ while ((line = Console.ReadLine()) != null)
             if (tacticalV3Env != null)
             {
                 TacticalV3View view = SelectTacticalV3(root, "step", tacticalV3Env.Step);
-                Send(TacticalV3Wire.View(view));
+                Send(TacticalV3Wire.View(view, tacticalV3Config!.Capacity));
             }
             else if (env != null)
             {
@@ -610,7 +610,7 @@ while ((line = Console.ReadLine()) != null)
                         referenceSeat == 1 ? PlayerId.Player1 : PlayerId.Player0,
                         learnerSeat);
                 tacticalV3DuelHasReset = true;
-                Send(TacticalV3Wire.View(view));
+                Send(TacticalV3Wire.View(view, tacticalV3Config!.Capacity));
             }
             else
             {
@@ -647,7 +647,9 @@ while ((line = Console.ReadLine()) != null)
             if (environment == MlContract.TacticalV3Version)
             {
                 tacticalV3Duel ??= new TacticalV3DuelEnv(tacticalV3Config!);
-                Send(TacticalV3Wire.View(SelectTacticalV3(root, "duel_step", tacticalV3Duel.Step)));
+                Send(TacticalV3Wire.View(
+                    SelectTacticalV3(root, "duel_step", tacticalV3Duel.Step),
+                    tacticalV3Config!.Capacity));
             }
             else if (environment == "tactical-v1")
             {

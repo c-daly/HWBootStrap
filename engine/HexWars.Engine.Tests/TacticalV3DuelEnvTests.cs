@@ -338,6 +338,7 @@ namespace HexWars.Engine.Tests
                 Assert.That(view.Terminated, Is.False);
                 Assert.That(view.Truncated, Is.True);
                 Assert.That(view.Decision.DecisionId, Is.EqualTo(config.Match.MaxSteps));
+                Assert.That(view.Decision.Candidates, Is.Empty);
                 Assert.That(ReplayFile.Read(env.ToReplay()).Commands,
                     Has.Count.EqualTo(config.Match.MaxSteps));
                 Assert.That(env.InternalFallbackCount, Is.Zero);
@@ -587,7 +588,14 @@ namespace HexWars.Engine.Tests
                 Assert.That(view.Terminated, Is.False);
                 Assert.That(view.Truncated, Is.True);
                 Assert.That(view.Reward.Finalized, Is.True);
+                Assert.That(view.Decision.Candidates, Is.Empty);
             });
+
+            int commandCount = ReplayFile.Read(env.ToReplay()).Commands.Count;
+            InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() =>
+                env.Step(view.Decision.DecisionId, candidateId: 0))!;
+            Assert.That(exception.Message, Does.Contain("finished"));
+            Assert.That(ReplayFile.Read(env.ToReplay()).Commands, Has.Count.EqualTo(commandCount));
 
             TacticalV3RewardBreakdown finalized = view.Reward;
             TacticalV3View reset = env.Reset(31, null, null);

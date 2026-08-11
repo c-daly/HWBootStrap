@@ -49,6 +49,29 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void InvalidZeroHealthState_StillProducesFiniteBoundedFinalReward()
+        {
+            var zeroHealth = new UnitStats(0, 1, 0, 1, 0, 1, 0, 1, 0);
+            GameState initial = TacticalV3Fixtures.RewardStart(zeroHealth);
+            TacticalV3RewardBreakdown value = TacticalV3Fixtures.Tracker(initial, PlayerId.Player0)
+                .Evaluate(initial, terminated: false, truncated: true);
+            float[] fields =
+            {
+                value.TerminalOutcome,
+                value.KnownHealthAdjustedMaterialProgress,
+                value.PublicResourceProgress,
+                value.TimePressure,
+                value.Total,
+            };
+
+            Assert.That(fields, Has.All.Matches<float>(field =>
+                !float.IsNaN(field) && !float.IsInfinity(field)));
+            Assert.That(value.KnownHealthAdjustedMaterialProgress, Is.InRange(-0.20f, 0.20f));
+            Assert.That(value.TimePressure, Is.InRange(-0.05f, 0f));
+            Assert.That(value.Total, Is.InRange(-1.25f, 1.20f));
+        }
+
+        [Test]
         public void TerminalPartialDamage_UsesHealthAdjustedMaterialProgressBeforeAKill()
         {
             GameState initial = TacticalV3Fixtures.RewardStart(unitCost: 10);

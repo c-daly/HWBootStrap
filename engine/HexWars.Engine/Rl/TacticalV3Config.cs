@@ -94,6 +94,96 @@ namespace HexWars.Engine.Rl
                 errors.Add("tactical-v3 stage one requires annihilation");
             if (Match.Game.GeneratorsEnabled)
                 errors.Add("tactical-v3 stage one requires generators disabled");
+            if (Match.Game.CaptureCost != int.MaxValue)
+                errors.Add("tactical-v3 stage one requires capture disabled with capture_cost=2147483647");
+            if (Match.Game.TerritoryMode)
+                errors.Add("tactical-v3 stage-one capture mechanics require territory_mode=false");
+            if (Match.Game.TerritoryIncome != 0)
+                errors.Add("tactical-v3 stage one requires territory_income=0");
+            if (Match.MaxSteps <= 0)
+                errors.Add("tactical-v3 max steps must be positive");
+            if (Match.Game.StartingPoints < 0)
+                errors.Add("tactical-v3 starting points must be non-negative");
+
+            bool bountyRateValid = IsFinite(Match.Game.BountyRate) &&
+                Match.Game.BountyRate >= 0.0;
+            if (!bountyRateValid)
+                errors.Add("tactical-v3 bounty rate must be finite and non-negative");
+            bool deployMultiplierValid = IsFinite(Match.Game.DeployCostMultiplier) &&
+                Match.Game.DeployCostMultiplier >= 0.0;
+            if (!deployMultiplierValid)
+                errors.Add("tactical-v3 deploy cost multiplier must be finite and non-negative");
+
+            long maximumBounty = 0;
+            bool templateArithmeticValid = true;
+            if (Match.Templates != null)
+            {
+                foreach (TacticalV2Template template in Match.Templates)
+                {
+                    UnitStats stats = template.Template.Stats;
+                    if (stats.Health < 1)
+                    {
+                        errors.Add("tactical-v3 template '" + template.Id + "' health must be at least 1");
+                        templateArithmeticValid = false;
+                    }
+                    if (stats.Damage < 0 || stats.Defense < 0 || stats.Movement < 0 ||
+                        stats.VerticalMovement < 0 || stats.Range < 0 || stats.RangeArc < 0 ||
+                        stats.Vision < 0 || stats.VisionArc < 0)
+                    {
+                        errors.Add("tactical-v3 template '" + template.Id +
+                            "' non-health stats must be non-negative");
+                        templateArithmeticValid = false;
+                    }
+
+                    long pointCost = (long)stats.Health + stats.Damage + stats.Defense +
+                        stats.Movement + stats.VerticalMovement + stats.Range + stats.RangeArc +
+                        stats.Vision + stats.VisionArc;
+                    if (pointCost < 0 || pointCost > int.MaxValue)
+                    {
+                        errors.Add("tactical-v3 template '" + template.Id +
+                            "' point cost exceeds Int32");
+                        templateArithmeticValid = false;
+                        continue;
+                    }
+
+                    if (deployMultiplierValid)
+                    {
+                        double deployCost = pointCost * Match.Game.DeployCostMultiplier;
+                        if (!IsFinite(deployCost) || deployCost > int.MaxValue)
+                        {
+                            errors.Add("tactical-v3 template '" + template.Id +
+                                "' deploy cost exceeds Int32");
+                            templateArithmeticValid = false;
+                        }
+                    }
+                    if (bountyRateValid)
+                    {
+                        double bounty = Math.Floor(pointCost * Match.Game.BountyRate);
+                        if (!IsFinite(bounty) || bounty > int.MaxValue)
+                        {
+                            errors.Add("tactical-v3 template '" + template.Id +
+                                "' bounty exceeds Int32");
+                            templateArithmeticValid = false;
+                        }
+                        else
+                        {
+                            maximumBounty = Math.Max(maximumBounty, (long)bounty);
+                        }
+                    }
+                }
+            }
+
+            if (templateArithmeticValid && bountyRateValid && Match.MaxSteps > 0 &&
+                Match.Game.StartingPoints >= 0)
+            {
+                long maximumReachablePoints =
+                    Match.Game.StartingPoints + (long)Match.MaxSteps * maximumBounty;
+                if (maximumReachablePoints >= Match.Game.CaptureCost)
+                {
+                    errors.Add(
+                        "tactical-v3 points can reach the disabled capture cost within max steps");
+                }
+            }
             if (Reward.TerminalWin != 1f || Reward.TerminalNonWin != -1f)
                 errors.Add("tactical-v3 terminal rewards must be +1/-1");
             if (Reward.MaterialAdjustmentBound != 0.20f || Reward.TimePressureBound != 0.05f)
@@ -103,5 +193,7 @@ namespace HexWars.Engine.Rl
 
             return errors.AsReadOnly();
         }
+        private static bool IsFinite(double value) =>
+            !double.IsNaN(value) && !double.IsInfinity(value);
     }
 }

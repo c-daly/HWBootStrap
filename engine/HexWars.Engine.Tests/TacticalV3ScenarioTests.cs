@@ -381,6 +381,17 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void TacticalV3Scenario_JsonRejectsZeroHealthTemplate()
+        {
+            JsonObject scenario = ValidTacticalV3Json();
+            JsonArray templates = (JsonArray)((JsonObject)scenario["tactical_v3"]!)["templates"]!;
+            JsonObject stats = (JsonObject)((JsonObject)templates[0]!)["stats"]!;
+            stats["health"] = 0;
+
+            AssertRejected(scenario);
+        }
+
+        [Test]
         public void LegacyCheckedInScenarios_StillParseUnchanged()
         {
             var expected = new List<string>();

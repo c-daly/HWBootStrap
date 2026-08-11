@@ -98,11 +98,17 @@ namespace HexWars.Engine.Rl
         private float PlayerValue(PlayerState player) {
             float value = _config.PointsWeight * player.Points;
             foreach (Unit unit in player.UnitsOnBoard)
-                value += unit.Stats.PointCost * unit.CurrentHp / (float)unit.Stats.Health;
+            {
+                int health = Math.Max(1, unit.Stats.Health);
+                value += unit.Stats.PointCost * unit.CurrentHp / (float)health;
+            }
             return value;
         }
 
-        private static float Clamp(float value, float minimum, float maximum) =>
-            value < minimum ? minimum : value > maximum ? maximum : value;
+        private static float Clamp(float value, float minimum, float maximum)
+        {
+            if (float.IsNaN(value)) return 0f;
+            return value < minimum ? minimum : value > maximum ? maximum : value;
+        }
     }
 }

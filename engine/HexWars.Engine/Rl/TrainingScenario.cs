@@ -418,7 +418,7 @@ namespace HexWars.Engine.Rl
         {
             ValidateTacticalMatch(errors, "tactical-v3", tacticalV3.StartingUnitCount,
                 tacticalV3.MaxControllableUnits, tacticalV3.PlacementPolicy, tacticalV3.Templates,
-                tacticalV3.StartProfiles, tacticalV3.StartDistribution);
+                tacticalV3.StartProfiles, tacticalV3.StartDistribution, requirePositiveHealth: true);
 
             if (Rules != null && Rules.FogOfWar)
                 errors.Add("tactical-v3 stage one requires fog_of_war=false");
@@ -483,7 +483,7 @@ namespace HexWars.Engine.Rl
                 int definitions = TacticalV3Capabilities.All.Count;
                 allocations = checked((declaredUnitCapacity + templateRows) * definitions);
 
-                // An even-q width-by-height rectangle has height-1 vertical edges per column and
+                // An odd-q width-by-height rectangle has height-1 vertical edges per column and
                 // 2*height-1 edges across each adjacent column pair. Relations store both directions.
                 long directedAdjacency = width == 0 || height == 0 ? 0 : checked(2L * checked(
                     checked(width * (height - 1L)) +
@@ -545,7 +545,8 @@ namespace HexWars.Engine.Rl
         private void ValidateTacticalMatch(
             List<string> errors, string version, int startingUnitCount, int maxControllableUnits,
             string placementPolicy, List<TrainingUnitTemplateConfig> templates,
-            List<TacticalV2StartProfile> startProfiles, List<TacticalV2StartWeight> startDistribution)
+            List<TacticalV2StartProfile> startProfiles, List<TacticalV2StartWeight> startDistribution,
+            bool requirePositiveHealth = false)
         {
             if (startingUnitCount < 1 || startingUnitCount > 12)
                 errors.Add(version + " starting unit count must be between 1 and 12");
@@ -613,7 +614,8 @@ namespace HexWars.Engine.Rl
                     else if (!seenIds.Add(template.Id))
                         errors.Add($"duplicate {version} template id '{template.Id}'");
 
-                    if (template.Health < 0 || template.Damage < 0 || template.Defense < 0
+                    if ((requirePositiveHealth ? template.Health < 1 : template.Health < 0) ||
+                        template.Damage < 0 || template.Defense < 0
                         || template.Movement < 0 || template.VerticalMovement < 0
                         || template.Range < 0 || template.RangeArc < 0
                         || template.Vision < 0 || template.VisionArc < 0)

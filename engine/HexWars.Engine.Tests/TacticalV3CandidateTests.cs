@@ -24,7 +24,7 @@ namespace HexWars.Engine.Tests
 
             Command[] resolved = frame.Candidates.Select(candidate =>
                 f.Resolver.Resolve(frame, frame.DecisionId, candidate.CandidateId, f.State)).ToArray();
-            Command[] expected = ExpectedCommands(f.State);
+            Command[] expected = ExpectedCommands(f.State, frame.Observation);
             Assert.That(resolved, Is.EqualTo(expected));
             Assert.That(resolved.Length, Is.EqualTo(expected.Length));
         }
@@ -45,6 +45,30 @@ namespace HexWars.Engine.Tests
             Assert.That(move.Projection.PointsDelta, Is.Zero);
             Assert.That(move.Projection.RoundDelta, Is.Zero);
             Assert.That(f.State.MovementSpent, Is.Empty);
+        }
+
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void CreateFrame_UsesObservationCellRowsWhenBoardInsertionOrderIsReversed(
+            PlayerId seat)
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            GameState original = WithActivePlayer(
+                new TacticalV2Layout(config.Match).NewGame(seed: 23).State, seat);
+            GameState reversed = WithReversedTileInsertion(original);
+            var observations = new TacticalV3SeatObservationSource(config);
+            var candidates = new TacticalV3LegalCandidateSource(
+                observations, new TacticalV3CandidateProjector(), config.Capacity);
+
+            TacticalV3DecisionFrame expected = candidates.CreateFrame(
+                original, seat, EmptyObservationMemory.Instance, decisionId: 7);
+            TacticalV3DecisionFrame actual = candidates.CreateFrame(
+                reversed, seat, EmptyObservationMemory.Instance, decisionId: 7);
+
+            Assert.That(actual.Observation.Cells.Select(CellCoordinate),
+                Is.EqualTo(expected.Observation.Cells.Select(CellCoordinate)));
+            Assert.That(actual.Candidates.Select(candidate => CellEvidence(actual, candidate)),
+                Is.EqualTo(expected.Candidates.Select(candidate => CellEvidence(expected, candidate))));
         }
 
         [Test]
@@ -238,10 +262,10 @@ namespace HexWars.Engine.Tests
                 new TacticalV3ActionResolver().Resolve(
                     frame, frame.DecisionId, candidate.CandidateId, state)).ToArray();
 
-            Assert.That(resolved, Is.EqualTo(ExpectedCommands(state)));
+            Assert.That(resolved, Is.EqualTo(ExpectedCommands(state, frame.Observation)));
             Assert.That(frame.Candidates.Where(candidate => candidate.Kind == TacticalV3CandidateKind.Move)
                 .Select(candidate => candidate.Actor!.Value.Row + ":" + candidate.Cell!.Value.Row),
-                Is.EqualTo(new[] { "0:0", "1:3" }));
+                Is.EqualTo(new[] { "0:3", "1:0" }));
             Assert.That(frame.Candidates.Where(candidate => candidate.Kind == TacticalV3CandidateKind.Deploy)
                 .Select(candidate => candidate.Template!.Value.Row + ":" + candidate.Cell!.Value.Row),
                 Is.EqualTo(new[] { "0:0", "0:3", "1:0", "1:3" }));
@@ -410,6 +434,46 @@ namespace HexWars.Engine.Tests
                 Enumerable.Empty<TacticalV3RuleToken>(),
                 Enumerable.Empty<TacticalV3MemoryToken>(),
                 Enumerable.Empty<TacticalV3RelationToken>());
+
+        private static GameState WithActivePlayer(GameState source, PlayerId seat) =>
+            new GameState(source.Board, source.Config, source.Players, seat, source.Round,
+                source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
+                source.AttackedUnitIds, source.MovementSpent);
+
+        private static GameState WithReversedTileInsertion(GameState source)
+        {
+            var control = source.Board.Tiles
+                .Where(tile => source.Board.Controller(tile.Coord).HasValue)
+                .ToDictionary(tile => tile.Coord, tile => source.Board.Controller(tile.Coord)!.Value);
+            var board = new Board(
+                source.Board.Tiles.Reverse(),
+                source.Board.DeploymentZone(PlayerId.Player0),
+                source.Board.DeploymentZone(PlayerId.Player1),
+                control);
+            return new GameState(board, source.Config, source.Players, source.ActivePlayer, source.Round,
+                source.NextEntityId, source.IsGameOver, source.Winner, source.MovedUnitIds,
+                source.AttackedUnitIds, source.MovementSpent);
+        }
+
+        private static string CellEvidence(
+            TacticalV3DecisionFrame frame, TacticalV3Candidate candidate) => string.Join("|", new[]
+            {
+                candidate.CandidateId.ToString(),
+                candidate.Kind.ToString(),
+                CellReference(frame.Observation, candidate.Cell),
+                CellReference(frame.Observation, candidate.Projection.SourceCell),
+                CellReference(frame.Observation, candidate.Projection.DestinationCell),
+            });
+
+        private static string CellReference(
+            TacticalV3Observation observation, TacticalV3TokenRef? reference)
+        {
+            if (!reference.HasValue) return "-";
+            TacticalV3CellToken cell = observation.Cells[reference.Value.Row];
+            return reference.Value.Row + "@" + CellCoordinate(cell);
+        }
+
+        private static string CellCoordinate(TacticalV3CellToken cell) => cell.Q + "," + cell.R;
 
         private static IEnumerable<TacticalV3CellToken> ProjectionCells(GameState state) =>
             state.Board.Tiles.Select(tile => new TacticalV3CellToken(
@@ -817,7 +881,7 @@ namespace HexWars.Engine.Tests
         }
 
 
-        private static Command[] ExpectedCommands(GameState state)
+        private static Command[] ExpectedCommands(GameState state, TacticalV3Observation observation)
         {
             var unitRows = new Dictionary<int, int>();
             int unitRow = 0;
@@ -829,9 +893,8 @@ namespace HexWars.Engine.Tests
                 unitRows.Add(unit.Id, unitRow++);
 
             var cellRows = new Dictionary<HexCoord, int>();
-            int cellRow = 0;
-            foreach (Tile tile in state.Board.Tiles)
-                cellRows.Add(tile.Coord, cellRow++);
+            for (int row = 0; row < observation.Cells.Count; row++)
+                cellRows.Add(CellAt(observation, row), row);
 
             return LegalMoves.For(state)
                 .OrderBy(CommandKind)

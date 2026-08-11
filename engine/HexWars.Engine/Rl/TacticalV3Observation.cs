@@ -201,12 +201,26 @@ namespace HexWars.Engine.Rl
 
     public sealed class TacticalV3Observation
     {
+        private readonly IReadOnlyDictionary<HexCoord, int> _actualCellRows;
+
         public TacticalV3Observation(IEnumerable<TacticalV3CellToken> cells,
             IEnumerable<TacticalV3UnitToken> units, IEnumerable<TacticalV3TemplateToken> templates,
             IEnumerable<TacticalV3CapabilityDefinition> capabilityDefinitions,
             IEnumerable<TacticalV3CapabilityAllocationToken> capabilityAllocations,
             IEnumerable<TacticalV3RuleToken> rules, IEnumerable<TacticalV3MemoryToken> memory,
             IEnumerable<TacticalV3RelationToken> relations)
+            : this(cells, units, templates, capabilityDefinitions, capabilityAllocations,
+                rules, memory, relations, actualCellRows: null)
+        {
+        }
+
+        internal TacticalV3Observation(IEnumerable<TacticalV3CellToken> cells,
+            IEnumerable<TacticalV3UnitToken> units, IEnumerable<TacticalV3TemplateToken> templates,
+            IEnumerable<TacticalV3CapabilityDefinition> capabilityDefinitions,
+            IEnumerable<TacticalV3CapabilityAllocationToken> capabilityAllocations,
+            IEnumerable<TacticalV3RuleToken> rules, IEnumerable<TacticalV3MemoryToken> memory,
+            IEnumerable<TacticalV3RelationToken> relations,
+            IReadOnlyDictionary<HexCoord, int>? actualCellRows)
         {
             Cells = Snapshot(cells);
             Units = Snapshot(units);
@@ -216,6 +230,7 @@ namespace HexWars.Engine.Rl
             Rules = Snapshot(rules);
             Memory = Snapshot(memory);
             Relations = Snapshot(relations);
+            _actualCellRows = SnapshotCellRows(actualCellRows);
         }
 
         public IReadOnlyList<TacticalV3CellToken> Cells { get; }
@@ -229,8 +244,36 @@ namespace HexWars.Engine.Rl
 
         private static IReadOnlyList<T> Snapshot<T>(IEnumerable<T> source) =>
             Array.AsReadOnly((source ?? throw new ArgumentNullException(nameof(source))).ToArray());
-    }
+        internal TacticalV3TokenRef CellReference(HexCoord actualCell) =>
+            _actualCellRows.TryGetValue(actualCell, out int row)
+                ? new TacticalV3TokenRef(TacticalV3TableKind.Cells, row)
+                : throw new InvalidOperationException(
+                    "legal command referenced a cell outside the observation");
 
+        private IReadOnlyDictionary<HexCoord, int> SnapshotCellRows(
+            IReadOnlyDictionary<HexCoord, int>? actualCellRows)
+        {
+            var rows = new Dictionary<HexCoord, int>();
+            if (actualCellRows == null)
+            {
+                for (int row = 0; row < Cells.Count; row++)
+                    rows.Add(new HexCoord(Cells[row].Q, Cells[row].R), row);
+            }
+            else
+            {
+                foreach (KeyValuePair<HexCoord, int> item in actualCellRows)
+                    rows.Add(item.Key, item.Value);
+            }
+            if (rows.Count != Cells.Count ||
+                rows.Values.Any(row => row < 0 || row >= Cells.Count) ||
+                rows.Values.Distinct().Count() != Cells.Count)
+            {
+                throw new ArgumentException("tactical-v3 actual cell rows must cover every cell exactly once");
+            }
+            return rows;
+        }
+
+    }
     public interface IObservationMemory
     {
         IReadOnlyList<TacticalV3MemoryToken> Snapshot(PlayerId seat);
@@ -313,7 +356,7 @@ namespace HexWars.Engine.Rl
             var relations = Relations(cellIndex, unitRows, allocations);
             EnsureCapacity(cellRows, unitRows, templateRows, definitions, allocations, rules, memoryRows, relations);
             return new TacticalV3Observation(cellRows, unitRows, templateRows, definitions, allocations, rules,
-                memoryRows, relations);
+                memoryRows, relations, cellIndex);
         }
 
         private static void AddUnits(PlayerState player, PlayerId seat, IReadOnlyDictionary<HexCoord, int> cellIndex,

@@ -106,10 +106,10 @@ namespace HexWars.Engine.Rl
             if (decisionId != _frame.DecisionId)
                 throw new InvalidOperationException("tactical-v3 decision id is stale");
 
+            if (IsFinished)
+                throw new InvalidOperationException("tactical-v3 episode is already finished");
             Command command = _resolver.Resolve(
                 _frame, decisionId, candidateId, _state);
-            if (IsFinished)
-                throw new InvalidOperationException("tactical-v3 episode is already complete");
 
             if (!TryApplyAccepted(command))
                 throw new InvalidOperationException(
@@ -191,7 +191,7 @@ namespace HexWars.Engine.Rl
 
         private void RefreshFrame()
         {
-            if (_state.IsGameOver)
+            if (IsFinished)
             {
                 TacticalV3Observation observation = _observations.Observe(
                     _state, _state.ActivePlayer, EmptyObservationMemory.Instance);

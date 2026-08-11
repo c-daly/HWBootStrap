@@ -7,6 +7,7 @@ Status: complete as unsealed experimental evidence. Project B may consume the st
 ## Commits
 
 - `53e9dfb` feat: define tactical-v3 structured schema
+- `1895505` docs: target real tactical-v3 test project
 - `5011a1b` docs: move tactical fixture seed to state creation
 - `83ba441` test: cover tactical-v3 config constraints
 - `1b2193a` feat: project tactical-v3 seat observations
@@ -32,6 +33,7 @@ Status: complete as unsealed experimental evidence. Project B may consume the st
 - `3f675b3` docs: keep project-a report in tracked docs
 - `be92556073636d2f104c741390b00ec1605bf43c` test: complete tactical-v3 contract gate
 - Review hardening: `test: harden tactical-v3 conformance proofs` (the current commit; its hash is unavoidably self-referential here).
+- Final-review closure: `fix: close tactical-v3 final review findings` (the current commit; its hash is unavoidably self-referential here).
 
 ## Acceptance evidence
 
@@ -47,6 +49,24 @@ Status: complete as unsealed experimental evidence. Project B may consume the st
 - JSONL smoke: `spaces`, `reset` with seed 41, legal `step` selecting decision 0/candidate 0, then `close`.
 - Smoke result: 10 reset candidates; selected kind `move`; successor decision 1 with 9 candidates; close exit 0.
 - Smoke schema result: no top-level flat `obs` or `mask` in spaces, reset, or step; structured observation tables and decision-local candidates were present.
+
+## Final-review closure evidence
+
+- Focused TDD: 11 confirmed regressions failed before their production fixes and then passed 11, failed 0.
+- Direct runtime configuration now rejects every stage-one path that can emit unsupported capture mechanics, requires positive template health, and validates the exact point-cost, deploy-cost, bounty, and reachable-points bounds needed to keep integer mechanics safe.
+- JSON tactical-v3 scenarios reject zero-health templates while legacy tactical-v2 validation retains its prior zero-health behavior.
+- Candidate and projected-delta cell references use the same canonical coordinate-to-row authority as observation cells; two reversed-board-insertion seat regressions prove coordinate stability.
+- Defensive reward evaluation remains finite and within the published shaping/total bounds even when handed an invalid zero-health state.
+- Every finished frame, including exact-step truncation, exposes zero candidates; a further step is rejected without changing replay commands.
+- `TacticalV3Wire.View` validates all eight observation-table counts and candidate count against the configured capacity before serialization. Live GymServer callers pass the validated scenario capacity explicitly.
+- The authoritative rectangular topology comment now correctly names odd-q.
+- Final tactical-v3 selector: 278 passed, 0 failed, 0 skipped.
+- Final full engine/GymServer suite: 991 passed, 0 failed, 0 skipped.
+- Final GymServer build: succeeded with 0 warnings and 0 errors.
+- Final structured JSONL smoke: `spaces`, seed-41 `reset`, decision-0/candidate-0 `move`, successor decision 1, then `close`; reset had 10 candidates, successor had 9, structured rows were present, flat `obs`/`mask` were absent, and exit was 0.
+- Final Coplay state: `playMode=false`, `hasCompilationErrors=false`.
+- Final Coplay compile result: `No compile errors`.
+- Final Coplay 200-entry log query: empty.
 
 ## Checked-in scenario identity
 
@@ -69,6 +89,10 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 - Two seed-149 trajectories matched complete public observations, candidates, selected command fields, rewards, terminal/truncation state, and exact replay text for exactly 10 positive commands; both ended `terminated=false`, `truncated=true`.
 - A cycle-safe learned-DTO graph traversal rooted at observation, candidate, projection, and token-reference types inspects public instance properties and fields through nullable, array, collection, generic, and nested DTO paths. It rejects `Name`, `DisplayName`, `EngineId`, `UnitId`, and any raw `PlayerId`; adversarial and safe DTOs self-characterize every path.
 - A scenario with `max_cells=1` was rejected at startup with empty stdout, before reset payload publication.
+- Reversing the authoritative board tile insertion order does not change either seat's observation coordinates, candidate cell coordinates, projected source-cell coordinates, or projected destination-cell coordinates.
+- Tactical-v3 JSON and direct runtime boundaries both require template health of at least 1; defensive reward handling prevents non-finite output if an invalid state bypasses those boundaries.
+- Truncated frames and terminal frames both have empty candidate lists, matching the step-rejection lifecycle.
+- The GymServer view boundary rejects every configured table-capacity overflow before payload construction.
 - Legacy payload-shape contract tests remained green for tactical-v1, adaptive-v1, and tactical-v2 as part of the final 982-test suite.
 
 ## Public interfaces
@@ -87,6 +111,7 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 - Engine: `engine/HexWars.Engine/ReplayFile.cs`; `engine/HexWars.Engine/Rl/MlContract.cs`; `TacticalV3Candidates.cs`; `TacticalV3Capabilities.cs`; `TacticalV3Config.cs`; `TacticalV3Contract.cs`; `TacticalV3DuelEnv.cs`; `TacticalV3Env.cs`; `TacticalV3Observation.cs`; `TacticalV3Reward.cs`; `TacticalV3Schema.cs`; and `TrainingScenario.cs` in the same `Rl` directory.
 - GymServer: `engine/HexWars.GymServer/Program.cs`; `ScenarioJson.cs`; `TacticalV3Wire.cs`.
 - Tests: `engine/HexWars.Engine.Tests/ReplayFileTests.cs`; `TacticalV3CandidateTests.cs`; `TacticalV3ContractTests.cs`; `TacticalV3DuelEnvTests.cs`; `TacticalV3Fixtures.cs`; `TacticalV3GymServerTests.cs`; `TacticalV3ObservationTests.cs`; `TacticalV3RewardTests.cs`; `TacticalV3ScenarioTests.cs`; `TacticalV3SchemaTests.cs`.
+- Final-fix evidence: `.superpowers/sdd/2026-08-10-tactical-v3-structured-environment-contract/final-fix-report.md`.
 - Final acceptance report: `docs/superpowers/reports/2026-08-10-generalizable-structured-imitation-project-a.md`.
 
 ## Known limitations
@@ -96,5 +121,5 @@ Scenario: `python/config/annihilation-structured-imitation-v1.json`
 - No design: unit-design actions and design-time learning are outside Project A.
 - No DAgger: tactical-v3 explicitly rejects DAgger and evidence-session RPCs that remain tactical-v2-only.
 - Unsealed experimental: hashes and exact schemas fail closed on drift, but this contract is not a production-sealed compatibility promise.
-- Deferred Task 6–9 hardening: the production odd-q comment wording remains unchanged in this test-only gate; additional candidate-kind self-characterization, deeper nested-map mutation coverage, per-token-row golden hardening, and legacy golden-provenance documentation remain follow-up work.
+- Deferred Task 6–9 hardening: additional candidate-kind self-characterization, deeper nested-map mutation coverage, per-token-row golden hardening, and legacy golden-provenance documentation remain follow-up work.
 - Legacy harness timing: fixed 10-second GymServer rejection waits were intermittently exceeded during two full-suite attempts even though every rotated case passed in isolation and the final exact suite was green. The hardening commit does not claim that legacy timing concern is closed.

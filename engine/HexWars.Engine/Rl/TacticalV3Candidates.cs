@@ -442,9 +442,8 @@ namespace HexWars.Engine.Rl
                 throw new InvalidOperationException("tactical-v3 observation template rows do not match the state");
 
             var cells = new Dictionary<HexCoord, TacticalV3TokenRef>();
-            int cellRow = 0;
             foreach (Tile tile in state.Board.Tiles)
-                cells.Add(tile.Coord, new TacticalV3TokenRef(TacticalV3TableKind.Cells, cellRow++));
+                cells.Add(tile.Coord, observation.CellReference(tile.Coord));
             return new CandidateReferences(units, templates, cells);
         }
 

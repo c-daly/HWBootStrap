@@ -72,6 +72,57 @@ namespace HexWars.Engine.Tests
             Assert.That(config.Validate(), Has.Some.Contains("requires generators disabled"));
         }
 
+        [TestCase(3, false)]
+        [TestCase(int.MaxValue, true)]
+        public void StageOneConfig_RejectsCaptureMechanicsBeforeEnvironmentConstruction(
+            int captureCost, bool territoryMode)
+        {
+            TacticalV2Config match = TacticalV2Config.Default();
+            match.Game = TacticalV3Fixtures.CloneGame(
+                match.Game, captureCost: captureCost, territoryMode: territoryMode);
+            TacticalV3Config config = Config(match);
+
+            Assert.That(config.Validate(), Has.Some.Contains("capture"));
+            Assert.Throws<ArgumentException>(() => new TacticalV3SeatObservationSource(config));
+            Assert.Throws<ArgumentException>(() => new TacticalV3DuelEnv(config));
+        }
+
+        [Test]
+        public void StageOneConfig_RejectsPointsThatCouldReachTheCaptureSentinel()
+        {
+            TacticalV2Config match = TacticalV2Config.Default();
+            match.Game = TacticalV3Fixtures.CloneGame(
+                match.Game, startingPoints: int.MaxValue - 1, bountyRate: 0.5);
+            TacticalV3Config config = Config(match);
+
+            Assert.That(config.Validate(),
+                Has.Some.Contains("points").And.Some.Contains("capture"));
+            Assert.Throws<ArgumentException>(() => new TacticalV3DuelEnv(config));
+        }
+
+        [Test]
+        public void StageOneConfig_RejectsZeroHealthAndOverflowingTemplatePointCost()
+        {
+            TacticalV2Config source = TacticalV2Config.Default();
+            var zeroHealth = new TacticalV2Template("zero-health",
+                new UnitTemplate("Zero", new UnitStats(0, 1, 0, 1, 0, 1, 0, 1, 0)));
+            var overflowing = new TacticalV2Template("overflowing",
+                new UnitTemplate("Overflow", new UnitStats(
+                    int.MaxValue, 1, 0, 0, 0, 0, 0, 0, 0)));
+            TacticalV2Config match = TacticalV3Fixtures.CloneMatch(
+                source, templates: Array.AsReadOnly(new[] { zeroHealth, overflowing }));
+            TacticalV3Config config = Config(match);
+
+            Assert.That(config.Validate(),
+                Has.Some.Contains("health").And.Some.Contains("point cost"));
+            Assert.Throws<ArgumentException>(() => new TacticalV3SeatObservationSource(config));
+        }
+
+        private static TacticalV3Config Config(TacticalV2Config match) => new TacticalV3Config(
+            match,
+            TacticalV3Fixtures.ExperimentalCapacity(),
+            new TacticalV3RewardConfig(+1f, -1f, 0.20f, 0.05f, 0.5f));
+
         [Test]
         public void CapabilityCatalog_IsStableAndContainsNoRosterIdentity()
         {

@@ -30,7 +30,13 @@ namespace HexWars.Engine.Tests
     internal static class TacticalV3Fixtures
     {
         public static GameConfig CloneGame(
-            GameConfig source, bool? fogOfWar = null, int? startingPoints = null)
+            GameConfig source,
+            bool? fogOfWar = null,
+            int? startingPoints = null,
+            double? bountyRate = null,
+            int? captureCost = null,
+            bool? territoryMode = null,
+            int? territoryIncome = null)
         {
             var terrain = new Dictionary<TerrainType, TerrainDef>();
             foreach (TerrainType terrainType in System.Enum.GetValues(typeof(TerrainType)))
@@ -39,7 +45,7 @@ namespace HexWars.Engine.Tests
             return new GameConfig(
                 terrain,
                 startingPoints: startingPoints ?? source.StartingPoints,
-                bountyRate: source.BountyRate,
+                bountyRate: bountyRate ?? source.BountyRate,
                 generatorCost: source.GeneratorCost,
                 generatorOutput: source.GeneratorOutput,
                 generatorHealth: source.GeneratorHealth,
@@ -52,7 +58,7 @@ namespace HexWars.Engine.Tests
                 turnPolicy: source.TurnPolicy,
                 biomesEnabled: source.BiomesEnabled,
                 winConditions: source.WinConditions,
-                captureCost: source.CaptureCost,
+                captureCost: captureCost ?? source.CaptureCost,
                 economyWinThreshold: source.EconomyWinThreshold,
                 scoreKills: source.ScoreKills,
                 scorePoints: source.ScorePoints,
@@ -61,10 +67,10 @@ namespace HexWars.Engine.Tests
                 upkeepFactor: source.UpkeepFactor,
                 captureFactor: source.CaptureFactor,
                 buildFactor: source.BuildFactor,
-                territoryMode: source.TerritoryMode,
+                territoryMode: territoryMode ?? source.TerritoryMode,
                 claimEndsTurn: source.ClaimEndsTurn,
                 buildAnywhere: source.BuildAnywhere,
-                territoryIncome: source.TerritoryIncome,
+                territoryIncome: territoryIncome ?? source.TerritoryIncome,
                 generatorsEnabled: source.GeneratorsEnabled,
                 pointDecay: source.PointDecay,
                 fogOfWar: fogOfWar ?? source.FogOfWar,
@@ -230,8 +236,10 @@ namespace HexWars.Engine.Tests
                 new TacticalV3LegalCandidateSource(source, projector, config.Capacity),
                 new TacticalV3ActionResolver());
         }
-        public static GameState RewardStart(int unitCost = 10, int round = 1)
+        public static GameState RewardStart(int unitCost = 10, int round = 1) =>
+            RewardStart(TestStates.Cost(unitCost), round);
 
+        public static GameState RewardStart(UnitStats stats, int round = 1)
         {
             var board = new Board(new[]
             {
@@ -242,11 +250,11 @@ namespace HexWars.Engine.Tests
             {
                 new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[]
                 {
-                    new Unit(1, PlayerId.Player0, TestStates.Cost(unitCost), new HexCoord(0, 0), 0),
+                    new Unit(1, PlayerId.Player0, stats, new HexCoord(0, 0), 0),
                 }),
                 new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[]
                 {
-                    new Unit(2, PlayerId.Player1, TestStates.Cost(unitCost), new HexCoord(1, 0), 0),
+                    new Unit(2, PlayerId.Player1, stats, new HexCoord(1, 0), 0),
                 }),
             }, PlayerId.Player0, round, 3);
         }
