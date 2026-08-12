@@ -1444,7 +1444,10 @@ def test_every_coefficient_rejects_nonfinite_and_negative_values(
     with pytest.raises(ValueError, match=field):
         ObjectiveConfig(**{field: value})
 
-def test_policy_coefficient_rejects_nonfinite_and_nonexact_values() -> None:`r`n    for value in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0, 0.5, 2.0):`r`n        with pytest.raises(ValueError, match="policy_coefficient must be exactly 1.0"):`r`n            ObjectiveConfig(policy_coefficient=value)
+def test_policy_coefficient_rejects_nonfinite_and_nonexact_values() -> None:
+    for value in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0, 0.5, 2.0):
+        with pytest.raises(ValueError, match="policy_coefficient must be exactly 1.0"):
+            ObjectiveConfig(policy_coefficient=value)
 
 def test_auxiliary_coefficient_sum_cannot_exceed_policy_coefficient() -> None:
     with pytest.raises(ValueError, match="auxiliary coefficient sum"):
@@ -1742,99 +1745,230 @@ class TrainingResult:
     history: tuple[EpochMetrics, ...]
 
 def train_offline(train_examples: tuple[StructuredExample, ...], validation_examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, trainer_config: TrainerConfig) -> TrainingResult:
-    """Train sorted immutable splits and restore the finite best validation state."""
+    raise NotImplementedError
+
 def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]:
     if type(example) is not StructuredExample:
         raise TypeError("example must be StructuredExample")
-    return (example.scenario_id, example.episode_seed, example.learner_seat, example.profile_id, example.decision.decision_id)
-
-def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
-    tables = MappingProxyType({name: TokenTableBatch(table.numeric.to(device), MappingProxyType({k: v.to(device) for k, v in table.categorical.items()}), MappingProxyType({k: v.to(device) for k, v in table.boolean.items()}), table.mask.to(device)) for name, table in batch.tables.items()})
-    neighborhoods = RelationNeighborhoodBatch(*(getattr(batch.neighborhoods, f.name).to(device) for f in dataclasses.fields(RelationNeighborhoodBatch)))
-    candidates = CandidateBatch(*(getattr(batch.candidates, f.name).to(device) for f in dataclasses.fields(CandidateBatch)))
-    direct = {f.name: getattr(batch, f.name).to(device) for f in dataclasses.fields(RaggedBatch) if isinstance(getattr(batch, f.name), torch.Tensor)}
-    return dataclasses.replace(batch, tables=tables, table_slices=MappingProxyType(dict(batch.table_slices)), neighborhoods=neighborhoods, candidates=candidates, **direct)
-
-def _evaluate_validation(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]:
-    totals = {n: 0.0 for n in ("total", "policy", "outcome", "horizon", "remaining_turns")}
-    with torch.no_grad():
-        for start in range(0, len(examples), batch_size):
-            rows = examples[start:start + batch_size]
-            loss = structured_imitation_loss(model(_batch_to_device(collate_examples(rows, model_config.horizon_turns), device)), _batch_to_device(collate_examples(rows, model_config.horizon_turns), device), objective_config)
-            for n in totals: totals[n] += float(getattr(loss, n).detach().item()) * len(rows)
-    metrics = MappingProxyType({n: totals[n] / len(examples) for n in totals})
-    return metrics, metrics["policy"]
+    return example.scenario_id, example.episode_seed, example.learner_seat, example.profile_id, example.decision.decision_id
 ```
 
-`TrainerConfig.__post_init__` accepts only seed `0` or another nonnegative built-in `int`; positive built-in `int` batch/max-epoch/patience; finite positive built-in `float` learning-rate/clip norm; and `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`. It rejects bool/Tensor/NumPy scalar/`torch.device`, unavailable CUDA, and out-of-range CUDA. Before seeding/model creation, reject empty splits, duplicate canonical keys inside either split, and cross-split equal keys. Sort immutable split tuples by `_canonical_example_key`; use one private CPU generator seeded once and one `torch.randperm` per train epoch; validation uses contiguous sorted batches only.
+`TrainerConfig` accepts seed `0` and only a nonnegative built-in `int`; batch size/max epochs/patience are positive built-in `int`; learning rate/clip norm are finite positive built-in `float`; device is exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`, with availability/index checked. Reject bool, Tensor, NumPy scalar, and `torch.device`. Before creating RNG/model, reject empty splits, duplicate canonical keys within either split, and equal canonical keys across splits. Sort both immutable tuples by the key; one private CPU generator seeded once produces one `torch.randperm` per train epoch. Validation has canonical contiguous batches and never uses the generator. Do not checkpoint, publish, create run artifacts, or write metadata.
 
-`_require_finite_boundary` permits `-inf` only at false candidate masks and checks valid logits, heads, each loss/total, non-None gradients, clip norm, and post-step parameters. It raises `FloatingPointError("epoch=<epoch> batch=<batch> <name>...")`. Each metric map is fresh `MappingProxyType` with exactly `total`, `policy`, `outcome`, `horizon`, `remaining_turns`, finite built-in floats, and `validation_policy_nll == validation["policy"]`.
-
-- [ ] **Step 1: Write failing trainer tests**
+- [ ] **Step 1: Write failing trainer tests and complete helper code**
 
 ```python
-def test_seed_zero_and_strict_config() -> None:
-    assert TrainerConfig(seed=0).seed == 0
-    for f, v in (("seed", True), ("seed", -1), ("batch_size", 0), ("max_epochs", 0), ("patience_epochs", False), ("learning_rate", 1), ("gradient_clip_norm", float("inf")), ("device", "mps"), ("device", "cuda:999")):
-        with pytest.raises(ValueError, match=f): TrainerConfig(**{f: v})
+from __future__ import annotations
 
-def test_mapping_proxy_batch_transfer_preserves_nested_dtypes() -> None:
-    moved = _batch_to_device(mapping_proxy_batch(collate_examples(make_trainer_case().train[:1], (4, 8, 16))), torch.device("cpu"))
-    assert isinstance(moved.tables, MappingProxyType) and isinstance(moved.table_slices, MappingProxyType)
-    assert moved.tables["cells"].numeric.dtype == torch.float32
-    assert moved.candidates.candidate_id.dtype == torch.int64 and moved.candidates.mask.dtype == torch.bool
+import dataclasses
+import hashlib
+import math
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Callable, Iterator, Literal, Mapping
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_cuda_training_moves_mapping_proxy_nested_tensors() -> None:
-    case = make_trainer_case(device="cuda:0", max_epochs=1)
-    batch = _batch_to_device(mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)), torch.device("cuda:0"))
-    assert run_training_case(case).model(batch).candidate_logits.device == torch.device("cuda:0")
+import numpy as np
+import pytest
+import torch
+from torch import Tensor
 
-def test_reversed_order_duplicate_and_cross_split_equal_key_cases() -> None:
-    case = make_trainer_case(); a = run_training_case(case); b = run_training_case(dataclasses.replace(case, train=tuple(reversed(case.train)), validation=tuple(reversed(case.validation))))
-    assert a.history == b.history; assert_state_dict_equal(a.model.state_dict(), b.model.state_dict())
-    for changed, msg in ((dataclasses.replace(case, train=(case.train[0], dataclasses.replace(case.train[0]))), "duplicate training example"), (dataclasses.replace(case, validation=(case.validation[0], dataclasses.replace(case.validation[0]))), "duplicate validation example"), (dataclasses.replace(case, validation=(dataclasses.replace(case.train[0]),)), "splits overlap")):
-        with pytest.raises(ValueError, match=msg): run_training_case(changed)
+import ml_lab.tactical_v3_training as training
+from ml_lab.tactical_v3_batching import CandidateBatch, RaggedBatch, RelationNeighborhoodBatch, TokenTableBatch, collate_examples
+from ml_lab.tactical_v3_corpus import StructuredExample, load_corpus
+from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
+from ml_lab.tactical_v3_model import CandidateIdentity, PolicyOutput, TacticalV3Policy
+from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, structured_imitation_loss
+from ml_lab.tactical_v3_schema import parse_spaces
+from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult, train_offline
 
-def test_uneven_validation_is_sample_weighted() -> None:
-    case = make_three_validation_example_case(); result = run_training_case(case); weighted, batch_mean = independent_validation_means(case, result.model)
-    assert result.history[0].validation_policy_nll == pytest.approx(weighted, abs=1e-7)
-    assert abs(weighted - batch_mean) > 1e-5
+METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
 
-def test_real_loop_validation_seam_checks_improved_history_patience_restore(monkeypatch) -> None:
-    states = {}; nlls = (0.8, 0.2, 0.4, 0.4, 0.4); monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, nlls))
-    result = run_training_case(make_trainer_case(max_epochs=5, patience_epochs=3))
-    assert tuple(x.validation_policy_nll for x in result.history) == nlls
-    assert tuple(x.improved for x in result.history) == (True, True, False, False, False)
-    assert tuple(x.epoch for x in result.history) == (0, 1, 2, 3, 4)
-    assert result.best_epoch == 1 and result.stopped_early and state_dict_sha256(result.model.state_dict()) == states[1]
+@dataclass(frozen=True, slots=True)
+class TrainerTestCase:
+    train: tuple[StructuredExample, ...]
+    validation: tuple[StructuredExample, ...]
+    model_config: TacticalV3ModelConfig
+    objective_config: ObjectiveConfig
+    trainer_config: TrainerConfig
 
-def test_padded_inf_and_all_required_finite_faults() -> None:
-    assert_valid_padded_negative_infinity_case()
-    for stage, name, steps in (("valid_logit", "candidate_logits", 0), ("head", "outcome_logits", 0), ("component", "loss.policy", 0), ("gradient", "gradient=", 0), ("clip", "gradient_norm", 0), ("parameter", "parameter=", 1)):
-        fault = run_fault_case(stage); assert f"epoch=0 batch=0 {name}" in str(fault.error); assert fault.optimizer_steps == steps
-```
+@dataclass(frozen=True, slots=True)
+class FaultResult:
+    error: BaseException
+    optimizer_steps: int
+    before_state_sha256: str
+    after_state_sha256: str
+    result: TrainingResult | None
 
-```python
+@dataclass(slots=True)
+class TrainingTrace:
+    optimizer_orders: list[tuple[str, ...]] = field(default_factory=list)
+    validation_orders: list[tuple[str, ...]] = field(default_factory=list)
+
+def stable_example_identity(example: StructuredExample) -> str:
+    key = training._canonical_example_key(example)
+    return hashlib.sha256(repr(key).encode("utf-8")).hexdigest()
+
+def make_trainer_case(*, device: str = "cpu", max_epochs: int = 6, batch_size: int = 4, patience_epochs: int = 6) -> TrainerTestCase:
+    spaces = parse_spaces(json.loads((FIXTURES / "seed-41-spaces.json").read_text(encoding="utf-8")))
+    corpus = load_corpus(FIXTURES / "tiny-corpus", spaces)
+    return TrainerTestCase(corpus.train, corpus.validation, TacticalV3ModelConfig(), ObjectiveConfig(), TrainerConfig(seed=227, batch_size=batch_size, max_epochs=max_epochs, patience_epochs=patience_epochs, device=device))
+
+def run_training_case(case: TrainerTestCase) -> TrainingResult:
+    return train_offline(case.train, case.validation, case.model_config, case.objective_config, case.trainer_config)
+
+def assert_state_dict_equal(left: Mapping[str, Tensor], right: Mapping[str, Tensor]) -> None:
+    assert tuple(left) == tuple(right)
+    for name in left:
+        assert left[name].dtype == right[name].dtype
+        assert left[name].device == right[name].device
+        assert left[name].shape == right[name].shape
+        assert torch.equal(left[name], right[name]), name
+
+def state_dict_sha256(state: Mapping[str, Tensor]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(state):
+        value = state[name].detach().contiguous().cpu()
+        digest.update(name.encode("utf-8")); digest.update(str(value.dtype).encode("ascii")); digest.update(repr(tuple(value.shape)).encode("ascii")); digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
+
+def iter_batch_tensors(batch: RaggedBatch) -> Iterator[Tensor]:
+    for table in batch.tables.values():
+        yield table.numeric; yield table.mask
+        yield from table.categorical.values(); yield from table.boolean.values()
+    for value in dataclasses.fields(RelationNeighborhoodBatch): yield getattr(batch.neighborhoods, value.name)
+    for value in dataclasses.fields(CandidateBatch): yield getattr(batch.candidates, value.name)
+    for value in dataclasses.fields(RaggedBatch):
+        current = getattr(batch, value.name)
+        if isinstance(current, Tensor): yield current
+
 def mapping_proxy_batch(batch: RaggedBatch) -> RaggedBatch:
-    tables = MappingProxyType({n: TokenTableBatch(t.numeric, MappingProxyType(dict(t.categorical)), MappingProxyType(dict(t.boolean)), t.mask) for n, t in batch.tables.items()})
+    tables = MappingProxyType({name: TokenTableBatch(table.numeric, MappingProxyType(dict(table.categorical)), MappingProxyType(dict(table.boolean)), table.mask) for name, table in batch.tables.items()})
     return dataclasses.replace(batch, tables=tables, table_slices=MappingProxyType(dict(batch.table_slices)))
 
-def make_three_validation_example_case() -> TrainerTestCase:
-    case = make_trainer_case(max_epochs=1, batch_size=2)
-    return dataclasses.replace(case, validation=(case.validation + case.train)[:3])
+@contextmanager
+def capture_training_trace(trace: TrainingTrace) -> Iterator[None]:
+    original_collate = training.collate_examples
+    original_evaluate = training._evaluate_validation
+    def traced_collate(rows, horizons):
+        trace.optimizer_orders.append(tuple(stable_example_identity(row) for row in rows))
+        return original_collate(rows, horizons)
+    def traced_evaluate(model, rows, model_config, objective_config, batch_size, device):
+        trace.validation_orders.append(tuple(stable_example_identity(row) for row in rows))
+        return original_evaluate(model, rows, model_config, objective_config, batch_size, device)
+    training.collate_examples = traced_collate
+    training._evaluate_validation = traced_evaluate
+    try: yield
+    finally:
+        training.collate_examples = original_collate
+        training._evaluate_validation = original_evaluate
+
+def independent_validation_means(case: TrainerTestCase, model: TacticalV3Policy) -> tuple[float, float]:
+    model = model.cpu().eval(); rows = case.validation
+    with torch.no_grad():
+        single = [float(structured_imitation_loss(model(collate_examples((row,), case.model_config.horizon_turns)), collate_examples((row,), case.model_config.horizon_turns), case.objective_config).policy) for row in rows]
+        first = float(structured_imitation_loss(model(collate_examples(rows[:2], case.model_config.horizon_turns)), collate_examples(rows[:2], case.model_config.horizon_turns), case.objective_config).policy)
+        last = float(structured_imitation_loss(model(collate_examples(rows[2:], case.model_config.horizon_turns)), collate_examples(rows[2:], case.model_config.horizon_turns), case.objective_config).policy)
+    return sum(single) / len(single), (first + last) / 2.0
 
 def scripted_validation(states: dict[int, str], nlls: tuple[float, ...]) -> Callable[..., tuple[Mapping[str, float], float]]:
-    def evaluate(model, examples, model_config, objective_config, batch_size, device):
+    def evaluate(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]:
         epoch = len(states); states[epoch] = state_dict_sha256(model.state_dict()); nll = nlls[epoch]
-        return MappingProxyType({"total": nll, "policy": nll, "outcome": 0.0, "horizon": 0.0, "remaining_turns": 0.0}), nll
+        metrics = MappingProxyType({"total": nll, "policy": nll, "outcome": 0.0, "horizon": 0.0, "remaining_turns": 0.0})
+        return metrics, nll
     return evaluate
 
-def run_fault_case(stage: Literal["valid_logit", "head", "component", "gradient", "clip", "parameter"]) -> FaultResult:
-    """Patch only real forward/loss/backward/clip/AdamW boundaries, returning actual step/hash evidence."""
+def run_fault_case(stage: Literal["valid_logit_nan", "valid_logit_neg_inf", "outcome", "horizon", "remaining", "policy", "outcome_loss", "horizon_loss", "remaining_loss", "total", "mask", "gradient", "clip", "parameter"]) -> FaultResult:
+    case = make_trainer_case(max_epochs=1); before = state_dict_sha256(TacticalV3Policy(case.model_config).state_dict()); steps = 0
+    original_forward = TacticalV3Policy.forward; original_loss = training.structured_imitation_loss; original_clip = torch.nn.utils.clip_grad_norm_; original_step = torch.optim.AdamW.step
+    def forward(model, batch):
+        output = original_forward(model, batch)
+        if stage in {"valid_logit_nan", "valid_logit_neg_inf"}:
+            logits = output.candidate_logits.clone(); row = int(torch.nonzero(batch.candidates.mask[0], as_tuple=False)[0, 0]); logits[0, row] = float("nan") if stage.endswith("nan") else float("-inf"); return dataclasses.replace(output, candidate_logits=logits)
+        field = {"outcome": "outcome_logits", "horizon": "horizon_logits", "remaining": "remaining_turns"}.get(stage)
+        if field is None: return output
+        value = getattr(output, field).clone(); value.reshape(-1)[0] = float("nan"); return dataclasses.replace(output, **{field: value})
+    def loss(output, batch, config):
+        value = original_loss(output, batch, config)
+        fields = {"policy": "policy", "outcome_loss": "outcome", "horizon_loss": "horizon", "remaining_loss": "remaining_turns", "total": "total"}
+        if stage not in fields: return value
+        field = fields[stage]; return dataclasses.replace(value, **{field: getattr(value, field) * float("nan")})
+    def clip(parameters, max_norm, *args, **kwargs):
+        result = original_clip(parameters, max_norm, *args, **kwargs)
+        return torch.tensor(float("inf"), device=result.device) if stage == "clip" else result
+    def step(optimizer, *args, **kwargs):
+        nonlocal steps; result = original_step(optimizer, *args, **kwargs); steps += 1
+        if stage == "parameter": next(iter(optimizer.param_groups[0]["params"])).data.reshape(-1)[0] = float("inf")
+        return result
+    TacticalV3Policy.forward = forward; training.structured_imitation_loss = loss; torch.nn.utils.clip_grad_norm_ = clip; torch.optim.AdamW.step = step
+    try:
+        if stage == "gradient":
+            original_register = Tensor.register_hook
+            def hook_register(tensor, hook): return original_register(tensor, lambda grad: torch.full_like(grad, float("nan")))
+            Tensor.register_hook = hook_register
+        try: result = run_training_case(case); error = AssertionError("fault did not fail")
+        except BaseException as caught: result = None; error = caught
+    finally:
+        TacticalV3Policy.forward = original_forward; training.structured_imitation_loss = original_loss; torch.nn.utils.clip_grad_norm_ = original_clip; torch.optim.AdamW.step = original_step
+        if stage == "gradient": Tensor.register_hook = original_register
+    after = before if steps == 0 else state_dict_sha256(result.model.state_dict()) if result is not None else before
+    return FaultResult(error, steps, before, after, result)
 ```
 
-The seam replaces only `_evaluate_validation`, so real optimizer, comparator (`candidate_nll < best_nll - 1e-12`), history, snapshot, early stop, and strict best-state restoration run. Faults modify a valid logit/head after real forward, policy loss after real loss, gradient hook, clip return after real clip, or parameter after original step; padded `-inf` remains unchanged. Never checkpoint, publish, write metadata, or create a run directory here.
+```python
+def test_seed_zero_and_exhaustive_config_rejection() -> None:
+    assert TrainerConfig(seed=0).seed == 0
+    values = (("seed", True), ("seed", -1), ("seed", torch.tensor(0)), ("seed", np.int64(0)), ("batch_size", 0), ("max_epochs", False), ("patience_epochs", 0), ("learning_rate", 1), ("gradient_clip_norm", float("nan")), ("device", torch.device("cpu")), ("device", "mps"), ("device", "cuda:x"), ("device", "cuda:999"))
+    for field, value in values:
+        with pytest.raises(ValueError, match=field): TrainerConfig(**{field: value})
+
+def test_recursive_mapping_proxy_transfer_and_cuda_selection() -> None:
+    case = make_trainer_case(); source = mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)); moved = training._batch_to_device(source, torch.device("cpu"))
+    assert isinstance(moved.tables, MappingProxyType) and isinstance(moved.table_slices, MappingProxyType)
+    assert all(isinstance(table.categorical, MappingProxyType) and isinstance(table.boolean, MappingProxyType) for table in moved.tables.values())
+    with pytest.raises(TypeError): moved.tables["cells"] = moved.tables["cells"]  # type: ignore[index]
+    assert [(tensor.device, tensor.dtype) for tensor in iter_batch_tensors(moved)] == [(tensor.device, tensor.dtype) for tensor in iter_batch_tensors(source)]
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_recursive_transfer_preserves_all_tensors_and_exact_legal_selection() -> None:
+    case = make_trainer_case(device="cuda:0", max_epochs=1); result = run_training_case(case); batch = training._batch_to_device(mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)), torch.device("cuda:0"))
+    assert all(tensor.device == torch.device("cuda:0") for tensor in iter_batch_tensors(batch)); assert all(parameter.device == torch.device("cuda:0") and parameter.dtype == torch.float32 for parameter in result.model.parameters())
+    selected = result.model.select(batch)[0]; legal = {(int(batch.candidates.decision_id[0, row]), int(batch.candidates.candidate_id[0, row])) for row in torch.nonzero(batch.candidates.mask[0], as_tuple=False).flatten()}
+    assert (selected.decision_id, selected.candidate_id) in legal
+
+def test_reversed_inputs_preserve_history_state_logits_actions_and_trace() -> None:
+    case = make_trainer_case(); left_trace = TrainingTrace(); right_trace = TrainingTrace()
+    with capture_training_trace(left_trace): left = run_training_case(case)
+    with capture_training_trace(right_trace): right = run_training_case(dataclasses.replace(case, train=tuple(reversed(case.train)), validation=tuple(reversed(case.validation))))
+    batch = collate_examples(case.validation, case.model_config.horizon_turns); assert left.history == right.history; assert_state_dict_equal(left.model.state_dict(), right.model.state_dict())
+    torch.testing.assert_close(left.model(batch).candidate_logits, right.model(batch).candidate_logits, rtol=0.0, atol=0.0); assert left.model.select(batch) == right.model.select(batch)
+    assert left_trace.optimizer_orders == right_trace.optimizer_orders and left_trace.validation_orders == right_trace.validation_orders
+
+def test_duplicate_and_cross_split_equal_key_objects_fail() -> None:
+    case = make_trainer_case()
+    with pytest.raises(ValueError, match="duplicate training example"): run_training_case(dataclasses.replace(case, train=(case.train[0], dataclasses.replace(case.train[0]))))
+    with pytest.raises(ValueError, match="duplicate validation example"): run_training_case(dataclasses.replace(case, validation=(case.validation[0], dataclasses.replace(case.validation[0]))))
+    with pytest.raises(ValueError, match="splits overlap"): run_training_case(dataclasses.replace(case, validation=(dataclasses.replace(case.train[0]),)))
+
+def test_three_example_batch_two_weighted_metric_selects_different_best_epoch_than_batch_mean(monkeypatch) -> None:
+    case = dataclasses.replace(make_trainer_case(max_epochs=2, batch_size=2), validation=(make_trainer_case().validation + make_trainer_case().train)[:3]); states = {}
+    weighted = (0.3, 0.2); monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, weighted)); result = run_training_case(case)
+    assert tuple(metric.validation_policy_nll for metric in result.history) == weighted; assert result.best_epoch == 1; assert state_dict_sha256(result.model.state_dict()) == states[1]
+
+def test_real_seam_exact_history_improvement_patience_and_restore(monkeypatch) -> None:
+    states = {}; monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, (0.8, 0.2, 0.4, 0.4, 0.4))); result = run_training_case(make_trainer_case(max_epochs=5, patience_epochs=3))
+    assert tuple(metric.improved for metric in result.history) == (True, True, False, False, False); assert tuple(metric.epoch for metric in result.history) == (0, 1, 2, 3, 4); assert result.best_epoch == 1 and result.stopped_early; assert state_dict_sha256(result.model.state_dict()) == states[1]
+
+def test_padded_negative_inf_control_and_full_finite_fault_matrix() -> None:
+    assert_valid_padded_negative_infinity_case()
+    matrix = (("valid_logit_nan", "candidate_logits", 0), ("valid_logit_neg_inf", "candidate_logits", 0), ("outcome", "outcome_logits", 0), ("horizon", "horizon_logits", 0), ("remaining", "remaining_turns", 0), ("policy", "loss.policy", 0), ("outcome_loss", "loss.outcome", 0), ("horizon_loss", "loss.horizon", 0), ("remaining_loss", "loss.remaining_turns", 0), ("total", "loss.total", 0), ("mask", "candidate_mask", 0), ("gradient", "gradient=", 0), ("clip", "gradient_norm", 0), ("parameter", "parameter=", 1))
+    for stage, name, steps in matrix:
+        fault = run_fault_case(stage); assert isinstance(fault.error, FloatingPointError); assert f"epoch=0 batch=0 {name}" in str(fault.error); assert fault.optimizer_steps == steps
+
+def test_epoch_metrics_are_exact_immutable_plain_float_maps() -> None:
+    metric = run_training_case(make_trainer_case()).history[0]; assert type(metric.train) is MappingProxyType and type(metric.validation) is MappingProxyType; assert tuple(metric.train) == METRIC_KEYS and tuple(metric.validation) == METRIC_KEYS; assert all(type(value) is float and math.isfinite(value) for value in (*metric.train.values(), *metric.validation.values())); assert metric.validation_policy_nll == metric.validation["policy"]
+    with pytest.raises(TypeError): metric.train["policy"] = 0.0  # type: ignore[index]
+```
 
 - [ ] **Step 2: Run RED**
 
@@ -1858,19 +1992,39 @@ git commit -m "feat: train tactical-v3 policy deterministically"
 - Create: `python/tests/test_tactical_v3_checkpoint.py`
 - Modify: `python/run_tactical_v3_imitation.py`
 
-- Modify: `python/run_tactical_v3_imitation.py`
-**Task-8 CLI handoff:** Task 9 owns persistent `train`. Change the CLI entry point to `def main(argv: Sequence[str] | None = None) -> int` and add `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>`. It calls `parse_spaces`, `load_corpus`, default model/objective configs and `TrainerConfig`, then `train_offline`, then exactly once `publish_structured_run`; it creates no file or directory itself.
+**Task-8 CLI handoff (Task 9 Step 1):** Task 9 owns persistent `train`. Change the entry point to `def main(argv: Sequence[str] | None = None) -> int`; add `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>`. It calls `parse_spaces`, `load_corpus`, default model/objective config plus `TrainerConfig`, then `train_offline`, then exactly once `publish_structured_run`. No CLI code creates a file/directory itself.
 
 ```python
+@dataclass(frozen=True, slots=True)
+class TrainCliCase:
+    identity: TacticalV3SemanticIdentity
+    corpus: StructuredCorpus
+    result: TrainingResult
+    corpus_root: Path
+    scenario_path: Path
+
+def make_train_cli_case(tmp_path: Path) -> TrainCliCase:
+    spaces_path = FIXTURES / "seed-41-spaces.json"
+    identity = parse_spaces(json.loads(spaces_path.read_text(encoding="utf-8")))
+    corpus_root = FIXTURES / "tiny-corpus"
+    corpus = load_corpus(corpus_root, identity)
+    model = TacticalV3Policy(TacticalV3ModelConfig()).eval()
+    result = TrainingResult(model, 0, 0.0, False, ())
+    scenario_path = tmp_path / "scenario.json"
+    scenario_path.write_bytes(spaces_path.read_bytes())
+    return TrainCliCase(identity, corpus, result, corpus_root, scenario_path)
+
 def test_train_cli_calls_training_then_publisher_without_direct_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(cli, "parse_spaces", lambda payload: identity)
-    monkeypatch.setattr(cli, "load_corpus", lambda root, expected: corpus)
-    monkeypatch.setattr(cli, "train_offline", lambda *args: calls.append("train") or result)
+    case = make_train_cli_case(tmp_path); calls: list[str] = []
+    import run_tactical_v3_imitation as cli
+    monkeypatch.setattr(cli, "parse_spaces", lambda payload: case.identity)
+    monkeypatch.setattr(cli, "load_corpus", lambda root, expected: case.corpus)
+    monkeypatch.setattr(cli, "train_offline", lambda *args: calls.append("train") or case.result)
     monkeypatch.setattr(cli, "publish_structured_run", lambda *args: calls.append("publish") or tmp_path / "run")
-    assert cli.main(["train", "--corpus", str(corpus_root), "--scenario", str(scenario_path), "--run-dir", str(tmp_path / "run"), "--seed", "0", "--device", "cpu"]) == 0
+    run_dir = tmp_path / "run"
+    assert cli.main(["train", "--corpus", str(case.corpus_root), "--scenario", str(case.scenario_path), "--run-dir", str(run_dir), "--seed", "0", "--device", "cpu"]) == 0
     assert calls == ["train", "publish"]
-    assert not (tmp_path / "run").exists()
+    assert not run_dir.exists()
 ```
 **Interfaces introduced in this task:**
 
