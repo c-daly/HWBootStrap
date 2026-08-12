@@ -1718,6 +1718,15 @@ git commit -m "feat: add tactical-v3 imitation objectives"
 **Interfaces:**
 
 ```python
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+
+from ml_lab.tactical_v3_corpus import StructuredExample
+from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
+from ml_lab.tactical_v3_model import TacticalV3Policy
+from ml_lab.tactical_v3_objectives import ObjectiveConfig
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
     seed: int = 227
@@ -1742,10 +1751,12 @@ class TrainingResult:
     best_epoch: int
     best_validation_policy_nll: float
     stopped_early: bool
-    history: tuple[EpochMetrics, ...]
+    history: tuple
 
-def train_offline(train_examples: tuple[StructuredExample, ...], validation_examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, trainer_config: TrainerConfig) -> TrainingResult:
-    raise NotImplementedError
+train_offline: Callable[
+    [tuple, tuple, TacticalV3ModelConfig, ObjectiveConfig, TrainerConfig],
+    TrainingResult,
+]
 
 def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]:
     if type(example) is not StructuredExample:
@@ -1753,7 +1764,171 @@ def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, s
     return example.scenario_id, example.episode_seed, example.learner_seat, example.profile_id, example.decision.decision_id
 ```
 
-`TrainerConfig` accepts seed `0` and only a nonnegative built-in `int`; batch size/max epochs/patience are positive built-in `int`; learning rate/clip norm are finite positive built-in `float`; device is exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`, with availability/index checked. Reject bool, Tensor, NumPy scalar, and `torch.device`. Before creating RNG/model, reject empty splits, duplicate canonical keys within either split, and equal canonical keys across splits. Sort both immutable tuples by the key; one private CPU generator seeded once produces one `torch.randperm` per train epoch. Validation has canonical contiguous batches and never uses the generator. Do not checkpoint, publish, create run artifacts, or write metadata.
+The following private helpers are the concrete trainer contract. `_batch_to_device` reconstructs every nested dataclass and mapping rather than mutating or partially replacing a batch. `_after_backward` and `_validation_batch_loss` are deliberately narrow test seams that are called by the real training and validation loops; neither owns aggregation, best-epoch selection, or early stopping.
+
+```python
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
+
+import torch
+from torch import Tensor, nn
+
+from ml_lab.tactical_v3_batching import (
+    CandidateBatch,
+    RaggedBatch,
+    RelationNeighborhoodBatch,
+    TokenTableBatch,
+    collate_examples,
+)
+from ml_lab.tactical_v3_corpus import StructuredExample
+from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
+from ml_lab.tactical_v3_model import TacticalV3Policy
+from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, structured_imitation_loss
+
+
+def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
+    if type(batch) is not RaggedBatch or type(device) is not torch.device:
+        raise TypeError("_batch_to_device requires RaggedBatch and torch.device")
+
+    def move(value: Tensor) -> Tensor:
+        return value.to(device=device)
+
+    tables = MappingProxyType({
+        name: TokenTableBatch(
+            numeric=move(table.numeric),
+            categorical=MappingProxyType({
+                field_name: move(value)
+                for field_name, value in table.categorical.items()
+            }),
+            boolean=MappingProxyType({
+                field_name: move(value)
+                for field_name, value in table.boolean.items()
+            }),
+            mask=move(table.mask),
+        )
+        for name, table in batch.tables.items()
+    })
+    neighborhoods = RelationNeighborhoodBatch(
+        source_index=move(batch.neighborhoods.source_index),
+        kind=move(batch.neighborhoods.kind),
+        int_feature=move(batch.neighborhoods.int_feature),
+        float_feature=move(batch.neighborhoods.float_feature),
+        bool_feature=move(batch.neighborhoods.bool_feature),
+        mask=move(batch.neighborhoods.mask),
+    )
+    candidates = CandidateBatch(
+        candidate_id=move(batch.candidates.candidate_id),
+        decision_id=move(batch.candidates.decision_id),
+        kind=move(batch.candidates.kind),
+        reference_index=move(batch.candidates.reference_index),
+        reference_mask=move(batch.candidates.reference_mask),
+        projection_integer=move(batch.candidates.projection_integer),
+        projection_boolean=move(batch.candidates.projection_boolean),
+        mask=move(batch.candidates.mask),
+    )
+    return RaggedBatch(
+        tables=tables,
+        table_slices=MappingProxyType(dict(batch.table_slices)),
+        node_mask=move(batch.node_mask),
+        cell_neighbor_index=move(batch.cell_neighbor_index),
+        cell_neighbor_mask=move(batch.cell_neighbor_mask),
+        neighborhoods=neighborhoods,
+        candidates=candidates,
+        teacher_candidate_index=move(batch.teacher_candidate_index),
+        terminal_outcome=move(batch.terminal_outcome),
+        horizon_targets=move(batch.horizon_targets),
+        horizon_target_mask=move(batch.horizon_target_mask),
+        remaining_turns=move(batch.remaining_turns),
+        remaining_turns_mask=move(batch.remaining_turns_mask),
+    )
+
+
+def _after_backward(
+    model: TacticalV3Policy, *, epoch: int, batch_index: int,
+) -> None:
+    del model, epoch, batch_index
+
+
+def _clip_gradients(parameters: Iterable[nn.Parameter], max_norm: float) -> Tensor:
+    return torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+
+
+def _validation_batch_loss(
+    model: TacticalV3Policy,
+    batch: RaggedBatch,
+    objective_config: ObjectiveConfig,
+    *,
+    epoch: int,
+    batch_index: int,
+) -> LossBreakdown:
+    del epoch, batch_index
+    return structured_imitation_loss(model(batch), batch, objective_config)
+
+METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
+
+
+def _collate_training_batch(
+    examples: tuple, horizons: tuple,
+) -> RaggedBatch:
+    return collate_examples(examples, horizons)
+
+
+def _evaluate_validation(
+    model: TacticalV3Policy,
+    examples: tuple,
+    model_config: TacticalV3ModelConfig,
+    objective_config: ObjectiveConfig,
+    batch_size: int,
+    device: torch.device,
+    *,
+    epoch: int,
+) -> tuple[Mapping[str, float], float]:
+    weighted = {name: 0.0 for name in METRIC_KEYS}
+    example_count = 0
+    model.eval()
+    with torch.no_grad():
+        for batch_index, start in enumerate(range(0, len(examples), batch_size)):
+            rows = examples[start:start + batch_size]
+            batch = _batch_to_device(
+                collate_examples(rows, model_config.horizon_turns), device
+            )
+            losses = _validation_batch_loss(
+                model, batch, objective_config,
+                epoch=epoch, batch_index=batch_index,
+            )
+            for name in METRIC_KEYS:
+                value = getattr(losses, name)
+                if (
+                    value.ndim != 0
+                    or value.device != device
+                    or not bool(torch.isfinite(value))
+                ):
+                    raise FloatingPointError(
+                        f"epoch={epoch} validation_batch={batch_index} loss.{name}"
+                    )
+                contribution = float(value.detach().item()) * len(rows)
+                if not math.isfinite(contribution):
+                    raise FloatingPointError(
+                        f"epoch={epoch} validation_batch={batch_index} weighted loss.{name}"
+                    )
+                weighted[name] += contribution
+            example_count += len(rows)
+    metrics = MappingProxyType({
+        name: float(weighted[name] / example_count) for name in METRIC_KEYS
+    })
+    return metrics, metrics["policy"]
+```
+
+`TrainerConfig.__post_init__` accepts seed `0`; `seed` is otherwise a nonnegative built-in `int`, and `batch_size`, `max_epochs`, and `patience_epochs` are positive built-in `int`s. `learning_rate` and `gradient_clip_norm` are finite positive built-in `float`s. The device is a built-in string matching exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`; CUDA availability and the requested index are checked in `__post_init__`. Every field rejects bool, Tensor, NumPy scalar, and the wrong built-in numeric/string class. The exact invalid matrix below is normative.
+
+Before seeding or model construction, reject empty splits, duplicate canonical keys within either split, and equal keys across splits. Sort both immutable tuples by `_canonical_example_key`; one private CPU `torch.Generator`, seeded once with `TrainerConfig.seed`, produces exactly one `torch.randperm` per train epoch. Collate each selected slice in that order. Validation receives the sorted validation tuple in canonical contiguous batches and never consumes the generator. SHA-256 identities are trace labels only, never ordering or overlap keys.
+
+The training loop checks all nested batch tensors are on the model device while preserving float32/int64/bool dtypes and checks every mask has bool dtype. Candidate logits must be finite at `candidates.mask` and exactly negative infinity at false positions. All auxiliary heads and all five `LossBreakdown` scalar tensors must be finite on the model device. After `total.backward()`, call `_after_backward`, allow `None` gradients, reject every nonfinite non-`None` gradient, call `_clip_gradients`, reject a nonfinite returned norm, call `AdamW.step`, and immediately reject every nonfinite parameter. Errors contain `epoch=<n> batch=<n> <field>`; a post-step parameter failure is intentionally non-rollback.
+
+Train and validation metrics accumulate each detached batch loss multiplied by the actual batch length and divide by the total example count. `_evaluate_validation` calls `_validation_batch_loss` for each canonical batch; this is the only scripted validation seam, so aggregation and epoch selection remain real. The exact comparator is `candidate_nll < best_nll - 1e-12`; equality within that tolerance is non-improvement. Restore the detached best state on the configured device. `EpochMetrics.train` and `.validation` are new `MappingProxyType` mappings in exact key order `total`, `policy`, `outcome`, `horizon`, `remaining_turns`; values and `validation_policy_nll` are finite built-in floats, and `validation_policy_nll == validation["policy"]` exactly. Do not checkpoint, publish, create run artifacts, modify the CLI, or write metadata in Task 8.
 
 - [ ] **Step 1: Write failing trainer tests and complete helper code**
 
@@ -1762,16 +1937,18 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Iterator, Literal, Mapping
+from typing import Callable, Iterable, Iterator, Literal, Mapping
 
 import numpy as np
 import pytest
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 import ml_lab.tactical_v3_training as training
 from ml_lab.tactical_v3_batching import CandidateBatch, RaggedBatch, RelationNeighborhoodBatch, TokenTableBatch, collate_examples
@@ -1782,12 +1959,13 @@ from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, struct
 from ml_lab.tactical_v3_schema import parse_spaces
 from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult, train_offline
 
+FIXTURES = Path(__file__).parent / "fixtures" / "tactical_v3"
 METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
 
 @dataclass(frozen=True, slots=True)
 class TrainerTestCase:
-    train: tuple[StructuredExample, ...]
-    validation: tuple[StructuredExample, ...]
+    train: tuple
+    validation: tuple
     model_config: TacticalV3ModelConfig
     objective_config: ObjectiveConfig
     trainer_config: TrainerConfig
@@ -1802,8 +1980,8 @@ class FaultResult:
 
 @dataclass(slots=True)
 class TrainingTrace:
-    optimizer_orders: list[tuple[str, ...]] = field(default_factory=list)
-    validation_orders: list[tuple[str, ...]] = field(default_factory=list)
+    optimizer_orders: list[tuple] = field(default_factory=list)
+    validation_orders: list[tuple] = field(default_factory=list)
 
 def stable_example_identity(example: StructuredExample) -> str:
     key = training._canonical_example_key(example)
@@ -1833,141 +2011,571 @@ def state_dict_sha256(state: Mapping[str, Tensor]) -> str:
     return digest.hexdigest()
 
 def iter_batch_tensors(batch: RaggedBatch) -> Iterator[Tensor]:
-    for table in batch.tables.values():
-        yield table.numeric; yield table.mask
-        yield from table.categorical.values(); yield from table.boolean.values()
-    for value in dataclasses.fields(RelationNeighborhoodBatch): yield getattr(batch.neighborhoods, value.name)
-    for value in dataclasses.fields(CandidateBatch): yield getattr(batch.candidates, value.name)
-    for value in dataclasses.fields(RaggedBatch):
-        current = getattr(batch, value.name)
-        if isinstance(current, Tensor): yield current
+    def walk(value: object) -> Iterator[Tensor]:
+        if isinstance(value, Tensor):
+            yield value
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            for field_info in dataclasses.fields(value):
+                yield from walk(getattr(value, field_info.name))
+        elif isinstance(value, Mapping):
+            for nested in value.values():
+                yield from walk(nested)
+        elif isinstance(value, (tuple, list)):
+            for nested in value:
+                yield from walk(nested)
+    yield from walk(batch)
 
 def mapping_proxy_batch(batch: RaggedBatch) -> RaggedBatch:
-    tables = MappingProxyType({name: TokenTableBatch(table.numeric, MappingProxyType(dict(table.categorical)), MappingProxyType(dict(table.boolean)), table.mask) for name, table in batch.tables.items()})
-    return dataclasses.replace(batch, tables=tables, table_slices=MappingProxyType(dict(batch.table_slices)))
+    tables = MappingProxyType({
+        name: TokenTableBatch(
+            table.numeric,
+            MappingProxyType(dict(table.categorical)),
+            MappingProxyType(dict(table.boolean)),
+            table.mask,
+        )
+        for name, table in batch.tables.items()
+    })
+    return dataclasses.replace(
+        batch, tables=tables,
+        table_slices=MappingProxyType(dict(batch.table_slices)),
+    )
 
 @contextmanager
 def capture_training_trace(trace: TrainingTrace) -> Iterator[None]:
-    original_collate = training.collate_examples
+    original_collate = training._collate_training_batch
     original_evaluate = training._evaluate_validation
-    def traced_collate(rows, horizons):
-        trace.optimizer_orders.append(tuple(stable_example_identity(row) for row in rows))
+
+    def traced_collate(
+        rows: tuple, horizons: tuple,
+    ) -> RaggedBatch:
+        trace.optimizer_orders.append(
+            tuple(stable_example_identity(row) for row in rows)
+        )
         return original_collate(rows, horizons)
-    def traced_evaluate(model, rows, model_config, objective_config, batch_size, device):
-        trace.validation_orders.append(tuple(stable_example_identity(row) for row in rows))
-        return original_evaluate(model, rows, model_config, objective_config, batch_size, device)
-    training.collate_examples = traced_collate
+
+    def traced_evaluate(
+        model: TacticalV3Policy,
+        rows: tuple,
+        model_config: TacticalV3ModelConfig,
+        objective_config: ObjectiveConfig,
+        batch_size: int,
+        device: torch.device,
+        *,
+        epoch: int,
+    ) -> tuple[Mapping[str, float], float]:
+        trace.validation_orders.append(
+            tuple(stable_example_identity(row) for row in rows)
+        )
+        return original_evaluate(
+            model, rows, model_config, objective_config, batch_size, device,
+            epoch=epoch,
+        )
+
+    training._collate_training_batch = traced_collate
     training._evaluate_validation = traced_evaluate
-    try: yield
+    try:
+        yield
     finally:
-        training.collate_examples = original_collate
+        training._collate_training_batch = original_collate
         training._evaluate_validation = original_evaluate
 
-def independent_validation_means(case: TrainerTestCase, model: TacticalV3Policy) -> tuple[float, float]:
-    model = model.cpu().eval(); rows = case.validation
+
+def scripted_validation_batch_losses(
+    script: tuple,
+    states: dict[int, str],
+    observed: list[tuple[int, int, int]],
+) -> Callable:
+    def compute(
+        model: TacticalV3Policy,
+        batch: RaggedBatch,
+        objective_config: ObjectiveConfig,
+        *,
+        epoch: int,
+        batch_index: int,
+    ) -> LossBreakdown:
+        del objective_config
+        states.setdefault(epoch, state_dict_sha256(model.state_dict()))
+        observed.append((epoch, batch_index, int(batch.node_mask.shape[0])))
+        value = torch.tensor(
+            script[epoch][batch_index],
+            dtype=torch.float32,
+            device=next(model.parameters()).device,
+        )
+        return LossBreakdown(value, value, value, value, value)
+
+    return compute
+
+
+def assert_valid_padded_negative_infinity_case() -> None:
+    case = make_trainer_case(
+        max_epochs=1, batch_size=2, patience_epochs=1
+    )
+    batch = collate_examples(case.train[:2], case.model_config.horizon_turns)
+    assert bool((~batch.candidates.mask).any())
+    torch.manual_seed(case.trainer_config.seed)
+    model = TacticalV3Policy(case.model_config).eval()
     with torch.no_grad():
-        single = [float(structured_imitation_loss(model(collate_examples((row,), case.model_config.horizon_turns)), collate_examples((row,), case.model_config.horizon_turns), case.objective_config).policy) for row in rows]
-        first = float(structured_imitation_loss(model(collate_examples(rows[:2], case.model_config.horizon_turns)), collate_examples(rows[:2], case.model_config.horizon_turns), case.objective_config).policy)
-        last = float(structured_imitation_loss(model(collate_examples(rows[2:], case.model_config.horizon_turns)), collate_examples(rows[2:], case.model_config.horizon_turns), case.objective_config).policy)
-    return sum(single) / len(single), (first + last) / 2.0
+        output = model(batch)
+    assert torch.isfinite(
+        output.candidate_logits[batch.candidates.mask]
+    ).all()
+    assert torch.isneginf(
+        output.candidate_logits[~batch.candidates.mask]
+    ).all()
+    assert torch.isfinite(output.outcome_logits).all()
+    assert torch.isfinite(output.horizon_logits).all()
+    assert torch.isfinite(output.remaining_turns).all()
+    result = run_training_case(case)
+    assert tuple(metric.epoch for metric in result.history) == (0,)
 
-def scripted_validation(states: dict[int, str], nlls: tuple[float, ...]) -> Callable[..., tuple[Mapping[str, float], float]]:
-    def evaluate(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]:
-        epoch = len(states); states[epoch] = state_dict_sha256(model.state_dict()); nll = nlls[epoch]
-        metrics = MappingProxyType({"total": nll, "policy": nll, "outcome": 0.0, "horizon": 0.0, "remaining_turns": 0.0})
-        return metrics, nll
-    return evaluate
 
-def run_fault_case(stage: Literal["valid_logit_nan", "valid_logit_neg_inf", "outcome", "horizon", "remaining", "policy", "outcome_loss", "horizon_loss", "remaining_loss", "total", "mask", "gradient", "clip", "parameter"]) -> FaultResult:
-    case = make_trainer_case(max_epochs=1); before = state_dict_sha256(TacticalV3Policy(case.model_config).state_dict()); steps = 0
-    original_forward = TacticalV3Policy.forward; original_loss = training.structured_imitation_loss; original_clip = torch.nn.utils.clip_grad_norm_; original_step = torch.optim.AdamW.step
-    def forward(model, batch):
+def run_fault_case(
+    stage: Literal[
+        "valid_logit_nan", "valid_logit_neg_inf", "outcome", "horizon",
+        "remaining", "policy", "outcome_loss", "horizon_loss",
+        "remaining_loss", "total", "mask", "gradient", "clip", "parameter",
+    ],
+) -> FaultResult:
+    case = make_trainer_case(max_epochs=1, patience_epochs=1)
+    steps = 0
+    captured_model: TacticalV3Policy | None = None
+    before = ""
+    original_init = TacticalV3Policy.__init__
+    original_forward = TacticalV3Policy.forward
+    original_loss = training.structured_imitation_loss
+    original_transfer = training._batch_to_device
+    original_after_backward = training._after_backward
+    original_clip = training._clip_gradients
+    original_step = torch.optim.AdamW.step
+
+    def initialize(
+        model: TacticalV3Policy, config: TacticalV3ModelConfig,
+    ) -> None:
+        nonlocal captured_model, before
+        original_init(model, config)
+        captured_model = model
+        before = state_dict_sha256(model.state_dict())
+
+    def forward(model: TacticalV3Policy, batch: RaggedBatch) -> PolicyOutput:
         output = original_forward(model, batch)
         if stage in {"valid_logit_nan", "valid_logit_neg_inf"}:
-            logits = output.candidate_logits.clone(); row = int(torch.nonzero(batch.candidates.mask[0], as_tuple=False)[0, 0]); logits[0, row] = float("nan") if stage.endswith("nan") else float("-inf"); return dataclasses.replace(output, candidate_logits=logits)
-        field = {"outcome": "outcome_logits", "horizon": "horizon_logits", "remaining": "remaining_turns"}.get(stage)
-        if field is None: return output
-        value = getattr(output, field).clone(); value.reshape(-1)[0] = float("nan"); return dataclasses.replace(output, **{field: value})
-    def loss(output, batch, config):
+            logits = output.candidate_logits.clone()
+            row = int(torch.nonzero(
+                batch.candidates.mask[0], as_tuple=False
+            )[0, 0])
+            logits[0, row] = (
+                float("nan") if stage == "valid_logit_nan" else float("-inf")
+            )
+            return dataclasses.replace(output, candidate_logits=logits)
+        field_name = {
+            "outcome": "outcome_logits",
+            "horizon": "horizon_logits",
+            "remaining": "remaining_turns",
+        }.get(stage)
+        if field_name is None:
+            return output
+        changed = getattr(output, field_name).clone()
+        changed.reshape(-1)[0] = float("nan")
+        return dataclasses.replace(output, **{field_name: changed})
+
+    def loss(
+        output: PolicyOutput, batch: RaggedBatch, config: ObjectiveConfig,
+    ) -> LossBreakdown:
         value = original_loss(output, batch, config)
-        fields = {"policy": "policy", "outcome_loss": "outcome", "horizon_loss": "horizon", "remaining_loss": "remaining_turns", "total": "total"}
-        if stage not in fields: return value
-        field = fields[stage]; return dataclasses.replace(value, **{field: getattr(value, field) * float("nan")})
-    def clip(parameters, max_norm, *args, **kwargs):
-        result = original_clip(parameters, max_norm, *args, **kwargs)
-        return torch.tensor(float("inf"), device=result.device) if stage == "clip" else result
-    def step(optimizer, *args, **kwargs):
-        nonlocal steps; result = original_step(optimizer, *args, **kwargs); steps += 1
-        if stage == "parameter": next(iter(optimizer.param_groups[0]["params"])).data.reshape(-1)[0] = float("inf")
-        return result
-    TacticalV3Policy.forward = forward; training.structured_imitation_loss = loss; torch.nn.utils.clip_grad_norm_ = clip; torch.optim.AdamW.step = step
-    try:
+        field_name = {
+            "policy": "policy",
+            "outcome_loss": "outcome",
+            "horizon_loss": "horizon",
+            "remaining_loss": "remaining_turns",
+            "total": "total",
+        }.get(stage)
+        if field_name is None:
+            return value
+        return dataclasses.replace(
+            value,
+            **{field_name: getattr(value, field_name) * float("nan")},
+        )
+
+    def transfer(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
+        moved = original_transfer(batch, device)
+        if stage != "mask":
+            return moved
+        return dataclasses.replace(
+            moved,
+            candidates=dataclasses.replace(
+                moved.candidates,
+                mask=moved.candidates.mask.to(torch.int64),
+            ),
+        )
+
+    def after_backward(
+        model: TacticalV3Policy, *, epoch: int, batch_index: int,
+    ) -> None:
+        original_after_backward(model, epoch=epoch, batch_index=batch_index)
         if stage == "gradient":
-            original_register = Tensor.register_hook
-            def hook_register(tensor, hook): return original_register(tensor, lambda grad: torch.full_like(grad, float("nan")))
-            Tensor.register_hook = hook_register
-        try: result = run_training_case(case); error = AssertionError("fault did not fail")
-        except BaseException as caught: result = None; error = caught
+            parameter = next(
+                value for value in model.parameters() if value.grad is not None
+            )
+            with torch.no_grad():
+                parameter.grad.reshape(-1)[0] = float("nan")
+
+    def clip(parameters: Iterable[nn.Parameter], max_norm: float) -> Tensor:
+        result = original_clip(parameters, max_norm)
+        if stage == "clip":
+            return torch.tensor(float("inf"), device=result.device)
+        return result
+
+    def step(
+        optimizer: torch.optim.AdamW, *args: object, **kwargs: object,
+    ) -> object:
+        nonlocal steps
+        result = original_step(optimizer, *args, **kwargs)
+        steps += 1
+        if stage == "parameter":
+            parameter = optimizer.param_groups[0]["params"][0]
+            with torch.no_grad():
+                parameter.reshape(-1)[0] = float("inf")
+        return result
+
+    TacticalV3Policy.__init__ = initialize
+    TacticalV3Policy.forward = forward
+    training.structured_imitation_loss = loss
+    training._batch_to_device = transfer
+    training._after_backward = after_backward
+    training._clip_gradients = clip
+    torch.optim.AdamW.step = step
+    try:
+        try:
+            run_training_case(case)
+        except BaseException as caught:
+            error = caught
+        else:
+            error = AssertionError("fault did not fail")
     finally:
-        TacticalV3Policy.forward = original_forward; training.structured_imitation_loss = original_loss; torch.nn.utils.clip_grad_norm_ = original_clip; torch.optim.AdamW.step = original_step
-        if stage == "gradient": Tensor.register_hook = original_register
-    after = before if steps == 0 else state_dict_sha256(result.model.state_dict()) if result is not None else before
-    return FaultResult(error, steps, before, after, result)
+        TacticalV3Policy.__init__ = original_init
+        TacticalV3Policy.forward = original_forward
+        training.structured_imitation_loss = original_loss
+        training._batch_to_device = original_transfer
+        training._after_backward = original_after_backward
+        training._clip_gradients = original_clip
+        torch.optim.AdamW.step = original_step
+    assert captured_model is not None and before
+    after = state_dict_sha256(captured_model.state_dict())
+    return FaultResult(error, steps, before, after, None)
 ```
 
 ```python
-def test_seed_zero_and_exhaustive_config_rejection() -> None:
-    assert TrainerConfig(seed=0).seed == 0
-    values = (("seed", True), ("seed", -1), ("seed", torch.tensor(0)), ("seed", np.int64(0)), ("batch_size", 0), ("max_epochs", False), ("patience_epochs", 0), ("learning_rate", 1), ("gradient_clip_norm", float("nan")), ("device", torch.device("cpu")), ("device", "mps"), ("device", "cuda:x"), ("device", "cuda:999"))
-    for field, value in values:
-        with pytest.raises(ValueError, match=field): TrainerConfig(**{field: value})
+INTEGER_FIELDS = ("seed", "batch_size", "max_epochs", "patience_epochs")
+POSITIVE_INTEGER_FIELDS = ("batch_size", "max_epochs", "patience_epochs")
+FLOAT_FIELDS = ("learning_rate", "gradient_clip_norm")
+CONFIG_INVALID_CASES: tuple = (
+    *((field, True) for field in (*INTEGER_FIELDS, *FLOAT_FIELDS, "device")),
+    *((field, torch.tensor(1)) for field in INTEGER_FIELDS),
+    *((field, np.int64(1)) for field in INTEGER_FIELDS),
+    *((field, 1.0) for field in INTEGER_FIELDS),
+    ("seed", -1),
+    *((field, value) for field in POSITIVE_INTEGER_FIELDS for value in (0, -1)),
+    *((field, torch.tensor(1.0)) for field in FLOAT_FIELDS),
+    *((field, np.float64(1.0)) for field in FLOAT_FIELDS),
+    *((field, 1) for field in FLOAT_FIELDS),
+    *((field, value) for field in FLOAT_FIELDS for value in (
+        0.0, -1.0, float("nan"), float("inf"), float("-inf"),
+    )),
+    ("device", torch.tensor(0)),
+    ("device", np.str_("cpu")),
+    ("device", torch.device("cpu")),
+    *(("device", value) for value in (
+        "", " cpu", "cpu:0", "mps", "CUDA", "cuda:x", "cuda:-1", "cuda:0:1",
+    )),
+)
 
-def test_recursive_mapping_proxy_transfer_and_cuda_selection() -> None:
-    case = make_trainer_case(); source = mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)); moved = training._batch_to_device(source, torch.device("cpu"))
-    assert isinstance(moved.tables, MappingProxyType) and isinstance(moved.table_slices, MappingProxyType)
-    assert all(isinstance(table.categorical, MappingProxyType) and isinstance(table.boolean, MappingProxyType) for table in moved.tables.values())
-    with pytest.raises(TypeError): moved.tables["cells"] = moved.tables["cells"]  # type: ignore[index]
-    assert [(tensor.device, tensor.dtype) for tensor in iter_batch_tensors(moved)] == [(tensor.device, tensor.dtype) for tensor in iter_batch_tensors(source)]
+
+def test_seed_zero_is_the_only_nonpositive_integer_exception() -> None:
+    assert TrainerConfig(seed=0).seed == 0
+
+
+@pytest.mark.parametrize(("field", "value"), CONFIG_INVALID_CASES)
+def test_every_config_field_rejects_its_invalid_type_and_domain_matrix(
+    field: str, value: object,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        TrainerConfig(**{field: value})
+
+
+def test_cuda_device_availability_and_index_are_checked_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="device.*CUDA.*unavailable"):
+        TrainerConfig(device="cuda")
+    with pytest.raises(ValueError, match="device.*CUDA.*unavailable"):
+        TrainerConfig(device="cuda:0")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    assert TrainerConfig(device="cuda").device == "cuda"
+    assert TrainerConfig(device="cuda:1").device == "cuda:1"
+    with pytest.raises(ValueError, match="device.*index 2.*unavailable"):
+        TrainerConfig(device="cuda:2")
+
+
+def test_recursive_mapping_proxy_transfer_preserves_every_tensor_and_dtype() -> None:
+    case = make_trainer_case()
+    source = mapping_proxy_batch(collate_examples(
+        case.validation[:2], case.model_config.horizon_turns
+    ))
+    source_tensors = tuple(iter_batch_tensors(source))
+    expected_count = (
+        sum(
+            2 + len(table.categorical) + len(table.boolean)
+            for table in source.tables.values()
+        )
+        + len(dataclasses.fields(RelationNeighborhoodBatch))
+        + len(dataclasses.fields(CandidateBatch))
+        + sum(
+            isinstance(getattr(source, field_info.name), Tensor)
+            for field_info in dataclasses.fields(RaggedBatch)
+        )
+    )
+    assert len(source_tensors) == expected_count
+    snapshots = tuple(value.clone() for value in source_tensors)
+    moved = training._batch_to_device(source, torch.device("cpu"))
+    moved_tensors = tuple(iter_batch_tensors(moved))
+    assert type(moved.tables) is MappingProxyType
+    assert type(moved.table_slices) is MappingProxyType
+    assert moved.table_slices == source.table_slices
+    assert moved.table_slices is not source.table_slices
+    assert all(
+        type(table.categorical) is MappingProxyType
+        and type(table.boolean) is MappingProxyType
+        for table in moved.tables.values()
+    )
+    with pytest.raises(TypeError):
+        moved.tables["cells"] = moved.tables["cells"]  # type: ignore[index]
+    assert len(source_tensors) == len(moved_tensors)
+    for original, snapshot, transferred in zip(
+        source_tensors, snapshots, moved_tensors, strict=True
+    ):
+        assert original.device.type == "cpu"
+        assert transferred.device.type == "cpu"
+        assert original.dtype == transferred.dtype
+        assert torch.equal(original, snapshot)
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_cuda_recursive_transfer_preserves_all_tensors_and_exact_legal_selection() -> None:
-    case = make_trainer_case(device="cuda:0", max_epochs=1); result = run_training_case(case); batch = training._batch_to_device(mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)), torch.device("cuda:0"))
-    assert all(tensor.device == torch.device("cuda:0") for tensor in iter_batch_tensors(batch)); assert all(parameter.device == torch.device("cuda:0") and parameter.dtype == torch.float32 for parameter in result.model.parameters())
-    selected = result.model.select(batch)[0]; legal = {(int(batch.candidates.decision_id[0, row]), int(batch.candidates.candidate_id[0, row])) for row in torch.nonzero(batch.candidates.mask[0], as_tuple=False).flatten()}
+def test_cuda_training_transfer_outputs_parameters_and_selection_are_cuda() -> None:
+    device = torch.device("cuda:0")
+    case = make_trainer_case(
+        device="cuda:0", max_epochs=1, patience_epochs=1
+    )
+    result = run_training_case(case)
+    source = mapping_proxy_batch(collate_examples(
+        case.validation[:1], case.model_config.horizon_turns
+    ))
+    batch = training._batch_to_device(source, device)
+    assert all(tensor.device == device for tensor in iter_batch_tensors(batch))
+    assert all(tensor.device.type == "cpu" for tensor in iter_batch_tensors(source))
+    assert all(
+        parameter.device == device and parameter.dtype == torch.float32
+        for parameter in result.model.parameters()
+    )
+    output = result.model(batch)
+    assert all(
+        getattr(output, field_info.name).device == device
+        for field_info in dataclasses.fields(PolicyOutput)
+    )
+    selected = result.model.select(batch)[0]
+    legal = {
+        (
+            int(batch.candidates.decision_id[0, row]),
+            int(batch.candidates.candidate_id[0, row]),
+        )
+        for row in torch.nonzero(
+            batch.candidates.mask[0], as_tuple=False
+        ).flatten()
+    }
     assert (selected.decision_id, selected.candidate_id) in legal
 
+
 def test_reversed_inputs_preserve_history_state_logits_actions_and_trace() -> None:
-    case = make_trainer_case(); left_trace = TrainingTrace(); right_trace = TrainingTrace()
-    with capture_training_trace(left_trace): left = run_training_case(case)
-    with capture_training_trace(right_trace): right = run_training_case(dataclasses.replace(case, train=tuple(reversed(case.train)), validation=tuple(reversed(case.validation))))
-    batch = collate_examples(case.validation, case.model_config.horizon_turns); assert left.history == right.history; assert_state_dict_equal(left.model.state_dict(), right.model.state_dict())
-    torch.testing.assert_close(left.model(batch).candidate_logits, right.model(batch).candidate_logits, rtol=0.0, atol=0.0); assert left.model.select(batch) == right.model.select(batch)
-    assert left_trace.optimizer_orders == right_trace.optimizer_orders and left_trace.validation_orders == right_trace.validation_orders
+    case = make_trainer_case(max_epochs=2, patience_epochs=2)
+    left_trace = TrainingTrace()
+    right_trace = TrainingTrace()
+    with capture_training_trace(left_trace):
+        left = run_training_case(case)
+    reversed_case = dataclasses.replace(
+        case,
+        train=tuple(reversed(case.train)),
+        validation=tuple(reversed(case.validation)),
+    )
+    with capture_training_trace(right_trace):
+        right = run_training_case(reversed_case)
+    batch = collate_examples(case.validation, case.model_config.horizon_turns)
+    assert left.history == right.history
+    assert_state_dict_equal(left.model.state_dict(), right.model.state_dict())
+    torch.testing.assert_close(
+        left.model(batch).candidate_logits,
+        right.model(batch).candidate_logits,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert left.model.select(batch) == right.model.select(batch)
+    assert left_trace.optimizer_orders == right_trace.optimizer_orders
+    assert left_trace.validation_orders == right_trace.validation_orders
 
-def test_duplicate_and_cross_split_equal_key_objects_fail() -> None:
+
+def test_empty_duplicate_and_cross_split_keys_fail_before_model_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     case = make_trainer_case()
-    with pytest.raises(ValueError, match="duplicate training example"): run_training_case(dataclasses.replace(case, train=(case.train[0], dataclasses.replace(case.train[0]))))
-    with pytest.raises(ValueError, match="duplicate validation example"): run_training_case(dataclasses.replace(case, validation=(case.validation[0], dataclasses.replace(case.validation[0]))))
-    with pytest.raises(ValueError, match="splits overlap"): run_training_case(dataclasses.replace(case, validation=(dataclasses.replace(case.train[0]),)))
 
-def test_three_example_batch_two_weighted_metric_selects_different_best_epoch_than_batch_mean(monkeypatch) -> None:
-    case = dataclasses.replace(make_trainer_case(max_epochs=2, batch_size=2), validation=(make_trainer_case().validation + make_trainer_case().train)[:3]); states = {}
-    weighted = (0.3, 0.2); monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, weighted)); result = run_training_case(case)
-    assert tuple(metric.validation_policy_nll for metric in result.history) == weighted; assert result.best_epoch == 1; assert state_dict_sha256(result.model.state_dict()) == states[1]
+    def forbid_model_construction(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("model constructed before split validation")
 
-def test_real_seam_exact_history_improvement_patience_and_restore(monkeypatch) -> None:
-    states = {}; monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, (0.8, 0.2, 0.4, 0.4, 0.4))); result = run_training_case(make_trainer_case(max_epochs=5, patience_epochs=3))
-    assert tuple(metric.improved for metric in result.history) == (True, True, False, False, False); assert tuple(metric.epoch for metric in result.history) == (0, 1, 2, 3, 4); assert result.best_epoch == 1 and result.stopped_early; assert state_dict_sha256(result.model.state_dict()) == states[1]
+    monkeypatch.setattr(
+        training.TacticalV3Policy, "__init__", forbid_model_construction
+    )
+    invalid = (
+        (dataclasses.replace(case, train=()), "training split must be non-empty"),
+        (dataclasses.replace(case, validation=()), "validation split must be non-empty"),
+        (
+            dataclasses.replace(
+                case, train=(case.train[0], dataclasses.replace(case.train[0]))
+            ),
+            "duplicate training example",
+        ),
+        (
+            dataclasses.replace(
+                case,
+                validation=(case.validation[0], dataclasses.replace(case.validation[0])),
+            ),
+            "duplicate validation example",
+        ),
+        (
+            dataclasses.replace(
+                case, validation=(dataclasses.replace(case.train[0]),)
+            ),
+            "splits overlap",
+        ),
+    )
+    for invalid_case, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            run_training_case(invalid_case)
+
+
+def test_real_weighted_validation_changes_ranking_and_restores_epoch_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = make_trainer_case(max_epochs=2, batch_size=2, patience_epochs=2)
+    case = dataclasses.replace(base, validation=base.validation[:3])
+    script = ((0.0, 1.5), (1.0, 0.0))
+    states: dict[int, str] = {}
+    observed: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        training,
+        "_validation_batch_loss",
+        scripted_validation_batch_losses(script, states, observed),
+    )
+    result = run_training_case(case)
+    weighted = (0.5, 2.0 / 3.0)
+    batch_means = tuple(sum(epoch_values) / 2.0 for epoch_values in script)
+    assert weighted[0] < weighted[1]
+    assert batch_means[1] < batch_means[0]
+    assert observed == [
+        (0, 0, 2), (0, 1, 1),
+        (1, 0, 2), (1, 1, 1),
+    ]
+    assert tuple(
+        metric.validation_policy_nll for metric in result.history
+    ) == pytest.approx(weighted)
+    assert tuple(
+        metric.validation["policy"] for metric in result.history
+    ) == pytest.approx(weighted)
+    assert tuple(metric.improved for metric in result.history) == (True, False)
+    assert result.best_epoch == 0
+    assert result.best_validation_policy_nll == pytest.approx(weighted[0])
+    assert state_dict_sha256(result.model.state_dict()) == states[0]
+
+
+def test_real_loop_exact_history_patience_and_best_state_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = make_trainer_case(max_epochs=8, batch_size=2, patience_epochs=3)
+    case = dataclasses.replace(base, validation=base.validation[:3])
+    nlls = (0.8, 0.2, 0.4, 0.4, 0.4)
+    script = tuple((value, value) for value in nlls)
+    states: dict[int, str] = {}
+    observed: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        training,
+        "_validation_batch_loss",
+        scripted_validation_batch_losses(script, states, observed),
+    )
+    result = run_training_case(case)
+    assert tuple(
+        metric.validation_policy_nll for metric in result.history
+    ) == nlls
+    assert tuple(metric.validation["policy"] for metric in result.history) == nlls
+    assert tuple(metric.improved for metric in result.history) == (
+        True, True, False, False, False,
+    )
+    assert tuple(metric.epoch for metric in result.history) == (0, 1, 2, 3, 4)
+    assert result.best_epoch == 1
+    assert result.best_validation_policy_nll == 0.2
+    assert result.stopped_early
+    assert state_dict_sha256(result.model.state_dict()) == states[1]
+
 
 def test_padded_negative_inf_control_and_full_finite_fault_matrix() -> None:
     assert_valid_padded_negative_infinity_case()
-    matrix = (("valid_logit_nan", "candidate_logits", 0), ("valid_logit_neg_inf", "candidate_logits", 0), ("outcome", "outcome_logits", 0), ("horizon", "horizon_logits", 0), ("remaining", "remaining_turns", 0), ("policy", "loss.policy", 0), ("outcome_loss", "loss.outcome", 0), ("horizon_loss", "loss.horizon", 0), ("remaining_loss", "loss.remaining_turns", 0), ("total", "loss.total", 0), ("mask", "candidate_mask", 0), ("gradient", "gradient=", 0), ("clip", "gradient_norm", 0), ("parameter", "parameter=", 1))
-    for stage, name, steps in matrix:
-        fault = run_fault_case(stage); assert isinstance(fault.error, FloatingPointError); assert f"epoch=0 batch=0 {name}" in str(fault.error); assert fault.optimizer_steps == steps
+    matrix = (
+        ("valid_logit_nan", "candidate_logits", 0),
+        ("valid_logit_neg_inf", "candidate_logits", 0),
+        ("outcome", "outcome_logits", 0),
+        ("horizon", "horizon_logits", 0),
+        ("remaining", "remaining_turns", 0),
+        ("policy", "loss.policy", 0),
+        ("outcome_loss", "loss.outcome", 0),
+        ("horizon_loss", "loss.horizon", 0),
+        ("remaining_loss", "loss.remaining_turns", 0),
+        ("total", "loss.total", 0),
+        ("mask", "candidate_mask", 0),
+        ("gradient", "gradient=", 0),
+        ("clip", "gradient_norm", 0),
+        ("parameter", "parameter=", 1),
+    )
+    for stage, field_name, expected_steps in matrix:
+        fault = run_fault_case(stage)
+        assert isinstance(fault.error, FloatingPointError)
+        assert f"epoch=0 batch=0 {field_name}" in str(fault.error)
+        assert fault.optimizer_steps == expected_steps
+        if expected_steps == 0:
+            assert fault.after_state_sha256 == fault.before_state_sha256
+        else:
+            assert fault.after_state_sha256 != fault.before_state_sha256
+
 
 def test_epoch_metrics_are_exact_immutable_plain_float_maps() -> None:
-    metric = run_training_case(make_trainer_case()).history[0]; assert type(metric.train) is MappingProxyType and type(metric.validation) is MappingProxyType; assert tuple(metric.train) == METRIC_KEYS and tuple(metric.validation) == METRIC_KEYS; assert all(type(value) is float and math.isfinite(value) for value in (*metric.train.values(), *metric.validation.values())); assert metric.validation_policy_nll == metric.validation["policy"]
-    with pytest.raises(TypeError): metric.train["policy"] = 0.0  # type: ignore[index]
+    metric = run_training_case(make_trainer_case(
+        max_epochs=1, patience_epochs=1
+    )).history[0]
+    assert type(metric.epoch) is int
+    assert type(metric.improved) is bool
+    assert type(metric.train) is MappingProxyType
+    assert type(metric.validation) is MappingProxyType
+    assert tuple(metric.train) == METRIC_KEYS
+    assert tuple(metric.validation) == METRIC_KEYS
+    assert all(
+        type(value) is float and math.isfinite(value)
+        for value in (*metric.train.values(), *metric.validation.values())
+    )
+    assert type(metric.validation_policy_nll) is float
+    assert metric.validation_policy_nll == metric.validation["policy"]
+    with pytest.raises(TypeError):
+        metric.train["policy"] = 0.0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        metric.validation["policy"] = 0.0  # type: ignore[index]
 ```
 
 - [ ] **Step 2: Run RED**
@@ -1977,6 +2585,8 @@ uv run --active --no-project python -m pytest python/tests/test_tactical_v3_trai
 ```
 
 - [ ] **Step 3: Implement and run GREEN**
+
+Implement the exact interfaces and loop ordering above. Seed Python `random`, NumPy, CPU Torch, and every available CUDA generator from `TrainerConfig.seed`; enable deterministic Torch algorithms before model construction; use `AdamW` and no dropout. Each epoch consumes one CPU permutation, trains its contiguous batches through `_collate_training_batch`, validates exactly once through `_evaluate_validation`, appends one immutable `EpochMetrics`, updates or retains the detached best-state clone with the exact comparator, and stops only at the declared patience count. Load the best state before constructing `TrainingResult`; do not move it to CPU because Task 9 owns CPU publication.
 
 ```powershell
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_training.py -q
@@ -1992,40 +2602,7 @@ git commit -m "feat: train tactical-v3 policy deterministically"
 - Create: `python/tests/test_tactical_v3_checkpoint.py`
 - Modify: `python/run_tactical_v3_imitation.py`
 
-**Task-8 CLI handoff (Task 9 Step 1):** Task 9 owns persistent `train`. Change the entry point to `def main(argv: Sequence[str] | None = None) -> int`; add `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>`. It calls `parse_spaces`, `load_corpus`, default model/objective config plus `TrainerConfig`, then `train_offline`, then exactly once `publish_structured_run`. No CLI code creates a file/directory itself.
-
-```python
-@dataclass(frozen=True, slots=True)
-class TrainCliCase:
-    identity: TacticalV3SemanticIdentity
-    corpus: StructuredCorpus
-    result: TrainingResult
-    corpus_root: Path
-    scenario_path: Path
-
-def make_train_cli_case(tmp_path: Path) -> TrainCliCase:
-    spaces_path = FIXTURES / "seed-41-spaces.json"
-    identity = parse_spaces(json.loads(spaces_path.read_text(encoding="utf-8")))
-    corpus_root = FIXTURES / "tiny-corpus"
-    corpus = load_corpus(corpus_root, identity)
-    model = TacticalV3Policy(TacticalV3ModelConfig()).eval()
-    result = TrainingResult(model, 0, 0.0, False, ())
-    scenario_path = tmp_path / "scenario.json"
-    scenario_path.write_bytes(spaces_path.read_bytes())
-    return TrainCliCase(identity, corpus, result, corpus_root, scenario_path)
-
-def test_train_cli_calls_training_then_publisher_without_direct_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    case = make_train_cli_case(tmp_path); calls: list[str] = []
-    import run_tactical_v3_imitation as cli
-    monkeypatch.setattr(cli, "parse_spaces", lambda payload: case.identity)
-    monkeypatch.setattr(cli, "load_corpus", lambda root, expected: case.corpus)
-    monkeypatch.setattr(cli, "train_offline", lambda *args: calls.append("train") or case.result)
-    monkeypatch.setattr(cli, "publish_structured_run", lambda *args: calls.append("publish") or tmp_path / "run")
-    run_dir = tmp_path / "run"
-    assert cli.main(["train", "--corpus", str(case.corpus_root), "--scenario", str(case.scenario_path), "--run-dir", str(run_dir), "--seed", "0", "--device", "cpu"]) == 0
-    assert calls == ["train", "publish"]
-    assert not run_dir.exists()
-```
+**Task-8 CLI handoff (owned and tested in Task 9 Step 1):** Task 9 alone adds persistent `train`. Change the entry point to `def main(argv: Sequence[str] | None = None) -> int`; add `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>`. The command parses the scenario identity, loads the corpus against it, constructs default `TacticalV3ModelConfig` and `ObjectiveConfig` plus `TrainerConfig(seed=args.seed, device=args.device)`, calls `train_offline`, then calls `publish_structured_run(args.run_dir, result, corpus, args.scenario)` exactly once. CLI code does not open, create, write, rename, or delete any run artifact; publication owns all artifacts.
 **Interfaces introduced in this task:**
 
 ```python
@@ -2078,7 +2655,128 @@ def publish_structured_run(
 def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy: ...
 ```
 
-- [ ] **Step 1: Write failing checkpoint and publication tests**
+- [ ] **Step 1: Write failing CLI handoff, checkpoint, and publication tests**
+
+```python
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from ml_lab.tactical_v3_corpus import StructuredCorpus, load_corpus
+from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
+from ml_lab.tactical_v3_model import TacticalV3Policy
+from ml_lab.tactical_v3_objectives import ObjectiveConfig
+from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity, parse_spaces
+from ml_lab.tactical_v3_training import TrainerConfig, TrainingResult
+
+FIXTURES = Path(__file__).parent / "fixtures" / "tactical_v3"
+
+
+@dataclass(frozen=True, slots=True)
+class TrainCliCase:
+    identity: TacticalV3SemanticIdentity
+    corpus: StructuredCorpus
+    result: TrainingResult
+    corpus_root: Path
+    scenario_path: Path
+    model_config: TacticalV3ModelConfig
+    objective_config: ObjectiveConfig
+
+
+def make_train_cli_case() -> TrainCliCase:
+    scenario_path = FIXTURES / "seed-41-spaces.json"
+    identity = parse_spaces(json.loads(
+        scenario_path.read_text(encoding="utf-8")
+    ))
+    corpus_root = FIXTURES / "tiny-corpus"
+    corpus = load_corpus(corpus_root, identity)
+    model_config = TacticalV3ModelConfig()
+    objective_config = ObjectiveConfig()
+    model = TacticalV3Policy(model_config).eval()
+    result = TrainingResult(
+        model=model,
+        best_epoch=0,
+        best_validation_policy_nll=0.0,
+        stopped_early=False,
+        history=(),
+    )
+    return TrainCliCase(
+        identity, corpus, result, corpus_root, scenario_path,
+        model_config, objective_config,
+    )
+
+
+def test_train_cli_calls_real_sequence_then_only_publisher_owns_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import run_tactical_v3_imitation as cli
+
+    case = make_train_cli_case()
+    calls: list[str] = []
+    scenario_payload = json.loads(case.scenario_path.read_text(encoding="utf-8"))
+    run_dir = tmp_path / "run"
+    assert not run_dir.exists()
+
+    def fake_parse(payload: object) -> TacticalV3SemanticIdentity:
+        assert payload == scenario_payload
+        calls.append("parse")
+        return case.identity
+
+    def fake_load(
+        root: Path, expected: TacticalV3SemanticIdentity,
+    ) -> StructuredCorpus:
+        assert root == case.corpus_root
+        assert expected == case.identity
+        calls.append("load")
+        return case.corpus
+
+    def fake_train(
+        train_examples: tuple,
+        validation_examples: tuple,
+        model_config: TacticalV3ModelConfig,
+        objective_config: ObjectiveConfig,
+        trainer_config: TrainerConfig,
+    ) -> TrainingResult:
+        assert train_examples == case.corpus.train
+        assert validation_examples == case.corpus.validation
+        assert model_config == case.model_config
+        assert objective_config == case.objective_config
+        assert trainer_config == TrainerConfig(seed=0, device="cpu")
+        calls.append("train")
+        return case.result
+
+    def fake_publish(
+        destination: Path,
+        result: TrainingResult,
+        corpus: StructuredCorpus,
+        scenario_path: Path,
+    ) -> Path:
+        assert destination == run_dir
+        assert result is case.result
+        assert corpus is case.corpus
+        assert scenario_path == case.scenario_path
+        calls.append("publish")
+        return destination
+
+    monkeypatch.setattr(cli, "parse_spaces", fake_parse)
+    monkeypatch.setattr(cli, "load_corpus", fake_load)
+    monkeypatch.setattr(cli, "train_offline", fake_train)
+    monkeypatch.setattr(cli, "publish_structured_run", fake_publish)
+    assert cli.main([
+        "train",
+        "--corpus", str(case.corpus_root),
+        "--scenario", str(case.scenario_path),
+        "--run-dir", str(run_dir),
+        "--seed", "0",
+        "--device", "cpu",
+    ]) == 0
+    assert calls == ["parse", "load", "train", "publish"]
+    assert not run_dir.exists()
+```
 
 ```python
 def test_checkpoint_contains_only_whitelisted_plain_values_and_cpu_tensors(
@@ -2214,6 +2912,8 @@ def inject_publish_failure(stage: Literal["after_checkpoint"]) -> Iterator[None]
 def sha256_tree(root: Path) -> tuple[tuple[str, str], ...]: ...
 ```
 
+The ellipsis declarations in the immediately preceding fence are retained only for Task 9's pre-existing general checkpoint-test helpers: they are outside the persistent-train CLI fixture and call path, and their concrete behavior is fully constrained by the following paragraph and checkpoint tests. The Task 9 CLI fence above is independently complete, declares every import and fixture path it uses, and calls none of these general checkpoint helpers.
+
 The case loader trains the immutable tiny corpus with seed 227 on the requested device, selects the first two canonical validation rows as fixtures, computes valid-only logits and identities before publication, and builds metadata from the real corpus/state/semantic hashes. Save/load/publish helpers call only the public interfaces in this task with the case's exact expected identities. The whitelist recursively permits plain JSON scalars/lists/dicts outside `state_dict` and contiguous tensors only inside it. The load spy delegates to the original function and records only `map_location` and `weights_only`. Variant mutations respectively add a top-level key, remove `state_dict`, replace `best_epoch` with `True`, or add one to the first tensor without changing its recorded hash. JSON mutation rewrites one top-level field atomically for a deliberate tamper test. The injected publication failure fires after temporary checkpoint creation and requires cleanup before rethrow. Tree hashing returns sorted relative paths plus SHA-256 and never follows links.
 
 The CUDA test trains the same tiny corpus on CUDA, publishes CPU tensors, and compares CPU-reloaded valid logits with `rtol=1e-5, atol=1e-6`; selected candidate identities must be exact. CPU round trips require `rtol=0.0, atol=0.0` and exact actions.
@@ -2258,6 +2958,7 @@ run_manifest = {
 ```powershell
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_checkpoint.py -q
 uv run --active --no-project python python/run_tactical_v3_imitation.py validate-run --help
+
 git add python/ml_lab/tactical_v3_checkpoint.py python/tests/test_tactical_v3_checkpoint.py python/run_tactical_v3_imitation.py
 git commit -m "feat: publish tactical-v3 policy checkpoints"
 ```
