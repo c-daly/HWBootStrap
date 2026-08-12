@@ -19,6 +19,12 @@ from ml_lab.tactical_v3_batching import (
 from ml_lab.tactical_v3_corpus import StructuredExample
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, PolicyOutput, TacticalV3Policy
+from ml_lab.tactical_v3_schema import (
+    Candidate,
+    MemoryToken,
+    ProjectedDelta,
+    TokenRef,
+)
 
 from .test_tactical_v3_layers import (
     canonical_example as _load_canonical_example,
@@ -70,6 +76,114 @@ def make_policy_case(candidate_counts: tuple[int, ...], seed: int) -> PolicyTest
     policy = seeded_policy(seed)
     batch = collate_examples(examples, horizons=policy.config.horizon_turns)
     return PolicyTestCase(policy=policy, batch=batch)
+
+
+def make_memory_rich_example() -> StructuredExample:
+    example = canonical_model_example()
+    memory = (
+        MemoryToken(TokenRef("cells", 0), 2, 3, 11, False),
+        MemoryToken(TokenRef("cells", 1), 5, 7, 13, True),
+    )
+    observation = replace(example.decision.observation, memory=memory)
+    return replace(example, decision=replace(example.decision, observation=observation))
+
+
+def _projection(
+    row: int,
+    *,
+    source_cell: TokenRef | None = None,
+    destination_cell: TokenRef | None = None,
+    template: TokenRef | None = None,
+    target: TokenRef | None = None,
+) -> ProjectedDelta:
+    base = (row + 1) * 10
+    return ProjectedDelta(
+        source_cell=source_cell,
+        destination_cell=destination_cell,
+        template=template,
+        target=target,
+        horizontal_movement_spent=base + 1,
+        vertical_movement_spent=base + 2,
+        target_hp_delta=base + 3,
+        damage=base + 4,
+        is_lethal=row in (1, 3),
+        bounty_delta=base + 5,
+        points_delta=base + 6,
+        round_delta=base + 7,
+        is_terminal=row in (2, 3),
+    )
+
+
+def make_four_kind_example() -> StructuredExample:
+    example = canonical_model_example()
+    decision = example.decision
+    candidates = (
+        Candidate(
+            0,
+            decision.decision_id,
+            "attack",
+            TokenRef("units", 0),
+            TokenRef("units", 3),
+            None,
+            None,
+            _projection(
+                0,
+                source_cell=decision.observation.units[0].cell,
+                target=TokenRef("units", 3),
+            ),
+        ),
+        Candidate(
+            1,
+            decision.decision_id,
+            "move",
+            TokenRef("units", 1),
+            None,
+            None,
+            TokenRef("cells", 14),
+            _projection(
+                1,
+                source_cell=decision.observation.units[1].cell,
+                destination_cell=TokenRef("cells", 14),
+            ),
+        ),
+        Candidate(
+            2,
+            decision.decision_id,
+            "deploy",
+            None,
+            None,
+            TokenRef("templates", 0),
+            TokenRef("cells", 2),
+            _projection(
+                2,
+                destination_cell=TokenRef("cells", 2),
+                template=TokenRef("templates", 0),
+            ),
+        ),
+        Candidate(
+            3,
+            decision.decision_id,
+            "end_turn",
+            None,
+            None,
+            None,
+            None,
+            _projection(3),
+        ),
+    )
+    return replace(
+        example,
+        decision=replace(decision, candidates=candidates),
+        target=replace(example.target, teacher_candidate_id=0),
+    )
+
+
+def make_four_kind_case(seed: int) -> PolicyTestCase:
+    policy = seeded_policy(seed)
+    batch = collate_examples(
+        (make_four_kind_example(),), horizons=policy.config.horizon_turns
+    )
+    return PolicyTestCase(policy, batch)
 
 
 def assert_auxiliary_heads_equal(
@@ -284,6 +398,74 @@ def candidate_identity_set(batch: RaggedBatch, sample: int) -> set[tuple[int, in
     )
 
 
+def _any_policy_value_changed(before: PolicyOutput, after: PolicyOutput) -> bool:
+    return any(
+        not torch.equal(getattr(before, field.name), getattr(after, field.name))
+        for field in dataclasses.fields(PolicyOutput)
+    )
+
+
+def _configure_candidate_path(policy: TacticalV3Policy, input_offset: int) -> None:
+    hidden = policy.config.hidden_dim
+    with torch.no_grad():
+        for parameter in policy.parameters():
+            parameter.zero_()
+        policy.candidate_encoder[0].weight[0, input_offset] = 1.0
+        policy.candidate_encoder[0].weight[1, input_offset] = -1.0
+        policy.candidate_encoder[2].weight[0, 0] = 1.0
+        policy.candidate_encoder[2].weight[0, 1] = -1.0
+        policy.candidate_scorer[0].weight[0, hidden] = 1.0
+        policy.candidate_scorer[0].weight[1, hidden] = -1.0
+        policy.candidate_scorer[2].weight[0, 0] = 1.0
+        policy.candidate_scorer[2].weight[0, 1] = -1.0
+
+
+def _configure_distinct_reference_nodes(policy: TacticalV3Policy) -> None:
+    hidden = policy.config.hidden_dim
+    with torch.no_grad():
+        policy.token_encoders.numeric_projections["cells"].weight[0, 0] = 1.0
+        policy.token_encoders.table_projections["cells"].weight[0, 0] = 1.0
+        for table_name in ("units", "templates"):
+            owner = policy.token_encoders.categorical_embeddings[
+                f"{table_name}__owner"
+            ]
+            owner.weight[0, 0] = 1.0
+            owner.weight[1, 0] = 2.0
+            policy.token_encoders.table_projections[table_name].weight[0, hidden] = 1.0
+
+
+def _reference_candidate_row(slot: int) -> int:
+    return (0, 0, 2, 1, 0, 1, 2, 0)[slot]
+
+
+def _alternate_reference(batch: RaggedBatch, row: int, slot: int) -> int:
+    current = int(batch.candidates.reference_index[0, row, slot])
+    table_name = (
+        "units", "units", "templates", "cells",
+        "cells", "cells", "templates", "units",
+    )[slot]
+    table_slice = batch.table_slices[table_name]
+    if table_name in ("units", "templates"):
+        boundary = 3 if table_name == "units" else 5
+        alternate_local = boundary if current - table_slice.start < boundary else 0
+        return table_slice.start + alternate_local
+    current_local = current - table_slice.start
+    current_q = float(batch.tables["cells"].numeric[0, current_local, 0])
+    for local, valid in enumerate(batch.tables["cells"].mask[0]):
+        if bool(valid) and float(batch.tables["cells"].numeric[0, local, 0]) != current_q:
+            return table_slice.start + local
+    raise AssertionError("fixture requires an alternate cell with a different q feature")
+
+
+def _assert_only_candidate_changed(
+    before: torch.Tensor, after: torch.Tensor, row: int
+) -> None:
+    other = torch.ones_like(before, dtype=torch.bool)
+    other[row] = False
+    torch.testing.assert_close(after[other], before[other], rtol=0.0, atol=0.0)
+    assert not torch.equal(after[row], before[row])
+
+
 def _to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
     tables = {
         name: TokenTableBatch(
@@ -410,7 +592,13 @@ def test_softmax_probability_is_zero_on_padding_and_sums_to_one_on_valid_rows() 
 
 
 def test_state_table_permutations_leave_policy_output_unchanged() -> None:
-    case = make_policy_case(candidate_counts=(19,), seed=73)
+    policy = seeded_policy(seed=73)
+    example = make_cardinality_stress_example(make_memory_rich_example(), 19)
+    case = PolicyTestCase(
+        policy,
+        collate_examples((example,), horizons=policy.config.horizon_turns),
+    )
+    assert int(case.batch.tables["memory_records"].mask.sum()) >= 2
     expected = case.policy(case.batch)
     for table in (
         "cells",
@@ -428,6 +616,29 @@ def test_state_table_permutations_leave_policy_output_unchanged() -> None:
             actual.candidate_logits, expected.candidate_logits, rtol=0.0, atol=1e-6
         )
         assert_auxiliary_heads_equal(actual, expected, atol=1e-6)
+        assert case.policy.select(permuted) == case.policy.select(case.batch)
+
+
+@pytest.mark.parametrize("change", ("feature", "reference"))
+def test_memory_only_feature_or_reference_change_affects_policy_output(
+    change: str,
+) -> None:
+    example = make_memory_rich_example()
+    policy = seeded_policy(seed=81)
+    batch = collate_examples((example,), horizons=policy.config.horizon_turns)
+    memory = list(example.decision.observation.memory)
+    if change == "feature":
+        memory[0] = replace(memory[0], observation_age=memory[0].observation_age + 17)
+    else:
+        memory[0] = replace(memory[0], cell=TokenRef("cells", 37))
+    changed_observation = replace(example.decision.observation, memory=tuple(memory))
+    changed_example = replace(
+        example, decision=replace(example.decision, observation=changed_observation)
+    )
+    changed_batch = collate_examples(
+        (changed_example,), horizons=policy.config.horizon_turns
+    )
+    assert _any_policy_value_changed(policy(batch), policy(changed_batch))
 
 
 def test_projection_reference_changes_affect_only_the_referenced_candidate_path() -> None:
@@ -440,6 +651,146 @@ def test_projection_reference_changes_affect_only_the_referenced_candidate_path(
     other[candidate_row] = False
     torch.testing.assert_close(after[other], before[other], rtol=0.0, atol=0.0)
     assert not torch.equal(after[candidate_row], before[candidate_row])
+
+
+def test_four_kind_fixture_exercises_every_candidate_input_family_on_cpu() -> None:
+    case = make_four_kind_case(seed=85)
+    candidates = case.batch.candidates
+    valid = candidates.mask[0]
+    assert candidates.candidate_id[0, valid].tolist() == [0, 1, 2, 3]
+    assert candidates.kind[0, valid].tolist() == [0, 1, 2, 3]
+    assert candidates.reference_mask[0, valid].any(dim=0).tolist() == [True] * 8
+    integers = candidates.projection_integer[0, valid]
+    assert bool((integers != 0).all())
+    assert all(torch.unique(integers[:, field]).numel() == 4 for field in range(7))
+    assert {
+        tuple(row) for row in candidates.projection_boolean[0, valid].tolist()
+    } == {(False, False), (True, False), (False, True), (True, True)}
+
+    output = case.policy(case.batch)
+    assert torch.isfinite(output.candidate_logits[0, valid]).all()
+    selection = case.policy.select(case.batch)[0]
+    assert (selection.decision_id, selection.candidate_id) in candidate_identity_set(
+        case.batch, 0
+    )
+
+
+@pytest.mark.parametrize("slot", range(8))
+def test_each_candidate_reference_slot_changes_only_its_candidate_path(
+    slot: int,
+) -> None:
+    case = make_four_kind_case(seed=87)
+    row = _reference_candidate_row(slot)
+    assert bool(case.batch.candidates.reference_mask[0, row, slot])
+    reference_offset = (
+        case.policy.config.categorical_dim
+        + case.policy.config.hidden_dim
+        + 2 * case.policy.config.categorical_dim
+        + slot * case.policy.config.hidden_dim
+    )
+    _configure_candidate_path(case.policy, reference_offset)
+    _configure_distinct_reference_nodes(case.policy)
+    before = case.policy(case.batch).candidate_logits[0]
+    indices = case.batch.candidates.reference_index.clone()
+    indices[0, row, slot] = _alternate_reference(case.batch, row, slot)
+    changed = replace(
+        case.batch,
+        candidates=replace(case.batch.candidates, reference_index=indices),
+    )
+    after = case.policy(changed).candidate_logits[0]
+    _assert_only_candidate_changed(before, after, row)
+
+
+@pytest.mark.parametrize("slot", range(8))
+def test_each_candidate_reference_presence_bit_changes_its_candidate_path(
+    slot: int,
+) -> None:
+    case = make_four_kind_case(seed=91)
+    row = _reference_candidate_row(slot)
+    presence_offset = (
+        case.policy.config.categorical_dim
+        + case.policy.config.hidden_dim
+        + 2 * case.policy.config.categorical_dim
+        + 8 * case.policy.config.hidden_dim
+        + slot
+    )
+    _configure_candidate_path(case.policy, presence_offset)
+    before = case.policy(case.batch).candidate_logits[0]
+    reference_mask = case.batch.candidates.reference_mask.clone()
+    reference_mask[0, row, slot] = False
+    changed = replace(
+        case.batch,
+        candidates=replace(case.batch.candidates, reference_mask=reference_mask),
+    )
+    after = case.policy(changed).candidate_logits[0]
+    _assert_only_candidate_changed(before, after, row)
+
+
+@pytest.mark.parametrize(
+    ("family", "field"),
+    (("kind", 0),)
+    + tuple(("integer", field) for field in range(7))
+    + tuple(("boolean", field) for field in range(2)),
+)
+def test_each_candidate_kind_and_projection_scalar_changes_its_candidate_path(
+    family: str, field: int
+) -> None:
+    case = make_four_kind_case(seed=93)
+    categorical = case.policy.config.categorical_dim
+    hidden = case.policy.config.hidden_dim
+    if family == "kind":
+        input_offset = 0
+    elif family == "integer":
+        input_offset = categorical
+    else:
+        input_offset = categorical + hidden + field * categorical
+    _configure_candidate_path(case.policy, input_offset)
+    candidates = case.batch.candidates
+    if family == "kind":
+        with torch.no_grad():
+            case.policy.candidate_kind_embedding.weight[:, 0] = torch.tensor(
+                [1.0, 2.0, 3.0, 4.0]
+            )
+        changed_candidates = replace(candidates, kind=candidates.kind.clone())
+        changed_candidates.kind[0, 0] = 1
+    elif family == "integer":
+        with torch.no_grad():
+            case.policy.projection_integer_projection.weight[0, field] = 1.0
+        changed_candidates = replace(
+            candidates, projection_integer=candidates.projection_integer.clone()
+        )
+        changed_candidates.projection_integer[0, 0, field] += 1
+    else:
+        with torch.no_grad():
+            embedding = case.policy.projection_boolean_embeddings[field]
+            embedding.weight[0, 0] = 1.0
+            embedding.weight[1, 0] = 2.0
+        changed_candidates = replace(
+            candidates, projection_boolean=candidates.projection_boolean.clone()
+        )
+        changed_candidates.projection_boolean[0, 0, field] = ~(
+            changed_candidates.projection_boolean[0, 0, field]
+        )
+    before = case.policy(case.batch).candidate_logits[0]
+    after = case.policy(
+        replace(case.batch, candidates=changed_candidates)
+    ).candidate_logits[0]
+    _assert_only_candidate_changed(before, after, 0)
+
+
+def test_four_kind_fixture_forward_and_select_on_cuda() -> None:
+    assert torch.cuda.is_available(), "managed test environment requires CUDA"
+    device = torch.device("cuda", torch.cuda.current_device())
+    case = make_four_kind_case(seed=95)
+    policy = case.policy.to(device)
+    batch = _to_device(case.batch, device)
+    output = policy(batch)
+    assert output.candidate_logits.device == torch.device("cuda:0") == device
+    assert torch.isfinite(output.candidate_logits[batch.candidates.mask]).all()
+    selection = policy.select(batch)[0]
+    assert (selection.decision_id, selection.candidate_id) in candidate_identity_set(
+        batch, 0
+    )
 
 
 def test_all_masked_candidate_rows_raise_before_argmax() -> None:
@@ -527,16 +878,21 @@ def test_policy_gradients_dtype_and_cpu_determinism_are_finite() -> None:
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_cuda_forward_smoke_preserves_device_dtype_and_identity() -> None:
+    assert torch.cuda.is_available(), "managed test environment requires CUDA"
     case = make_policy_case(candidate_counts=(3,), seed=109)
     expected = case.policy.select(case.batch)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     policy = case.policy.to(device)
     batch = _to_device(case.batch, device)
-    output = policy(batch)
-    assert output.candidate_logits.device == device
-    assert output.candidate_logits.dtype == torch.float32
+    first = policy(batch)
+    second = policy(batch)
+    assert first.candidate_logits.device == torch.device("cuda:0") == device
+    assert first.candidate_logits.dtype == torch.float32
+    for field in dataclasses.fields(PolicyOutput):
+        torch.testing.assert_close(
+            getattr(first, field.name), getattr(second, field.name), rtol=0.0, atol=0.0
+        )
     assert policy.select(batch) == expected
 
 
