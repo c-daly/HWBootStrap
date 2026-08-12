@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 import shutil
@@ -17,12 +18,16 @@ from ml_lab.tactical_v3_corpus import (
     create_tiny_corpus,
     load_corpus,
 )
+from ml_lab.tactical_v3_schema import parse_spaces
+from tests.tactical_v3_fixture_support import load_tiny_corpus_fixture
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO = ROOT / "python" / "config" / "annihilation-structured-imitation-v1.json"
 SERVER_DLL = ROOT / "engine" / "HexWars.GymServer" / "bin" / "Debug" / "net8.0" / "HexWars.GymServer.dll"
 FIXTURE = Path(__file__).parent / "fixtures" / "tactical_v3" / "tiny-corpus"
+DUEL_SPACES_FIXTURE = FIXTURE.parent / "seed-41-duel-spaces.json"
+TACTICAL_SPACES_FIXTURE = FIXTURE.parent / "seed-41-spaces.json"
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +40,32 @@ def server_cmd() -> list[str]:
 def expected_identity(server_cmd: list[str]):
     with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
         return client.identity
+
+
+def test_checked_in_duel_identity_authenticates_tiny_corpus() -> None:
+    corpus = load_tiny_corpus_fixture()
+    assert corpus.train and corpus.validation
+
+
+def test_tactical_identity_is_rejected_for_authenticated_duel_corpus() -> None:
+    identity = parse_spaces(json.loads(TACTICAL_SPACES_FIXTURE.read_text(encoding="utf-8")))
+    with pytest.raises(ValueError, match="manifest (contract_hash|environment_kind)"):
+        load_corpus(FIXTURE, identity)
+
+
+@pytest.mark.parametrize("mutation", ("encoding_payload", "contract_hash"))
+def test_tampered_duel_identity_is_rejected_by_parse_or_load(mutation: str) -> None:
+    payload = json.loads(DUEL_SPACES_FIXTURE.read_text(encoding="utf-8"))
+    tampered = deepcopy(payload)
+    if mutation == "encoding_payload":
+        tampered["encoding"]["schema_version"] = 2
+        with pytest.raises(ValueError, match="encoding_hash does not match encoding"):
+            parse_spaces(tampered)
+    else:
+        tampered["contract_hash"] = "0" * 64
+        identity = parse_spaces(tampered)
+        with pytest.raises(ValueError, match="manifest contract_hash"):
+            load_corpus(FIXTURE, identity)
 
 
 def _sha256(path: Path) -> str:

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from dataclasses import replace
-from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
@@ -20,38 +18,18 @@ from ml_lab.tactical_v3_batching import (
     collate_examples,
     validate_ragged_batch,
 )
-from ml_lab.tactical_v3_corpus import StructuredExample, load_corpus
+from ml_lab.tactical_v3_corpus import StructuredExample
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import PolicyOutput, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import (
     ObjectiveConfig,
     structured_imitation_loss,
 )
-from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity
-
-
-ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "tactical_v3"
-CORPUS_ROOT = FIXTURE_ROOT / "tiny-corpus"
-IDENTITY_FIXTURE = FIXTURE_ROOT / "seed-41-spaces.json"
+from tests.tactical_v3_fixture_support import load_tiny_corpus_fixture
 
 
 def objective_examples() -> tuple[StructuredExample, StructuredExample]:
-    payload = json.loads(IDENTITY_FIXTURE.read_text(encoding="utf-8"))
-    manifest = json.loads((CORPUS_ROOT / "manifest.json").read_text(encoding="utf-8"))
-    identity = TacticalV3SemanticIdentity(
-        scenario_id=payload["scenario_id"],
-        scenario_schema_version=payload["scenario_schema_version"],
-        contract_version=payload["contract_version"],
-        contract_hash=manifest["contract_hash"],
-        encoding_hash=payload["encoding_hash"],
-        capacity_hash=payload["capacity_hash"],
-        environment_kind=manifest["environment_kind"],
-        match=payload["match"],
-        encoding=payload["encoding"],
-        capacity=payload["capacity"],
-    )
-    corpus = load_corpus(CORPUS_ROOT, identity)
+    corpus = load_tiny_corpus_fixture()
     return corpus.train[0], corpus.validation[0]
 
 

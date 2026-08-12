@@ -133,7 +133,7 @@ rule_kind = win_conditions, round, round_cap, actions_per_turn, starting_points,
 - Modify `python/policy_server.py` only to validate tactical-v3 expectations and route structured decisions to the new adapter.
 - Create `python/tests/test_tactical_v3_schema.py`, `test_tactical_v3_client.py`, `test_tactical_v3_corpus.py`, `test_tactical_v3_batching.py`, `test_tactical_v3_layers.py`, `test_tactical_v3_model.py`, `test_tactical_v3_objectives.py`, `test_tactical_v3_training.py`, `test_tactical_v3_checkpoint.py`, `test_tactical_v3_controller.py`, and `test_tactical_v3_end_to_end.py`.
 - Modify `python/tests/test_controllers.py` and `python/tests/test_policy_server.py` for legacy-regression plus tactical-v3 routing.
-- Create `python/tests/fixtures/tactical_v3/seed-41-spaces.json`, `seed-41-decision.json`, `scenario-24x16.json`, and `tiny-corpus/{manifest.json,train.jsonl,validation.jsonl}`.
+- Create `python/tests/fixtures/tactical_v3/seed-41-spaces.json`, `seed-41-duel-spaces.json`, `seed-41-decision.json`, `scenario-24x16.json`, and `tiny-corpus/{manifest.json,train.jsonl,validation.jsonl}` plus `python/tests/tactical_v3_fixture_support.py`.
 
 ### Engine and Unity Arena integration
 
@@ -588,6 +588,7 @@ Expected: all schema tests pass.
 - Create: `python/ml_lab/tactical_v3_client.py`
 - Create: `python/tests/test_tactical_v3_client.py`
 - Create: `python/tests/fixtures/tactical_v3/seed-41-spaces.json`
+- Create: `python/tests/fixtures/tactical_v3/seed-41-duel-spaces.json`
 - Create: `python/tests/fixtures/tactical_v3/seed-41-decision.json`
 - Create: `python/tests/fixtures/tactical_v3/scenario-24x16.json`
 
@@ -650,7 +651,7 @@ Launch with `stdin/stdout/stderr` text pipes, UTF-8, `creationflags=no_window_cr
 
 - [ ] **Step 4: Capture canonical fixtures from the freshly built server**
 
-Add a private test helper gated by the exact environment value `HEXWARS_CAPTURE_TACTICAL_V3_FIXTURES=1`; normal test mode must never write. The helper writes only the three named paths with sorted, indented, `allow_nan=False` JSON. Create `scenario-24x16.json` first by changing only `id`, `name`, `board.width=24`, and `board.height=16` while retaining the capacity profile, then capture `spaces` and seed-41 `reset` from the freshly built server. Immediately rerun without the variable so checked-in bytes are validated rather than regenerated.
+Add a private test helper gated by the exact environment value `HEXWARS_CAPTURE_TACTICAL_V3_FIXTURES=1`; normal test mode must never write. The helper writes only the four named paths with sorted, indented, `allow_nan=False` JSON. Create `scenario-24x16.json` first by changing only `id`, `name`, `board.width=24`, and `board.height=16` while retaining the capacity profile, then capture `spaces`, `duel_spaces`, and seed-41 `reset` from the freshly built server. Immediately rerun without the variable so checked-in bytes are validated rather than regenerated. The duel fixture is the sole semantic identity fixture for the duel-collected tiny corpus; tests must never synthesize a hybrid identity from tactical spaces and manifest fields.
 
 Run:
 
@@ -669,7 +670,7 @@ Expected: the canonical decision contains 117 cells, exact structured tables/can
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add python/ml_lab/tactical_v3_client.py python/tests/test_tactical_v3_client.py python/tests/fixtures/tactical_v3/seed-41-spaces.json python/tests/fixtures/tactical_v3/seed-41-decision.json python/tests/fixtures/tactical_v3/scenario-24x16.json
+git add python/ml_lab/tactical_v3_client.py python/tests/test_tactical_v3_client.py python/tests/fixtures/tactical_v3/seed-41-spaces.json python/tests/fixtures/tactical_v3/seed-41-duel-spaces.json python/tests/fixtures/tactical_v3/seed-41-decision.json python/tests/fixtures/tactical_v3/scenario-24x16.json
 git commit -m "feat: add tactical-v3 GymServer client"
 ```
 
@@ -1394,6 +1395,7 @@ git commit -m "feat: score tactical-v3 legal candidates"
 **Files:**
 - Create: `python/ml_lab/tactical_v3_objectives.py`
 - Create: `python/tests/test_tactical_v3_objectives.py`
+- Create: `python/tests/tactical_v3_fixture_support.py`
 
 **Interfaces introduced in this task:**
 
@@ -1682,7 +1684,7 @@ def make_gradient_case(seed: int) -> tuple[TacticalV3Policy, RaggedBatch]: ...
 def named_required_gradients(model: nn.Module, prefixes: tuple[str, ...]) -> dict[str, Tensor | None]: ...
 ```
 
-`objective_examples` loads train row zero and validation row zero from `python/tests/fixtures/tactical_v3/tiny-corpus` through the real corpus loader using the semantic identity parsed from `python/tests/fixtures/tactical_v3/seed-41-spaces.json`; it returns exactly two immutable examples. `finite_output_for_batch` derives `B`, `C`, and horizon count only from Task 4 tensors, emits finite zero heads, and places `-inf` only under false candidate masks. `malformed_objective_case` starts from the canonical objective case and changes only the field named by its exhaustive branch; every branch body above is the required mutation.
+`objective_examples` uses `tests.tactical_v3_fixture_support.load_tiny_corpus_fixture`, which parses the authoritative `seed-41-duel-spaces.json` fixture and loads the authenticated duel corpus without mixing fields from unrelated identities; it returns train row zero and validation row zero as exactly two immutable examples. `finite_output_for_batch` derives `B`, `C`, and horizon count only from Task 4 tensors, emits finite zero heads, and places `-inf` only under false candidate masks. `malformed_objective_case` starts from the canonical objective case and changes only the field named by its exhaustive branch; every branch body above is the required mutation.
 
 `make_objective_case` returns two samples with candidate logits `[[2,0,-inf],[0,1,2]]`, masks `[[T,T,F],[T,T,T]]`, and targets `[0,2]`; outcome logits `[[2,1,0],[0,1,2]]` with targets `[loss,win]`; horizon logits `[[0,2,-2],[1,-1,3]]`, targets `[[1,0,0],[0,1,1]]`, and mask `[[T,F,F],[F,T,F]]`; remaining predictions `[4,7]`, targets `[5,9]`, and mask `[T,F]`. All output tensors are independent `requires_grad=True` leaves. Replacement helpers use `dataclasses.replace`, mutate only the named masked/valid positions, and leave the source frozen values unchanged. `valid_candidate_matrix` clones logits and restores `-inf` at false masks. `make_gradient_case` collates two immutable corpus rows and constructs the default seeded CPU model; `named_required_gradients` returns every trainable parameter whose name begins with either exact prefix.
 
@@ -1714,6 +1716,7 @@ git commit -m "feat: add tactical-v3 imitation objectives"
 **Files:**
 - Create: `python/ml_lab/tactical_v3_training.py`
 - Create: `python/tests/test_tactical_v3_training.py`
+- Modify: `python/tests/tactical_v3_fixture_support.py`
 
 **Interfaces:**
 
@@ -2268,11 +2271,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import json
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Iterable, Iterator, Literal, Mapping
 
@@ -2283,14 +2284,13 @@ from torch import Tensor, nn
 
 import ml_lab.tactical_v3_training as training
 from ml_lab.tactical_v3_batching import CandidateBatch, RaggedBatch, RelationNeighborhoodBatch, TokenTableBatch, collate_examples
-from ml_lab.tactical_v3_corpus import StructuredExample, load_corpus
+from ml_lab.tactical_v3_corpus import StructuredExample
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, PolicyOutput, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, structured_imitation_loss
-from ml_lab.tactical_v3_schema import parse_spaces
 from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult, train_offline
+from tests.tactical_v3_fixture_support import load_tiny_corpus_fixture
 
-FIXTURES = Path(__file__).parent / "fixtures" / "tactical_v3"
 METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
 
 @dataclass(frozen=True, slots=True)
@@ -2319,8 +2319,7 @@ def stable_example_identity(example: StructuredExample) -> str:
     return hashlib.sha256(repr(key).encode("utf-8")).hexdigest()
 
 def make_trainer_case(*, device: str = "cpu", max_epochs: int = 6, batch_size: int = 4, patience_epochs: int = 6) -> TrainerTestCase:
-    spaces = parse_spaces(json.loads((FIXTURES / "seed-41-spaces.json").read_text(encoding="utf-8")))
-    corpus = load_corpus(FIXTURES / "tiny-corpus", spaces)
+    corpus = load_tiny_corpus_fixture()
     return TrainerTestCase(corpus.train, corpus.validation, TacticalV3ModelConfig(), ObjectiveConfig(), TrainerConfig(seed=227, batch_size=batch_size, max_epochs=max_epochs, patience_epochs=patience_epochs, device=device))
 
 def run_training_case(case: TrainerTestCase) -> TrainingResult:
@@ -3011,15 +3010,18 @@ from pathlib import Path
 
 import pytest
 
-from ml_lab.tactical_v3_corpus import StructuredCorpus, load_corpus
+from ml_lab.tactical_v3_corpus import StructuredCorpus
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import TacticalV3Policy
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
-from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity, parse_spaces
+from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity
 from ml_lab.tactical_v3_training import TrainerConfig, TrainingResult
-
-FIXTURES = Path(__file__).parent / "fixtures" / "tactical_v3"
-
+from tests.tactical_v3_fixture_support import (
+    DUEL_IDENTITY_FIXTURE,
+    TINY_CORPUS_ROOT,
+    load_duel_identity_fixture,
+    load_tiny_corpus_fixture,
+)
 
 @dataclass(frozen=True, slots=True)
 class TrainCliCase:
@@ -3033,12 +3035,10 @@ class TrainCliCase:
 
 
 def make_train_cli_case() -> TrainCliCase:
-    scenario_path = FIXTURES / "seed-41-spaces.json"
-    identity = parse_spaces(json.loads(
-        scenario_path.read_text(encoding="utf-8")
-    ))
-    corpus_root = FIXTURES / "tiny-corpus"
-    corpus = load_corpus(corpus_root, identity)
+    scenario_path = DUEL_IDENTITY_FIXTURE
+    identity = load_duel_identity_fixture()
+    corpus_root = TINY_CORPUS_ROOT
+    corpus = load_tiny_corpus_fixture()
     model_config = TacticalV3ModelConfig()
     objective_config = ObjectiveConfig()
     model = TacticalV3Policy(model_config).eval()

@@ -111,6 +111,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "tactical_v3"
 CHECKED_IN_SCENARIO = ROOT / "python" / "config" / "annihilation-structured-imitation-v1.json"
 SCENARIO_24X16 = FIXTURES / "scenario-24x16.json"
 SPACES_FIXTURE = FIXTURES / "seed-41-spaces.json"
+DUEL_SPACES_FIXTURE = FIXTURES / "seed-41-duel-spaces.json"
 DECISION_FIXTURE = FIXTURES / "seed-41-decision.json"
 SERVER_DLL = ROOT / "engine" / "HexWars.GymServer" / "bin" / "Debug" / "net8.0" / "HexWars.GymServer.dll"
 CAPTURE_ENV = "HEXWARS_CAPTURE_TACTICAL_V3_FIXTURES"
@@ -145,6 +146,7 @@ def _capture_fixtures() -> None:
     process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(CHECKED_IN_SCENARIO), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", creationflags=no_window_creationflags())
     try:
         _write_fixture(SPACES_FIXTURE, _raw_request(process, {"cmd": "spaces"}))
+        _write_fixture(DUEL_SPACES_FIXTURE, _raw_request(process, {"cmd": "duel_spaces"}))
         _write_fixture(DECISION_FIXTURE, _raw_request(process, {"cmd": "reset", "seed": 41}))
         assert process.stdin is not None
         process.stdin.write('{"cmd":"close"}\n')
@@ -179,10 +181,12 @@ def test_real_server_13x9_and_24x16_share_encoding_not_match_hash() -> None:
 def test_checked_in_fixtures_are_canonical_project_a_wire_values() -> None:
     _capture_fixtures()
     spaces = json.loads(SPACES_FIXTURE.read_text(encoding="utf-8"))
+    duel_spaces = json.loads(DUEL_SPACES_FIXTURE.read_text(encoding="utf-8"))
     decision = json.loads(DECISION_FIXTURE.read_text(encoding="utf-8"))
     process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(CHECKED_IN_SCENARIO), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
     try:
         assert _raw_request(process, {"cmd": "spaces"}) == spaces
+        assert _raw_request(process, {"cmd": "duel_spaces"}) == duel_spaces
         assert _raw_request(process, {"cmd": "reset", "seed": 41}) == decision
         assert process.stdin is not None
         process.stdin.write('{"cmd":"close"}\n'); process.stdin.flush()
@@ -191,6 +195,10 @@ def test_checked_in_fixtures_are_canonical_project_a_wire_values() -> None:
         process.wait(timeout=2)
     assert len(decision["observation"]["cells"]) == 117
     assert {"obs", "mask", "obs_len", "n_actions"}.isdisjoint(spaces)
+    assert duel_spaces["environment_kind"] == "duel"
+    assert duel_spaces["contract_hash"] == "bac4af4d4b8e68466ffaf37c2721f98129edc93b90f529999ba45463cd921437"
+    assert duel_spaces["encoding_hash"] == spaces["encoding_hash"]
+    assert duel_spaces["capacity_hash"] == spaces["capacity_hash"]
     assert {"obs", "mask", "obs_len", "n_actions"}.isdisjoint(decision)
 
     process = subprocess.Popen(["dotnet", str(SERVER_DLL), "--scenario-file", str(SCENARIO_24X16), "--environment", "tactical-v3"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
