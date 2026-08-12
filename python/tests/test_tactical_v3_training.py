@@ -652,3 +652,53 @@ def test_epoch_metrics_are_exact_immutable_plain_float_maps() -> None:
         metric.train["policy"] = 0.0  # type: ignore[index]
     with pytest.raises(TypeError):
         metric.validation["policy"] = 0.0  # type: ignore[index]
+
+
+def test_sub_tolerance_validation_improvement_does_not_replace_best_epoch() -> None:
+    case = make_trainer_case(max_epochs=2, patience_epochs=1)
+    script = ((1e-13,), (0.0,))
+    states: dict[int, str] = {}
+    observed: list[tuple[int, int, int]] = []
+    original = training._validation_batch_losses
+    training._validation_batch_losses = scripted_validation_batch_losses(
+        script, states, observed,
+    )
+    try:
+        result = run_training_case(case)
+    finally:
+        training._validation_batch_losses = original
+
+    assert tuple(metric.improved for metric in result.history) == (True, False)
+    assert tuple(metric.epoch for metric in result.history) == (0, 1)
+    assert result.best_epoch == 0
+    assert result.stopped_early is True
+    assert state_dict_sha256(result.model.state_dict()) == states[0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_snapshot_state_is_detached_cpu_clone_independent_of_cuda_model() -> None:
+    model = TacticalV3Policy(TacticalV3ModelConfig()).to("cuda:0")
+    snapshot = training._snapshot_state(model)
+    name, source = next(iter(model.state_dict().items()))
+    copied = snapshot[name]
+
+    assert copied.device.type == "cpu"
+    assert copied.requires_grad is False
+    before = copied.clone()
+    with torch.no_grad():
+        source.reshape(-1)[0].add_(1.0)
+    assert torch.equal(copied, before)
+
+
+def test_restore_state_rejects_missing_and_unexpected_keys() -> None:
+    model = TacticalV3Policy(TacticalV3ModelConfig())
+    state = dict(training._snapshot_state(model))
+    missing = dict(state)
+    missing.pop(next(iter(missing)))
+    with pytest.raises(RuntimeError, match="Missing key"):
+        training._restore_state(model, missing, torch.device("cpu"))
+
+    unexpected = dict(state)
+    unexpected["unexpected"] = next(iter(state.values())).clone()
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        training._restore_state(model, unexpected, torch.device("cpu"))
