@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -53,19 +54,32 @@ def test_tactical_identity_is_rejected_for_authenticated_duel_corpus() -> None:
         load_corpus(FIXTURE, identity)
 
 
-@pytest.mark.parametrize("mutation", ("encoding_payload", "contract_hash"))
-def test_tampered_duel_identity_is_rejected_by_parse_or_load(mutation: str) -> None:
+def test_tampered_duel_encoding_payload_is_rejected_by_parser() -> None:
     payload = json.loads(DUEL_SPACES_FIXTURE.read_text(encoding="utf-8"))
     tampered = deepcopy(payload)
-    if mutation == "encoding_payload":
-        tampered["encoding"]["schema_version"] = 2
-        with pytest.raises(ValueError, match="encoding_hash does not match encoding"):
-            parse_spaces(tampered)
-    else:
-        tampered["contract_hash"] = "0" * 64
-        identity = parse_spaces(tampered)
-        with pytest.raises(ValueError, match="manifest contract_hash"):
-            load_corpus(FIXTURE, identity)
+    tampered["encoding"]["schema_version"] = 2
+    with pytest.raises(ValueError, match="encoding_hash does not match encoding"):
+        parse_spaces(tampered)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("scenario_id", "wrong-scenario"),
+        ("contract_hash", "0" * 64),
+        ("encoding_hash", "0" * 64),
+        ("capacity_hash", "0" * 64),
+        ("environment_kind", "tactical"),
+    ),
+)
+def test_each_tampered_duel_identity_field_is_rejected_by_loader(
+    field: str, value: str,
+) -> None:
+    identity = parse_spaces(json.loads(DUEL_SPACES_FIXTURE.read_text(encoding="utf-8")))
+    tampered = replace(identity, **{field: value})
+    with pytest.raises(ValueError, match=f"manifest {field}"):
+        load_corpus(FIXTURE, tampered)
+
 
 
 def _sha256(path: Path) -> str:
