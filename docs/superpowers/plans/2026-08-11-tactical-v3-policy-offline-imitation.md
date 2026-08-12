@@ -1720,13 +1720,41 @@ git commit -m "feat: add tactical-v3 imitation objectives"
 ```python
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+
+import torch
 
 from ml_lab.tactical_v3_corpus import StructuredExample
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import TacticalV3Policy
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
+
+
+def _canonical_device(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("device must be a built-in str")
+    if value == "cpu":
+        return "cpu"
+    match = re.fullmatch(r"cuda(?::([0-9]+))?", value)
+    if match is None:
+        raise ValueError(
+            "device must be exactly cpu, cuda, or cuda:<nonnegative decimal index>"
+        )
+    if not torch.cuda.is_available():
+        raise ValueError("device requests CUDA but CUDA is unavailable")
+    index = (
+        torch.cuda.current_device()
+        if match.group(1) is None
+        else int(match.group(1))
+    )
+    if index < 0 or index >= torch.cuda.device_count():
+        raise ValueError(f"device CUDA index {index} is unavailable")
+    return f"cuda:{index}"
+
+
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
     seed: int = 227
@@ -1737,6 +1765,22 @@ class TrainerConfig:
     gradient_clip_norm: float = 1.0
     device: str = "cpu"
 
+    def __post_init__(self) -> None:
+        for name in ("seed", "batch_size", "max_epochs", "patience_epochs"):
+            value = getattr(self, name)
+            minimum = 0 if name == "seed" else 1
+            if type(value) is not int or value < minimum:
+                qualifier = "nonnegative" if name == "seed" else "positive"
+                raise ValueError(f"{name} must be a {qualifier} built-in int")
+        for name in ("learning_rate", "gradient_clip_norm"):
+            value = getattr(self, name)
+            if type(value) is not float or not math.isfinite(value) or value <= 0.0:
+                raise ValueError(
+                    f"{name} must be a finite positive built-in float"
+                )
+        object.__setattr__(self, "device", _canonical_device(self.device))
+
+
 @dataclass(frozen=True, slots=True)
 class EpochMetrics:
     epoch: int
@@ -1744,6 +1788,7 @@ class EpochMetrics:
     validation: Mapping[str, float]
     validation_policy_nll: float
     improved: bool
+
 
 @dataclass(frozen=True, slots=True)
 class TrainingResult:
@@ -1753,10 +1798,24 @@ class TrainingResult:
     stopped_early: bool
     history: tuple
 
-train_offline: Callable[
-    [tuple, tuple, TacticalV3ModelConfig, ObjectiveConfig, TrainerConfig],
-    TrainingResult,
-]
+
+def train_offline(
+    train_examples: tuple,
+    validation_examples: tuple,
+    model_config: TacticalV3ModelConfig,
+    objective_config: ObjectiveConfig,
+    trainer_config: TrainerConfig,
+) -> TrainingResult:
+    del (
+        train_examples,
+        validation_examples,
+        model_config,
+        objective_config,
+        trainer_config,
+    )
+    raise NotImplementedError(
+        "RED interface sentinel: Task 8 Step 3 replaces this body with the exact loop"
+    )
 
 def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]:
     if type(example) is not StructuredExample:
@@ -1922,7 +1981,7 @@ def _evaluate_validation(
     return metrics, metrics["policy"]
 ```
 
-`TrainerConfig.__post_init__` accepts seed `0`; `seed` is otherwise a nonnegative built-in `int`, and `batch_size`, `max_epochs`, and `patience_epochs` are positive built-in `int`s. `learning_rate` and `gradient_clip_norm` are finite positive built-in `float`s. The device is a built-in string matching exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`; CUDA availability and the requested index are checked in `__post_init__`. Every field rejects bool, Tensor, NumPy scalar, and the wrong built-in numeric/string class. The exact invalid matrix below is normative.
+`TrainerConfig.__post_init__` accepts seed `0`; `seed` is otherwise a nonnegative built-in `int`, and `batch_size`, `max_epochs`, and `patience_epochs` are positive built-in `int`s. `learning_rate` and `gradient_clip_norm` are finite positive built-in `float`s. Device input is exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`. After checking availability, bare `cuda` resolves through `torch.cuda.current_device()` and is stored as canonical `cuda:<current-index>`; explicit CUDA indices are range-checked and stored indexed. Downstream helpers receive `torch.device(trainer_config.device)`, avoiding comparisons between unindexed `cuda` and indexed tensor devices. Every field rejects bool, Tensor, NumPy scalar, and the wrong built-in numeric/string class. The invalid matrix below is normative.
 
 Before seeding or model construction, reject empty splits, duplicate canonical keys within either split, and equal keys across splits. Sort both immutable tuples by `_canonical_example_key`; one private CPU `torch.Generator`, seeded once with `TrainerConfig.seed`, produces exactly one `torch.randperm` per train epoch. Collate each selected slice in that order. Validation receives the sorted validation tuple in canonical contiguous batches and never consumes the generator. SHA-256 identities are trace labels only, never ordering or overlap keys.
 
@@ -2294,6 +2353,10 @@ def test_seed_zero_is_the_only_nonpositive_integer_exception() -> None:
     assert TrainerConfig(seed=0).seed == 0
 
 
+def test_public_train_offline_interface_binds_a_callable() -> None:
+    assert train_offline is training.train_offline
+    assert callable(train_offline)
+
 @pytest.mark.parametrize(("field", "value"), CONFIG_INVALID_CASES)
 def test_every_config_field_rejects_its_invalid_type_and_domain_matrix(
     field: str, value: object,
@@ -2302,7 +2365,7 @@ def test_every_config_field_rejects_its_invalid_type_and_domain_matrix(
         TrainerConfig(**{field: value})
 
 
-def test_cuda_device_availability_and_index_are_checked_exactly(
+def test_cuda_device_availability_index_and_bare_normalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -2313,8 +2376,13 @@ def test_cuda_device_availability_and_index_are_checked_exactly(
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    assert TrainerConfig(device="cuda").device == "cuda"
-    assert TrainerConfig(device="cuda:1").device == "cuda:1"
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    bare = TrainerConfig(device="cuda")
+    assert bare.device == "cuda:1"
+    assert torch.device(bare.device) == torch.device("cuda:1")
+    explicit = TrainerConfig(device="cuda:0")
+    assert explicit.device == "cuda:0"
+    assert torch.device(explicit.device) == torch.device("cuda:0")
     with pytest.raises(ValueError, match="device.*index 2.*unavailable"):
         TrainerConfig(device="cuda:2")
 
@@ -2363,11 +2431,19 @@ def test_recursive_mapping_proxy_transfer_preserves_every_tensor_and_dtype() -> 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_cuda_training_transfer_outputs_parameters_and_selection_are_cuda() -> None:
-    device = torch.device("cuda:0")
+@pytest.mark.parametrize("requested", ("cuda", "cuda:0"))
+def test_cuda_training_uses_canonical_index_for_all_tensors_and_selection(
+    requested: str,
+) -> None:
+    expected_index = torch.cuda.current_device() if requested == "cuda" else 0
+    canonical = f"cuda:{expected_index}"
     case = make_trainer_case(
-        device="cuda:0", max_epochs=1, patience_epochs=1
+        device=requested, max_epochs=1, patience_epochs=1
     )
+    assert case.trainer_config.device == canonical
+    device = torch.device(case.trainer_config.device)
+    assert device == torch.device(canonical)
+    assert device.type == "cuda" and device.index == expected_index
     result = run_training_case(case)
     source = mapping_proxy_batch(collate_examples(
         case.validation[:1], case.model_config.horizon_turns
@@ -2395,8 +2471,6 @@ def test_cuda_training_transfer_outputs_parameters_and_selection_are_cuda() -> N
         ).flatten()
     }
     assert (selected.decision_id, selected.candidate_id) in legal
-
-
 def test_reversed_inputs_preserve_history_state_logits_actions_and_trace() -> None:
     case = make_trainer_case(max_epochs=2, patience_epochs=2)
     left_trace = TrainingTrace()
