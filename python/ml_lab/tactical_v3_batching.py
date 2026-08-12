@@ -1175,9 +1175,12 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
     for sample in range(batch_size):
         valid = candidate_mask[sample]
         ids = candidates.candidate_id[sample, valid]
-        if torch.unique(ids).numel() != ids.numel():
+        expected_ids = torch.arange(
+            ids.numel(), dtype=torch.int64, device=device
+        )
+        if not torch.equal(ids, expected_ids):
             raise ValueError(
-                "candidate identity must be unique within a sample"
+                "candidate_id active values must be canonical dense row indices"
             )
         decisions = candidates.decision_id[sample, valid]
         if not bool((decisions == decisions[0]).all()):
@@ -1318,15 +1321,6 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
         raise ValueError("horizon_targets must be finite")
     if not bool(torch.isfinite(batch.remaining_turns).all()):
         raise ValueError("batch.remaining_turns must be finite")
-    if bool(((horizon_targets != 0) & (horizon_targets != 1)).any()):
-        raise ValueError("horizon_targets must be binary")
-    if bool(
-        (
-            batch.remaining_turns_mask
-            & (batch.remaining_turns <= 0)
-        ).any()
-    ):
-        raise ValueError("remaining_turns targets must be positive")
 
     teacher = batch.teacher_candidate_index
     outcome = batch.terminal_outcome
@@ -1338,7 +1332,22 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
                 "target-free sentinels require teacher_candidate_index=-1 "
                 "and terminal_outcome=-1 for every sample"
             )
+        if (
+            bool(horizon_targets.any())
+            or bool(horizon_mask.any())
+            or bool(batch.remaining_turns.any())
+            or bool(batch.remaining_turns_mask.any())
+        ):
+            raise ValueError(
+                "target-free auxiliary targets must be zero with all masks false"
+            )
     else:
+        if bool(((horizon_targets != 0) & (horizon_targets != 1)).any()):
+            raise ValueError("horizon_targets must be binary")
+        if bool(
+            (batch.remaining_turns_mask & (batch.remaining_turns <= 0)).any()
+        ):
+            raise ValueError("remaining_turns targets must be positive")
         if bool(
             ((teacher < 0) | (teacher >= candidate_count)).any()
         ):

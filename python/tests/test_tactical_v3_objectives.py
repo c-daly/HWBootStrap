@@ -658,3 +658,36 @@ def test_complete_ragged_batch_contract_rejects_mixed_target_free_sentinels() ->
     teacher[0] = -1
     with pytest.raises(ValueError, match="teacher_candidate_index|target-free"):
         structured_imitation_loss(output, replace(batch, teacher_candidate_index=teacher), ObjectiveConfig())
+
+
+def test_complete_ragged_batch_contract_requires_dense_active_candidate_ids() -> None:
+    output, batch = make_objective_case()
+    candidate_id = batch.candidates.candidate_id.clone()
+    candidate_id[0, 1] = 2
+    bad = replace(
+        batch, candidates=replace(batch.candidates, candidate_id=candidate_id)
+    )
+    with pytest.raises(ValueError, match="candidate_id.*canonical|dense"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "horizon_targets",
+        "horizon_target_mask",
+        "remaining_turns",
+        "remaining_turns_mask",
+    ),
+)
+def test_target_free_batch_requires_zero_values_and_false_auxiliary_masks(
+    field: str,
+) -> None:
+    examples = objective_examples()
+    batch = collate_decisions(
+        tuple(example.decision for example in examples), horizons=(4, 8, 16)
+    )
+    value = getattr(batch, field).clone()
+    value.reshape(-1)[0] = True if value.dtype == torch.bool else 1.0
+    with pytest.raises(ValueError, match="target-free.*auxiliary"):
+        validate_ragged_batch(replace(batch, **{field: value}))
