@@ -21,28 +21,24 @@ class ObjectiveConfig:
     remaining_turns_coefficient: float = 0.1
 
     def __post_init__(self) -> None:
+        if type(self.policy_coefficient) is not float or not math.isfinite(self.policy_coefficient) or self.policy_coefficient != 1.0:
+            raise ValueError("policy_coefficient must be the exact built-in float 1.0")
         fields = (
-            "policy_coefficient",
             "outcome_coefficient",
             "horizon_coefficient",
             "remaining_turns_coefficient",
         )
         for field in fields:
             value = getattr(self, field)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"{field} must be a finite nonnegative number")
-            value = float(value)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{field} must be finite and nonnegative")
-        if self.policy_coefficient <= 0:
-            raise ValueError("policy_coefficient must be strictly positive")
+            if type(value) is not float or not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{field} must be a finite nonnegative built-in float")
         auxiliary = (
             self.outcome_coefficient
             + self.horizon_coefficient
             + self.remaining_turns_coefficient
         )
-        if auxiliary > self.policy_coefficient:
-            raise ValueError("auxiliary coefficient sum cannot exceed policy_coefficient")
+        if auxiliary > 0.5:
+            raise ValueError("auxiliary coefficient sum cannot exceed 0.5")
 
 
 @dataclass(frozen=True, slots=True)

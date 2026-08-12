@@ -204,7 +204,7 @@ def test_default_auxiliary_coefficient_sum_is_within_policy_coefficient() -> Non
     default = ObjectiveConfig()
     assert (default.outcome_coefficient + default.horizon_coefficient
             + default.remaining_turns_coefficient) == pytest.approx(0.5)
-    assert 0.5 <= default.policy_coefficient
+    assert default.policy_coefficient == 1.0
 
 
 @pytest.mark.parametrize("field", ("policy_coefficient", "outcome_coefficient", "horizon_coefficient", "remaining_turns_coefficient"))
@@ -440,3 +440,34 @@ def test_direct_target_masks_and_indices_require_batch_device(field: str) -> Non
     bad = replace(batch, **{field: getattr(batch, field).to(device="meta")})
     with pytest.raises(ValueError, match=rf"{field} must be on the candidate mask device"):
         structured_imitation_loss(output, bad, ObjectiveConfig())
+
+@pytest.mark.parametrize("value", (0.5, 1.1, 1, True, torch.tensor(1.0)))
+def test_policy_coefficient_must_be_exact_builtin_float_one(value: object) -> None:
+    with pytest.raises(ValueError, match="policy_coefficient"):
+        ObjectiveConfig(policy_coefficient=value)  # type: ignore[arg-type]
+
+
+def test_policy_coefficient_rejects_numpy_scalar() -> None:
+    np = pytest.importorskip("numpy")
+    with pytest.raises(ValueError, match="policy_coefficient"):
+        ObjectiveConfig(policy_coefficient=np.float64(1.0))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ("outcome_coefficient", "horizon_coefficient", "remaining_turns_coefficient"))
+@pytest.mark.parametrize("value", (True, 1, torch.tensor(0.1)))
+def test_auxiliary_coefficients_require_exact_builtin_float(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match=field):
+        ObjectiveConfig(**{field: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ("outcome_coefficient", "horizon_coefficient", "remaining_turns_coefficient"))
+def test_auxiliary_coefficients_reject_numpy_scalars(field: str) -> None:
+    np = pytest.importorskip("numpy")
+    with pytest.raises(ValueError, match=field):
+        ObjectiveConfig(**{field: np.float64(0.1)})  # type: ignore[arg-type]
+
+
+def test_auxiliary_coefficient_sum_is_capped_at_exactly_one_half() -> None:
+    ObjectiveConfig(outcome_coefficient=0.2, horizon_coefficient=0.2, remaining_turns_coefficient=0.1)
+    with pytest.raises(ValueError, match="auxiliary coefficient sum"):
+        ObjectiveConfig(outcome_coefficient=0.2, horizon_coefficient=0.2, remaining_turns_coefficient=0.1000000000000001)
