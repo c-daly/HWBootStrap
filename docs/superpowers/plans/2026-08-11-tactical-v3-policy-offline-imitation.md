@@ -1166,6 +1166,7 @@ class CandidateIdentity:
 class TacticalV3Policy(nn.Module):
     config: TacticalV3ModelConfig
 
+    def __init__(self, config: TacticalV3ModelConfig) -> None: ...
     def forward(self, batch: RaggedBatch) -> PolicyOutput: ...
 
     @torch.inference_mode()
@@ -1175,6 +1176,18 @@ class TacticalV3Policy(nn.Module):
 - [ ] **Step 1: Write failing policy tests**
 
 ```python
+def test_policy_output_shapes_and_finiteness() -> None:
+    case = make_policy_case(candidate_counts=(1, 3, 19), seed=47)
+    output = case.policy(case.batch)
+    assert output.candidate_logits.shape == (3, 19)
+    assert output.outcome_logits.shape == (3, 3)
+    assert output.horizon_logits.shape == (3, 3)
+    assert output.remaining_turns.shape == (3,)
+    assert torch.isfinite(output.candidate_logits[case.batch.candidates.mask]).all()
+    assert torch.isneginf(output.candidate_logits[~case.batch.candidates.mask]).all()
+    for name in ("outcome_logits", "horizon_logits", "remaining_turns"):
+        assert torch.isfinite(getattr(output, name)).all(), name
+
 def test_candidate_permutation_permutes_logits_and_preserves_identity_selection() -> None:
     case = make_policy_case(candidate_counts=(1, 3, 19), seed=53)
     permuted, inverse = permute_candidate_rows(case.batch, seed=59)
@@ -1195,14 +1208,15 @@ def test_candidate_padding_cannot_change_valid_logits_or_argmax() -> None:
         rtol=0.0,
         atol=0.0,
     )
+    assert_auxiliary_heads_equal(actual, expected, atol=0.0)
     assert case.policy.select(padded) == case.policy.select(case.batch)
 
-def test_batching_beside_24x16_cannot_change_13x9_logits_or_action() -> None:
+def test_batch_shape_padding_beside_synthetic_384_cell_state_is_invariant() -> None:
     example = canonical_model_example()
-    large = expand_cells(example, total_cells=384)
+    synthetic_large = expand_synthetic_cells_for_batch_shape(example, total_cells=384)
     policy = seeded_policy(seed=67)
     single = collate_examples((example,), horizons=policy.config.horizon_turns)
-    mixed = collate_examples((example, large), horizons=policy.config.horizon_turns)
+    mixed = collate_examples((example, synthetic_large), horizons=policy.config.horizon_turns)
     expected = policy(single)
     actual = policy(mixed)
     torch.testing.assert_close(
@@ -1211,6 +1225,10 @@ def test_batching_beside_24x16_cannot_change_13x9_logits_or_action() -> None:
         rtol=0.0,
         atol=1e-6,
     )
+    for name in ("outcome_logits", "horizon_logits", "remaining_turns"):
+        torch.testing.assert_close(
+            getattr(actual, name)[0], getattr(expected, name)[0], rtol=0.0, atol=1e-6
+        )
     assert policy.select(mixed)[0] == policy.select(single)[0]
 
 def test_softmax_probability_is_zero_on_padding_and_sums_to_one_on_valid_rows() -> None:
@@ -1221,14 +1239,16 @@ def test_softmax_probability_is_zero_on_padding_and_sums_to_one_on_valid_rows() 
     torch.testing.assert_close(probabilities.sum(dim=1), torch.ones(3),
                                rtol=0.0, atol=1e-7)
 
-def test_state_table_permutations_leave_candidate_logits_unchanged() -> None:
+def test_state_table_permutations_leave_policy_output_unchanged() -> None:
     case = make_policy_case(candidate_counts=(19,), seed=73)
-    expected = case.policy(case.batch).candidate_logits
+    expected = case.policy(case.batch)
     for table in ("cells", "units", "templates", "capability_definitions",
-                  "capability_allocations", "rules", "relations"):
+                  "capability_allocations", "rules", "memory", "relations"):
         permuted, _inverse = permute_model_table_and_remap(case.batch, table, seed=79)
-        torch.testing.assert_close(case.policy(permuted).candidate_logits, expected,
+        actual = case.policy(permuted)
+        torch.testing.assert_close(actual.candidate_logits, expected.candidate_logits,
                                    rtol=0.0, atol=1e-6)
+        assert_auxiliary_heads_equal(actual, expected, atol=1e-6)
 
 def test_projection_reference_changes_affect_only_the_referenced_candidate_path() -> None:
     case = make_reference_sensitive_policy_case(seed=83)
@@ -1246,31 +1266,80 @@ def test_all_masked_candidate_rows_raise_before_argmax() -> None:
     with pytest.raises(ValueError, match="sample 0 has no valid candidates"):
         case.policy.select(mask_all_candidates(case.batch))
 
-def test_nonfinite_logits_raise_before_selection() -> None:
+@pytest.mark.parametrize(
+    "field", ("candidate_logits", "outcome_logits", "horizon_logits", "remaining_turns")
+)
+def test_nonfinite_policy_output_raises_before_selection(field: str) -> None:
     case = make_policy_case(candidate_counts=(3,), seed=97)
-    handle = inject_nan_into_first_valid_score(case.policy)
+    handle = inject_nan_into_policy_output(case.policy, field)
     try:
-        with pytest.raises(FloatingPointError, match="candidate_logits"):
+        with pytest.raises(FloatingPointError, match=field):
             case.policy(case.batch)
     finally:
         handle.remove()
 
-def test_selected_candidate_is_an_exact_member_of_each_input_candidate_set() -> None:
+def test_selected_candidate_is_an_exact_member_of_each_constructed_candidate_set() -> None:
     case = make_policy_case(candidate_counts=(1, 3, 19), seed=101)
     force_equal_candidate_logits(case.policy)
     selections = case.policy.select(case.batch)
     for sample, selection in enumerate(selections):
-        legal = legal_identity_set(case.batch, sample)
-        assert (selection.decision_id, selection.candidate_id) in legal
-        assert selection.candidate_id == min(candidate_id for _, candidate_id in legal)
+        constructed = candidate_identity_set(case.batch, sample)
+        assert (selection.decision_id, selection.candidate_id) in constructed
+        assert selection.candidate_id == min(candidate_id for _, candidate_id in constructed)
 ```
 Helper contracts for this test file:
 
 ```python
 def canonical_model_example() -> StructuredExample: ...
-def make_policy_case(candidate_counts: tuple[int, ...], seed: int) -> PolicyTestCase: ...
-def seeded_policy(seed: int) -> TacticalV3Policy: ...
-def expand_cells(example: StructuredExample, total_cells: int) -> StructuredExample: ...
+
+@dataclass(frozen=True, slots=True)
+class PolicyTestCase:
+    policy: TacticalV3Policy
+    batch: RaggedBatch
+
+def make_cardinality_stress_example(
+    example: StructuredExample, candidate_count: int,
+) -> StructuredExample:
+    if candidate_count <= 0 or not example.decision.candidates:
+        raise ValueError("cardinality stress data requires positive count and a source candidate")
+    decision_id = example.decision.decision_id
+    source = example.decision.candidates
+    candidates = tuple(
+        dataclasses.replace(
+            source[index % len(source)], candidate_id=index, decision_id=decision_id
+        )
+        for index in range(candidate_count)
+    )
+    return dataclasses.replace(
+        example,
+        decision=dataclasses.replace(example.decision, candidates=candidates),
+        target=dataclasses.replace(example.target, teacher_candidate_id=0),
+    )
+
+def make_policy_case(candidate_counts: tuple[int, ...], seed: int) -> PolicyTestCase:
+    canonical = canonical_model_example()
+    examples = tuple(
+        make_cardinality_stress_example(canonical, count) for count in candidate_counts
+    )
+    policy = seeded_policy(seed)
+    batch = collate_examples(examples, horizons=policy.config.horizon_turns)
+    return PolicyTestCase(policy=policy, batch=batch)
+
+def seeded_policy(seed: int) -> TacticalV3Policy:
+    torch.manual_seed(seed)
+    return TacticalV3Policy(TacticalV3ModelConfig()).cpu().eval()
+
+def assert_auxiliary_heads_equal(
+    actual: PolicyOutput, expected: PolicyOutput, atol: float,
+) -> None:
+    for name in ("outcome_logits", "horizon_logits", "remaining_turns"):
+        torch.testing.assert_close(
+            getattr(actual, name), getattr(expected, name), rtol=0.0, atol=atol
+        )
+
+def expand_synthetic_cells_for_batch_shape(
+    example: StructuredExample, total_cells: int,
+) -> StructuredExample: ...
 def permute_candidate_rows(batch: RaggedBatch, seed: int) -> tuple[RaggedBatch, tuple[Tensor, ...]]: ...
 def restore_candidate_rows(logits: Tensor, inverse: tuple[Tensor, ...]) -> Tensor: ...
 def append_candidate_padding(batch: RaggedBatch, rows: int, fill: float) -> RaggedBatch: ...
@@ -1279,12 +1348,19 @@ def make_reference_sensitive_policy_case(seed: int) -> PolicyTestCase: ...
 def movable_projection_case(batch: RaggedBatch) -> tuple[int, int]: ...
 def retarget_projection(batch: RaggedBatch, candidate_row: int, cell_row: int) -> RaggedBatch: ...
 def mask_all_candidates(batch: RaggedBatch) -> RaggedBatch: ...
-def inject_nan_into_first_valid_score(policy: TacticalV3Policy) -> RemovableHandle: ...
+def inject_nan_into_policy_output(
+    policy: TacticalV3Policy,
+    field: Literal["candidate_logits", "outcome_logits", "horizon_logits", "remaining_turns"],
+) -> RemovableHandle: ...
 def force_equal_candidate_logits(policy: TacticalV3Policy) -> None: ...
-def legal_identity_set(batch: RaggedBatch, sample: int) -> set[tuple[int, int]]: ...
+def candidate_identity_set(batch: RaggedBatch, sample: int) -> set[tuple[int, int]]: ...
 ```
 
-The canonical loader uses the immutable seed-41 example. `make_policy_case` clones it once per requested count, keeps candidates `0..count-1`, selects candidate zero as the valid target, collates the samples, and returns one CPU eval-mode policy created after `torch.manual_seed(seed)`. `expand_cells` appends unreferenced, visible=false plains cells with unique `(1000+i,-1000-i)` coordinates until the exact requested total; all original tokens/candidates remain unchanged. Candidate/table permutation helpers use private seeded generators, remap every dependent reference, and return inverse row orders. Padding adds only false-masked rows. The reference-sensitive case sets the projection-destination coordinate path and final scorer weight to one and other scorer weights to zero; `movable_projection_case` returns the first move plus a different valid cell. The NaN helper installs a removable forward hook on the scorer's last linear layer and changes only the first valid score. Equal-logit setup zeros that layer's weight and bias. `legal_identity_set` reads only true-masked rows and returns their exact integer decision/candidate pairs.
+The canonical loader uses the immutable seed-41 example. `make_cardinality_stress_example` cycles/copies its already validated candidate payloads, changes only `candidate_id` and `decision_id`, assigns exact contiguous IDs `0..count-1`, and preserves every actor/target/template/cell/projection reference. These are test-only cardinality stress rows, not claims that the engine emitted 1, 3, or 19 distinct legal actions. `make_policy_case` selects constructed candidate zero as the target, collates the constructed examples, and returns one CPU eval-mode policy created after `torch.manual_seed(seed)`.
+
+`expand_synthetic_cells_for_batch_shape` appends unreferenced, `currently_visible=False` plains cells with unique `(1000+i, -1000-i)` coordinates until the exact requested total; all original tokens/candidates remain unchanged. It tests ragged batch shape and padding only and is not a real 24x16 match; Task 13 owns real cross-size legality. Candidate/table permutation helpers use private seeded generators, remap every dependent reference including Task 4 neighbor tensors, and return inverse row orders. Padding adds only false-masked rows. The reference-sensitive case sets the projection-destination coordinate path and final scorer weight to one and other scorer weights to zero; `movable_projection_case` returns the first move plus a different valid cell.
+
+`inject_nan_into_policy_output` maps each field to the final module that produces it (`candidate_scorer`, `outcome_head`, `horizon_head`, or `remaining_turns_head`), installs a removable forward hook that clones the tensor and replaces its first valid scalar with NaN, and returns the handle. Equal-logit setup zeros the candidate scorer's final weight and bias. `candidate_identity_set` reads only true-masked rows from the constructed batch and returns their exact integer decision/candidate pairs.
 
 Use a deterministic tie and require the smallest `candidate_id`, not the first padded row, as the tie-break. Exercise candidate counts 1, 3, and 19 in one batch; no constructor argument may encode a maximum action count.
 
@@ -1298,7 +1374,7 @@ Expected: collection fails because `tactical_v3_model` is absent.
 
 - [ ] **Step 3: Implement state and candidate projection paths**
 
-Pool each typed table with mask-aware mean plus max, concatenate per-table summaries with match/start-profile scalars, and project to a shared state vector. Build each candidate from its kind/scalars; gathered source/target unit, cell, allocation, definition, and tile embeddings; typed projection edge/value embeddings; and explicit presence bits for every optional reference. Use one candidate MLP for all kinds and rows. Do not flatten tables or candidate axes into model parameters.
+Pool only the encoded typed state-table regions in `batch.table_slices` with mask-aware mean plus max, concatenate those table summaries, and project them to a shared state vector. Rules, cells, and units already represent current match state; do not add match, semantic-identity, or start-profile metadata to `RaggedBatch`. Exact identity/profile compatibility remains external in the checkpoint and controller tasks. Build each candidate from its kind/scalars; gathered source/target unit, cell, allocation, definition, and tile embeddings; typed projection edge/value embeddings; and explicit presence bits for every optional reference. Use one candidate MLP for all kinds and rows. Do not flatten tables or candidate axes into model parameters.
 
 - [ ] **Step 4: Implement scoring, heads, and selection**
 
