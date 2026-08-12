@@ -4,6 +4,7 @@ import dataclasses
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 import pytest
@@ -14,8 +15,10 @@ import torch.nn.functional as F
 from ml_lab.tactical_v3_batching import (
     CandidateBatch,
     RaggedBatch,
+    TABLE_ORDER,
     collate_decisions,
     collate_examples,
+    validate_ragged_batch,
 )
 from ml_lab.tactical_v3_corpus import StructuredExample, load_corpus
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
@@ -471,3 +474,187 @@ def test_auxiliary_coefficient_sum_is_capped_at_exactly_one_half() -> None:
     ObjectiveConfig(outcome_coefficient=0.2, horizon_coefficient=0.2, remaining_turns_coefficient=0.1)
     with pytest.raises(ValueError, match="auxiliary coefficient sum"):
         ObjectiveConfig(outcome_coefficient=0.2, horizon_coefficient=0.2, remaining_turns_coefficient=0.1000000000000001)
+
+
+def test_valid_canonical_ragged_batch_control() -> None:
+    output, batch = make_objective_case()
+    actual = structured_imitation_loss(output, batch, ObjectiveConfig())
+    assert torch.isfinite(actual.total)
+
+
+def test_valid_target_free_ragged_batch_control() -> None:
+    examples = objective_examples()
+    batch = collate_decisions(
+        tuple(example.decision for example in examples), horizons=(4, 8, 16)
+    )
+    validate_ragged_batch(batch)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "tables",
+        "table_slices",
+        "neighbor_index",
+        "neighbor_mask",
+        "neighborhood_source",
+        "neighborhood_kind",
+        "neighborhood_mask",
+    ),
+)
+def test_complete_ragged_batch_contract_rejects_topology_mutations(
+    mutation: str,
+) -> None:
+    output, batch = make_objective_case()
+    if mutation == "tables":
+        bad = replace(batch, tables={})
+    elif mutation == "table_slices":
+        slices = dict(batch.table_slices)
+        slices["cells"] = slice(slices["cells"].start + 1, slices["cells"].stop)
+        bad = replace(batch, table_slices=slices)
+    elif mutation == "neighbor_index":
+        value = batch.cell_neighbor_index.clone()
+        value[0, 0, 0] = batch.node_mask.shape[1]
+        bad = replace(batch, cell_neighbor_index=value)
+    elif mutation == "neighbor_mask":
+        bad = replace(
+            batch, cell_neighbor_mask=batch.cell_neighbor_mask.to(dtype=torch.int64)
+        )
+    elif mutation == "neighborhood_source":
+        value = batch.neighborhoods.source_index.clone()
+        value[0, 0, 0] = batch.node_mask.shape[1]
+        bad = replace(
+            batch, neighborhoods=replace(batch.neighborhoods, source_index=value)
+        )
+    elif mutation == "neighborhood_kind":
+        value = batch.neighborhoods.kind.clone()
+        value[0, 0, 0] = 14
+        bad = replace(batch, neighborhoods=replace(batch.neighborhoods, kind=value))
+    else:
+        bad = replace(
+            batch,
+            neighborhoods=replace(
+                batch.neighborhoods,
+                mask=batch.neighborhoods.mask.to(dtype=torch.int64),
+            ),
+        )
+    with pytest.raises(
+        ValueError, match="ragged batch|table|slice|neighbor|neighborhood"
+    ):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "table_key_order",
+        "table_tensor_dtype",
+        "table_mapping",
+        "table_category_range",
+        "table_mask_gap",
+        "node_mask_device",
+        "neighbor_self",
+        "neighbor_mask_gap",
+        "neighborhood_integer_range",
+        "neighborhood_mask_gap",
+        "candidate_mask_gap",
+        "candidate_reference_family",
+        "candidate_reference_mask",
+    ),
+)
+def test_complete_ragged_batch_contract_rejects_adversarial_canonical_mutations(
+    mutation: str,
+) -> None:
+    output, batch = make_objective_case()
+    if mutation == "table_key_order":
+        bad = replace(
+            batch,
+            tables=MappingProxyType(
+                {name: batch.tables[name] for name in reversed(TABLE_ORDER)}
+            ),
+        )
+    elif mutation == "table_tensor_dtype":
+        tables = dict(batch.tables)
+        tables["cells"] = replace(
+            tables["cells"], numeric=tables["cells"].numeric.to(torch.float64)
+        )
+        bad = replace(batch, tables=MappingProxyType(tables))
+    elif mutation == "table_mapping":
+        tables = dict(batch.tables)
+        tables["cells"] = replace(
+            tables["cells"], categorical=dict(tables["cells"].categorical)
+        )
+        bad = replace(batch, tables=MappingProxyType(tables))
+    elif mutation == "table_category_range":
+        tables = dict(batch.tables)
+        terrain = tables["cells"].categorical["terrain"].clone()
+        terrain[0, 0] = 4
+        categorical = dict(tables["cells"].categorical)
+        categorical["terrain"] = terrain
+        tables["cells"] = replace(
+            tables["cells"], categorical=MappingProxyType(categorical)
+        )
+        bad = replace(batch, tables=MappingProxyType(tables))
+    elif mutation == "table_mask_gap":
+        tables = dict(batch.tables)
+        mask = tables["rules"].mask.clone()
+        mask[0, 0] = False
+        tables["rules"] = replace(tables["rules"], mask=mask)
+        node_mask = batch.node_mask.clone()
+        node_mask[0, batch.table_slices["rules"].start] = False
+        bad = replace(batch, tables=MappingProxyType(tables), node_mask=node_mask)
+    elif mutation == "node_mask_device":
+        bad = replace(batch, node_mask=batch.node_mask.to("meta"))
+    elif mutation == "neighbor_self":
+        value = batch.cell_neighbor_index.clone()
+        value[0, 0, 0] = batch.table_slices["cells"].start
+        bad = replace(batch, cell_neighbor_index=value)
+    elif mutation == "neighbor_mask_gap":
+        mask = batch.cell_neighbor_mask.clone()
+        mask[0, 0, 0] = False
+        bad = replace(batch, cell_neighbor_mask=mask)
+    elif mutation == "neighborhood_integer_range":
+        value = batch.neighborhoods.int_feature.clone()
+        sample, destination, slot = batch.neighborhoods.mask.nonzero()[0].tolist()
+        value[sample, destination, slot] = 2**31
+        bad = replace(
+            batch, neighborhoods=replace(batch.neighborhoods, int_feature=value)
+        )
+    elif mutation == "neighborhood_mask_gap":
+        mask = batch.neighborhoods.mask.clone()
+        sample, destination = (mask.sum(dim=2) >= 2).nonzero()[0].tolist()
+        mask[sample, destination, 0] = False
+        bad = replace(batch, neighborhoods=replace(batch.neighborhoods, mask=mask))
+    elif mutation == "candidate_mask_gap":
+        mask = batch.candidates.mask.clone()
+        mask[0] = torch.tensor([True, False, True])
+        candidates = replace(batch.candidates, mask=mask)
+        logits = output.candidate_logits.detach().clone()
+        logits[0, 2] = 0.0
+        output = replace(output, candidate_logits=logits.requires_grad_(True))
+        bad = replace(batch, candidates=candidates)
+    elif mutation == "candidate_reference_family":
+        value = batch.candidates.reference_index.clone()
+        value[0, 0, 0] = batch.table_slices["cells"].start
+        bad = replace(
+            batch, candidates=replace(batch.candidates, reference_index=value)
+        )
+    else:
+        value = batch.candidates.reference_mask.clone()
+        value[0, 0, 0] = False
+        bad = replace(
+            batch, candidates=replace(batch.candidates, reference_mask=value)
+        )
+    with pytest.raises(
+        ValueError,
+        match="table|node_mask|neighbor|neighborhood|candidate|reference|cells|categorical|numeric|mask",
+    ):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+def test_complete_ragged_batch_contract_rejects_mixed_target_free_sentinels() -> None:
+    output, batch = make_objective_case()
+    teacher = batch.teacher_candidate_index.clone()
+    teacher[0] = -1
+    with pytest.raises(ValueError, match="teacher_candidate_index|target-free"):
+        structured_imitation_loss(output, replace(batch, teacher_candidate_index=teacher), ObjectiveConfig())

@@ -798,3 +798,559 @@ def collate_examples(
         remaining_turns=remaining_turns,
         remaining_turns_mask=remaining_mask,
     )
+
+
+def validate_ragged_batch(batch: RaggedBatch) -> None:
+    """Validate the complete immutable ragged tensor contract."""
+    if type(batch) is not RaggedBatch:
+        raise ValueError("batch must be RaggedBatch")
+
+    def require_tensor(value: object, name: str) -> torch.Tensor:
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"{name} must be a tensor")
+        return value
+
+    def require_exact(
+        value: torch.Tensor,
+        dtype: torch.dtype,
+        shape: tuple[int, ...],
+        name: str,
+        device: torch.device,
+    ) -> None:
+        if value.shape != shape:
+            raise ValueError(f"{name} shape must be {shape}")
+        if value.dtype != dtype:
+            raise ValueError(f"{name} dtype must be {dtype}")
+        if value.device != device:
+            raise ValueError(f"{name} must be on the candidate mask device")
+
+    if type(batch.tables) is not MappingProxyType or tuple(batch.tables) != TABLE_ORDER:
+        raise ValueError("ragged batch tables keys/order are invalid")
+    if (
+        type(batch.table_slices) is not MappingProxyType
+        or tuple(batch.table_slices) != TABLE_ORDER
+    ):
+        raise ValueError("ragged batch table_slices keys/order are invalid")
+
+    node_mask = require_tensor(batch.node_mask, "node_mask")
+    if node_mask.ndim != 2 or node_mask.shape[0] <= 0:
+        raise ValueError("node_mask shape must be [B, N]")
+    if node_mask.dtype != torch.bool:
+        raise ValueError("node_mask dtype must be torch.bool")
+    device = node_mask.device
+    batch_size, node_count = node_mask.shape
+
+    expected_start = 0
+    table_masks: list[torch.Tensor] = []
+    for table_name in TABLE_ORDER:
+        table_slice = batch.table_slices[table_name]
+        if (
+            type(table_slice) is not slice
+            or type(table_slice.start) is not int
+            or type(table_slice.stop) is not int
+            or table_slice.start != expected_start
+            or table_slice.stop < expected_start
+            or table_slice.step not in (None, 1)
+        ):
+            raise ValueError(f"{table_name} table slice is not contiguous")
+        width = table_slice.stop - table_slice.start
+        table = batch.tables[table_name]
+        if type(table) is not TokenTableBatch:
+            raise ValueError(f"tables[{table_name}] must be TokenTableBatch")
+
+        numeric = require_tensor(table.numeric, f"{table_name}.numeric")
+        require_exact(
+            numeric,
+            torch.float32,
+            (batch_size, width, len(TABLE_NUMERIC_FIELDS[table_name])),
+            f"{table_name}.numeric",
+            device,
+        )
+        if not bool(torch.isfinite(numeric).all()):
+            raise ValueError(f"{table_name}.numeric must be finite")
+
+        mask = require_tensor(table.mask, f"{table_name}.mask")
+        require_exact(
+            mask, torch.bool, (batch_size, width), f"{table_name}.mask", device
+        )
+        expected_mask = (
+            torch.arange(width, device=device).unsqueeze(0)
+            < mask.sum(dim=1, keepdim=True)
+        )
+        if not torch.equal(mask, expected_mask):
+            raise ValueError(
+                f"{table_name}.mask must select one contiguous row prefix"
+            )
+
+        if (
+            type(table.categorical) is not MappingProxyType
+            or tuple(table.categorical)
+            != TABLE_CATEGORICAL_FIELDS[table_name]
+        ):
+            raise ValueError(f"{table_name}.categorical keys/order are invalid")
+        for field in TABLE_CATEGORICAL_FIELDS[table_name]:
+            name = f"{table_name}.categorical.{field}"
+            value = require_tensor(table.categorical[field], name)
+            require_exact(value, torch.int64, (batch_size, width), name, device)
+            active = value[mask]
+            cardinality = TABLE_CATEGORICAL_CARDINALITIES[table_name][field]
+            if active.numel() and not bool(
+                ((active >= 0) & (active < cardinality)).all()
+            ):
+                raise ValueError(f"{name} active values are out of range")
+
+        if (
+            type(table.boolean) is not MappingProxyType
+            or tuple(table.boolean) != TABLE_BOOLEAN_FIELDS[table_name]
+        ):
+            raise ValueError(f"{table_name}.boolean keys/order are invalid")
+        for field in TABLE_BOOLEAN_FIELDS[table_name]:
+            name = f"{table_name}.boolean.{field}"
+            value = require_tensor(table.boolean[field], name)
+            require_exact(value, torch.bool, (batch_size, width), name, device)
+
+        table_masks.append(mask)
+        expected_start = table_slice.stop
+
+    if expected_start != node_count:
+        raise ValueError("table slices do not cover the global node count")
+    expected_nodes = torch.cat(table_masks, dim=1)
+    if not torch.equal(expected_nodes, node_mask):
+        raise ValueError("node_mask disagrees with table masks and slices")
+
+    cells = batch.table_slices["cells"]
+    cell_count = cells.stop - cells.start
+    neighbor_index = require_tensor(
+        batch.cell_neighbor_index, "cell_neighbor_index"
+    )
+    neighbor_mask = require_tensor(batch.cell_neighbor_mask, "cell_neighbor_mask")
+    require_exact(
+        neighbor_index,
+        torch.int64,
+        (batch_size, cell_count, 6),
+        "cell_neighbor_index",
+        device,
+    )
+    require_exact(
+        neighbor_mask,
+        torch.bool,
+        (batch_size, cell_count, 6),
+        "cell_neighbor_mask",
+        device,
+    )
+    expected_neighbor_mask = (
+        torch.arange(6, device=device).view(1, 1, 6)
+        < neighbor_mask.sum(dim=2, keepdim=True)
+    )
+    if not torch.equal(neighbor_mask, expected_neighbor_mask):
+        raise ValueError(
+            "cell_neighbor_mask must select one contiguous source prefix"
+        )
+    cell_mask = batch.tables["cells"].mask
+    if bool((neighbor_mask & ~cell_mask.unsqueeze(-1)).any()):
+        raise ValueError("padded cell destinations cannot have neighbors")
+    destinations = (
+        torch.arange(cell_count, device=device).view(1, cell_count, 1)
+        + cells.start
+    )
+    if bool((neighbor_mask & (neighbor_index == destinations)).any()):
+        raise ValueError("cell neighbor references cannot be self-neighbors")
+    active_neighbors = neighbor_index[neighbor_mask]
+    if active_neighbors.numel():
+        if not bool(
+            ((active_neighbors >= cells.start) & (active_neighbors < cells.stop)).all()
+        ):
+            raise ValueError(
+                "cell neighbor references are outside the cells table slice"
+            )
+        samples = (
+            torch.arange(batch_size, device=device)
+            .view(batch_size, 1, 1)
+            .expand_as(neighbor_index)[neighbor_mask]
+        )
+        if not bool(node_mask[samples, active_neighbors].all()):
+            raise ValueError(
+                "cell neighbor references do not select valid nodes"
+            )
+    for sample in range(batch_size):
+        for destination in range(cell_count):
+            values = neighbor_index[
+                sample, destination, neighbor_mask[sample, destination]
+            ]
+            if values.numel() > 1 and not bool((values[1:] > values[:-1]).all()):
+                raise ValueError(
+                    "cell neighbor references must be unique and sorted"
+                )
+
+    neighborhoods = batch.neighborhoods
+    if type(neighborhoods) is not RelationNeighborhoodBatch:
+        raise ValueError(
+            "batch.neighborhoods must be RelationNeighborhoodBatch"
+        )
+    source_index = require_tensor(
+        neighborhoods.source_index, "neighborhoods.source_index"
+    )
+    if (
+        source_index.ndim != 3
+        or source_index.shape[:2] != (batch_size, node_count)
+        or source_index.shape[2] <= 0
+    ):
+        raise ValueError("neighborhoods tensor shapes are invalid")
+    slots = source_index.shape[2]
+    neighborhood_contracts = (
+        (
+            neighborhoods.source_index,
+            torch.int64,
+            "neighborhoods.source_index",
+        ),
+        (neighborhoods.kind, torch.int64, "neighborhoods.kind"),
+        (
+            neighborhoods.int_feature,
+            torch.int64,
+            "neighborhoods.int_feature",
+        ),
+        (
+            neighborhoods.float_feature,
+            torch.float32,
+            "neighborhoods.float_feature",
+        ),
+        (
+            neighborhoods.bool_feature,
+            torch.bool,
+            "neighborhoods.bool_feature",
+        ),
+        (neighborhoods.mask, torch.bool, "neighborhoods.mask"),
+    )
+    shape = (batch_size, node_count, slots)
+    for value, dtype, name in neighborhood_contracts:
+        require_exact(require_tensor(value, name), dtype, shape, name, device)
+    if not bool(torch.isfinite(neighborhoods.float_feature).all()):
+        raise ValueError("neighborhoods.float_feature must be finite")
+
+    edge_mask = neighborhoods.mask
+    expected_edge_mask = (
+        torch.arange(slots, device=device).view(1, 1, slots)
+        < edge_mask.sum(dim=2, keepdim=True)
+    )
+    if not torch.equal(edge_mask, expected_edge_mask):
+        raise ValueError(
+            "neighborhoods.mask must select one contiguous incoming prefix"
+        )
+    active_sources = neighborhoods.source_index[edge_mask]
+    if active_sources.numel():
+        if not bool(
+            ((active_sources >= 0) & (active_sources < node_count)).all()
+        ):
+            raise ValueError("neighborhood source references are out of range")
+        samples = (
+            torch.arange(batch_size, device=device)
+            .view(batch_size, 1, 1)
+            .expand_as(neighborhoods.source_index)[edge_mask]
+        )
+        if not bool(node_mask[samples, active_sources].all()):
+            raise ValueError(
+                "neighborhood source references do not select valid nodes"
+            )
+    active_kinds = neighborhoods.kind[edge_mask]
+    if active_kinds.numel() and not bool(
+        ((active_kinds >= 0) & (active_kinds < RELATION_KIND_COUNT)).all()
+    ):
+        raise ValueError("neighborhood relation kinds are out of range")
+    active_integers = neighborhoods.int_feature[edge_mask]
+    if active_integers.numel() and not bool(
+        ((active_integers >= -(2**31)) & (active_integers < 2**31)).all()
+    ):
+        raise ValueError(
+            "neighborhood int_feature active values are out of int32 range"
+        )
+    destination_mask = edge_mask.any(dim=2)
+    if bool((destination_mask & ~node_mask).any()):
+        raise ValueError(
+            "neighborhood destinations do not select valid nodes"
+        )
+
+    candidates = batch.candidates
+    if type(candidates) is not CandidateBatch:
+        raise ValueError("batch.candidates must be CandidateBatch")
+    candidate_mask = require_tensor(candidates.mask, "candidates.mask")
+    if (
+        candidate_mask.ndim != 2
+        or candidate_mask.shape[0] != batch_size
+        or candidate_mask.shape[1] <= 0
+    ):
+        raise ValueError("candidates.mask shape must be [B, C]")
+    require_exact(
+        candidate_mask,
+        torch.bool,
+        tuple(candidate_mask.shape),
+        "candidates.mask",
+        device,
+    )
+    candidate_count = candidate_mask.shape[1]
+    candidate_id = require_tensor(candidates.candidate_id, "candidate_id")
+    if (
+        candidate_id.ndim == 2
+        and candidate_id.shape[0] == batch_size
+        and candidate_id.shape[1] != candidate_count
+    ):
+        peer_shapes = (
+            getattr(candidates.decision_id, "shape", None),
+            getattr(candidates.kind, "shape", None),
+            getattr(candidates.reference_index, "shape", None),
+            getattr(candidates.reference_mask, "shape", None),
+            getattr(candidates.projection_integer, "shape", None),
+            getattr(candidates.projection_boolean, "shape", None),
+        )
+        width = candidate_id.shape[1]
+        expected_peers = (
+            (batch_size, width),
+            (batch_size, width),
+            (batch_size, width, 8),
+            (batch_size, width, 8),
+            (batch_size, width, 7),
+            (batch_size, width, 2),
+        )
+        if peer_shapes == expected_peers:
+            raise ValueError(
+                "candidate mask shape must agree with candidate fields"
+            )
+    candidate_contracts = (
+        (candidate_id, torch.int64, (batch_size, candidate_count), "candidate_id"),
+        (
+            candidates.decision_id,
+            torch.int64,
+            (batch_size, candidate_count),
+            "decision_id",
+        ),
+        (
+            candidates.kind,
+            torch.int64,
+            (batch_size, candidate_count),
+            "kind",
+        ),
+        (
+            candidates.reference_index,
+            torch.int64,
+            (batch_size, candidate_count, 8),
+            "reference_index",
+        ),
+        (
+            candidates.reference_mask,
+            torch.bool,
+            (batch_size, candidate_count, 8),
+            "reference_mask",
+        ),
+        (
+            candidates.projection_integer,
+            torch.int64,
+            (batch_size, candidate_count, 7),
+            "projection_integer",
+        ),
+        (
+            candidates.projection_boolean,
+            torch.bool,
+            (batch_size, candidate_count, 2),
+            "projection_boolean",
+        ),
+    )
+    for value, dtype, shape, name in candidate_contracts:
+        require_exact(require_tensor(value, name), dtype, shape, name, device)
+
+    if not bool(candidate_mask.any(dim=1).all()):
+        raise ValueError("each candidate sample must contain a valid candidate")
+    expected_candidate_mask = (
+        torch.arange(candidate_count, device=device).unsqueeze(0)
+        < candidate_mask.sum(dim=1, keepdim=True)
+    )
+    if not torch.equal(candidate_mask, expected_candidate_mask):
+        raise ValueError(
+            "candidate mask must select one contiguous candidate prefix"
+        )
+
+    active_ids = candidates.candidate_id[candidate_mask]
+    if active_ids.numel() and not bool(
+        ((active_ids >= -(2**31)) & (active_ids < 2**31)).all()
+    ):
+        raise ValueError("candidate_id active values are out of int32 range")
+    for sample in range(batch_size):
+        valid = candidate_mask[sample]
+        ids = candidates.candidate_id[sample, valid]
+        if torch.unique(ids).numel() != ids.numel():
+            raise ValueError(
+                "candidate identity must be unique within a sample"
+            )
+        decisions = candidates.decision_id[sample, valid]
+        if not bool((decisions == decisions[0]).all()):
+            raise ValueError(
+                "candidate decision_id values must agree within a sample"
+            )
+
+    active_kinds = candidates.kind[candidate_mask]
+    if active_kinds.numel() and not bool(
+        ((active_kinds >= 0) & (active_kinds < len(_CANDIDATE_KINDS))).all()
+    ):
+        raise ValueError("candidate kinds are out of range")
+    active_integers = candidates.projection_integer[
+        candidate_mask.unsqueeze(-1).expand_as(candidates.projection_integer)
+    ]
+    if active_integers.numel() and not bool(
+        ((active_integers >= -(2**31)) & (active_integers < 2**31)).all()
+    ):
+        raise ValueError(
+            "projection_integer active values are out of int32 range"
+        )
+
+    active_reference_mask = (
+        candidates.reference_mask & candidate_mask.unsqueeze(-1)
+    )
+    active_references = candidates.reference_index[active_reference_mask]
+    if active_references.numel():
+        if not bool(
+            ((active_references >= 0) & (active_references < node_count)).all()
+        ):
+            raise ValueError(
+                "reference_index active values are out of range"
+            )
+        samples = (
+            torch.arange(batch_size, device=device)
+            .view(batch_size, 1, 1)
+            .expand_as(candidates.reference_index)[active_reference_mask]
+        )
+        if not bool(node_mask[samples, active_references].all()):
+            raise ValueError(
+                "candidate references do not select valid nodes"
+            )
+
+    for sample, row in candidate_mask.nonzero(as_tuple=False).tolist():
+        kind_name = _CANDIDATE_KINDS[
+            int(candidates.kind[sample, row].item())
+        ]
+        families = (
+            *CANDIDATE_REFERENCE_FAMILIES[kind_name].values(),
+            *PROJECTED_REFERENCE_FAMILIES[kind_name].values(),
+        )
+        expected_reference_mask = tuple(
+            family is not None for family in families
+        )
+        actual_reference_mask = tuple(
+            bool(value)
+            for value in candidates.reference_mask[sample, row].tolist()
+        )
+        if actual_reference_mask != expected_reference_mask:
+            raise ValueError(
+                "candidate reference mask does not match candidate kind"
+            )
+        for slot, family in enumerate(families):
+            if family is None:
+                continue
+            reference = int(
+                candidates.reference_index[sample, row, slot].item()
+            )
+            family_slice = batch.table_slices[family]
+            if not family_slice.start <= reference < family_slice.stop:
+                raise ValueError(
+                    "candidate reference does not select its required table family"
+                )
+
+    horizon_targets = require_tensor(batch.horizon_targets, "horizon_targets")
+    horizon_mask = require_tensor(
+        batch.horizon_target_mask, "horizon_target_mask"
+    )
+    if (
+        horizon_targets.ndim != 2
+        or horizon_targets.shape[0] != batch_size
+        or horizon_targets.shape[1] <= 0
+    ):
+        raise ValueError("horizon_targets shape must be [B, H]")
+    if horizon_mask.ndim != 2 or horizon_mask.shape[0] != batch_size:
+        raise ValueError("horizon_target_mask shape must be [B, H]")
+    if horizon_targets.shape[1] != horizon_mask.shape[1]:
+        if horizon_mask.shape[1] < horizon_targets.shape[1]:
+            raise ValueError(
+                "horizon_target_mask shape must agree with horizon_targets"
+            )
+        raise ValueError(
+            "horizon_targets shape must agree with horizon_target_mask"
+        )
+    horizon_count = horizon_targets.shape[1]
+    target_contracts = (
+        (
+            batch.teacher_candidate_index,
+            torch.int64,
+            (batch_size,),
+            "teacher_candidate_index",
+        ),
+        (
+            batch.terminal_outcome,
+            torch.int64,
+            (batch_size,),
+            "terminal_outcome",
+        ),
+        (
+            horizon_targets,
+            torch.float32,
+            (batch_size, horizon_count),
+            "horizon_targets",
+        ),
+        (
+            horizon_mask,
+            torch.bool,
+            (batch_size, horizon_count),
+            "horizon_target_mask",
+        ),
+        (
+            batch.remaining_turns,
+            torch.float32,
+            (batch_size,),
+            "batch.remaining_turns",
+        ),
+        (
+            batch.remaining_turns_mask,
+            torch.bool,
+            (batch_size,),
+            "remaining_turns_mask",
+        ),
+    )
+    for value, dtype, shape, name in target_contracts:
+        require_exact(require_tensor(value, name), dtype, shape, name, device)
+
+    if not bool(torch.isfinite(horizon_targets).all()):
+        raise ValueError("horizon_targets must be finite")
+    if not bool(torch.isfinite(batch.remaining_turns).all()):
+        raise ValueError("batch.remaining_turns must be finite")
+    if bool(((horizon_targets != 0) & (horizon_targets != 1)).any()):
+        raise ValueError("horizon_targets must be binary")
+    if bool(
+        (
+            batch.remaining_turns_mask
+            & (batch.remaining_turns <= 0)
+        ).any()
+    ):
+        raise ValueError("remaining_turns targets must be positive")
+
+    teacher = batch.teacher_candidate_index
+    outcome = batch.terminal_outcome
+    teacher_free = teacher == -1
+    outcome_free = outcome == -1
+    if bool(teacher_free.any()) or bool(outcome_free.any()):
+        if not bool(teacher_free.all()) or not bool(outcome_free.all()):
+            raise ValueError(
+                "target-free sentinels require teacher_candidate_index=-1 "
+                "and terminal_outcome=-1 for every sample"
+            )
+    else:
+        if bool(
+            ((teacher < 0) | (teacher >= candidate_count)).any()
+        ):
+            raise ValueError(
+                "teacher_candidate_index values are out of range"
+            )
+        samples = torch.arange(batch_size, device=device)
+        if not bool(candidate_mask[samples, teacher].all()):
+            raise ValueError(
+                "teacher_candidate_index selects a padded candidate"
+            )
+        if bool(((outcome < 0) | (outcome > 2)).any()):
+            raise ValueError(
+                "terminal_outcome targets must be in 0..2"
+            )

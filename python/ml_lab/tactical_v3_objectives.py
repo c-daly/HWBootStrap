@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
-from .tactical_v3_batching import RaggedBatch
+from .tactical_v3_batching import RaggedBatch, validate_ragged_batch
 from .tactical_v3_model import PolicyOutput
 
 
@@ -95,6 +95,7 @@ def _validate(
         raise ValueError("batch must be RaggedBatch")
     if type(config) is not ObjectiveConfig:
         raise ValueError("config must be ObjectiveConfig")
+    validate_ragged_batch(batch)
 
     mask = _tensor(batch.candidates.mask, "candidate mask")
     if mask.ndim != 2 or mask.shape[0] <= 0 or mask.shape[1] <= 0:
