@@ -702,3 +702,26 @@ def test_restore_state_rejects_missing_and_unexpected_keys() -> None:
     unexpected["unexpected"] = next(iter(state.values())).clone()
     with pytest.raises(RuntimeError, match="Unexpected key"):
         training._restore_state(model, unexpected, torch.device("cpu"))
+
+
+def test_snapshot_state_cpu_source_has_independent_cpu_clone_storage() -> None:
+    model = TacticalV3Policy(TacticalV3ModelConfig())
+    source = model.state_dict()
+    snapshot = training._snapshot_state(model)
+
+    assert type(snapshot) is MappingProxyType
+    assert tuple(snapshot) == tuple(source)
+    before = {name: value.clone() for name, value in snapshot.items()}
+    for name, copied in snapshot.items():
+        original = source[name]
+        assert copied.device.type == "cpu"
+        assert copied.requires_grad is False
+        assert copied.is_contiguous()
+        assert copied.dtype == original.dtype
+        assert copied.shape == original.shape
+        assert copied.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+
+    with torch.no_grad():
+        next(iter(source.values())).reshape(-1)[0].add_(1.0)
+    for name, copied in snapshot.items():
+        assert torch.equal(copied, before[name])
