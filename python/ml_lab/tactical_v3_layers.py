@@ -242,9 +242,14 @@ class TypedTokenEncoders(nn.Module):
             mask = table.mask.unsqueeze(-1)
             fields: list[torch.Tensor] = []
             if TABLE_NUMERIC_FIELDS[table_name]:
+                numeric = torch.where(
+                    table.mask.unsqueeze(-1),
+                    table.numeric,
+                    torch.zeros_like(table.numeric),
+                )
                 fields.append(
                     _row_linear(
-                        self.numeric_projections[table_name], table.numeric
+                        self.numeric_projections[table_name], numeric
                     )
                 )
             for field_name in TABLE_CATEGORICAL_FIELDS[table_name]:
@@ -333,7 +338,7 @@ class LocalHexMessagePassing(nn.Module):
             or type(cells_slice.start) is not int
             or type(cells_slice.stop) is not int
             or cells_slice.step not in (None, 1)
-            or cells_slice.start < 0
+            or cells_slice.start != 0
             or cells_slice.stop < cells_slice.start
             or cells_slice.stop > node_count
         ):
@@ -347,9 +352,11 @@ class LocalHexMessagePassing(nn.Module):
             )
         active = index[mask]
         if active.numel() and not bool(
-            ((active >= 0) & (active < node_count)).all()
+            ((active >= cells_slice.start) & (active < cells_slice.stop)).all()
         ):
-            raise ValueError("cell_neighbor_index active values are out of range")
+            raise ValueError(
+                "cell_neighbor_index active values must lie inside cells slice"
+            )
         if active.numel():
             sample = (
                 torch.arange(batch_size, device=node_state.device)
