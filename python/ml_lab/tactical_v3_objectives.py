@@ -77,6 +77,10 @@ def _floating(value: Tensor, name: str) -> None:
         raise ValueError(f"{name} must use a floating dtype")
 
 
+def _float32(value: Tensor, name: str) -> None:
+    if value.dtype != torch.float32:
+        raise ValueError(f"{name} dtype must be torch.float32")
+
 def _finite(value: Tensor, name: str, *, allow_negative_infinity: bool = False) -> None:
     if allow_negative_infinity:
         bad = ~torch.isfinite(value) & ~torch.isneginf(value)
@@ -105,16 +109,47 @@ def _validate(
         raise ValueError("candidate mask must contain a valid candidate per sample")
     device = mask.device
 
-    candidate_id = _tensor(batch.candidates.candidate_id, "candidate_id")
-    if candidate_id.shape != (batch_size, candidate_count):
-        raise ValueError("candidate mask shape must agree with candidate fields")
+    node_mask = _tensor(batch.node_mask, "node_mask")
+    if node_mask.ndim != 2 or node_mask.shape[0] != batch_size:
+        raise ValueError("node_mask shape must be [B, N]")
+    _dtype(node_mask, torch.bool, "node_mask")
+    if node_mask.device != device:
+        raise ValueError("node_mask must be on the candidate mask device")
+    candidate_id_raw = _tensor(batch.candidates.candidate_id, "candidate_id")
+    if candidate_id_raw.shape != (batch_size, candidate_count):
+        peer_shapes = ((batch.candidates.decision_id, candidate_id_raw.shape), (batch.candidates.kind, candidate_id_raw.shape), (batch.candidates.reference_index, (*candidate_id_raw.shape, 8)), (batch.candidates.reference_mask, (*candidate_id_raw.shape, 8)), (batch.candidates.projection_integer, (*candidate_id_raw.shape, 7)), (batch.candidates.projection_boolean, (*candidate_id_raw.shape, 2)))
+        if all(isinstance(value, Tensor) and value.shape == expected for value, expected in peer_shapes):
+            raise ValueError("candidate mask shape must agree with candidate fields")
+    candidate_fields = (
+        ("candidate_id", batch.candidates.candidate_id, torch.int64, (batch_size, candidate_count)),
+        ("decision_id", batch.candidates.decision_id, torch.int64, (batch_size, candidate_count)),
+        ("kind", batch.candidates.kind, torch.int64, (batch_size, candidate_count)),
+        ("reference_index", batch.candidates.reference_index, torch.int64, (batch_size, candidate_count, 8)),
+        ("reference_mask", batch.candidates.reference_mask, torch.bool, (batch_size, candidate_count, 8)),
+        ("projection_integer", batch.candidates.projection_integer, torch.int64, (batch_size, candidate_count, 7)),
+        ("projection_boolean", batch.candidates.projection_boolean, torch.bool, (batch_size, candidate_count, 2)),
+    )
+    checked_candidates: dict[str, Tensor] = {}
+    for name, value, dtype, expected in candidate_fields:
+        tensor = _tensor(value, name)
+        if tensor.shape != expected:
+            raise ValueError(f"{name} shape must be {expected}")
+        _dtype(tensor, dtype, name)
+        if tensor.device != device:
+            raise ValueError(f"{name} must be on the candidate mask device")
+        checked_candidates[name] = tensor
+    candidate_id = checked_candidates["candidate_id"]
+    kind = checked_candidates["kind"]
+    reference_index = checked_candidates["reference_index"]
+    reference_mask = checked_candidates["reference_mask"]
+    projection_integer = checked_candidates["projection_integer"]
     candidate_logits_raw = _tensor(output.candidate_logits, "candidate_logits")
     if candidate_logits_raw.ndim != 2 or candidate_logits_raw.shape[0] != batch_size:
         raise ValueError("candidate_logits shape must be [B, C]")
     if candidate_logits_raw.shape[1] != candidate_count:
         raise ValueError("candidate_logits shape must be [B, C]")
     candidate_logits = candidate_logits_raw
-    _floating(candidate_logits, "candidate_logits")
+    _float32(candidate_logits, "candidate_logits")
     if candidate_logits.device != device:
         raise ValueError("candidate_logits must be on the candidate mask device")
     _finite(candidate_logits, "candidate_logits", allow_negative_infinity=True)
@@ -122,7 +157,7 @@ def _validate(
         raise FloatingPointError("nonfinite values in candidate_logits")
 
     outcome_logits = _shape(output.outcome_logits, (batch_size, 3), "outcome_logits")
-    _floating(outcome_logits, "outcome_logits")
+    _float32(outcome_logits, "outcome_logits")
     if outcome_logits.device != device:
         raise ValueError("outcome_logits must be on the candidate mask device")
     _finite(outcome_logits, "outcome_logits")
@@ -140,7 +175,7 @@ def _validate(
         if horizon_mask.shape[1] > horizon_count:
             raise ValueError("horizon_targets shape must agree with horizon_target_mask")
         raise ValueError("horizon_target_mask shape must agree with horizon_targets")
-    _floating(horizon_targets, "horizon_targets")
+    _float32(horizon_targets, "horizon_targets")
     if horizon_targets.device != device:
         raise ValueError("horizon_targets must be on the candidate mask device")
     horizon_logits_raw = _tensor(output.horizon_logits, "horizon_logits")
@@ -149,7 +184,7 @@ def _validate(
     if horizon_logits_raw.shape[1] != horizon_count:
         raise ValueError("horizon count must agree with horizon_logits")
     horizon_logits = horizon_logits_raw
-    _floating(horizon_logits, "horizon_logits")
+    _float32(horizon_logits, "horizon_logits")
     if horizon_logits.device != device:
         raise ValueError("horizon_logits must be on the candidate mask device")
     _finite(horizon_logits, "horizon_logits")
@@ -159,11 +194,11 @@ def _validate(
         raise ValueError("horizon_target_mask must be on the candidate mask device")
 
     remaining_targets = _shape(batch.remaining_turns, (batch_size,), "batch.remaining_turns")
-    _floating(remaining_targets, "batch.remaining_turns")
+    _float32(remaining_targets, "batch.remaining_turns")
     if remaining_targets.device != device:
         raise ValueError("batch.remaining_turns must be on the candidate mask device")
     remaining_logits = _shape(output.remaining_turns, (batch_size,), "remaining_turns")
-    _floating(remaining_logits, "remaining_turns")
+    _float32(remaining_logits, "remaining_turns")
     if remaining_logits.device != device:
         raise ValueError("remaining_turns must be on the candidate mask device")
     _finite(remaining_logits, "remaining_turns")
@@ -192,6 +227,24 @@ def _validate(
         raise ValueError("teacher_candidate_index selects a padded candidate")
     if bool(((outcome < 0) | (outcome > 2)).any()):
         raise ValueError("terminal_outcome targets must be in 0..2")
+
+    active = mask
+    if not bool(((candidate_id[active] >= -(2**31)) & (candidate_id[active] < 2**31)).all()):
+        raise ValueError("candidate_id active values are out of int32 range")
+    active_kinds = kind[active]
+    if not bool(((active_kinds >= 0) & (active_kinds < 4)).all()):
+        raise ValueError("kind active values are out of range")
+    active_integers = projection_integer[active.unsqueeze(-1).expand_as(projection_integer)]
+    if not bool(((active_integers >= -(2**31)) & (active_integers < 2**31)).all()):
+        raise ValueError("projection_integer active values are out of int32 range")
+    active_references = reference_mask & active.unsqueeze(-1)
+    references = reference_index[active_references]
+    if references.numel():
+        if not bool(((references >= 0) & (references < node_mask.shape[1])).all()):
+            raise ValueError("reference_index active values are out of range")
+        samples = torch.arange(batch_size, device=device).view(batch_size, 1, 1).expand_as(reference_index)[active_references]
+        if not bool(node_mask[samples, references].all()):
+            raise ValueError("reference_index active values must select valid nodes")
 
     _finite(horizon_targets, "horizon_targets")
     if bool(((horizon_targets != 0) & (horizon_targets != 1)).any()):

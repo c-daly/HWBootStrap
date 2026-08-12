@@ -321,3 +321,122 @@ def test_default_loss_backpropagates_finite_scorer_and_encoder_gradients() -> No
     gradients = named_required_gradients(model, prefixes=("encoders.", "candidate_scorer."))
     assert gradients
     assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients.values())
+
+@pytest.mark.parametrize("field", ("candidate_logits", "outcome_logits", "horizon_logits", "remaining_turns"))
+@pytest.mark.parametrize("dtype", (torch.float64, torch.float16, torch.bfloat16))
+def test_policy_heads_require_exact_float32(field: str, dtype: torch.dtype) -> None:
+    output, batch = make_objective_case()
+    changed = getattr(output, field).to(dtype=dtype).detach().requires_grad_(True)
+    bad = dataclasses.replace(output, **{field: changed})
+    with pytest.raises(ValueError, match=rf"{field} dtype must be torch\.float32"):
+        structured_imitation_loss(bad, batch, ObjectiveConfig())
+
+
+@pytest.mark.parametrize("field", ("horizon_targets", "remaining_turns"))
+@pytest.mark.parametrize("dtype", (torch.float64, torch.float16, torch.bfloat16))
+def test_continuous_targets_require_exact_float32(field: str, dtype: torch.dtype) -> None:
+    output, batch = make_objective_case()
+    bad = replace(batch, **{field: getattr(batch, field).to(dtype=dtype)})
+    with pytest.raises(ValueError, match=rf"{field} dtype must be torch\.float32"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("candidate_id", "decision_id", "kind", "reference_index", "reference_mask",
+     "projection_integer", "projection_boolean"),
+)
+def test_every_candidate_field_shape_is_validated(field: str) -> None:
+    output, batch = make_objective_case()
+    value = getattr(batch.candidates, field)
+    changed = value[..., :-1]
+    candidates = dataclasses.replace(batch.candidates, **{field: changed})
+    bad = replace(batch, candidates=candidates)
+    with pytest.raises(ValueError, match=rf"{field} shape"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    ("field", "dtype"),
+    (("candidate_id", torch.int32), ("decision_id", torch.int32), ("kind", torch.int32),
+     ("reference_index", torch.int32), ("reference_mask", torch.int64),
+     ("projection_integer", torch.int32), ("projection_boolean", torch.int64)),
+)
+def test_every_candidate_field_dtype_is_validated(field: str, dtype: torch.dtype) -> None:
+    output, batch = make_objective_case()
+    value = getattr(batch.candidates, field).to(dtype=dtype)
+    candidates = dataclasses.replace(batch.candidates, **{field: value})
+    bad = replace(batch, candidates=candidates)
+    with pytest.raises(ValueError, match=rf"{field} dtype"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("candidate_id", "decision_id", "kind", "reference_index", "reference_mask",
+     "projection_integer", "projection_boolean"),
+)
+def test_every_candidate_field_device_is_validated(field: str) -> None:
+    output, batch = make_objective_case()
+    value = getattr(batch.candidates, field).to(device="meta")
+    candidates = dataclasses.replace(batch.candidates, **{field: value})
+    bad = replace(batch, candidates=candidates)
+    with pytest.raises(ValueError, match=rf"{field} must be on the candidate mask device"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+def test_candidate_id_active_values_must_fit_int32() -> None:
+    output, batch = make_objective_case()
+    value = batch.candidates.candidate_id.clone(); value[0, 0] = 2**31
+    bad = replace(batch, candidates=dataclasses.replace(batch.candidates, candidate_id=value))
+    with pytest.raises(ValueError, match="candidate_id.*int32"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+def test_candidate_kind_active_values_must_be_in_range() -> None:
+    output, batch = make_objective_case()
+    value = batch.candidates.kind.clone(); value[0, 0] = 4
+    bad = replace(batch, candidates=dataclasses.replace(batch.candidates, kind=value))
+    with pytest.raises(ValueError, match="kind.*out of range"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+def test_candidate_reference_active_values_must_select_nodes() -> None:
+    output, batch = make_objective_case()
+    value = batch.candidates.reference_index.clone()
+    value[0, 0, 0] = batch.node_mask.shape[1]
+    refs = dataclasses.replace(batch.candidates, reference_index=value)
+    bad = replace(batch, candidates=refs)
+    with pytest.raises(ValueError, match="reference_index.*out of range"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+def test_projection_integer_active_values_must_fit_int32() -> None:
+    output, batch = make_objective_case()
+    value = batch.candidates.projection_integer.clone(); value[0, 0, 0] = 2**31
+    bad = replace(batch, candidates=dataclasses.replace(batch.candidates, projection_integer=value))
+    with pytest.raises(ValueError, match="projection_integer.*int32"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    ("field", "dtype"),
+    (("horizon_target_mask", torch.int64), ("remaining_turns_mask", torch.int64),
+     ("teacher_candidate_index", torch.int32), ("terminal_outcome", torch.int32)),
+)
+def test_direct_target_masks_and_indices_require_exact_dtype(field: str, dtype: torch.dtype) -> None:
+    output, batch = make_objective_case()
+    bad = replace(batch, **{field: getattr(batch, field).to(dtype=dtype)})
+    with pytest.raises(ValueError, match=rf"{field} dtype"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("horizon_target_mask", "remaining_turns_mask", "teacher_candidate_index", "terminal_outcome"),
+)
+def test_direct_target_masks_and_indices_require_batch_device(field: str) -> None:
+    output, batch = make_objective_case()
+    bad = replace(batch, **{field: getattr(batch, field).to(device="meta")})
+    with pytest.raises(ValueError, match=rf"{field} must be on the candidate mask device"):
+        structured_imitation_loss(output, bad, ObjectiveConfig())
