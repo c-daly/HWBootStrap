@@ -1423,11 +1423,15 @@ def structured_imitation_loss(
 - [ ] **Step 1: Write failing objective tests**
 
 ```python
-def test_default_auxiliary_coefficient_sum_is_within_policy_coefficient() -> None:
+def test_policy_coefficient_is_exactly_one_and_auxiliary_sum_is_at_most_half() -> None:
     default = ObjectiveConfig()
     assert (default.outcome_coefficient + default.horizon_coefficient
             + default.remaining_turns_coefficient) == pytest.approx(0.5)
-    assert 0.5 <= default.policy_coefficient
+    assert default.policy_coefficient == 1.0
+    assert default.outcome_coefficient + default.horizon_coefficient + default.remaining_turns_coefficient <= 0.5
+    for value in (0.0, 0.5, 1.0000001):
+        with pytest.raises(ValueError, match="policy_coefficient must be exactly 1.0"):
+            ObjectiveConfig(policy_coefficient=value)
 
 @pytest.mark.parametrize(
     "field", ("policy_coefficient", "outcome_coefficient",
@@ -1440,9 +1444,7 @@ def test_every_coefficient_rejects_nonfinite_and_negative_values(
     with pytest.raises(ValueError, match=field):
         ObjectiveConfig(**{field: value})
 
-def test_policy_coefficient_must_be_strictly_positive() -> None:
-    with pytest.raises(ValueError, match="policy_coefficient"):
-        ObjectiveConfig(policy_coefficient=0.0)
+def test_policy_coefficient_rejects_nonfinite_and_nonexact_values() -> None:`r`n    for value in (float("nan"), float("inf"), float("-inf"), -1.0, 0.0, 0.5, 2.0):`r`n        with pytest.raises(ValueError, match="policy_coefficient must be exactly 1.0"):`r`n            ObjectiveConfig(policy_coefficient=value)
 
 def test_auxiliary_coefficient_sum_cannot_exceed_policy_coefficient() -> None:
     with pytest.raises(ValueError, match="auxiliary coefficient sum"):
@@ -1681,7 +1683,7 @@ def named_required_gradients(model: nn.Module, prefixes: tuple[str, ...]) -> dic
 
 `make_objective_case` returns two samples with candidate logits `[[2,0,-inf],[0,1,2]]`, masks `[[T,T,F],[T,T,T]]`, and targets `[0,2]`; outcome logits `[[2,1,0],[0,1,2]]` with targets `[loss,win]`; horizon logits `[[0,2,-2],[1,-1,3]]`, targets `[[1,0,0],[0,1,1]]`, and mask `[[T,F,F],[F,T,F]]`; remaining predictions `[4,7]`, targets `[5,9]`, and mask `[T,F]`. All output tensors are independent `requires_grad=True` leaves. Replacement helpers use `dataclasses.replace`, mutate only the named masked/valid positions, and leave the source frozen values unchanged. `valid_candidate_matrix` clones logits and restores `-inf` at false masks. `make_gradient_case` collates two immutable corpus rows and constructs the default seeded CPU model; `named_required_gradients` returns every trainable parameter whose name begins with either exact prefix.
 
-Assert the default auxiliary coefficient sum is `0.5 <= 1.0`. Reject negative or nonfinite coefficients, a nonpositive policy coefficient, and `outcome + horizon + remaining_turns > policy`.
+Policy coefficient is exactly `1.0`; reject every other value. Reject negative/nonfinite auxiliary coefficients and `outcome + horizon + remaining_turns > 0.5`.
 
 - [ ] **Step 2: Run RED**
 
@@ -1710,7 +1712,7 @@ git commit -m "feat: add tactical-v3 imitation objectives"
 - Create: `python/ml_lab/tactical_v3_training.py`
 - Create: `python/tests/test_tactical_v3_training.py`
 
-**Interfaces introduced in this task:**
+**Interfaces:**
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -1739,115 +1741,100 @@ class TrainingResult:
     stopped_early: bool
     history: tuple[EpochMetrics, ...]
 
-def train_offline(
-    train_examples: tuple[StructuredExample, ...],
-    validation_examples: tuple[StructuredExample, ...],
-    model_config: TacticalV3ModelConfig,
-    objective_config: ObjectiveConfig,
-    trainer_config: TrainerConfig,
-) -> TrainingResult: ...
+def train_offline(train_examples: tuple[StructuredExample, ...], validation_examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, trainer_config: TrainerConfig) -> TrainingResult:
+    """Train sorted immutable splits and restore the finite best validation state."""
+def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]:
+    if type(example) is not StructuredExample:
+        raise TypeError("example must be StructuredExample")
+    return (example.scenario_id, example.episode_seed, example.learner_seat, example.profile_id, example.decision.decision_id)
+
+def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
+    tables = MappingProxyType({name: TokenTableBatch(table.numeric.to(device), MappingProxyType({k: v.to(device) for k, v in table.categorical.items()}), MappingProxyType({k: v.to(device) for k, v in table.boolean.items()}), table.mask.to(device)) for name, table in batch.tables.items()})
+    neighborhoods = RelationNeighborhoodBatch(*(getattr(batch.neighborhoods, f.name).to(device) for f in dataclasses.fields(RelationNeighborhoodBatch)))
+    candidates = CandidateBatch(*(getattr(batch.candidates, f.name).to(device) for f in dataclasses.fields(CandidateBatch)))
+    direct = {f.name: getattr(batch, f.name).to(device) for f in dataclasses.fields(RaggedBatch) if isinstance(getattr(batch, f.name), torch.Tensor)}
+    return dataclasses.replace(batch, tables=tables, table_slices=MappingProxyType(dict(batch.table_slices)), neighborhoods=neighborhoods, candidates=candidates, **direct)
+
+def _evaluate_validation(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]:
+    totals = {n: 0.0 for n in ("total", "policy", "outcome", "horizon", "remaining_turns")}
+    with torch.no_grad():
+        for start in range(0, len(examples), batch_size):
+            rows = examples[start:start + batch_size]
+            loss = structured_imitation_loss(model(_batch_to_device(collate_examples(rows, model_config.horizon_turns), device)), _batch_to_device(collate_examples(rows, model_config.horizon_turns), device), objective_config)
+            for n in totals: totals[n] += float(getattr(loss, n).detach().item()) * len(rows)
+    metrics = MappingProxyType({n: totals[n] / len(examples) for n in totals})
+    return metrics, metrics["policy"]
 ```
+
+`TrainerConfig.__post_init__` accepts only seed `0` or another nonnegative built-in `int`; positive built-in `int` batch/max-epoch/patience; finite positive built-in `float` learning-rate/clip norm; and `cpu`, `cuda`, or `cuda:<nonnegative decimal index>`. It rejects bool/Tensor/NumPy scalar/`torch.device`, unavailable CUDA, and out-of-range CUDA. Before seeding/model creation, reject empty splits, duplicate canonical keys inside either split, and cross-split equal keys. Sort immutable split tuples by `_canonical_example_key`; use one private CPU generator seeded once and one `torch.randperm` per train epoch; validation uses contiguous sorted batches only.
+
+`_require_finite_boundary` permits `-inf` only at false candidate masks and checks valid logits, heads, each loss/total, non-None gradients, clip norm, and post-step parameters. It raises `FloatingPointError("epoch=<epoch> batch=<batch> <name>...")`. Each metric map is fresh `MappingProxyType` with exactly `total`, `policy`, `outcome`, `horizon`, `remaining_turns`, finite built-in floats, and `validation_policy_nll == validation["policy"]`.
 
 - [ ] **Step 1: Write failing trainer tests**
 
 ```python
-def test_two_cpu_runs_have_identical_history_weights_logits_and_actions() -> None:
-    case = make_trainer_case()
-    first = run_training_case(case)
-    second = run_training_case(case)
-    assert first.history == second.history
-    assert first.best_epoch == second.best_epoch
-    assert_state_dict_equal(first.model.state_dict(), second.model.state_dict())
-    batch = collate_examples(case.validation, case.model_config.horizon_turns)
-    torch.testing.assert_close(first.model(batch).candidate_logits,
-                               second.model(batch).candidate_logits, rtol=0.0, atol=0.0)
-    assert first.model.select(batch) == second.model.select(batch)
+def test_seed_zero_and_strict_config() -> None:
+    assert TrainerConfig(seed=0).seed == 0
+    for f, v in (("seed", True), ("seed", -1), ("batch_size", 0), ("max_epochs", 0), ("patience_epochs", False), ("learning_rate", 1), ("gradient_clip_norm", float("inf")), ("device", "mps"), ("device", "cuda:999")):
+        with pytest.raises(ValueError, match=f): TrainerConfig(**{f: v})
 
-def test_validation_examples_are_never_seen_by_optimizer_or_shuffle() -> None:
-    case = make_trainer_case()
-    trace = TrainingTrace()
-    with capture_training_trace(trace):
-        run_training_case(case)
-    train_ids = {stable_example_identity(row) for row in case.train}
-    validation_ids = tuple(stable_example_identity(row) for row in case.validation)
-    assert trace.optimizer_example_ids
-    assert all(set(batch_ids) <= train_ids for batch_ids in trace.optimizer_example_ids)
-    assert trace.validation_epoch_orders
-    assert all(order == validation_ids for order in trace.validation_epoch_orders)
-    assert train_ids.isdisjoint(validation_ids)
+def test_mapping_proxy_batch_transfer_preserves_nested_dtypes() -> None:
+    moved = _batch_to_device(mapping_proxy_batch(collate_examples(make_trainer_case().train[:1], (4, 8, 16))), torch.device("cpu"))
+    assert isinstance(moved.tables, MappingProxyType) and isinstance(moved.table_slices, MappingProxyType)
+    assert moved.tables["cells"].numeric.dtype == torch.float32
+    assert moved.candidates.candidate_id.dtype == torch.int64 and moved.candidates.mask.dtype == torch.bool
 
-def test_best_validation_policy_nll_state_is_restored() -> None:
-    case = make_scripted_validation_case(losses=(0.8, 0.2, 0.4, 0.6))
-    result, epoch_states = run_scripted_validation_case(case)
-    assert result.best_epoch == 1
-    assert state_dict_sha256(result.model.state_dict()) == epoch_states[1]
-    assert state_dict_sha256(result.model.state_dict()) != epoch_states[3]
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_training_moves_mapping_proxy_nested_tensors() -> None:
+    case = make_trainer_case(device="cuda:0", max_epochs=1)
+    batch = _batch_to_device(mapping_proxy_batch(collate_examples(case.validation[:1], case.model_config.horizon_turns)), torch.device("cuda:0"))
+    assert run_training_case(case).model(batch).candidate_logits.device == torch.device("cuda:0")
 
-def test_patience_stops_after_exact_number_of_nonimproving_epochs() -> None:
-    case = make_scripted_validation_case(losses=(0.5, 0.4, 0.4, 0.4, 0.4),
-                                         patience_epochs=3)
-    result, _states = run_scripted_validation_case(case)
-    assert result.stopped_early is True
-    assert result.best_epoch == 1
-    assert tuple(metric.epoch for metric in result.history) == (0, 1, 2, 3, 4)
+def test_reversed_order_duplicate_and_cross_split_equal_key_cases() -> None:
+    case = make_trainer_case(); a = run_training_case(case); b = run_training_case(dataclasses.replace(case, train=tuple(reversed(case.train)), validation=tuple(reversed(case.validation))))
+    assert a.history == b.history; assert_state_dict_equal(a.model.state_dict(), b.model.state_dict())
+    for changed, msg in ((dataclasses.replace(case, train=(case.train[0], dataclasses.replace(case.train[0]))), "duplicate training example"), (dataclasses.replace(case, validation=(case.validation[0], dataclasses.replace(case.validation[0]))), "duplicate validation example"), (dataclasses.replace(case, validation=(dataclasses.replace(case.train[0]),)), "splits overlap")):
+        with pytest.raises(ValueError, match=msg): run_training_case(changed)
 
-def test_nonfinite_loss_fails_before_backward() -> None:
-    fault = run_fault_case("loss")
-    assert isinstance(fault.error, FloatingPointError)
-    assert "epoch=0 batch=0 loss.total" in str(fault.error)
-    assert fault.optimizer_steps == 0
-    assert fault.before_state_sha256 == fault.after_state_sha256
+def test_uneven_validation_is_sample_weighted() -> None:
+    case = make_three_validation_example_case(); result = run_training_case(case); weighted, batch_mean = independent_validation_means(case, result.model)
+    assert result.history[0].validation_policy_nll == pytest.approx(weighted, abs=1e-7)
+    assert abs(weighted - batch_mean) > 1e-5
 
-def test_nonfinite_gradient_fails_before_optimizer_step() -> None:
-    fault = run_fault_case("gradient")
-    assert isinstance(fault.error, FloatingPointError)
-    assert "epoch=0 batch=0 gradient=" in str(fault.error)
-    assert fault.optimizer_steps == 0
-    assert fault.before_state_sha256 == fault.after_state_sha256
+def test_real_loop_validation_seam_checks_improved_history_patience_restore(monkeypatch) -> None:
+    states = {}; nlls = (0.8, 0.2, 0.4, 0.4, 0.4); monkeypatch.setattr(training, "_evaluate_validation", scripted_validation(states, nlls))
+    result = run_training_case(make_trainer_case(max_epochs=5, patience_epochs=3))
+    assert tuple(x.validation_policy_nll for x in result.history) == nlls
+    assert tuple(x.improved for x in result.history) == (True, True, False, False, False)
+    assert tuple(x.epoch for x in result.history) == (0, 1, 2, 3, 4)
+    assert result.best_epoch == 1 and result.stopped_early and state_dict_sha256(result.model.state_dict()) == states[1]
 
-def test_nonfinite_parameter_fails_immediately_after_optimizer_step() -> None:
-    fault = run_fault_case("parameter")
-    assert isinstance(fault.error, FloatingPointError)
-    assert "epoch=0 batch=0 parameter=" in str(fault.error)
-    assert fault.optimizer_steps == 1
-    assert fault.result is None
-
-def test_train_rejects_empty_or_overlapping_splits() -> None:
-    case = make_trainer_case()
-    with pytest.raises(ValueError, match="training split must not be empty"):
-        run_training_case(dataclasses.replace(case, train=()))
-    with pytest.raises(ValueError, match="validation split must not be empty"):
-        run_training_case(dataclasses.replace(case, validation=()))
-    with pytest.raises(ValueError, match="splits overlap"):
-        run_training_case(dataclasses.replace(case, validation=(case.train[0],)))
+def test_padded_inf_and_all_required_finite_faults() -> None:
+    assert_valid_padded_negative_infinity_case()
+    for stage, name, steps in (("valid_logit", "candidate_logits", 0), ("head", "outcome_logits", 0), ("component", "loss.policy", 0), ("gradient", "gradient=", 0), ("clip", "gradient_norm", 0), ("parameter", "parameter=", 1)):
+        fault = run_fault_case(stage); assert f"epoch=0 batch=0 {name}" in str(fault.error); assert fault.optimizer_steps == steps
 ```
-
-Helper contracts for this test file:
 
 ```python
-@dataclass
-class TrainingTrace:
-    optimizer_example_ids: list[tuple[str, ...]] = field(default_factory=list)
-    validation_epoch_orders: list[tuple[str, ...]] = field(default_factory=list)
+def mapping_proxy_batch(batch: RaggedBatch) -> RaggedBatch:
+    tables = MappingProxyType({n: TokenTableBatch(t.numeric, MappingProxyType(dict(t.categorical)), MappingProxyType(dict(t.boolean)), t.mask) for n, t in batch.tables.items()})
+    return dataclasses.replace(batch, tables=tables, table_slices=MappingProxyType(dict(batch.table_slices)))
 
-def make_trainer_case() -> TrainerTestCase: ...
-def run_training_case(case: TrainerTestCase) -> TrainingResult: ...
-def assert_state_dict_equal(left: Mapping[str, Tensor], right: Mapping[str, Tensor]) -> None: ...
-def stable_example_identity(example: StructuredExample) -> str: ...
-@contextmanager
-def capture_training_trace(trace: TrainingTrace) -> Iterator[None]: ...
-def make_scripted_validation_case(
-    losses: tuple[float, ...],
-    patience_epochs: int = 100,
-) -> ScriptedValidationCase: ...
-def run_scripted_validation_case(
-    case: ScriptedValidationCase,
-) -> tuple[TrainingResult, dict[int, str]]: ...
-def state_dict_sha256(state: Mapping[str, Tensor]) -> str: ...
-def run_fault_case(stage: Literal["loss", "gradient", "parameter"]) -> FaultResult: ...
+def make_three_validation_example_case() -> TrainerTestCase:
+    case = make_trainer_case(max_epochs=1, batch_size=2)
+    return dataclasses.replace(case, validation=(case.validation + case.train)[:3])
+
+def scripted_validation(states: dict[int, str], nlls: tuple[float, ...]) -> Callable[..., tuple[Mapping[str, float], float]]:
+    def evaluate(model, examples, model_config, objective_config, batch_size, device):
+        epoch = len(states); states[epoch] = state_dict_sha256(model.state_dict()); nll = nlls[epoch]
+        return MappingProxyType({"total": nll, "policy": nll, "outcome": 0.0, "horizon": 0.0, "remaining_turns": 0.0}), nll
+    return evaluate
+
+def run_fault_case(stage: Literal["valid_logit", "head", "component", "gradient", "clip", "parameter"]) -> FaultResult:
+    """Patch only real forward/loss/backward/clip/AdamW boundaries, returning actual step/hash evidence."""
 ```
 
-`make_trainer_case` loads the immutable train/validation tuples, default model/objective config, and `TrainerConfig(seed=227, batch_size=4, max_epochs=6, patience_epochs=6, device="cpu")`; each run reconstructs every object so no RNG/model state is shared. Stable example identity is the canonical SHA-256 of scenario, seed, seat, profile, and decision id. The trace context wraps collation, validation, and `AdamW.step`: it records the most recent collated identities at every optimizer step and each validation order without changing values. Scripted validation returns the supplied NLL by epoch while recording the CPU state hash at that exact evaluation boundary. `run_fault_case` snapshots the initial state; for `loss` it replaces total loss with NaN, for `gradient` it registers a NaN gradient hook, and for `parameter` it wraps the first real optimizer step then writes infinity to its first parameter. It catches and returns the exact exception, step count, before/after hashes, and optional result. Loss/gradient faults must leave state unchanged; the post-step fault is required to abort before returning a result, not to roll back the already-detected invalid step.
+The seam replaces only `_evaluate_validation`, so real optimizer, comparator (`candidate_nll < best_nll - 1e-12`), history, snapshot, early stop, and strict best-state restoration run. Faults modify a valid logit/head after real forward, policy loss after real loss, gradient hook, clip return after real clip, or parameter after original step; padded `-inf` remains unchanged. Never checkpoint, publish, write metadata, or create a run directory here.
 
 - [ ] **Step 2: Run RED**
 
@@ -1855,19 +1842,7 @@ def run_fault_case(stage: Literal["loss", "gradient", "parameter"]) -> FaultResu
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_training.py -q
 ```
 
-Expected: collection fails because `tactical_v3_training` is absent.
-
-- [ ] **Step 3: Implement deterministic ownership**
-
-Validate all trainer fields. Seed Python, NumPy, and PyTorch; enable `torch.use_deterministic_algorithms(True)`; configure deterministic cuDNN when CUDA is requested. Use a private seeded `torch.Generator` for epoch permutations, canonical corpus order before shuffling, and `DataLoader(num_workers=0)`. Construct `AdamW(..., weight_decay=0.0)`. Never mutate, re-split, or shuffle the frozen validation tuple.
-
-- [ ] **Step 4: Implement guarded training and early stopping**
-
-For each batch, check model outputs and total/component losses before backward, every gradient before clipping, clipped norm, and every parameter after `optimizer.step()`. Raise a contextual `FloatingPointError` with epoch/batch/tensor name at the first failure. Evaluate without gradients in canonical validation order. The selection metric is mean validation policy NLL only; auxiliary losses remain logged diagnostics. Treat improvement as strictly more than `1e-12`, snapshot a detached CPU clone of every state tensor, stop after exactly `patience_epochs` consecutive nonimproving epochs, then restore the best snapshot.
-
-- [ ] **Step 5: Run GREEN and commit**
-
-Task 9 owns the persistent train CLI; do not write a run artifact in Task 8.
+- [ ] **Step 3: Implement and run GREEN**
 
 ```powershell
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_training.py -q
@@ -1876,26 +1851,27 @@ git commit -m "feat: train tactical-v3 policy deterministically"
 ```
 
 ---
-
-#### Task 8 corrections (required before implementation)
-
-Add these private signatures to the Task 8 interface: `def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]: ...`, `def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch: ...`, and `def _evaluate_validation(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]: ...`. The canonical key is exactly `(scenario_id, episode_seed, learner_seat, profile_id, decision.decision_id)`. Before seeding/model construction reject empty splits, duplicate keys within either split, and shared keys; sort immutable tuples by it. Use one private CPU `torch.Generator().manual_seed(seed)` for one `torch.randperm` per train epoch; validation uses sorted contiguous batches and never uses the generator.
-
-`TrainerConfig.__post_init__` rejects bool/Tensor/NumPy-scalar/`torch.device` values; accepts only nonnegative built-in `int` seed, positive built-in `int` batch/epoch/patience, finite positive built-in `float` learning-rate/clip norm, and exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>` device strings (reject unavailable/out-of-range CUDA). `_batch_to_device` reconstructs all nested `TokenTableBatch`, `RelationNeighborhoodBatch`, `CandidateBatch`, and direct `RaggedBatch` tensor fields without casting, preserving float32/int64/bool and table slices.
-
-`_evaluate_validation` is `torch.no_grad()`, validates output/loss, accumulates every component as `component.detach().item() * current_batch_size`, divides by total examples, and returns an immutable `MappingProxyType` with exact finite built-in-float keys `total`, `policy`, `outcome`, `horizon`, `remaining_turns`; second result is exactly `metrics["policy"]`. Epoch metric maps use the same immutability/value contract. Finite checks permit `-inf` only under false candidate masks, require finite valid logits/heads/losses/non-None gradients/clipped norm/post-step parameters, and raise `FloatingPointError("epoch=<epoch> batch=<batch> <name>...")`. Improve only for `candidate_nll < best_nll - 1e-12`; snapshot detached contiguous CPU state; stop after exactly patience nonimprovements; restore strictly/eval. No Task 8 checkpoint/run-directory/metadata/publication.
-
-Add focused tests for reversed input tuples yielding exact history/state/logits/actions; three validation examples with batch size two proving sample-weighted NLL differs from unweighted batch means; each valid-logit/head/component/clip-norm nonfinite fault aborting before optimizer step; invalid config values and read-only plain-float metrics; and CUDA training recursively moving all batch tensors without dtype casts.
-
-**Task 9 CLI handoff:** Remove Task 8 `--run-dir` ownership. In Task 9 add persistent `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>` that calls `parse_spaces`, `load_corpus`, default configs plus `TrainerConfig`, then `train_offline(corpus.train, corpus.validation, ...)`, then exactly once `publish_structured_run(run_dir, result, corpus, scenario)`. Test with monkeypatched `train_offline`/`publish_structured_run` asserting calls `[("train"), ("publish")]`; CLI writes no artifact itself.
-
 ### Task 9: Strict Checkpoints, Deterministic Save/Load, and CPU Publication
 
 **Files:**
 - Create: `python/ml_lab/tactical_v3_checkpoint.py`
 - Create: `python/tests/test_tactical_v3_checkpoint.py`
+- Modify: `python/run_tactical_v3_imitation.py`
 
 - Modify: `python/run_tactical_v3_imitation.py`
+**Task-8 CLI handoff:** Task 9 owns persistent `train`. Change the CLI entry point to `def main(argv: Sequence[str] | None = None) -> int` and add `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>`. It calls `parse_spaces`, `load_corpus`, default model/objective configs and `TrainerConfig`, then `train_offline`, then exactly once `publish_structured_run`; it creates no file or directory itself.
+
+```python
+def test_train_cli_calls_training_then_publisher_without_direct_artifacts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "parse_spaces", lambda payload: identity)
+    monkeypatch.setattr(cli, "load_corpus", lambda root, expected: corpus)
+    monkeypatch.setattr(cli, "train_offline", lambda *args: calls.append("train") or result)
+    monkeypatch.setattr(cli, "publish_structured_run", lambda *args: calls.append("publish") or tmp_path / "run")
+    assert cli.main(["train", "--corpus", str(corpus_root), "--scenario", str(scenario_path), "--run-dir", str(tmp_path / "run"), "--seed", "0", "--device", "cpu"]) == 0
+    assert calls == ["train", "publish"]
+    assert not (tmp_path / "run").exists()
+```
 **Interfaces introduced in this task:**
 
 ```python
