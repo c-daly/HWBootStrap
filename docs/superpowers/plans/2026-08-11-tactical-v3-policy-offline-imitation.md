@@ -1709,7 +1709,6 @@ git commit -m "feat: add tactical-v3 imitation objectives"
 **Files:**
 - Create: `python/ml_lab/tactical_v3_training.py`
 - Create: `python/tests/test_tactical_v3_training.py`
-- Modify: `python/run_tactical_v3_imitation.py`
 
 **Interfaces introduced in this task:**
 
@@ -1866,25 +1865,37 @@ Validate all trainer fields. Seed Python, NumPy, and PyTorch; enable `torch.use_
 
 For each batch, check model outputs and total/component losses before backward, every gradient before clipping, clipped norm, and every parameter after `optimizer.step()`. Raise a contextual `FloatingPointError` with epoch/batch/tensor name at the first failure. Evaluate without gradients in canonical validation order. The selection metric is mean validation policy NLL only; auxiliary losses remain logged diagnostics. Treat improvement as strictly more than `1e-12`, snapshot a detached CPU clone of every state tensor, stop after exactly `patience_epochs` consecutive nonimproving epochs, then restore the best snapshot.
 
-- [ ] **Step 5: Add the narrow train CLI and run GREEN**
+- [ ] **Step 5: Run GREEN and commit**
 
-Add `train --corpus --run-dir --seed --device`; all architecture/objective/trainer defaults come from the frozen configuration classes and are written to metadata. Do not add collection, DAgger, curriculum, evaluation, or game-play flags.
+Task 9 owns the persistent train CLI; do not write a run artifact in Task 8.
 
 ```powershell
 uv run --active --no-project python -m pytest python/tests/test_tactical_v3_training.py -q
-uv run --active --no-project python python/run_tactical_v3_imitation.py train --help
-git add python/ml_lab/tactical_v3_training.py python/tests/test_tactical_v3_training.py python/run_tactical_v3_imitation.py
+git add python/ml_lab/tactical_v3_training.py python/tests/test_tactical_v3_training.py
 git commit -m "feat: train tactical-v3 policy deterministically"
 ```
 
 ---
+
+#### Task 8 corrections (required before implementation)
+
+Add these private signatures to the Task 8 interface: `def _canonical_example_key(example: StructuredExample) -> tuple[str, int, int, str, int]: ...`, `def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch: ...`, and `def _evaluate_validation(model: TacticalV3Policy, examples: tuple[StructuredExample, ...], model_config: TacticalV3ModelConfig, objective_config: ObjectiveConfig, batch_size: int, device: torch.device) -> tuple[Mapping[str, float], float]: ...`. The canonical key is exactly `(scenario_id, episode_seed, learner_seat, profile_id, decision.decision_id)`. Before seeding/model construction reject empty splits, duplicate keys within either split, and shared keys; sort immutable tuples by it. Use one private CPU `torch.Generator().manual_seed(seed)` for one `torch.randperm` per train epoch; validation uses sorted contiguous batches and never uses the generator.
+
+`TrainerConfig.__post_init__` rejects bool/Tensor/NumPy-scalar/`torch.device` values; accepts only nonnegative built-in `int` seed, positive built-in `int` batch/epoch/patience, finite positive built-in `float` learning-rate/clip norm, and exactly `cpu`, `cuda`, or `cuda:<nonnegative decimal index>` device strings (reject unavailable/out-of-range CUDA). `_batch_to_device` reconstructs all nested `TokenTableBatch`, `RelationNeighborhoodBatch`, `CandidateBatch`, and direct `RaggedBatch` tensor fields without casting, preserving float32/int64/bool and table slices.
+
+`_evaluate_validation` is `torch.no_grad()`, validates output/loss, accumulates every component as `component.detach().item() * current_batch_size`, divides by total examples, and returns an immutable `MappingProxyType` with exact finite built-in-float keys `total`, `policy`, `outcome`, `horizon`, `remaining_turns`; second result is exactly `metrics["policy"]`. Epoch metric maps use the same immutability/value contract. Finite checks permit `-inf` only under false candidate masks, require finite valid logits/heads/losses/non-None gradients/clipped norm/post-step parameters, and raise `FloatingPointError("epoch=<epoch> batch=<batch> <name>...")`. Improve only for `candidate_nll < best_nll - 1e-12`; snapshot detached contiguous CPU state; stop after exactly patience nonimprovements; restore strictly/eval. No Task 8 checkpoint/run-directory/metadata/publication.
+
+Add focused tests for reversed input tuples yielding exact history/state/logits/actions; three validation examples with batch size two proving sample-weighted NLL differs from unweighted batch means; each valid-logit/head/component/clip-norm nonfinite fault aborting before optimizer step; invalid config values and read-only plain-float metrics; and CUDA training recursively moving all batch tensors without dtype casts.
+
+**Task 9 CLI handoff:** Remove Task 8 `--run-dir` ownership. In Task 9 add persistent `train --corpus <Path> --scenario <Path> --run-dir <Path> --seed <int> --device <str>` that calls `parse_spaces`, `load_corpus`, default configs plus `TrainerConfig`, then `train_offline(corpus.train, corpus.validation, ...)`, then exactly once `publish_structured_run(run_dir, result, corpus, scenario)`. Test with monkeypatched `train_offline`/`publish_structured_run` asserting calls `[("train"), ("publish")]`; CLI writes no artifact itself.
+
 ### Task 9: Strict Checkpoints, Deterministic Save/Load, and CPU Publication
 
 **Files:**
 - Create: `python/ml_lab/tactical_v3_checkpoint.py`
 - Create: `python/tests/test_tactical_v3_checkpoint.py`
-- Modify: `python/run_tactical_v3_imitation.py`
 
+- Modify: `python/run_tactical_v3_imitation.py`
 **Interfaces introduced in this task:**
 
 ```python
