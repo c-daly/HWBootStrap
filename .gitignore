@@ -138,6 +138,7 @@ python/events.out.tfevents.*
 /python/panels/annihilation-imitation-v1/final-publication.json
 /python/panels/annihilation-imitation-v1/.final-generations/
 /python/panels/annihilation-imitation-v1/evidence/
+/python/evidence/tactical-v3-training-pilot-v1/
 
 # Intentionally publishable Task 12 results remain visible to Git.
 !/python/panels/annihilation-imitation-v1/aggregate.json

@@ -396,3 +396,83 @@ def test_run_pilot_writes_machine_authority_and_report_from_one_mapping(
     assert "python -m ml_lab pilot" in report
     assert "PROMISING" in report
     assert collection.identity.contract_hash in report
+
+
+def test_pilot_cli_routes_only_fixed_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import run_tactical_v3_imitation as cli
+
+    server = tmp_path / "GymServer.dll"
+    scenario = tmp_path / "scenario.json"
+    server.write_bytes(b"server")
+    scenario.write_text("{}", encoding="utf-8")
+    output = tmp_path / "pilot"
+    captured = {}
+    monkeypatch.setattr(cli, "run_pilot", lambda *args: captured.setdefault("args", args))
+    argv = (
+        "pilot", "--server-dll", str(server), "--scenario", str(scenario),
+        "--output", str(output), "--seed", "227", "--device", "cuda",
+    )
+
+    assert cli.main(argv) == 0
+    server_cmd, actual_output, seed, device, command = captured["args"]
+    assert server_cmd == ("dotnet", str(server), "--scenario-file", str(scenario))
+    assert actual_output == output
+    assert seed == 227 and device == "cuda"
+    assert tuple(command[-len(argv):]) == argv
+
+
+@pytest.mark.parametrize("failure", ["server", "scenario", "output", "seed", "extra"])
+def test_pilot_cli_rejects_invalid_inputs_before_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    import run_tactical_v3_imitation as cli
+
+    server = tmp_path / "GymServer.dll"
+    scenario = tmp_path / "scenario.json"
+    server.write_bytes(b"server")
+    scenario.write_text("{}", encoding="utf-8")
+    output = tmp_path / "pilot"
+    if failure == "server": server.unlink()
+    if failure == "scenario": scenario.unlink()
+    if failure == "output": output.mkdir()
+    called = False
+    def fail_if_called(*args):
+        nonlocal called
+        called = True
+    monkeypatch.setattr(cli, "run_pilot", fail_if_called)
+    argv = [
+        "pilot", "--server-dll", str(server), "--scenario", str(scenario),
+        "--output", str(output), "--seed", "226" if failure == "seed" else "227",
+        "--device", "cpu",
+    ]
+    if failure == "extra": argv.extend(("--profiles", "all"))
+
+    with pytest.raises((ValueError, FileExistsError, SystemExit)):
+        cli.main(argv)
+    assert not called
+
+
+def test_real_server_collects_reciprocal_standard_games() -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+    from ml_lab.tactical_v3_pilot import collect_game, collection_schedule
+
+    server = ROOT / "engine" / "HexWars.GymServer" / "bin" / "Debug" / "net8.0" / "HexWars.GymServer.dll"
+    scenario = ROOT / "python" / "config" / "annihilation-structured-imitation-v1.json"
+    assert server.is_file() and scenario.is_file()
+    items = collection_schedule("train")[:2]
+    with TacticalV3GymClient(
+        ("dotnet", str(server), "--scenario-file", str(scenario)),
+        environment_kind="duel",
+    ) as client:
+        results = tuple(collect_game(client, item) for item in items)
+
+    assert [item.learner_seat for item in items] == [0, 1]
+    assert all(examples for examples, _ in results)
+    assert all(summary.terminated or summary.truncated for _, summary in results)
+    assert all(summary.internal_fallback_count == 0 for _, summary in results)
+    assert all(
+        example.teacher.search_depth == 4 and
+        example.teacher.expansion_budget == 512 and
+        example.teacher.heuristic_identity == "material-plus-pursuit-v1"
+        for examples, _ in results for example in examples
+    )
