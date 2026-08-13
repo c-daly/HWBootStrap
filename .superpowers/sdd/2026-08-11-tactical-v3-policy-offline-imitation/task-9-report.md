@@ -134,3 +134,34 @@ above an ordinary immediate parent therefore redirected both operations.
   `63 passed, 6 skipped in 67.91s`. The six skips are ordinary-symlink cases
   unavailable under this Windows host privileges; real junction coverage
   executed.
+
+## Fix Round 3 - dot-component ancestor bypass rejection
+
+The scoped re-review found that the lexical ancestor walker stopped at the
+first nonexistent raw component. On Windows, a later `..` cancels that
+component before filesystem traversal, so
+`missing\\..\\junction\\ordinary-parent\\run` bypassed the initial guard.
+
+### RED evidence
+
+- Added direct public-boundary `.`/`..` rejection coverage and executed real
+  Windows publish and validation regressions using the bypass path.
+- On unchanged production, focused
+  `-k "dot_path_components or missing_dotdot"` produced
+  `4 failed, 69 deselected in 9.29s`. Validation accepted the junction-backed
+  run. Publication crossed the boundary and created its temporary directory
+  through the junction before later validation rejected it and cleaned up.
+
+### GREEN evidence
+
+- Public run paths now reject raw `.` or `..` components before conversion to
+  `Path` and before any filesystem access. The existing non-resolving `lstat`
+  ancestor walk remains responsible for symlink, junction, and reparse
+  detection on accepted paths.
+- Focused `-k "dot_path_components or missing_dotdot"`:
+  `4 passed, 69 deselected in 6.19s`. Both real Windows junction regressions
+  executed; publication rejected before creating the physical target run.
+- Full Task 9:
+  `67 passed, 6 skipped in 69.40s`. The six skips remain the ordinary Windows
+  symlink cases unavailable under host privileges; real junction cases
+  executed.

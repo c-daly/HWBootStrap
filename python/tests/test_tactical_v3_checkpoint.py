@@ -610,6 +610,40 @@ def test_validate_rejects_real_windows_junction(
         os.rmdir(junction)
 
 
+@pytest.mark.parametrize("component", (".", ".."))
+def test_validate_rejects_dot_path_components_at_public_boundary(
+    tmp_path: Path,
+    component: str,
+) -> None:
+    run_path = f"{tmp_path}{os.sep}{component}{os.sep}run"
+
+    with pytest.raises(ValueError, match="dot path component|traversal"):
+        validate_structured_run(run_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows reparse points")
+def test_validate_rejects_missing_dotdot_windows_junction_bypass(
+    tmp_path: Path,
+    published_run_template: tuple[CheckpointCase, Path],
+) -> None:
+    _, template = published_run_template
+    target = tmp_path / "junction-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    clone_published_run(template, ordinary_parent / "run")
+    junction = tmp_path / "ancestor-junction"
+    create_windows_junction(junction, target)
+    candidate = (
+        tmp_path / "missing" / ".." / junction.name / "ordinary-parent" / "run"
+    )
+    try:
+        assert candidate.exists()
+        with pytest.raises(ValueError, match="dot path component|traversal"):
+            validate_structured_run(candidate)
+    finally:
+        os.rmdir(junction)
+
+
 def test_validate_rejects_nested_symlink_ancestor(
     tmp_path: Path,
     published_run_template: tuple[CheckpointCase, Path],
@@ -712,6 +746,33 @@ def test_publish_rejects_windows_reparse_parent(
                 case.corpus,
                 case.scenario,
             )
+    finally:
+        os.rmdir(junction)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows reparse points")
+def test_publish_rejects_missing_dotdot_windows_junction_bypass_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    case = make_case()
+    target = tmp_path / "junction-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    junction = tmp_path / "ancestor-junction"
+    create_windows_junction(junction, target)
+    candidate = (
+        tmp_path / "missing" / ".." / junction.name / "ordinary-parent" / "run"
+    )
+    try:
+        assert candidate.parent.exists()
+        with pytest.raises(ValueError, match="dot path component|traversal"):
+            publish_structured_run(
+                candidate,
+                case.result,
+                case.corpus,
+                case.scenario,
+            )
+        assert not (ordinary_parent / "run").exists()
     finally:
         os.rmdir(junction)
 

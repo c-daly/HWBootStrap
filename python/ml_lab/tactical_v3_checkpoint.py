@@ -624,6 +624,18 @@ def _is_reparse(path: Path) -> bool:
     )
 
 
+def _public_run_path(value: Path, label: str) -> Path:
+    raw = os.fspath(value)
+    components = (
+        raw.replace(os.altsep, os.sep).split(os.sep)
+        if os.altsep
+        else raw.split(os.sep)
+    )
+    if any(component in {".", ".."} for component in components):
+        raise ValueError(f"{label} must not contain a dot path component or traversal")
+    return Path(raw)
+
+
 def _require_plain_lexical_chain(path: Path, label: str) -> None:
     lexical = path if path.is_absolute() else Path.cwd() / path
     for component in reversed((lexical, *lexical.parents)):
@@ -694,7 +706,7 @@ def _authenticated_corpus_manifest(
 
 
 def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: StructuredCorpus, scenario_path: Path) -> Path:
-    run_dir = Path(run_dir)
+    run_dir = _public_run_path(run_dir, "run destination")
     _require_plain_lexical_chain(run_dir.parent, "run destination")
     if run_dir.exists() or _is_reparse(run_dir):
         raise FileExistsError(f"refusing to overwrite existing run {run_dir}")
@@ -777,7 +789,7 @@ def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: Struct
 
 
 def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
-    root = Path(run_dir)
+    root = _public_run_path(run_dir, "run directory")
     _require_plain_lexical_chain(root, "run directory")
     entries = _require_plain_run_inventory(root)
     checkpoint_dir = entries["checkpoints"]
