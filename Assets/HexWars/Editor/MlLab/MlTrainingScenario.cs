@@ -2,11 +2,33 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using HexWars.Presentation;
 using UnityEngine;
 
 namespace HexWars.Presentation.EditorTools.MlLab
 {
+    sealed class MlTacticalV3PolicyIdentity
+    {
+        public MlTacticalV3PolicyIdentity(
+            string version, string environmentKind, string contractHash,
+            string encodingHash, string capacityHash)
+        {
+            Version = version;
+            EnvironmentKind = environmentKind;
+            ContractHash = contractHash;
+            EncodingHash = encodingHash;
+            CapacityHash = capacityHash;
+        }
+
+        public string Version { get; }
+        public string EnvironmentKind { get; }
+        public string ContractHash { get; }
+        public string EncodingHash { get; }
+        public string CapacityHash { get; }
+    }
+
     public sealed class MlTrainingScenario
     {
         public int SchemaVersion { get; set; }
@@ -647,6 +669,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     static class MlStrictScenarioJson
     {
+        static readonly string[] TacticalV3PolicyIdentityKeys =
+        {
+            "capacity", "capacity_hash", "contract_hash",
+            "contract_version", "encoding", "encoding_hash",
+            "environment_kind", "match", "scenario_id",
+            "scenario_schema_version",
+        };
         static readonly string[] LibraryKeys = { "schema_version", "templates" };
         static readonly string[] ScenarioKeys =
         {
@@ -749,6 +778,150 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!root.TryGetValue(objectName, out child)) return false;
             Dictionary<string, JsonNode> value = RequireObject(child, "root." + objectName);
             return memberNames.Any(value.ContainsKey);
+        }
+
+        public static MlTacticalV3PolicyIdentity ValidatePolicyIdentity(
+            string json, string source)
+        {
+            Dictionary<string, JsonNode> value =
+                RequireObject(Parse(json, source), "policy_identity");
+            ExactKeys(value, TacticalV3PolicyIdentityKeys, "policy_identity");
+            string version = RequireString(
+                value["contract_version"],
+                "policy_identity.contract_version");
+            string environmentKind = RequireString(
+                value["environment_kind"],
+                "policy_identity.environment_kind");
+            string contractHash = RequireString(
+                value["contract_hash"],
+                "policy_identity.contract_hash");
+            string encodingHash = RequireString(
+                value["encoding_hash"],
+                "policy_identity.encoding_hash");
+            string capacityHash = RequireString(
+                value["capacity_hash"],
+                "policy_identity.capacity_hash");
+            RequireObject(value["encoding"], "policy_identity.encoding");
+            RequireObject(value["capacity"], "policy_identity.capacity");
+            RequireObject(value["match"], "policy_identity.match");
+            RequireString(
+                value["scenario_id"], "policy_identity.scenario_id");
+            RequireInteger(
+                value["scenario_schema_version"],
+                "policy_identity.scenario_schema_version");
+
+            if (!string.Equals(
+                    Sha256(CanonicalJson(value["encoding"])), encodingHash,
+                    StringComparison.Ordinal))
+                Fail("policy_identity encoding hash does not authenticate encoding");
+            if (!string.Equals(
+                    Sha256(CanonicalJson(value["capacity"])), capacityHash,
+                    StringComparison.Ordinal))
+                Fail("policy_identity capacity hash does not authenticate capacity");
+            string contractJson = new StringBuilder().Append('{')
+                .Append(JsonString("encoding_hash")).Append(':')
+                .Append(JsonString(encodingHash)).Append(',')
+                .Append(JsonString("environment_kind")).Append(':')
+                .Append(JsonString(environmentKind)).Append(',')
+                .Append(JsonString("match")).Append(':')
+                .Append(CanonicalJson(value["match"])).Append(',')
+                .Append(JsonString("schema_version")).Append(":1,")
+                .Append(JsonString("version")).Append(':')
+                .Append(JsonString(version)).Append('}').ToString();
+            if (!string.Equals(
+                    Sha256(contractJson), contractHash, StringComparison.Ordinal))
+                Fail("policy_identity contract hash does not authenticate match");
+            return new MlTacticalV3PolicyIdentity(
+                version, environmentKind, contractHash, encodingHash, capacityHash);
+        }
+
+        static string Sha256(string value)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+                var text = new StringBuilder(hash.Length * 2);
+                foreach (byte item in hash)
+                    text.Append(item.ToString(
+                        "x2", System.Globalization.CultureInfo.InvariantCulture));
+                return text.ToString();
+            }
+        }
+
+        static string CanonicalJson(JsonNode node)
+        {
+            var text = new StringBuilder();
+            AppendCanonical(text, node);
+            return text.ToString();
+        }
+
+        static void AppendCanonical(StringBuilder text, JsonNode node)
+        {
+            switch (node.Kind)
+            {
+                case JsonKind.Object:
+                    text.Append('{');
+                    bool firstProperty = true;
+                    foreach (string key in node.ObjectValue.Keys.OrderBy(
+                                 item => item, StringComparer.Ordinal))
+                    {
+                        if (!firstProperty) text.Append(',');
+                        firstProperty = false;
+                        text.Append(JsonString(key)).Append(':');
+                        AppendCanonical(text, node.ObjectValue[key]);
+                    }
+                    text.Append('}');
+                    return;
+                case JsonKind.Array:
+                    text.Append('[');
+                    for (int i = 0; i < node.ArrayValue.Count; i++)
+                    {
+                        if (i > 0) text.Append(',');
+                        AppendCanonical(text, node.ArrayValue[i]);
+                    }
+                    text.Append(']');
+                    return;
+                case JsonKind.String:
+                    text.Append(JsonString(node.StringValue));
+                    return;
+                case JsonKind.Integer:
+                case JsonKind.Number:
+                    text.Append(node.NumberText);
+                    return;
+                case JsonKind.Boolean:
+                    text.Append(node.BooleanValue ? "true" : "false");
+                    return;
+                case JsonKind.Null:
+                    text.Append("null");
+                    return;
+                default:
+                    throw new InvalidDataException(
+                        "unsupported policy identity JSON value");
+            }
+        }
+
+        static string JsonString(string value)
+        {
+            var text = new StringBuilder().Append((char)34);
+            foreach (char character in value)
+            {
+                if (character == (char)92)
+                    text.Append((char)92).Append((char)92);
+                else if (character == (char)34)
+                    text.Append((char)92).Append((char)34);
+                else if (character == '\n')
+                    text.Append((char)92).Append('n');
+                else if (character == '\r')
+                    text.Append((char)92).Append('r');
+                else if (character == '\t')
+                    text.Append((char)92).Append('t');
+                else if (character < ' ')
+                    text.Append((char)92).Append('u').Append(
+                        ((int)character).ToString("x4"));
+                else
+                    text.Append(character);
+            }
+            return text.Append((char)34).ToString();
         }
 
         static void ValidateScenarioNode(JsonNode node, string path)
@@ -1052,6 +1225,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public List<JsonNode> ArrayValue;
             public string StringValue;
             public string NumberText;
+            public bool BooleanValue;
         }
 
         sealed class JsonParser
@@ -1090,12 +1264,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (current == 't')
                 {
                     ReadLiteral("true");
-                    return new JsonNode { Kind = JsonKind.Boolean };
+                    return new JsonNode {
+                        Kind = JsonKind.Boolean, BooleanValue = true };
                 }
                 if (current == 'f')
                 {
                     ReadLiteral("false");
-                    return new JsonNode { Kind = JsonKind.Boolean };
+                    return new JsonNode {
+                        Kind = JsonKind.Boolean, BooleanValue = false };
                 }
                 if (current == 'n')
                 {

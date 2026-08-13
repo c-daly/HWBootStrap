@@ -59,11 +59,11 @@ The real validate-run CLI exited 0. Earlier acceptance v1/v2 directories were pr
 - End-to-end gate after schema-2 resolver fix: 4 passed in 339.47 seconds.
 - Engine suite: 995 passed, 0 failed/skipped in 207.5 seconds.
 - Release build-to-Unity: 0 errors; 5 existing nullable warnings.
-- Unity 6000.5 exact-worktree EditMode gate: 187 passed, 0 failed/skipped in 5.98 seconds.
-- Temporary exact-artifact Unity admission probe: the actual ignored v3 run passed 1/1 and produced its exact run:PATH spec; the environment-specific test was removed afterward.
+- Unity 6000.5 exact-worktree EditMode gate after review hardening: 191 passed, 0 failed/skipped in 3.31 seconds.
+- Temporary exact-artifact Unity admission probe: the actual ignored v3 run passed 1/1 under the final strict validator and produced its exact run:PATH spec; the environment-specific test was removed afterward.
 - Live Coplay health: exact project connected, play mode off, hasCompilationErrors=false; check_compile_errors returned No compile errors.
 - Unity console contained no task error; only an unrelated unsupported-toolbar warning.
-- CUDA was available in the environment, but the prescribed determinism and acceptance publication were intentionally executed on CPU.
+- CUDA was available. The standalone real CUDA training/publication test passed 1/1 in 8.67 seconds: GPU-reloaded logits matched CPU at rtol 1e-5 and atol 1e-6, and selected actions matched exactly. The prescribed deterministic acceptance publication remained CPU.
 
 Six focused Python skips and 21 full-suite skips are the existing Windows privilege-only symlink cases.
 
@@ -80,3 +80,9 @@ Transient normalization of the seed-bank advanced the suite but could not repair
 ## Boundaries
 
 This evidence establishes deterministic offline overfit on the authenticated tiny corpus, exact checkpoint reload behavior, real transport/action identity, and capacity-compatible cross-size inference. It does not establish full-game policy quality, bounded-search full-game collection, production DAgger, curriculum performance, fog-of-war behavior, unit-design generalization, or promotion/sealing readiness.
+
+## Independent Review Fix
+
+- Unity policy-identity admission now strictly parses the exact full sidecar, rejects duplicate/extra/missing properties, and recomputes encoding, capacity, and contract hashes over canonical parsed bodies.
+- The focused behavioral RED rejected none of four minimal/body-tamper/extra/duplicate cases (0/4); after the fix the same matrix passed 4/4.
+- The final combined Unity gate passed 191/191 with no compile or unhandled errors.

@@ -830,6 +830,59 @@ namespace HexWars.Presentation.Tests
             finally { Directory.Delete(fixture.Run, true); }
         }
 
+        [TestCase("minimal")]
+        [TestCase("body-tamper")]
+        [TestCase("extra")]
+        [TestCase("duplicate")]
+        public void StructuredArenaRun_RejectsUnauthenticatedPolicyIdentityBody(
+            string mutation)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string policyPath = Path.Combine(
+                    fixture.Run, "policy-identity.json");
+                if (mutation == "minimal")
+                {
+                    File.WriteAllText(policyPath, @"{
+                        ""contract_version"":""tactical-v3"",
+                        ""environment_kind"":""duel"",
+                        ""contract_hash"":""bac4af4d4b8e68466ffaf37c2721f98129edc93b90f529999ba45463cd921437"",
+                        ""encoding_hash"":""e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"",
+                        ""capacity_hash"":""7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364""
+                    }");
+                }
+                else if (mutation == "body-tamper")
+                {
+                    string policy = File.ReadAllText(policyPath);
+                    string quote = ((char)34).ToString();
+                    string changed = policy.Replace(
+                        quote + "max_candidates" + quote + ": 32768",
+                        quote + "max_candidates" + quote + ": 32767");
+                    Assert.That(changed, Is.Not.EqualTo(policy));
+                    File.WriteAllText(policyPath, changed);
+                }
+                else
+                {
+                    string policy = File.ReadAllText(policyPath);
+                    string marker = "{";
+                    string quote = ((char)34).ToString();
+                    string member = mutation == "extra"
+                        ? quote + "unexpected" + quote + ":true,"
+                        : quote + "contract_version" + quote + ":" +
+                          quote + "tactical-v3" + quote + ",";
+                    File.WriteAllText(policyPath,
+                        policy.Replace(marker, marker + member));
+                }
+
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void StructuredArenaRun_RejectsMissingCheckpointOrTraversalBeforeMutation(

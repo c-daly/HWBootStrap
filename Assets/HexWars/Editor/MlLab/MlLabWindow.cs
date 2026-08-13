@@ -147,6 +147,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             catch (Exception error) when (
                 error is ArgumentException ||
+                error is InvalidDataException ||
                 error is IOException ||
                 error is UnauthorizedAccessException)
             {
@@ -249,14 +250,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
             RequireContainedRegularFile(
                 runPath, policyPath, label + " policy identity", errors);
             if (errors.Count != errorCount) return;
-            ArenaPolicyIdentity policy = JsonUtility.FromJson<ArenaPolicyIdentity>(
-                File.ReadAllText(policyPath));
-            if (policy == null ||
-                !string.Equals(policy.contract_version, contract.version, StringComparison.Ordinal) ||
-                !string.Equals(policy.environment_kind, contract.environment_kind, StringComparison.Ordinal) ||
-                !string.Equals(policy.contract_hash, contract.contract_hash, StringComparison.Ordinal) ||
-                !string.Equals(policy.encoding_hash, contract.encoding_hash, StringComparison.Ordinal) ||
-                !string.Equals(policy.capacity_hash, contract.capacity_hash, StringComparison.Ordinal))
+            MlTacticalV3PolicyIdentity policy =
+                MlStrictScenarioJson.ValidatePolicyIdentity(
+                    File.ReadAllText(policyPath), policyPath);
+            if (!string.Equals(policy.Version, contract.version, StringComparison.Ordinal) ||
+                !string.Equals(policy.EnvironmentKind, contract.environment_kind, StringComparison.Ordinal) ||
+                !string.Equals(policy.ContractHash, contract.contract_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.EncodingHash, contract.encoding_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.CapacityHash, contract.capacity_hash, StringComparison.Ordinal))
                 errors.Add(label + " policy identity does not match run contract.");
         }
 
@@ -293,14 +294,6 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public int action_size;
         }
 
-        [Serializable] sealed class ArenaPolicyIdentity
-        {
-            public string contract_version;
-            public string environment_kind;
-            public string contract_hash;
-            public string encoding_hash;
-            public string capacity_hash;
-        }
     }
 
     public sealed class MlLabWindowState
