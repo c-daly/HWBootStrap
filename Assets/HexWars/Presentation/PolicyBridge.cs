@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -22,6 +23,7 @@ namespace HexWars.Presentation
         public string ContractHash { get; internal set; }
         public string Environment { get; internal set; }
         public string EncodingHash { get; internal set; }
+        public string CapacityHash { get; internal set; }
     }
 
     public sealed class PolicyReadyResult
@@ -43,6 +45,12 @@ namespace HexWars.Presentation
             string detail = string.IsNullOrWhiteSpace(stderrTail) ? Error : Error + "\n" + stderrTail;
             throw new InvalidOperationException(detail);
         }
+    }
+
+    public sealed class PolicyCandidateResult
+    {
+        public long DecisionId { get; internal set; }
+        public int CandidateId { get; internal set; }
     }
 
     public sealed class PolicyReloadResult
@@ -72,6 +80,7 @@ namespace HexWars.Presentation
         public async Task<bool> StartAsync(
             string pythonExe, string serverScript, string p0Spec, string p1Spec, string workingDir,
             string expectedEnvironment, string expectedContractVersion, string expectedEncodingHash,
+            string expectedCapacityHash = null,
             int timeoutMs = DefaultStartupTimeoutMs, CancellationToken cancellationToken = default)
         {
             if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
@@ -82,7 +91,8 @@ namespace HexWars.Presentation
             {
                 FileName = pythonExe,
                 Arguments = BuildArguments(serverScript, p0Spec, p1Spec,
-                    expectedEnvironment, expectedContractVersion, expectedEncodingHash),
+                    expectedEnvironment, expectedContractVersion, expectedEncodingHash,
+                    expectedCapacityHash),
                 WorkingDirectory = workingDir,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -135,6 +145,36 @@ namespace HexWars.Presentation
             string response = _proc.StandardOutput.ReadLine();
             if (response == null) throw new InvalidOperationException(WithStderr("policy server closed unexpectedly"));
             return ParseAction(response).RequireAction(StderrTail);
+        }
+
+        public PolicyCandidateResult ActStructured(
+            int seat, TacticalV3ViewDto decision)
+        {
+            if (decision == null) throw new ArgumentNullException(nameof(decision));
+            if (seat != decision.seat)
+                throw new InvalidOperationException(
+                    "structured policy request seat does not match decision seat");
+            EnsureRunning();
+            var request = new TacticalV3PolicyRequestDto
+            {
+                seat = seat,
+                decision = decision,
+            };
+            _proc.StandardInput.WriteLine(JsonUtility.ToJson(request));
+            _proc.StandardInput.Flush();
+            string response = _proc.StandardOutput.ReadLine();
+            if (response == null)
+                throw new InvalidOperationException(WithStderr(
+                    "policy server closed unexpectedly"));
+            try
+            {
+                return ParseStructuredAction(response, decision.decision_id);
+            }
+            catch (InvalidOperationException error)
+            {
+                throw new InvalidOperationException(
+                    WithStderr(error.Message), error);
+            }
         }
 
         public PolicyReloadResult Reload()
@@ -222,6 +262,7 @@ namespace HexWars.Presentation
                     ContractHash = seat.contract_hash ?? string.Empty,
                     Environment = seat.environment ?? string.Empty,
                     EncodingHash = seat.encoding_hash ?? string.Empty,
+                    CapacityHash = seat.capacity_hash ?? string.Empty,
                 };
             }
             return result;
@@ -285,7 +326,8 @@ namespace HexWars.Presentation
         }
 
         public static string BuildArguments(string serverScript, string p0Spec, string p1Spec,
-            string expectedEnvironment, string expectedContractVersion, string expectedEncodingHash)
+            string expectedEnvironment, string expectedContractVersion,
+            string expectedEncodingHash, string expectedCapacityHash = null)
         {
             if (string.IsNullOrWhiteSpace(expectedEnvironment))
                 throw new ArgumentException("expected environment is required", nameof(expectedEnvironment));
@@ -293,13 +335,69 @@ namespace HexWars.Presentation
                 throw new ArgumentException("expected contract version is required", nameof(expectedContractVersion));
             if (!IsLowerSha256(expectedEncodingHash))
                 throw new ArgumentException("expected encoding hash must be lowercase SHA-256", nameof(expectedEncodingHash));
+            bool structured = string.Equals(
+                expectedEnvironment, "tactical-v3", StringComparison.Ordinal);
+            if (structured && !IsLowerSha256(expectedCapacityHash))
+                throw new ArgumentException(
+                    "tactical-v3 expected capacity hash must be lowercase SHA-256",
+                    nameof(expectedCapacityHash));
+            if (!structured && expectedCapacityHash != null)
+                throw new ArgumentException(
+                    "expected capacity hash is valid only for tactical-v3",
+                    nameof(expectedCapacityHash));
             var args = new List<string> { QuoteArgument(serverScript) };
             if (!string.IsNullOrEmpty(p0Spec)) { args.Add("--p0"); args.Add(QuoteArgument(p0Spec)); }
             if (!string.IsNullOrEmpty(p1Spec)) { args.Add("--p1"); args.Add(QuoteArgument(p1Spec)); }
             args.Add("--expected-environment"); args.Add(QuoteArgument(expectedEnvironment));
             args.Add("--expected-contract-version"); args.Add(QuoteArgument(expectedContractVersion));
             args.Add("--expected-encoding-hash"); args.Add(QuoteArgument(expectedEncodingHash));
+            if (structured)
+            {
+                args.Add("--expected-capacity-hash");
+                args.Add(QuoteArgument(expectedCapacityHash));
+            }
             return string.Join(" ", args);
+        }
+
+        public static PolicyCandidateResult ParseStructuredAction(
+            string json, long expectedDecisionId)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                throw new InvalidOperationException(
+                    "policy server returned no structured action message");
+            const string decisionFirst =
+                @"^[ \t\r\n]*\{[ \t\r\n]*""decision_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*,[ \t\r\n]*""candidate_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*\}[ \t\r\n]*$";
+            const string candidateFirst =
+                @"^[ \t\r\n]*\{[ \t\r\n]*""candidate_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*,[ \t\r\n]*""decision_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*\}[ \t\r\n]*$";
+            Match match = Regex.Match(json, decisionFirst, RegexOptions.CultureInvariant);
+            bool reversed = false;
+            if (!match.Success)
+            {
+                match = Regex.Match(json, candidateFirst, RegexOptions.CultureInvariant);
+                reversed = true;
+            }
+            if (!match.Success)
+                throw new InvalidOperationException(
+                    "invalid structured policy action message: expected exactly decision_id and candidate_id integers");
+
+            string decisionText = match.Groups[reversed ? 2 : 1].Value;
+            string candidateText = match.Groups[reversed ? 1 : 2].Value;
+            if (!long.TryParse(decisionText, NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture, out long decisionId))
+                throw new InvalidOperationException(
+                    "invalid structured policy action decision_id");
+            if (!int.TryParse(candidateText, NumberStyles.AllowLeadingSign,
+                CultureInfo.InvariantCulture, out int candidateId))
+                throw new InvalidOperationException(
+                    "invalid structured policy action candidate_id");
+            if (decisionId != expectedDecisionId)
+                throw new InvalidOperationException(
+                    "structured policy action decision id does not match request");
+            return new PolicyCandidateResult
+            {
+                DecisionId = decisionId,
+                CandidateId = candidateId,
+            };
         }
 
         static bool IsLowerSha256(string value)
@@ -345,6 +443,7 @@ namespace HexWars.Presentation
             public string contract_hash;
             public string environment;
             public string encoding_hash;
+            public string capacity_hash;
         }
     }
 }

@@ -256,5 +256,18 @@ namespace HexWars.Presentation.Tests
             Assert.That(text, Does.Contain("combined-arms scripted deployment"));
             Assert.That(text, Does.Contain("hidden deployment"));
         }
+
+        [Test]
+        public void TacticalV3Training_IsRejectedWithOfflineImitationGuidance()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+
+            Assert.That(config.Validate(), Has.Some.Contains("offline imitation"));
+            InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+                () => config.BuildTrainArguments(@"C:\scenario.json"));
+            Assert.That(error.Message, Does.Contain("offline imitation"));
+            Assert.That(error.Message, Does.Contain("Arena"));
+        }
     }
 }

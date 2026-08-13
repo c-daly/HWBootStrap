@@ -1,0 +1,694 @@
+{
+  "capacity": {
+    "max_candidates": 32768,
+    "max_capability_allocations": 2048,
+    "max_capability_definitions": 128,
+    "max_cells": 512,
+    "max_memory_records": 64,
+    "max_relations": 65536,
+    "max_rules": 128,
+    "max_templates": 32,
+    "max_units": 64
+  },
+  "capacity_hash": "7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364",
+  "contract_hash": "0ae48260cde97bce9ed75975874676a262588b3ed17963cdb41d09d09d3088ce",
+  "contract_version": "tactical-v3",
+  "encoding": {
+    "candidate_schema": {
+      "fields": [
+        "candidate_id:int32",
+        "decision_id:int64",
+        "kind:candidate_kind",
+        "actor:nullable_token_ref",
+        "target:nullable_token_ref",
+        "template:nullable_token_ref",
+        "cell:nullable_token_ref",
+        "projection:projected_delta"
+      ],
+      "projection_fields": [
+        "source_cell:nullable_token_ref",
+        "destination_cell:nullable_token_ref",
+        "template:nullable_token_ref",
+        "target:nullable_token_ref",
+        "horizontal_movement_spent:int32",
+        "vertical_movement_spent:int32",
+        "target_hp_delta:int32",
+        "damage:int32",
+        "is_lethal:bool",
+        "bounty_delta:int32",
+        "points_delta:int32",
+        "round_delta:int32",
+        "is_terminal:bool"
+      ]
+    },
+    "capability_descriptors": {
+      "definition_fields": [
+        "kind:capability_kind"
+      ],
+      "definitions": [
+        "health",
+        "damage",
+        "defense",
+        "movement",
+        "vertical_movement",
+        "range",
+        "range_arc",
+        "vision",
+        "vision_arc"
+      ],
+      "relation_fields": [
+        "source:capability_kind",
+        "kind:capability_relation_kind",
+        "target:capability_or_action"
+      ],
+      "relations": [
+        {
+          "kind": "opposes",
+          "source": "damage",
+          "target": "capability:health"
+        },
+        {
+          "kind": "reduces",
+          "source": "defense",
+          "target": "capability:damage"
+        },
+        {
+          "kind": "enables_action",
+          "source": "range",
+          "target": "action:attack"
+        },
+        {
+          "kind": "enables_action",
+          "source": "range_arc",
+          "target": "action:attack"
+        }
+      ]
+    },
+    "enums": {
+      "action_kind": [
+        "move",
+        "attack",
+        "deploy",
+        "end_turn"
+      ],
+      "candidate_kind": [
+        "attack",
+        "move",
+        "deploy",
+        "end_turn"
+      ],
+      "capability_kind": [
+        "health",
+        "damage",
+        "defense",
+        "movement",
+        "vertical_movement",
+        "range",
+        "range_arc",
+        "vision",
+        "vision_arc"
+      ],
+      "capability_relation_kind": [
+        "opposes",
+        "reduces",
+        "enables_action"
+      ],
+      "relation_kind": [
+        "neighbor",
+        "occupies",
+        "has_capability"
+      ],
+      "relative_owner": [
+        "self",
+        "opponent"
+      ],
+      "rule_kind": [
+        "win_conditions",
+        "round",
+        "round_cap",
+        "actions_per_turn",
+        "starting_points",
+        "self_points",
+        "opponent_points",
+        "damage_floor",
+        "damage_high_ground_bonus",
+        "range_high_ground_bonus",
+        "bounty_rate",
+        "deploy_cost_multiplier",
+        "fog_of_war",
+        "max_design_point_cost",
+        "design_fee"
+      ],
+      "table_kind": [
+        "cells",
+        "units",
+        "templates",
+        "capability_definitions",
+        "capability_allocations",
+        "rules",
+        "memory_records",
+        "relations",
+        "candidates"
+      ],
+      "terrain_type": [
+        "plains",
+        "forest",
+        "rough",
+        "water"
+      ],
+      "win_condition": [
+        "none",
+        "annihilation",
+        "economy",
+        "score"
+      ]
+    },
+    "hex_offset_layout": "odd-q",
+    "schema_version": 1,
+    "tables": {
+      "candidates": [
+        "candidate_id:int32",
+        "decision_id:int64",
+        "kind:candidate_kind",
+        "actor:nullable_token_ref",
+        "target:nullable_token_ref",
+        "template:nullable_token_ref",
+        "cell:nullable_token_ref",
+        "projection:projected_delta"
+      ],
+      "capability_allocations": [
+        "owner:token_ref",
+        "definition:token_ref",
+        "capability:capability_kind",
+        "purchased_level:int32",
+        "effective_value:int32"
+      ],
+      "capability_definitions": [
+        "kind:capability_kind"
+      ],
+      "cells": [
+        "q:int32",
+        "r:int32",
+        "terrain:terrain_type",
+        "elevation:int32",
+        "self_deployment_zone:bool",
+        "opponent_deployment_zone:bool",
+        "controller:nullable_relative_owner",
+        "is_boundary:bool",
+        "currently_visible:bool",
+        "previously_observed:bool"
+      ],
+      "memory": [
+        "cell:token_ref",
+        "last_seen_round:int32",
+        "observation_age:int32",
+        "last_known_current_hp:int32",
+        "currently_visible:bool"
+      ],
+      "relations": [
+        "kind:relation_kind",
+        "source:token_ref",
+        "target:token_ref",
+        "int_feature:int32",
+        "float_feature:float32",
+        "bool_feature:bool"
+      ],
+      "rules": [
+        "kind:rule_kind",
+        "int_value:int32",
+        "float_value:float32",
+        "bool_value:bool"
+      ],
+      "templates": [
+        "owner:relative_owner",
+        "point_cost:int32",
+        "deploy_cost:int32",
+        "is_fixed:bool",
+        "is_deployable:bool"
+      ],
+      "units": [
+        "owner:relative_owner",
+        "current_hp:int32",
+        "max_hp:int32",
+        "cell:token_ref",
+        "elevation:int32",
+        "moved:bool",
+        "attacked:bool",
+        "horizontal_movement_spent:int32",
+        "vertical_movement_spent:int32",
+        "point_cost:int32",
+        "deploy_cost:int32",
+        "currently_visible:bool"
+      ]
+    },
+    "token_reference_schema": [
+      "table:table_kind",
+      "row:int32"
+    ],
+    "version": "tactical-v3"
+  },
+  "encoding_hash": "e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6",
+  "environment_kind": "tactical",
+  "match": {
+    "board": {
+      "flat_chance": 0.6,
+      "forest_weight": 15,
+      "height": 9,
+      "hex_offset_layout": "odd-q",
+      "max_elevation": 4,
+      "plains_weight": 70,
+      "rough_weight": 10,
+      "water_weight": 5,
+      "width": 13,
+      "zone_depth": 3
+    },
+    "game": {
+      "actions_per_turn": null,
+      "biomes_enabled": false,
+      "bounty_rate": 0.5,
+      "build_anywhere": false,
+      "build_factor": 4,
+      "capture_cost": 2147483647,
+      "capture_factor": 4,
+      "claim_ends_turn": true,
+      "damage_floor": 0,
+      "deploy_cost_multiplier": 1,
+      "design_fee": 0,
+      "dmg_high_ground_bonus": 1,
+      "economy_win_threshold": 200,
+      "fixed_template_count": 5,
+      "fog_of_war": false,
+      "generator_cost": 2,
+      "generator_health": 3,
+      "generator_output": 1,
+      "generators_enabled": false,
+      "max_design_point_cost": 0,
+      "point_decay": 0,
+      "range_high_ground_bonus": 1,
+      "round_cap": 100,
+      "score_army": 1,
+      "score_kills": 1,
+      "score_points": 1,
+      "score_territory": 1,
+      "starting_points": 12,
+      "template_slot_count": 5,
+      "terrain": {
+        "forest": {
+          "concealment": 0,
+          "defense": 0,
+          "move_cost": 1,
+          "passable": true
+        },
+        "plains": {
+          "concealment": 0,
+          "defense": 0,
+          "move_cost": 1,
+          "passable": true
+        },
+        "rough": {
+          "concealment": 0,
+          "defense": 0,
+          "move_cost": 1,
+          "passable": true
+        },
+        "water": {
+          "concealment": 0,
+          "defense": 0,
+          "move_cost": 1,
+          "passable": true
+        }
+      },
+      "territory_income": 0,
+      "territory_mode": false,
+      "turn_policy": "all_units",
+      "upkeep_factor": 0.25,
+      "win_conditions": [
+        "annihilation"
+      ]
+    },
+    "max_controllable_units": 3,
+    "max_steps": 808,
+    "placement_policy": "profiled-seeded-v1",
+    "reward": {
+      "material_adjustment_bound": 0.2,
+      "points_weight": 0.5,
+      "terminal_non_win": -1,
+      "terminal_win": 1,
+      "time_pressure_bound": 0.05
+    },
+    "start_distribution": [
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-1v1-far"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-1v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-1v1-near"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-2v1-far"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-2v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-2v1-near"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-3v1-far"
+      },
+      {
+        "basis_points": 0,
+        "profile_id": "conversion-3v1-medium"
+      },
+      {
+        "basis_points": 500,
+        "profile_id": "conversion-3v1-near"
+      },
+      {
+        "basis_points": 7000,
+        "profile_id": "standard-3v3"
+      }
+    ],
+    "start_profiles": [
+      {
+        "id": "conversion-1v1-far",
+        "learner_unit_count": 1,
+        "opponent_unit_count": 1,
+        "separation": "far"
+      },
+      {
+        "id": "conversion-1v1-medium",
+        "learner_unit_count": 1,
+        "opponent_unit_count": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-1v1-near",
+        "learner_unit_count": 1,
+        "opponent_unit_count": 1,
+        "separation": "near"
+      },
+      {
+        "id": "conversion-2v1-far",
+        "learner_unit_count": 2,
+        "opponent_unit_count": 1,
+        "separation": "far"
+      },
+      {
+        "id": "conversion-2v1-medium",
+        "learner_unit_count": 2,
+        "opponent_unit_count": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-2v1-near",
+        "learner_unit_count": 2,
+        "opponent_unit_count": 1,
+        "separation": "near"
+      },
+      {
+        "id": "conversion-3v1-far",
+        "learner_unit_count": 3,
+        "opponent_unit_count": 1,
+        "separation": "far"
+      },
+      {
+        "id": "conversion-3v1-medium",
+        "learner_unit_count": 3,
+        "opponent_unit_count": 1,
+        "separation": "medium"
+      },
+      {
+        "id": "conversion-3v1-near",
+        "learner_unit_count": 3,
+        "opponent_unit_count": 1,
+        "separation": "near"
+      },
+      {
+        "id": "standard-3v3",
+        "learner_unit_count": 3,
+        "opponent_unit_count": 3,
+        "separation": "legacy-mirrored"
+      }
+    ],
+    "starting_unit_count": 3,
+    "templates": [
+      {
+        "capability_allocations": [
+          {
+            "capability": "health",
+            "effective_value": 7,
+            "purchased_level": 7
+          },
+          {
+            "capability": "damage",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "defense",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "movement",
+            "effective_value": 3,
+            "purchased_level": 3
+          },
+          {
+            "capability": "vertical_movement",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "range",
+            "effective_value": 1,
+            "purchased_level": 1
+          },
+          {
+            "capability": "range_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          },
+          {
+            "capability": "vision",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "vision_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          }
+        ]
+      },
+      {
+        "capability_allocations": [
+          {
+            "capability": "health",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "damage",
+            "effective_value": 6,
+            "purchased_level": 6
+          },
+          {
+            "capability": "defense",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "movement",
+            "effective_value": 3,
+            "purchased_level": 3
+          },
+          {
+            "capability": "vertical_movement",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "range",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "range_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          },
+          {
+            "capability": "vision",
+            "effective_value": 3,
+            "purchased_level": 3
+          },
+          {
+            "capability": "vision_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          }
+        ]
+      },
+      {
+        "capability_allocations": [
+          {
+            "capability": "health",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "damage",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "defense",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "movement",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "vertical_movement",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "range",
+            "effective_value": 6,
+            "purchased_level": 6
+          },
+          {
+            "capability": "range_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          },
+          {
+            "capability": "vision",
+            "effective_value": 4,
+            "purchased_level": 4
+          },
+          {
+            "capability": "vision_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          }
+        ]
+      },
+      {
+        "capability_allocations": [
+          {
+            "capability": "health",
+            "effective_value": 3,
+            "purchased_level": 3
+          },
+          {
+            "capability": "damage",
+            "effective_value": 6,
+            "purchased_level": 6
+          },
+          {
+            "capability": "defense",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "movement",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "vertical_movement",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "range",
+            "effective_value": 5,
+            "purchased_level": 5
+          },
+          {
+            "capability": "range_arc",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "vision",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "vision_arc",
+            "effective_value": 1,
+            "purchased_level": 1
+          }
+        ]
+      },
+      {
+        "capability_allocations": [
+          {
+            "capability": "health",
+            "effective_value": 2,
+            "purchased_level": 2
+          },
+          {
+            "capability": "damage",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "defense",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "movement",
+            "effective_value": 4,
+            "purchased_level": 4
+          },
+          {
+            "capability": "vertical_movement",
+            "effective_value": 3,
+            "purchased_level": 3
+          },
+          {
+            "capability": "range",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "range_arc",
+            "effective_value": 0,
+            "purchased_level": 0
+          },
+          {
+            "capability": "vision",
+            "effective_value": 7,
+            "purchased_level": 7
+          },
+          {
+            "capability": "vision_arc",
+            "effective_value": 2,
+            "purchased_level": 2
+          }
+        ]
+      }
+    ]
+  },
+  "scenario_id": "annihilation-structured-imitation-v1",
+  "scenario_schema_version": 1
+}

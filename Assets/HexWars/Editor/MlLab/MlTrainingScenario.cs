@@ -2,11 +2,33 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using HexWars.Presentation;
 using UnityEngine;
 
 namespace HexWars.Presentation.EditorTools.MlLab
 {
+    sealed class MlTacticalV3PolicyIdentity
+    {
+        public MlTacticalV3PolicyIdentity(
+            string version, string environmentKind, string contractHash,
+            string encodingHash, string capacityHash)
+        {
+            Version = version;
+            EnvironmentKind = environmentKind;
+            ContractHash = contractHash;
+            EncodingHash = encodingHash;
+            CapacityHash = capacityHash;
+        }
+
+        public string Version { get; }
+        public string EnvironmentKind { get; }
+        public string ContractHash { get; }
+        public string EncodingHash { get; }
+        public string CapacityHash { get; }
+    }
+
     public sealed class MlTrainingScenario
     {
         public int SchemaVersion { get; set; }
@@ -20,6 +42,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public MlAdaptiveReward AdaptiveReward { get; set; }
         public MlTrainingAdaptive Adaptive { get; set; }
         public MlTrainingTacticalV2 TacticalV2 { get; set; }
+        public MlTacticalV3Reward TacticalV3Reward { get; set; }
+        public MlTrainingTacticalV3 TacticalV3 { get; set; }
 
         public IReadOnlyList<string> Validate()
         {
@@ -66,9 +90,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     errors.Add("adaptive section is not valid for tactical-v2");
                 ValidateTacticalV2(errors);
             }
+            else if (Environment == MlEnvironmentContract.TacticalV3)
+            {
+                if (TacticalV3Reward == null)
+                    errors.Add("tactical-v3 requires a tactical-v3 reward section");
+                else if (!TacticalV3Reward.IsFinite())
+                    errors.Add("tactical-v3 reward values must be finite");
+                if (TacticalReward != null || AdaptiveReward != null ||
+                    Adaptive != null || TacticalV2 != null)
+                    errors.Add("legacy environment sections are not valid for tactical-v3");
+                ValidateTacticalV3(errors);
+            }
             else
             {
-                errors.Add("environment must be tactical-v1, tactical-v2, or adaptive-v1");
+                errors.Add("environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1");
             }
 
             return errors;
@@ -230,6 +265,43 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("tactical-v2 deployment cells must cover the starting unit count");
         }
 
+        void ValidateTacticalV3(List<string> errors)
+        {
+            if (TacticalV3 == null)
+            {
+                errors.Add("tactical-v3 requires a tactical-v3 section");
+                return;
+            }
+            if (Rules != null && (Rules.FogOfWar || Rules.BiomesEnabled))
+                errors.Add("tactical-v3 requires fog and biomes disabled");
+            if (TacticalV3Reward != null &&
+                (TacticalV3Reward.TerminalWin != 1f ||
+                 TacticalV3Reward.TerminalNonWin != -1f ||
+                 TacticalV3Reward.MaterialAdjustmentBound != 0.2f ||
+                 TacticalV3Reward.TimePressureBound != 0.05f ||
+                 TacticalV3Reward.PointsWeight != 0.5f))
+                errors.Add("tactical-v3 reward values do not match the stage-one contract");
+            if (TacticalV3.Capacity == null || TacticalV3.Templates == null ||
+                TacticalV3.StartProfiles == null || TacticalV3.StartDistribution == null ||
+                TacticalV3.Templates.Any(item => item?.Stats == null) ||
+                TacticalV3.StartProfiles.Any(item => item == null) ||
+                TacticalV3.StartDistribution.Any(item => item == null))
+            {
+                errors.Add("tactical-v3 structured sections must be complete and non-null");
+                return;
+            }
+            try
+            {
+                MlTrainingScenarioPreflight.ToEngine(this).BuildTacticalV3();
+            }
+            catch (Exception error) when (
+                error is ArgumentException || error is InvalidDataException ||
+                error is InvalidOperationException || error is OverflowException)
+            {
+                errors.Add(error.Message);
+            }
+        }
+
         static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
     }
 
@@ -311,6 +383,47 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public List<MlTrainingTacticalV2StartProfile> StartProfiles { get; set; }
         public List<MlTrainingTacticalV2StartWeight> StartDistribution { get; set; }
         public List<MlTrainingUnitTemplate> Templates { get; set; }
+    }
+
+    public sealed class MlTacticalV3Reward
+    {
+        public float TerminalWin { get; set; }
+        public float TerminalNonWin { get; set; }
+        public float MaterialAdjustmentBound { get; set; }
+        public float TimePressureBound { get; set; }
+        public float PointsWeight { get; set; }
+
+        internal bool IsFinite() =>
+            IsFiniteValue(TerminalWin) && IsFiniteValue(TerminalNonWin) &&
+            IsFiniteValue(MaterialAdjustmentBound) &&
+            IsFiniteValue(TimePressureBound) && IsFiniteValue(PointsWeight);
+
+        static bool IsFiniteValue(float value) =>
+            !float.IsNaN(value) && !float.IsInfinity(value);
+    }
+
+    public sealed class MlTrainingTacticalV3
+    {
+        public int StartingUnitCount { get; set; }
+        public int MaxControllableUnits { get; set; }
+        public string PlacementPolicy { get; set; }
+        public MlTrainingTacticalV3Capacity Capacity { get; set; }
+        public List<MlTrainingUnitTemplate> Templates { get; set; }
+        public List<MlTrainingTacticalV2StartProfile> StartProfiles { get; set; }
+        public List<MlTrainingTacticalV2StartWeight> StartDistribution { get; set; }
+    }
+
+    public sealed class MlTrainingTacticalV3Capacity
+    {
+        public int MaxCells { get; set; }
+        public int MaxUnits { get; set; }
+        public int MaxTemplates { get; set; }
+        public int MaxCapabilityDefinitions { get; set; }
+        public int MaxCapabilityAllocations { get; set; }
+        public int MaxRules { get; set; }
+        public int MaxMemoryRecords { get; set; }
+        public int MaxRelations { get; set; }
+        public int MaxCandidates { get; set; }
     }
 
     public sealed class MlTrainingTacticalV2StartProfile
@@ -486,6 +599,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return JsonUtility.ToJson(
                     MlSymmetricTacticalV2ScenarioWire.FromScenario(scenario), true);
             }
+            if (scenario.Environment == MlEnvironmentContract.TacticalV3)
+                return JsonUtility.ToJson(
+                    MlTacticalV3ScenarioWire.FromScenario(scenario), true);
             return JsonUtility.ToJson(MlTacticalScenarioWire.FromScenario(scenario), true);
         }
 
@@ -553,6 +669,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     static class MlStrictScenarioJson
     {
+        static readonly string[] TacticalV3PolicyIdentityKeys =
+        {
+            "capacity", "capacity_hash", "contract_hash",
+            "contract_version", "encoding", "encoding_hash",
+            "environment_kind", "match", "scenario_id",
+            "scenario_schema_version",
+        };
         static readonly string[] LibraryKeys = { "schema_version", "templates" };
         static readonly string[] ScenarioKeys =
         {
@@ -563,6 +686,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ScenarioKeys.Concat(new[] { "adaptive" }).ToArray();
         static readonly string[] TacticalV2ScenarioKeys =
             ScenarioKeys.Concat(new[] { "tactical_v2" }).ToArray();
+        static readonly string[] TacticalV3ScenarioKeys =
+            ScenarioKeys.Concat(new[] { "tactical_v3" }).ToArray();
         static readonly string[] BoardKeys =
         {
             "width", "height", "max_elevation", "zone_depth", "flat_chance",
@@ -584,6 +709,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             "intermediate_decision_penalty", "deployment_completion_bonus",
         };
+        static readonly string[] TacticalV3RewardKeys =
+        {
+            "terminal_win", "terminal_non_win", "material_adjustment_bound",
+            "time_pressure_bound", "points_weight",
+        };
         static readonly string[] AdaptiveKeys =
         {
             "starting_unit_count", "starting_army_budget", "max_design_point_cost",
@@ -596,6 +726,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             "starting_unit_count", "max_controllable_units", "placement_policy",
             "start_profiles", "start_distribution", "templates",
+        };
+        static readonly string[] TacticalV3Keys =
+        {
+            "starting_unit_count", "max_controllable_units", "placement_policy",
+            "capacity", "templates", "start_profiles", "start_distribution",
+        };
+        static readonly string[] TacticalV3CapacityKeys =
+        {
+            "max_cells", "max_units", "max_templates", "max_capability_definitions",
+            "max_capability_allocations", "max_rules", "max_memory_records",
+            "max_relations", "max_candidates",
         };
         static readonly string[] StartProfileKeys =
         {
@@ -628,6 +769,161 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ValidateScenarioNode(Parse(json, source), "scenario");
         }
 
+        public static bool ObjectContainsAnyMember(
+            string json, string source, string objectName,
+            params string[] memberNames)
+        {
+            Dictionary<string, JsonNode> root = RequireObject(Parse(json, source), "root");
+            JsonNode child;
+            if (!root.TryGetValue(objectName, out child)) return false;
+            Dictionary<string, JsonNode> value = RequireObject(child, "root." + objectName);
+            return memberNames.Any(value.ContainsKey);
+        }
+
+        public static MlTacticalV3PolicyIdentity ValidatePolicyIdentity(
+            string json, string source)
+        {
+            Dictionary<string, JsonNode> value =
+                RequireObject(Parse(json, source), "policy_identity");
+            ExactKeys(value, TacticalV3PolicyIdentityKeys, "policy_identity");
+            string version = RequireString(
+                value["contract_version"],
+                "policy_identity.contract_version");
+            string environmentKind = RequireString(
+                value["environment_kind"],
+                "policy_identity.environment_kind");
+            string contractHash = RequireString(
+                value["contract_hash"],
+                "policy_identity.contract_hash");
+            string encodingHash = RequireString(
+                value["encoding_hash"],
+                "policy_identity.encoding_hash");
+            string capacityHash = RequireString(
+                value["capacity_hash"],
+                "policy_identity.capacity_hash");
+            RequireObject(value["encoding"], "policy_identity.encoding");
+            RequireObject(value["capacity"], "policy_identity.capacity");
+            RequireObject(value["match"], "policy_identity.match");
+            RequireString(
+                value["scenario_id"], "policy_identity.scenario_id");
+            RequireInteger(
+                value["scenario_schema_version"],
+                "policy_identity.scenario_schema_version");
+
+            if (!string.Equals(
+                    Sha256(CanonicalJson(value["encoding"])), encodingHash,
+                    StringComparison.Ordinal))
+                Fail("policy_identity encoding hash does not authenticate encoding");
+            if (!string.Equals(
+                    Sha256(CanonicalJson(value["capacity"])), capacityHash,
+                    StringComparison.Ordinal))
+                Fail("policy_identity capacity hash does not authenticate capacity");
+            string contractJson = new StringBuilder().Append('{')
+                .Append(JsonString("encoding_hash")).Append(':')
+                .Append(JsonString(encodingHash)).Append(',')
+                .Append(JsonString("environment_kind")).Append(':')
+                .Append(JsonString(environmentKind)).Append(',')
+                .Append(JsonString("match")).Append(':')
+                .Append(CanonicalJson(value["match"])).Append(',')
+                .Append(JsonString("schema_version")).Append(":1,")
+                .Append(JsonString("version")).Append(':')
+                .Append(JsonString(version)).Append('}').ToString();
+            if (!string.Equals(
+                    Sha256(contractJson), contractHash, StringComparison.Ordinal))
+                Fail("policy_identity contract hash does not authenticate match");
+            return new MlTacticalV3PolicyIdentity(
+                version, environmentKind, contractHash, encodingHash, capacityHash);
+        }
+
+        static string Sha256(string value)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(value));
+                var text = new StringBuilder(hash.Length * 2);
+                foreach (byte item in hash)
+                    text.Append(item.ToString(
+                        "x2", System.Globalization.CultureInfo.InvariantCulture));
+                return text.ToString();
+            }
+        }
+
+        static string CanonicalJson(JsonNode node)
+        {
+            var text = new StringBuilder();
+            AppendCanonical(text, node);
+            return text.ToString();
+        }
+
+        static void AppendCanonical(StringBuilder text, JsonNode node)
+        {
+            switch (node.Kind)
+            {
+                case JsonKind.Object:
+                    text.Append('{');
+                    bool firstProperty = true;
+                    foreach (string key in node.ObjectValue.Keys.OrderBy(
+                                 item => item, StringComparer.Ordinal))
+                    {
+                        if (!firstProperty) text.Append(',');
+                        firstProperty = false;
+                        text.Append(JsonString(key)).Append(':');
+                        AppendCanonical(text, node.ObjectValue[key]);
+                    }
+                    text.Append('}');
+                    return;
+                case JsonKind.Array:
+                    text.Append('[');
+                    for (int i = 0; i < node.ArrayValue.Count; i++)
+                    {
+                        if (i > 0) text.Append(',');
+                        AppendCanonical(text, node.ArrayValue[i]);
+                    }
+                    text.Append(']');
+                    return;
+                case JsonKind.String:
+                    text.Append(JsonString(node.StringValue));
+                    return;
+                case JsonKind.Integer:
+                case JsonKind.Number:
+                    text.Append(node.NumberText);
+                    return;
+                case JsonKind.Boolean:
+                    text.Append(node.BooleanValue ? "true" : "false");
+                    return;
+                case JsonKind.Null:
+                    text.Append("null");
+                    return;
+                default:
+                    throw new InvalidDataException(
+                        "unsupported policy identity JSON value");
+            }
+        }
+
+        static string JsonString(string value)
+        {
+            var text = new StringBuilder().Append((char)34);
+            foreach (char character in value)
+            {
+                if (character == (char)92)
+                    text.Append((char)92).Append((char)92);
+                else if (character == (char)34)
+                    text.Append((char)92).Append((char)34);
+                else if (character == '\n')
+                    text.Append((char)92).Append('n');
+                else if (character == '\r')
+                    text.Append((char)92).Append('r');
+                else if (character == '\t')
+                    text.Append((char)92).Append('t');
+                else if (character < ' ')
+                    text.Append((char)92).Append('u').Append(
+                        ((int)character).ToString("x4"));
+                else
+                    text.Append(character);
+            }
+            return text.Append((char)34).ToString();
+        }
+
         static void ValidateScenarioNode(JsonNode node, string path)
         {
             Dictionary<string, JsonNode> scenario = RequireObject(node, path);
@@ -639,12 +935,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 environment, "adaptive-v1", StringComparison.Ordinal);
             bool tacticalV2 = string.Equals(
                 environment, "tactical-v2", StringComparison.Ordinal);
-            if (!adaptive && !tacticalV2 && !string.Equals(
+            bool tacticalV3 = string.Equals(
+                environment, "tactical-v3", StringComparison.Ordinal);
+            if (!adaptive && !tacticalV2 && !tacticalV3 && !string.Equals(
                     environment, "tactical-v1", StringComparison.Ordinal))
-                Fail(path + ".environment must be tactical-v1, tactical-v2, or adaptive-v1");
+                Fail(path + ".environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1");
 
             string[] keys = adaptive ? AdaptiveScenarioKeys
                 : tacticalV2 ? TacticalV2ScenarioKeys
+                : tacticalV3 ? TacticalV3ScenarioKeys
                 : ScenarioKeys;
             ExactKeys(scenario, keys, path);
             RequireSchemaVersion(scenario["schema_version"], path + ".schema_version");
@@ -656,9 +955,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ValidateEpisode(scenario["episode"], path + ".episode");
             ValidateReward(
                 scenario["reward"], path + ".reward",
-                adaptive ? AdaptiveRewardKeys : TacticalRewardKeys);
+                adaptive ? AdaptiveRewardKeys
+                    : tacticalV3 ? TacticalV3RewardKeys : TacticalRewardKeys);
             if (adaptive) ValidateAdaptive(scenario["adaptive"], path + ".adaptive");
             if (tacticalV2) ValidateTacticalV2(scenario["tactical_v2"], path + ".tactical_v2");
+            if (tacticalV3) ValidateTacticalV3(scenario["tactical_v3"], path + ".tactical_v3");
         }
 
         static void ValidateBoard(JsonNode node, string path)
@@ -744,6 +1045,33 @@ namespace HexWars.Presentation.EditorTools.MlLab
             List<JsonNode> templates = RequireArray(value["templates"], path + ".templates");
             for (int i = 0; i < templates.Count; i++)
                 ValidateUnitTemplate(templates[i], path + ".templates[" + i + "]");
+        }
+
+        static void ValidateTacticalV3(JsonNode node, string path)
+        {
+            Dictionary<string, JsonNode> value = RequireObject(node, path);
+            ExactKeys(value, TacticalV3Keys, path);
+            RequireInteger(value["starting_unit_count"], path + ".starting_unit_count");
+            RequireInteger(value["max_controllable_units"], path + ".max_controllable_units");
+            RequireNonEmptyString(value["placement_policy"], path + ".placement_policy");
+
+            Dictionary<string, JsonNode> capacity =
+                RequireObject(value["capacity"], path + ".capacity");
+            ExactKeys(capacity, TacticalV3CapacityKeys, path + ".capacity");
+            foreach (string key in TacticalV3CapacityKeys)
+                RequireInteger(capacity[key], path + ".capacity." + key);
+
+            List<JsonNode> templates = RequireArray(value["templates"], path + ".templates");
+            for (int i = 0; i < templates.Count; i++)
+                ValidateUnitTemplate(templates[i], path + ".templates[" + i + "]");
+            List<JsonNode> profiles = RequireArray(
+                value["start_profiles"], path + ".start_profiles");
+            for (int i = 0; i < profiles.Count; i++)
+                ValidateStartProfile(profiles[i], path + ".start_profiles[" + i + "]");
+            List<JsonNode> weights = RequireArray(
+                value["start_distribution"], path + ".start_distribution");
+            for (int i = 0; i < weights.Count; i++)
+                ValidateStartWeight(weights[i], path + ".start_distribution[" + i + "]");
         }
 
         static void ValidateStartProfile(JsonNode node, string path)
@@ -897,6 +1225,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public List<JsonNode> ArrayValue;
             public string StringValue;
             public string NumberText;
+            public bool BooleanValue;
         }
 
         sealed class JsonParser
@@ -935,12 +1264,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (current == 't')
                 {
                     ReadLiteral("true");
-                    return new JsonNode { Kind = JsonKind.Boolean };
+                    return new JsonNode {
+                        Kind = JsonKind.Boolean, BooleanValue = true };
                 }
                 if (current == 'f')
                 {
                     ReadLiteral("false");
-                    return new JsonNode { Kind = JsonKind.Boolean };
+                    return new JsonNode {
+                        Kind = JsonKind.Boolean, BooleanValue = false };
                 }
                 if (current == 'n')
                 {
@@ -966,10 +1297,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     if (_index >= _json.Length || _json[_index] != '"')
                         Error("object property name must be a string");
                     string key = ParseString();
+                    if (fields.ContainsKey(key))
+                        Error("duplicate object property '" + key + "'");
                     SkipWhitespace();
                     Expect(':');
                     SkipWhitespace();
-                    fields[key] = ParseValue(depth);
+                    fields.Add(key, ParseValue(depth));
                     SkipWhitespace();
                     if (TryRead('}')) break;
                     Expect(',');
@@ -1161,29 +1494,40 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public MlTrainingRewardWire reward;
         public MlTrainingAdaptiveWire adaptive;
         public MlTrainingTacticalV2Wire tactical_v2;
+        public MlTrainingTacticalV3Wire tactical_v3;
 
         public static MlTrainingScenario ToScenario(MlTrainingScenarioWire wire)
         {
             bool adaptiveEnvironment;
             bool tacticalV2Environment;
+            bool tacticalV3Environment;
             if (string.Equals(wire.environment, "adaptive-v1", StringComparison.Ordinal))
             {
                 adaptiveEnvironment = true;
                 tacticalV2Environment = false;
+                tacticalV3Environment = false;
             }
             else if (string.Equals(wire.environment, "tactical-v1", StringComparison.Ordinal))
             {
                 adaptiveEnvironment = false;
                 tacticalV2Environment = false;
+                tacticalV3Environment = false;
             }
             else if (string.Equals(wire.environment, "tactical-v2", StringComparison.Ordinal))
             {
                 adaptiveEnvironment = false;
                 tacticalV2Environment = true;
+                tacticalV3Environment = false;
+            }
+            else if (string.Equals(wire.environment, "tactical-v3", StringComparison.Ordinal))
+            {
+                adaptiveEnvironment = false;
+                tacticalV2Environment = false;
+                tacticalV3Environment = true;
             }
             else
                 throw new ArgumentException(
-                    "environment must be tactical-v1, tactical-v2, or adaptive-v1");
+                    "environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1");
             return new MlTrainingScenario
             {
                 SchemaVersion = wire.schema_version,
@@ -1193,14 +1537,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     ? MlEnvironmentContract.AdaptiveV1
                     : tacticalV2Environment
                         ? MlEnvironmentContract.TacticalV2
-                        : MlEnvironmentContract.TacticalV1,
+                        : tacticalV3Environment
+                            ? MlEnvironmentContract.TacticalV3
+                            : MlEnvironmentContract.TacticalV1,
                 Board = wire.board?.ToModel(),
                 Rules = wire.rules?.ToModel(),
                 Episode = wire.episode?.ToModel(),
-                TacticalReward = adaptiveEnvironment ? null : wire.reward?.ToTactical(),
+                TacticalReward = adaptiveEnvironment || tacticalV3Environment
+                    ? null : wire.reward?.ToTactical(),
+                TacticalV3Reward = tacticalV3Environment ? wire.reward?.ToTacticalV3() : null,
                 AdaptiveReward = adaptiveEnvironment ? wire.reward?.ToAdaptive() : null,
                 Adaptive = adaptiveEnvironment ? wire.adaptive?.ToModel() : null,
                 TacticalV2 = tacticalV2Environment ? wire.tactical_v2?.ToModel() : null,
+                TacticalV3 = tacticalV3Environment ? wire.tactical_v3?.ToModel() : null,
             };
         }
     }
@@ -1257,6 +1606,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 reward = MlAdaptiveRewardWire.FromModel(scenario.AdaptiveReward),
                 adaptive = MlTrainingAdaptiveWire.FromModel(scenario.Adaptive),
             };
+    }
+
+    [Serializable]
+    sealed class MlTacticalV3ScenarioWire
+    {
+        public int schema_version;
+        public string id;
+        public string name;
+        public string environment;
+        public MlTrainingBoardWire board;
+        public MlTrainingRulesWire rules;
+        public MlTrainingEpisodeWire episode;
+        public MlTacticalV3RewardWire reward;
+        public MlTrainingTacticalV3Wire tactical_v3;
+
+        public static MlTacticalV3ScenarioWire FromScenario(
+            MlTrainingScenario scenario) => new MlTacticalV3ScenarioWire
+        {
+            schema_version = scenario.SchemaVersion,
+            id = scenario.Id,
+            name = scenario.Name,
+            environment = MlEnvironmentContracts.CliValue(scenario.Environment),
+            board = MlTrainingBoardWire.FromModel(scenario.Board),
+            rules = MlTrainingRulesWire.FromModel(scenario.Rules),
+            episode = MlTrainingEpisodeWire.FromModel(scenario.Episode),
+            reward = MlTacticalV3RewardWire.FromModel(scenario.TacticalV3Reward),
+            tactical_v3 = MlTrainingTacticalV3Wire.FromModel(scenario.TacticalV3),
+        };
     }
 
     [Serializable]
@@ -1443,6 +1820,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public float points_weight;
         public float intermediate_decision_penalty;
         public float deployment_completion_bonus;
+        public float terminal_win;
+        public float terminal_non_win;
+        public float material_adjustment_bound;
+        public float time_pressure_bound;
 
         public MlTacticalReward ToTactical() => new MlTacticalReward
         {
@@ -1457,6 +1838,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             IntermediateDecisionPenalty = intermediate_decision_penalty,
             DeploymentCompletionBonus = deployment_completion_bonus,
+        };
+
+        public MlTacticalV3Reward ToTacticalV3() => new MlTacticalV3Reward
+        {
+            TerminalWin = terminal_win,
+            TerminalNonWin = terminal_non_win,
+            MaterialAdjustmentBound = material_adjustment_bound,
+            TimePressureBound = time_pressure_bound,
+            PointsWeight = points_weight,
         };
     }
 
@@ -1476,6 +1866,26 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 step_penalty = model.StepPenalty,
                 closing_weight = model.ClosingWeight,
                 draw_credit_weight = model.DrawCreditWeight,
+                points_weight = model.PointsWeight,
+            };
+    }
+
+    [Serializable]
+    sealed class MlTacticalV3RewardWire
+    {
+        public float terminal_win;
+        public float terminal_non_win;
+        public float material_adjustment_bound;
+        public float time_pressure_bound;
+        public float points_weight;
+
+        public static MlTacticalV3RewardWire FromModel(MlTacticalV3Reward model) =>
+            new MlTacticalV3RewardWire
+            {
+                terminal_win = model.TerminalWin,
+                terminal_non_win = model.TerminalNonWin,
+                material_adjustment_bound = model.MaterialAdjustmentBound,
+                time_pressure_bound = model.TimePressureBound,
                 points_weight = model.PointsWeight,
             };
     }
@@ -1561,6 +1971,91 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 templates = (model.Templates ?? new List<MlTrainingUnitTemplate>())
                     .Select(MlTrainingUnitTemplateWire.FromModel).ToArray(),
             };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV3Wire
+    {
+        public int starting_unit_count;
+        public int max_controllable_units;
+        public string placement_policy;
+        public MlTrainingTacticalV3CapacityWire capacity;
+        public MlTrainingUnitTemplateWire[] templates;
+        public MlTrainingTacticalV2StartProfileWire[] start_profiles;
+        public MlTrainingTacticalV2StartWeightWire[] start_distribution;
+
+        public MlTrainingTacticalV3 ToModel() => new MlTrainingTacticalV3
+        {
+            StartingUnitCount = starting_unit_count,
+            MaxControllableUnits = max_controllable_units,
+            PlacementPolicy = placement_policy,
+            Capacity = capacity?.ToModel(),
+            Templates = (templates ?? Array.Empty<MlTrainingUnitTemplateWire>())
+                .Select(item => item.ToModel()).ToList(),
+            StartProfiles = (start_profiles ??
+                    Array.Empty<MlTrainingTacticalV2StartProfileWire>())
+                .Select(item => item.ToModel()).ToList(),
+            StartDistribution = (start_distribution ??
+                    Array.Empty<MlTrainingTacticalV2StartWeightWire>())
+                .Select(item => item.ToModel()).ToList(),
+        };
+
+        public static MlTrainingTacticalV3Wire FromModel(MlTrainingTacticalV3 model) =>
+            new MlTrainingTacticalV3Wire
+            {
+                starting_unit_count = model.StartingUnitCount,
+                max_controllable_units = model.MaxControllableUnits,
+                placement_policy = model.PlacementPolicy,
+                capacity = MlTrainingTacticalV3CapacityWire.FromModel(model.Capacity),
+                templates = model.Templates.Select(
+                    MlTrainingUnitTemplateWire.FromModel).ToArray(),
+                start_profiles = model.StartProfiles.Select(
+                    MlTrainingTacticalV2StartProfileWire.FromModel).ToArray(),
+                start_distribution = model.StartDistribution.Select(
+                    MlTrainingTacticalV2StartWeightWire.FromModel).ToArray(),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV3CapacityWire
+    {
+        public int max_cells;
+        public int max_units;
+        public int max_templates;
+        public int max_capability_definitions;
+        public int max_capability_allocations;
+        public int max_rules;
+        public int max_memory_records;
+        public int max_relations;
+        public int max_candidates;
+
+        public MlTrainingTacticalV3Capacity ToModel() =>
+            new MlTrainingTacticalV3Capacity
+            {
+                MaxCells = max_cells,
+                MaxUnits = max_units,
+                MaxTemplates = max_templates,
+                MaxCapabilityDefinitions = max_capability_definitions,
+                MaxCapabilityAllocations = max_capability_allocations,
+                MaxRules = max_rules,
+                MaxMemoryRecords = max_memory_records,
+                MaxRelations = max_relations,
+                MaxCandidates = max_candidates,
+            };
+
+        public static MlTrainingTacticalV3CapacityWire FromModel(
+            MlTrainingTacticalV3Capacity model) => new MlTrainingTacticalV3CapacityWire
+        {
+            max_cells = model.MaxCells,
+            max_units = model.MaxUnits,
+            max_templates = model.MaxTemplates,
+            max_capability_definitions = model.MaxCapabilityDefinitions,
+            max_capability_allocations = model.MaxCapabilityAllocations,
+            max_rules = model.MaxRules,
+            max_memory_records = model.MaxMemoryRecords,
+            max_relations = model.MaxRelations,
+            max_candidates = model.MaxCandidates,
+        };
     }
 
     [Serializable]

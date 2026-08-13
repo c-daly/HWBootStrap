@@ -94,6 +94,7 @@ namespace HexWars.Presentation
         {
             "maskable_ppo" => "Maskable PPO",
             "masked_dqn" => "Masked DQN",
+            "structured_imitation" => "Structured PyTorch policy",
             _ => string.IsNullOrWhiteSpace(value) ? "unknown algorithm" : value,
         };
 

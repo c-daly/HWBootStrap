@@ -1030,6 +1030,22 @@ def test_resolves_run_manifest_checkpoint_and_contract(
     assert resolved.metadata()["encoding_hash"] == "b" * 64
 
 
+@pytest.mark.parametrize("algorithm", ("maskable_ppo", "masked_dqn"))
+def test_legacy_run_algorithms_require_zip_checkpoints(
+    tmp_path: Path, contract: EnvironmentContract, loader, algorithm: str,
+) -> None:
+    run = _write_run(tmp_path, contract, algorithm=algorithm)
+    manifest = __import__("json").loads((run / "run.json").read_text(encoding="utf-8"))
+    manifest["latest_checkpoint"] = "checkpoints/model.pt"
+    (run / "checkpoints" / "model.pt").write_bytes(b"not-an-sb3-model")
+    atomic_write_json(run / "run.json", manifest)
+
+    with pytest.raises(ControllerResolutionError, match=".zip"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {"kind": "run", "path": str(run), "mode": "fixed"}
+        )
+
+
 def test_controller_rejects_wrong_environment_for_adaptive_runtime(
     contract: EnvironmentContract,
 ) -> None:
@@ -1193,8 +1209,21 @@ def test_rejects_run_without_published_checkpoint_metadata(
         )
 
 
-def test_rejects_incompatible_model_geometry_even_when_contract_hash_differs(
-    tmp_path: Path, contract: EnvironmentContract
+@pytest.mark.parametrize("algorithm", ("maskable_ppo", "masked_dqn"))
+@pytest.mark.parametrize(
+    ("mismatch", "observation_shape", "action_size"),
+    (
+        ("observation", (11,), 7),
+        ("action", (12,), 6),
+    ),
+)
+def test_legacy_run_algorithms_resolve_valid_zip_then_reject_each_geometry_mismatch(
+    tmp_path: Path,
+    contract: EnvironmentContract,
+    algorithm: str,
+    mismatch: str,
+    observation_shape: tuple[int, ...],
+    action_size: int,
 ) -> None:
     run_contract = EnvironmentContract(
         version=contract.version,
@@ -1206,15 +1235,26 @@ def test_rejects_incompatible_model_geometry_even_when_contract_hash_differs(
         roster=contract.roster,
         reward=contract.reward,
     )
-    run = _write_run(tmp_path, run_contract)
+    run = _write_run(tmp_path, run_contract, algorithm=algorithm)
+    controller = {"kind": "run", "path": str(run), "mode": "fixed"}
 
-    def incompatible_loader(path: Path, algorithm: str) -> _Model:
-        return _Model(_Space(shape=(11,)), _Space(n=7))
+    resolved = ControllerResolver(
+        contract,
+        model_loader=lambda _path, _algorithm: _Model(
+            _Space(shape=(12,)), _Space(n=7)
+        ),
+    ).resolve(controller)
+    assert resolved.path == run / "checkpoints" / "step_000000010.zip"
+    assert resolved.algorithm == algorithm
+    assert (resolved.observation_size, resolved.action_size) == (12, 7)
 
-    with pytest.raises(ControllerResolutionError, match="observation"):
-        ControllerResolver(contract, model_loader=incompatible_loader).resolve(
-            {"kind": "run", "path": str(run), "mode": "fixed"}
-        )
+    with pytest.raises(ControllerResolutionError, match=mismatch):
+        ControllerResolver(
+            contract,
+            model_loader=lambda _path, _algorithm: _Model(
+                _Space(shape=observation_shape), _Space(n=action_size)
+            ),
+        ).resolve(controller)
 
 
 def test_live_run_only_advances_after_explicit_reload(

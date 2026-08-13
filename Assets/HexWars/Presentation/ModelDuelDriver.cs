@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -201,6 +202,7 @@ namespace HexWars.Presentation
             : Array.Empty<HexCoord>();
         public bool ShouldShowArenaOverlays => Environment == MlEnvironmentContract.TacticalV1
             || Environment == MlEnvironmentContract.TacticalV2
+            || Environment == MlEnvironmentContract.TacticalV3
             || (_duel != null && _view.DeploymentComplete);
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
@@ -296,16 +298,29 @@ namespace HexWars.Presentation
                 scenario.AdaptiveReward = null;
                 scenario.Adaptive = null;
                 scenario.TacticalV2 = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
             }
             else if (scenario.Environment == MlContract.AdaptiveVersion)
             {
                 scenario.TacticalReward = null;
                 scenario.TacticalV2 = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
             }
             else if (scenario.Environment == MlContract.TacticalV2Version)
             {
                 scenario.AdaptiveReward = null;
                 scenario.Adaptive = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
+            }
+            else if (scenario.Environment == MlContract.TacticalV3Version)
+            {
+                scenario.AdaptiveReward = null;
+                scenario.Adaptive = null;
+                scenario.TacticalReward = null;
+                scenario.TacticalV2 = null;
             }
             IReadOnlyList<string> errors = scenario.Validate();
             if (errors.Count > 0)
@@ -365,8 +380,32 @@ namespace HexWars.Presentation
             if (!seatIsModel) { _done = true; return; }
             try
             {
-                int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
-                _view = _duel.Step(action);
+                if (_duel is IStructuredModelDuelEnvironment structured)
+                {
+                    TacticalV3View decision = _view.StructuredDecision ??
+                        throw new InvalidOperationException(
+                            "structured environment did not expose a tactical-v3 decision");
+                    TacticalV3ViewDto payload = TacticalV3PolicyPayload.From(decision);
+                    PolicyCandidateResult selected =
+                        _bridge.ActStructured(seat, payload);
+                    int matches = decision.Decision.Candidates.Count(candidate =>
+                        candidate.DecisionId == selected.DecisionId &&
+                        candidate.CandidateId == selected.CandidateId);
+                    if (matches != 1)
+                        throw new InvalidOperationException(
+                            "structured policy selected an unknown candidate identity");
+                    _view = structured.Step(
+                        selected.DecisionId, selected.CandidateId);
+                }
+                else
+                {
+                    var legacy = _duel as ILegacyModelDuelEnvironment ??
+                        throw new InvalidOperationException(
+                            "environment exposes neither structured nor legacy stepping");
+                    int action = _bridge.Act(
+                        seat, _view.Observation, _view.ActionMask);
+                    _view = legacy.Step(action);
+                }
                 HandlePresentation();
             }
             catch (Exception error)
@@ -620,6 +659,7 @@ namespace HexWars.Presentation
                 _contractIdentity.Environment,
                 _contractIdentity.Version,
                 _contractIdentity.EncodingHash,
+                _contractIdentity.CapacityHash,
                 PolicyBridge.DefaultStartupTimeoutMs,
                 _startupCancellation.Token);
             IsStarting = false;
@@ -652,6 +692,8 @@ namespace HexWars.Presentation
                 ? MlEnvironmentContract.AdaptiveV1
                 : game.Scenario.Environment == MlContract.TacticalV2Version
                     ? MlEnvironmentContract.TacticalV2
+                    : game.Scenario.Environment == MlContract.TacticalV3Version
+                        ? MlEnvironmentContract.TacticalV3
                     : MlEnvironmentContract.TacticalV1;
         }
 

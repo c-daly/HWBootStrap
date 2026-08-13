@@ -36,12 +36,30 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public static MlArenaLaunchPlan Create(ModelDuelConfiguration config)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
+            if (config.Environment == MlEnvironmentContract.TacticalV3)
+            {
+                if (HasDotPathComponent(config.ScenarioRunPath))
+                    throw new InvalidOperationException(
+                        "tactical-v3 scenario run path must not contain . or .. components.");
+                var scenarioErrors = new List<string>();
+                RequireContainedRegularFile(
+                    config.ScenarioRunPath,
+                    Path.Combine(config.ScenarioRunPath, "scenario.json"),
+                    "tactical-v3 scenario", scenarioErrors);
+                if (scenarioErrors.Count > 0)
+                    throw new InvalidOperationException(string.Join("\n", scenarioErrors));
+            }
             TrainingScenario scenario = LoadScenario(config);
             ModelDuelContractIdentity expected =
                 ModelDuelEnvironmentFactory.ContractIdentity(scenario);
+            TacticalV3Contract structuredExpected =
+                config.Environment == MlEnvironmentContract.TacticalV3
+                    ? TacticalV3Contract.Create(
+                        scenario.BuildTacticalV3(), MlEnvironmentKind.Duel)
+                    : null;
             var errors = new List<string>();
-            ValidateSeatContract(config.P0, "Seat 0", expected, errors);
-            ValidateSeatContract(config.P1, "Seat 1", expected, errors);
+            ValidateSeatContract(config.P0, "Seat 0", expected, structuredExpected, errors);
+            ValidateSeatContract(config.P1, "Seat 1", expected, structuredExpected, errors);
             if (errors.Count > 0)
                 throw new InvalidOperationException(string.Join("\n", errors));
             return new MlArenaLaunchPlan(
@@ -86,16 +104,30 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ModelSeatConfiguration seat,
             string label,
             ModelDuelContractIdentity expected,
+            TacticalV3Contract structuredExpected,
             List<string> errors)
         {
             if (seat == null || !seat.IsModel ||
                 string.IsNullOrWhiteSpace(seat.Path))
                 return;
+            if (structuredExpected != null && HasDotPathComponent(seat.Path))
+            {
+                errors.Add(label + " run path must not contain . or .. components.");
+                return;
+            }
             string manifestPath = Path.Combine(seat.Path, "run.json");
             try
             {
+                string manifestJson = File.ReadAllText(manifestPath);
                 ArenaContractManifest manifest = JsonUtility.FromJson<ArenaContractManifest>(
-                    File.ReadAllText(manifestPath));
+                    manifestJson);
+                if (structuredExpected != null)
+                {
+                    ValidateStructuredRun(
+                        seat.Path, label, manifestPath, manifestJson, manifest,
+                        structuredExpected, errors);
+                    return;
+                }
                 ArenaContract contract = manifest?.contract;
                 if (contract == null)
                 {
@@ -115,6 +147,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             catch (Exception error) when (
                 error is ArgumentException ||
+                error is InvalidDataException ||
                 error is IOException ||
                 error is UnauthorizedAccessException)
             {
@@ -123,17 +156,144 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
         }
 
+        static void RequireContainedRegularFile(
+            string runPath, string path, string label, List<string> errors)
+        {
+            string root = Path.GetFullPath(runPath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string file = Path.GetFullPath(path);
+            string prefix = root + Path.DirectorySeparatorChar;
+            if (!file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add(label + " must be contained by the selected run directory.");
+                return;
+            }
+            if (!File.Exists(file))
+            {
+                errors.Add(label + " does not exist: " + file);
+                return;
+            }
+            if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                errors.Add(label + " must be a regular file, not a reparse point.");
+
+            DirectoryInfo directory = new FileInfo(file).Directory;
+            while (directory != null)
+            {
+                if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                    errors.Add(label + " must not traverse a reparse-point directory.");
+                if (string.Equals(directory.FullName, root, StringComparison.OrdinalIgnoreCase))
+                    return;
+                directory = directory.Parent;
+            }
+            errors.Add(label + " must be contained by the selected run directory.");
+        }
+
+        static bool HasDotPathComponent(string path) =>
+            !string.IsNullOrWhiteSpace(path) && path.Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries).Any(
+                    part => part == "." || part == "..");
+
+        static void ValidateStructuredRun(
+            string runPath, string label, string manifestPath, string manifestJson,
+            ArenaContractManifest manifest, TacticalV3Contract expected,
+            List<string> errors)
+        {
+            RequireContainedRegularFile(runPath, manifestPath, label + " run metadata", errors);
+            if (manifest == null)
+            {
+                errors.Add(label + " run metadata is empty: " + manifestPath);
+                return;
+            }
+            if (manifest.schema_version != 2)
+                errors.Add(label + " run schema version must be 2.");
+            if (!string.Equals(manifest.config?.algorithm, "structured_imitation", StringComparison.Ordinal))
+                errors.Add(label + " algorithm must be structured_imitation.");
+            if (!string.Equals(manifest.evidence_status, "unsealed-experimental", StringComparison.Ordinal))
+                errors.Add(label + " evidence status must be unsealed-experimental.");
+            ArenaContract contract = manifest.contract;
+            if (contract == null)
+            {
+                errors.Add(label + " run metadata is missing contract identity: " + manifestPath);
+                return;
+            }
+            if (!string.Equals(contract.environment, "tactical-v3", StringComparison.Ordinal))
+                errors.Add(label + " environment must be tactical-v3.");
+            if (!string.Equals(contract.version, expected.Version, StringComparison.Ordinal))
+                errors.Add(label + " contract version does not match " + expected.Version + ".");
+            if (!string.Equals(contract.environment_kind, "duel", StringComparison.Ordinal))
+                errors.Add(label + " environment kind must be duel.");
+            if (!IsLowerSha256(contract.contract_hash))
+                errors.Add(label + " contract hash must be a lowercase SHA-256 hash.");
+            if (!string.Equals(contract.encoding_hash, expected.EncodingHash, StringComparison.Ordinal))
+                errors.Add(label + " encoding hash does not match the tactical-v3 encoding.");
+            if (!string.Equals(contract.capacity_hash, expected.CapacityHash, StringComparison.Ordinal))
+                errors.Add(label + " capacity hash does not match the selected scenario.");
+            if (MlStrictScenarioJson.ObjectContainsAnyMember(
+                    manifestJson, manifestPath, "contract",
+                    "observation_size", "action_size"))
+                errors.Add(label + " tactical-v3 contract must not declare fixed observation_size or action_size.");
+            if (!string.Equals(manifest.latest_checkpoint, "checkpoints/best.pt", StringComparison.Ordinal))
+                errors.Add(label + " latest checkpoint must be checkpoints/best.pt.");
+            RequireContainedRegularFile(runPath,
+                Path.Combine(runPath, "checkpoints", "best.pt"),
+                label + " checkpoint", errors);
+            if (!string.Equals(
+                    manifest.policy_identity, "policy-identity.json",
+                    StringComparison.Ordinal))
+            {
+                errors.Add(label + " policy identity must be policy-identity.json.");
+                return;
+            }
+            string policyPath = Path.Combine(runPath, manifest.policy_identity);
+            int errorCount = errors.Count;
+            RequireContainedRegularFile(
+                runPath, policyPath, label + " policy identity", errors);
+            if (errors.Count != errorCount) return;
+            MlTacticalV3PolicyIdentity policy =
+                MlStrictScenarioJson.ValidatePolicyIdentity(
+                    File.ReadAllText(policyPath), policyPath);
+            if (!string.Equals(policy.Version, contract.version, StringComparison.Ordinal) ||
+                !string.Equals(policy.EnvironmentKind, contract.environment_kind, StringComparison.Ordinal) ||
+                !string.Equals(policy.ContractHash, contract.contract_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.EncodingHash, contract.encoding_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.CapacityHash, contract.capacity_hash, StringComparison.Ordinal))
+                errors.Add(label + " policy identity does not match run contract.");
+        }
+
+        static bool IsLowerSha256(string value) =>
+            value != null && value.Length == 64 &&
+            value.All(character =>
+                (character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f'));
+
         [Serializable] sealed class ArenaContractManifest
         {
+            public int schema_version;
+            public string evidence_status;
+            public ArenaRunConfig config;
             public ArenaContract contract;
+            public string policy_identity;
+            public string latest_checkpoint;
+        }
+
+        [Serializable] sealed class ArenaRunConfig
+        {
+            public string algorithm;
         }
 
         [Serializable] sealed class ArenaContract
         {
             public string environment;
             public string version;
+            public string environment_kind;
+            public string contract_hash;
             public string encoding_hash;
+            public string capacity_hash;
+            public int observation_size;
+            public int action_size;
         }
+
     }
 
     public sealed class MlLabWindowState
@@ -438,7 +598,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
     public sealed class MlTrainingScenarioPreflight
     {
         MlTrainingScenarioPreflight(
-            MlTrainingScenario scenario, int observationSize, int actionSize)
+            MlTrainingScenario scenario, int? observationSize, int? actionSize,
+            bool usesStructuredCandidates,
+            ModelDuelContractIdentity contractIdentity,
+            string contractHash = null)
         {
             TemplateId = scenario.Id;
             TemplateName = scenario.Name;
@@ -452,6 +615,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             FogOfWar = scenario.Rules.FogOfWar;
             ObservationSize = observationSize;
             ActionSize = actionSize;
+            UsesStructuredCandidates = usesStructuredCandidates;
+            ContractIdentity = contractIdentity;
+            ContractHash = contractHash ?? string.Empty;
             LargeScenarioWarning =
                 (long)scenario.Board.Width * scenario.Board.Height > 13L * 9L;
             if (scenario.Environment == MlEnvironmentContract.TacticalV2 &&
@@ -473,8 +639,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int RoundCap { get; }
         public int MaxSteps { get; }
         public bool FogOfWar { get; }
-        public int ObservationSize { get; }
-        public int ActionSize { get; }
+        public int? ObservationSize { get; }
+        public int? ActionSize { get; }
+        public bool UsesStructuredCandidates { get; }
+        public ModelDuelContractIdentity ContractIdentity { get; }
+        public string ContractHash { get; }
         public bool LargeScenarioWarning { get; }
         public int TacticalV2StartingUnitCount { get; }
         public int TacticalV2ControllableSlots { get; }
@@ -486,13 +655,26 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (scenario == null) throw new ArgumentNullException(nameof(scenario));
             TrainingScenario engineScenario = ToEngine(scenario);
+            if (scenario.Environment == MlEnvironmentContract.TacticalV3)
+            {
+                TacticalV3Contract structuredContract = TacticalV3Contract.Create(
+                    engineScenario.BuildTacticalV3(), MlEnvironmentKind.Duel);
+                return new MlTrainingScenarioPreflight(
+                    scenario, null, null, true,
+                    new ModelDuelContractIdentity(
+                        structuredContract.Version, structuredContract.Version,
+                        structuredContract.EncodingHash, structuredContract.CapacityHash),
+                    structuredContract.ContractHash);
+            }
             MlContract contract = scenario.Environment == MlEnvironmentContract.AdaptiveV1
                 ? MlContract.CreateAdaptive(engineScenario.BuildAdaptive())
                 : scenario.Environment == MlEnvironmentContract.TacticalV2
                     ? MlContract.CreateTacticalV2(engineScenario.BuildTacticalV2())
                     : MlContract.Create(engineScenario.BuildTactical());
             return new MlTrainingScenarioPreflight(
-                scenario, contract.ObservationSize, contract.ActionSize);
+                scenario, contract.ObservationSize, contract.ActionSize, false,
+                new ModelDuelContractIdentity(
+                    contract.Version, contract.Version, contract.EncodingHash));
         }
 
         public static MlTrainingScenarioPreflight LoadSourceRun(
@@ -510,6 +692,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             string actions = ActionsPerTurn == 0
                 ? "Whole team"
                 : ActionsPerTurn.ToString(CultureInfo.InvariantCulture);
+            string geometry = UsesStructuredCandidates
+                ? "variable structured candidates\n" +
+                  "Contract " + ContractHash +
+                  " \u00b7 encoding " + ContractIdentity.EncodingHash +
+                  " \u00b7 capacity " + ContractIdentity.CapacityHash
+                : "Observation " + ObservationSize +
+                  " \u00b7 actions " + ActionSize;
             string text = TemplateName + " \u00b7 " +
                    MlEnvironmentContracts.CliValue(Environment) + "\n" +
                    "Board " + BoardWidth + "\u00d7" + BoardHeight +
@@ -520,8 +709,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                    " \u00b7 fog " + (FogOfWar ? "on" : "off") +
                    " \u00b7 opponent " + opponent +
                    " \u00b7 learner seats " + learnerSeats + "\n" +
-                   "Observation " + ObservationSize +
-                   " \u00b7 actions " + ActionSize;
+                   geometry;
             if (Environment == MlEnvironmentContract.TacticalV2)
                 text += "\n" +
                     "Starting units " + TacticalV2StartingUnitCount +
@@ -585,6 +773,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         DrawCreditWeight = scenario.TacticalReward.DrawCreditWeight,
                         PointsWeight = scenario.TacticalReward.PointsWeight,
                     },
+                TacticalV3Reward = scenario.TacticalV3Reward == null
+                    ? null
+                    : new TrainingTacticalV3RewardConfig
+                    {
+                        TerminalWin = scenario.TacticalV3Reward.TerminalWin,
+                        TerminalNonWin = scenario.TacticalV3Reward.TerminalNonWin,
+                        MaterialAdjustmentBound =
+                            scenario.TacticalV3Reward.MaterialAdjustmentBound,
+                        TimePressureBound = scenario.TacticalV3Reward.TimePressureBound,
+                        PointsWeight = scenario.TacticalV3Reward.PointsWeight,
+                    },
                 AdaptiveReward = scenario.AdaptiveReward == null
                     ? null
                     : new AdaptiveRewardConfig
@@ -639,6 +838,47 @@ namespace HexWars.Presentation.EditorTools.MlLab
                                 VisionArc = item.Stats.VisionArc,
                             })
                             .ToList(),
+                    },
+                TacticalV3 = scenario.TacticalV3 == null
+                    ? null
+                    : new TrainingTacticalV3Config
+                    {
+                        StartingUnitCount = scenario.TacticalV3.StartingUnitCount,
+                        MaxControllableUnits = scenario.TacticalV3.MaxControllableUnits,
+                        PlacementPolicy = scenario.TacticalV3.PlacementPolicy,
+                        Capacity = scenario.TacticalV3.Capacity == null ? null
+                            : new TrainingTacticalV3CapacityConfig
+                            {
+                                MaxCells = scenario.TacticalV3.Capacity.MaxCells,
+                                MaxUnits = scenario.TacticalV3.Capacity.MaxUnits,
+                                MaxTemplates = scenario.TacticalV3.Capacity.MaxTemplates,
+                                MaxCapabilityDefinitions = scenario.TacticalV3.Capacity.MaxCapabilityDefinitions,
+                                MaxCapabilityAllocations = scenario.TacticalV3.Capacity.MaxCapabilityAllocations,
+                                MaxRules = scenario.TacticalV3.Capacity.MaxRules,
+                                MaxMemoryRecords = scenario.TacticalV3.Capacity.MaxMemoryRecords,
+                                MaxRelations = scenario.TacticalV3.Capacity.MaxRelations,
+                                MaxCandidates = scenario.TacticalV3.Capacity.MaxCandidates,
+                            },
+                        StartProfiles = (scenario.TacticalV3.StartProfiles ??
+                                new List<MlTrainingTacticalV2StartProfile>())
+                            .Select(item => new TacticalV2StartProfile(item.Id,
+                                item.LearnerUnitCount, item.OpponentUnitCount,
+                                item.Separation)).ToList(),
+                        StartDistribution = (scenario.TacticalV3.StartDistribution ??
+                                new List<MlTrainingTacticalV2StartWeight>())
+                            .Select(item => new TacticalV2StartWeight(
+                                item.ProfileId, item.BasisPoints)).ToList(),
+                        Templates = (scenario.TacticalV3.Templates ??
+                                new List<MlTrainingUnitTemplate>())
+                            .Select(item => new TrainingUnitTemplateConfig
+                            {
+                                Id = item.Id, Name = item.Name,
+                                Health = item.Stats.Health, Damage = item.Stats.Damage,
+                                Defense = item.Stats.Defense, Movement = item.Stats.Movement,
+                                VerticalMovement = item.Stats.VerticalMovement,
+                                Range = item.Stats.Range, RangeArc = item.Stats.RangeArc,
+                                Vision = item.Stats.Vision, VisionArc = item.Stats.VisionArc,
+                            }).ToList(),
                     },
             };
             IReadOnlyList<string> errors = converted.Validate();
@@ -904,6 +1144,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public sealed class MlLabWindow : EditorWindow
     {
+        static readonly MlEnvironmentContract[] TrainEnvironmentValues =
+        {
+            MlEnvironmentContract.TacticalV1,
+            MlEnvironmentContract.AdaptiveV1,
+            MlEnvironmentContract.TacticalV2,
+        };
+
+        public static IReadOnlyList<MlEnvironmentContract> TrainEnvironmentChoices =>
+            Array.AsReadOnly(TrainEnvironmentValues);
+
         const string SelectedRunKey = "HexWars.MlLab.SelectedRun";
         const string PendingWatchRunDirectoryKey = "HexWars.MlLab.PendingWatchRunDirectory";
         const string PendingWatchDeadlineKey = "HexWars.MlLab.PendingWatchDeadline";
@@ -1412,9 +1662,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 return;
             }
 
-            MlEnvironmentContract environment =
-                (MlEnvironmentContract)EditorGUILayout.EnumPopup(
-                    "Environment", _scenarioSession.Environment);
+            int environmentIndex = Math.Max(0,
+                Array.IndexOf(TrainEnvironmentValues, _scenarioSession.Environment));
+            environmentIndex = EditorGUILayout.Popup(
+                "Environment", environmentIndex,
+                TrainEnvironmentValues.Select(MlEnvironmentContracts.CliValue).ToArray());
+            MlEnvironmentContract environment = TrainEnvironmentValues[environmentIndex];
             if (environment != _scenarioSession.Environment)
             {
                 try

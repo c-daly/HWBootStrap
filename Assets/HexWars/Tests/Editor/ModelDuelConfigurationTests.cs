@@ -81,6 +81,44 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void TacticalV3Factory_UsesStructuredIdentityWithoutLegacyGeometry()
+        {
+            Assert.That(MlEnvironmentContracts.Parse("tactical-v3"),
+                Is.EqualTo(MlEnvironmentContract.TacticalV3));
+            IModelDuelEnvironment duel =
+                ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.TacticalV3);
+            var structured = duel as IStructuredModelDuelEnvironment;
+            ModelDuelContractIdentity identity =
+                ModelDuelEnvironmentFactory.ContractIdentity(
+                    MlEnvironmentContract.TacticalV3);
+
+            Assert.That(structured, Is.Not.Null);
+            Assert.That(duel, Is.Not.InstanceOf<ILegacyModelDuelEnvironment>());
+            Assert.That(identity.CapacityHash,
+                Is.EqualTo(structured.StructuredContract.CapacityHash));
+            Assert.That(identity.EncodingHash,
+                Is.EqualTo(structured.StructuredContract.EncodingHash));
+
+            ModelDuelView view = duel.Reset(41, null, null);
+            Assert.That(view.StructuredDecision, Is.Not.Null);
+            Assert.That(view.Observation, Is.Null);
+            Assert.That(view.ActionMask, Is.Null);
+        }
+
+        [Test]
+        public void TacticalV3Adapter_CapturesTransitionsOnlyWhenOptedIn()
+        {
+            IModelDuelEnvironment duel =
+                ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.TacticalV3);
+            duel.Reset(41, new CountingEndTurnAgent(), null);
+            Assert.That(duel.DrainTransitions(), Is.Empty);
+
+            duel.CaptureTransitions = true;
+            duel.Reset(41, new CountingEndTurnAgent(), null);
+            Assert.That(duel.DrainTransitions(), Has.Count.EqualTo(1));
+        }
+
+        [Test]
         public void ReplayViewerScenario_PreservesTacticalV2Contract()
         {
             var scenario = TrainingScenario.CreateStandard("tactical-v2");
@@ -478,7 +516,8 @@ namespace HexWars.Presentation.Tests
         public void Factory_CreatesTacticalV2DuelWithMatchingIdentity()
         {
             TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v2");
-            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+            var duel = (ILegacyModelDuelEnvironment)
+                ModelDuelEnvironmentFactory.Create(scenario);
 
             Assert.That(duel.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
             Assert.That(duel.Contract.Version, Is.EqualTo("tactical-v2"));
@@ -513,7 +552,8 @@ namespace HexWars.Presentation.Tests
             scenario.Board.Width = 24;
             scenario.Board.Height = 16;
 
-            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+            var duel = (ILegacyModelDuelEnvironment)
+                ModelDuelEnvironmentFactory.Create(scenario);
 
             Assert.That(duel.Contract.Board["width"], Is.EqualTo(24));
             Assert.That(duel.Contract.Board["height"], Is.EqualTo(16));
@@ -528,7 +568,8 @@ namespace HexWars.Presentation.Tests
             scenario.Adaptive.StartingArmyBudget = 176;
             scenario.Episode.MaxSteps = 321;
 
-            IModelDuelEnvironment duel = ModelDuelEnvironmentFactory.Create(scenario);
+            var duel = (ILegacyModelDuelEnvironment)
+                ModelDuelEnvironmentFactory.Create(scenario);
 
             Assert.That(duel.Contract.Semantics["starting_army_budget"], Is.EqualTo(176));
             Assert.That(duel.Contract.Board["max_steps"], Is.EqualTo(642),
@@ -723,7 +764,8 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void AdaptiveAdapter_RequestsExternalActionsWithoutExposingStateBeforeReveal()
         {
-            var environment = ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
+            var environment = (ILegacyModelDuelEnvironment)
+                ModelDuelEnvironmentFactory.Create(MlEnvironmentContract.AdaptiveV1);
 
             ModelDuelView view = environment.Reset(seed: 41, controller0: null, controller1: null);
 
@@ -1458,7 +1500,7 @@ namespace HexWars.Presentation.Tests
             finally { UnityEngine.Object.DestroyImmediate(go); }
         }
 
-        sealed class MultiFaultModelDuelEnvironment : IModelDuelEnvironment
+        sealed class MultiFaultModelDuelEnvironment : ILegacyModelDuelEnvironment
         {
             readonly IReadOnlyList<DuelTransition> _transitions;
             public MultiFaultModelDuelEnvironment(IReadOnlyList<DuelTransition> transitions) =>
@@ -1466,6 +1508,7 @@ namespace HexWars.Presentation.Tests
 
             public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV1;
             public MlContract Contract => null;
+            public ModelDuelContractIdentity ContractIdentity => default;
             public GameState CurrentState => _transitions[0].Previous;
             public bool RequiresContinuation => false;
             public bool CaptureTransitions { get; set; }
@@ -1562,10 +1605,11 @@ namespace HexWars.Presentation.Tests
             return info.GetValue(target);
         }
 
-        sealed class ThrowingModelDuelEnvironment : IModelDuelEnvironment
+        sealed class ThrowingModelDuelEnvironment : ILegacyModelDuelEnvironment
         {
             public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV1;
             public MlContract Contract => null;
+            public ModelDuelContractIdentity ContractIdentity => default;
             public GameState CurrentState => null;
             public bool RequiresContinuation => false;
             public bool CaptureTransitions { get; set; }

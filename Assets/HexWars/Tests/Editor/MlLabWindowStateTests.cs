@@ -592,6 +592,17 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void TrainEnvironmentChoices_ExcludeOfflineTacticalV3()
+        {
+            Assert.That(MlLabWindow.TrainEnvironmentChoices,
+                Has.None.EqualTo(MlEnvironmentContract.TacticalV3));
+            Assert.That(MlLabWindow.TrainEnvironmentChoices,
+                Is.EqualTo(new[] { MlEnvironmentContract.TacticalV1,
+                    MlEnvironmentContract.AdaptiveV1,
+                    MlEnvironmentContract.TacticalV2 }));
+        }
+
+        [Test]
         public void LiveBlankCustomTracker_DisablesLaunchWithoutMutatingConfig()
         {
             var session = new MlTrainingScenarioSession(
@@ -625,6 +636,295 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(HexWars.Presentation.EditorTools.ReplayViewerMenu.EnvironmentFromRunManifest(json),
                 Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void StructuredArenaRun_LoadsThenRejectsBadEvidenceWithoutMutatingConfig()
+        {
+            string run = Path.Combine(Path.GetTempPath(), "hexwars-v3-arena-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(run, "checkpoints"));
+                File.Copy(Path.Combine("python", "config",
+                    "annihilation-structured-imitation-v1.json"), Path.Combine(run, "scenario.json"));
+                var scenario = MlTrainingScenarioFile.Load(Path.Combine(run, "scenario.json"));
+                var engine = MlTrainingScenarioPreflight.ToEngine(scenario);
+                var identity = HexWars.Engine.Rl.TacticalV3Contract.Create(
+                    engine.BuildTacticalV3(), HexWars.Engine.Rl.MlEnvironmentKind.Duel);
+                File.Copy(Path.Combine("python", "tests", "fixtures",
+                    "tactical_v3", "seed-41-duel-spaces.json"),
+                    Path.Combine(run, "policy-identity.json"));
+                File.WriteAllText(Path.Combine(run, "checkpoints", "best.pt"), "checkpoint");
+                string manifest = $@"{{""schema_version"":2,""evidence_status"":""unsealed-experimental"",""config"":{{""algorithm"":""structured_imitation""}},""contract"":{{""environment"":""tactical-v3"",""version"":""tactical-v3"",""environment_kind"":""duel"",""contract_hash"":""{identity.ContractHash}"",""encoding_hash"":""{identity.EncodingHash}"",""capacity_hash"":""{identity.CapacityHash}""}},""policy_identity"":""policy-identity.json"",""latest_checkpoint"":""checkpoints/best.pt""}}";
+                File.WriteAllText(Path.Combine(run, "run.json"), manifest);
+                var config = new ModelDuelConfiguration { Environment = MlEnvironmentContract.TacticalV3,
+                    ScenarioRunPath = run, P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.FixedRun, Path = run } };
+                Assert.That(MlArenaLaunchPlan.Create(config).P0Spec, Is.EqualTo("run:" + run));
+                File.WriteAllText(Path.Combine(run, "run.json"), manifest.Replace("unsealed-experimental", "sealed"));
+                Assert.Throws<InvalidOperationException>(() => MlArenaLaunchPlan.Create(config));
+                Assert.That(config.P0.Path, Is.EqualTo(run));
+                Assert.That(config.ScenarioRunPath, Is.EqualTo(run));
+            }
+            finally { if (Directory.Exists(run)) Directory.Delete(run, true); }
+        }
+
+        [Test]
+        public void StructuredArenaRun_AllowsDifferentPolicyMatchContract()
+        {
+            string run = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-split-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(run, "checkpoints"));
+                File.Copy(Path.Combine("python", "config",
+                    "annihilation-structured-imitation-v1.json"),
+                    Path.Combine(run, "scenario.json"));
+                string arenaScenarioPath = Path.Combine(run, "scenario.json");
+                string quote = ((char)34).ToString();
+                string arenaScenario = File.ReadAllText(arenaScenarioPath)
+                    .Replace(quote + "width" + quote + ": 13",
+                        quote + "width" + quote + ": 24")
+                    .Replace(quote + "height" + quote + ": 9",
+                        quote + "height" + quote + ": 16");
+                File.WriteAllText(arenaScenarioPath, arenaScenario);
+                File.Copy(Path.Combine("python", "tests", "fixtures",
+                    "tactical_v3", "seed-41-duel-spaces.json"),
+                    Path.Combine(run, "policy-identity.json"));
+                File.WriteAllText(
+                    Path.Combine(run, "checkpoints", "best.pt"),
+                    "checkpoint");
+                string manifest = @"{
+                    ""schema_version"":2,
+                    ""evidence_status"":""unsealed-experimental"",
+                    ""config"":{""algorithm"":""structured_imitation""},
+                    ""contract"":{
+                        ""environment"":""tactical-v3"",
+                        ""version"":""tactical-v3"",
+                        ""environment_kind"":""duel"",
+                        ""contract_hash"":""bac4af4d4b8e68466ffaf37c2721f98129edc93b90f529999ba45463cd921437"",
+                        ""encoding_hash"":""e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"",
+                        ""capacity_hash"":""7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364""
+                    },
+                    ""policy_identity"":""policy-identity.json"",
+                    ""latest_checkpoint"":""checkpoints/best.pt""
+                }";
+                File.WriteAllText(Path.Combine(run, "run.json"), manifest);
+                var config = new ModelDuelConfiguration {
+                    Environment = MlEnvironmentContract.TacticalV3,
+                    ScenarioRunPath = run,
+                    P0 = new ModelSeatConfiguration {
+                        Kind = ModelControllerKind.FixedRun, Path = run } };
+
+                Assert.That(MlArenaLaunchPlan.Create(config).P0Spec,
+                    Is.EqualTo("run:" + run));
+            }
+            finally { if (Directory.Exists(run)) Directory.Delete(run, true); }
+        }
+
+        static (string Run, string Manifest, ModelDuelConfiguration Config)
+            CreateStructuredArenaRun()
+        {
+            string run = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-arena-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(run, "checkpoints"));
+            File.Copy(Path.Combine("python", "config",
+                "annihilation-structured-imitation-v1.json"),
+                Path.Combine(run, "scenario.json"));
+            var scenario = MlTrainingScenarioFile.Load(Path.Combine(run, "scenario.json"));
+            var engine = MlTrainingScenarioPreflight.ToEngine(scenario);
+            var id = HexWars.Engine.Rl.TacticalV3Contract.Create(
+                engine.BuildTacticalV3(), HexWars.Engine.Rl.MlEnvironmentKind.Duel);
+            File.Copy(Path.Combine("python", "tests", "fixtures",
+                "tactical_v3", "seed-41-duel-spaces.json"),
+                Path.Combine(run, "policy-identity.json"));
+            File.WriteAllText(Path.Combine(run, "checkpoints", "best.pt"), "checkpoint");
+            string manifest = $@"{{""schema_version"":2,""evidence_status"":""unsealed-experimental"",""config"":{{""algorithm"":""structured_imitation""}},""contract"":{{""environment"":""tactical-v3"",""version"":""tactical-v3"",""environment_kind"":""duel"",""contract_hash"":""{id.ContractHash}"",""encoding_hash"":""{id.EncodingHash}"",""capacity_hash"":""{id.CapacityHash}""}},""policy_identity"":""policy-identity.json"",""latest_checkpoint"":""checkpoints/best.pt""}}";
+            File.WriteAllText(Path.Combine(run, "run.json"), manifest);
+            var config = new ModelDuelConfiguration {
+                Environment = MlEnvironmentContract.TacticalV3, ScenarioRunPath = run,
+                P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.FixedRun, Path = run } };
+            return (run, manifest, config);
+        }
+
+        [TestCase("algorithm")]
+        [TestCase("evidence_status")]
+        [TestCase("environment")]
+        [TestCase("version")]
+        [TestCase("contract_hash")]
+        [TestCase("encoding_hash")]
+        [TestCase("capacity_hash")]
+        public void StructuredArenaRun_RejectsManifestIdentityBeforeMutation(string field)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string marker = "\"" + field + "\":\"";
+                string changed = fixture.Manifest.Replace(marker, marker + "bad-");
+                Assert.That(changed, Is.Not.EqualTo(fixture.Manifest));
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [TestCase("\\u006fbservation_size")]
+        [TestCase("acti\\u006fn_size")]
+        public void StructuredArenaRun_RejectsEscapedFixedGeometryMember(string escapedName)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string changed = fixture.Manifest.Replace("\"contract\":{",
+                    "\"contract\":{\"" + escapedName + "\":0,");
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.Throws<InvalidOperationException>(() => MlArenaLaunchPlan.Create(fixture.Config));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [Test]
+        public void StructuredArenaRun_AllowsFixedGeometryTokenInsideStringValue()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string changed = fixture.Manifest.Replace("\"config\":{",
+                    "\"note\":\"observation_size and action_size are variable\",\"config\":{");
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.That(MlArenaLaunchPlan.Create(fixture.Config).P0Spec,
+                    Is.EqualTo("run:" + fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [Test]
+        public void StructuredArenaRun_RejectsMissingScenarioBeforeMutation()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                File.Delete(Path.Combine(fixture.Run, "scenario.json"));
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [Test]
+        public void StructuredArenaRun_RejectsMissingPolicyIdentityBeforeMutation()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                File.Delete(Path.Combine(fixture.Run, "policy-identity.json"));
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [TestCase("minimal")]
+        [TestCase("body-tamper")]
+        [TestCase("extra")]
+        [TestCase("duplicate")]
+        public void StructuredArenaRun_RejectsUnauthenticatedPolicyIdentityBody(
+            string mutation)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string policyPath = Path.Combine(
+                    fixture.Run, "policy-identity.json");
+                if (mutation == "minimal")
+                {
+                    File.WriteAllText(policyPath, @"{
+                        ""contract_version"":""tactical-v3"",
+                        ""environment_kind"":""duel"",
+                        ""contract_hash"":""bac4af4d4b8e68466ffaf37c2721f98129edc93b90f529999ba45463cd921437"",
+                        ""encoding_hash"":""e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"",
+                        ""capacity_hash"":""7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364""
+                    }");
+                }
+                else if (mutation == "body-tamper")
+                {
+                    string policy = File.ReadAllText(policyPath);
+                    string quote = ((char)34).ToString();
+                    string changed = policy.Replace(
+                        quote + "max_candidates" + quote + ": 32768",
+                        quote + "max_candidates" + quote + ": 32767");
+                    Assert.That(changed, Is.Not.EqualTo(policy));
+                    File.WriteAllText(policyPath, changed);
+                }
+                else
+                {
+                    string policy = File.ReadAllText(policyPath);
+                    string marker = "{";
+                    string quote = ((char)34).ToString();
+                    string member = mutation == "extra"
+                        ? quote + "unexpected" + quote + ":true,"
+                        : quote + "contract_version" + quote + ":" +
+                          quote + "tactical-v3" + quote + ",";
+                    File.WriteAllText(policyPath,
+                        policy.Replace(marker, marker + member));
+                }
+
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void StructuredArenaRun_RejectsMissingCheckpointOrTraversalBeforeMutation(
+            bool traversal)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                if (traversal)
+                    fixture.Config.ScenarioRunPath = Path.Combine(
+                        fixture.Run, "checkpoints", "..");
+                else
+                    File.Delete(Path.Combine(fixture.Run, "checkpoints", "best.pt"));
+                string selected = fixture.Config.ScenarioRunPath;
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(selected));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [TestCase("observation_size")]
+        [TestCase("action_size")]
+        [TestCase("latest_checkpoint")]
+        public void StructuredArenaRun_RejectsFixedGeometryOrWrongCheckpointBeforeMutation(
+            string field)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string changed = field == "latest_checkpoint"
+                    ? fixture.Manifest.Replace("checkpoints/best.pt", "checkpoints/other.pt")
+                    : fixture.Manifest.Replace("\"contract\":{",
+                        "\"contract\":{\"" + field + "\":0,");
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.Throws<InvalidOperationException>(() =>
+                    MlArenaLaunchPlan.Create(fixture.Config));
+                Assert.That(fixture.Config.P0.Path, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
         }
 
         static string CreateLibraryCopy()

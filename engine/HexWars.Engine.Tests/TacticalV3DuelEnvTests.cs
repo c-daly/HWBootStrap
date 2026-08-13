@@ -11,6 +11,83 @@ namespace HexWars.Engine.Tests
     public class TacticalV3DuelEnvTests
     {
         [Test]
+        public void DrainTransitions_RequiresResetAndResetStartsEmpty()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+
+            Assert.Throws<InvalidOperationException>(() => env.DrainTransitions());
+
+            env.Reset(31, null, null);
+
+            Assert.That(env.DrainTransitions(), Is.Empty);
+        }
+
+        [Test]
+        public void DrainTransitions_ReturnsAcceptedExternalAndScriptedCommandsExactlyOnce()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View view = env.Reset(31, null, new EndTurnAgent());
+            TacticalV3Candidate endTurn = view.Decision.Candidates.Single(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.EndTurn);
+
+            env.Step(view.Decision.DecisionId, endTurn.CandidateId);
+            IReadOnlyList<DuelTransition> first = env.DrainTransitions();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(first, Has.Count.EqualTo(2));
+                Assert.That(first.Select(item => item.Command),
+                    Is.All.TypeOf<EndTurn>());
+                Assert.That(first.Select(item => item.Command.Issuer),
+                    Is.EqualTo(new[] { PlayerId.Player0, PlayerId.Player1 }));
+                Assert.That(env.DrainTransitions(), Is.Empty);
+            });
+        }
+
+        [Test]
+        public void DrainTransitions_DoesNotChangeReplayStateDecisionOrTruncationAccounting()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.MaxSteps = 1;
+            var env = new TacticalV3DuelEnv(config);
+            TacticalV3View view = env.Reset(31, null, null);
+            TacticalV3Candidate endTurn = view.Decision.Candidates.Single(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.EndTurn);
+            TacticalV3View after = env.Step(view.Decision.DecisionId, endTurn.CandidateId);
+            string replay = env.ToReplay();
+            string state = StateSignature(env.State);
+
+            IReadOnlyList<DuelTransition> drained = env.DrainTransitions();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(drained, Has.Count.EqualTo(1));
+                Assert.That(env.ToReplay(), Is.EqualTo(replay));
+                Assert.That(StateSignature(env.State), Is.EqualTo(state));
+                Assert.That(after.Decision.DecisionId, Is.EqualTo(1));
+                Assert.That(after.Truncated, Is.True);
+            });
+        }
+
+        [Test]
+        public void Reset_ClearsTransitionHistoryAndDrainCursor()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View first = env.Reset(31, null, null);
+            EndTurn(env, first);
+            Assert.That(env.DrainTransitions(), Has.Count.EqualTo(1));
+
+            TacticalV3View reset = env.Reset(41, null, null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(env.DrainTransitions(), Is.Empty);
+                Assert.That(ReplayFile.Read(env.ToReplay()).Commands, Is.Empty);
+                Assert.That(reset.Decision.DecisionId, Is.Zero);
+            });
+        }
+
+        [Test]
         public void Reset_SameSeedProducesSameStateDecisionAndCandidateOrder()
         {
             TacticalV3DuelEnv first = TacticalV3Fixtures.Env();
