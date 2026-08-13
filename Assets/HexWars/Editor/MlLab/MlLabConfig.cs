@@ -104,6 +104,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             IReadOnlyList<MlTrackerConfig> trackers)
         {
             var errors = new List<string>();
+            if (Environment == MlEnvironmentContract.TacticalV3)
+                errors.Add(
+                    "tactical-v3 uses offline imitation; load its structured-imitation run in Arena instead of Train.");
             if (string.IsNullOrWhiteSpace(RunName) || !SafeRunName.IsMatch(RunName))
                 errors.Add("Run name must use 1-64 letters, numbers, dots, underscores, or dashes.");
             if (TotalTimesteps <= 0) errors.Add("Timesteps must be greater than zero.");
@@ -138,6 +141,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         string BuildTrainArgumentsCore(string scenarioPath)
         {
+            if (Environment == MlEnvironmentContract.TacticalV3)
+                throw new InvalidOperationException(
+                    "tactical-v3 uses offline imitation; load its structured-imitation run in Arena instead of Train.");
+
             var args = new List<string>
             {
                 "train",
