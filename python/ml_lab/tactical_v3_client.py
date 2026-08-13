@@ -32,6 +32,22 @@ class CandidateSelection:
     candidate_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class TeacherSelection:
+    decision_id: int
+    candidate_id: int
+    search_depth: int
+    expansion_budget: int
+    actual_expansions: int
+    heuristic_identity: str
+
+
+@dataclass(frozen=True, slots=True)
+class OracleStepResult:
+    selection: TeacherSelection
+    view: TacticalV3View
+
+
 class TacticalV3GymClient:
     """Own one tactical-v3 GymServer process and fail closed on wire drift."""
 
@@ -114,6 +130,110 @@ class TacticalV3GymClient:
     def duel_step(self, selection: CandidateSelection) -> TacticalV3View:
         self._require_kind("duel")
         return self._step("duel_step", selection)
+
+    def duel_oracle_step(
+        self,
+        decision_id: int,
+        *,
+        search_depth: int = 4,
+        expansion_budget: int = 512,
+        heuristic_identity: str = "material-plus-pursuit-v1",
+    ) -> OracleStepResult:
+        self._require_kind("duel")
+        decision_id = self._int64(decision_id, "decision_id")
+        search_depth = self._int32(search_depth, "search_depth")
+        expansion_budget = self._int32(expansion_budget, "expansion_budget")
+        if type(heuristic_identity) is not str or not heuristic_identity:
+            raise TypeError("heuristic_identity must be a non-empty string")
+        if search_depth != 4 or expansion_budget != 512 or (
+            heuristic_identity != "material-plus-pursuit-v1"
+        ):
+            raise ValueError("unsupported tactical-v3 teacher configuration")
+        current = self._view
+        if current is None:
+            raise RuntimeError("duel_reset must precede duel_oracle_step")
+        if current.terminated or current.truncated:
+            raise RuntimeError("duel_oracle_step requires a nonterminal view")
+        if decision_id != current.decision.decision_id:
+            raise ValueError("decision_id is stale")
+
+        payload = self._rpc({
+            "cmd": "duel_oracle_step",
+            "decision_id": decision_id,
+            "search_depth": search_depth,
+            "expansion_budget": expansion_budget,
+            "heuristic_identity": heuristic_identity,
+        })
+        if payload == {"error": "tactical-v3 decision id is stale"}:
+            raise ValueError("tactical-v3 decision id is stale")
+        try:
+            if set(payload) != {"selection", "view"}:
+                raise ValueError("GymServer duel_oracle_step fields changed")
+            raw_selection = payload["selection"]
+            if type(raw_selection) is not dict or set(raw_selection) != {
+                "decision_id", "candidate_id", "search_depth", "expansion_budget",
+                "actual_expansions", "heuristic_identity",
+            }:
+                raise ValueError("GymServer teacher selection fields changed")
+            selected_decision = self._int64(
+                raw_selection["decision_id"], "selection.decision_id"
+            )
+            candidate_id = self._int32(
+                raw_selection["candidate_id"], "selection.candidate_id"
+            )
+            selected_depth = self._int32(
+                raw_selection["search_depth"], "selection.search_depth"
+            )
+            selected_budget = self._int32(
+                raw_selection["expansion_budget"], "selection.expansion_budget"
+            )
+            actual_expansions = self._int32(
+                raw_selection["actual_expansions"], "selection.actual_expansions"
+            )
+            selected_heuristic = raw_selection["heuristic_identity"]
+            if type(selected_heuristic) is not str or not selected_heuristic:
+                raise TypeError("selection.heuristic_identity must be a non-empty string")
+            if selected_decision != decision_id:
+                raise ValueError("teacher selection decision_id does not match request")
+            if selected_depth != search_depth or selected_budget != expansion_budget or (
+                selected_heuristic != heuristic_identity
+            ):
+                raise ValueError("teacher selection configuration does not match request")
+            if not 1 <= actual_expansions <= expansion_budget:
+                raise ValueError("teacher selection actual_expansions is out of range")
+            if sum(
+                candidate.candidate_id == candidate_id
+                for candidate in current.decision.candidates
+            ) != 1:
+                raise ValueError(
+                    "teacher selection candidate_id must occur exactly once in current decision"
+                )
+            selection = TeacherSelection(
+                selected_decision, candidate_id, selected_depth, selected_budget,
+                actual_expansions, selected_heuristic,
+            )
+            view = parse_view(payload["view"], self._identity)
+        except BaseException as error:
+            self._raise_after_protocol_error(error)
+        self._view = view
+        return OracleStepResult(selection, view)
+
+    def duel_status(self) -> int:
+        self._require_kind("duel")
+        payload = self._rpc({"cmd": "duel_status"})
+        if set(payload) != {"internal_fallback_count"}:
+            self._raise_after_protocol_error(
+                ValueError("GymServer duel_status fields changed")
+            )
+        try:
+            count = self._int32(
+                payload["internal_fallback_count"], "internal_fallback_count"
+            )
+            if count < 0:
+                raise ValueError("internal_fallback_count must be nonnegative")
+        except BaseException as error:
+            self._raise_after_protocol_error(error)
+        return count
 
     def save_replay(self, path: Path) -> Path:
         self._require_kind("duel")
