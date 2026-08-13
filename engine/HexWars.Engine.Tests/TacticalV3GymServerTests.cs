@@ -507,6 +507,112 @@ namespace HexWars.Engine.Tests
             AssertViewIdentities(next);
         }
 
+        [Test]
+        public void Process_DuelOracleStepReturnsExactSelectionSuccessorAndStatus()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            JsonElement initialStatus = server.Request("{\"cmd\":\"duel_status\"}");
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_step",
+                decision_id = decisionId,
+                search_depth = 4,
+                expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+
+            AssertProperties(response, "selection", "view");
+            JsonElement selection = response.GetProperty("selection");
+            AssertProperties(selection,
+                "decision_id", "candidate_id", "search_depth", "expansion_budget",
+                "actual_expansions", "heuristic_identity");
+            int candidateId = selection.GetProperty("candidate_id").GetInt32();
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection.GetProperty("decision_id").GetInt64(),
+                    Is.EqualTo(decisionId));
+                Assert.That(selection.GetProperty("search_depth").GetInt32(), Is.EqualTo(4));
+                Assert.That(selection.GetProperty("expansion_budget").GetInt32(),
+                    Is.EqualTo(512));
+                Assert.That(selection.GetProperty("actual_expansions").GetInt32(),
+                    Is.InRange(1, 512));
+                Assert.That(selection.GetProperty("heuristic_identity").GetString(),
+                    Is.EqualTo(BoundedSearchAgent.HeuristicIdentity));
+                Assert.That(reset.GetProperty("candidates").EnumerateArray().Count(candidate =>
+                    candidate.GetProperty("candidate_id").GetInt32() == candidateId),
+                    Is.EqualTo(1));
+                Assert.That(initialStatus.GetRawText(),
+                    Is.EqualTo("{\"internal_fallback_count\":0}"));
+            });
+            AssertViewIdentities(response.GetProperty("view"));
+            Assert.That(server.Request("{\"cmd\":\"duel_status\"}").GetRawText(),
+                Is.EqualTo("{\"internal_fallback_count\":0}"));
+        }
+
+        [Test]
+        public void Process_DuelOracleStepStaleDecisionIsRecoverableWithoutAdvancing()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_001,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            var valid = new
+            {
+                cmd = "duel_oracle_step", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            };
+
+            JsonElement stale = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_step", decision_id = decisionId + 1,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+            Assert.That(stale.GetRawText(),
+                Is.EqualTo("{\"error\":\"tactical-v3 decision id is stale\"}"));
+
+            JsonElement accepted = server.Request(JsonSerializer.Serialize(valid));
+            Assert.That(accepted.GetProperty("selection").GetProperty("decision_id").GetInt64(),
+                Is.EqualTo(decisionId));
+            AssertViewIdentities(accepted.GetProperty("view"));
+        }
+
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":3,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":511,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"wrong\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\",\"extra\":true}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":null,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4.0,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":2147483648,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        public void Process_DuelOracleStepRejectsMalformedOrUnapprovedRequests(string request)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            Assert.That(server.RejectCommand(request), Is.Not.Empty);
+        }
+
+        [TestCase("{\"cmd\":\"duel_status\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        public void Process_DuelTeacherCommandsRejectBeforeSuccessfulReset(string request)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            Assert.That(server.RejectCommand(request), Does.Contain("successful duel_reset"));
+        }
+
         [TestCase("step", "decision_id")]
         [TestCase("step", "candidate_id")]
         [TestCase("step", "unknown")]

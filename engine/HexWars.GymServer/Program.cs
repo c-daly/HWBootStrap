@@ -151,6 +151,7 @@ void RequireTacticalV3FieldValue(JsonProperty property, string? command)
         case "p1":
         case "start_profile":
         case "path":
+        case "heuristic_identity":
             if (property.Value.ValueKind != JsonValueKind.String ||
                 string.IsNullOrEmpty(property.Value.GetString()))
                 throw new InvalidDataException(
@@ -160,6 +161,8 @@ void RequireTacticalV3FieldValue(JsonProperty property, string? command)
         case "learner":
         case "reference_seat":
         case "candidate_id":
+        case "search_depth":
+        case "expansion_budget":
             if (property.Value.ValueKind != JsonValueKind.Number ||
                 !property.Value.TryGetInt32(out _))
                 throw new InvalidDataException(
@@ -199,6 +202,12 @@ string RequireTacticalV3Command(JsonElement element)
             "cmd", "seed", "p0", "p1", "learner", "start_profile", "reference_seat",
         },
         "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_oracle_step" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
+        "duel_status" => new[] { "cmd" },
         "duel_save" => new[] { "cmd", "path" },
         "close" => new[] { "cmd" },
         _ => null,
@@ -235,12 +244,30 @@ string RequireTacticalV3Command(JsonElement element)
     {
         "step" => new[] { "cmd", "decision_id", "candidate_id" },
         "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_oracle_step" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
         _ => new[] { "cmd" },
     };
     if (required.Any(field =>
             !properties.Any(property => property.Name == field)))
         throw new InvalidDataException(
             $"tactical-v3 {command} has unknown or missing fields");
+    if (command == "duel_oracle_step")
+    {
+        if (element.GetProperty("search_depth").GetInt32() != 4)
+            throw new InvalidDataException(
+                "tactical-v3 duel_oracle_step search_depth must be 4");
+        if (element.GetProperty("expansion_budget").GetInt32() != 512)
+            throw new InvalidDataException(
+                "tactical-v3 duel_oracle_step expansion_budget must be 512");
+        if (element.GetProperty("heuristic_identity").GetString() !=
+            BoundedSearchAgent.HeuristicIdentity)
+            throw new InvalidDataException(
+                "tactical-v3 duel_oracle_step heuristic_identity is unsupported");
+    }
     return command;
 }
 
@@ -690,6 +717,33 @@ while ((line = Console.ReadLine()) != null)
             }
             break;
         }
+
+        case "duel_oracle_step":
+        {
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_oracle_step requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            TacticalV3TeacherSelection selection = tacticalV3Duel!.SelectTeacherCandidate(
+                new BoundedSearchAgent(512, 4, useHeuristic: true));
+            if (selection.DecisionId != decisionId)
+            {
+                Send(new { error = "tactical-v3 decision id is stale" });
+                break;
+            }
+            TacticalV3View next = tacticalV3Duel.Step(
+                selection.DecisionId, selection.CandidateId);
+            Send(TacticalV3Wire.OracleStep(
+                selection, next, tacticalV3Config!.Capacity));
+            break;
+        }
+
+        case "duel_status":
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_status requires a successful duel_reset");
+            Send(new { internal_fallback_count = tacticalV3Duel!.InternalFallbackCount });
+            break;
 
         case "duel_trace_enable":
         {            if (evidenceSession != null && !evidenceSession.Ended)
