@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1843,6 +1844,153 @@ def test_interrupted_evaluation_resumes_only_missing_map_without_root_aggregate(
     assert manifest["state"] == "in_progress"
     assert not (output_root / "audit.json").exists()
     assert not (output_root / "report.md").exists()
+
+
+def test_interrupted_artifact_publication_recovers_without_manual_deletion(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _stub_audit_identity(monkeypatch)
+
+    class InterruptAfterArtifact:
+        def __call__(self, _p0: str, _p1: str, **kwargs: Any) -> dict[str, Any]:
+            evidence = Path(kwargs["evidence_dir"])
+            trace = evidence / "traces" / (
+                "match-000000-seed-16000000-candidate-seat-0.json")
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            trace.write_text("partial trace\n", encoding="utf-8")
+            raise RuntimeError("simulated interruption after artifact publication")
+
+    with pytest.raises(RuntimeError, match="after artifact publication"):
+        audit_module.evaluate_audit(
+            definition,
+            output_root=output_root,
+            server_cmd=["fake-gym-server"],
+            workers=1,
+            evaluator=InterruptAfterArtifact(),
+            progress=lambda _message: None,
+        )
+
+    resumed = _FakeAuditEvaluator(definition)
+    audit_module.evaluate_audit(
+        definition,
+        output_root=output_root,
+        server_cmd=["fake-gym-server"],
+        workers=1,
+        evaluator=resumed,
+        progress=lambda _message: None,
+    )
+
+    assert len(resumed.calls) == definition.schedule.maps
+    audit_module.validate_physical_map(
+        output_root,
+        definition.candidates[0],
+        definition.schedule,
+        definition.schedule.seed_start,
+    )
+
+
+def test_interrupted_raw_evaluation_is_enriched_and_reused_on_resume(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _stub_audit_identity(monkeypatch)
+    original_enrich = audit_module._enrich_evaluation
+    interrupted = False
+
+    def interrupt_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated interruption before enrichment")
+        original_enrich(*args, **kwargs)
+
+    monkeypatch.setattr(audit_module, "_enrich_evaluation", interrupt_once)
+    first = _FakeAuditEvaluator(definition)
+    with pytest.raises(RuntimeError, match="before enrichment"):
+        audit_module.evaluate_audit(
+            definition,
+            output_root=output_root,
+            server_cmd=["fake-gym-server"],
+            workers=1,
+            evaluator=first,
+            progress=lambda _message: None,
+        )
+
+    resumed = _FakeAuditEvaluator(definition)
+    audit_module.evaluate_audit(
+        definition,
+        output_root=output_root,
+        server_cmd=["fake-gym-server"],
+        workers=1,
+        evaluator=resumed,
+        progress=lambda _message: None,
+    )
+
+    assert len(resumed.calls) == definition.schedule.maps - 1
+    audit_module.validate_physical_map(
+        output_root,
+        definition.candidates[0],
+        definition.schedule,
+        definition.schedule.seed_start,
+    )
+
+
+def test_concurrent_evaluation_is_rejected_before_second_evaluator_runs(
+    source_runs: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = _audit_definition(source_runs)
+    output_root = tmp_path / "audit"
+    _stub_audit_identity(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    background_errors: list[BaseException] = []
+
+    class BlockingEvaluator(_FakeAuditEvaluator):
+        def __call__(self, p0: str, p1: str, **kwargs: Any) -> dict[str, Any]:
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("test did not release the first evaluator")
+            return super().__call__(p0, p1, **kwargs)
+
+    def run_first() -> None:
+        try:
+            audit_module.evaluate_audit(
+                definition,
+                output_root=output_root,
+                server_cmd=["fake-gym-server"],
+                workers=1,
+                evaluator=BlockingEvaluator(definition),
+                progress=lambda _message: None,
+            )
+        except BaseException as error:
+            background_errors.append(error)
+
+    worker = threading.Thread(target=run_first, daemon=True)
+    worker.start()
+    assert entered.wait(5), "first evaluator did not enter the map"
+    contender = _FakeAuditEvaluator(definition)
+    try:
+        with pytest.raises(ValueError, match="already being evaluated"):
+            audit_module.evaluate_audit(
+                definition,
+                output_root=output_root,
+                server_cmd=["fake-gym-server"],
+                workers=1,
+                evaluator=contender,
+                progress=lambda _message: None,
+            )
+    finally:
+        release.set()
+        worker.join(15)
+
+    assert not worker.is_alive()
+    assert background_errors == []
+    assert contender.calls == []
+
 
 @pytest.mark.parametrize("mutation", ["schedule", "candidate", "scenario"])
 def test_validator_rejects_self_consistent_root_definition_tamper(
