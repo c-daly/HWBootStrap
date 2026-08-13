@@ -740,6 +740,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ValidateScenarioNode(Parse(json, source), "scenario");
         }
 
+        public static bool ObjectContainsAnyMember(
+            string json, string source, string objectName,
+            params string[] memberNames)
+        {
+            Dictionary<string, JsonNode> root = RequireObject(Parse(json, source), "root");
+            JsonNode child;
+            if (!root.TryGetValue(objectName, out child)) return false;
+            Dictionary<string, JsonNode> value = RequireObject(child, "root." + objectName);
+            return memberNames.Any(value.ContainsKey);
+        }
+
         static void ValidateScenarioNode(JsonNode node, string path)
         {
             Dictionary<string, JsonNode> scenario = RequireObject(node, path);
@@ -1110,10 +1121,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     if (_index >= _json.Length || _json[_index] != '"')
                         Error("object property name must be a string");
                     string key = ParseString();
+                    if (fields.ContainsKey(key))
+                        Error("duplicate object property '" + key + "'");
                     SkipWhitespace();
                     Expect(':');
                     SkipWhitespace();
-                    fields[key] = ParseValue(depth);
+                    fields.Add(key, ParseValue(depth));
                     SkipWhitespace();
                     if (TryRead('}')) break;
                     Expect(',');

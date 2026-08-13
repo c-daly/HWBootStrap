@@ -465,6 +465,29 @@ namespace HexWars.Presentation.Tests
             }
         }
 
+        [TestCase("top")]
+        [TestCase("reward")]
+        [TestCase("capacity")]
+        [TestCase("array-row")]
+        public void TacticalV3Scenario_StrictJsonRejectsDuplicateDecodedKeys(string location)
+        {
+            string valid = File.ReadAllText(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            string changed = location == "top"
+                ? valid.Replace("\"schema_version\": 1,", "\"schema_version\": 1,\n  \"schema_version\": 1,")
+                : location == "reward"
+                    ? InsertFirstObjectMember(valid, "reward", "\"terminal_win\": 1.0,")
+                    : location == "capacity"
+                        ? InsertFirstObjectMember(valid, "capacity", "\"max_cells\": 512,")
+                        : valid.Replace("{\"id\": \"standard-3v3\",",
+                            "{\"id\": \"standard-3v3\", \"\\u0069d\": \"standard-3v3\",");
+            string candidate = Path.Combine(_scratch, "duplicate-" + location + ".json");
+            File.WriteAllText(candidate, changed);
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() =>
+                MlTrainingScenarioFile.Load(candidate));
+            Assert.That(error.Message, Does.Contain("duplicate object property"));
+        }
+
         [Test]
         public void TacticalV3Scenario_RejectsInvalidStructuredSemantics()
         {

@@ -224,8 +224,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add(label + " encoding hash does not match the tactical-v3 encoding.");
             if (!string.Equals(contract.capacity_hash, expected.CapacityHash, StringComparison.Ordinal))
                 errors.Add(label + " capacity hash does not match the selected scenario.");
-            if (manifestJson.IndexOf("\"observation_size\"", StringComparison.Ordinal) >= 0 ||
-                manifestJson.IndexOf("\"action_size\"", StringComparison.Ordinal) >= 0)
+            if (MlStrictScenarioJson.ObjectContainsAnyMember(
+                    manifestJson, manifestPath, "contract",
+                    "observation_size", "action_size"))
                 errors.Add(label + " tactical-v3 contract must not declare fixed observation_size or action_size.");
             if (!string.Equals(manifest.latest_checkpoint, "checkpoints/best.pt", StringComparison.Ordinal))
                 errors.Add(label + " latest checkpoint must be checkpoints/best.pt.");

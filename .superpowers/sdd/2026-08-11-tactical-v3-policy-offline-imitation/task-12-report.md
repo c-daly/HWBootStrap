@@ -31,3 +31,12 @@
 
 - Final scope is the six Task 12 ML Lab implementation/test files plus this report.
 - No known remaining concerns.
+
+## Fix Round 1 (2026-08-13)
+
+- Rejected duplicate JSON object properties after escape decoding at every scenario nesting level, preventing last-value overwrite at the root, reward, capacity, and array-row levels.
+- Replaced Arena's raw fixed-geometry token scan with structural inspection of decoded direct `contract` members. Escaped observation/action member names now reject, while the same words inside unrelated string metadata remain valid.
+- RED: the focused scenario/window gate ran 89 tests; 83 passed and exactly 6 failed: four duplicate-key cases and two escaped fixed-geometry members. The string-metadata control already passed.
+- Focused GREEN: the same gate passed 89/89.
+- Final Unity 6000.5 exact-worktree six-class Task 12 + Task 11 gate passed 185/185, with 0 failed and 0 skipped. The log contains no C# compile errors; its two exception lines are expected Task 11 render-fault assertions.
+- Coplay remained unavailable, so exact-worktree batchmode/XML/log inspection was used. Unity-generated settings were restored; no runs or checkpoints were touched.

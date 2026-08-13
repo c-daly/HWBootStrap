@@ -711,6 +711,36 @@ namespace HexWars.Presentation.Tests
             finally { Directory.Delete(fixture.Run, true); }
         }
 
+        [TestCase("\\u006fbservation_size")]
+        [TestCase("acti\\u006fn_size")]
+        public void StructuredArenaRun_RejectsEscapedFixedGeometryMember(string escapedName)
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string changed = fixture.Manifest.Replace("\"contract\":{",
+                    "\"contract\":{\"" + escapedName + "\":0,");
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.Throws<InvalidOperationException>(() => MlArenaLaunchPlan.Create(fixture.Config));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [Test]
+        public void StructuredArenaRun_AllowsFixedGeometryTokenInsideStringValue()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                string changed = fixture.Manifest.Replace("\"config\":{",
+                    "\"note\":\"observation_size and action_size are variable\",\"config\":{");
+                File.WriteAllText(Path.Combine(fixture.Run, "run.json"), changed);
+                Assert.That(MlArenaLaunchPlan.Create(fixture.Config).P0Spec,
+                    Is.EqualTo("run:" + fixture.Run));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
         [Test]
         public void StructuredArenaRun_RejectsMissingScenarioBeforeMutation()
         {
