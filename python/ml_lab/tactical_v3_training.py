@@ -91,6 +91,9 @@ class EpochMetrics:
 @dataclass(frozen=True, slots=True)
 class TrainingResult:
     model: TacticalV3Policy
+    model_config: TacticalV3ModelConfig
+    objective_config: ObjectiveConfig
+    trainer_config: TrainerConfig
     best_epoch: int
     best_validation_policy_nll: float
     stopped_early: bool
@@ -522,6 +525,9 @@ def _train_offline_impl(
     model.eval()
     return TrainingResult(
         model=model,
+        model_config=model_config,
+        objective_config=objective_config,
+        trainer_config=trainer_config,
         best_epoch=best_epoch,
         best_validation_policy_nll=float(best_nll),
         stopped_early=stopped_early,
