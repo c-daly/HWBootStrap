@@ -366,9 +366,9 @@ namespace HexWars.Presentation
                 throw new InvalidOperationException(
                     "policy server returned no structured action message");
             const string decisionFirst =
-                @"^\s*\{\s*""decision_id""\s*:\s*(-?[0-9]+)\s*,\s*""candidate_id""\s*:\s*(-?[0-9]+)\s*\}\s*$";
+                @"^[ \t\r\n]*\{[ \t\r\n]*""decision_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*,[ \t\r\n]*""candidate_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*\}[ \t\r\n]*$";
             const string candidateFirst =
-                @"^\s*\{\s*""candidate_id""\s*:\s*(-?[0-9]+)\s*,\s*""decision_id""\s*:\s*(-?[0-9]+)\s*\}\s*$";
+                @"^[ \t\r\n]*\{[ \t\r\n]*""candidate_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*,[ \t\r\n]*""decision_id""[ \t\r\n]*:[ \t\r\n]*(-?(?:0|[1-9][0-9]*))[ \t\r\n]*\}[ \t\r\n]*$";
             Match match = Regex.Match(json, decisionFirst, RegexOptions.CultureInvariant);
             bool reversed = false;
             if (!match.Success)

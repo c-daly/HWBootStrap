@@ -38,3 +38,12 @@
 - Restored Unity/import-generated settings and unrelated Python bytecode files before staging.
 - No old runs or checkpoints were modified.
 - No known remaining concerns.
+
+## Fix Round 1 (2026-08-12)
+
+- Tightened structured policy action parsing to accept only JSON whitespace (space, tab, CR, and LF) and JSON integer syntax (-?(?:0|[1-9][0-9]*)) while retaining invariant Int64/Int32 bounds and either exact key order.
+- RED: focused PolicyBridgeProtocolTests ran 13 tests; 10 passed and exactly 3 failed for decision 08, candidate 01, and an NBSP separator.
+- GREEN: the same focused gate passed 13/13.
+- Final exact-worktree Unity 6000.5 EditMode gate passed 75/75 with exit code 0 and no C# compile errors or unhandled exceptions in the log.
+- Engine production and tests were untouched, so the engine gate was omitted as authorized for this fix round.
+- Coplay accepted the exact project root, but no Editor was running there; check_compile_errors was attempted after the C# edit and the exact-worktree Unity batch compile/log gate provided the fallback verification.

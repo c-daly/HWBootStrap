@@ -75,6 +75,37 @@ namespace HexWars.Presentation.Tests
                     @"{""error"":""selection failed""}", 8));
         }
 
+        [TestCase(@"{""decision_id"":08,""candidate_id"":1}")]
+        [TestCase(@"{""decision_id"":8,""candidate_id"":01}")]
+        public void StructuredAction_RejectsNonJsonIntegerAndWhitespaceSyntax(string json)
+        {
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(json, 8));
+        }
+
+        [Test]
+        public void StructuredAction_RejectsNonJsonWhitespaceSyntax()
+        {
+            string json = @"{""decision_id"":8," + '\u00a0' +
+                @"""candidate_id"":1}";
+
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(json, 8));
+        }
+
+        [Test]
+        public void StructuredAction_AcceptsJsonWhitespaceAndIntegerBounds()
+        {
+            string json = " \t\r\n" +
+                @"{""candidate_id"" " + "\t: -2147483648,\n  " +
+                @"""decision_id"" : 9223372036854775806}" + "\t ";
+            PolicyCandidateResult accepted = PolicyBridge.ParseStructuredAction(
+                json, 9223372036854775806L);
+
+            Assert.That(accepted.DecisionId, Is.EqualTo(9223372036854775806L));
+            Assert.That(accepted.CandidateId, Is.EqualTo(int.MinValue));
+        }
+
         [Test]
         public void SeatStepMetadata_DistinguishesMissingFromExplicitZero()
         {
