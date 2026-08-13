@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, replace
@@ -21,6 +23,9 @@ from .io import atomic_write_json
 
 _CHECKPOINT_NAME = re.compile(r"step_(?P<step>\d{9})\.zip\Z")
 _CANDIDATE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,127}\Z")
+_PARTIAL_ARTIFACT_NAME = re.compile(
+    r"match-\d{6}-seed-\d+-candidate-seat-[01]\.(?:json|replay)\Z"
+)
 _EXPECTED_SEED = 227
 _COMPATIBILITY_FIELDS = (
     ("environment", "environment"),
@@ -29,6 +34,53 @@ _COMPATIBILITY_FIELDS = (
     ("observation_size", "observation"),
     ("action_size", "action"),
 )
+
+
+class _AuditEvaluationLock:
+    def __init__(self, root: Path) -> None:
+        self._path = root.parent / f".{root.name}.evaluation.lock"
+        self._stream: Any | None = None
+
+    def __enter__(self) -> None:
+        stream = self._path.open("a+b")
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            stream.close()
+            raise ValueError("audit output is already being evaluated") from error
+        self._stream = stream
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        stream = self._stream
+        if stream is None:
+            return
+        try:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
+            self._stream = None
+
+
 TRACE_FIELDS = {
     "rounds": "round_count",
     "decisions": "command_count",
@@ -1603,6 +1655,102 @@ def _enrich_evaluation(
     atomic_write_json(evaluation_path, enriched)
 
 
+def _map_recovery_marker(evaluation_path: Path) -> Path:
+    return evaluation_path.parent.parent / (
+        f".{evaluation_path.parent.name}.in-progress.json"
+    )
+
+
+def _map_recovery_identity(
+    manifest: Mapping[str, Any], candidate: AuditCandidate, map_seed: int
+) -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "definition_sha256": manifest["definition_sha256"],
+        "candidate_id": candidate.candidate_id,
+        "map_seed": map_seed,
+    }
+
+
+def _require_map_recovery_marker(
+    evaluation_path: Path,
+    manifest: Mapping[str, Any],
+    candidate: AuditCandidate,
+    map_seed: int,
+) -> Path | None:
+    marker = _map_recovery_marker(evaluation_path)
+    if not marker.exists():
+        return None
+    payload, _raw = _read_json_bytes(marker, label="map recovery marker")
+    if payload != _map_recovery_identity(manifest, candidate, map_seed):
+        raise ValueError(f"map recovery marker identity changed: {marker}")
+    return marker
+
+
+def _recoverable_partial_map_inventory(map_root: Path) -> bool:
+    for path in map_root.rglob("*"):
+        if path.is_symlink():
+            return False
+        relative = path.relative_to(map_root)
+        if not relative.parts or relative.parts[0] != "evidence":
+            return False
+        if path.is_dir():
+            if len(relative.parts) == 1:
+                continue
+            if len(relative.parts) == 2 and (
+                relative.parts[1] in {"traces", "replays"}
+                or relative.parts[1].startswith(".evaluation-staging-")
+            ):
+                continue
+            return False
+        if len(relative.parts) != 3 or not _PARTIAL_ARTIFACT_NAME.fullmatch(path.name):
+            return False
+        parent = relative.parts[1]
+        if parent not in {"traces", "replays"} and not parent.startswith(
+            ".evaluation-staging-"
+        ):
+            return False
+    return True
+
+
+def _recover_interrupted_maps(
+    root: Path,
+    definition: AuditDefinition,
+    manifest: Mapping[str, Any],
+    progress: Callable[[str], None],
+) -> None:
+    for candidate in definition.candidates:
+        for map_offset in range(definition.schedule.maps):
+            map_seed = definition.schedule.seed_start + map_offset
+            evaluation_path = audit_map_path(root, candidate.candidate_id, map_seed)
+            marker = _require_map_recovery_marker(
+                evaluation_path, manifest, candidate, map_seed
+            )
+            if evaluation_path.exists():
+                evaluation, _raw = _read_json_bytes(
+                    evaluation_path, label="published map evaluation"
+                )
+                if "audit_identity" not in evaluation:
+                    if marker is None:
+                        raise ValueError(
+                            "raw map evaluation has no authenticated recovery marker"
+                        )
+                    _enrich_evaluation(root, evaluation_path, candidate, manifest)
+                    progress(
+                        f"recovered interrupted raw map evaluation: {evaluation_path.parent}"
+                    )
+                continue
+            map_root = evaluation_path.parent
+            if not map_root.exists() or not any(map_root.iterdir()):
+                continue
+            if marker is None or not _recoverable_partial_map_inventory(map_root):
+                raise ValueError(
+                    f"map directory exists without valid evaluation evidence: {map_root}"
+                )
+            progress(f"discarding interrupted partial map evidence: {map_root}")
+            shutil.rmtree(map_root)
+
+
 def _duration(seconds: float) -> str:
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)
@@ -1665,6 +1813,34 @@ def evaluate_audit(
     progress: Callable[[str], None] = print,
     _smoke: bool = False,
 ) -> Mapping[str, Any]:
+    """Evaluate every immutable candidate/map under one process-level output lock."""
+    if workers < 1:
+        raise ValueError("checkpoint audit workers must be positive")
+    _validate_global_audit_definition(definition, smoke=_smoke)
+    root = Path(output_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    with _AuditEvaluationLock(root):
+        return _evaluate_audit_locked(
+            definition,
+            output_root=root,
+            server_cmd=server_cmd,
+            workers=workers,
+            evaluator=evaluator,
+            progress=progress,
+            _smoke=_smoke,
+        )
+
+
+def _evaluate_audit_locked(
+    definition: AuditDefinition,
+    *,
+    output_root: Path,
+    server_cmd: Sequence[str],
+    workers: int,
+    evaluator: Callable[..., Mapping[str, Any]] = evaluate_controllers,
+    progress: Callable[[str], None] = print,
+    _smoke: bool = False,
+) -> Mapping[str, Any]:
     """Evaluate every immutable candidate/map and reuse only validated physical evidence."""
     if workers < 1:
         raise ValueError("checkpoint audit workers must be positive")
@@ -1706,6 +1882,8 @@ def evaluate_audit(
         )
         atomic_write_json(manifest_path, manifest)
 
+    _recover_interrupted_maps(root, definition, manifest, progress)
+
     existing_replay_winners = _inspect_replays(
         _replay_paths_for_definition(root, definition, existing_only=True)
     )
@@ -1731,6 +1909,7 @@ def evaluate_audit(
         for map_offset in range(schedule.maps):
             map_seed = schedule.seed_start + map_offset
             evaluation_path = audit_map_path(root, candidate.candidate_id, map_seed)
+            recovery_marker = _map_recovery_marker(evaluation_path)
             if evaluation_path.exists():
                 validate_physical_map(
                     root,
@@ -1739,6 +1918,7 @@ def evaluate_audit(
                     map_seed,
                     _replay_winners=existing_replay_winners,
                 )
+                recovery_marker.unlink(missing_ok=True)
                 candidate_reused += 1
                 reused_total += 1
                 completed += 1
@@ -1760,6 +1940,9 @@ def evaluate_audit(
                 raise ValueError(
                     f"map directory exists without valid evaluation evidence: {evaluation_path.parent}"
                 )
+            atomic_write_json(
+                recovery_marker, _map_recovery_identity(manifest, candidate, map_seed)
+            )
             evidence_dir = evaluation_path.parent / "evidence"
             result = evaluator(
                 candidate.controller,
@@ -1780,6 +1963,7 @@ def evaluate_audit(
                 raise ValueError("checkpoint audit evaluator must return an evaluation mapping")
             _enrich_evaluation(root, evaluation_path, candidate, manifest)
             validate_physical_map(root, candidate, schedule, map_seed)
+            recovery_marker.unlink(missing_ok=True)
             completed += 1
             if (map_offset + 1) % 10 == 0:
                 progress(
