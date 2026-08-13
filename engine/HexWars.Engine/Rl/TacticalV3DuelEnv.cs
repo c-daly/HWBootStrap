@@ -120,6 +120,29 @@ namespace HexWars.Engine.Rl
             return MakeView();
         }
 
+        public TacticalV3TeacherSelection SelectTeacherCandidate(
+            BoundedSearchAgent teacher)
+        {
+            RequireReset();
+            if (teacher == null) throw new ArgumentNullException(nameof(teacher));
+            if (IsFinished)
+                throw new InvalidOperationException(
+                    "cannot select a teacher candidate from a finished tactical-v3 episode");
+            if (Controller(_state.ActivePlayer) != null)
+                throw new InvalidOperationException(
+                    "teacher selection requires the active tactical-v3 seat to be external");
+
+            Command command = teacher.Decide(State);
+            int candidateId = _frame.RequireUniqueCandidateId(command);
+            return new TacticalV3TeacherSelection(
+                _frame.DecisionId,
+                candidateId,
+                teacher.Depth,
+                teacher.ExpansionBudget,
+                teacher.LastExpansionCount,
+                teacher.UseHeuristic ? BoundedSearchAgent.HeuristicIdentity : "none");
+        }
+
         public string ToReplay()
         {
             RequireReset();

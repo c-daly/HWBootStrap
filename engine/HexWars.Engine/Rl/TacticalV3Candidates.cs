@@ -146,6 +146,25 @@ namespace HexWars.Engine.Rl
 
         internal bool IsFor(GameState state) => ReferenceEquals(_sourceState, state);
         internal Command CommandAt(int candidateId) => _commands[candidateId];
+
+        internal int RequireUniqueCandidateId(Command selected)
+        {
+            if (selected == null) throw new ArgumentNullException(nameof(selected));
+
+            int candidateId = -1;
+            int matchCount = 0;
+            for (int index = 0; index < _commands.Count; index++)
+            {
+                if (!_commands[index].Equals(selected)) continue;
+                candidateId = Candidates[index].CandidateId;
+                matchCount++;
+            }
+
+            if (matchCount != 1)
+                throw new InvalidOperationException(
+                    "teacher command must match exactly one tactical-v3 candidate");
+            return candidateId;
+        }
     }
 
     public sealed class TacticalV3CandidateProjector : ICandidateProjector
