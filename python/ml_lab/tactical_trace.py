@@ -282,22 +282,29 @@ def _dto_fields(value: Any, path: str, pascal_names: tuple[str, ...]) -> dict[st
     if not isinstance(value, Mapping):
         raise ValueError(f"{path} must be a JSON object")
     camel_names = tuple(_camel_case(name) for name in pascal_names)
+    snake_names = tuple(
+        "".join(
+            ("_" if index else "") + character.lower()
+            if character.isupper() else character
+            for index, character in enumerate(name)
+        )
+        for name in pascal_names
+    )
     keys = set(value)
     if keys == set(pascal_names):
         return {name: value[name] for name in pascal_names}
     if keys == set(camel_names):
         return {name: value[_camel_case(name)] for name in pascal_names}
-    for pascal, camel in zip(pascal_names, camel_names):
-        snake = "".join(
-            ("_" if index else "") + character.lower()
-            if character.isupper() else character
-            for index, character in enumerate(pascal)
-        )
+    if keys == set(snake_names):
+        return {name: value[snake] for name, snake in zip(pascal_names, snake_names)}
+    for pascal, camel, snake in zip(pascal_names, camel_names, snake_names):
         if snake != camel and snake in value:
-            raise ValueError(f"{path}.{snake} must use a transport casing alias")
-        if pascal not in value and camel not in value:
+            raise ValueError(f"{path}.{snake} must use one consistent DTO casing")
+        if pascal not in value and camel not in value and snake not in value:
             raise ValueError(f"{path}.{camel} is required")
-    raise ValueError(f"{path} must use only PascalCase or camelCase DTO fields")
+    raise ValueError(
+        f"{path} must use only PascalCase, camelCase, or snake_case DTO fields"
+    )
 
 
 def _camel_case(name: str) -> str:

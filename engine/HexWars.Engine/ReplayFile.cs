@@ -32,10 +32,11 @@ namespace HexWars.Engine
             sb.Append(Header).Append('\n');
             sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round)
               .Append(' ').Append(s.Config.BiomesEnabled ? 1 : 0)
-              .Append(' ').Append(s.Config.TurnPolicy.ActionsPerTurn ?? 0).Append('\n');
+              .Append(' ').Append(s.Config.TurnPolicy.ActionsPerTurn ?? 0)
+              .Append(' ').Append(TurnPolicyKind(s.Config.TurnPolicy)).Append('\n');
+            var tiles = new List<Tile>(s.Board.Tiles);
             WriteConfig(sb, s.Config);
 
-            var tiles = new List<Tile>(s.Board.Tiles);
             sb.Append("TILES ").Append(tiles.Count).Append('\n');
             foreach (var t in tiles)
                 sb.Append(t.Coord.Q).Append(' ').Append(t.Coord.R).Append(' ').Append(t.Elevation).Append(' ').Append((int)t.Terrain).Append('\n');
@@ -62,12 +63,13 @@ namespace HexWars.Engine
 
             if (Next() != Header) throw new FormatException("not a HexWars replay");
 
-            var meta = Next().Split(' ');           // META nextId active round [biomes] [turnActions]
+            var meta = Next().Split(' '); // META nextId active round [biomes] [turnActions] [turnPolicyKind]
             int nextId = int.Parse(meta[1], CultureInfo.InvariantCulture);
             var active = (PlayerId)int.Parse(meta[2], CultureInfo.InvariantCulture);
             int round = int.Parse(meta[3], CultureInfo.InvariantCulture);
             bool biomes = meta.Length <= 4 || int.Parse(meta[4], CultureInfo.InvariantCulture) != 0; // old replays: biomes on
             int turnActions = meta.Length > 5 ? int.Parse(meta[5], CultureInfo.InvariantCulture) : 0; // old replays: whole army
+            int turnPolicyKind = meta.Length > 6 ? int.Parse(meta[6], CultureInfo.InvariantCulture) : -1;
 
             // CONFIG is optional (old payloads lack it) — without it, defaults reproduce the old behaviour
             var cfgKv = new Dictionary<string, string>();
@@ -94,7 +96,7 @@ namespace HexWars.Engine
 
             var p0 = ReadPlayer(Next, PlayerId.Player0);
             var p1 = ReadPlayer(Next, PlayerId.Player1);
-            var start = new GameState(board, BuildConfig(cfgKv, biomes, turnActions),
+            var start = new GameState(board, BuildConfig(cfgKv, biomes, turnActions, turnPolicyKind),
                 new[] { p0, p1 }, active, round, nextId);
 
             int cmdCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
@@ -107,6 +109,26 @@ namespace HexWars.Engine
         // ---- helpers ----
 
         private static int I(string s) => int.Parse(s, CultureInfo.InvariantCulture);
+        private static int TurnPolicyKind(ITurnPolicy policy)
+        {
+            if (policy is AllUnitsPolicy) return 0;
+            if (policy is OneActionPolicy) return 1;
+            if (policy is KActionsPolicy) return 2;
+            throw new NotSupportedException(
+                "replay serialization does not support turn policy '" +
+                policy.GetType().FullName + "'");
+        }
+
+        private static ITurnPolicy ReadTurnPolicy(int kind, int actions)
+        {
+            if (kind < 0)
+                return actions > 0 ? (ITurnPolicy)new KActionsPolicy(actions) : new AllUnitsPolicy();
+            if (kind == 0) return new AllUnitsPolicy();
+            if (kind == 1) return new OneActionPolicy();
+            if (kind == 2) return new KActionsPolicy(actions);
+            throw new FormatException("unknown replay turn policy kind " + kind);
+        }
+
 
         // The effective ruleset, as key=value pairs mapping onto GameConfig.Default's parameters —
         // every game-construction path (GameFactory, GameBootstrap, tests) builds through Default, so
@@ -127,9 +149,16 @@ namespace HexWars.Engine
             sb.Append(" captureFactor=").Append(c.CaptureFactor.ToString("R", inv));
             sb.Append(" buildFactor=").Append(c.BuildFactor.ToString("R", inv));
             sb.Append(" genOutput=").Append(c.GeneratorOutput);
+            sb.Append(" genCost=").Append(c.GeneratorCost);
+            sb.Append(" genHealth=").Append(c.GeneratorHealth);
             sb.Append(" startingPoints=").Append(c.StartingPoints);
+            sb.Append(" bounty=").Append(c.BountyRate.ToString("R", inv));
             sb.Append(" damageFloor=").Append(c.DamageFloor);
+            sb.Append(" dmgHigh=").Append(c.DmgHighGroundBonus);
+            sb.Append(" rangeHigh=").Append(c.RangeHighGroundBonus);
+            sb.Append(" roundCap=").Append(c.RoundCap);
             sb.Append(" designFee=").Append(c.DesignFee);
+            sb.Append(" deployMultiplier=").Append(c.DeployCostMultiplier.ToString("R", inv));
             sb.Append(" maxDesignCost=").Append(c.MaxDesignPointCost);
             sb.Append(" fixedTemplates=").Append(c.FixedTemplateCount);
             sb.Append(" templateSlots=").Append(c.TemplateSlotCount);
@@ -140,6 +169,23 @@ namespace HexWars.Engine
             sb.Append(" generators=").Append(c.GeneratorsEnabled ? 1 : 0);
             sb.Append(" pointDecay=").Append(c.PointDecay.ToString("R", inv));
             sb.Append(" fog=").Append(c.FogOfWar ? 1 : 0);
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+            {
+                TerrainDef terrain;
+                try
+                {
+                    terrain = c.Terrain(terrainType);
+                }
+                catch (KeyNotFoundException)
+                {
+                    continue;
+                }
+                string prefix = " terrain" + (int)terrainType;
+                sb.Append(prefix).Append("Move=").Append(terrain.MoveCost);
+                sb.Append(prefix).Append("Conceal=").Append(terrain.Concealment);
+                sb.Append(prefix).Append("Defense=").Append(terrain.Defense);
+                sb.Append(prefix).Append("Passable=").Append(terrain.Passable ? 1 : 0);
+            }
             sb.Append('\n');
         }
 
@@ -153,39 +199,63 @@ namespace HexWars.Engine
             }
         }
 
-        private static GameConfig BuildConfig(Dictionary<string, string> kv, bool biomes, int turnActions)
+        private static GameConfig BuildConfig(
+            Dictionary<string, string> kv, bool biomes, int turnActions, int turnPolicyKind)
         {
             int Gi(string k, int def) => kv.TryGetValue(k, out var v) ? int.Parse(v, CultureInfo.InvariantCulture) : def;
             double Gd(string k, double def) => kv.TryGetValue(k, out var v) ? double.Parse(v, CultureInfo.InvariantCulture) : def;
             bool Gb(string k, bool def) => kv.TryGetValue(k, out var v) ? v != "0" : def;
 
-            return GameConfig.Default(
+            GameConfig defaults = GameConfig.Default(
                 biomesEnabled: biomes,
-                turnPolicy: turnActions > 0 ? new KActionsPolicy(turnActions) : null,
-                winConditions: (WinBy)Gi("win", (int)WinBy.Annihilation),
-                captureCost: Gi("captureCost", 3),
-                economyWinThreshold: Gi("economyWin", 200),
-                scoreKills: Gi("scoreKills", 1),
-                scorePoints: Gi("scorePoints", 1),
-                scoreArmy: Gi("scoreArmy", 1),
-                scoreTerritory: Gi("scoreTerritory", 1),
-                upkeepFactor: Gd("upkeep", 0.25),
-                captureFactor: Gd("captureFactor", 4.0),
-                buildFactor: Gd("buildFactor", 4.0),
-                generatorOutput: Gi("genOutput", 1),
-                startingPoints: Gi("startingPoints", 12),
-                damageFloor: Gi("damageFloor", 0),
-                designFee: Gi("designFee", 0),
-                maxDesignPointCost: Gi("maxDesignCost", 0),
-                fixedTemplateCount: Gi("fixedTemplates", 0),
-                templateSlotCount: Gi("templateSlots", 0),
-                territoryMode: Gb("territory", false),
-                claimEndsTurn: Gb("claimEndsTurn", true),
-                buildAnywhere: Gb("buildAnywhere", false),
-                territoryIncome: Gi("territoryIncome", 0),
-                generatorsEnabled: Gb("generators", true),
-                pointDecay: Gd("pointDecay", 0.0),
-                fogOfWar: Gb("fog", false));
+                turnPolicy: ReadTurnPolicy(turnPolicyKind, turnActions));
+            var terrain = new Dictionary<TerrainType, TerrainDef>();
+            foreach (TerrainType terrainType in Enum.GetValues(typeof(TerrainType)))
+            {
+                string prefix = "terrain" + (int)terrainType;
+                TerrainDef fallback = defaults.Terrain(terrainType);
+                terrain.Add(terrainType, new TerrainDef(
+                    Gi(prefix + "Move", fallback.MoveCost),
+                    Gi(prefix + "Conceal", fallback.Concealment),
+                    Gi(prefix + "Defense", fallback.Defense),
+                    Gb(prefix + "Passable", fallback.Passable)));
+            }
+
+            return new GameConfig(
+                terrain,
+                startingPoints: Gi("startingPoints", defaults.StartingPoints),
+                bountyRate: Gd("bounty", defaults.BountyRate),
+                generatorCost: Gi("genCost", defaults.GeneratorCost),
+                generatorOutput: Gi("genOutput", defaults.GeneratorOutput),
+                generatorHealth: Gi("genHealth", defaults.GeneratorHealth),
+                damageFloor: Gi("damageFloor", defaults.DamageFloor),
+                dmgHighGroundBonus: Gi("dmgHigh", defaults.DmgHighGroundBonus),
+                rangeHighGroundBonus: Gi("rangeHigh", defaults.RangeHighGroundBonus),
+                roundCap: Gi("roundCap", defaults.RoundCap),
+                designFee: Gi("designFee", defaults.DesignFee),
+                deployCostMultiplier: Gd("deployMultiplier", defaults.DeployCostMultiplier),
+                turnPolicy: defaults.TurnPolicy,
+                biomesEnabled: biomes,
+                winConditions: (WinBy)Gi("win", (int)defaults.WinConditions),
+                captureCost: Gi("captureCost", defaults.CaptureCost),
+                economyWinThreshold: Gi("economyWin", defaults.EconomyWinThreshold),
+                scoreKills: Gi("scoreKills", defaults.ScoreKills),
+                scorePoints: Gi("scorePoints", defaults.ScorePoints),
+                scoreArmy: Gi("scoreArmy", defaults.ScoreArmy),
+                scoreTerritory: Gi("scoreTerritory", defaults.ScoreTerritory),
+                upkeepFactor: Gd("upkeep", defaults.UpkeepFactor),
+                captureFactor: Gd("captureFactor", defaults.CaptureFactor),
+                buildFactor: Gd("buildFactor", defaults.BuildFactor),
+                territoryMode: Gb("territory", defaults.TerritoryMode),
+                claimEndsTurn: Gb("claimEndsTurn", defaults.ClaimEndsTurn),
+                buildAnywhere: Gb("buildAnywhere", defaults.BuildAnywhere),
+                territoryIncome: Gi("territoryIncome", defaults.TerritoryIncome),
+                generatorsEnabled: Gb("generators", defaults.GeneratorsEnabled),
+                pointDecay: Gd("pointDecay", defaults.PointDecay),
+                fogOfWar: Gb("fog", defaults.FogOfWar),
+                maxDesignPointCost: Gi("maxDesignCost", defaults.MaxDesignPointCost),
+                fixedTemplateCount: Gi("fixedTemplates", defaults.FixedTemplateCount),
+                templateSlotCount: Gi("templateSlots", defaults.TemplateSlotCount));
         }
 
         private static void WriteControl(StringBuilder sb, string tag, Board board, PlayerId owner)

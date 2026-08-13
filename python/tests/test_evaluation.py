@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
 import csv
-from collections.abc import Iterator
+import hashlib
+import json
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,6 +184,142 @@ def _episode_trace(winner: int) -> EpisodeTrace:
                 after=after,
             ),
         ),
+    )
+
+
+_EVIDENCE_NONCE = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+_EVIDENCE_SESSION = hashlib.sha256(
+    f"gymserver-evidence-v1|{_EVIDENCE_NONCE}".encode("utf-8")
+).hexdigest()
+_EVIDENCE_SCHEDULE_BODY = (
+    b'[{"episode_seed":1,"learner_seat":0,"map_seed":1,'
+    b'"profile":"conversion-3v1-near","reference_seat":0,"schedule_index":0}]'
+)
+_EVIDENCE_SCHEDULE_SHA256 = hashlib.sha256(_EVIDENCE_SCHEDULE_BODY).hexdigest()
+
+
+def _evidence_begin_request() -> dict[str, object]:
+    candidate = {"oracle_type": "bounded-search", "depth": 4, "expansion_budget": 512, "use_heuristic": True, "heuristic_identity": "material-plus-pursuit-v1", "code_hash": "1" * 64}
+    scheduled = {"schedule_index": 0, "map_seed": 1, "episode_seed": 1, "profile": "conversion-3v1-near", "reference_seat": 0, "learner_seat": 0}
+    return {"cmd": "duel_evidence_begin", "schema_version": 1, "purpose": "oracle-preflight", "nonce": _EVIDENCE_NONCE, "panel_sha256": "a" * 64, "repository": {"commit": "b" * 40, "source_tree": "c" * 40, "dirty": False}, "scenario_sha256": "d" * 64, "contract_hash": "e" * 64, "encoding_hash": "f" * 64, "oracle": {"oracle_type": "bounded-search", "heuristic_identity": "material-plus-pursuit-v1", "code_hash": "1" * 64}, "candidates": [candidate], "preflight_schedule": [scheduled], "preflight_schedule_sha256": _EVIDENCE_SCHEDULE_SHA256, "candidates_by_schedule": [{"candidate_index": 0, "game_index": 0, "oracle": candidate, "scheduled_duel": scheduled}]}
+
+
+def _evidence_begin_body() -> bytes:
+    request = _evidence_begin_request()
+    body = {"schema_version": 1, "purpose": "oracle-preflight", "nonce": _EVIDENCE_NONCE, "session_id": _EVIDENCE_SESSION, "panel_sha256": request["panel_sha256"], "repository": request["repository"], "environment": "tactical-v2", "scenario_sha256": request["scenario_sha256"], "contract_hash": request["contract_hash"], "encoding_hash": request["encoding_hash"], "oracle": request["candidates"][0], "candidates": request["candidates"], "preflight_schedule": request["preflight_schedule"], "preflight_schedule_sha256": request["preflight_schedule_sha256"], "candidates_by_schedule": request["candidates_by_schedule"]}
+    return json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+
+_EVIDENCE_BEGIN_BODY = _evidence_begin_body()
+_EVIDENCE_BEGIN_SHA256 = hashlib.sha256(_EVIDENCE_BEGIN_BODY).hexdigest()
+
+
+def _evidence_begin_ack() -> dict[str, object]:
+    return {"schema_version": 1, "nonce": _EVIDENCE_NONCE, "session_id": _EVIDENCE_SESSION, "schedule_sha256": _EVIDENCE_SCHEDULE_SHA256, "environment": "tactical-v2", "scenario_sha256": "d" * 64, "contract_hash": "e" * 64, "encoding_hash": "f" * 64, "oracle_type": "bounded-search", "oracle_heuristic_identity": "material-plus-pursuit-v1", "oracle_code_sha256": "1" * 64, "sequence": 0, "initial_chain_sha256": _EVIDENCE_BEGIN_SHA256, "begin_content_sha256": _EVIDENCE_BEGIN_SHA256, "canonical_body_utf8_base64": base64.b64encode(_EVIDENCE_BEGIN_BODY).decode("ascii")}
+
+
+def _evidence_receipt_body(trace: bytes, replay: bytes, benchmark: bytes) -> bytes:
+    request = _evidence_begin_request()
+    body = {"schema_version": 1, "session_id": _EVIDENCE_SESSION, "nonce": _EVIDENCE_NONCE, "sequence": 1, "previous_receipt_sha256": _EVIDENCE_BEGIN_SHA256, "begin_content_sha256": _EVIDENCE_BEGIN_SHA256, "panel_sha256": request["panel_sha256"], "repository": request["repository"], "candidate_index": 0, "game_index": 0, "scheduled_duel": request["preflight_schedule"][0], "oracle": request["candidates"][0], "candidates": request["candidates"], "preflight_schedule": request["preflight_schedule"], "preflight_schedule_sha256": request["preflight_schedule_sha256"], "candidates_by_schedule": request["candidates_by_schedule"], "environment": "tactical-v2", "scenario_sha256": request["scenario_sha256"], "contract_hash": request["contract_hash"], "encoding_hash": request["encoding_hash"], "engine_protocol": "gymserver-evidence-v1", "outcome": "draw", "winner": None, "transition_count": 1, "benchmark_sample_count": 1, "expansion_total": 2, "trace": {"sha256": hashlib.sha256(trace).hexdigest(), "byte_size": len(trace)}, "replay": {"sha256": hashlib.sha256(replay).hexdigest(), "byte_size": len(replay)}, "benchmark": {"sha256": hashlib.sha256(benchmark).hexdigest(), "byte_size": len(benchmark)}}
+    return json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+
+def _evidence_game_response(trace: bytes = b"trace", replay: bytes = b"replay", benchmark: bytes = b"benchmark") -> dict[str, object]:
+    receipt_utf8 = _evidence_receipt_body(trace, replay, benchmark)
+    def artifact(payload: bytes) -> dict[str, object]:
+        return {"utf8_base64": base64.b64encode(payload).decode("ascii"), "sha256": hashlib.sha256(payload).hexdigest(), "byte_size": len(payload)}
+    return {"receipt": json.loads(receipt_utf8), "receipt_sha256": hashlib.sha256(receipt_utf8).hexdigest(), "receipt_utf8_base64": base64.b64encode(receipt_utf8).decode("ascii"), "trace": artifact(trace), "replay": artifact(replay), "benchmark": artifact(benchmark)}
+
+
+def test_engine_evidence_client_sends_exact_begin_and_validates_ack() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    client = object.__new__(EngineEvidenceDuelClient)
+    captured: list[dict[str, object]] = []
+    client._rpc = lambda request: (captured.append(request), _evidence_begin_ack())[1]
+    acknowledgement = client.begin_evidence(_evidence_begin_request())
+    assert captured == [_evidence_begin_request()]
+    assert dict(acknowledgement) == _evidence_begin_ack()
+    with pytest.raises(TypeError): acknowledgement["nonce"] = "x"  # type: ignore[index]
+
+
+def test_engine_evidence_client_decodes_exact_artifact_bytes_and_receipt() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    trace, replay, benchmark = b"literal trace", b"literal replay", b"literal benchmark"
+    response = _evidence_game_response(trace, replay, benchmark)
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda request: _evidence_begin_ack() if request["cmd"] == "duel_evidence_begin" else response
+    client.begin_evidence(_evidence_begin_request())
+    game = client.close_evidence_game()
+    assert game.trace.payload == trace
+    assert game.replay.payload == replay
+    assert game.benchmark.payload == benchmark
+    assert game.receipt_utf8 == _evidence_receipt_body(trace, replay, benchmark)
+    with pytest.raises(TypeError): game.receipt["sequence"] = 2  # type: ignore[index]
+
+
+@pytest.mark.parametrize("mutation", ["nonce", "sequence", "hash", "unknown"])
+def test_engine_evidence_client_rejects_wrong_nonce_sequence_hash_and_unknown_fields(mutation: str) -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    response = _evidence_game_response()
+    if mutation == "nonce": response["receipt"]["nonce"] = "0" * 64  # type: ignore[index]
+    elif mutation == "sequence":
+        response["receipt"]["sequence"] = True  # type: ignore[index]
+        receipt_utf8 = json.dumps(response["receipt"], separators=(",", ":")).encode("utf-8")  # type: ignore[arg-type]
+        response["receipt_utf8_base64"] = base64.b64encode(receipt_utf8).decode("ascii")
+        response["receipt_sha256"] = hashlib.sha256(receipt_utf8).hexdigest()
+    elif mutation == "hash": response["trace"]["sha256"] = "0" * 64  # type: ignore[index]
+    else: response["unexpected"] = True
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda request: _evidence_begin_ack() if request["cmd"] == "duel_evidence_begin" else response
+    client.begin_evidence(_evidence_begin_request())
+    with pytest.raises(ValueError): client.close_evidence_game()
+
+
+def test_engine_evidence_client_requires_close_before_success() -> None:
+    from ml_lab.evaluation import EngineEvidenceDuelClient
+    client = object.__new__(EngineEvidenceDuelClient)
+    client._rpc = lambda _request: _evidence_begin_ack()
+    client.close = lambda: None
+    client.begin_evidence(_evidence_begin_request())
+    client.close()
+    assert not hasattr(client, "closure")
+    with pytest.raises(ValueError, match="incomplete"): client.end_evidence()
+
+
+def test_engine_evidence_hash_vectors_match_gymserver_golden_values() -> None:
+    assert hashlib.sha256(_EVIDENCE_BEGIN_BODY).hexdigest() == "9c9deb61e8f60b1ff1d5ef8fe31033d60d58fabbfe0af8fe050d223777afa338"
+    assert hashlib.sha256(_evidence_receipt_body(b"trace", b"replay", b"benchmark")).hexdigest() == "58c7ce2615d335b4c888c7ff9935fd23275a0391e13d884fdf4b181e253eae42"
+
+def _trace_evaluation_fixture(
+    tmp_path: Path, *, outcomes: tuple[str, ...]
+) -> tuple[ResolvedController, ResolvedController, Callable[[int], FakeDuelClient]]:
+    contract = EnvironmentContract(
+        version="tactical-v2",
+        contract_hash="d" * 64,
+        encoding_hash="e" * 64,
+        observation_size=3,
+        action_size=3,
+        board={"width": 1, "height": 1},
+        roster=["scout"],
+        reward={"terminal_win": 1.0},
+    )
+    winners = iter(
+        0 if outcome == "win" and index % 2 == 0 else
+        1 if outcome == "win" else
+        1 if outcome == "loss" and index % 2 == 0 else
+        0 if outcome == "loss" else
+        -1
+        for index, outcome in enumerate(outcomes)
+    )
+    candidate = _model_controller(tmp_path, contract, "candidate", 64)
+    opponent = _model_controller(tmp_path, contract, "opponent", 96)
+    for controller in (candidate, opponent):
+        assert controller.model is not None
+        controller.model.predict = lambda *_args, **_kwargs: (1, None)
+    return (
+        candidate,
+        opponent,
+        lambda worker_index: FakeDuelClient(winners, worker_index),
     )
 
 
@@ -766,6 +905,94 @@ def test_evaluation_writes_all_draws_and_first_controls_per_candidate_seat(
     assert sorted(path.name for path in evidence_dir.iterdir()) == ["replays", "traces"]
 
 
+def test_evaluate_matchup_all_retention_publishes_every_trace_and_replay(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    candidate, opponent, factory = _trace_evaluation_fixture(
+        tmp_path, outcomes=("win", "win", "win", "win")
+    )
+
+    result = evaluate_matchup(
+        candidate,
+        opponent,
+        games=2,
+        both_seats=True,
+        workers=1,
+        client_factory=factory,
+        capture_trace=True,
+        evidence_dir=tmp_path / "evidence",
+        evidence_retention="all",
+    )
+
+    assert result["evidence"] == {
+        "retention": "all",
+        "retained": 4,
+        "draw_traces": 0,
+        "control_traces": 4,
+        "draw_categories": {},
+    }
+    assert all(Path(row["trace_path"]).is_file() for row in result["matches"])
+    assert all(Path(row["replay_path"]).is_file() for row in result["matches"])
+
+    diagnostic_candidate, diagnostic_opponent, diagnostic_factory = (
+        _trace_evaluation_fixture(
+            tmp_path / "diagnostic", outcomes=("win", "win", "win", "win")
+        )
+    )
+    diagnostic = evaluate_matchup(
+        diagnostic_candidate,
+        diagnostic_opponent,
+        games=2,
+        both_seats=True,
+        workers=1,
+        client_factory=diagnostic_factory,
+        capture_trace=True,
+        evidence_dir=tmp_path / "diagnostic-evidence",
+    )
+
+    assert diagnostic["evidence"] == {
+        "retention": "diagnostic",
+        "retained": 2,
+        "draw_traces": 0,
+        "control_traces": 2,
+        "draw_categories": {},
+    }
+    assert sum(row["trace_path"] is not None for row in diagnostic["matches"]) == 2
+
+
+def test_evaluate_matchup_rejects_invalid_all_retention_before_creating_clients(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.evaluation import evaluate_matchup
+
+    candidate, opponent, factory = _trace_evaluation_fixture(tmp_path, outcomes=("win",))
+
+    with pytest.raises(ValueError, match="evidence_retention"):
+        evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            both_seats=False,
+            workers=1,
+            client_factory=factory,
+            evidence_retention="unknown",
+        )
+    with pytest.raises(
+        ValueError, match="requires trace capture and an evidence directory"
+    ):
+        evaluate_matchup(
+            candidate,
+            opponent,
+            games=1,
+            both_seats=False,
+            workers=1,
+            client_factory=factory,
+            evidence_retention="all",
+        )
+
+
 def test_evaluation_preserves_preexisting_unretained_destinations(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:
@@ -799,6 +1026,102 @@ def test_evaluation_preserves_preexisting_unretained_destinations(
     assert result["matches"][1]["trace_path"] is None
     assert trace_path.read_bytes() == trace_sentinel
     assert replay_path.read_bytes() == replay_sentinel
+
+
+def test_atomic_exclusive_copy_preserves_destination_created_at_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    staged = tmp_path / "staged.json"
+    destination = tmp_path / "evidence" / "traces" / "trace.json"
+    payload = b'{"schema_version":1}\n'
+    collision_payload = b'{"concurrent":"writer"}\n'
+    staged.write_bytes(payload)
+    real_replace = evaluation_module.os.replace
+    real_link = evaluation_module.os.link
+
+    def reveal_collision(source, target) -> None:
+        source_path = Path(source)
+        target_path = Path(target)
+        assert source_path.parent == target_path.parent
+        assert source_path.read_bytes() == payload
+        assert not target_path.exists()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(collision_payload)
+
+    def replacing_after_collision(source, target) -> None:
+        reveal_collision(source, target)
+        real_replace(source, target)
+
+    def linking_after_collision(source, target) -> None:
+        reveal_collision(source, target)
+        return real_link(source, target)
+
+    monkeypatch.setattr(evaluation_module.os, "replace", replacing_after_collision)
+    monkeypatch.setattr(evaluation_module.os, "link", linking_after_collision)
+
+    with pytest.raises(FileExistsError):
+        evaluation_module._copy_file_atomically_exclusive(staged, destination)
+
+    assert destination.read_bytes() == collision_payload
+    assert not any(
+        path.name.startswith(".")
+        for path in (tmp_path / "evidence").rglob("*")
+    )
+
+
+def test_publish_artifact_pair_uses_atomic_no_clobber_publication_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    staged_trace = tmp_path / "staged-trace.json"
+    staged_replay = tmp_path / "staged-replay.replay"
+    trace_path = tmp_path / "evidence" / "traces" / "trace.json"
+    replay_path = tmp_path / "evidence" / "replays" / "trace.replay"
+    staged_trace.write_text('{"schema_version":1}\n', encoding="utf-8")
+    staged_replay.write_text("replay\n", encoding="utf-8")
+    real_copy = evaluation_module.shutil.copyfileobj
+    real_link = evaluation_module.os.link
+    replacements: list[tuple[Path, Path]] = []
+
+    def copy_to_temporary(source, target, *args, **kwargs) -> None:
+        destination = Path(target.name)
+        assert destination not in {trace_path, replay_path}
+        real_copy(source, target, *args, **kwargs)
+
+    def fail_second_link(source, destination) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        assert source_path.parent == destination_path.parent
+        assert source_path != destination_path
+        assert not destination_path.exists()
+        replacements.append((source_path, destination_path))
+        if destination_path == replay_path:
+            raise OSError("injected replay publication failure")
+        real_link(source_path, destination_path)
+
+    monkeypatch.setattr(evaluation_module.shutil, "copyfileobj", copy_to_temporary)
+    monkeypatch.setattr(evaluation_module.os, "link", fail_second_link)
+
+    with pytest.raises(OSError, match="injected replay publication failure"):
+        evaluation_module._publish_artifact_pair(
+            staged_trace,
+            staged_replay,
+            trace_path,
+            replay_path,
+        )
+
+    assert [destination for _, destination in replacements] == [trace_path, replay_path]
+    assert not trace_path.exists()
+    assert not replay_path.exists()
+    assert not any(
+        path.name.startswith(".")
+        for path in (tmp_path / "evidence").rglob("*")
+    )
 
 
 def test_retained_artifact_pair_reuses_identical_files_without_republication(
@@ -1316,6 +1639,49 @@ def test_evaluate_controllers_rejects_unknown_environment_before_resolution(
         )
 
 
+def test_evaluate_controllers_propagates_profile_and_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.evaluation as evaluation_module
+
+    controller = ResolvedController(
+        spec=ControllerSpec(kind="scripted", name="random"),
+        server_controller="random",
+        model=None,
+        path=None,
+        algorithm=None,
+        step=None,
+        contract=None,
+        observation_size=None,
+        action_size=None,
+        legacy=False,
+        promotable=False,
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        evaluation_module,
+        "ControllerResolver",
+        lambda: SimpleNamespace(resolve=lambda _raw: controller),
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "evaluate_matchup",
+        lambda *_args, **kwargs: captured.update(kwargs) or {},
+    )
+
+    evaluation_module.evaluate_controllers(
+        "random",
+        "random",
+        games=1,
+        server_cmd=["server"],
+        start_profile="standard-3v3",
+        evidence_retention="all",
+    )
+
+    assert captured["start_profile"] == "standard-3v3"
+    assert captured["evidence_retention"] == "all"
+
+
 def test_evaluate_controllers_rejects_explicit_model_contract_mismatch_before_server(
     tmp_path: Path,
     contract: EnvironmentContract,
@@ -1533,6 +1899,282 @@ def test_validate_demonstration_payload_rejects_extra_fields(
         validate_demonstration_payload(
             payload, replace(contract, version="tactical-v2")
         )
+
+
+def _valid_dagger_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "decisions": [
+            {
+                "Observation": [0.0, 0.25, 1.0],
+                "LegalMask": [True, False, True],
+                "LearnerAction": 0,
+                "LearnerCommand": {
+                    "Kind": "end_turn",
+                    "Issuer": 0,
+                    "ActorId": None,
+                    "TargetId": None,
+                    "Q": None,
+                    "R": None,
+                },
+                "TeacherAction": 2,
+                "TeacherCommand": {
+                    "Kind": "move",
+                    "Issuer": 0,
+                    "ActorId": 7,
+                    "TargetId": None,
+                    "Q": 2,
+                    "R": 3,
+                },
+                "Reasons": 11,
+                "StateHash": "a" * 64,
+                "NormalizedAdvantage": 0.125,
+                "OpponentLivingUnitCount": 1,
+                "ProductiveLegalActionCount": 1,
+                "Seat": 0,
+                "Round": 3,
+                "DecisionIndex": 0,
+                "Disagreement": True,
+                "OracleDepth": 4,
+                "OracleExpansionBudget": 512,
+                "OracleHeuristicIdentity": "material-plus-pursuit-v1",
+                "OracleActualExpansionCount": 17,
+            },
+        ],
+    }
+
+
+def test_duel_client_dagger_methods_send_exact_rpc_sequence(
+    contract: EnvironmentContract,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    responses = iter(
+        [
+            {
+                "enabled": True,
+                "depth": 4,
+                "expansion_budget": 512,
+                "use_heuristic": True,
+            },
+            _valid_dagger_payload(),
+        ]
+    )
+    requests: list[dict[str, object]] = []
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda request: (requests.append(request), next(responses))[1]
+
+    client.configure_dagger(
+        enabled=True,
+        depth=4,
+        expansion_budget=512,
+        use_heuristic=True,
+    )
+    decisions = client.drain_dagger()
+
+    assert requests == [
+        {
+            "cmd": "duel_dagger_configure",
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+        {"cmd": "duel_dagger_drain"},
+    ]
+    assert decisions == _valid_dagger_payload()["decisions"]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enabled": 1}, "enabled"),
+        ({"depth": True}, "depth"),
+        ({"depth": "4"}, "depth"),
+        ({"depth": 0}, "depth"),
+        ({"expansion_budget": False}, "expansion budget"),
+        ({"expansion_budget": "512"}, "expansion budget"),
+        ({"expansion_budget": 0}, "expansion budget"),
+        ({"use_heuristic": 1}, "heuristic"),
+        ({"use_heuristic": False}, "heuristic"),
+    ],
+)
+def test_duel_client_dagger_configure_rejects_coercible_or_unsupported_values(
+    contract: EnvironmentContract,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda _request: pytest.fail("invalid request must not reach GymServer")
+    kwargs = {
+        "enabled": True,
+        "depth": 4,
+        "expansion_budget": 512,
+        "use_heuristic": True,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        client.configure_dagger(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"enabled": True, "depth": 4, "expansion_budget": 512},
+        {
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+            "extra": 1,
+        },
+        {
+            "enabled": True,
+            "depth": True,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+        {
+            "enabled": True,
+            "depth": 4,
+            "expansion_budget": "512",
+            "use_heuristic": True,
+        },
+        {
+            "enabled": False,
+            "depth": 4,
+            "expansion_budget": 512,
+            "use_heuristic": True,
+        },
+    ],
+)
+def test_duel_client_dagger_configure_requires_exact_acknowledgment(
+    contract: EnvironmentContract,
+    response: dict[str, object],
+) -> None:
+    from ml_lab.evaluation import DuelClient
+
+    client = object.__new__(DuelClient)
+    client.contract = replace(contract, version="tactical-v2")
+    client._rpc = lambda _request: response
+
+    with pytest.raises(ValueError, match="acknowledge DAgger configuration"):
+        client.configure_dagger(
+            enabled=True,
+            depth=4,
+            expansion_budget=512,
+            use_heuristic=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload.update(schema_version=True), "schema version"),
+        (lambda payload: payload.update(schema_version=2), "schema version"),
+        (lambda payload: payload.update(decisions={}), "decisions"),
+        (lambda payload: payload["decisions"][0].pop("Reasons"), "fields"),
+        (lambda payload: payload["decisions"][0].update(Unexpected=True), "fields"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0]), "observation length"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0, True, 1.0]), "finite"),
+        (lambda payload: payload["decisions"][0].update(Observation=[0.0, float("inf"), 1.0]), "finite"),
+        (lambda payload: payload["decisions"][0].update(LegalMask=[True]), "legal mask"),
+        (lambda payload: payload["decisions"][0].update(LegalMask=[True, 0, True]), "legal mask"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction=True), "learner action"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction="0"), "learner action"),
+        (lambda payload: payload["decisions"][0].update(LearnerAction=1), "learner action.*masked"),
+        (lambda payload: payload["decisions"][0].update(TeacherAction=3), "teacher action"),
+        (lambda payload: payload["decisions"][0].update(TeacherAction=1), "teacher action.*masked"),
+        (lambda payload: payload["decisions"][0].update(Reasons=True), "reasons"),
+        (lambda payload: payload["decisions"][0].update(Reasons=0), "reasons"),
+        (lambda payload: payload["decisions"][0].update(Reasons=16), "reasons"),
+        (lambda payload: payload["decisions"][0].update(StateHash="A" * 64), "state hash"),
+        (lambda payload: payload["decisions"][0].update(StateHash="a" * 63), "state hash"),
+        (lambda payload: payload["decisions"][0].update(NormalizedAdvantage=float("nan")), "normalized advantage"),
+        (lambda payload: payload["decisions"][0].update(OpponentLivingUnitCount=True), "opponent living"),
+        (lambda payload: payload["decisions"][0].update(OpponentLivingUnitCount=-1), "opponent living"),
+        (lambda payload: payload["decisions"][0].update(ProductiveLegalActionCount="1"), "productive legal"),
+        (lambda payload: payload["decisions"][0].update(Seat=2), "seat"),
+        (lambda payload: payload["decisions"][0].update(Round=-1), "round"),
+        (lambda payload: payload["decisions"][0].update(DecisionIndex=False), "decision index"),
+        (lambda payload: payload["decisions"][0].update(Disagreement=1), "disagreement"),
+        (lambda payload: payload["decisions"][0].update(Disagreement=False), "disagreement"),
+        (lambda payload: payload["decisions"][0].update(OracleDepth=True), "oracle depth"),
+        (lambda payload: payload["decisions"][0].update(OracleExpansionBudget=0), "oracle expansion budget"),
+        (lambda payload: payload["decisions"][0].update(OracleHeuristicIdentity="unknown"), "oracle heuristic"),
+        (lambda payload: payload["decisions"][0].update(OracleActualExpansionCount=513), "actual expansion"),
+        (lambda payload: payload["decisions"][0].update(TeacherCommand=[]), "teacher command"),
+        (lambda payload: payload["decisions"][0]["TeacherCommand"].update(Issuer=1), "teacher command issuer"),
+        (lambda payload: payload["decisions"][0]["TeacherCommand"].update(TargetId=4), "teacher command shape"),
+        (lambda payload: payload["decisions"][0].update(LearnerCommand=[]), "learner command"),
+    ],
+)
+def test_validate_dagger_payload_rejects_malformed_evidence(
+    contract: EnvironmentContract,
+    mutate,
+    message: str,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    payload = _valid_dagger_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError, match=message):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
+
+@pytest.mark.parametrize("command_name", ["LearnerCommand", "TeacherCommand"])
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda command: command.pop("R"), "fields"),
+        (lambda command: command.update(Unexpected=None), "fields"),
+        (lambda command: command.update(Kind="retreat"), "kind"),
+        (lambda command: command.update(Kind=7), "kind"),
+        (lambda command: command.update(Issuer=True), "issuer"),
+        (lambda command: command.update(Issuer="0"), "issuer"),
+        (lambda command: command.update(ActorId=True), "ActorId"),
+        (lambda command: command.update(ActorId="7"), "ActorId"),
+    ],
+)
+def test_validate_dagger_payload_rejects_command_key_and_scalar_boundaries(
+    contract: EnvironmentContract,
+    command_name: str,
+    mutate,
+    message: str,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    payload = _valid_dagger_payload()
+    command = payload["decisions"][0][command_name]
+    mutate(command)
+
+    with pytest.raises(ValueError, match=message):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"schema_version": 1},
+        {"schema_version": 1, "decisions": [], "extra": True},
+    ],
+)
+def test_validate_dagger_payload_rejects_non_exact_envelopes(
+    contract: EnvironmentContract,
+    payload: object,
+) -> None:
+    from ml_lab.evaluation import validate_dagger_payload
+
+    with pytest.raises(ValueError, match="payload|fields"):
+        validate_dagger_payload(payload, replace(contract, version="tactical-v2"))
+
 
 
 def test_duel_client_sends_tactical_v2_and_requires_duel_kind(

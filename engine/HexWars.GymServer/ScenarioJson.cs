@@ -22,7 +22,9 @@ namespace HexWars.GymServer
             ScenarioWire? wire;
             try
             {
-                wire = JsonSerializer.Deserialize<ScenarioWire>(File.ReadAllText(path), Options);
+                string json = File.ReadAllText(path);
+                ValidateNoDuplicateProperties(json);
+                wire = JsonSerializer.Deserialize<ScenarioWire>(json, Options);
             }
             catch (JsonException exception)
             {
@@ -50,6 +52,41 @@ namespace HexWars.GymServer
             if (errors.Count > 0) throw new InvalidDataException(string.Join("; ", errors));
 
             return scenario;
+        }
+
+        private static void ValidateNoDuplicateProperties(string json)
+        {
+            using JsonDocument document = JsonDocument.Parse(json, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Disallow,
+            });
+            ValidateNoDuplicateProperties(document.RootElement, "$");
+        }
+
+        private static void ValidateNoDuplicateProperties(JsonElement element, string path)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (!names.Add(property.Name))
+                        throw new JsonException(
+                            $"duplicate JSON property '{property.Name}' at {path}");
+
+                    ValidateNoDuplicateProperties(
+                        property.Value, path + "." + property.Name);
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                int index = 0;
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    ValidateNoDuplicateProperties(item, $"{path}[{index}]");
+                    index++;
+                }
+            }
         }
 
         private static void ValidateRequiredFields(ScenarioWire wire, List<string> errors)
@@ -105,6 +142,7 @@ namespace HexWars.GymServer
                 }
                 RequireAbsent(wire.Adaptive, "adaptive section is not valid for tactical-v1", errors);
                 RequireAbsent(wire.TacticalV2, "tactical-v2 section is not valid for tactical-v1", errors);
+                RequireAbsent(wire.TacticalV3, "tactical-v3 section is not valid for tactical-v1", errors);
             }
             else if (wire.Environment == MlContract.AdaptiveVersion)
             {
@@ -123,6 +161,7 @@ namespace HexWars.GymServer
                     Require(wire.Adaptive.MaxDesignPointCost, "adaptive.max_design_point_cost", errors);
                 }
                 RequireAbsent(wire.TacticalV2, "tactical-v2 section is not valid for adaptive-v1", errors);
+                RequireAbsent(wire.TacticalV3, "tactical-v3 section is not valid for adaptive-v1", errors);
             }
             else if (wire.Environment == MlContract.TacticalV2Version)
             {
@@ -136,6 +175,7 @@ namespace HexWars.GymServer
                     Require(reward.PointsWeight, "reward.points_weight", errors);
                 }
                 RequireAbsent(wire.Adaptive, "adaptive section is not valid for tactical-v2", errors);
+                RequireAbsent(wire.TacticalV3, "tactical-v3 section is not valid for tactical-v2", errors);
 
                 Require(wire.TacticalV2, "tactical_v2 section", errors);
                 if (wire.TacticalV2 != null)
@@ -151,6 +191,11 @@ namespace HexWars.GymServer
                             for (int i = 0; i < wire.TacticalV2.StartProfiles.Count; i++)
                             {
                                 TacticalV2Wire.TacticalV2StartProfileWire profile = wire.TacticalV2.StartProfiles[i];
+                                if (profile == null)
+                                {
+                                    errors.Add($"tactical_v2.start_profiles[{i}] is required");
+                                    continue;
+                                }
                                 RequireText(profile.Id, $"tactical_v2.start_profiles[{i}].id", errors);
                                 Require(profile.LearnerUnitCount, $"tactical_v2.start_profiles[{i}].learner_units", errors);
                                 Require(profile.OpponentUnitCount, $"tactical_v2.start_profiles[{i}].opponent_units", errors);
@@ -158,7 +203,16 @@ namespace HexWars.GymServer
                             }
                         if (wire.TacticalV2.StartDistribution != null)
                             for (int i = 0; i < wire.TacticalV2.StartDistribution.Count; i++)
-                                ValidateTacticalV2StartWeightWire(wire.TacticalV2.StartDistribution[i], i, errors);
+                            {
+                                TacticalV2Wire.TacticalV2StartWeightWire weight =
+                                    wire.TacticalV2.StartDistribution[i];
+                                if (weight == null)
+                                {
+                                    errors.Add($"tactical_v2.start_distribution[{i}] is required");
+                                    continue;
+                                }
+                                ValidateTacticalV2StartWeightWire(weight, i, errors);
+                            }
 
                     }
                     if (wire.TacticalV2.Templates == null || wire.TacticalV2.Templates.Count == 0)
@@ -168,7 +222,102 @@ namespace HexWars.GymServer
                     else
                     {
                         for (int i = 0; i < wire.TacticalV2.Templates.Count; i++)
-                            ValidateTacticalV2TemplateWire(wire.TacticalV2.Templates[i], $"tactical_v2.templates[{i}]", errors);
+                        {
+                            TacticalV2TemplateWire template = wire.TacticalV2.Templates[i];
+                            if (template == null)
+                            {
+                                errors.Add($"tactical_v2.templates[{i}] is required");
+                                continue;
+                            }
+                            ValidateTacticalV2TemplateWire(template, $"tactical_v2.templates[{i}]", errors);
+                        }
+                    }
+                }
+            }
+            else if (wire.Environment == MlContract.TacticalV3Version)
+            {
+                TacticalV3RewardWire? reward = DeserializeReward<TacticalV3RewardWire>(wire.Reward, errors);
+                if (reward != null)
+                {
+                    Require(reward.TerminalWin, "reward.terminal_win", errors);
+                    Require(reward.TerminalNonWin, "reward.terminal_non_win", errors);
+                    Require(reward.MaterialAdjustmentBound, "reward.material_adjustment_bound", errors);
+                    Require(reward.TimePressureBound, "reward.time_pressure_bound", errors);
+                    Require(reward.PointsWeight, "reward.points_weight", errors);
+                }
+
+                RequireAbsent(wire.Adaptive, "adaptive section is not valid for tactical-v3", errors);
+                RequireAbsent(wire.TacticalV2, "tactical-v2 section is not valid for tactical-v3", errors);
+                Require(wire.TacticalV3, "tactical_v3 section", errors);
+                if (wire.TacticalV3 != null)
+                {
+                    TacticalV3Wire source = wire.TacticalV3;
+                    Require(source.StartingUnitCount, "tactical_v3.starting_unit_count", errors);
+                    Require(source.MaxControllableUnits, "tactical_v3.max_controllable_units", errors);
+                    RequireText(source.PlacementPolicy, "tactical_v3.placement_policy", errors);
+                    Require(source.StartProfiles, "tactical_v3.start_profiles", errors);
+                    Require(source.StartDistribution, "tactical_v3.start_distribution", errors);
+                    if (source.StartProfiles != null)
+                        for (int i = 0; i < source.StartProfiles.Count; i++)
+                        {
+                            TacticalV2Wire.TacticalV2StartProfileWire profile = source.StartProfiles[i];
+                            if (profile == null)
+                            {
+                                errors.Add($"tactical_v3.start_profiles[{i}] is required");
+                                continue;
+                            }
+                            RequireText(profile.Id, $"tactical_v3.start_profiles[{i}].id", errors);
+                            Require(profile.LearnerUnitCount, $"tactical_v3.start_profiles[{i}].learner_units", errors);
+                            Require(profile.OpponentUnitCount, $"tactical_v3.start_profiles[{i}].opponent_units", errors);
+                            RequireText(profile.Separation, $"tactical_v3.start_profiles[{i}].separation", errors);
+                        }
+                    if (source.StartDistribution != null)
+                        for (int i = 0; i < source.StartDistribution.Count; i++)
+                        {
+                            TacticalV2Wire.TacticalV2StartWeightWire weight = source.StartDistribution[i];
+                            if (weight == null)
+                            {
+                                errors.Add($"tactical_v3.start_distribution[{i}] is required");
+                                continue;
+                            }
+                            RequireText(weight.ProfileId, $"tactical_v3.start_distribution[{i}].profile_id", errors);
+                            Require(weight.BasisPoints, $"tactical_v3.start_distribution[{i}].basis_points", errors);
+                        }
+
+                    if (source.Templates == null || source.Templates.Count == 0)
+                    {
+                        errors.Add("tactical_v3.templates is required");
+                    }
+                    else
+                    {
+                        for (int i = 0; i < source.Templates.Count; i++)
+                        {
+                            TacticalV2TemplateWire template = source.Templates[i];
+                            if (template == null)
+                            {
+                                errors.Add($"tactical_v3.templates[{i}] is required");
+                                continue;
+                            }
+                            ValidateTacticalV2TemplateWire(
+                                template, $"tactical_v3.templates[{i}]", errors);
+                        }
+                    }
+
+                    Require(source.Capacity, "tactical_v3.capacity", errors);
+                    if (source.Capacity != null)
+                    {
+                        Require(source.Capacity.MaxCells, "tactical_v3.capacity.max_cells", errors);
+                        Require(source.Capacity.MaxUnits, "tactical_v3.capacity.max_units", errors);
+                        Require(source.Capacity.MaxTemplates, "tactical_v3.capacity.max_templates", errors);
+                        Require(source.Capacity.MaxCapabilityDefinitions,
+                            "tactical_v3.capacity.max_capability_definitions", errors);
+                        Require(source.Capacity.MaxCapabilityAllocations,
+                            "tactical_v3.capacity.max_capability_allocations", errors);
+                        Require(source.Capacity.MaxRules, "tactical_v3.capacity.max_rules", errors);
+                        Require(source.Capacity.MaxMemoryRecords,
+                            "tactical_v3.capacity.max_memory_records", errors);
+                        Require(source.Capacity.MaxRelations, "tactical_v3.capacity.max_relations", errors);
+                        Require(source.Capacity.MaxCandidates, "tactical_v3.capacity.max_candidates", errors);
                     }
                 }
             }
@@ -291,6 +440,40 @@ namespace HexWars.GymServer
                     Templates = wire.TacticalV2.Templates!.Select(MapTacticalV2Template).ToList(),
                 };
             }
+            else if (wire.Environment == MlContract.TacticalV3Version)
+            {
+                TacticalV3RewardWire reward = wire.Reward!.Value.Deserialize<TacticalV3RewardWire>(Options)!;
+                TacticalV3Wire source = wire.TacticalV3!;
+                scenario.TacticalV3Reward = new TrainingTacticalV3RewardConfig
+                {
+                    TerminalWin = reward.TerminalWin!.Value,
+                    TerminalNonWin = reward.TerminalNonWin!.Value,
+                    MaterialAdjustmentBound = reward.MaterialAdjustmentBound!.Value,
+                    TimePressureBound = reward.TimePressureBound!.Value,
+                    PointsWeight = reward.PointsWeight!.Value,
+                };
+                scenario.TacticalV3 = new TrainingTacticalV3Config
+                {
+                    StartingUnitCount = source.StartingUnitCount!.Value,
+                    MaxControllableUnits = source.MaxControllableUnits!.Value,
+                    PlacementPolicy = source.PlacementPolicy!,
+                    StartProfiles = source.StartProfiles!.Select(MapTacticalV2StartProfile).ToList(),
+                    StartDistribution = source.StartDistribution!.Select(MapTacticalV2StartWeight).ToList(),
+                    Templates = source.Templates!.Select(MapTacticalV2Template).ToList(),
+                    Capacity = new TrainingTacticalV3CapacityConfig
+                    {
+                        MaxCells = source.Capacity!.MaxCells!.Value,
+                        MaxUnits = source.Capacity.MaxUnits!.Value,
+                        MaxTemplates = source.Capacity.MaxTemplates!.Value,
+                        MaxCapabilityDefinitions = source.Capacity.MaxCapabilityDefinitions!.Value,
+                        MaxCapabilityAllocations = source.Capacity.MaxCapabilityAllocations!.Value,
+                        MaxRules = source.Capacity.MaxRules!.Value,
+                        MaxMemoryRecords = source.Capacity.MaxMemoryRecords!.Value,
+                        MaxRelations = source.Capacity.MaxRelations!.Value,
+                        MaxCandidates = source.Capacity.MaxCandidates!.Value,
+                    },
+                };
+            }
 
             return scenario;
         }
@@ -351,6 +534,7 @@ namespace HexWars.GymServer
             [JsonPropertyName("reward")] public JsonElement? Reward { get; set; }
             [JsonPropertyName("adaptive")] public AdaptiveWire? Adaptive { get; set; }
             [JsonPropertyName("tactical_v2")] public TacticalV2Wire? TacticalV2 { get; set; }
+            [JsonPropertyName("tactical_v3")] public TacticalV3Wire? TacticalV3 { get; set; }
         }
 
         private sealed class BoardWire
@@ -393,6 +577,14 @@ namespace HexWars.GymServer
             [JsonPropertyName("draw_credit_weight")] public float? DrawCreditWeight { get; set; }
             [JsonPropertyName("points_weight")] public float? PointsWeight { get; set; }
         }
+        private sealed class TacticalV3RewardWire
+        {
+            [JsonPropertyName("terminal_win")] public float? TerminalWin { get; set; }
+            [JsonPropertyName("terminal_non_win")] public float? TerminalNonWin { get; set; }
+            [JsonPropertyName("material_adjustment_bound")] public float? MaterialAdjustmentBound { get; set; }
+            [JsonPropertyName("time_pressure_bound")] public float? TimePressureBound { get; set; }
+            [JsonPropertyName("points_weight")] public float? PointsWeight { get; set; }
+        }
 
         private sealed class AdaptiveRewardWire
         {
@@ -428,6 +620,31 @@ namespace HexWars.GymServer
         }
             [JsonPropertyName("start_distribution")] public List<TacticalV2StartWeightWire>? StartDistribution { get; set; }
             [JsonPropertyName("templates")] public List<TacticalV2TemplateWire>? Templates { get; set; }
+        }
+        private sealed class TacticalV3Wire
+        {
+            [JsonPropertyName("starting_unit_count")] public int? StartingUnitCount { get; set; }
+            [JsonPropertyName("max_controllable_units")] public int? MaxControllableUnits { get; set; }
+            [JsonPropertyName("placement_policy")] public string? PlacementPolicy { get; set; }
+            [JsonPropertyName("start_profiles")]
+            public List<TacticalV2Wire.TacticalV2StartProfileWire>? StartProfiles { get; set; }
+            [JsonPropertyName("start_distribution")]
+            public List<TacticalV2Wire.TacticalV2StartWeightWire>? StartDistribution { get; set; }
+            [JsonPropertyName("templates")] public List<TacticalV2TemplateWire>? Templates { get; set; }
+            [JsonPropertyName("capacity")] public TacticalV3CapacityWire? Capacity { get; set; }
+        }
+
+        private sealed class TacticalV3CapacityWire
+        {
+            [JsonPropertyName("max_cells")] public int? MaxCells { get; set; }
+            [JsonPropertyName("max_units")] public int? MaxUnits { get; set; }
+            [JsonPropertyName("max_templates")] public int? MaxTemplates { get; set; }
+            [JsonPropertyName("max_capability_definitions")] public int? MaxCapabilityDefinitions { get; set; }
+            [JsonPropertyName("max_capability_allocations")] public int? MaxCapabilityAllocations { get; set; }
+            [JsonPropertyName("max_rules")] public int? MaxRules { get; set; }
+            [JsonPropertyName("max_memory_records")] public int? MaxMemoryRecords { get; set; }
+            [JsonPropertyName("max_relations")] public int? MaxRelations { get; set; }
+            [JsonPropertyName("max_candidates")] public int? MaxCandidates { get; set; }
         }
 
         private sealed class TacticalV2TemplateWire

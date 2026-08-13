@@ -24,6 +24,16 @@ namespace HexWars.Engine.Rl
             _templateIndices = Enumerable.Repeat(-1, capacity).ToArray();
         }
 
+        private TacticalV2UnitRegistry(int[] unitIds, int[] templateIndices)
+        {
+            if (unitIds == null) throw new ArgumentNullException(nameof(unitIds));
+            if (templateIndices == null) throw new ArgumentNullException(nameof(templateIndices));
+            if (unitIds.Length != templateIndices.Length)
+                throw new ArgumentException("unit ids and template indices must have the same length");
+            _unitIds = (int[])unitIds.Clone();
+            _templateIndices = (int[])templateIndices.Clone();
+        }
+
         public int Capacity => _unitIds.Length;
 
         /// <summary>True while at least one slot has no living unit tracked in it — i.e. a deploy can
@@ -33,6 +43,9 @@ namespace HexWars.Engine.Rl
         public int UnitIdAt(int slot) => slot >= 0 && slot < Capacity ? _unitIds[slot] : -1;
         public int TemplateIndexAt(int slot) => slot >= 0 && slot < Capacity ? _templateIndices[slot] : -1;
         public int SlotOf(int unitId) => Array.IndexOf(_unitIds, unitId);
+
+        /// <summary>Returns an independent registry retaining this registry's current slot identity.</summary>
+        public TacticalV2UnitRegistry Snapshot() => new TacticalV2UnitRegistry(_unitIds, _templateIndices);
 
         /// <summary>Seeds the registry from the starting army: <paramref name="units"/>[i] takes slot i
         /// and is tagged with <paramref name="templateIndices"/>[i]. Overwrites any prior contents; any

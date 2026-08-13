@@ -4,17 +4,20 @@ import hashlib
 import io
 import json
 import math
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 from types import MappingProxyType
 import zipfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
 import torch
 import gymnasium as gym
 from gymnasium import spaces
+import ml_lab.algorithms as algorithms_module
+import ml_lab.dagger as dagger_module
 import ml_lab.imitation as imitation_module
 
 from ml_lab.contracts import ContractMismatch, EnvironmentContract
@@ -191,6 +194,545 @@ def test_sampler_keeps_70_30_ratio_is_seeded_and_excludes_validation_rows(sample
     assert set(first.partitions) == {"train"}
     assert first.observations.flags.owndata
     assert np.all(first.legal_masks[np.arange(len(first.actions)), first.actions])
+
+
+def _three_source_partition(
+    *, targeted_rows: int = 4, targeted_metadata_variant: bool = False,
+) -> MaterializedImitationPartition:
+    sources = [
+        *([Source.GREEDY_STANDARD] * 6),
+        *([Source.SEARCH_CONVERSION] * 5),
+        *([imitation_module.Source.DAGGER_TARGETED] * targeted_rows),
+    ]
+    count = len(sources)
+    profiles = [
+        *("standard-3v3" for _ in range(6)),
+        *("conversion-3v1-near" for _ in range(5)),
+        *(
+            ("conversion-1v1-far" if targeted_metadata_variant and index % 2 else "standard-3v3")
+            for index in range(targeted_rows)
+        ),
+    ]
+    seats = np.asarray(
+        [index % 2 for index in range(11)]
+        + [((index + 1) % 2 if targeted_metadata_variant else 0) for index in range(targeted_rows)],
+        dtype=np.int32,
+    )
+    action_kinds = np.asarray(
+        [index % 4 for index in range(11)]
+        + [((index + 2) % 4 if targeted_metadata_variant else 1) for index in range(targeted_rows)],
+        dtype=np.int32,
+    )
+    game_ids = np.arange(count, dtype=np.int64)
+    decision_indices = np.zeros(count, dtype=np.int32)
+    batch = ImitationBatch(
+        observations=np.asarray(
+            [[float(index), 1.0, 2.0] for index in range(count)], dtype=np.float32,
+        ),
+        legal_masks=np.ones((count, 5), dtype=bool),
+        actions=np.full(count, 2, dtype=np.int64),
+        game_ids=game_ids,
+        decision_indices=decision_indices,
+        sources=np.asarray(sources, dtype=object),
+        profiles=np.asarray(profiles, dtype=object),
+        seats=seats,
+        action_kinds=action_kinds,
+        partitions=np.full(count, "train", dtype=object),
+    )
+    identities = MappingProxyType({
+        (f"component-{index:02d}", int(game_ids[index]), 0): index
+        for index in range(count)
+    })
+    return MaterializedImitationPartition("train", batch, identities)
+
+
+def _locked_dagger_mixture() -> MappingProxyType:
+    return MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+    )))
+
+
+@pytest.mark.parametrize(
+    "fractions",
+    [
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.49),
+            (Source.SEARCH_CONVERSION, 0.21),
+            (imitation_module.Source.DAGGER_TARGETED, 0.0),
+        )),
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.49),
+            (Source.SEARCH_CONVERSION, float("nan")),
+            (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        )),
+        OrderedDict((
+            (Source.GREEDY_STANDARD, 0.40),
+            (Source.SEARCH_CONVERSION, 0.20),
+            (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        )),
+    ],
+)
+def test_source_mixture_sampler_rejects_nonpositive_nonfinite_or_unbalanced_fractions(
+    fractions: OrderedDict,
+) -> None:
+    """Relaxing fraction validation must permit undefined long-run source exposure."""
+
+    with pytest.raises(ValueError, match="source fractions"):
+        imitation_module.SourceMixtureSampler(
+            _three_source_partition(),
+            source_fractions=fractions,
+            batch_size=256,
+            seed=227,
+        )
+
+
+def test_source_mixture_sampler_freezes_the_ordered_fraction_mapping() -> None:
+    """Retaining the caller's mutable mapping must let later mutation alter provenance."""
+
+    fractions = OrderedDict(_locked_dagger_mixture())
+    sampler = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=fractions,
+        batch_size=256,
+        seed=227,
+    )
+    fractions[Source.GREEDY_STANDARD] = 0.10
+    assert list(sampler.source_fractions.items()) == list(
+        _locked_dagger_mixture().items()
+    )
+    with pytest.raises(TypeError):
+        sampler.source_fractions[Source.GREEDY_STANDARD] = 0.10
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param(None, id="entropy"),
+        pytest.param(np.random.SeedSequence(227), id="seed-sequence"),
+        pytest.param(np.random.default_rng(227), id="external-generator"),
+        pytest.param(True, id="boolean"),
+        pytest.param(np.bool_(True), id="numpy-boolean"),
+        pytest.param(-1, id="negative"),
+        pytest.param(227.0, id="nonintegral"),
+    ],
+)
+def test_source_mixture_sampler_rejects_unowned_or_nonintegral_seeds(
+    seed,
+) -> None:
+    """The generic sampler owns deterministic state seeded by a nonnegative integer."""
+
+    with pytest.raises(ValueError, match="configuration"):
+        imitation_module.SourceMixtureSampler(
+            _three_source_partition(),
+            source_fractions=_locked_dagger_mixture(),
+            batch_size=1,
+            seed=seed,
+        )
+
+
+@pytest.mark.parametrize("seed", [np.int64(227), np.uint32(227)])
+def test_source_mixture_sampler_normalizes_numpy_integral_seeds(seed) -> None:
+    expected = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=10,
+        seed=227,
+    ).next_batch()
+    actual = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=10,
+        seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
+def test_source_mixture_sampler_residual_accounts_nonintegral_256_batches() -> None:
+    """Allocating rounding remainder to a fixed source must drift from 49/21/30."""
+
+    materialized = _three_source_partition()
+    sampler = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=227,
+    )
+    batches = [sampler.next_batch() for _ in range(40)]
+
+    first_counts = [
+        int(np.count_nonzero(batches[0].sources == source))
+        for source in _locked_dagger_mixture()
+    ]
+    second_counts = [
+        int(np.count_nonzero(batches[1].sources == source))
+        for source in _locked_dagger_mixture()
+    ]
+    totals = [
+        sum(int(np.count_nonzero(batch.sources == source)) for batch in batches)
+        for source in _locked_dagger_mixture()
+    ]
+    assert first_counts == [125, 54, 77]
+    assert second_counts == [126, 53, 77]
+    assert totals == [5_018, 2_150, 3_072]
+    assert sum(totals) == 10_240
+    assert list(batches[0].sources) != [
+        *([Source.GREEDY_STANDARD] * 125),
+        *([Source.SEARCH_CONVERSION] * 54),
+        *([imitation_module.Source.DAGGER_TARGETED] * 77),
+    ]
+
+    repeated = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=227,
+    ).next_batch()
+    different = imitation_module.SourceMixtureSampler(
+        materialized,
+        source_fractions=_locked_dagger_mixture(),
+        batch_size=256,
+        seed=228,
+    ).next_batch()
+    np.testing.assert_array_equal(repeated.observations, batches[0].observations)
+    assert not np.array_equal(different.observations, batches[0].observations)
+
+
+@pytest.mark.parametrize(
+    ("fractions", "batches", "expected"),
+    [
+        ((0.01, 0.495, 0.495), 1_000, (10, 495, 495)),
+        ((0.001, 0.009, 0.99), 10_000, (10, 90, 9_900)),
+    ],
+)
+def test_source_mixture_sampler_repairs_negative_floors_for_small_batches(
+    fractions: tuple[float, float, float],
+    batches: int,
+    expected: tuple[int, int, int],
+) -> None:
+    """Allocation stays exact when residual carry makes a source target negative."""
+
+    mixture = MappingProxyType(OrderedDict(zip(
+        (
+            Source.GREEDY_STANDARD,
+            Source.SEARCH_CONVERSION,
+            imitation_module.Source.DAGGER_TARGETED,
+        ),
+        fractions,
+        strict=True,
+    )))
+    first = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=mixture,
+        batch_size=1,
+        seed=227,
+    )
+    second = imitation_module.SourceMixtureSampler(
+        _three_source_partition(),
+        source_fractions=mixture,
+        batch_size=1,
+        seed=227,
+    )
+    totals = Counter()
+    first_sequence: list[Source] = []
+    second_sequence: list[Source] = []
+    for _ in range(batches):
+        first_batch = first.next_batch()
+        second_batch = second.next_batch()
+        assert len(first_batch.actions) == len(second_batch.actions) == 1
+        first_source = first_batch.sources[0]
+        second_source = second_batch.sources[0]
+        totals[first_source] += 1
+        first_sequence.append(first_source)
+        second_sequence.append(second_source)
+    assert tuple(totals[source] for source in mixture) == expected
+    assert first_sequence == second_sequence
+
+
+def test_targeted_sampler_is_uniform_before_repeat_and_ignores_row_metadata() -> None:
+    """Stratifying targeted labels by profile, seat, or action kind must bias exposure."""
+
+    def targeted_sequence(materialized: MaterializedImitationPartition) -> list[int]:
+        sampler = imitation_module.SourceMixtureSampler(
+            materialized,
+            source_fractions=_locked_dagger_mixture(),
+            batch_size=10,
+            seed=227,
+        )
+        selected: list[int] = []
+        while len(selected) < 404:
+            batch = sampler.next_batch()
+            selected.extend(
+                int(value)
+                for value in batch.observations[
+                    batch.sources == imitation_module.Source.DAGGER_TARGETED, 0
+                ]
+            )
+        return selected[:404]
+
+    ordinary = targeted_sequence(_three_source_partition(targeted_rows=3))
+    changed_metadata = targeted_sequence(
+        _three_source_partition(
+            targeted_rows=3, targeted_metadata_variant=True,
+        )
+    )
+    assert ordinary == changed_metadata
+    assert len(set(ordinary[:3])) == 3
+    assert ordinary[3] in set(ordinary[:3])
+    counts = Counter(ordinary[:300])
+    assert set(counts.values()) == {100}
+
+
+def test_legacy_sampler_default_sequence_remains_byte_for_byte_stable(
+    sampled_dataset: Path,
+) -> None:
+    """Routing the compatibility wrapper through new allocation must not alter old runs."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    sampler = StratifiedDecisionSampler(dataset, materialized, batch_size=7, seed=211)
+
+    actual = [
+        [
+            (int(game_id), int(decision_index), source.value)
+            for game_id, decision_index, source in zip(
+                batch.game_ids, batch.decision_indices, batch.sources, strict=True,
+            )
+        ]
+        for batch in (sampler.next_batch() for _ in range(4))
+    ]
+    assert actual == [
+        [(0, 0, "greedy_standard"), (1, 2, "greedy_standard"), (3, 0, "search_conversion"), (0, 2, "greedy_standard"), (2, 1, "search_conversion"), (3, 2, "search_conversion"), (1, 1, "greedy_standard")],
+        [(1, 0, "greedy_standard"), (3, 1, "search_conversion"), (0, 0, "greedy_standard"), (1, 1, "greedy_standard"), (0, 2, "greedy_standard"), (0, 1, "greedy_standard"), (2, 0, "search_conversion")],
+        [(1, 2, "greedy_standard"), (1, 0, "greedy_standard"), (1, 1, "greedy_standard"), (2, 2, "search_conversion"), (3, 2, "search_conversion"), (0, 1, "greedy_standard"), (0, 2, "greedy_standard")],
+        [(3, 0, "search_conversion"), (2, 1, "search_conversion"), (0, 1, "greedy_standard"), (0, 0, "greedy_standard"), (0, 2, "greedy_standard"), (1, 2, "greedy_standard"), (1, 0, "greedy_standard")],
+    ]
+
+
+@pytest.mark.parametrize("seed", [np.int64(211), np.uint32(211)])
+def test_legacy_sampler_accepts_numpy_integral_seeds_with_the_locked_sequence(
+    sampled_dataset: Path, seed,
+) -> None:
+    """Legacy NumPy integer seeds reproduce the exact Python-int sequence."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    expected = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=211,
+    ).next_batch()
+    actual = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [np.random.SeedSequence(211), np.random.default_rng(211)],
+    ids=["seed-sequence", "generator"],
+)
+def test_legacy_sampler_preserves_default_rng_seed_inputs(
+    sampled_dataset: Path, seed,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    expected = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=211,
+    ).next_batch()
+    actual = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=seed,
+    ).next_batch()
+    for field in ImitationBatch.__dataclass_fields__:
+        np.testing.assert_array_equal(
+            getattr(actual, field), getattr(expected, field),
+        )
+
+
+def test_legacy_sampler_preserves_default_rng_entropy_seed(
+    sampled_dataset: Path,
+) -> None:
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    materialized = materialize_imitation_partition(dataset, "train")
+    batch = StratifiedDecisionSampler(
+        dataset, materialized, batch_size=7, seed=None,
+    ).next_batch()
+    assert len(batch.actions) == 7
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"batch_size": 0, "partition": "train"},
+        {"batch_size": 1, "standard_fraction": 1.0, "partition": "train"},
+        {"batch_size": 1, "partition": "unknown"},
+    ],
+)
+def test_legacy_sampler_configuration_errors_precede_materialization_errors(
+    sampled_dataset: Path, kwargs: dict[str, Any],
+) -> None:
+    """Configuration failures retain precedence over materialization failures."""
+
+    dataset = load_imitation_dataset(sampled_dataset, expected_contract=contract())
+    validation = materialize_imitation_partition(dataset, "validation")
+    with pytest.raises(ValueError, match="configuration"):
+        StratifiedDecisionSampler(dataset, validation, seed=211, **kwargs)
+
+
+@pytest.mark.filterwarnings("error:The given NumPy array is not writable")
+def test_actor_supervision_corpus_never_optimizes_validation_sentinel(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Using one combined partition for training and metrics must leak sentinel action 4."""
+
+    validation_batch = ImitationBatch(
+        observations=np.asarray(
+            [[40.0, 1.0, 2.0], [41.0, 1.0, 2.0]], dtype=np.float32,
+        ),
+        legal_masks=np.ones((2, 5), dtype=bool),
+        actions=np.asarray([4, 4], dtype=np.int64),
+        game_ids=np.asarray([0, 1], dtype=np.int64),
+        decision_indices=np.zeros(2, dtype=np.int32),
+        sources=np.asarray(
+            [imitation_module.Source.DAGGER_TARGETED] * 2, dtype=object,
+        ),
+        profiles=np.asarray(["standard-3v3", "conversion-1v1-far"], dtype=object),
+        seats=np.asarray([0, 1], dtype=np.int32),
+        action_kinds=np.asarray([3, 3], dtype=np.int32),
+        partitions=np.full(2, "validation", dtype=object),
+    )
+    validation = MaterializedImitationPartition(
+        "validation",
+        validation_batch,
+        MappingProxyType({
+            ("e" * 64, 0, 0): 0,
+            ("e" * 64, 1, 0): 1,
+        }),
+    )
+    scenario_hash = hashlib.sha256(
+        clone_scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    corpus = imitation_module.ActorSupervisionCorpus(
+        training=_three_source_partition(),
+        validation=validation,
+        source_fractions=_locked_dagger_mixture(),
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "test-corpus",
+            "base_manifest_sha256": "d" * 64,
+            "contract_hash": contract().contract_hash,
+            "encoding_hash": contract().encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+    observed: dict[str, list[int]] = {"train": [], "validation": []}
+    original_distribution = imitation_module._distribution_tensors
+    original_metrics = imitation_module._clone_metrics
+
+    def record_distribution(model, batch: ImitationBatch):
+        if set(batch.partitions) == {"train"}:
+            observed["train"].extend(int(action) for action in batch.actions)
+        return original_distribution(model, batch)
+
+    def record_metrics(model, batch: ImitationBatch):
+        observed["validation"].extend(int(action) for action in batch.actions)
+        return original_metrics(model, batch)
+
+    monkeypatch.setattr(
+        imitation_module, "_distribution_tensors", record_distribution,
+    )
+    monkeypatch.setattr(imitation_module, "_clone_metrics", record_metrics)
+    result = imitation_module.train_actor_supervision(
+        corpus=corpus,
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "mixed-supervision",
+        config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=1,
+            patience=1,
+            device="cpu",
+        ),
+    )
+
+    assert observed["train"] and 4 not in observed["train"]
+    assert observed["validation"] and set(observed["validation"]) == {4}
+    assert result.validation.strata["teacher/dagger-targeted"]["count"] == 2
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    run = json.loads((result.run_dir / "run.json").read_text(encoding="utf-8"))
+    expected_mixture = [
+        {"source": "greedy_standard", "fraction": 0.49},
+        {"source": "search_conversion", "fraction": 0.21},
+        {"source": "dagger_targeted", "fraction": 0.30},
+    ]
+    assert bc["source_mixture"] == expected_mixture
+    assert run["source_mixture"] == expected_mixture
+    assert bc["supervision_corpus"]["source_mixture"] == [
+        ["greedy_standard", 0.49],
+        ["search_conversion", 0.21],
+        ["dagger_targeted", 0.30],
+    ]
+    assert run["supervision_corpus"] == bc["supervision_corpus"]
+
+
+def test_actor_corpus_identity_binds_source_order_and_fractions() -> None:
+    """Order and fractions are part of the reproducible corpus identity."""
+
+    training = _three_source_partition()
+    selected = np.asarray([11], dtype=np.int64)
+    values = {
+        name: getattr(training.batch, name)[selected].copy()
+        for name in ImitationBatch.__dataclass_fields__
+    }
+    values["partitions"][:] = "validation"
+    validation = MaterializedImitationPartition(
+        "validation",
+        ImitationBatch(**values),
+        MappingProxyType({("v" * 64, 0, 0): 0}),
+    )
+    base_identity = MappingProxyType({
+        "schema_version": 1,
+        "kind": "identity-test",
+        "base_manifest_sha256": "d" * 64,
+        "contract_hash": "a" * 64,
+        "encoding_hash": "b" * 64,
+        "scenario_hash": "c" * 64,
+    })
+    reordered = MappingProxyType(OrderedDict((
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+        (Source.GREEDY_STANDARD, 0.49),
+        (Source.SEARCH_CONVERSION, 0.21),
+    )))
+    changed_fraction = MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.48),
+        (Source.SEARCH_CONVERSION, 0.22),
+        (imitation_module.Source.DAGGER_TARGETED, 0.30),
+    )))
+    corpora = [
+        imitation_module.ActorSupervisionCorpus(
+            training=training,
+            validation=validation,
+            source_fractions=fractions,
+            identity=base_identity,
+        )
+        for fractions in (_locked_dagger_mixture(), reordered, changed_fraction)
+    ]
+    assert corpora[0].identity["source_mixture"] == (
+        ("greedy_standard", 0.49),
+        ("search_conversion", 0.21),
+        ("dagger_targeted", 0.30),
+    )
+    assert len({tuple(corpus.identity["source_mixture"]) for corpus in corpora}) == 3
 
 
 def test_sampler_benchmark_runs_exact_batches_and_reports_checksum(
@@ -384,12 +926,1067 @@ class _TinyCloneEnv(gym.Env):
         return np.asarray([True, False, True, False, False], dtype=bool)
 
 
+def _distillation_corpus(clone_scenario) -> imitation_module.ActorSupervisionCorpus:
+    training = _three_source_partition()
+    selected = np.flatnonzero(
+        training.batch.sources == imitation_module.Source.DAGGER_TARGETED
+    )
+    values = {
+        name: getattr(training.batch, name)[selected].copy()
+        for name in ImitationBatch.__dataclass_fields__
+    }
+    values["partitions"][:] = "validation"
+    validation = MaterializedImitationPartition(
+        "validation",
+        ImitationBatch(**values),
+        MappingProxyType({
+            (f"validation-overlay-{index}", int(game_id), 0): index
+            for index, game_id in enumerate(values["game_ids"])
+        }),
+    )
+    scenario_hash = hashlib.sha256(
+        clone_scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    return imitation_module.ActorSupervisionCorpus(
+        training=training,
+        validation=validation,
+        source_fractions=_locked_dagger_mixture(),
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "selective-dagger-v1",
+            "base_manifest_sha256": "d" * 64,
+            "train_overlays": ("e" * 64,),
+            "validation_overlays": ("f" * 64,),
+            "contract_hash": contract().contract_hash,
+            "encoding_hash": contract().encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+
+
+def _write_actor_snapshot_source(
+    root: Path, *, source_kind: str = "snapshot",
+):
+    if source_kind not in {"snapshot", "dagger_actor"}:
+        raise ValueError(source_kind)
+    adapter = MaskablePPOAdapter()
+    model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        seed=101,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    step = 0 if source_kind == "dagger_actor" else 7
+    checkpoint = adapter.save(
+        model, root / "checkpoints" / f"step_{step:09d}.zip",
+    )
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    published_actor_sha256 = (
+        algorithms_module.actor_state_sha256(model)
+        if source_kind == "dagger_actor"
+        else None
+    )
+    actor_initialization = {
+        "schema_version": 1,
+        "kind": "actor_only",
+        "source_kind": "snapshot",
+        "source_checkpoint_sha256": "e" * 64,
+    }
+    publication_verification = {
+        "checkpoint_sha256": digest,
+        "actor_sha256": published_actor_sha256,
+    }
+    manifest = {
+        "schema_version": 1,
+        "state": "completed" if source_kind == "dagger_actor" else "stopped",
+        "latest_checkpoint": f"checkpoints/step_{step:09d}.zip",
+        "latest_checkpoint_step": step,
+        "config": {"algorithm": "maskable_ppo", "policy": "HexCNN"},
+        "contract": contract().to_dict(),
+    }
+    if source_kind == "dagger_actor":
+        manifest.update({
+            "training_kind": "selective-dagger-distillation-v1",
+            "distillation_iteration": 1,
+            "checkpoint_sha256": digest,
+            "target_actor_sha256_final": published_actor_sha256,
+            "actor_initialization": actor_initialization,
+            "publication_verification": publication_verification,
+            "production": True,
+        })
+    (root / "run.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    if source_kind == "dagger_actor":
+        (root / "bc.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": 1,
+                "algorithm": "maskable_ppo",
+                "policy": "HexCNN",
+                "checkpoint_sha256": digest,
+                "target_actor_sha256_final": published_actor_sha256,
+                "actor_initialization": actor_initialization,
+                "publication_verification": publication_verification,
+                "production": True,
+            }),
+            encoding="utf-8",
+        )
+    source = algorithms_module.ActorTransferSource(
+        source_kind=source_kind,
+        controller={
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(root.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": step,
+            "inference_mode": "deterministic",
+        },
+        checkpoint_sha256=digest,
+        published_actor_sha256=published_actor_sha256,
+    )
+    return source, model
+
+
 def _test_masked_logits(model, observations: np.ndarray, masks: np.ndarray) -> torch.Tensor:
     with torch.no_grad():
         observation_tensor = torch.as_tensor(observations, dtype=torch.float32, device=model.device)
         mask_tensor = torch.as_tensor(masks, dtype=torch.bool, device=model.device)
         distribution = model.policy.get_distribution(observation_tensor, action_masks=mask_tensor)
         return distribution.distribution.logits.detach().cpu()
+
+
+def _train_test_distillation(
+    clone_scenario,
+    source,
+    destination: Path,
+):
+    return dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        run_dir=destination,
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227, batch_size=10, max_epochs=1, patience=1,
+            device="cpu",
+        ),
+    )
+
+
+def test_distillation_warm_start_publishes_canonical_actor_and_complete_provenance(
+    clone_scenario, tmp_path: Path,
+) -> None:
+    """Publishing only a zip cannot prove source, value isolation, or physical reload."""
+
+    source, source_model = _write_actor_snapshot_source(tmp_path / "source")
+    fresh_target = MaskablePPOAdapter().create(
+        _TinyCloneEnv(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    expected_fresh_value_hash = imitation_module._parameter_hash(
+        imitation_module._value_named_parameters(fresh_target)
+    )
+    frozen_initialization = MaskablePPOAdapter().initialize_actor_from_source(
+        fresh_target, source, contract(), "cpu",
+    )
+    expected_actor_initialization = (
+        algorithms_module.actor_transfer_provenance_to_json(
+            frozen_initialization,
+        )
+    )
+    assert json.loads(json.dumps(expected_actor_initialization)) == (
+        expected_actor_initialization
+    )
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "distilled",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=1,
+            patience=1,
+            device="cpu",
+        ),
+    )
+
+    bc = json.loads((result.run_dir / "bc.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (result.run_dir / "run.json").read_text(encoding="utf-8")
+    )
+    checkpoint = result.run_dir / "checkpoints" / "step_000000000.zip"
+    fixtures_path = result.run_dir / "actor-fixtures.npz"
+    publication_path = result.run_dir / "publication.json"
+    source_hash = algorithms_module.actor_state_sha256(source_model)
+    assert bc["training_kind"] == "selective-dagger-distillation-v1"
+    assert bc["distillation_iteration"] == 1
+    assert bc["production"] is False
+    assert bc["actor_initialization"]["source_checkpoint_sha256"] == (
+        source.checkpoint_sha256
+    )
+    assert bc["actor_initialization"]["source_actor_sha256"] == source_hash
+    assert bc["actor_initialization"] == expected_actor_initialization
+    assert manifest["actor_initialization"] == expected_actor_initialization
+    assert bc["target_actor_sha256_initial"] == source_hash
+    assert bc["target_actor_sha256_final"] != ""
+    assert bc["value_parameters_sha256_before"] == expected_fresh_value_hash
+    assert bc["value_parameters_sha256_after"] == expected_fresh_value_hash
+    assert bc["checkpoint_sha256"] == hashlib.sha256(
+        checkpoint.read_bytes()
+    ).hexdigest()
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    assert publication == {
+        "schema_version": 1,
+        "contract": contract().to_dict(),
+        "checkpoint": {
+            "path": "checkpoints/step_000000000.zip",
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        },
+        "actor_fixtures": {
+            "path": "actor-fixtures.npz",
+            "sha256": hashlib.sha256(fixtures_path.read_bytes()).hexdigest(),
+        },
+        "target_actor_sha256_final": bc["target_actor_sha256_final"],
+        "value_parameters_sha256_before": bc[
+            "value_parameters_sha256_before"
+        ],
+    }
+    publication_sha256 = hashlib.sha256(publication_path.read_bytes()).hexdigest()
+    assert bc["publication_metadata_sha256"] == publication_sha256
+    assert manifest["publication_metadata_sha256"] == publication_sha256
+    assert bc["publication_verification"]["value_parameters_sha256"] == (
+        expected_fresh_value_hash
+    )
+    assert bc["publication_verification"]["actor_fixtures_sha256"] == (
+        publication["actor_fixtures"]["sha256"]
+    )
+    assert bc["source_example_counts"] == {
+        "greedy_standard": 10,
+        "search_conversion": 4,
+        "dagger_targeted": 6,
+    }
+    assert bc["supervision_corpus"]["train_overlays"] == ["e" * 64]
+    assert bc["supervision_corpus"]["validation_overlays"] == ["f" * 64]
+    assert bc["validation_partition"] == "held_out_targeted"
+    assert {
+        "python_version",
+        "numpy_version",
+        "torch_version",
+        "stable_baselines3_version",
+        "sb3_contrib_version",
+        "platform",
+    } == set(bc["software_provenance"])
+    assert all(
+        isinstance(value, str) and value
+        for value in bc["software_provenance"].values()
+    )
+    for key in (
+        "actor_initialization",
+        "checkpoint_sha256",
+        "target_actor_sha256_initial",
+        "target_actor_sha256_final",
+        "value_parameters_sha256_before",
+        "value_parameters_sha256_after",
+        "source_example_counts",
+        "software_provenance",
+    ):
+        assert manifest[key] == bc[key]
+    history = json.loads(
+        (result.run_dir / "training-history.json").read_text(encoding="utf-8")
+    )
+    history_path = result.run_dir / "training-history.json"
+    history_sha256 = hashlib.sha256(history_path.read_bytes()).hexdigest()
+    for document in (bc, manifest):
+        assert document["training_history"]["path"] == "training-history.json"
+        assert document["training_history"]["sha256"] == history_sha256
+        assert document["training_history"]["epoch_count"] == len(
+            history["epochs"]
+        )
+        assert document["training_history"]["timings"] == [
+            {
+                key: event[key]
+                for key in (
+                    "epoch", "epoch_seconds", "elapsed_seconds",
+                    "examples_per_second", "sampling_seconds",
+                    "transfer_forward_seconds", "optimization_seconds",
+                    "validation_seconds", "unclassified_seconds",
+                )
+            }
+            for event in history["epochs"]
+        ]
+    assert manifest["training_device"] == bc["training_device"]
+    assert manifest["publication_device"] == "cpu"
+    assert manifest["validation_partition"] == "held_out_targeted"
+    assert history["epochs"][0]["source_example_counts"] == (
+        bc["source_example_counts"]
+    )
+    assert history["epochs"][0]["validation_nll"] == pytest.approx(
+        result.validation.nll
+    )
+    with np.load(fixtures_path, allow_pickle=False) as data:
+        assert set(data.files) == {
+            "observations", "legal_masks", "expected_logits",
+        }
+        observations = data["observations"]
+        legal_masks = data["legal_masks"]
+        expected_logits = torch.as_tensor(data["expected_logits"])
+    reloaded = ControllerResolver(contract()).resolve(f"run:{result.run_dir}").model
+    assert algorithms_module.actor_state_sha256(reloaded) == bc[
+        "target_actor_sha256_final"
+    ]
+    torch.testing.assert_close(
+        _test_masked_logits(reloaded, observations, legal_masks),
+        expected_logits,
+        rtol=0,
+        atol=0,
+    )
+    assert imitation_module.validate_actor_supervision_publication(
+        result.run_dir, contract(),
+    )["publication_metadata_sha256"] == publication_sha256
+    with zipfile.ZipFile(checkpoint) as archive:
+        names = archive.namelist()
+        assert not any(
+            token in name.lower()
+            for name in names
+            for token in ("rollout", "replay", "scheduler", "bc_optimizer")
+        )
+        optimizer_state = torch.load(
+            io.BytesIO(archive.read("policy.optimizer.pth")),
+            map_location="cpu",
+            weights_only=True,
+        )
+        assert optimizer_state["state"] == {}
+
+
+def test_distillation_publication_reloads_before_manifests_and_fails_atomically(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest written before reload could bless corrupt or unreloadable bytes."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "failed-distillation"
+
+    def reject_reload(staging, *_args, **_kwargs):
+        staging = Path(staging)
+        assert not (staging / "run.json").exists()
+        assert not (staging / "bc.json").exists()
+        raise RuntimeError("injected distillation reload failure")
+
+    monkeypatch.setattr(
+        imitation_module, "_verify_reload_identity", reject_reload,
+    )
+    with pytest.raises(RuntimeError, match="injected distillation reload failure"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".failed-distillation.publishing-*")) == []
+
+
+def test_publication_reload_uses_the_checkpoint_bytes_authenticated_before_a_swap(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path reopened after hashing can deserialize bytes the descriptor never named."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "publication-checkpoint-swap"
+    original_read = imitation_module._read_publication_metadata
+    original_load = MaskablePPOAdapter.load
+    load_buffers: list[io.BytesIO] = []
+    swapped = False
+
+    def read_then_swap(root, expected_contract):
+        nonlocal swapped
+        snapshot = original_read(root, expected_contract)
+        if not swapped:
+            checkpoint = (
+                Path(root) / "checkpoints" / "step_000000000.zip"
+            )
+            checkpoint.write_bytes(
+                checkpoint.read_bytes() + b"swapped-after-authentication"
+            )
+            swapped = True
+        return snapshot
+
+    def load_owned_bytes(self, checkpoint, *, env, device):
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        load_buffers.append(checkpoint)
+        return original_load(self, checkpoint, env=env, device=device)
+
+    monkeypatch.setattr(
+        imitation_module, "_read_publication_metadata", read_then_swap,
+    )
+    monkeypatch.setattr(MaskablePPOAdapter, "load", load_owned_bytes)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert swapped is True
+    assert len(load_buffers) == 2
+    assert all(buffer.closed for buffer in load_buffers)
+    assert not destination.exists()
+    assert list(tmp_path.glob(
+        f".{destination.name}.publishing-*"
+    )) == []
+
+
+def test_distillation_publication_rejects_reloaded_value_state_mismatch(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actor/logit equality cannot prove the fresh value head survived serialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-value-publication"
+    original_load = MaskablePPOAdapter.load
+    load_calls = 0
+
+    def load_with_changed_value(self, checkpoint, *, env, device):
+        nonlocal load_calls
+        load_calls += 1
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        model = original_load(self, checkpoint, env=env, device=device)
+        if load_calls == 2:
+            with torch.no_grad():
+                next(model.policy.value_net.parameters()).add_(1.0)
+        return model
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", load_with_changed_value)
+    with pytest.raises(RuntimeError, match="value"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-value-publication.publishing-*")) == []
+
+
+def test_distillation_publication_rejects_tampered_physical_contract_sidecar(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied contract is not evidence unless staged bytes bind it."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-contract-publication"
+    original_write = imitation_module.atomic_write_json
+
+    def tamper_publication(path, payload):
+        if Path(path).name == "publication.json":
+            payload = json.loads(json.dumps(payload))
+            payload["contract"]["contract_hash"] = "f" * 64
+        return original_write(path, payload)
+
+    monkeypatch.setattr(
+        imitation_module, "atomic_write_json", tamper_publication,
+    )
+    with pytest.raises((ContractMismatch, ValueError), match="contract"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-contract-publication.publishing-*")) == []
+
+
+def test_distillation_publication_detects_real_presave_to_reload_logit_defect(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comparison oracle must be logits captured before serialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "bad-logit-publication"
+    original_save = MaskablePPOAdapter.save
+
+    def save_changed_actor(self, model, path):
+        parameter = next(model.policy.action_net.parameters())
+        original = parameter.detach().clone()
+        try:
+            with torch.no_grad():
+                parameter.add_(0.5)
+            return original_save(self, model, path)
+        finally:
+            with torch.no_grad():
+                parameter.copy_(original)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "save", save_changed_actor)
+    with pytest.raises(AssertionError):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(".bad-logit-publication.publishing-*")) == []
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "training",
+        "save",
+        "publication.json",
+        "bc.json",
+        "run.json",
+        "final_rename",
+    ],
+)
+def test_distillation_failures_preserve_atomic_publication_boundary(
+    failure_point: str,
+    clone_scenario,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every expensive stage either publishes one complete directory or nothing."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / f"atomic-{failure_point.replace('.', '-')}"
+    preserved = tmp_path / f".{destination.name}.publishing-preserved"
+    preserved.mkdir()
+    sentinel = preserved / "sentinel.bin"
+    sentinel.write_bytes(b"preexisting-bytes")
+
+    if failure_point == "training":
+        monkeypatch.setattr(
+            imitation_module,
+            "_distribution_tensors",
+            lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(RuntimeError("injected training failure"))
+            ),
+        )
+    elif failure_point == "save":
+        monkeypatch.setattr(
+            MaskablePPOAdapter,
+            "save",
+            lambda *_args, **_kwargs: (
+                (_ for _ in ()).throw(RuntimeError("injected save failure"))
+            ),
+        )
+    elif failure_point.endswith(".json"):
+        original_write = imitation_module.atomic_write_json
+
+        def fail_serialization(path, payload):
+            if Path(path).name == failure_point:
+                raise RuntimeError("injected manifest serialization failure")
+            return original_write(path, payload)
+
+        monkeypatch.setattr(
+            imitation_module, "atomic_write_json", fail_serialization,
+        )
+    else:
+        original_replace = imitation_module.os.replace
+
+        def fail_final_rename(source_path, destination_path):
+            source_path = Path(source_path)
+            if (
+                source_path.name.startswith(
+                    f".{destination.name}.publishing-"
+                )
+                and Path(destination_path) == destination
+            ):
+                raise RuntimeError("injected final rename failure")
+            return original_replace(source_path, destination_path)
+
+        monkeypatch.setattr(
+            imitation_module.os, "replace", fail_final_rename,
+        )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert not destination.exists()
+    assert list(tmp_path.glob(
+        f".{destination.name}.publishing-*"
+    )) == [preserved]
+    assert sentinel.read_bytes() == b"preexisting-bytes"
+
+
+def test_completed_distillation_reopen_rejects_training_history_tamper(
+    clone_scenario, tmp_path: Path,
+) -> None:
+    """A completed manifest must bind the physical timing history it summarizes."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        run_dir=tmp_path / "history-tamper",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227, batch_size=10, max_epochs=1, patience=1,
+            device="cpu",
+        ),
+    )
+    history_path = result.run_dir / "training-history.json"
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history["epochs"][0]["elapsed_seconds"] += 1.0
+    history_path.write_text(json.dumps(history), encoding="utf-8")
+    rebound_sha256 = hashlib.sha256(history_path.read_bytes()).hexdigest()
+    for manifest_name in ("bc.json", "run.json"):
+        manifest_path = result.run_dir / manifest_name
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["training_history"]["sha256"] = rebound_sha256
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training history"):
+        imitation_module.validate_actor_supervision_publication(
+            result.run_dir, contract(),
+        )
+
+
+def test_distillation_malformed_source_never_publishes_output(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source changed after definition must fail before checkpoint deserialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    source = replace(source, checkpoint_sha256="f" * 64)
+    destination = tmp_path / "bad-source-distillation"
+    resolve_calls = 0
+    original_resolve = ControllerResolver.resolve
+
+    def counted_resolve(self, raw):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(self, raw)
+
+    monkeypatch.setattr(ControllerResolver, "resolve", counted_resolve)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        dagger_module.train_dagger_actor(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            source=source,
+            nonproduction_cpu_config=BehavioralCloningConfig(
+                model_seed=227, batch_size=10, max_epochs=1, patience=1,
+                device="cpu",
+            ),
+        )
+
+    assert not destination.exists()
+    assert resolve_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "manifest_name", "field", "value"),
+    [
+        (
+            "snapshot",
+            "run.json",
+            "latest_checkpoint",
+            "checkpoints/step_000000008.zip",
+        ),
+        ("snapshot", "run.json", "latest_checkpoint_step", 8),
+        ("snapshot", "run.json", "schema_version", 2),
+        (
+            "snapshot",
+            "run.json",
+            "contract",
+            {**contract().to_dict(), "contract_hash": "f" * 64},
+        ),
+        ("dagger_actor", "bc.json", "production", False),
+    ],
+)
+def test_actor_transfer_rejects_all_metadata_before_checkpoint_deserialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    manifest_name: str,
+    field: str,
+    value: object,
+) -> None:
+    """Metadata-only rejection must not invoke any SB3 deserializer."""
+
+    source, _source_model = _write_actor_snapshot_source(
+        tmp_path / source_kind, source_kind=source_kind,
+    )
+    manifest_path = Path(source.controller["source_run"]) / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original_load = MaskablePPOAdapter.load
+    load_calls = 0
+
+    def counted_load(self, checkpoint, *, env, device):
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(self, checkpoint, env=env, device=device)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", counted_load)
+    adapter = MaskablePPOAdapter()
+    target_model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    target_before = algorithms_module.actor_state_sha256(target_model)
+
+    with pytest.raises(ValueError, match="metadata|provenance|contract"):
+        adapter.initialize_actor_from_source(
+            target_model, source, contract(), "cpu",
+        )
+
+    assert load_calls == 0
+    assert algorithms_module.actor_state_sha256(target_model) == target_before
+
+
+def test_distillation_loads_only_the_exact_checkpoint_bytes_it_authenticated(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkpoint swap after path preflight must fail before deserialization."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = tmp_path / "swapped-source-distillation"
+    original_preflight = algorithms_module.preflight_actor_transfer_source
+    resolver_calls = 0
+    adapter_load_calls = 0
+    original_resolve = ControllerResolver.resolve
+    original_load = MaskablePPOAdapter.load
+
+    def preflight_then_swap(candidate):
+        result = original_preflight(candidate)
+        checkpoint = result[1]
+        checkpoint.write_bytes(checkpoint.read_bytes() + b"swapped-after-hash")
+        return result
+
+    def counted_resolve(self, raw):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        return original_resolve(self, raw)
+
+    def counted_load(self, path, *, env, device):
+        nonlocal adapter_load_calls
+        adapter_load_calls += 1
+        return original_load(self, path, env=env, device=device)
+
+    monkeypatch.setattr(
+        algorithms_module,
+        "preflight_actor_transfer_source",
+        preflight_then_swap,
+    )
+    monkeypatch.setattr(ControllerResolver, "resolve", counted_resolve)
+    monkeypatch.setattr(MaskablePPOAdapter, "load", counted_load)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        _train_test_distillation(clone_scenario, source, destination)
+
+    assert resolver_calls == 0
+    assert adapter_load_calls == 0
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("source_kind", ["snapshot", "dagger_actor"])
+def test_actor_transfer_hashes_and_loads_one_checkpoint_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str,
+) -> None:
+    """The bytes supplied to SB3 must be the sole physical checkpoint read."""
+
+    source, _source_model = _write_actor_snapshot_source(
+        tmp_path / "source", source_kind=source_kind,
+    )
+    adapter = MaskablePPOAdapter()
+    target_model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+    checkpoint = Path(source.controller["path"])
+    expected_bytes = checkpoint.read_bytes()
+    original_path_open = Path.open
+    original_load = MaskablePPOAdapter.load
+    checkpoint_opens = 0
+    load_buffers: list[io.BytesIO] = []
+
+    def counted_open(path, *args, **kwargs):
+        nonlocal checkpoint_opens
+        if Path(path) == checkpoint:
+            checkpoint_opens += 1
+        return original_path_open(path, *args, **kwargs)
+
+    def inspect_load(self, checkpoint_buffer, *, env, device):
+        assert isinstance(checkpoint_buffer, io.BytesIO)
+        assert checkpoint_buffer.tell() == 0
+        assert checkpoint_buffer.getvalue() == expected_bytes
+        load_buffers.append(checkpoint_buffer)
+        return original_load(self, checkpoint_buffer, env=env, device=device)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    monkeypatch.setattr(MaskablePPOAdapter, "load", inspect_load)
+
+    adapter.initialize_actor_from_source(
+        target_model, source, contract(), "cpu",
+    )
+
+    assert checkpoint_opens == 1
+    assert len(load_buffers) == 1
+    assert load_buffers[0].closed is True
+
+
+@pytest.mark.parametrize("source_kind", ["snapshot", "dagger_actor"])
+def test_actor_transfer_owns_its_buffer_and_never_reopens_source_after_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str,
+) -> None:
+    """The combined operation copies directly from its one owned byte snapshot."""
+
+    source, source_model = _write_actor_snapshot_source(
+        tmp_path / "source", source_kind=source_kind,
+    )
+    adapter = MaskablePPOAdapter()
+    original_load = MaskablePPOAdapter.load
+    buffers: list[io.BytesIO] = []
+    deserialized = False
+
+    target_model = adapter.create(
+        _TinyCloneEnv(),
+        spaces_info={
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+        seed=227,
+        device="cpu",
+        checkpoint_interval=2,
+    )
+
+    source_run = Path(source.controller["source_run"])
+    guarded_paths = {
+        Path(source.controller["path"]),
+        source_run / "run.json",
+    }
+    if source_kind == "dagger_actor":
+        guarded_paths.add(source_run / "bc.json")
+    original_path_open = Path.open
+
+    def inspect_load(self, checkpoint, *, env, device):
+        nonlocal deserialized
+        assert isinstance(checkpoint, io.BytesIO)
+        assert checkpoint.tell() == 0
+        buffers.append(checkpoint)
+        loaded = original_load(self, checkpoint, env=env, device=device)
+        deserialized = True
+        return loaded
+
+    def reject_late_source_reopen(path, *args, **kwargs):
+        if deserialized and Path(path) in guarded_paths:
+            raise AssertionError("authenticated source path was reopened after load")
+        return original_path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(MaskablePPOAdapter, "load", inspect_load)
+    monkeypatch.setattr(Path, "open", reject_late_source_reopen)
+
+    adapter.initialize_actor_from_source(
+        target_model, source, contract(), "cpu",
+    )
+
+    assert len(buffers) == 1
+    assert buffers[0].closed is True
+    assert algorithms_module.actor_state_sha256(target_model) == (
+        algorithms_module.actor_state_sha256(source_model)
+    )
+
+
+def test_distillation_restores_the_best_validation_actor_before_publication(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving the last epoch instead of the best targeted NLL defeats patience."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    original_metrics = imitation_module._clone_metrics
+    observed_actor_hashes: list[str] = []
+
+    def staged_metrics(model, batch):
+        metrics = original_metrics(model, batch)
+        observed_actor_hashes.append(
+            algorithms_module.actor_state_sha256(model)
+        )
+        if len(observed_actor_hashes) == 1:
+            return replace(metrics, nll=0.1)
+        if len(observed_actor_hashes) == 2:
+            return replace(metrics, nll=10.0)
+        return metrics
+
+    monkeypatch.setattr(imitation_module, "_clone_metrics", staged_metrics)
+    result = dagger_module.train_dagger_actor(
+        corpus=_distillation_corpus(clone_scenario),
+        scenario=clone_scenario,
+        env=_TinyCloneEnv(),
+        contract=contract(),
+        spaces_info={"channels": 1, "board_h": 1, "board_w": 1, "globals": 2},
+        run_dir=tmp_path / "best-restored",
+        source=source,
+        nonproduction_cpu_config=BehavioralCloningConfig(
+            model_seed=227,
+            batch_size=10,
+            learning_rate=3e-4,
+            max_epochs=2,
+            patience=2,
+            device="cpu",
+        ),
+    )
+
+    assert result.best_epoch == 1
+    assert len(observed_actor_hashes) >= 3
+    assert observed_actor_hashes[0] != observed_actor_hashes[1]
+    assert observed_actor_hashes[-1] == observed_actor_hashes[0]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model_seed", 228),
+        ("batch_size", 255),
+        ("learning_rate", 1e-3),
+        ("max_epochs", 49),
+        ("patience", 4),
+        ("device", "cpu"),
+    ],
+)
+def test_direct_production_distillation_rejects_each_unlocked_config_field_before_mutation(
+    field: str, value: object, clone_scenario, tmp_path: Path,
+) -> None:
+    """Every field in the production tuple is locked at the lower boundary."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+    destination = (
+        tmp_path / f"uncreated-{field}-parent" / "forged-production"
+    )
+    forged = replace(
+        imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG,
+        **{field: value},
+    )
+
+    with pytest.raises(ValueError, match="locked production"):
+        imitation_module.train_actor_supervision(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=destination,
+            config=forged,
+            warm_start=source,
+            distillation_mode="production",
+        )
+
+    assert not destination.parent.exists()
+
+
+def test_direct_production_distillation_accepts_only_the_exact_locked_config(
+    clone_scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact production tuple reaches request preparation without relaxation."""
+
+    source, _source_model = _write_actor_snapshot_source(tmp_path / "source")
+
+    class RequestPreparationReached(RuntimeError):
+        pass
+
+    def stop_after_validation(config, run_dir):
+        assert config is imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG
+        raise RequestPreparationReached
+
+    monkeypatch.setattr(
+        imitation_module,
+        "_prepare_behavioral_cloning_request",
+        stop_after_validation,
+    )
+    with pytest.raises(RequestPreparationReached):
+        imitation_module.train_actor_supervision(
+            corpus=_distillation_corpus(clone_scenario),
+            scenario=clone_scenario,
+            env=_TinyCloneEnv(),
+            contract=contract(),
+            spaces_info={
+                "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+            },
+            run_dir=tmp_path / "exact-production",
+            config=imitation_module.PRODUCTION_DAGGER_DISTILLATION_CONFIG,
+            warm_start=source,
+            distillation_mode="production",
+        )
 
 
 def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publishes_a_resolvable_run(clone_dataset: Path, clone_scenario, tmp_path: Path) -> None:
@@ -410,7 +2007,7 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
     assert result.best_epoch <= result.epochs_trained <= 200
     expected_files = {
         "run.json", "scenario.json", "bc.json", "metrics.json", "actor-fixtures.npz",
-        "training-history.json",
+        "training-history.json", "publication.json",
         "checkpoints/step_000000000.zip",
     }
     assert {path.relative_to(run_dir).as_posix() for path in run_dir.rglob("*") if path.is_file()} == expected_files
@@ -449,9 +2046,12 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
             "seat/0", "seat/1"} <= set(metrics["strata"])
 
     with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as fixtures:
-        assert set(fixtures.files) == {"observations", "legal_masks"}
+        assert set(fixtures.files) == {
+            "observations", "legal_masks", "expected_logits",
+        }
         observations = fixtures["observations"]
         masks = fixtures["legal_masks"]
+        expected_logits = torch.as_tensor(fixtures["expected_logits"])
         assert observations.dtype == np.float32 and masks.dtype == np.bool_
         assert observations.shape == (2, 3) and masks.shape == (2, 5)
         assert set(observations[:, 0]) == {5.0, 6.0}
@@ -465,7 +2065,13 @@ def test_canonical_cpu_artifact_overfits_a_five_example_masked_dataset_and_publi
     assert isinstance(first.model.policy.features_extractor, HexCNN)
     torch.testing.assert_close(
         _test_masked_logits(first.model, observations, masks),
+        expected_logits,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
         _test_masked_logits(second.model, observations, masks),
+        expected_logits,
         rtol=0,
         atol=0,
     )
@@ -656,6 +2262,52 @@ def test_behavioral_cloning_defaults_are_the_reviewed_production_limits() -> Non
     assert (config.batch_size, config.learning_rate, config.max_epochs, config.patience) == (256, 3e-4, 50, 5)
     with pytest.raises(ValueError, match="finite"):
         BehavioralCloningConfig(learning_rate=float("nan"), device="cpu")
+
+def test_legacy_clone_request_errors_precede_partition_materialization(
+    clone_dataset: Path, clone_scenario, tmp_path: Path,
+) -> None:
+    """Request failures retain precedence over partition materialization failures."""
+
+    dataset = load_imitation_dataset(clone_dataset, expected_contract=contract())
+    without_validation = replace(
+        dataset,
+        index=MappingProxyType({"train": dataset.index["train"]}),
+    )
+    common = {
+        "dataset": without_validation,
+        "scenario": clone_scenario,
+        "env": _TinyCloneEnv(),
+        "contract": contract(),
+        "spaces_info": {
+            "channels": 1, "board_h": 1, "board_w": 1, "globals": 2,
+        },
+    }
+    with pytest.raises(TypeError, match="config"):
+        train_behavioral_clone(
+            **common,
+            run_dir=tmp_path / "invalid-config",
+            config=object(),
+        )
+
+    existing = tmp_path / "existing-run"
+    existing.mkdir()
+    existing_bytes = existing / "sentinel.bin"
+    existing_bytes.write_bytes(b"preserve-me")
+    with pytest.raises(FileExistsError) as error:
+        train_behavioral_clone(
+            **common,
+            run_dir=existing,
+            config=BehavioralCloningConfig(
+                model_seed=211,
+                batch_size=5,
+                max_epochs=1,
+                patience=1,
+                device="cpu",
+            ),
+        )
+    assert error.value.args == (existing,)
+    assert existing_bytes.read_bytes() == b"preserve-me"
+
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_behavioral_cloning_config_accepts_explicit_supported_device(device: str) -> None:

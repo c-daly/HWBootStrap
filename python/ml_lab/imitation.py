@@ -12,9 +12,11 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from itertools import chain
 from dataclasses import asdict, dataclass
+from numbers import Integral
 from pathlib import Path
 from typing import Callable
 from typing import Any
@@ -22,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from .contracts import ContractMismatch, EnvironmentContract
-from .io import atomic_write_json
+from .io import atomic_write_json, read_json
 from .scenarios import ResolvedScenario
 
 DATASET_SCHEMA_VERSION = 1
@@ -336,6 +338,7 @@ from types import MappingProxyType
 class Source(Enum):
     GREEDY_STANDARD = "greedy_standard"
     SEARCH_CONVERSION = "search_conversion"
+    DAGGER_TARGETED = "dagger_targeted"
 
 
 @dataclass(frozen=True)
@@ -450,7 +453,7 @@ class ImitationDataset:
 class MaterializedImitationPartition:
     partition: str
     batch: ImitationBatch
-    offsets: Mapping[tuple[int, int], int]
+    offsets: Mapping[tuple[Any, ...], int]
 
     def __post_init__(self) -> None:
         if self.partition not in {"train", "validation"}:
@@ -462,6 +465,82 @@ class MaterializedImitationPartition:
             raise ValueError("materialized partition metadata differs")
         if set(self.offsets.values()) != set(range(count)):
             raise ValueError("materialized partition offsets are invalid")
+        if any(
+            not isinstance(values, np.ndarray) or len(values) != count
+            for values in (
+                getattr(self.batch, name)
+                for name in ImitationBatch.__dataclass_fields__
+            )
+        ):
+            raise ValueError("materialized partition batch fields are inconsistent")
+        frozen_offsets = MappingProxyType(dict(self.offsets))
+        object.__setattr__(self, "offsets", frozen_offsets)
+        for name in ImitationBatch.__dataclass_fields__:
+            getattr(self.batch, name).setflags(write=False)
+
+
+def _freeze_source_fractions(
+    value: Mapping[Source, float],
+) -> Mapping[Source, float]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("source fractions must be a non-empty ordered mapping")
+    frozen: OrderedDict[Source, float] = OrderedDict()
+    for source, fraction in value.items():
+        if (
+            not isinstance(source, Source)
+            or isinstance(fraction, bool)
+            or not isinstance(fraction, (int, float))
+            or not math.isfinite(float(fraction))
+            or float(fraction) <= 0.0
+        ):
+            raise ValueError("source fractions must contain finite positive values")
+        frozen[source] = float(fraction)
+    if not math.isclose(sum(frozen.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("source fractions must sum to 1.0")
+    return MappingProxyType(frozen)
+
+
+@dataclass(frozen=True)
+class ActorSupervisionCorpus:
+    training: MaterializedImitationPartition
+    validation: MaterializedImitationPartition
+    source_fractions: Mapping[Source, float]
+    identity: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.training, MaterializedImitationPartition)
+            or self.training.partition != "train"
+            or not isinstance(self.validation, MaterializedImitationPartition)
+            or self.validation.partition != "validation"
+        ):
+            raise ValueError("actor supervision corpus partitions are invalid")
+        fractions = _freeze_source_fractions(self.source_fractions)
+        if set(self.training.batch.sources) != set(fractions):
+            raise ValueError("actor supervision training sources differ from mixture")
+        if set(self.training.offsets) & set(self.validation.offsets):
+            raise ValueError("actor supervision train and validation identities overlap")
+        if (
+            not isinstance(self.identity, Mapping)
+            or not self.identity
+            or any(not isinstance(key, str) for key in self.identity)
+        ):
+            raise ValueError("actor supervision corpus identity is invalid")
+        source_mixture = tuple(
+            (source.value, fraction) for source, fraction in fractions.items()
+        )
+        identity = dict(self.identity)
+        if (
+            "source_mixture" in identity
+            and tuple(tuple(item) for item in identity["source_mixture"])
+            != source_mixture
+        ):
+            raise ValueError(
+                "actor supervision corpus identity source mixture differs"
+            )
+        identity["source_mixture"] = source_mixture
+        object.__setattr__(self, "source_fractions", fractions)
+        object.__setattr__(self, "identity", MappingProxyType(identity))
 
 
 def training_rows_as_validation(dataset: ImitationDataset) -> ImitationDataset:
@@ -673,7 +752,7 @@ def load_imitation_dataset(root: Path, expected_contract: EnvironmentContract) -
 
 
 class _StratumCycler:
-    def __init__(self, strata: Sequence[Sequence[tuple[int, int]]], rng: np.random.Generator) -> None:
+    def __init__(self, strata: Sequence[Sequence[Any]], rng: np.random.Generator) -> None:
         if not strata or any(not rows for rows in strata):
             raise ValueError("sampler source contains an empty stratum")
         self._rows = [tuple(rows[index] for index in rng.permutation(len(rows))) for rows in strata]
@@ -681,8 +760,8 @@ class _StratumCycler:
         self._row_positions = [0] * len(self._rows)
         self._stratum_position = 0
 
-    def take(self, count: int) -> list[tuple[int, int]]:
-        result: list[tuple[int, int]] = []
+    def take(self, count: int) -> list[Any]:
+        result: list[Any] = []
         for _ in range(count):
             group = self._strata[self._stratum_position % len(self._strata)]
             self._stratum_position += 1
@@ -692,59 +771,249 @@ class _StratumCycler:
         return result
 
 
-def _source_strata(dataset: ImitationDataset, partition: str, source: Source) -> list[tuple[tuple[int, int], ...]]:
-    try:
-        profiles = dataset.index[partition][source]
-    except KeyError as exc:
-        raise ValueError(f"sampler has no {source.value} rows in {partition} partition") from exc
-    return [rows for profile in sorted(profiles) for seat in sorted(profiles[profile]) for kind in sorted(profiles[profile][seat]) for rows in (profiles[profile][seat][kind],)]
+def _materialized_source_strata(
+    materialized: MaterializedImitationPartition, source: Source,
+) -> list[tuple[int, ...]]:
+    batch = materialized.batch
+    selected = np.flatnonzero(batch.sources == source)
+    if not len(selected):
+        raise ValueError(
+            f"sampler has no {source.value} rows in {materialized.partition} partition"
+        )
+    if source is Source.DAGGER_TARGETED:
+        return [tuple(int(index) for index in selected)]
+    grouped: dict[tuple[str, int, int], list[int]] = {}
+    for raw_index in selected:
+        index = int(raw_index)
+        key = (
+            str(batch.profiles[index]),
+            int(batch.seats[index]),
+            int(batch.action_kinds[index]),
+        )
+        grouped.setdefault(key, []).append(index)
+    return [tuple(grouped[key]) for key in sorted(grouped)]
 
 
-class StratifiedDecisionSampler:
-    """Partition-scoped, seeded strata cycling; undersized strata cycle deterministically."""
+class SourceMixtureSampler:
+    """Seeded residual-accounted source exposure over one materialized partition."""
 
-    def __init__(self, dataset: ImitationDataset, materialized: MaterializedImitationPartition, batch_size: int = 1, standard_fraction: float = 0.70, seed: int = 0, partition: str = "train") -> None:
-        if type(batch_size) is not int or batch_size < 1 or partition not in {"train", "validation"} or not isinstance(standard_fraction, (int, float)) or not 0.0 < standard_fraction < 1.0:
+    def __init__(
+        self,
+        materialized: MaterializedImitationPartition,
+        *,
+        source_fractions: Mapping[Source, float],
+        batch_size: int = 1,
+        seed: int = 0,
+        partition: str | None = None,
+    ) -> None:
+        if (
+            isinstance(seed, (bool, np.bool_))
+            or not isinstance(seed, Integral)
+            or int(seed) < 0
+        ):
             raise ValueError("sampler configuration is invalid")
-        if not isinstance(materialized, MaterializedImitationPartition) or materialized.partition != partition:
-            raise ValueError("sampler materialized partition differs")
-        if set(materialized.offsets) != set(_partition_refs(dataset, partition)):
-            raise ValueError("sampler materialized reference map differs")
-        self.dataset, self.materialized, self.batch_size, self.standard_fraction, self.partition = dataset, materialized, batch_size, float(standard_fraction), partition
-        self._rng = np.random.default_rng(seed)
-        self._cyclers = {Source.GREEDY_STANDARD: _StratumCycler(_source_strata(dataset, partition, Source.GREEDY_STANDARD), self._rng), Source.SEARCH_CONVERSION: _StratumCycler(_source_strata(dataset, partition, Source.SEARCH_CONVERSION), self._rng)}
-        self._residual = 0.0
+        self._initialize_with_rng(
+            materialized,
+            source_fractions=source_fractions,
+            batch_size=batch_size,
+            rng=np.random.default_rng(int(seed)),
+            partition=partition,
+            legacy_standard_fraction=None,
+        )
 
-    def _next_refs_and_sources(self) -> list[tuple[tuple[int, int], Source]]:
-        target = self.batch_size * self.standard_fraction + self._residual
-        standard_count = int(np.floor(target + 1e-12))
-        self._residual = target - standard_count
-        refs_and_sources = [(ref, Source.GREEDY_STANDARD) for ref in self._cyclers[Source.GREEDY_STANDARD].take(standard_count)]
-        refs_and_sources += [(ref, Source.SEARCH_CONVERSION) for ref in self._cyclers[Source.SEARCH_CONVERSION].take(self.batch_size - standard_count)]
-        order = self._rng.permutation(len(refs_and_sources))
-        return [refs_and_sources[int(index)] for index in order]
+    def _initialize_with_rng(
+        self,
+        materialized: MaterializedImitationPartition,
+        *,
+        source_fractions: Mapping[Source, float],
+        batch_size: int,
+        rng: np.random.Generator,
+        partition: str | None,
+        legacy_standard_fraction: float | None,
+    ) -> None:
+        if (
+            not isinstance(materialized, MaterializedImitationPartition)
+            or type(batch_size) is not int
+            or batch_size < 1
+            or not isinstance(rng, np.random.Generator)
+        ):
+            raise ValueError("sampler configuration is invalid")
+        expected_partition = materialized.partition if partition is None else partition
+        if (
+            expected_partition not in {"train", "validation"}
+            or materialized.partition != expected_partition
+        ):
+            raise ValueError("sampler materialized partition differs")
+        fractions = _freeze_source_fractions(source_fractions)
+        if set(materialized.batch.sources) != set(fractions):
+            raise ValueError("sampler materialized sources differ from mixture")
+        if legacy_standard_fraction is not None and (
+            tuple(fractions) != (
+                Source.GREEDY_STANDARD, Source.SEARCH_CONVERSION,
+            )
+            or not math.isclose(
+                float(legacy_standard_fraction),
+                fractions[Source.GREEDY_STANDARD],
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError("legacy sampler mixture is invalid")
+        self.materialized = materialized
+        self.batch_size = batch_size
+        self.partition = expected_partition
+        self.source_fractions = fractions
+        self._rng = rng
+        self._cyclers = {
+            source: _StratumCycler(
+                _materialized_source_strata(materialized, source), self._rng,
+            )
+            for source in fractions
+        }
+        self._carry = {source: 0.0 for source in fractions}
+        self._legacy_standard_fraction = legacy_standard_fraction
+        self._legacy_residual = 0.0
+
+    def _source_counts(self) -> Mapping[Source, int]:
+        if self._legacy_standard_fraction is not None:
+            target = (
+                self.batch_size * self._legacy_standard_fraction
+                + self._legacy_residual
+            )
+            standard_count = int(np.floor(target + 1e-12))
+            self._legacy_residual = target - standard_count
+            return {
+                Source.GREEDY_STANDARD: standard_count,
+                Source.SEARCH_CONVERSION: self.batch_size - standard_count,
+            }
+
+        targets = {
+            source: self.batch_size * fraction + self._carry[source]
+            for source, fraction in self.source_fractions.items()
+        }
+        source_order = tuple(self.source_fractions)
+        # Reconciliation preserves the per-batch invariant: every count is
+        # nonnegative, counts sum to batch_size, and source order breaks ties.
+        counts = {
+            source: max(0, int(np.floor(target + 1e-12)))
+            for source, target in targets.items()
+        }
+        while sum(counts.values()) > self.batch_size:
+            loser = min(
+                (
+                    index for index, source in enumerate(source_order)
+                    if counts[source] > 0
+                ),
+                key=lambda index: (
+                    targets[source_order[index]] - counts[source_order[index]],
+                    index,
+                ),
+            )
+            counts[source_order[loser]] -= 1
+        while sum(counts.values()) < self.batch_size:
+            winner = max(
+                range(len(source_order)),
+                key=lambda index: (
+                    targets[source_order[index]] - counts[source_order[index]],
+                    -index,
+                ),
+            )
+            counts[source_order[winner]] += 1
+        if sum(counts.values()) != self.batch_size or any(
+            count < 0 for count in counts.values()
+        ):
+            raise RuntimeError("source residual allocation is inconsistent")
+        self._carry = {
+            source: targets[source] - counts[source] for source in source_order
+        }
+        return counts
+
+    def _next_indices_and_sources(self) -> list[tuple[int, Source]]:
+        counts = self._source_counts()
+        indices_and_sources = [
+            (int(index), source)
+            for source in self.source_fractions
+            for index in self._cyclers[source].take(counts[source])
+        ]
+        order = self._rng.permutation(len(indices_and_sources))
+        return [indices_and_sources[int(index)] for index in order]
 
     def next_batch(self) -> ImitationBatch:
-        refs_and_sources = self._next_refs_and_sources()
-        try:
-            offsets = np.fromiter(
-                (self.materialized.offsets[ref] for ref, _source in refs_and_sources),
-                dtype=np.int64,
-                count=len(refs_and_sources),
-            )
-        except KeyError as exc:
-            raise RuntimeError("sampler selected a missing materialized reference") from exc
-        batch = _take_batch(self.materialized.batch, offsets)
+        indices_and_sources = self._next_indices_and_sources()
+        indices = np.fromiter(
+            (index for index, _source in indices_and_sources),
+            dtype=np.int64,
+            count=len(indices_and_sources),
+        )
+        batch = _take_batch(self.materialized.batch, indices)
         scheduled_sources = np.asarray(
-            [source for _ref, source in refs_and_sources], dtype=object,
+            [source for _index, source in indices_and_sources], dtype=object,
         )
         if not np.array_equal(batch.sources, scheduled_sources):
             raise RuntimeError("materialized source metadata differs from scheduler")
         if set(batch.partitions) != {self.partition}:
             raise RuntimeError("materialized sampler crossed a partition")
-        if not np.all(batch.legal_masks[np.arange(len(batch.actions)), batch.actions]):
+        if not np.all(
+            batch.legal_masks[np.arange(len(batch.actions)), batch.actions]
+        ):
             raise ValueError("selected teacher action is masked")
         return batch
+
+
+class StratifiedDecisionSampler(SourceMixtureSampler):
+    """Compatibility wrapper preserving the original two-source sequence."""
+
+    def __init__(
+        self,
+        dataset: ImitationDataset,
+        materialized: MaterializedImitationPartition,
+        batch_size: int = 1,
+        standard_fraction: float = 0.70,
+        seed: int = 0,
+        partition: str = "train",
+    ) -> None:
+        if (
+            type(batch_size) is not int
+            or batch_size < 1
+            or partition not in {"train", "validation"}
+            or not isinstance(standard_fraction, (int, float))
+            or isinstance(standard_fraction, bool)
+            or not 0.0 < float(standard_fraction) < 1.0
+        ):
+            raise ValueError("sampler configuration is invalid")
+        if (
+            not isinstance(materialized, MaterializedImitationPartition)
+            or materialized.partition != partition
+        ):
+            raise ValueError("sampler materialized partition differs")
+        if set(materialized.offsets) != set(_partition_refs(dataset, partition)):
+            raise ValueError("sampler materialized reference map differs")
+        self.dataset = dataset
+        self.standard_fraction = float(standard_fraction)
+        self._refs_by_index = {
+            index: ref for ref, index in materialized.offsets.items()
+        }
+        fractions = MappingProxyType(OrderedDict((
+            (Source.GREEDY_STANDARD, self.standard_fraction),
+            (Source.SEARCH_CONVERSION, 1.0 - self.standard_fraction),
+        )))
+        legacy_rng = np.random.default_rng(seed)
+        self._initialize_with_rng(
+            materialized,
+            source_fractions=fractions,
+            batch_size=batch_size,
+            rng=legacy_rng,
+            partition=partition,
+            legacy_standard_fraction=self.standard_fraction,
+        )
+
+    def _next_refs_and_sources(
+        self,
+    ) -> list[tuple[tuple[int, int], Source]]:
+        return [
+            (self._refs_by_index[index], source)
+            for index, source in self._next_indices_and_sources()
+        ]
 
 
 def benchmark_imitation_sampler(
@@ -851,6 +1120,15 @@ class BehavioralCloningConfig:
             )
 
 
+PRODUCTION_DAGGER_DISTILLATION_CONFIG = BehavioralCloningConfig(
+    model_seed=227,
+    batch_size=256,
+    learning_rate=3e-4,
+    max_epochs=50,
+    patience=5,
+    device="cuda",
+)
+
 
 def resolve_behavioral_cloning_device(requested: str) -> dict[str, Any]:
     import torch
@@ -876,6 +1154,25 @@ def resolve_behavioral_cloning_device(requested: str) -> dict[str, Any]:
         "cuda_runtime": None,
         "device_index": None,
         "device_name": None,
+    }
+
+
+def _software_provenance() -> dict[str, str]:
+    import importlib.metadata
+    import platform
+    import sys
+
+    import torch
+
+    return {
+        "python_version": platform.python_version(),
+        "numpy_version": str(np.__version__),
+        "torch_version": str(torch.__version__),
+        "stable_baselines3_version": importlib.metadata.version(
+            "stable-baselines3"
+        ),
+        "sb3_contrib_version": importlib.metadata.version("sb3-contrib"),
+        "platform": platform.platform() or sys.platform,
     }
 
 @dataclass(frozen=True)
@@ -1000,9 +1297,18 @@ def _parameter_hash(named_parameters: Sequence[tuple[str, Any]]) -> str:
 def _distribution_tensors(model: Any, batch: ImitationBatch) -> tuple[Any, Any, Any]:
     import torch
 
-    observations = torch.as_tensor(batch.observations, dtype=torch.float32, device=model.device)
-    legal_masks = torch.as_tensor(batch.legal_masks, dtype=torch.bool, device=model.device)
-    actions = torch.as_tensor(batch.actions, dtype=torch.int64, device=model.device)
+    def tensor_source(values: np.ndarray) -> np.ndarray:
+        return values if values.flags.writeable else values.copy()
+
+    observations = torch.as_tensor(
+        tensor_source(batch.observations), dtype=torch.float32, device=model.device,
+    )
+    legal_masks = torch.as_tensor(
+        tensor_source(batch.legal_masks), dtype=torch.bool, device=model.device,
+    )
+    actions = torch.as_tensor(
+        tensor_source(batch.actions), dtype=torch.int64, device=model.device,
+    )
     distribution = model.policy.get_distribution(observations, action_masks=legal_masks)
     return distribution, actions, legal_masks
 
@@ -1017,9 +1323,13 @@ def _masked_logits(model: Any, batch: ImitationBatch) -> Any:
 
 
 def _strata_metrics(predictions: np.ndarray, actions: np.ndarray, batch: ImitationBatch) -> Mapping[str, Mapping[str, float | int]]:
+    teacher_names = {
+        Source.GREEDY_STANDARD: "greedy",
+        Source.SEARCH_CONVERSION: "bounded-search",
+        Source.DAGGER_TARGETED: "dagger-targeted",
+    }
     teacher = np.asarray(
-        ["greedy" if source is Source.GREEDY_STANDARD else "bounded-search" for source in batch.sources],
-        dtype=object,
+        [teacher_names[source] for source in batch.sources], dtype=object,
     )
     kind_names = {value: name for name, value in ACTION_KINDS.items()}
     dimensions = {
@@ -1091,8 +1401,20 @@ def _clone_metrics(model: Any, batch: ImitationBatch) -> CloneMetrics:
     return metrics
 
 
-def _atomic_actor_fixtures(path: Path, fixtures: ImitationBatch) -> None:
+def _atomic_actor_fixtures(
+    path: Path,
+    fixtures: ImitationBatch,
+    expected_logits: Any,
+) -> None:
     path = Path(path)
+    logits = expected_logits.detach().cpu().contiguous().numpy()
+    if (
+        logits.dtype != np.float32
+        or logits.ndim != 2
+        or logits.shape != fixtures.legal_masks.shape
+        or not np.isfinite(logits).all()
+    ):
+        raise ValueError("actor fixture logits have incompatible shape, dtype, or values")
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
     os.close(descriptor)
@@ -1102,6 +1424,7 @@ def _atomic_actor_fixtures(path: Path, fixtures: ImitationBatch) -> None:
                 stream,
                 observations=fixtures.observations.astype(np.float32, copy=False),
                 legal_masks=fixtures.legal_masks.astype(bool, copy=False),
+                expected_logits=logits,
             )
             stream.flush()
             os.fsync(stream.fileno())
@@ -1127,26 +1450,241 @@ def _assert_no_bc_optimizer_state(checkpoint: Path) -> None:
                 raise RuntimeError("saved PPO optimizer unexpectedly contains training state")
 
 
-def _verify_reload_identity(run_dir: Path, contract: EnvironmentContract, expected_logits: Any) -> None:
-    import torch
-    from .controllers import ControllerResolver
+def _contained_publication_file(root: Path, relative: str) -> Path:
+    root = Path(root).resolve(strict=True)
+    candidate = (root / _safe_relative(relative)).resolve(strict=True)
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        raise ValueError("publication artifact must be a contained regular file")
+    return candidate
 
-    with np.load(run_dir / "actor-fixtures.npz", allow_pickle=False) as loaded:
-        fixtures = ImitationBatch(
-            observations=loaded["observations"],
-            legal_masks=loaded["legal_masks"],
-            actions=np.zeros(len(loaded["observations"]), dtype=np.int64),
-            game_ids=np.zeros(len(loaded["observations"]), dtype=np.int64),
-            decision_indices=np.arange(len(loaded["observations"]), dtype=np.int32),
-            sources=np.full(len(loaded["observations"]), Source.GREEDY_STANDARD, dtype=object),
-            profiles=np.full(len(loaded["observations"]), "fixture", dtype=object),
-            seats=np.zeros(len(loaded["observations"]), dtype=np.uint8),
-            action_kinds=np.ones(len(loaded["observations"]), dtype=np.uint8),
-            partitions=np.full(len(loaded["observations"]), "validation", dtype=object),
+
+@dataclass(frozen=True)
+class _PublicationSnapshot:
+    root: Path
+    metadata: Mapping[str, Any]
+    checkpoint_bytes: bytes
+    checkpoint_sha256: str
+    fixtures_bytes: bytes
+    fixtures_sha256: str
+    metadata_sha256: str
+
+
+def _publication_artifact(
+    root: Path,
+    descriptor: object,
+    *,
+    canonical_path: str,
+) -> tuple[bytes, str]:
+    if (
+        not isinstance(descriptor, Mapping)
+        or set(descriptor) != {"path", "sha256"}
+        or descriptor.get("path") != canonical_path
+        or not _is_hash(descriptor.get("sha256"))
+    ):
+        raise ValueError("publication artifact descriptor is invalid")
+    path = _contained_publication_file(root, canonical_path)
+    with path.open("rb") as stream:
+        payload = stream.read()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != descriptor["sha256"]:
+        raise ValueError("publication artifact SHA-256 does not match physical bytes")
+    return payload, digest
+
+
+def _read_publication_metadata(
+    root: Path,
+    expected_contract: EnvironmentContract,
+) -> _PublicationSnapshot:
+    root = Path(root).resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("actor publication root must be a directory")
+    metadata_path = _contained_publication_file(root, "publication.json")
+    with metadata_path.open("rb") as stream:
+        metadata_bytes = stream.read()
+    try:
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("publication metadata is unreadable") from exc
+    if (
+        not isinstance(metadata, Mapping)
+        or set(metadata) != {
+            "schema_version",
+            "contract",
+            "checkpoint",
+            "actor_fixtures",
+            "target_actor_sha256_final",
+            "value_parameters_sha256_before",
+        }
+        or metadata.get("schema_version") != 1
+        or not _is_hash(metadata.get("target_actor_sha256_final"))
+        or not _is_hash(metadata.get("value_parameters_sha256_before"))
+    ):
+        raise ValueError("publication metadata is invalid")
+    if metadata.get("contract") != expected_contract.to_dict():
+        raise ContractMismatch("publication contract does not match expected contract")
+    checkpoint_bytes, checkpoint_sha256 = _publication_artifact(
+        root,
+        metadata.get("checkpoint"),
+        canonical_path="checkpoints/step_000000000.zip",
+    )
+    fixtures_bytes, fixtures_sha256 = _publication_artifact(
+        root,
+        metadata.get("actor_fixtures"),
+        canonical_path="actor-fixtures.npz",
+    )
+    return _PublicationSnapshot(
+        root=root,
+        metadata=metadata,
+        checkpoint_bytes=checkpoint_bytes,
+        checkpoint_sha256=checkpoint_sha256,
+        fixtures_bytes=fixtures_bytes,
+        fixtures_sha256=fixtures_sha256,
+        metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
+    )
+
+
+def _verify_reload_identity(
+    publication_root: Path,
+    adapter: Any,
+    contract: EnvironmentContract,
+) -> Mapping[str, Any]:
+    import torch
+
+    from .algorithms import actor_state_sha256
+
+    snapshot = _read_publication_metadata(publication_root, contract)
+    metadata = snapshot.metadata
+    fixtures_buffer = io.BytesIO(snapshot.fixtures_bytes)
+    try:
+        with np.load(fixtures_buffer, allow_pickle=False) as loaded:
+            if set(loaded.files) != {
+                "observations", "legal_masks", "expected_logits",
+            }:
+                raise ValueError(
+                    "actor fixtures must contain observations, legal_masks, and expected_logits"
+                )
+            observations = loaded["observations"].copy()
+            legal_masks = loaded["legal_masks"].copy()
+            expected_logits_array = loaded["expected_logits"].copy()
+    finally:
+        fixtures_buffer.close()
+    if (
+        observations.dtype != np.float32
+        or legal_masks.dtype != np.bool_
+        or expected_logits_array.dtype != np.float32
+        or observations.ndim != 2
+        or legal_masks.ndim != 2
+        or expected_logits_array.ndim != 2
+        or observations.shape[0] == 0
+        or observations.shape
+        != (legal_masks.shape[0], contract.observation_size)
+        or legal_masks.shape != expected_logits_array.shape
+        or legal_masks.shape[1] != contract.action_size
+        or not np.isfinite(observations).all()
+        or not np.isfinite(expected_logits_array).all()
+        or not legal_masks.any(axis=1).all()
+    ):
+        raise ValueError("actor fixtures have incompatible shape, dtype, or values")
+
+    checkpoint_buffer = io.BytesIO(snapshot.checkpoint_bytes)
+    try:
+        if checkpoint_buffer.tell() != 0:
+            raise AssertionError("publication checkpoint buffer is not rewound")
+        reloaded = adapter.load(checkpoint_buffer, env=None, device="cpu")
+    finally:
+        checkpoint_buffer.close()
+    adapter.validate_model(reloaded, contract)
+    if {parameter.device.type for parameter in reloaded.policy.parameters()} != {
+        "cpu"
+    }:
+        raise RuntimeError("reloaded actor publication is not canonical CPU")
+    reloaded.policy.set_training_mode(False)
+    with torch.no_grad():
+        distribution = reloaded.policy.get_distribution(
+            torch.as_tensor(
+                observations, dtype=torch.float32, device=reloaded.device,
+            ),
+            action_masks=torch.as_tensor(
+                legal_masks, dtype=torch.bool, device=reloaded.device,
+            ),
         )
-    resolved = ControllerResolver(contract).resolve(f"run:{run_dir}")
-    actual_logits = _masked_logits(resolved.model, fixtures)
+        actual_logits = distribution.distribution.logits.detach().cpu()
+    expected_logits = torch.as_tensor(expected_logits_array)
     torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=0)
+    actor_sha256 = actor_state_sha256(reloaded)
+    if actor_sha256 != metadata["target_actor_sha256_final"]:
+        raise RuntimeError("reloaded actor hash differs from publication metadata")
+    value_parameters_sha256 = _parameter_hash(
+        _value_named_parameters(reloaded)
+    )
+    if value_parameters_sha256 != metadata["value_parameters_sha256_before"]:
+        raise RuntimeError(
+            "reloaded value parameter hash differs from publication metadata"
+        )
+    return {
+        "checkpoint_sha256": snapshot.checkpoint_sha256,
+        "actor_sha256": actor_sha256,
+        "value_parameters_sha256": value_parameters_sha256,
+        "actor_fixtures_sha256": snapshot.fixtures_sha256,
+        "publication_metadata_sha256": snapshot.metadata_sha256,
+        "contract_hash": contract.contract_hash,
+        "encoding_hash": contract.encoding_hash,
+        "observation_size": contract.observation_size,
+        "action_size": contract.action_size,
+        "comparison_rtol": 0.0,
+        "comparison_atol": 0.0,
+        "maximum_absolute_logit_difference": float(
+            torch.max(torch.abs(actual_logits - expected_logits)).item()
+        ),
+    }
+
+
+_TRAINING_HISTORY_TIMING_FIELDS = (
+    "epoch",
+    "epoch_seconds",
+    "elapsed_seconds",
+    "examples_per_second",
+    "sampling_seconds",
+    "transfer_forward_seconds",
+    "optimization_seconds",
+    "validation_seconds",
+    "unclassified_seconds",
+)
+
+
+def _read_training_history_identity(
+    root: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    history_path = _contained_publication_file(root, "training-history.json")
+    try:
+        history = read_json(history_path)
+        epochs = history["epochs"]
+        if (
+            not isinstance(history, Mapping)
+            or history.get("schema_version") != 1
+            or type(history.get("model_seed")) is not int
+            or not isinstance(history.get("training_device"), Mapping)
+            or history.get("publication_device") != "cpu"
+            or not isinstance(epochs, list)
+            or not epochs
+        ):
+            raise ValueError
+        timings = []
+        for event in epochs:
+            if not isinstance(event, Mapping):
+                raise ValueError
+            _validate_behavioral_cloning_progress_event(event)
+            timings.append({
+                key: event[key] for key in _TRAINING_HISTORY_TIMING_FIELDS
+            })
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("training history is invalid") from error
+    return history, {
+        "path": "training-history.json",
+        "sha256": sha256_file(history_path),
+        "epoch_count": len(epochs),
+        "timings": timings,
+    }
 
 
 def canonicalize_behavioral_clone_for_publication(model: Any) -> None:
@@ -1198,9 +1736,107 @@ def _validate_behavioral_cloning_progress_event(event: Mapping[str, Any]) -> Non
     ):
         raise ValueError("behavioral-cloning phase timing differs from epoch duration")
 
-def train_behavioral_clone(
+
+def validate_actor_supervision_publication(
+    run_dir: Path,
+    expected_contract: EnvironmentContract,
+) -> Mapping[str, Any]:
+    """Reopen a completed actor-supervision run and authenticate its physical bytes."""
+
+    from .algorithms import MaskablePPOAdapter
+
+    root = Path(run_dir).resolve(strict=True)
+    bc_path = _contained_publication_file(root, "bc.json")
+    run_path = _contained_publication_file(root, "run.json")
+    bc = read_json(bc_path)
+    manifest = read_json(run_path)
+    if (
+        not isinstance(bc, Mapping)
+        or not isinstance(manifest, Mapping)
+        or bc.get("schema_version") != 1
+        or manifest.get("schema_version") != 1
+        or manifest.get("state") != "completed"
+        or manifest.get("timesteps") != 0
+        or manifest.get("latest_checkpoint")
+        != "checkpoints/step_000000000.zip"
+        or manifest.get("latest_checkpoint_step") != 0
+        or manifest.get("contract") != expected_contract.to_dict()
+    ):
+        raise ValueError("actor-supervision manifests are invalid")
+
+    history, training_history = _read_training_history_identity(root)
+    if (
+        bc.get("training_history") != training_history
+        or manifest.get("training_history") != training_history
+    ):
+        raise ValueError("training history does not match physical bytes")
+    for field in ("training_device", "publication_device"):
+        if (
+            bc.get(field) != manifest.get(field)
+            or history.get(field) != bc.get(field)
+        ):
+            raise ValueError(
+                f"actor-supervision {field} provenance does not agree"
+            )
+    if (
+        bc.get("validation_partition")
+        not in {"held_out_targeted", "held_out_demonstration"}
+        or manifest.get("validation_partition")
+        != bc.get("validation_partition")
+    ):
+        raise ValueError(
+            "actor-supervision validation_partition provenance does not agree"
+        )
+    if history.get("model_seed") != bc.get("model_seed"):
+        raise ValueError("training history model seed does not agree")
+
+    verification = dict(
+        _verify_reload_identity(root, MaskablePPOAdapter(), expected_contract)
+    )
+    if (
+        bc.get("publication_verification") != verification
+        or manifest.get("publication_verification") != verification
+    ):
+        raise ValueError(
+            "publication verification does not match physical bytes"
+        )
+    for field, expected in (
+        ("checkpoint_sha256", verification["checkpoint_sha256"]),
+        ("target_actor_sha256_final", verification["actor_sha256"]),
+        (
+            "value_parameters_sha256_before",
+            verification["value_parameters_sha256"],
+        ),
+        (
+            "value_parameters_sha256_after",
+            verification["value_parameters_sha256"],
+        ),
+        (
+            "publication_metadata_sha256",
+            verification["publication_metadata_sha256"],
+        ),
+    ):
+        if bc.get(field) != expected or manifest.get(field) != expected:
+            raise ValueError(f"actor-supervision {field} does not agree")
+    return verification
+
+
+def _prepare_behavioral_cloning_request(
+    config: BehavioralCloningConfig, run_dir: Path,
+) -> tuple[Path, dict[str, Any]]:
+    if not isinstance(config, BehavioralCloningConfig):
+        raise TypeError("config must be BehavioralCloningConfig")
+    prepared_run_dir = Path(run_dir)
+    training_device = resolve_behavioral_cloning_device(config.device)
+    prepared_run_dir.parent.mkdir(parents=True, exist_ok=True)
+    if prepared_run_dir.exists():
+        raise FileExistsError(prepared_run_dir)
+    return prepared_run_dir, training_device
+
+
+def train_actor_supervision(
     *,
-    dataset: ImitationDataset,
+    corpus: ActorSupervisionCorpus,
     scenario: ResolvedScenario,
     env: Any,
     contract: EnvironmentContract,
@@ -1208,33 +1844,69 @@ def train_behavioral_clone(
     run_dir: Path,
     config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
     progress: Callable[[Mapping[str, Any]], None] | None = None,
+    _sampler_factory: Callable[
+        [MaterializedImitationPartition, int, int], Any
+    ] | None = None,
+    _prepared_request: tuple[Path, dict[str, Any]] | None = None,
+    warm_start: Any | None = None,
+    distillation_mode: str | None = None,
 ) -> BehavioralCloningResult:
-    """Train only the production MaskablePPO actor and atomically publish a resolver-backed run."""
+    """Train the production actor from generic immutable supervision partitions."""
     import torch
-    from .algorithms import MaskablePPOAdapter
+    from .algorithms import (
+        ActorTransferSource,
+        MaskablePPOAdapter,
+        actor_transfer_provenance_to_json,
+        actor_state_sha256,
+    )
 
-    if not isinstance(dataset, ImitationDataset):
-        raise TypeError("dataset must be a loaded ImitationDataset")
-    if dataset.contract != contract:
-        raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(corpus, ActorSupervisionCorpus):
+        raise TypeError("corpus must be an ActorSupervisionCorpus")
     if not isinstance(scenario, ResolvedScenario):
         raise TypeError("scenario must be a ResolvedScenario")
     if scenario.environment != contract.environment:
         raise ContractMismatch("behavioral-cloning scenario environment does not match the contract")
     scenario_hash = hashlib.sha256(scenario.canonical_json.encode("utf-8")).hexdigest()
-    if any(game["scenario_hash"] != scenario_hash for game in dataset.games):
-        raise ContractMismatch("behavioral-cloning scenario hash does not match the dataset")
+    if (
+        corpus.identity.get("contract_hash") != contract.contract_hash
+        or corpus.identity.get("encoding_hash") != contract.encoding_hash
+    ):
+        raise ContractMismatch("actor-supervision corpus contract does not match")
+    if corpus.identity.get("scenario_hash") != scenario_hash:
+        raise ContractMismatch("behavioral-cloning scenario hash does not match the corpus")
+    dataset_manifest_sha256 = corpus.identity.get("base_manifest_sha256")
+    if not _is_hash(dataset_manifest_sha256):
+        raise ValueError("actor-supervision base manifest identity is invalid")
+    if (warm_start is None) != (distillation_mode is None):
+        raise ValueError(
+            "actor-supervision warm start and distillation mode are inseparable"
+        )
+    if warm_start is not None:
+        if not isinstance(warm_start, ActorTransferSource):
+            raise TypeError("warm_start must be an ActorTransferSource")
+        if distillation_mode not in {"production", "nonproduction_cpu"}:
+            raise ValueError("actor-supervision distillation mode is invalid")
+        if (
+            distillation_mode == "production"
+            and config != PRODUCTION_DAGGER_DISTILLATION_CONFIG
+        ):
+            raise ValueError(
+                "production DAgger distillation must use the exact locked production config"
+            )
+        if set(corpus.validation.batch.sources) != {Source.DAGGER_TARGETED}:
+            raise ValueError(
+                "DAgger distillation validation must contain targeted labels only"
+            )
 
-    if not isinstance(config, BehavioralCloningConfig):
-        raise TypeError("config must be BehavioralCloningConfig")
-    run_dir = Path(run_dir)
-    training_device = resolve_behavioral_cloning_device(config.device)
-    run_dir.parent.mkdir(parents=True, exist_ok=True)
-    if run_dir.exists():
-        raise FileExistsError(run_dir)
+    if _prepared_request is None:
+        run_dir, training_device = _prepare_behavioral_cloning_request(
+            config, run_dir,
+        )
+    else:
+        run_dir, training_device = _prepared_request
 
-    training = materialize_imitation_partition(dataset, "train")
-    validation = materialize_imitation_partition(dataset, "validation")
+    training = corpus.training
+    validation = corpus.validation
     fixtures = _fixture_batch(validation.batch)
     adapter = MaskablePPOAdapter()
     model = adapter.create(
@@ -1249,29 +1921,50 @@ def train_behavioral_clone(
     if parameter_devices != {config.device}:
         raise RuntimeError("behavioral-cloning model parameters are not on the requested device")
 
-    actor_named = _actor_named_parameters(model)
     value_named = _value_named_parameters(model)
+    value_parameters = tuple(parameter for _name, parameter in value_named)
+    if not value_parameters:
+        raise RuntimeError("production policy did not expose value parameters")
+    value_before = tuple(
+        parameter.detach().cpu().clone() for parameter in value_parameters
+    )
+    value_hash_before = _parameter_hash(value_named)
+    actor_initialization = None
+    if warm_start is not None:
+        actor_initialization = actor_transfer_provenance_to_json(
+            adapter.initialize_actor_from_source(
+                model,
+                warm_start,
+                contract,
+                config.device,
+            )
+        )
+        if _parameter_hash(value_named) != value_hash_before:
+            raise RuntimeError("actor warm-start modified value-side parameters")
+    target_actor_sha256_initial = actor_state_sha256(model)
+    actor_named = _actor_named_parameters(model)
     actor_parameters = tuple(chain(
         model.policy.features_extractor.parameters(),
         model.policy.mlp_extractor.policy_net.parameters(),
         model.policy.action_net.parameters(),
     ))
     assert {id(parameter) for parameter in actor_parameters} == {id(parameter) for _name, parameter in actor_named}
-    value_parameters = tuple(parameter for _name, parameter in value_named)
     if not actor_parameters or not value_parameters:
         raise RuntimeError("production policy did not expose actor/value parameter groups")
     if {id(parameter) for parameter in actor_parameters} & {id(parameter) for parameter in value_parameters}:
         raise RuntimeError("behavioral-cloning actor and value parameter groups overlap")
-    value_before = tuple(parameter.detach().cpu().clone() for parameter in value_parameters)
-    value_hash_before = _parameter_hash(value_named)
     optimizer = torch.optim.Adam(actor_parameters, lr=float(config.learning_rate))
 
-    sampler = StratifiedDecisionSampler(
-        dataset,
-        training,
-        batch_size=config.batch_size,
-        seed=config.model_seed,
-        partition="train",
+    sampler = (
+        SourceMixtureSampler(
+            training,
+            source_fractions=corpus.source_fractions,
+            batch_size=config.batch_size,
+            seed=config.model_seed,
+            partition="train",
+        )
+        if _sampler_factory is None
+        else _sampler_factory(training, config.batch_size, config.model_seed)
     )
     steps_per_epoch = max(1, int(np.ceil(len(training.batch.actions) / config.batch_size)))
     best_nll = float("inf")
@@ -1279,6 +1972,7 @@ def train_behavioral_clone(
     best_actor_state: tuple[Any, ...] | None = None
     epochs_without_improvement = 0
     epochs_trained = 0
+    source_example_counts: Counter[str] = Counter()
 
     history: list[dict[str, Any]] = []
     training_started = time.perf_counter()
@@ -1290,12 +1984,18 @@ def train_behavioral_clone(
         transfer_forward_seconds = 0.0
         optimization_seconds = 0.0
         validation_seconds = 0.0
+        epoch_source_counts: Counter[str] = Counter()
         for _step in range(steps_per_epoch):
             phase_started = time.perf_counter()
             batch = sampler.next_batch()
             sampling_seconds += time.perf_counter() - phase_started
             if set(batch.partitions) != {"train"}:
                 raise RuntimeError("validation rows entered behavioral-cloning optimization")
+            selected_sources = Counter(
+                source.value for source in batch.sources
+            )
+            source_example_counts.update(selected_sources)
+            epoch_source_counts.update(selected_sources)
 
             phase_started = time.perf_counter()
             distribution, actions, _legal_masks = _distribution_tensors(model, batch)
@@ -1306,6 +2006,10 @@ def train_behavioral_clone(
             phase_started = time.perf_counter()
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if any(parameter.grad is not None for parameter in value_parameters):
+                raise RuntimeError(
+                    "actor supervision produced a value-side gradient"
+                )
             torch.nn.utils.clip_grad_norm_(actor_parameters, max_norm=1.0)
             optimizer.step()
             optimization_seconds += time.perf_counter() - phase_started
@@ -1360,6 +2064,11 @@ def train_behavioral_clone(
             "validation_seconds": float(validation_seconds),
             "unclassified_seconds": float(unclassified_seconds),
         }
+        if warm_start is not None:
+            event["source_example_counts"] = {
+                source.value: int(epoch_source_counts[source.value])
+                for source in corpus.source_fractions
+            }
         _validate_behavioral_cloning_progress_event(event)
         history.append(event)
         if progress is not None:
@@ -1379,12 +2088,22 @@ def train_behavioral_clone(
     value_hash_after = _parameter_hash(value_named)
     if value_hash_after != value_hash_before:
         raise RuntimeError("behavioral cloning modified value-side parameters")
+    target_actor_sha256_final = actor_state_sha256(model)
     validation_metrics = _clone_metrics(model, validation.batch)
     expected_logits = _masked_logits(model, fixtures)
 
-    dataset_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
     config_data = asdict(config)
     metrics_data = asdict(validation_metrics)
+    corpus_identity = dict(corpus.identity)
+    source_mixture_data = [
+        {"source": source.value, "fraction": fraction}
+        for source, fraction in corpus.source_fractions.items()
+    ]
+    validation_partition = (
+        "held_out_targeted"
+        if warm_start is not None
+        else "held_out_demonstration"
+    )
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{run_dir.name}.publishing-", dir=run_dir.parent)
     )
@@ -1393,33 +2112,105 @@ def train_behavioral_clone(
         checkpoint.parent.mkdir(parents=True)
         checkpoint = adapter.save(model, checkpoint)
         _assert_no_bc_optimizer_state(checkpoint)
-        _atomic_actor_fixtures(temporary / "actor-fixtures.npz", fixtures)
+        fixtures_path = temporary / "actor-fixtures.npz"
+        _atomic_actor_fixtures(fixtures_path, fixtures, expected_logits)
+        checkpoint_sha256 = sha256_file(checkpoint)
+        actor_fixtures_sha256 = sha256_file(fixtures_path)
+        atomic_write_json(
+            temporary / "publication.json",
+            {
+                "schema_version": 1,
+                "contract": contract.to_dict(),
+                "checkpoint": {
+                    "path": "checkpoints/step_000000000.zip",
+                    "sha256": checkpoint_sha256,
+                },
+                "actor_fixtures": {
+                    "path": "actor-fixtures.npz",
+                    "sha256": actor_fixtures_sha256,
+                },
+                "target_actor_sha256_final": target_actor_sha256_final,
+                "value_parameters_sha256_before": value_hash_before,
+            },
+        )
+        publication_verification = dict(_verify_reload_identity(
+            temporary,
+            adapter,
+            contract,
+        ))
+        if publication_verification["actor_sha256"] != target_actor_sha256_final:
+            raise RuntimeError(
+                "reloaded actor hash differs from the canonical training actor"
+            )
+        checkpoint_sha256 = publication_verification["checkpoint_sha256"]
+        publication_metadata_sha256 = publication_verification[
+            "publication_metadata_sha256"
+        ]
+        software_provenance = _software_provenance()
+        total_source_counts = {
+            source.value: int(source_example_counts[source.value])
+            for source in corpus.source_fractions
+        }
+        atomic_write_json(
+            temporary / "training-history.json",
+            {
+                "schema_version": 1,
+                "model_seed": config.model_seed,
+                "training_device": training_device,
+                "publication_device": "cpu",
+                "epochs": history,
+            },
+        )
+        _physical_history, training_history = (
+            _read_training_history_identity(temporary)
+        )
         bc_data = {
             "schema_version": 1,
             "algorithm": adapter.name,
             "policy": adapter.policy_name,
             "dataset_manifest_sha256": dataset_manifest_sha256,
+            "supervision_corpus": corpus_identity,
+            "source_mixture": source_mixture_data,
             "config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
             "epochs_trained": epochs_trained,
             "training_device": training_device,
             "publication_device": "cpu",
-            "best_validation_nll": validation_metrics.nll,
+            "best_validation_nll": best_nll,
             "actor_parameter_count": int(sum(parameter.numel() for parameter in actor_parameters)),
             "value_parameter_count": int(sum(parameter.numel() for parameter in value_parameters)),
             "value_parameters_sha256_before": value_hash_before,
             "value_parameters_sha256_after": value_hash_after,
+            "target_actor_sha256_initial": target_actor_sha256_initial,
+            "target_actor_sha256_final": target_actor_sha256_final,
+            "checkpoint_sha256": checkpoint_sha256,
+            "publication_metadata_sha256": publication_metadata_sha256,
+            "publication_verification": publication_verification,
+            "training_history": training_history,
+            "software_provenance": software_provenance,
+            "source_example_counts": total_source_counts,
+            "validation_partition": validation_partition,
             "training_decision_count": int(len(training.batch.actions)),
             "validation_decision_count": int(len(validation.batch.actions)),
             "validation_game_count": int(len(np.unique(validation.batch.game_ids))),
         }
+        if warm_start is not None:
+            bc_data.update({
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": len(
+                    corpus.identity["train_overlays"]
+                ),
+                "production": distillation_mode == "production",
+                "actor_initialization": actor_initialization,
+            })
         manifest = {
             "schema_version": 1,
             "state": "completed",
             "timesteps": 0,
             "latest_checkpoint": "checkpoints/step_000000000.zip",
             "latest_checkpoint_step": 0,
+            "checkpoint_sha256": checkpoint_sha256,
             "config": {
                 "backend": "stable_baselines3",
                 "algorithm": adapter.name,
@@ -1432,25 +2223,38 @@ def train_behavioral_clone(
             "contract": contract.to_dict(),
             "scenario": {"path": "scenario.json", "template_id": scenario.template_id, "schema_version": scenario.schema_version},
             "dataset_manifest_sha256": dataset_manifest_sha256,
+            "supervision_corpus": corpus_identity,
+            "source_mixture": source_mixture_data,
             "bc_config": config_data,
             "model_seed": config.model_seed,
             "best_epoch": best_epoch,
+            "target_actor_sha256_initial": target_actor_sha256_initial,
+            "target_actor_sha256_final": target_actor_sha256_final,
+            "value_parameters_sha256_before": value_hash_before,
+            "value_parameters_sha256_after": value_hash_after,
+            "publication_metadata_sha256": publication_metadata_sha256,
+            "publication_verification": publication_verification,
+            "training_history": training_history,
+            "training_device": training_device,
+            "publication_device": "cpu",
+            "validation_partition": validation_partition,
+            "software_provenance": software_provenance,
+            "source_example_counts": total_source_counts,
         }
-        atomic_write_json(
-            temporary / "training-history.json",
-            {
-                "schema_version": 1,
-                "model_seed": config.model_seed,
-                "training_device": training_device,
-                "publication_device": "cpu",
-                "epochs": history,
-            },
-        )
+        if warm_start is not None:
+            manifest.update({
+                "training_kind": "selective-dagger-distillation-v1",
+                "distillation_iteration": len(
+                    corpus.identity["train_overlays"]
+                ),
+                "production": distillation_mode == "production",
+                "actor_initialization": actor_initialization,
+            })
         scenario.write(temporary / "scenario.json")
         atomic_write_json(temporary / "bc.json", bc_data)
         atomic_write_json(temporary / "metrics.json", metrics_data)
         atomic_write_json(temporary / "run.json", manifest)
-        _verify_reload_identity(temporary, contract, expected_logits)
+        validate_actor_supervision_publication(temporary, contract)
         os.replace(temporary, run_dir)
     finally:
         if temporary.exists():
@@ -1473,4 +2277,94 @@ def train_behavioral_clone(
         validation=validation_metrics,
         best_epoch=best_epoch,
         epochs_trained=epochs_trained,
+    )
+
+
+def train_behavioral_clone(
+    *,
+    dataset: ImitationDataset,
+    scenario: ResolvedScenario,
+    env: Any,
+    contract: EnvironmentContract,
+    spaces_info: Mapping[str, Any],
+    run_dir: Path,
+    config: BehavioralCloningConfig = BehavioralCloningConfig(device="cpu"),
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
+) -> BehavioralCloningResult:
+    """Behavior-preserving adapter for the original two-source imitation dataset."""
+
+    if not isinstance(dataset, ImitationDataset):
+        raise TypeError("dataset must be a loaded ImitationDataset")
+    if dataset.contract != contract:
+        raise ContractMismatch("behavioral-cloning dataset contract does not match")
+    if not isinstance(scenario, ResolvedScenario):
+        raise TypeError("scenario must be a ResolvedScenario")
+    if scenario.environment != contract.environment:
+        raise ContractMismatch(
+            "behavioral-cloning scenario environment does not match the contract"
+        )
+    scenario_hash = hashlib.sha256(
+        scenario.canonical_json.encode("utf-8")
+    ).hexdigest()
+    if any(game["scenario_hash"] != scenario_hash for game in dataset.games):
+        raise ContractMismatch(
+            "behavioral-cloning scenario hash does not match the dataset"
+        )
+
+    prepared_request = _prepare_behavioral_cloning_request(config, run_dir)
+    training = materialize_imitation_partition(dataset, "train")
+    validation = materialize_imitation_partition(dataset, "validation")
+    if set(training.offsets) & set(validation.offsets):
+        validation = MaterializedImitationPartition(
+            partition="validation",
+            batch=validation.batch,
+            offsets=MappingProxyType({
+                ("validation-alias", *identity): index
+                for identity, index in validation.offsets.items()
+            }),
+        )
+    base_manifest_sha256 = sha256_file(dataset.root / "manifest.json")
+    fractions = MappingProxyType(OrderedDict((
+        (Source.GREEDY_STANDARD, 0.70),
+        (Source.SEARCH_CONVERSION, 0.30),
+    )))
+    corpus = ActorSupervisionCorpus(
+        training=training,
+        validation=validation,
+        source_fractions=fractions,
+        identity=MappingProxyType({
+            "schema_version": 1,
+            "kind": "behavioral-cloning-v1",
+            "base_manifest_sha256": base_manifest_sha256,
+            "contract_hash": contract.contract_hash,
+            "encoding_hash": contract.encoding_hash,
+            "scenario_hash": scenario_hash,
+        }),
+    )
+
+    def legacy_sampler(
+        materialized: MaterializedImitationPartition,
+        batch_size: int,
+        seed: int,
+    ) -> StratifiedDecisionSampler:
+        return StratifiedDecisionSampler(
+            dataset,
+            materialized,
+            batch_size=batch_size,
+            standard_fraction=0.70,
+            seed=seed,
+            partition="train",
+        )
+
+    return train_actor_supervision(
+        corpus=corpus,
+        scenario=scenario,
+        env=env,
+        contract=contract,
+        spaces_info=spaces_info,
+        run_dir=run_dir,
+        config=config,
+        progress=progress,
+        _sampler_factory=legacy_sampler,
+        _prepared_request=prepared_request,
     )

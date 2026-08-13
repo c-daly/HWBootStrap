@@ -42,6 +42,21 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void ConfigurationMetadata_ReportsTheStableSearchContract()
+        {
+            var teacher = new BoundedSearchAgent(expansionBudget: 2048, depth: 4, useHeuristic: true);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(teacher.ExpansionBudget, Is.EqualTo(2048));
+                Assert.That(teacher.Depth, Is.EqualTo(4));
+                Assert.That(teacher.UseHeuristic, Is.True);
+                Assert.That(BoundedSearchAgent.HeuristicIdentity,
+                    Is.EqualTo("material-plus-pursuit-v1"));
+            });
+        }
+
+        [Test]
         public void Decide_PrefersAttackBeforeMoveAndEndTurn_WhenNonterminalScoresTie()
         {
             var teacher = new BoundedSearchAgent(expansionBudget: 64, depth: 1, useHeuristic: false);

@@ -33,6 +33,7 @@ namespace HexWars.Engine.Rl
         private float _prevAdv;
         private float _armyValue;
         private int _steps;
+        private int _decisionIndex;
 
         public TacticalV2DuelEnv(
             TacticalV2Config config,
@@ -51,6 +52,7 @@ namespace HexWars.Engine.Rl
         public GameState State => _state;
         public string SelectedStartProfileId { get; private set; } = "standard-3v3";
         public PlayerId ReferenceSeat { get; private set; } = PlayerId.Player0;
+        public ITacticalV2DecisionObserver? DecisionObserver { get; set; }
 
         /// <summary>Opt-in: when true, every accepted command captures a <see cref="DuelTransition"/>
         /// for <see cref="DrainTransitions"/>. Defaults to false so headless training (which never
@@ -108,10 +110,13 @@ namespace HexWars.Engine.Rl
             _ctrl1 = controller1;
             _learner = learnerSeat;
             _steps = 0;
+            _decisionIndex = 0;
             _log.Clear();
             _demonstrationSink?.Reset();
             _transitions.Clear();
             _transitionSink.Reset(_state);
+            DecisionObserver?.Reset(new TacticalV2EpisodeContext(
+                _state, SelectedStartProfileId, ReferenceSeat, _learner, _cfg.PointsWeight));
             AdvancePastInternal();
             _prevAdv = Advantage();
             _armyValue = RewardShaping.PositionValue(_state, _learner, _cfg.PointsWeight);
@@ -123,7 +128,35 @@ namespace HexWars.Engine.Rl
         public View Step(int action)
         {
             PlayerId seat = _state.ActivePlayer;
-            Command cmd = TacticalV2Coding.Decode(action, _state, seat, _layout, Registry(seat));
+            ITacticalV2DecisionObserver? observer = DecisionObserver;
+            Command cmd;
+            if (observer == null)
+            {
+                cmd = TacticalV2Coding.Decode(action, _state, seat, _layout, Registry(seat));
+            }
+            else
+            {
+                TacticalV2UnitRegistry own = Registry(seat).Snapshot();
+                TacticalV2UnitRegistry foe = Registry(
+                    seat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0).Snapshot();
+                float[] observation = TacticalV2Coding.Observe(_state, seat, _layout, own, foe);
+                bool[] legalMask = TacticalV2Coding.Mask(_state, seat, _layout, own);
+                if (action < 0 || action >= legalMask.Length || !legalMask[action])
+                    throw new InvalidOperationException("observer action must be in range and legal");
+
+                cmd = TacticalV2Coding.Decode(action, _state, seat, _layout, own);
+                if (!TacticalV2Coding.TryEncode(cmd, _state, _layout, own, out int encoded)
+                    || encoded != action)
+                    throw new InvalidOperationException(
+                        "observer action did not round-trip to an identical legal tactical-v2 command");
+
+                if (seat == _learner)
+                {
+                    observer.Observe(new TacticalV2DecisionContext(
+                        _state, seat, _decisionIndex++, observation, legalMask, action, cmd,
+                        own, foe, _layout));
+                }
+            }
 
             // active-piece closing, credited only when the LEARNER moves one of its own units
             var mv = seat == _learner ? cmd as MoveUnit : null;

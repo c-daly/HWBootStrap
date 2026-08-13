@@ -5,6 +5,10 @@ from __future__ import annotations
 import os
 import shutil
 import json
+import base64
+import binascii
+import hashlib
+import re
 import csv
 import subprocess
 import tempfile
@@ -16,7 +20,9 @@ from math import isfinite, sqrt
 from statistics import NormalDist
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Literal
+from types import MappingProxyType
+from uuid import uuid4
 
 import numpy as np
 
@@ -54,6 +60,7 @@ from .tactical_trace import EpisodeTrace
 DEFAULT_HELD_OUT_SEED = 1_000_000
 MAX_DECISIONS_PER_GAME = 10_000
 
+EvidenceRetention = Literal["diagnostic", "all"]
 
 def wilson_interval(
     successes: int, total: int, confidence: float = 0.95
@@ -96,30 +103,30 @@ def controller_identity(resolved: ResolvedController) -> dict[str, Any]:
     return identity
 
 
-def _validate_demonstration_command(
-    raw: Any, *, seat: int, index: int
+def _validate_authoritative_command(
+    raw: Any, *, seat: int, descriptor: str
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
-        raise ValueError(f"demonstration decision {index} command must be an object")
+        raise ValueError(f"{descriptor} must be an object")
     required = {"Kind", "Issuer", "ActorId", "TargetId", "Q", "R"}
     if set(raw) != required:
-        raise ValueError(f"demonstration decision {index} command fields are invalid")
+        raise ValueError(f"{descriptor} fields are invalid")
 
     kind = raw["Kind"]
     issuer = raw["Issuer"]
     if not isinstance(kind, str) or kind not in {
         "end_turn", "move", "attack", "deploy",
     }:
-        raise ValueError(f"demonstration decision {index} command kind is invalid")
+        raise ValueError(f"{descriptor} kind is invalid")
     if type(issuer) is not int or issuer not in {0, 1} or issuer != seat:
-        raise ValueError(f"demonstration decision {index} command issuer is invalid")
+        raise ValueError(f"{descriptor} issuer is invalid")
 
     nullable_fields = ("ActorId", "TargetId", "Q", "R")
     for field in nullable_fields:
         value = raw[field]
         if value is not None and type(value) is not int:
             raise ValueError(
-                f"demonstration decision {index} command {field} is invalid"
+                f"{descriptor} {field} is invalid"
             )
 
     actor = raw["ActorId"]
@@ -133,7 +140,7 @@ def _validate_demonstration_command(
         or (kind == "deploy" and actor is None and target is None and q is not None and r is not None)
     )
     if not shape_is_valid:
-        raise ValueError(f"demonstration decision {index} command shape is invalid")
+        raise ValueError(f"{descriptor} shape is invalid")
     return dict(raw)
 
 
@@ -193,11 +200,166 @@ def validate_demonstration_payload(
             raise ValueError(f"demonstration decision {index} seat is invalid")
 
         decision = dict(raw)
-        decision["Command"] = _validate_demonstration_command(
-            raw["Command"], seat=seat, index=index
+        decision["Command"] = _validate_authoritative_command(
+            raw["Command"],
+            seat=seat,
+            descriptor=f"demonstration decision {index} command",
         )
         result.append(decision)
     return result
+
+
+def validate_dagger_payload(
+    payload: Any, contract: EnvironmentContract
+) -> list[dict[str, Any]]:
+    """Validate and return a version-1 tactical-v2 selective-DAgger batch."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("DAgger payload must be an object")
+    if set(payload) != {"schema_version", "decisions"}:
+        raise ValueError("DAgger payload fields are invalid")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise ValueError("unsupported DAgger schema version")
+    decisions = payload["decisions"]
+    if not isinstance(decisions, list):
+        raise ValueError("DAgger decisions must be a list")
+
+    required = {
+        "Observation",
+        "LegalMask",
+        "LearnerAction",
+        "LearnerCommand",
+        "TeacherAction",
+        "TeacherCommand",
+        "Reasons",
+        "StateHash",
+        "NormalizedAdvantage",
+        "OpponentLivingUnitCount",
+        "ProductiveLegalActionCount",
+        "Seat",
+        "Round",
+        "DecisionIndex",
+        "Disagreement",
+        "OracleDepth",
+        "OracleExpansionBudget",
+        "OracleHeuristicIdentity",
+        "OracleActualExpansionCount",
+    }
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(decisions):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"DAgger decision {index} must be an object")
+        if set(raw) != required:
+            raise ValueError(f"DAgger decision {index} fields are invalid")
+
+        observation = raw["Observation"]
+        if not isinstance(observation, list) or len(observation) != contract.observation_size:
+            raise ValueError(f"DAgger decision {index} observation length is invalid")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(float(value))
+            for value in observation
+        ):
+            raise ValueError(
+                f"DAgger decision {index} observation values must be finite"
+            )
+
+        legal_mask = raw["LegalMask"]
+        if (
+            not isinstance(legal_mask, list)
+            or len(legal_mask) != contract.action_size
+            or any(type(value) is not bool for value in legal_mask)
+        ):
+            raise ValueError(
+                f"DAgger decision {index} legal mask length or values are invalid"
+            )
+
+        actions: dict[str, int] = {}
+        for field, label in (
+            ("LearnerAction", "learner action"),
+            ("TeacherAction", "teacher action"),
+        ):
+            action = raw[field]
+            if type(action) is not int or action < 0 or action >= contract.action_size:
+                raise ValueError(f"DAgger decision {index} {label} is invalid")
+            if not legal_mask[action]:
+                raise ValueError(f"DAgger decision {index} {label} is masked off")
+            actions[field] = action
+
+        reasons = raw["Reasons"]
+        if type(reasons) is not int or reasons <= 0 or reasons & ~15:
+            raise ValueError(f"DAgger decision {index} reasons bitmask is invalid")
+
+        state_hash = raw["StateHash"]
+        if not isinstance(state_hash, str) or re.fullmatch(r"[0-9a-f]{64}", state_hash) is None:
+            raise ValueError(f"DAgger decision {index} state hash is invalid")
+
+        normalized_advantage = raw["NormalizedAdvantage"]
+        if (
+            isinstance(normalized_advantage, bool)
+            or not isinstance(normalized_advantage, (int, float))
+            or not isfinite(float(normalized_advantage))
+        ):
+            raise ValueError(
+                f"DAgger decision {index} normalized advantage must be finite"
+            )
+
+        for field, label in (
+            ("OpponentLivingUnitCount", "opponent living unit count"),
+            ("ProductiveLegalActionCount", "productive legal action count"),
+            ("Round", "round"),
+            ("DecisionIndex", "decision index"),
+        ):
+            value = raw[field]
+            if type(value) is not int or value < 0:
+                raise ValueError(f"DAgger decision {index} {label} is invalid")
+
+        seat = raw["Seat"]
+        if type(seat) is not int or seat not in {0, 1}:
+            raise ValueError(f"DAgger decision {index} seat is invalid")
+
+        disagreement = raw["Disagreement"]
+        if type(disagreement) is not bool or disagreement is not (
+            actions["LearnerAction"] != actions["TeacherAction"]
+        ):
+            raise ValueError(f"DAgger decision {index} disagreement is invalid")
+
+        oracle_depth = raw["OracleDepth"]
+        if type(oracle_depth) is not int or oracle_depth < 1:
+            raise ValueError(f"DAgger decision {index} oracle depth is invalid")
+        oracle_budget = raw["OracleExpansionBudget"]
+        if type(oracle_budget) is not int or oracle_budget < 1:
+            raise ValueError(
+                f"DAgger decision {index} oracle expansion budget is invalid"
+            )
+        if raw["OracleHeuristicIdentity"] != "material-plus-pursuit-v1":
+            raise ValueError(
+                f"DAgger decision {index} oracle heuristic identity is invalid"
+            )
+        actual_expansions = raw["OracleActualExpansionCount"]
+        if (
+            type(actual_expansions) is not int
+            or actual_expansions < 0
+            or actual_expansions > oracle_budget
+        ):
+            raise ValueError(
+                f"DAgger decision {index} actual expansion count is invalid"
+            )
+
+        decision = dict(raw)
+        decision["LearnerCommand"] = _validate_authoritative_command(
+            raw["LearnerCommand"],
+            seat=seat,
+            descriptor=f"DAgger decision {index} learner command",
+        )
+        decision["TeacherCommand"] = _validate_authoritative_command(
+            raw["TeacherCommand"],
+            seat=seat,
+            descriptor=f"DAgger decision {index} teacher command",
+        )
+        result.append(decision)
+    return result
+
 
 
 class DuelClient:
@@ -307,6 +469,45 @@ class DuelClient:
         payload = self._rpc({"cmd": "duel_demo_drain"})
         return validate_demonstration_payload(payload, self.contract)
 
+    def configure_dagger(
+        self,
+        *,
+        enabled: bool,
+        depth: int,
+        expansion_budget: int,
+        use_heuristic: bool,
+    ) -> None:
+        if type(enabled) is not bool:
+            raise ValueError("DAgger enabled flag must be boolean")
+        if type(depth) is not int or depth < 1:
+            raise ValueError("DAgger depth must be a positive integer")
+        if type(expansion_budget) is not int or expansion_budget < 1:
+            raise ValueError("DAgger expansion budget must be a positive integer")
+        if type(use_heuristic) is not bool or not use_heuristic:
+            raise ValueError("DAgger heuristic choice must be true")
+
+        expected = {
+            "enabled": enabled,
+            "depth": depth,
+            "expansion_budget": expansion_budget,
+            "use_heuristic": use_heuristic,
+        }
+        response = self._rpc({"cmd": "duel_dagger_configure", **expected})
+        if (
+            set(response) != set(expected)
+            or type(response.get("enabled")) is not bool
+            or type(response.get("depth")) is not int
+            or type(response.get("expansion_budget")) is not int
+            or type(response.get("use_heuristic")) is not bool
+            or response != expected
+        ):
+            raise ValueError("GymServer did not acknowledge DAgger configuration")
+
+    def drain_dagger(self) -> list[dict[str, Any]]:
+        payload = self._rpc({"cmd": "duel_dagger_drain"})
+        return validate_dagger_payload(payload, self.contract)
+
+
     def save_replay(self, path: Path) -> Path:
         path = Path(path)
         response = self._rpc({"cmd": "duel_save", "path": str(path)})
@@ -336,6 +537,254 @@ class DuelClient:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2)
+
+
+@dataclass(frozen=True)
+class EngineEvidenceArtifact:
+    payload: bytes
+    sha256: str
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class EngineEvidenceGame:
+    receipt: Mapping[str, Any]
+    receipt_utf8: bytes
+    trace: EngineEvidenceArtifact
+    replay: EngineEvidenceArtifact
+    benchmark: EngineEvidenceArtifact
+
+
+@dataclass(frozen=True)
+class EngineEvidenceClosure:
+    begin: Mapping[str, Any]
+    games: tuple[EngineEvidenceGame, ...]
+    end: Mapping[str, Any]
+
+
+_EVIDENCE_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+_EVIDENCE_HASH = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _evidence_hash(value: Any, name: str) -> str:
+    if type(value) is not str or _EVIDENCE_HASH.fullmatch(value) is None:
+        raise ValueError(f"evidence {name} must be lowercase 64-hex")
+    return value
+
+
+def _evidence_int(value: Any, name: str, *, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"evidence {name} is invalid")
+    return value
+
+
+def _evidence_exact(value: Any, keys: set[str], name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError(f"evidence {name} has unknown or missing fields")
+    return value
+
+
+def _freeze_evidence(value: Any) -> Any:
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_evidence(item) for key, item in value.items()})
+    if isinstance(value, list) or isinstance(value, tuple):
+        return tuple(_freeze_evidence(item) for item in value)
+    raise ValueError("evidence response contains a non-JSON value")
+
+
+def _evidence_base64(value: Any, name: str) -> bytes:
+    if type(value) is not str or len(value) > ((_EVIDENCE_MAX_ARTIFACT_BYTES + 2) // 3 * 4):
+        raise ValueError(f"evidence {name} base64 is invalid")
+    try:
+        payload = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"evidence {name} base64 is invalid") from error
+    if len(payload) > _EVIDENCE_MAX_ARTIFACT_BYTES:
+        raise ValueError(f"evidence {name} exceeds size limit")
+    return payload
+
+
+def _evidence_artifact(value: Any, name: str) -> EngineEvidenceArtifact:
+    artifact = _evidence_exact(value, {"utf8_base64", "sha256", "byte_size"}, name)
+    payload = _evidence_base64(artifact["utf8_base64"], name)
+    sha256 = _evidence_hash(artifact["sha256"], f"{name} sha256")
+    byte_size = _evidence_int(artifact["byte_size"], f"{name} byte size")
+    if len(payload) != byte_size or hashlib.sha256(payload).hexdigest() != sha256:
+        raise ValueError(f"evidence {name} descriptor does not match bytes")
+    return EngineEvidenceArtifact(payload=payload, sha256=sha256, byte_size=byte_size)
+
+
+class EngineEvidenceDuelClient(DuelClient):
+    """GymServer tactical-v2 evidence client with local receipt verification."""
+
+    def __init__(self, server_cmd: Sequence[str]) -> None:
+        super().__init__(server_cmd, environment="tactical-v2")
+        self._evidence_begin: Mapping[str, Any] | None = None
+        self._evidence_ack: Mapping[str, Any] | None = None
+        self._evidence_games: list[EngineEvidenceGame] = []
+        self._evidence_ended = False
+
+    def begin_evidence(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        if getattr(self, "_evidence_begin", None) is not None:
+            raise ValueError("evidence session is already active")
+        frozen_request = _freeze_evidence(dict(request))
+        self._validate_evidence_request(frozen_request)
+        response = self._rpc(dict(request))
+        acknowledgement = self._validate_begin_ack(response, frozen_request)
+        self._evidence_begin = frozen_request
+        self._evidence_ack = acknowledgement
+        self._evidence_games = []
+        self._evidence_ended = False
+        return acknowledgement
+
+    def close_evidence_game(self) -> EngineEvidenceGame:
+        begin, acknowledgement = self._active_evidence()
+        expected = begin["candidates_by_schedule"][len(self._evidence_games)]
+        if not isinstance(expected, Mapping):
+            raise ValueError("evidence schedule is invalid")
+        request = {
+            "cmd": "duel_evidence_game_close",
+            "schema_version": 1,
+            "session_id": acknowledgement["session_id"],
+            "nonce": begin["nonce"],
+            "candidate_index": expected["candidate_index"],
+            "game_index": expected["game_index"],
+        }
+        response = self._rpc(request)
+        game = self._validate_game_response(response, begin, acknowledgement, expected)
+        self._evidence_games.append(game)
+        return game
+
+    def end_evidence(self) -> EngineEvidenceClosure:
+        begin, acknowledgement = self._active_evidence()
+        if len(self._evidence_games) != len(begin["candidates_by_schedule"]):
+            raise ValueError("evidence schedule is incomplete")
+        response = self._rpc({
+            "cmd": "duel_evidence_end", "schema_version": 1,
+            "session_id": acknowledgement["session_id"], "nonce": begin["nonce"],
+        })
+        end = self._validate_end_ack(response, begin, acknowledgement)
+        self._evidence_ended = True
+        return EngineEvidenceClosure(begin=begin, games=tuple(self._evidence_games), end=end)
+
+    def __enter__(self) -> EngineEvidenceDuelClient:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def _active_evidence(self) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        begin = getattr(self, "_evidence_begin", None)
+        acknowledgement = getattr(self, "_evidence_ack", None)
+        if begin is None or acknowledgement is None or getattr(self, "_evidence_ended", False):
+            raise ValueError("no active evidence session")
+        return begin, acknowledgement
+
+    @staticmethod
+    def _validate_evidence_request(request: Mapping[str, Any]) -> None:
+        _evidence_exact(request, {"cmd", "schema_version", "purpose", "nonce", "panel_sha256", "repository", "scenario_sha256", "contract_hash", "encoding_hash", "oracle", "candidates", "preflight_schedule", "preflight_schedule_sha256", "candidates_by_schedule"}, "begin request")
+        if request["cmd"] != "duel_evidence_begin" or _evidence_int(request["schema_version"], "schema version", minimum=1) != 1 or request["purpose"] != "oracle-preflight":
+            raise ValueError("evidence begin request is invalid")
+        for key in ("nonce", "panel_sha256", "scenario_sha256", "contract_hash", "encoding_hash", "preflight_schedule_sha256"):
+            _evidence_hash(request[key], key)
+        repository = _evidence_exact(request["repository"], {"commit", "source_tree", "dirty"}, "repository")
+        for key in ("commit", "source_tree"):
+            value = repository[key]
+            if type(value) is not str or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) is None:
+                raise ValueError(f"evidence repository {key} is invalid")
+        if repository["dirty"] is not False:
+            raise ValueError("evidence repository dirty must be false")
+        if not isinstance(request["candidates"], tuple) or not request["candidates"] or not isinstance(request["preflight_schedule"], tuple) or not request["preflight_schedule"]:
+            raise ValueError("evidence schedule is invalid")
+        expanded = request["candidates_by_schedule"]
+        if not isinstance(expanded, tuple) or len(expanded) != len(request["candidates"]) * len(request["preflight_schedule"]):
+            raise ValueError("evidence expanded schedule is invalid")
+        for index, item in enumerate(expanded):
+            item = _evidence_exact(item, {"candidate_index", "game_index", "oracle", "scheduled_duel"}, "schedule item")
+            candidate_index, game_index = divmod(index, len(request["preflight_schedule"]))
+            if item["candidate_index"] != candidate_index or item["game_index"] != game_index or item["oracle"] != request["candidates"][candidate_index] or item["scheduled_duel"] != request["preflight_schedule"][game_index]:
+                raise ValueError("evidence expanded schedule is noncanonical")
+
+    @staticmethod
+    def _validate_begin_ack(response: Any, begin: Mapping[str, Any]) -> Mapping[str, Any]:
+        ack = _evidence_exact(response, {"schema_version", "nonce", "session_id", "schedule_sha256", "environment", "scenario_sha256", "contract_hash", "encoding_hash", "oracle_type", "oracle_heuristic_identity", "oracle_code_sha256", "sequence", "initial_chain_sha256", "begin_content_sha256", "canonical_body_utf8_base64"}, "begin acknowledgement")
+        if _evidence_int(ack["schema_version"], "schema version", minimum=1) != 1 or ack["environment"] != "tactical-v2" or _evidence_int(ack["sequence"], "sequence") != 0:
+            raise ValueError("evidence begin acknowledgement is invalid")
+        for key in ("nonce", "scenario_sha256", "contract_hash", "encoding_hash"):
+            if ack[key] != begin[key]:
+                raise ValueError(f"evidence begin {key} does not match request")
+            _evidence_hash(ack[key], key)
+        if ack["schedule_sha256"] != begin["preflight_schedule_sha256"]:
+            raise ValueError("evidence schedule hash does not match request")
+        if ack["oracle_type"] != "bounded-search" or ack["oracle_heuristic_identity"] != begin["oracle"]["heuristic_identity"] or ack["oracle_code_sha256"] != begin["oracle"]["code_hash"]:
+            raise ValueError("evidence oracle identity does not match request")
+        session = _evidence_hash(ack["session_id"], "session id")
+        if session != hashlib.sha256(f"gymserver-evidence-v1|{begin['nonce']}".encode("utf-8")).hexdigest():
+            raise ValueError("evidence session id does not match nonce")
+        initial = _evidence_hash(ack["initial_chain_sha256"], "initial chain")
+        content = _evidence_hash(ack["begin_content_sha256"], "begin content")
+        body = _evidence_base64(ack["canonical_body_utf8_base64"], "begin body")
+        if hashlib.sha256(body).hexdigest() != content or initial != content:
+            raise ValueError("evidence begin body hash does not match acknowledgement")
+        try:
+            decoded = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("evidence begin body is not UTF-8 JSON") from error
+        if not isinstance(decoded, dict) or decoded.get("session_id") != session:
+            raise ValueError("evidence begin body does not match acknowledgement")
+        return _freeze_evidence(dict(ack))
+
+    def _validate_game_response(self, response: Any, begin: Mapping[str, Any], acknowledgement: Mapping[str, Any], expected: Mapping[str, Any]) -> EngineEvidenceGame:
+        envelope = _evidence_exact(response, {"receipt", "receipt_sha256", "receipt_utf8_base64", "trace", "replay", "benchmark"}, "game response")
+        trace, replay, benchmark = (_evidence_artifact(envelope[name], name) for name in ("trace", "replay", "benchmark"))
+        receipt_utf8 = _evidence_base64(envelope["receipt_utf8_base64"], "receipt")
+        receipt_sha256 = _evidence_hash(envelope["receipt_sha256"], "receipt sha256")
+        if hashlib.sha256(receipt_utf8).hexdigest() != receipt_sha256:
+            raise ValueError("evidence receipt hash does not match bytes")
+        try:
+            decoded = json.loads(receipt_utf8)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("evidence receipt is not UTF-8 JSON") from error
+        if decoded != envelope["receipt"]:
+            raise ValueError("evidence receipt bytes do not match receipt object")
+        receipt = _evidence_exact(decoded, {"schema_version", "session_id", "nonce", "sequence", "previous_receipt_sha256", "begin_content_sha256", "panel_sha256", "repository", "candidate_index", "game_index", "scheduled_duel", "oracle", "candidates", "preflight_schedule", "preflight_schedule_sha256", "candidates_by_schedule", "environment", "scenario_sha256", "contract_hash", "encoding_hash", "engine_protocol", "outcome", "winner", "transition_count", "benchmark_sample_count", "expansion_total", "trace", "replay", "benchmark"}, "receipt")
+        if _evidence_int(receipt["schema_version"], "schema version", minimum=1) != 1 or receipt["session_id"] != acknowledgement["session_id"] or receipt["nonce"] != begin["nonce"]:
+            raise ValueError("evidence receipt session does not match")
+        sequence = len(self._evidence_games) + 1
+        if _evidence_int(receipt["sequence"], "receipt sequence", minimum=1) != sequence:
+            raise ValueError("evidence receipt sequence does not match")
+        previous = acknowledgement["initial_chain_sha256"] if not self._evidence_games else self._evidence_games[-1].receipt["receipt_sha256"]
+        if receipt["previous_receipt_sha256"] != previous or receipt["begin_content_sha256"] != acknowledgement["begin_content_sha256"]:
+            raise ValueError("evidence receipt chain does not match")
+        expected_values = {"panel_sha256": begin["panel_sha256"], "repository": begin["repository"], "scheduled_duel": expected["scheduled_duel"], "oracle": expected["oracle"], "candidates": begin["candidates"], "preflight_schedule": begin["preflight_schedule"], "preflight_schedule_sha256": begin["preflight_schedule_sha256"], "scenario_sha256": begin["scenario_sha256"], "contract_hash": begin["contract_hash"], "encoding_hash": begin["encoding_hash"]}
+        if any(_freeze_evidence(receipt[key]) != value for key, value in expected_values.items()) or receipt["candidate_index"] != expected["candidate_index"] or receipt["game_index"] != expected["game_index"]:
+            raise ValueError("evidence receipt does not match schedule")
+        _evidence_int(receipt["candidate_index"], "candidate index")
+        _evidence_int(receipt["game_index"], "game index")
+        if receipt["winner"] is not None and (type(receipt["winner"]) is not int or receipt["winner"] not in {0, 1}):
+            raise ValueError("evidence receipt winner is invalid")
+        if receipt["environment"] != "tactical-v2" or receipt["engine_protocol"] != "gymserver-evidence-v1" or receipt["outcome"] not in {"win", "loss", "draw"} or receipt["winner"] not in {None, 0, 1}:
+            raise ValueError("evidence receipt protocol is invalid")
+        for key, minimum in (("transition_count", 1), ("benchmark_sample_count", 0), ("expansion_total", 0)):
+            _evidence_int(receipt[key], key, minimum=minimum)
+        for name, artifact in (("trace", trace), ("replay", replay), ("benchmark", benchmark)):
+            if receipt[name] != {"sha256": artifact.sha256, "byte_size": artifact.byte_size}:
+                raise ValueError(f"evidence receipt {name} descriptor does not match artifact")
+        return EngineEvidenceGame(_freeze_evidence({**decoded, "receipt_sha256": receipt_sha256}), receipt_utf8, trace, replay, benchmark)
+
+    def _validate_end_ack(self, response: Any, begin: Mapping[str, Any], acknowledgement: Mapping[str, Any]) -> Mapping[str, Any]:
+        end = _evidence_exact(response, {"schema_version", "session_id", "nonce", "receipt_count", "final_receipt_sha256", "end_content_sha256"}, "end acknowledgement")
+        if _evidence_int(end["schema_version"], "schema version", minimum=1) != 1 or end["session_id"] != acknowledgement["session_id"] or end["nonce"] != begin["nonce"] or _evidence_int(end["receipt_count"], "receipt count") != len(self._evidence_games):
+            raise ValueError("evidence end acknowledgement does not match session")
+        final = acknowledgement["initial_chain_sha256"] if not self._evidence_games else self._evidence_games[-1].receipt["receipt_sha256"]
+        if end["final_receipt_sha256"] != final:
+            raise ValueError("evidence end final receipt hash does not match")
+        _evidence_hash(end["final_receipt_sha256"], "final receipt hash")
+        _evidence_hash(end["end_content_sha256"], "end content hash")
+        return _freeze_evidence(dict(end))
+
 
 
 def _contract_from_spaces(spaces: dict[str, Any]) -> EnvironmentContract:
@@ -554,6 +1003,19 @@ def _copy_file_exclusive(source: Path, destination: Path) -> None:
         raise
 
 
+def _copy_file_atomically_exclusive(source: Path, destination: Path) -> None:
+    temporary_path = destination.with_name(
+        f".{destination.name}.{uuid4().hex}.tmp"
+    )
+    try:
+        _copy_file_exclusive(source, temporary_path)
+        os.link(temporary_path, destination)
+        temporary_path.unlink()
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _rollback_artifacts(paths: Sequence[Path]) -> None:
     for path in reversed(paths):
         path.unlink(missing_ok=True)
@@ -582,9 +1044,9 @@ def _publish_artifact_pair(
 
     created: list[Path] = []
     try:
-        _copy_file_exclusive(staged_trace, trace_path)
+        _copy_file_atomically_exclusive(staged_trace, trace_path)
         created.append(trace_path)
-        _copy_file_exclusive(staged_replay, replay_path)
+        _copy_file_atomically_exclusive(staged_replay, replay_path)
         created.append(replay_path)
     except BaseException:
         _rollback_artifacts(created)
@@ -624,8 +1086,15 @@ def evaluate_matchup(
     confidence: float = 0.95,
     evidence_dir: Path | None = None,
     capture_trace: bool = False,
+    evidence_retention: EvidenceRetention = "diagnostic",
 ) -> dict[str, Any]:
     """Evaluate a fixed controller identity on deterministic held-out seeds."""
+    if evidence_retention not in {"diagnostic", "all"}:
+        raise ValueError("evidence_retention must be 'diagnostic' or 'all'")
+    if evidence_retention == "all" and (not capture_trace or evidence_dir is None):
+        raise ValueError(
+            "evidence_retention='all' requires trace capture and an evidence directory"
+        )
     if games <= 0:
         raise ValueError("evaluation games must be positive")
     if workers <= 0:
@@ -737,9 +1206,12 @@ def evaluate_matchup(
         draw_trace_count = 0
         control_trace_count = 0
         for index, match, played in ordered_games:
-            retain = match["outcome"] == "draw"
-            if retain:
+            is_draw = match["outcome"] == "draw"
+            retain = evidence_retention == "all" or is_draw
+            if is_draw:
                 draw_trace_count += 1
+            elif evidence_retention == "all":
+                control_trace_count += 1
             else:
                 stratum = (match["candidate_seat"], match["outcome"])
                 if stratum not in selected_controls:
@@ -796,6 +1268,8 @@ def evaluate_matchup(
 
         if capture_trace:
             evidence_summary = {
+                "retention": evidence_retention,
+                "retained": draw_trace_count + control_trace_count,
                 "draw_traces": draw_trace_count,
                 "control_traces": control_trace_count,
                 "draw_categories": dict(sorted(draw_categories.items())),
@@ -939,6 +1413,8 @@ def evaluate_controllers(
     environment: str | None = None,
     evidence_dir: Path | None = None,
     capture_trace: bool = False,
+    start_profile: str | None = None,
+    evidence_retention: EvidenceRetention = "diagnostic",
 ) -> dict[str, Any]:
     """Resolve any two supported controller specs and evaluate them headlessly."""
     if environment is not None and environment not in SUPPORTED_ENVIRONMENTS:
@@ -984,8 +1460,10 @@ def evaluate_controllers(
             environment=selected_environment,
         ),
         output_path=destination,
+        start_profile=start_profile,
         evidence_dir=evidence_dir,
         capture_trace=capture_trace,
+        evidence_retention=evidence_retention,
     )
 
 
