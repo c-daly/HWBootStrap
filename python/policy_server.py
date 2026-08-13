@@ -26,6 +26,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from typing import Mapping
 
 from ml_lab.controllers import (
     ControllerResolutionError,
@@ -35,45 +36,64 @@ from ml_lab.controllers import (
     validate_inference_input,
 )
 from ml_lab.protocol import validate_json_object, validate_view_payload
+from ml_lab.tactical_v3_controller import select_candidate
+from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity, parse_view
 
 # So models that reference a custom feature extractor (hex_cnn.HexCNN) load no matter what cwd Unity
 # spawns us from — SB3 imports the class by module path on load.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PolicyExpectation:
     environment: str
     version: str
     encoding_hash: str
+    capacity_hash: str | None = None
 
     def __post_init__(self):
-        if self.environment not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+        if self.environment not in {"tactical-v1", "tactical-v2", "adaptive-v1", "tactical-v3"}:
             raise ValueError(f"unsupported expected environment {self.environment!r}")
-        if self.version not in {"tactical-v1", "tactical-v2", "adaptive-v1"}:
+        if self.version not in {"tactical-v1", "tactical-v2", "adaptive-v1", "tactical-v3"}:
             raise ValueError(f"unsupported expected contract version {self.version!r}")
         if self.environment != self.version:
             raise ValueError("expected environment must match expected contract version")
         if not re.fullmatch(r"[0-9a-f]{64}", self.encoding_hash):
             raise ValueError("expected encoding hash must be a lowercase SHA-256 hex digest")
+        if self.environment == "tactical-v3":
+            if self.capacity_hash is None:
+                raise ValueError("--expected-capacity-hash is required for tactical-v3")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.capacity_hash):
+                raise ValueError("expected capacity hash must be a lowercase SHA-256 hex digest")
+        elif self.capacity_hash is not None:
+            raise ValueError("capacity hash is valid only for tactical-v3")
 
 
 def validate_resolved_contract(resolved, expected: PolicyExpectation) -> None:
     contract = resolved.contract
     if contract is None:
         raise ControllerResolutionError("model is missing contract metadata")
-    if contract.environment != expected.environment:
+    environment = contract.environment if hasattr(contract, "environment") else "tactical-v3"
+    version = contract.version if hasattr(contract, "version") else contract.contract_version
+    if environment != expected.environment:
         raise ControllerResolutionError(
-            f"model environment {contract.environment!r} does not match expected {expected.environment!r}"
+            f"model environment {environment!r} does not match expected {expected.environment!r}"
         )
-    if contract.version != expected.version:
+    if version != expected.version:
         raise ControllerResolutionError(
-            f"model contract version {contract.version!r} does not match expected {expected.version!r}"
+            f"model contract version {version!r} does not match expected {expected.version!r}"
         )
     if contract.encoding_hash != expected.encoding_hash:
         raise ControllerResolutionError(
             f"model encoding hash {contract.encoding_hash} does not match expected {expected.encoding_hash}"
         )
+    if expected.capacity_hash is not None:
+        if not isinstance(contract, TacticalV3SemanticIdentity):
+            raise ControllerResolutionError("model is missing tactical-v3 capacity metadata")
+        if contract.capacity_hash != expected.capacity_hash:
+            raise ControllerResolutionError(
+                f"model capacity hash {contract.capacity_hash} does not match expected {expected.capacity_hash}"
+            )
 
 
 class Seat:
@@ -124,6 +144,7 @@ def main():
     ap.add_argument("--expected-environment", default=None)
     ap.add_argument("--expected-contract-version", default=None)
     ap.add_argument("--expected-encoding-hash", default=None)
+    ap.add_argument("--expected-capacity-hash", default=None)
     args = ap.parse_args()
 
     expectation_values = (
@@ -140,7 +161,7 @@ def main():
         )
     try:
         expectation = (
-            PolicyExpectation(*expectation_values)
+            PolicyExpectation(*expectation_values, args.expected_capacity_hash)
             if all(value is not None for value in expectation_values)
             else None
         )
@@ -194,6 +215,30 @@ def main():
             continue
         try:
             seat = seats[int(msg["seat"])]
+            if seat.resolved.algorithm == "structured_imitation":
+                if set(msg) != {"seat", "decision"}:
+                    raise ControllerResolutionError(
+                        "structured policy request fields must be exactly seat and decision"
+                    )
+                identity = seat.resolved.contract
+                if not isinstance(identity, TacticalV3SemanticIdentity):
+                    raise ControllerResolutionError("structured model is missing semantic identity")
+                view = parse_view(msg["decision"], identity)
+                if int(msg["seat"]) != view.seat:
+                    raise ControllerResolutionError("structured policy request seat does not match view seat")
+                selected = select_candidate(seat.resolved.model, view)
+                if selected.decision_id != view.decision.decision_id:
+                    raise ControllerResolutionError("structured policy selected a different decision identity")
+                if sum(
+                    candidate.candidate_id == selected.candidate_id
+                    for candidate in view.decision.candidates
+                ) != 1:
+                    raise ControllerResolutionError("structured policy selected an unknown candidate identity")
+                print(json.dumps({
+                    "decision_id": selected.decision_id,
+                    "candidate_id": selected.candidate_id,
+                }), flush=True)
+                continue
             if seat.resolved.observation_size is None or seat.resolved.action_size is None:
                 raise ControllerResolutionError("resolved model is missing inference geometry")
             obs, mask = validate_view_payload(

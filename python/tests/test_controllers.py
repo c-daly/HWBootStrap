@@ -1030,6 +1030,22 @@ def test_resolves_run_manifest_checkpoint_and_contract(
     assert resolved.metadata()["encoding_hash"] == "b" * 64
 
 
+@pytest.mark.parametrize("algorithm", ("maskable_ppo", "masked_dqn"))
+def test_legacy_run_algorithms_require_zip_checkpoints_and_fixed_geometry(
+    tmp_path: Path, contract: EnvironmentContract, loader, algorithm: str,
+) -> None:
+    run = _write_run(tmp_path, contract, algorithm=algorithm)
+    manifest = __import__("json").loads((run / "run.json").read_text(encoding="utf-8"))
+    manifest["latest_checkpoint"] = "checkpoints/model.pt"
+    (run / "checkpoints" / "model.pt").write_bytes(b"not-an-sb3-model")
+    atomic_write_json(run / "run.json", manifest)
+
+    with pytest.raises(ControllerResolutionError, match=".zip"):
+        ControllerResolver(contract, model_loader=loader).resolve(
+            {"kind": "run", "path": str(run), "mode": "fixed"}
+        )
+
+
 def test_controller_rejects_wrong_environment_for_adaptive_runtime(
     contract: EnvironmentContract,
 ) -> None:

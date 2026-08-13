@@ -3,12 +3,83 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
+import pytest
 from gymnasium import spaces
+
+from tests.test_tactical_v3_controller import make_structured_run_case
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyServerCase:
+    args: tuple[str, ...]
+    seat: int
+    view_payload: Mapping[str, object]
+    legal_identities: frozenset[tuple[int, int]]
+
+
+def make_policy_server_case(tmp_path: Path) -> PolicyServerCase:
+    structured = make_structured_run_case(tmp_path)
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "tactical_v3" / "seed-41-decision.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    script = Path(__file__).resolve().parents[1] / "policy_server.py"
+    return PolicyServerCase(
+        (
+            sys.executable, str(script), "--p0", f"run:{structured.run_dir}",
+            "--expected-environment", "tactical-v3",
+            "--expected-contract-version", "tactical-v3",
+            "--expected-encoding-hash", structured.identity.encoding_hash,
+            "--expected-capacity-hash", structured.identity.capacity_hash,
+        ),
+        0,
+        payload,
+        frozenset(
+            (candidate["decision_id"], candidate["candidate_id"])
+            for candidate in payload["candidates"]
+        ),
+    )
+
+
+def without_argument(args: tuple[str, ...], flag: str) -> tuple[str, ...]:
+    index = args.index(flag)
+    assert args.count(flag) == 1
+    return args[:index] + args[index + 2:]
+
+
+@contextmanager
+def start_policy_server(args: tuple[str, ...]) -> Iterator[tuple[subprocess.Popen[str], Mapping[str, object]]]:
+    process = subprocess.Popen(
+        args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8",
+    )
+    assert process.stdout is not None
+    ready = json.loads(process.stdout.readline())
+    try:
+        yield process, ready
+    finally:
+        if process.poll() is None:
+            assert process.stdin is not None
+            process.stdin.write(json.dumps({"cmd": "close"}) + "\n")
+            process.stdin.flush()
+            process.terminate()
+        process.communicate(timeout=30)
+
+
+def request(process: subprocess.Popen[str], payload: Mapping[str, object]) -> Mapping[str, object]:
+    assert process.stdin is not None and process.stdout is not None
+    process.stdin.write(json.dumps(payload) + "\n")
+    process.stdin.flush()
+    return json.loads(process.stdout.readline())
 
 
 class _TinyEnv(gym.Env):
@@ -132,12 +203,59 @@ def test_policy_expectation_accepts_tactical_v2() -> None:
     assert PolicyExpectation("tactical-v2", "tactical-v2", "a" * 64).encoding_hash == "a" * 64
 
 
-def test_policy_expectation_rejects_unknown_environment_version() -> None:
+def test_policy_expectation_requires_capacity_hash_for_tactical_v3() -> None:
     from policy_server import PolicyExpectation
 
     import pytest
-    with pytest.raises(ValueError, match="unsupported"):
+    with pytest.raises(ValueError, match="expected-capacity-hash"):
         PolicyExpectation("tactical-v3", "tactical-v3", "a" * 64)
+
+
+def test_legacy_expectation_rejects_capacity_hash() -> None:
+    from policy_server import PolicyExpectation
+
+    import pytest
+    with pytest.raises(ValueError, match="capacity hash is valid only for tactical-v3"):
+        PolicyExpectation("tactical-v1", "tactical-v1", "a" * 64, "b" * 64)
+
+
+def test_tactical_v3_requires_expected_capacity_hash(tmp_path: Path) -> None:
+    case = make_policy_server_case(tmp_path)
+    result = subprocess.run(
+        without_argument(case.args, "--expected-capacity-hash"),
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "--expected-capacity-hash is required for tactical-v3" in result.stderr
+
+
+def test_tactical_v3_request_returns_exact_legal_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    case = make_policy_server_case(tmp_path)
+    with start_policy_server(case.args) as (server, ready):
+        assert ready["ready"] is True
+        response = request(server, {"seat": case.seat, "decision": case.view_payload})
+
+    assert set(response) == {"decision_id", "candidate_id"}
+    assert response["decision_id"] == case.view_payload["decision_id"]
+    assert (response["decision_id"], response["candidate_id"]) in case.legal_identities
+
+
+def test_tactical_v3_request_rejects_flat_or_mixed_payloads(tmp_path: Path) -> None:
+    case = make_policy_server_case(tmp_path)
+    invalid = (
+        {"seat": case.seat, "obs": [0.0], "mask": [True]},
+        {"seat": case.seat, "decision": case.view_payload, "obs": [0.0], "mask": [True]},
+        {"seat": case.seat, "decision": case.view_payload, "extra": 1},
+    )
+    with start_policy_server(case.args) as (server, _ready):
+        for payload in invalid:
+            response = request(server, payload)
+            assert set(response) == {"error"}
+            assert "structured policy request fields" in response["error"]
 
 
 def test_policy_expectation_rejects_tactical_v1_model_for_tactical_v2_expectation() -> None:
