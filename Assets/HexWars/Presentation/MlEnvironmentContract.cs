@@ -6,6 +6,7 @@ namespace HexWars.Presentation
         TacticalV1,
         AdaptiveV1,
         TacticalV2,
+        TacticalV3,
     }
 
     public static class MlEnvironmentContracts
@@ -16,6 +17,7 @@ namespace HexWars.Presentation
             {
                 case MlEnvironmentContract.AdaptiveV1: return "adaptive-v1";
                 case MlEnvironmentContract.TacticalV2: return "tactical-v2";
+                case MlEnvironmentContract.TacticalV3: return "tactical-v3";
                 default: return "tactical-v1";
             }
         }
@@ -30,6 +32,8 @@ namespace HexWars.Presentation
                     return MlEnvironmentContract.AdaptiveV1;
                 case "tactical-v2":
                     return MlEnvironmentContract.TacticalV2;
+                case "tactical-v3":
+                    return MlEnvironmentContract.TacticalV3;
                 default:
                     throw new System.ArgumentException(
                         "Unknown ML environment contract: " + contractVersion,
@@ -42,15 +46,19 @@ namespace HexWars.Presentation
 
     public readonly struct ModelDuelContractIdentity
     {
-        public ModelDuelContractIdentity(string environment, string version, string encodingHash)
+        public ModelDuelContractIdentity(
+            string environment, string version, string encodingHash,
+            string capacityHash = null)
         {
             Environment = environment;
             Version = version;
             EncodingHash = encodingHash;
+            CapacityHash = capacityHash;
         }
 
         public string Environment { get; }
         public string Version { get; }
         public string EncodingHash { get; }
+        public string CapacityHash { get; }
     }
 }

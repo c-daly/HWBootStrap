@@ -13,6 +13,7 @@ namespace HexWars.Engine.Rl
         private readonly IActionResolver _resolver;
         private readonly IRewardContract _reward;
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
+        private int _drainedTransitionCount;
 
         private GameState _start = null!;
         private GameState _state = null!;
@@ -127,6 +128,16 @@ namespace HexWars.Engine.Rl
                 _transitions.Select(transition => transition.Command).ToArray());
         }
 
+        public IReadOnlyList<DuelTransition> DrainTransitions()
+        {
+            RequireReset();
+            DuelTransition[] drained = _transitions
+                .Skip(_drainedTransitionCount)
+                .ToArray();
+            _drainedTransitionCount = _transitions.Count;
+            return Array.AsReadOnly(drained);
+        }
+
         private TacticalV3View ResetFromStart(
             TacticalV2Start start,
             IAgent? controller0,
@@ -145,6 +156,7 @@ namespace HexWars.Engine.Rl
             _startProfileId = start.ProfileId;
             _referenceSeat = referenceSeat;
             _transitions.Clear();
+            _drainedTransitionCount = 0;
             InternalFallbackCount = 0;
             _hasReset = true;
             _reward.Reset(_state, _learnerSeat);
