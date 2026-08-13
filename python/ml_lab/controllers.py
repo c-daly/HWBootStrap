@@ -21,7 +21,7 @@ from .io import read_json
 
 Algorithm = Literal["maskable_ppo", "masked_dqn"]
 InferenceMode = Literal["deterministic", "stochastic"]
-SCRIPTED_NAMES = frozenset({"greedy", "random"})
+SCRIPTED_NAMES = frozenset({"bounded-search", "greedy", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
 SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
 
@@ -92,7 +92,7 @@ def normalize_controller_spec(raw: str | Mapping[str, Any] | ControllerSpec) -> 
     if kind == "scripted":
         name = raw.get("name")
         if name not in SCRIPTED_NAMES:
-            raise ControllerResolutionError("scripted controller name must be 'greedy' or 'random'")
+            raise ControllerResolutionError("unsupported scripted controller name")
         return ControllerSpec(kind="scripted", name=name)
     if kind == "checkpoint":
         mode = raw.get("mode", "fixed")
@@ -171,7 +171,7 @@ def _parse_string_spec(raw: str) -> Mapping[str, Any]:
     if path.is_dir() and (path / "run.json").is_file():
         return {"kind": "run", "path": value, "mode": "fixed"}
     raise ControllerResolutionError(
-        "controller strings must be random, greedy, run:PATH, JSON, or @spec.json"
+        "controller string must name a supported scripted controller, run:PATH, JSON, or @spec.json"
     )
 
 

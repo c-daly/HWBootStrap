@@ -178,6 +178,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="capture evaluation-only tactical transition evidence",
     )
     evaluate.add_argument(
+        "--start-profile",
+        help="force a declared tactical start profile with the candidate as reference",
+    )
+    evaluate.add_argument(
+        "--evidence-retention",
+        choices=("diagnostic", "all"),
+        default="diagnostic",
+        help="retain diagnostic traces or every trace/replay",
+    )
+    evaluate.add_argument(
         "--evidence-dir",
         type=Path,
         help="write per-match traces and replays; implies --capture-trace",
@@ -617,8 +627,10 @@ def _dispatch(
             server_cmd=["dotnet", args.server],
             output_path=args.output,
             environment=args.environment,
+            start_profile=args.start_profile,
             capture_trace=args.capture_trace or args.evidence_dir is not None,
             evidence_dir=args.evidence_dir,
+            evidence_retention=args.evidence_retention,
         )
     if args.command == "benchmark":
         return benchmark_gymserver(
