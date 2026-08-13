@@ -911,6 +911,30 @@ namespace HexWars.Engine.Tests
             Assert.That(error, Does.Contain("reference_seat"));
         }
 
+        [Test]
+        public void Process_DuelResetUnknownProfileReturnsErrorAndKeepsSessionAlive()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement error = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 59,
+                p0 = "external", p1 = "external", learner = 0,
+                start_profile = "missing-profile", reference_seat = 0,
+            }));
+
+            AssertProperties(error, "error");
+            Assert.That(error.GetProperty("error").GetString(), Does.Contain(
+                "start_profile 'missing-profile' is not declared"));
+
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 59,
+                p0 = "external", p1 = "external", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            AssertViewIdentities(reset);
+        }
+
         [TestCase("p0")]
         [TestCase("p1")]
         public void Process_DuelResetRejectsUnknownControllerSpecPerSeat(string seat)

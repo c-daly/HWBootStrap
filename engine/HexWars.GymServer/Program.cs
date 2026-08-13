@@ -560,6 +560,13 @@ while ((line = Console.ReadLine()) != null)
             {
                 RequireTacticalV3ControllerSpec(p0, "p0");
                 RequireTacticalV3ControllerSpec(p1, "p1");
+                if (startProfile != null && !tacticalV3Config!.Match.StartProfiles.Any(
+                        profile => profile.Id == startProfile))
+                {
+                    Send(new { error =
+                        $"tactical-v3 duel_reset start_profile '{startProfile}' is not declared" });
+                    break;
+                }
             }
             if (evidenceSession != null && !evidenceSession.Ended)
             {
