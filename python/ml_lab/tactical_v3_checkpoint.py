@@ -51,12 +51,12 @@ _METADATA_FIELDS = frozenset({
 _FIXTURE_FIELDS = frozenset({"examples", "valid_candidate_logits", "selected_identities"})
 _RUN_INVENTORY = frozenset({
     "run.json", "scenario.json", "corpus-manifest.json", "metrics.jsonl",
-    "inference-fixture.json", "checkpoints",
+    "inference-fixture.json", "policy-identity.json", "checkpoints",
 })
 _RUN_FIELDS = frozenset({
     "schema_version", "state", "evidence_status", "config", "contract",
     "latest_checkpoint", "latest_checkpoint_step", "dataset_manifest_sha256",
-    "best_epoch", "best_validation_policy_nll",
+    "best_epoch", "best_validation_policy_nll", "policy_identity",
 })
 _METRICS_FIELDS = frozenset({
     "epoch", "train", "validation", "validation_policy_nll", "improved",
@@ -705,7 +705,14 @@ def _authenticated_corpus_manifest(
             return evidence["manifest.json"]
 
 
-def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: StructuredCorpus, scenario_path: Path) -> Path:
+def publish_structured_run(
+    run_dir: Path,
+    result: TrainingResult,
+    corpus: StructuredCorpus,
+    *,
+    training_scenario_path: Path,
+    policy_identity: TacticalV3SemanticIdentity,
+) -> Path:
     run_dir = _public_run_path(run_dir, "run destination")
     _require_plain_lexical_chain(run_dir.parent, "run destination")
     if run_dir.exists() or _is_reparse(run_dir):
@@ -722,10 +729,12 @@ def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: Struct
         raise ValueError("result model config does not match model config")
     if next(result.model.parameters()).device != torch.device(result.trainer_config.device):
         raise ValueError("result trainer device does not match model device")
-    scenario_value = _read_json_file(Path(scenario_path), "scenario")
-    identity = parse_spaces(scenario_value)
+    scenario_value = _read_json_file(
+        Path(training_scenario_path), "training scenario"
+    )
+    identity = policy_identity
     if identity != parse_spaces(_identity_wire(identity)):
-        raise ValueError("scenario identity cannot be canonicalized")
+        raise ValueError("policy identity cannot be canonicalized")
     if any((example.encoding_hash, example.capacity_hash) != (identity.encoding_hash, identity.capacity_hash)
            for example in corpus.train + corpus.validation):
         raise ValueError("corpus examples do not match scenario identity")
@@ -755,14 +764,19 @@ def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: Struct
         _after_checkpoint_written()
         fixture = load_structured_checkpoint(checkpoint, identity.encoding_hash, identity.capacity_hash).fixture
         run_manifest = {
-            "schema_version": 1, "state": "completed", "evidence_status": "unsealed-experimental",
+            "schema_version": 2, "state": "completed", "evidence_status": "unsealed-experimental",
             "config": {"algorithm": "structured_imitation"}, "contract": _identity_manifest(identity),
+            "policy_identity": "policy-identity.json",
             "latest_checkpoint": "checkpoints/best.pt", "latest_checkpoint_step": metadata.best_epoch,
             "dataset_manifest_sha256": metadata.corpus_sha256, "best_epoch": metadata.best_epoch,
             "best_validation_policy_nll": metadata.best_validation_policy_nll,
         }
         _write_bytes(temporary / "run.json", _canonical_json(run_manifest))
         _write_bytes(temporary / "scenario.json", _canonical_json(scenario_value))
+        _write_bytes(
+            temporary / "policy-identity.json",
+            _canonical_json(_identity_wire(identity)),
+        )
         _write_bytes(temporary / "corpus-manifest.json", corpus_manifest_bytes)
         metrics_bytes = _metrics_jsonl(result.history)
         _metrics_from_jsonl(
@@ -799,7 +813,7 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
         _RUN_FIELDS,
         "run manifest",
     )
-    if _int(manifest["schema_version"], "run manifest schema_version") != 1:
+    if _int(manifest["schema_version"], "run manifest schema_version") != 2:
         raise ValueError("run manifest schema_version is invalid")
     if _string(manifest["state"], "run manifest state") != "completed":
         raise ValueError("run manifest state is invalid")
@@ -816,10 +830,21 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
     }), "run manifest contract")
     for name in contract:
         _string(contract[name], f"run manifest contract.{name}")
-    scenario = _read_canonical_json_file(root / "scenario.json", "scenario")
-    identity = parse_spaces(scenario)
+    _read_canonical_json_file(root / "scenario.json", "training scenario")
+    if (
+        _validate_relative(
+            manifest["policy_identity"], "run manifest policy_identity"
+        )
+        != "policy-identity.json"
+    ):
+        raise ValueError("run manifest policy_identity is invalid")
+    identity = parse_spaces(
+        _read_canonical_json_file(
+            root / "policy-identity.json", "policy identity"
+        )
+    )
     if contract != _identity_manifest(identity):
-        raise ValueError("run manifest contract does not match scenario")
+        raise ValueError("run manifest contract does not match policy identity")
     if _validate_relative(manifest["latest_checkpoint"], "run manifest latest_checkpoint") != "checkpoints/best.pt":
         raise ValueError("run manifest latest_checkpoint is invalid")
     dataset_sha256 = _sha256(
@@ -854,7 +879,7 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
     if loaded.metadata.corpus_sha256 != dataset_sha256:
         raise ValueError("corpus SHA-256 does not match checkpoint")
     if loaded.metadata.identity != identity:
-        raise ValueError("checkpoint identity does not match scenario")
+        raise ValueError("checkpoint identity does not match policy identity")
     if latest_step != loaded.metadata.best_epoch or best_epoch != loaded.metadata.best_epoch:
         raise ValueError("run manifest best epoch does not match checkpoint")
     if best_nll != loaded.metadata.best_validation_policy_nll:

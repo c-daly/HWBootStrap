@@ -204,6 +204,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add(label + " run metadata is empty: " + manifestPath);
                 return;
             }
+            if (manifest.schema_version != 2)
+                errors.Add(label + " run schema version must be 2.");
             if (!string.Equals(manifest.config?.algorithm, "structured_imitation", StringComparison.Ordinal))
                 errors.Add(label + " algorithm must be structured_imitation.");
             if (!string.Equals(manifest.evidence_status, "unsealed-experimental", StringComparison.Ordinal))
@@ -218,8 +220,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add(label + " environment must be tactical-v3.");
             if (!string.Equals(contract.version, expected.Version, StringComparison.Ordinal))
                 errors.Add(label + " contract version does not match " + expected.Version + ".");
-            if (!string.Equals(contract.contract_hash, expected.ContractHash, StringComparison.Ordinal))
-                errors.Add(label + " contract hash does not match the selected scenario.");
+            if (!string.Equals(contract.environment_kind, "duel", StringComparison.Ordinal))
+                errors.Add(label + " environment kind must be duel.");
+            if (!IsLowerSha256(contract.contract_hash))
+                errors.Add(label + " contract hash must be a lowercase SHA-256 hash.");
             if (!string.Equals(contract.encoding_hash, expected.EncodingHash, StringComparison.Ordinal))
                 errors.Add(label + " encoding hash does not match the tactical-v3 encoding.");
             if (!string.Equals(contract.capacity_hash, expected.CapacityHash, StringComparison.Ordinal))
@@ -233,13 +237,42 @@ namespace HexWars.Presentation.EditorTools.MlLab
             RequireContainedRegularFile(runPath,
                 Path.Combine(runPath, "checkpoints", "best.pt"),
                 label + " checkpoint", errors);
+            if (!string.Equals(
+                    manifest.policy_identity, "policy-identity.json",
+                    StringComparison.Ordinal))
+            {
+                errors.Add(label + " policy identity must be policy-identity.json.");
+                return;
+            }
+            string policyPath = Path.Combine(runPath, manifest.policy_identity);
+            int errorCount = errors.Count;
+            RequireContainedRegularFile(
+                runPath, policyPath, label + " policy identity", errors);
+            if (errors.Count != errorCount) return;
+            ArenaPolicyIdentity policy = JsonUtility.FromJson<ArenaPolicyIdentity>(
+                File.ReadAllText(policyPath));
+            if (policy == null ||
+                !string.Equals(policy.contract_version, contract.version, StringComparison.Ordinal) ||
+                !string.Equals(policy.environment_kind, contract.environment_kind, StringComparison.Ordinal) ||
+                !string.Equals(policy.contract_hash, contract.contract_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.encoding_hash, contract.encoding_hash, StringComparison.Ordinal) ||
+                !string.Equals(policy.capacity_hash, contract.capacity_hash, StringComparison.Ordinal))
+                errors.Add(label + " policy identity does not match run contract.");
         }
+
+        static bool IsLowerSha256(string value) =>
+            value != null && value.Length == 64 &&
+            value.All(character =>
+                (character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f'));
 
         [Serializable] sealed class ArenaContractManifest
         {
+            public int schema_version;
             public string evidence_status;
             public ArenaRunConfig config;
             public ArenaContract contract;
+            public string policy_identity;
             public string latest_checkpoint;
         }
 
@@ -252,11 +285,21 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             public string environment;
             public string version;
+            public string environment_kind;
             public string contract_hash;
             public string encoding_hash;
             public string capacity_hash;
             public int observation_size;
             public int action_size;
+        }
+
+        [Serializable] sealed class ArenaPolicyIdentity
+        {
+            public string contract_version;
+            public string environment_kind;
+            public string contract_hash;
+            public string encoding_hash;
+            public string capacity_hash;
         }
     }
 

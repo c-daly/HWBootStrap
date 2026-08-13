@@ -337,16 +337,22 @@ class ControllerResolver:
             manifest = read_json(manifest_path)
         except (OSError, json.JSONDecodeError) as error:
             raise ControllerResolutionError(f"could not read run manifest {manifest_path}") from error
-        if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
-            raise ControllerResolutionError("run manifest must have schema_version 1")
+        if not isinstance(manifest, Mapping):
+            raise ControllerResolutionError("run manifest must be a JSON object")
         config = manifest.get("config")
         if not isinstance(config, Mapping):
             raise ControllerResolutionError("run manifest is missing config metadata")
         declared_algorithm = config.get("algorithm")
         if declared_algorithm == "structured_imitation":
+            if manifest.get("schema_version") != 2:
+                raise ControllerResolutionError(
+                    "structured run manifest must have schema_version 2"
+                )
             if requested_algorithm is not None:
                 raise ControllerResolutionError("legacy algorithm does not match the run manifest algorithm")
             return self._resolve_structured_run(spec, manifest)
+        if manifest.get("schema_version") != 1:
+            raise ControllerResolutionError("run manifest must have schema_version 1")
         algorithm = _algorithm_field({"algorithm": declared_algorithm})
         if requested_algorithm is not None and requested_algorithm != algorithm:
             raise ControllerResolutionError("legacy algorithm does not match the run manifest algorithm")
@@ -370,10 +376,16 @@ class ControllerResolver:
     ) -> ResolvedController:
         assert spec.path is not None
         try:
-            scenario = read_json(spec.path / "scenario.json")
-            identity = parse_spaces(scenario)
+            if manifest.get("policy_identity") != "policy-identity.json":
+                raise ValueError(
+                    "structured run must declare policy-identity.json"
+                )
+            policy_identity = read_json(spec.path / "policy-identity.json")
+            identity = parse_spaces(policy_identity)
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
-            raise ControllerResolutionError("structured run requires a valid scenario identity") from error
+            raise ControllerResolutionError(
+                "structured run requires a valid policy identity"
+            ) from error
         from .tactical_v3_controller import load_structured_controller
 
         try:

@@ -22,6 +22,10 @@ from tests.tactical_v3_fixture_support import (
     load_duel_identity_fixture,
 )
 
+TRAINING_SCENARIO = Path(
+    "python/config/annihilation-structured-imitation-v1.json"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class StructuredRunCase:
@@ -80,7 +84,13 @@ def make_structured_run_case(
         stopped_early=False,
         history=history,
     )
-    run_dir = publish_structured_run(tmp_path / "run", result, corpus, DUEL_IDENTITY_FIXTURE)
+    run_dir = publish_structured_run(
+        tmp_path / "run",
+        result,
+        corpus,
+        training_scenario_path=TRAINING_SCENARIO,
+        policy_identity=identity,
+    )
     payload = json.loads(
         (Path(__file__).parent / "fixtures" / "tactical_v3" / "seed-41-decision.json").read_text(
             encoding="utf-8"
@@ -170,3 +180,27 @@ def test_load_structured_controller_rejects_manifest_checkpoint_outside_checkpoi
         load_structured_controller(
             case.run_dir, case.identity.encoding_hash, case.identity.capacity_hash
         )
+
+
+def test_load_structured_controller_rejects_missing_policy_identity_before_checkpoint_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_controller as controller_module
+
+    case = make_structured_run_case(tmp_path)
+    (case.run_dir / "policy-identity.json").unlink()
+    called = False
+
+    def should_not_load(_run_dir: Path) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("checkpoint tensor loader must not run")
+
+    monkeypatch.setattr(
+        controller_module, "validate_structured_run", should_not_load
+    )
+    with pytest.raises(ValueError, match="manifest is invalid"):
+        controller_module.load_structured_controller(
+            case.run_dir, case.identity.encoding_hash, case.identity.capacity_hash
+        )
+    assert called is False

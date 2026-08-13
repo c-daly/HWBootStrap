@@ -27,7 +27,13 @@ def _run_identity_and_checkpoint(run_dir: Path) -> tuple[TacticalV3SemanticIdent
     root = Path(run_dir).resolve()
     try:
         manifest = json.loads((root / "run.json").read_text(encoding="utf-8"))
-        identity = parse_spaces(json.loads((root / "scenario.json").read_text(encoding="utf-8")))
+        if manifest.get("schema_version") != 2:
+            raise ValueError("structured run schema version must be 2")
+        if manifest.get("policy_identity") != "policy-identity.json":
+            raise ValueError("structured run must declare policy-identity.json")
+        identity = parse_spaces(json.loads(
+            (root / "policy-identity.json").read_text(encoding="utf-8")
+        ))
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
         raise ValueError(f"structured run manifest is invalid: {root}") from error
     if not isinstance(manifest, Mapping):
@@ -52,7 +58,9 @@ def _run_identity_and_checkpoint(run_dir: Path) -> tuple[TacticalV3SemanticIdent
         "capacity_hash": identity.capacity_hash,
     }
     if contract != expected_contract:
-        raise ValueError("structured run manifest contract does not match scenario identity")
+        raise ValueError(
+            "structured run manifest contract does not match policy identity"
+        )
     return identity, checkpoint_path
 
 
@@ -69,7 +77,9 @@ def load_structured_controller(
         raise ValueError("structured controller capacity hash does not match expected capacity hash")
     loaded = validate_structured_run(Path(run_dir))
     if loaded.metadata.identity != identity:
-        raise ValueError("validated structured checkpoint identity does not match run scenario")
+        raise ValueError(
+            "validated structured checkpoint identity does not match policy identity"
+        )
     policy = loaded.model.to(device="cpu")
     policy.eval()
     if next(policy.parameters()).device.type != "cpu" or policy.training:

@@ -16,13 +16,14 @@ from ml_lab.tactical_v3_batching import collate_examples
 from ml_lab.tactical_v3_checkpoint import (
     StructuredCheckpointMetadata,
     load_structured_checkpoint,
-    publish_structured_run,
+    publish_structured_run as publish_schema2_run,
     save_structured_checkpoint,
     validate_structured_run,
 )
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
+from ml_lab.tactical_v3_schema import parse_spaces
 from ml_lab.tactical_v3_training import (
     METRIC_KEYS,
     EpochMetrics,
@@ -38,6 +39,33 @@ from tests.tactical_v3_fixture_support import (
     load_duel_identity_fixture,
     load_tiny_corpus_fixture,
 )
+
+TRAINING_SCENARIO = Path(
+    'python/config/annihilation-structured-imitation-v1.json'
+)
+
+
+def publish_case_run(
+    run_dir: Path,
+    result: TrainingResult,
+    corpus: object,
+    policy_spaces_path: Path | None = None,
+    *,
+    training_scenario_path: Path = TRAINING_SCENARIO,
+    policy_identity: object | None = None,
+) -> Path:
+    identity = policy_identity
+    if identity is None:
+        if policy_spaces_path is None:
+            raise AssertionError("policy spaces path is required")
+        identity = parse_spaces(json.loads(policy_spaces_path.read_bytes()))
+    return publish_schema2_run(
+        run_dir,
+        result,
+        corpus,
+        training_scenario_path=training_scenario_path,
+        policy_identity=identity,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +227,7 @@ def published_run_template(
 ) -> tuple[CheckpointCase, Path]:
     case = make_case()
     root = tmp_path_factory.mktemp("published-run-template")
-    return case, publish_structured_run(
+    return case, publish_case_run(
         root / "run",
         case.result,
         case.corpus,
@@ -297,7 +325,7 @@ def test_training_result_preserves_exact_nondefault_configs() -> None:
 
 def test_publish_uses_result_provenance_without_silent_defaults(tmp_path: Path) -> None:
     case = make_case()
-    run_dir = publish_structured_run(
+    run_dir = publish_case_run(
         tmp_path / "run",
         case.result,
         case.corpus,
@@ -311,6 +339,63 @@ def test_publish_uses_result_provenance_without_silent_defaults(tmp_path: Path) 
     assert loaded.metadata.trainer_config == case.result.trainer_config
     assert loaded.metadata.trainer_config.seed == 0
     assert loaded.metadata.published_device == "cpu"
+
+
+def test_publish_splits_training_scenario_from_policy_identity(
+    tmp_path: Path,
+) -> None:
+    case = make_case()
+    run_dir = publish_case_run(
+        tmp_path / 'run',
+        case.result,
+        case.corpus,
+        training_scenario_path=TRAINING_SCENARIO,
+        policy_identity=case.metadata.identity,
+    )
+
+    assert json.loads((run_dir / 'scenario.json').read_bytes()) == json.loads(
+        TRAINING_SCENARIO.read_bytes()
+    )
+    policy_payload = json.loads(
+        (run_dir / 'policy-identity.json').read_bytes()
+    )
+    assert parse_spaces(policy_payload) == case.metadata.identity
+    manifest = json.loads((run_dir / 'run.json').read_bytes())
+    assert manifest['schema_version'] == 2
+    assert manifest['policy_identity'] == 'policy-identity.json'
+    assert validate_structured_run(run_dir).metadata.identity == case.metadata.identity
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "repointed", "mismatched_identity"),
+)
+def test_validate_rejects_invalid_policy_identity_sidecar(
+    tmp_path: Path, mutation: str,
+) -> None:
+    case = make_case()
+    run_dir = publish_case_run(
+        tmp_path / "run", case.result, case.corpus, case.scenario
+    )
+    policy_path = run_dir / "policy-identity.json"
+    if mutation == "missing":
+        policy_path.unlink()
+    elif mutation == "repointed":
+        manifest_path = run_dir / "run.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["policy_identity"] = "scenario.json"
+        manifest_path.write_bytes(canonical_json_bytes(manifest))
+    else:
+        policy_path.write_bytes(
+            (Path(__file__).parent / "fixtures" / "tactical_v3" /
+             "seed-41-spaces.json").read_bytes()
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="inventory|policy identity|policy_identity|checkpoint identity",
+    ):
+        validate_structured_run(run_dir)
 
 
 @pytest.mark.parametrize(
@@ -343,7 +428,7 @@ def test_publish_rejects_unauthenticated_corpus_manifest_bytes(
     manifest_path.write_bytes(changed)
 
     with pytest.raises(ValueError, match="manifest|corpus"):
-        publish_structured_run(
+        publish_case_run(
             tmp_path / "run",
             case.result,
             case.corpus,
@@ -360,7 +445,7 @@ def test_publish_copies_exact_authenticated_manifest_without_mutating_corpus(
         for path in case.corpus.root.iterdir()
     }
 
-    run_dir = publish_structured_run(
+    run_dir = publish_case_run(
         tmp_path / "run",
         case.result,
         case.corpus,
@@ -718,7 +803,7 @@ def test_publish_injected_failure_cleans_temporary_run(
 
     monkeypatch.setattr(module, "_after_checkpoint_written", fail)
     with pytest.raises(RuntimeError, match="injected after_checkpoint"):
-        publish_structured_run(
+        publish_case_run(
             run_dir,
             case.result,
             case.corpus,
@@ -740,7 +825,7 @@ def test_publish_rejects_windows_reparse_parent(
     create_windows_junction(junction, target)
     try:
         with pytest.raises(ValueError, match="plain|reparse"):
-            publish_structured_run(
+            publish_case_run(
                 junction / "run",
                 case.result,
                 case.corpus,
@@ -766,7 +851,7 @@ def test_publish_rejects_missing_dotdot_windows_junction_bypass_without_writing_
     try:
         assert candidate.parent.exists()
         with pytest.raises(ValueError, match="dot path component|traversal"):
-            publish_structured_run(
+            publish_case_run(
                 candidate,
                 case.result,
                 case.corpus,
@@ -791,7 +876,7 @@ def test_publish_rejects_nested_symlink_ancestor_without_writing_target(
         pytest.skip(f"symlink creation unavailable: {error}")
     try:
         with pytest.raises(ValueError, match="ancestor|plain|reparse"):
-            publish_structured_run(
+            publish_case_run(
                 symlink / "ordinary-parent" / "run",
                 case.result,
                 case.corpus,
@@ -814,7 +899,7 @@ def test_publish_rejects_nested_windows_junction_ancestor_without_writing_target
     create_windows_junction(junction, target)
     try:
         with pytest.raises(ValueError, match="ancestor|plain|reparse"):
-            publish_structured_run(
+            publish_case_run(
                 junction / "ordinary-parent" / "run",
                 case.result,
                 case.corpus,
@@ -861,7 +946,7 @@ def test_real_cuda_training_publication_matches_cpu_with_declared_tolerance(
         fixture_examples,
     )
 
-    run_dir = publish_structured_run(
+    run_dir = publish_case_run(
         tmp_path / "run",
         result,
         corpus,
@@ -907,7 +992,7 @@ def test_publish_holds_corpus_file_leases_through_authentication(
 
     monkeypatch.setattr(module, "_validate_partitions", attack)
 
-    assert publish_structured_run(
+    assert publish_case_run(
         tmp_path / "run",
         case.result,
         case.corpus,
@@ -924,7 +1009,7 @@ def test_publish_rejects_result_model_config_mismatch(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="model config"):
-        publish_structured_run(
+        publish_case_run(
             tmp_path / "run",
             bad_result,
             case.corpus,
@@ -1169,13 +1254,13 @@ def test_load_rejects_hash_and_contract_mismatch(tmp_path: Path) -> None:
 def test_publish_validates_is_atomic_and_refuses_overwrite(tmp_path: Path) -> None:
     case = make_case()
     run_dir = tmp_path / "run"
-    assert publish_structured_run(run_dir, case.result, case.corpus, case.scenario) == run_dir
+    assert publish_case_run(run_dir, case.result, case.corpus, case.scenario) == run_dir
     manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     assert manifest["evidence_status"] == "unsealed-experimental"
     assert manifest["config"]["algorithm"] == "structured_imitation"
     assert validate_structured_run(run_dir).fixture.examples == case.corpus.validation[:2]
     with pytest.raises(FileExistsError):
-        publish_structured_run(run_dir, case.result, case.corpus, case.scenario)
+        publish_case_run(run_dir, case.result, case.corpus, case.scenario)
     manifest["dataset_manifest_sha256"] = "0" * 64
     (run_dir / "run.json").write_bytes(canonical_json_bytes(manifest))
     with pytest.raises(ValueError, match="corpus SHA-256"):
@@ -1188,11 +1273,15 @@ def test_train_cli_calls_real_sequence_then_only_publisher_owns_artifacts(
 
     case = make_case()
     calls: list[str] = []
-    scenario_payload = json.loads(case.scenario.read_text(encoding="utf-8"))
+    scenario_payload = json.loads(TRAINING_SCENARIO.read_text(encoding="utf-8"))
+    policy_payload = json.loads(case.scenario.read_text(encoding="utf-8"))
     run_dir = tmp_path / "run"
+    expected_model, expected_objective, expected_trainer = (
+        cli._smoke_training_configs(0, "cpu")
+    )
 
     def fake_parse(payload: object) -> object:
-        assert payload == scenario_payload
+        assert payload == policy_payload
         calls.append("parse")
         return case.metadata.identity
 
@@ -1208,20 +1297,25 @@ def test_train_cli_calls_real_sequence_then_only_publisher_owns_artifacts(
     ) -> TrainingResult:
         assert train_examples == case.corpus.train
         assert validation_examples == case.corpus.validation
-        assert model_config == TacticalV3ModelConfig()
-        assert objective_config == ObjectiveConfig()
-        assert trainer_config == TrainerConfig(seed=0, device="cpu")
+        assert model_config == expected_model
+        assert objective_config == expected_objective
+        assert trainer_config == expected_trainer
         calls.append("train")
         return case.result
 
-    def fake_publish(destination: Path, result: TrainingResult, corpus: object, scenario: Path) -> Path:
+    def fake_publish(
+        destination: Path,
+        result: TrainingResult,
+        corpus: object,
+        *,
+        training_scenario_path: Path,
+        policy_identity: object,
+    ) -> Path:
         assert destination == run_dir
         assert result is case.result
-        assert result.model_config == TacticalV3ModelConfig()
-        assert result.objective_config == ObjectiveConfig()
-        assert result.trainer_config == TrainerConfig(seed=0, device="cpu")
         assert corpus is case.corpus
-        assert scenario == case.scenario
+        assert training_scenario_path == TRAINING_SCENARIO
+        assert policy_identity == case.metadata.identity
         calls.append("publish")
         return destination
 
@@ -1230,7 +1324,9 @@ def test_train_cli_calls_real_sequence_then_only_publisher_owns_artifacts(
     monkeypatch.setattr(cli, "train_offline", fake_train)
     monkeypatch.setattr(cli, "publish_structured_run", fake_publish)
     assert cli.main([
-        "train", "--corpus", str(TINY_CORPUS_ROOT), "--scenario", str(case.scenario),
+        "train", "--corpus", str(TINY_CORPUS_ROOT),
+        "--scenario", str(TRAINING_SCENARIO),
+        "--policy-spaces", str(case.scenario),
         "--run-dir", str(run_dir), "--seed", "0", "--device", "cpu",
     ]) == 0
     assert calls == ["parse", "load", "train", "publish"]
