@@ -98,7 +98,14 @@ def validate_resolved_contract(resolved, expected: PolicyExpectation) -> None:
 
 class Seat:
     def __init__(self, spec, expectation: PolicyExpectation):
-        self.binding = ControllerResolver().bind(spec)
+        structured_hashes = (
+            (expectation.encoding_hash, expectation.capacity_hash)
+            if expectation.capacity_hash is not None
+            else None
+        )
+        self.binding = ControllerResolver(
+            expected_structured_hashes=structured_hashes
+        ).bind(spec)
         if self.binding.resolved.model is None:
             raise ControllerResolutionError("policy_server only serves trained checkpoint or run controllers")
         self.expectation = expectation
@@ -152,6 +159,14 @@ def main():
         args.expected_contract_version,
         args.expected_encoding_hash,
     )
+    if args.expected_capacity_hash is not None and not all(
+        value is not None for value in expectation_values
+    ):
+        sys.exit(
+            "policy_server: --expected-capacity-hash requires "
+            "--expected-environment, --expected-contract-version, and "
+            "--expected-encoding-hash"
+        )
     if any(value is not None for value in expectation_values) and not all(
         value is not None for value in expectation_values
     ):
@@ -200,9 +215,19 @@ def main():
             continue
         msg = validate_json_object(json.loads(line), "policy request")
         cmd = msg.get("cmd")
-        if cmd == "close":
-            break
-        if cmd == "reload":
+        if cmd is not None:
+            if set(msg) != {"cmd"}:
+                print(json.dumps({
+                    "error": "ValueError: policy command fields must be exactly cmd"
+                }), flush=True)
+                continue
+            if cmd == "close":
+                break
+            if cmd != "reload":
+                print(json.dumps({
+                    "error": "ValueError: policy command must be reload or close"
+                }), flush=True)
+                continue
             try:
                 changed = [i for i, s in seats.items() if s.reload()]
                 print(json.dumps({
@@ -214,7 +239,12 @@ def main():
                 print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
             continue
         try:
-            seat = seats[int(msg["seat"])]
+            request_seat = msg["seat"]
+            if type(request_seat) is not int:
+                raise ControllerResolutionError(
+                    "policy request seat must be a built-in int"
+                )
+            seat = seats[request_seat]
             if seat.resolved.algorithm == "structured_imitation":
                 if set(msg) != {"seat", "decision"}:
                     raise ControllerResolutionError(
@@ -224,7 +254,7 @@ def main():
                 if not isinstance(identity, TacticalV3SemanticIdentity):
                     raise ControllerResolutionError("structured model is missing semantic identity")
                 view = parse_view(msg["decision"], identity)
-                if int(msg["seat"]) != view.seat:
+                if request_seat != view.seat:
                     raise ControllerResolutionError("structured policy request seat does not match view seat")
                 selected = select_candidate(seat.resolved.model, view)
                 if selected.decision_id != view.decision.decision_id:

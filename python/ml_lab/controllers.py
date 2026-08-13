@@ -215,9 +215,16 @@ def _inference_mode_field(raw: Mapping[str, Any]) -> InferenceMode:
 class ControllerResolver:
     """Resolve immutable controller specs against an optional runtime contract."""
 
-    def __init__(self, runtime_contract: EnvironmentContract | None = None, *, model_loader: ModelLoader | None = None):
+    def __init__(
+        self,
+        runtime_contract: EnvironmentContract | None = None,
+        *,
+        model_loader: ModelLoader | None = None,
+        expected_structured_hashes: tuple[str, str] | None = None,
+    ):
         self.runtime_contract = runtime_contract
         self.model_loader = model_loader or load_model
+        self.expected_structured_hashes = expected_structured_hashes
 
     def bind(self, raw: str | Mapping[str, Any] | ControllerSpec) -> "ControllerBinding":
         return ControllerBinding(self, normalize_controller_spec(raw))
@@ -370,8 +377,13 @@ class ControllerResolver:
         from .tactical_v3_controller import load_structured_controller
 
         try:
+            expected_encoding_hash, expected_capacity_hash = (
+                self.expected_structured_hashes
+                if self.expected_structured_hashes is not None
+                else (identity.encoding_hash, identity.capacity_hash)
+            )
             structured = load_structured_controller(
-                spec.path, identity.encoding_hash, identity.capacity_hash
+                spec.path, expected_encoding_hash, expected_capacity_hash
             )
         except (OSError, TypeError, ValueError) as error:
             raise ControllerResolutionError(str(error)) from error

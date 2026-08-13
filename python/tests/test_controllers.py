@@ -1031,7 +1031,7 @@ def test_resolves_run_manifest_checkpoint_and_contract(
 
 
 @pytest.mark.parametrize("algorithm", ("maskable_ppo", "masked_dqn"))
-def test_legacy_run_algorithms_require_zip_checkpoints_and_fixed_geometry(
+def test_legacy_run_algorithms_require_zip_checkpoints(
     tmp_path: Path, contract: EnvironmentContract, loader, algorithm: str,
 ) -> None:
     run = _write_run(tmp_path, contract, algorithm=algorithm)

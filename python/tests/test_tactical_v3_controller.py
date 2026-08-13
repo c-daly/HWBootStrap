@@ -6,7 +6,9 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+import torch
 
+from ml_lab.tactical_v3_batching import collate_decisions
 from ml_lab.tactical_v3_checkpoint import publish_structured_run
 from ml_lab.tactical_v3_corpus import load_corpus
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
@@ -28,7 +30,9 @@ class StructuredRunCase:
     view: TacticalV3View
 
 
-def make_structured_run_case(tmp_path: Path) -> StructuredRunCase:
+def make_structured_run_case(
+    tmp_path: Path, *, best_epoch: int = 0,
+) -> StructuredRunCase:
     identity = load_duel_identity_fixture()
     corpus = load_corpus(TINY_CORPUS_ROOT, identity)
     model_config = TacticalV3ModelConfig(
@@ -43,22 +47,38 @@ def make_structured_run_case(tmp_path: Path) -> StructuredRunCase:
     )
     objective_config = ObjectiveConfig()
     trainer_config = TrainerConfig(seed=0, device="cpu")
-    metrics = MappingProxyType({
+    train_metrics = MappingProxyType({
         "total": 0.0,
         "policy": 0.0,
         "outcome": 0.0,
         "horizon": 0.0,
         "remaining_turns": 0.0,
     })
+    history = tuple(
+        EpochMetrics(
+            epoch,
+            train_metrics,
+            MappingProxyType({
+                "total": float(best_epoch - epoch),
+                "policy": float(best_epoch - epoch),
+                "outcome": 0.0,
+                "horizon": 0.0,
+                "remaining_turns": 0.0,
+            }),
+            float(best_epoch - epoch),
+            True,
+        )
+        for epoch in range(best_epoch + 1)
+    )
     result = TrainingResult(
         model=TacticalV3Policy(model_config).eval(),
         model_config=model_config,
         objective_config=objective_config,
         trainer_config=trainer_config,
-        best_epoch=0,
+        best_epoch=best_epoch,
         best_validation_policy_nll=0.0,
         stopped_early=False,
-        history=(EpochMetrics(0, metrics, metrics, 0.0, True),),
+        history=history,
     )
     run_dir = publish_structured_run(tmp_path / "run", result, corpus, DUEL_IDENTITY_FIXTURE)
     payload = json.loads(
@@ -87,6 +107,13 @@ def test_load_structured_controller_is_cpu_eval_and_selects_exact_legal_identity
     assert first.identity == case.identity
     assert first.policy.training is False
     assert next(first.policy.parameters()).device.type == "cpu"
+    batch = collate_decisions(
+        (case.view.decision,), first.policy.config.horizon_turns
+    )
+    with torch.inference_mode():
+        first_logits = first.policy(batch).candidate_logits
+        second_logits = second.policy(batch).candidate_logits
+    torch.testing.assert_close(first_logits, second_logits, rtol=0.0, atol=0.0)
     assert select_candidate(first, case.view) == select_candidate(second, case.view)
     selected = select_candidate(first, case.view)
     assert selected.decision_id == case.view.decision.decision_id
@@ -96,8 +123,13 @@ def test_load_structured_controller_is_cpu_eval_and_selects_exact_legal_identity
     ) == 1
 
 
-def test_load_structured_controller_matches_hashes_before_checkpoint_tensor_load(
+@pytest.mark.parametrize(
+    ("wrong_field", "message"),
+    (("encoding", "encoding hash"), ("capacity", "capacity hash")),
+)
+def test_load_structured_controller_matches_both_hashes_before_checkpoint_tensor_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    wrong_field: str, message: str,
 ) -> None:
     import ml_lab.tactical_v3_controller as controller_module
 
@@ -110,9 +142,15 @@ def test_load_structured_controller_matches_hashes_before_checkpoint_tensor_load
         raise AssertionError("checkpoint tensor loader must not run")
 
     monkeypatch.setattr(controller_module, "validate_structured_run", should_not_load)
-    with pytest.raises(ValueError, match="encoding hash"):
+    encoding_hash = (
+        "0" * 64 if wrong_field == "encoding" else case.identity.encoding_hash
+    )
+    capacity_hash = (
+        "0" * 64 if wrong_field == "capacity" else case.identity.capacity_hash
+    )
+    with pytest.raises(ValueError, match=message):
         controller_module.load_structured_controller(
-            case.run_dir, "0" * 64, case.identity.capacity_hash
+            case.run_dir, encoding_hash, capacity_hash
         )
     assert called is False
 
