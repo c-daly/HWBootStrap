@@ -24,7 +24,11 @@ namespace HexWars.Engine
 
             int roll = _rng.Next(100);
             if (roll < 25) return new EndTurn(me);                       // end turns often -> rounds advance
-            if (roll < 45 && player.Points >= 1) return RandomCreate(me, player.Points);
+            if (roll < 45 && player.Points >= 1)
+            {
+                Command design = RandomCreate(me, player.Points);
+                if (GameEngine.Apply(state, design).Success) return design;
+            }
 
             var moves = LegalMoves.For(state);
             return moves[_rng.Next(moves.Count)];                        // always non-empty (includes EndTurn)
