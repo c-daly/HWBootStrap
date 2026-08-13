@@ -624,6 +624,19 @@ def _is_reparse(path: Path) -> bool:
     )
 
 
+def _require_plain_lexical_chain(path: Path, label: str) -> None:
+    lexical = path if path.is_absolute() else Path.cwd() / path
+    for component in reversed((lexical, *lexical.parents)):
+        try:
+            os.lstat(component)
+        except FileNotFoundError:
+            break
+        if _is_reparse(component):
+            raise ValueError(
+                f"{label} ancestor must not be a symlink or reparse point: {component}"
+            )
+
+
 def _require_plain_run_inventory(root: Path) -> dict[str, Path]:
     if _is_reparse(root) or not root.is_dir():
         raise ValueError(
@@ -682,6 +695,7 @@ def _authenticated_corpus_manifest(
 
 def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: StructuredCorpus, scenario_path: Path) -> Path:
     run_dir = Path(run_dir)
+    _require_plain_lexical_chain(run_dir.parent, "run destination")
     if run_dir.exists() or _is_reparse(run_dir):
         raise FileExistsError(f"refusing to overwrite existing run {run_dir}")
     if type(result) is not TrainingResult or type(corpus) is not StructuredCorpus:
@@ -751,6 +765,7 @@ def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: Struct
             "selected_identities": [asdict(item) for item in fixture.selected_identities],
         }))
         validate_structured_run(temporary)
+        _require_plain_lexical_chain(run_dir.parent, "run destination")
         if run_dir.exists() or _is_reparse(run_dir):
             raise FileExistsError(f"refusing to overwrite existing run {run_dir}")
         _publish_no_replace(temporary, run_dir)
@@ -763,6 +778,7 @@ def publish_structured_run(run_dir: Path, result: TrainingResult, corpus: Struct
 
 def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
     root = Path(run_dir)
+    _require_plain_lexical_chain(root, "run directory")
     entries = _require_plain_run_inventory(root)
     checkpoint_dir = entries["checkpoints"]
     checkpoint = checkpoint_dir / "best.pt"

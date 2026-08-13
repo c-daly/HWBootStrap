@@ -610,6 +610,46 @@ def test_validate_rejects_real_windows_junction(
         os.rmdir(junction)
 
 
+def test_validate_rejects_nested_symlink_ancestor(
+    tmp_path: Path,
+    published_run_template: tuple[CheckpointCase, Path],
+) -> None:
+    _, template = published_run_template
+    target = tmp_path / "symlink-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    clone_published_run(template, ordinary_parent / "run")
+    symlink = tmp_path / "ancestor-symlink"
+    try:
+        os.symlink(target, symlink, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    try:
+        with pytest.raises(ValueError, match="ancestor|plain|reparse"):
+            validate_structured_run(symlink / "ordinary-parent" / "run")
+    finally:
+        symlink.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows reparse points")
+def test_validate_rejects_nested_windows_junction_ancestor(
+    tmp_path: Path,
+    published_run_template: tuple[CheckpointCase, Path],
+) -> None:
+    _, template = published_run_template
+    target = tmp_path / "junction-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    clone_published_run(template, ordinary_parent / "run")
+    junction = tmp_path / "ancestor-junction"
+    create_windows_junction(junction, target)
+    try:
+        with pytest.raises(ValueError, match="ancestor|plain|reparse"):
+            validate_structured_run(junction / "ordinary-parent" / "run")
+    finally:
+        os.rmdir(junction)
+
+
 def test_validate_rejects_checkpoint_escape_and_preserves_run_bytes(
     tmp_path: Path,
     published_run_template: tuple[CheckpointCase, Path],
@@ -672,6 +712,54 @@ def test_publish_rejects_windows_reparse_parent(
                 case.corpus,
                 case.scenario,
             )
+    finally:
+        os.rmdir(junction)
+
+
+def test_publish_rejects_nested_symlink_ancestor_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    case = make_case()
+    target = tmp_path / "symlink-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    symlink = tmp_path / "ancestor-symlink"
+    try:
+        os.symlink(target, symlink, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+    try:
+        with pytest.raises(ValueError, match="ancestor|plain|reparse"):
+            publish_structured_run(
+                symlink / "ordinary-parent" / "run",
+                case.result,
+                case.corpus,
+                case.scenario,
+            )
+        assert not (ordinary_parent / "run").exists()
+    finally:
+        symlink.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows reparse points")
+def test_publish_rejects_nested_windows_junction_ancestor_without_writing_target(
+    tmp_path: Path,
+) -> None:
+    case = make_case()
+    target = tmp_path / "junction-target"
+    ordinary_parent = target / "ordinary-parent"
+    ordinary_parent.mkdir(parents=True)
+    junction = tmp_path / "ancestor-junction"
+    create_windows_junction(junction, target)
+    try:
+        with pytest.raises(ValueError, match="ancestor|plain|reparse"):
+            publish_structured_run(
+                junction / "ordinary-parent" / "run",
+                case.result,
+                case.corpus,
+                case.scenario,
+            )
+        assert not (ordinary_parent / "run").exists()
     finally:
         os.rmdir(junction)
 

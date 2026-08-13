@@ -103,3 +103,34 @@
 
 The earlier report note about publication using silent default
 objective/trainer settings is superseded by this fix round.
+
+## Fix Round 2 - lexical ancestor reparse rejection
+
+The scoped re-review found that publication checked only the immediate run
+parent and validation checked only the run root and descendants. A junction
+above an ordinary immediate parent therefore redirected both operations.
+
+### RED evidence
+
+- Added nested-ancestor publish and validation regressions for Windows
+  junctions plus ordinary directory symlinks where host privileges permit.
+- On unchanged production, focused `-k nested` produced
+  `2 failed, 5 passed, 2 skipped, 60 deselected in 18.03s`. Both real Windows
+  junction cases executed and failed because publish and validation accepted
+  the redirected run. Ordinary symlink creation was unavailable on this host.
+
+### GREEN evidence
+
+- Added a lexical ancestor-chain guard that walks existing path components
+  from the filesystem anchor with `lstat`, without resolving away link or
+  reparse evidence. Validation checks through the run root. Publication checks
+  the destination parent before writing and again immediately before the
+  no-replace publication step.
+- Focused `-k nested`:
+  `7 passed, 2 skipped, 60 deselected in 13.81s`. Both real Windows nested
+  junction tests executed and passed; the publish test also proved the
+  physical target run was not created.
+- Full Task 9:
+  `63 passed, 6 skipped in 67.91s`. The six skips are ordinary-symlink cases
+  unavailable under this Windows host privileges; real junction coverage
+  executed.
