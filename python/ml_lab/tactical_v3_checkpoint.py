@@ -208,6 +208,12 @@ def _state_wire(model: TacticalV3Policy) -> dict[str, Tensor]:
     }
 
 
+def structured_model_state_sha256(model: TacticalV3Policy) -> str:
+    if type(model) is not TacticalV3Policy:
+        raise TypeError("model must be TacticalV3Policy")
+    return _state_sha256(_state_wire(model))
+
+
 def _example_wire(example: StructuredExample) -> dict[str, object]:
     if type(example) is not StructuredExample:
         raise TypeError("fixture examples must be StructuredExample")

@@ -19,12 +19,13 @@ from ml_lab.tactical_v3_checkpoint import (
     load_structured_checkpoint,
     publish_structured_run as publish_schema2_run,
     save_structured_checkpoint,
+    structured_model_state_sha256,
     validate_structured_run,
 )
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
-from ml_lab.tactical_v3_schema import parse_spaces
+from ml_lab.tactical_v3_schema import parse_spaces, parse_view
 from ml_lab.tactical_v3_training import (
     METRIC_KEYS,
     EpochMetrics,
@@ -33,7 +34,10 @@ from ml_lab.tactical_v3_training import (
     _batch_to_device,
     train_offline,
 )
-from ml_lab.tactical_v3_corpus import load_corpus
+from ml_lab.tactical_v3_corpus import (
+    StructuredExample, StructuredTarget, TeacherEvidence, load_corpus,
+)
+from tests.test_tactical_v3_schema import minimal_view_payload
 from tests.tactical_v3_fixture_support import (
     DUEL_IDENTITY_FIXTURE,
     TINY_CORPUS_ROOT,
@@ -220,6 +224,35 @@ def copied_corpus_case(tmp_path: Path) -> CheckpointCase:
         case,
         corpus=load_corpus(copied, case.metadata.identity),
     )
+
+
+def test_public_model_state_hash_round_trips_through_cpu_checkpoint(tmp_path: Path) -> None:
+    identity = load_duel_identity_fixture()
+    view = parse_view(minimal_view_payload(), identity)
+    example = StructuredExample(
+        1, view.decision, StructuredTarget(0, "win", 0, 1, False),
+        TeacherEvidence("bounded-search-v1", 4, 512, 17,
+                        "material-plus-pursuit-v1", None),
+        identity.scenario_id, identity.contract_hash, identity.encoding_hash,
+        identity.capacity_hash, "standard-3v3", 61_000_000, 0,
+    )
+    model = TacticalV3Policy(TacticalV3ModelConfig()).eval()
+    state_hash = structured_model_state_sha256(model)
+    metadata = StructuredCheckpointMetadata(
+        1, "structured_imitation", identity, model.config, ObjectiveConfig(),
+        TrainerConfig(seed=227, device="cpu"), "a" * 64, state_hash, 0, 0.0, "cpu",
+    )
+    checkpoint = save_structured_checkpoint(
+        tmp_path / "best.pt", model, metadata, (example,),
+    )
+    loaded = load_structured_checkpoint(
+        checkpoint, metadata.identity.encoding_hash, metadata.identity.capacity_hash,
+    )
+
+    assert metadata.model_state_sha256 == state_hash
+    assert loaded.metadata.model_state_sha256 == state_hash
+    assert structured_model_state_sha256(loaded.model) == state_hash
+    assert next(loaded.model.parameters()).device.type == "cpu"
 
 
 @pytest.fixture(scope="module")
