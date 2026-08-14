@@ -120,18 +120,26 @@ namespace HexWars.GymServer
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             return new
             {
-                selection = new
-                {
-                    decision_id = selection.DecisionId,
-                    candidate_id = selection.CandidateId,
-                    search_depth = selection.SearchDepth,
-                    expansion_budget = selection.ExpansionBudget,
-                    actual_expansions = selection.ActualExpansions,
-                    heuristic_identity = selection.HeuristicIdentity,
-                },
+                selection = TeacherSelection(selection),
                 view = View(view, capacity),
             };
         }
+
+        public static object OracleQuery(TacticalV3TeacherSelection selection)
+        {
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+            return new { selection = TeacherSelection(selection) };
+        }
+
+        private static object TeacherSelection(TacticalV3TeacherSelection selection) => new
+        {
+            decision_id = selection.DecisionId,
+            candidate_id = selection.CandidateId,
+            search_depth = selection.SearchDepth,
+            expansion_budget = selection.ExpansionBudget,
+            actual_expansions = selection.ActualExpansions,
+            heuristic_identity = selection.HeuristicIdentity,
+        };
 
         public static object View(TacticalV3View view, TacticalV3CapacityProfile capacity)
         {

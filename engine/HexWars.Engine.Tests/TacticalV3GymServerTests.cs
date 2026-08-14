@@ -558,6 +558,69 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Process_DuelOracleQueryLeavesDecisionLiveForDistinctLearnerStep()
+        {
+            using var queried = TacticalV3ServerProcess.Start(CheckedInScenario);
+            using var direct = TacticalV3ServerProcess.Start(CheckedInScenario);
+            using var teacher = TacticalV3ServerProcess.Start(CheckedInScenario);
+            string resetRequest = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            });
+            JsonElement initial = queried.Request(resetRequest);
+            JsonElement directInitial = direct.Request(resetRequest);
+            JsonElement teacherInitial = teacher.Request(resetRequest);
+            Assert.That(directInitial.GetRawText(), Is.EqualTo(initial.GetRawText()));
+            Assert.That(teacherInitial.GetRawText(), Is.EqualTo(initial.GetRawText()));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = queried.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_query", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+
+            AssertProperties(response, "selection");
+            JsonElement selection = response.GetProperty("selection");
+            AssertProperties(selection,
+                "decision_id", "candidate_id", "search_depth", "expansion_budget",
+                "actual_expansions", "heuristic_identity");
+            int teacherCandidateId = selection.GetProperty("candidate_id").GetInt32();
+            int learnerCandidateId = initial.GetProperty("candidates").EnumerateArray()
+                .Select(candidate => candidate.GetProperty("candidate_id").GetInt32())
+                .First(candidateId => candidateId != teacherCandidateId);
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection.GetProperty("decision_id").GetInt64(),
+                    Is.EqualTo(decisionId));
+                Assert.That(initial.GetProperty("candidates").EnumerateArray().Count(candidate =>
+                    candidate.GetProperty("candidate_id").GetInt32() == teacherCandidateId),
+                    Is.EqualTo(1));
+                Assert.That(learnerCandidateId, Is.Not.EqualTo(teacherCandidateId));
+            });
+
+            string learnerStep = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId,
+                candidate_id = learnerCandidateId,
+            });
+            JsonElement afterQuery = queried.Request(learnerStep);
+            JsonElement withoutQuery = direct.Request(learnerStep);
+            JsonElement teacherStep = teacher.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId,
+                candidate_id = teacherCandidateId,
+            }));
+
+            Assert.That(afterQuery.GetRawText(), Is.EqualTo(withoutQuery.GetRawText()));
+            Assert.That(afterQuery.GetRawText(), Is.Not.EqualTo(teacherStep.GetRawText()));
+            AssertViewIdentities(afterQuery);
+        }
+
+        [Test]
         public void Process_DuelOracleStepStaleDecisionIsRecoverableWithoutAdvancing()
         {
             using var server = TacticalV3ServerProcess.Start(CheckedInScenario);

@@ -78,6 +78,13 @@ for line in sys.stdin:
                 "actual_expansions": 17,
                 "heuristic_identity": "material-plus-pursuit-v1",
             }, "view": view}
+    elif request["cmd"] == "duel_oracle_query":
+        response = replies.get(request["cmd"], {"selection": {
+            "decision_id": request["decision_id"], "candidate_id": 0,
+            "search_depth": 4, "expansion_budget": 512,
+            "actual_expansions": 17,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        }})
     elif request["cmd"] == "duel_status":
         response = replies.get(request["cmd"], {"internal_fallback_count": 0})
     elif request["cmd"] == "duel_save":
@@ -130,6 +137,27 @@ def test_duel_oracle_step_sends_exact_request_returns_frozen_result_and_status(
         "heuristic_identity": "material-plus-pursuit-v1",
     }
     assert fake_server.requests[-2] == {"cmd": "duel_status"}
+
+
+def test_duel_oracle_query_sends_exact_request_and_returns_frozen_selection(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient, TeacherSelection
+
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(41, "external", "random", 0, "standard-3v3", 0)
+        selection = client.duel_oracle_query(initial.decision.decision_id)
+        assert type(selection) is TeacherSelection
+        assert selection.decision_id == initial.decision.decision_id
+        assert selection.candidate_id == initial.decision.candidates[0].candidate_id
+        with pytest.raises(FrozenInstanceError):
+            selection.candidate_id = 1  # type: ignore[misc]
+
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_oracle_query", "decision_id": 7,
+        "search_depth": 4, "expansion_budget": 512,
+        "heuristic_identity": "material-plus-pursuit-v1",
+    }
 
 
 def test_duel_oracle_step_exact_stale_error_preserves_view_and_allows_retry(
