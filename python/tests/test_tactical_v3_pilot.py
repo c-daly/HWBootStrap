@@ -205,8 +205,24 @@ def test_collection_evidence_is_canonical_content_addressed_and_write_once(tmp_p
         write_collection_evidence(output, collection)
 
 
+def test_collection_evidence_round_trips_without_collecting_again(tmp_path: Path) -> None:
+    from ml_lab.tactical_v3_pilot import (
+        load_collection_evidence,
+        write_collection_evidence,
+    )
+
+    expected = _canonical_collection()
+    output = tmp_path / "pilot"
+    expected_evidence = write_collection_evidence(output, expected)
+
+    actual, actual_evidence = load_collection_evidence(output, expected.identity)
+
+    assert actual == expected
+    assert actual_evidence == expected_evidence
+
+
 def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     import ml_lab.tactical_v3_pilot as module
     from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
@@ -218,20 +234,33 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     evidence = module.write_collection_evidence(output, collection)
     captured = {}
 
-    def fake_train(train, validation, model_config, objective_config, trainer_config):
+    def fake_train(
+        train, validation, model_config, objective_config, trainer_config,
+        *, epoch_callback, deadline_monotonic,
+    ):
         captured.update(train=train, validation=validation, model=model_config,
-                        objective=objective_config, trainer=trainer_config)
+                        objective=objective_config, trainer=trainer_config,
+                        deadline=deadline_monotonic)
         model = TacticalV3Policy(model_config).eval()
         metrics = MappingProxyType({
             "total": 1.0, "policy": 1.0, "outcome": 0.0,
             "horizon": 0.0, "remaining_turns": 0.0,
         })
         history = (EpochMetrics(0, metrics, metrics, 1.0, True),)
+        epoch_callback(history[0])
         return TrainingResult(model, model_config, objective_config, trainer_config,
                               0, 1.0, False, history)
 
     monkeypatch.setattr(module, "train_offline", fake_train)
-    artifacts = module.train_pilot(collection, evidence, output, 227, "cpu")
+    attempt = output / "retry-1"
+    artifacts = module.train_pilot(
+        collection,
+        evidence,
+        output,
+        227,
+        "cpu",
+        artifacts_output=attempt,
+    )
 
     assert captured["train"] is collection.train
     assert captured["validation"] is collection.validation
@@ -246,16 +275,44 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     assert captured["trainer"].learning_rate == 0.001
     assert captured["trainer"].max_epochs == 100
     assert captured["trainer"].patience_epochs == 12
+    assert captured["deadline"] > 0.0
     assert artifacts.loaded.metadata.corpus_sha256 == evidence.collection_sha256
     assert next(artifacts.loaded.model.parameters()).device.type == "cpu"
     assert artifacts.restored_train.valid_logit_count == len(collection.train)
     assert artifacts.restored_validation.valid_logit_count == len(collection.validation)
-    assert (output / "metrics.jsonl").read_text(encoding="utf-8") == (
+    expected_history = (
         '{"epoch":0,"improved":true,"train":{"horizon":0.0,"outcome":0.0,'
         '"policy":1.0,"remaining_turns":0.0,"total":1.0},'
         '"validation":{"horizon":0.0,"outcome":0.0,"policy":1.0,'
         '"remaining_turns":0.0,"total":1.0},"validation_policy_nll":1.0}\n'
     )
+    assert (attempt / "metrics.jsonl").read_text(encoding="utf-8") == expected_history
+    assert (attempt / "telemetry.jsonl").read_text(encoding="utf-8") == expected_history
+    console = capsys.readouterr().out
+    assert "phase=initial_metrics" in console
+    assert "epoch=1/100" in console
+    assert "validation_policy_nll=1.000000" in console
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    events = EventAccumulator(str(attempt / "tensorboard")).Reload()
+    assert events.Scalars("baseline/train_policy_nll")[0].value >= 0.0
+    assert events.Scalars("epoch/validation_policy_nll")[0].value == pytest.approx(1.0)
+    assert events.Scalars("progress/started")[0].value == pytest.approx(1.0)
+
+
+def test_policy_target_metrics_honors_training_deadline_before_a_batch() -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+
+    collection = _canonical_collection()
+    model_config, _, _ = module._pilot_configs(227, "cpu")
+    model = TacticalV3Policy(model_config).eval()
+
+    with pytest.raises(TimeoutError, match="training deadline"):
+        module._policy_target_metrics(
+            model,
+            collection.train,
+            deadline_monotonic=0.0,
+        )
 
 
 class _EvaluationClient:
@@ -419,6 +476,105 @@ def test_pilot_cli_routes_only_fixed_inputs(tmp_path: Path, monkeypatch: pytest.
     assert actual_output == output
     assert seed == 227 and device == "cuda"
     assert tuple(command[-len(argv):]) == argv
+
+
+def test_pilot_retry_cli_routes_existing_collection_without_collection_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import run_tactical_v3_imitation as cli
+
+    server = tmp_path / "GymServer.dll"
+    scenario = tmp_path / "scenario.json"
+    output = tmp_path / "pilot"
+    server.write_bytes(b"server")
+    scenario.write_text("{}", encoding="utf-8")
+    output.mkdir()
+    (output / "collection.json").write_text("{}\n", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(
+        cli, "run_pilot_retry", lambda *args: captured.setdefault("args", args),
+    )
+    argv = (
+        "pilot-retry", "--server-dll", str(server), "--scenario", str(scenario),
+        "--output", str(output), "--seed", "227", "--device", "cuda",
+    )
+
+    assert cli.main(argv) == 0
+    server_cmd, actual_output, seed, device, command = captured["args"]
+    assert server_cmd == ("dotnet", str(server), "--scenario-file", str(scenario))
+    assert actual_output == output
+    assert seed == 227 and device == "cuda"
+    assert tuple(command[-len(argv):]) == argv
+
+
+def test_run_pilot_retry_reuses_collection_and_writes_only_retry_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    expected = _canonical_collection()
+    root = tmp_path / "pilot"
+    module.write_collection_evidence(root, expected)
+    initial = module.PolicyTargetMetrics(1.0, 0.25, 4, 4)
+    restored = module.PolicyTargetMetrics(0.5, 0.75, 4, 4)
+    training = module.PilotTrainingArtifacts(
+        Path("checkpoints/best.pt"), initial, initial, restored, restored,
+        SimpleNamespace(metadata=SimpleNamespace(identity=expected.identity)), 2.5,
+    )
+    summary = module.PilotEvaluationSummary(28, 17, 9, 2, 2, 11.5, 0, 0, 17 / 28)
+    baseline = module.PilotEvaluationSummary(28, 12, 12, 4, 4, 13.0, 0, 0, 12 / 28)
+    evaluations = {
+        "model": module.PilotEvaluation("model", (), summary, ()),
+        "random": module.PilotEvaluation("random", (), baseline, ()),
+    }
+    captured = {}
+
+    def fail_collection(*args):
+        pytest.fail("retry must not collect games")
+
+    def fake_train(collection, evidence, collection_root, seed, device, *, artifacts_output):
+        captured.update(
+            collection=collection,
+            evidence=evidence,
+            collection_root=collection_root,
+            seed=seed,
+            device=device,
+            artifacts_output=artifacts_output,
+        )
+        artifacts_output.mkdir()
+        return training
+
+    class Client:
+        def __init__(self, command, *, environment_kind):
+            assert tuple(command) == ("dotnet", "server.dll")
+            assert environment_kind == "duel"
+            self.identity = expected.identity
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    monkeypatch.setattr(module, "collect_pilot", fail_collection)
+    monkeypatch.setattr(module, "train_pilot", fake_train)
+    monkeypatch.setattr(module, "TacticalV3GymClient", Client)
+    monkeypatch.setattr(
+        module, "evaluate_pilot",
+        lambda client, loaded, controller, schedule: evaluations[controller],
+    )
+    command = ("python", "-m", "ml_lab", "pilot-retry")
+
+    attempt = module.run_pilot_retry(
+        ("dotnet", "server.dll"), root, 227, "cpu", command,
+    )
+
+    assert attempt == root / "retry-1"
+    assert captured["collection"] == expected
+    assert captured["collection_root"] == root
+    assert captured["artifacts_output"] == root / "retry-1"
+    assert set(path.name for path in root.iterdir()) == {
+        "train.jsonl", "validation.jsonl", "collection.json", "retry-1",
+    }
+    evaluation = json.loads((attempt / "evaluation.json").read_text(encoding="utf-8"))
+    assert evaluation["execution"]["command"] == list(command)
+    assert evaluation["collection"]["train_games"] == 28
 
 
 @pytest.mark.parametrize("failure", ["server", "scenario", "output", "seed", "extra"])

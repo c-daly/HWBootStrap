@@ -15,6 +15,7 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 from .tactical_v3_batching import collate_decisions, collate_examples
 from .tactical_v3_checkpoint import (
@@ -25,12 +26,32 @@ from .tactical_v3_checkpoint import (
     structured_model_state_sha256,
 )
 from .tactical_v3_client import CandidateSelection, TacticalV3GymClient, TeacherSelection
-from .tactical_v3_corpus import StructuredExample, StructuredTarget, TeacherEvidence
+from .tactical_v3_corpus import (
+    StructuredExample,
+    StructuredTarget,
+    TeacherEvidence,
+    _ROW_FIELDS,
+    _TEACHER_FIELDS,
+    _exact_mapping,
+    _int,
+    _parse_target,
+    _text,
+)
 from .tactical_v3_layers import TacticalV3ModelConfig
 from .tactical_v3_model import TacticalV3Policy
 from .tactical_v3_objectives import ObjectiveConfig
-from .tactical_v3_schema import TacticalV3Decision, TacticalV3SemanticIdentity, TacticalV3View
-from .tactical_v3_training import EpochMetrics, TrainerConfig, train_offline
+from .tactical_v3_schema import (
+    TacticalV3Decision,
+    TacticalV3SemanticIdentity,
+    TacticalV3View,
+    parse_decision,
+)
+from .tactical_v3_training import (
+    EpochMetrics,
+    TrainerConfig,
+    _batch_to_device,
+    train_offline,
+)
 
 
 PILOT_PROFILES = (
@@ -429,6 +450,162 @@ def write_collection_evidence(
     )
 
 
+def load_collection_evidence(
+    output: Path,
+    identity: TacticalV3SemanticIdentity,
+) -> tuple[PilotCollection, PilotCollectionEvidence]:
+    identity = _validate_identity(identity)
+    output = Path(output)
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("pilot evidence output must be a plain directory")
+    if {path.name for path in output.iterdir() if path.is_file()} < {
+        "train.jsonl", "validation.jsonl", "collection.json",
+    }:
+        raise ValueError("pilot collection evidence is incomplete")
+
+    manifest_bytes = (output / "collection.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
+        raise ValueError("pilot collection manifest must be canonical JSON")
+    if set(manifest) != {
+        "schema_version", "label_source", "identity", "profiles", "teacher",
+        "train", "validation", "games",
+    }:
+        raise ValueError("pilot collection manifest fields are not exact")
+    expected_identity = {
+        "scenario_id": identity.scenario_id,
+        "contract_hash": identity.contract_hash,
+        "encoding_hash": identity.encoding_hash,
+        "capacity_hash": identity.capacity_hash,
+        "environment_kind": "duel",
+    }
+    if (
+        manifest["schema_version"] != 1
+        or manifest["label_source"] != "bounded-search-v1"
+        or manifest["identity"] != expected_identity
+        or manifest["profiles"] != list(PILOT_PROFILES)
+        or manifest["teacher"] != {
+            "search_depth": 4,
+            "expansion_budget": 512,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        }
+    ):
+        raise ValueError("pilot collection manifest does not match the frozen contract")
+
+    def load_partition(name: str) -> tuple[StructuredExample, ...]:
+        metadata = manifest[name]
+        if type(metadata) is not dict or set(metadata) != {"games", "examples", "sha256"}:
+            raise ValueError(f"pilot {name} metadata fields are not exact")
+        path = output / f"{name}.jsonl"
+        digest = hashlib.sha256()
+        rows = []
+        with path.open("rb") as handle:
+            for index, line in enumerate(handle):
+                digest.update(line)
+                if not line.endswith(b"\n") or line == b"\n":
+                    raise ValueError(f"pilot {name} row {index} is not canonical JSONL")
+                try:
+                    raw = json.loads(line[:-1].decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError(f"pilot {name} row {index} is invalid JSON") from error
+                if line != _canonical_bytes(raw):
+                    raise ValueError(f"pilot {name} row {index} is not canonical JSON")
+                rows.append(_parse_pilot_row(raw, identity))
+        if digest.hexdigest() != metadata["sha256"] or len(rows) != metadata["examples"]:
+            raise ValueError(f"pilot {name} evidence does not match its manifest")
+        return tuple(rows)
+
+    games = []
+    for raw in manifest["games"]:
+        if type(raw) is not dict or set(raw) != {
+            "schedule", "winner", "terminated", "truncated", "decisions",
+            "internal_fallback_count",
+        }:
+            raise ValueError("pilot game summary fields are not exact")
+        schedule = raw["schedule"]
+        if type(schedule) is not dict or set(schedule) != {
+            "partition", "profile_id", "episode_seed", "learner_seat",
+            "reference_seat",
+        }:
+            raise ValueError("pilot game schedule fields are not exact")
+        games.append(PilotGameSummary(
+            PilotScheduleItem(**schedule),
+            raw["winner"],
+            raw["terminated"],
+            raw["truncated"],
+            raw["decisions"],
+            raw["internal_fallback_count"],
+        ))
+    collection = PilotCollection(
+        identity,
+        load_partition("train"),
+        load_partition("validation"),
+        tuple(games),
+    )
+    _require_collection(collection)
+    if len(collection.games) != len(manifest["games"]):
+        raise ValueError("pilot game count does not match manifest")
+    evidence = PilotCollectionEvidence(
+        manifest["train"]["sha256"],
+        manifest["validation"]["sha256"],
+        hashlib.sha256(manifest_bytes).hexdigest(),
+    )
+    return collection, evidence
+
+
+def _parse_pilot_row(
+    value: object,
+    identity: TacticalV3SemanticIdentity,
+) -> StructuredExample:
+    data = _exact_mapping(value, _ROW_FIELDS, "pilot example")
+    if _int(data["example_schema_version"], "example.example_schema_version") != 1:
+        raise ValueError("pilot example schema version is unsupported")
+    for field, expected in (
+        ("scenario_id", identity.scenario_id),
+        ("contract_hash", identity.contract_hash),
+        ("encoding_hash", identity.encoding_hash),
+        ("capacity_hash", identity.capacity_hash),
+    ):
+        if data[field] != expected:
+            raise ValueError(f"pilot example {field} does not match collection identity")
+    decision = parse_decision(data["decision"], identity)
+    target = _parse_target(data["target"], decision)
+    teacher_data = _exact_mapping(data["teacher"], _TEACHER_FIELDS, "teacher")
+    teacher = TeacherEvidence(
+        _text(teacher_data["identity"], "teacher.identity"),
+        _int(teacher_data["search_depth"], "teacher.search_depth", nonnegative=True),
+        _int(teacher_data["expansion_budget"], "teacher.expansion_budget", nonnegative=True),
+        _int(teacher_data["actual_expansions"], "teacher.actual_expansions", nonnegative=True),
+        _text(teacher_data["heuristic_identity"], "teacher.heuristic_identity"),
+        teacher_data["confidence"],
+    )
+    if (
+        teacher.identity != "bounded-search-v1"
+        or teacher.search_depth != 4
+        or teacher.expansion_budget != 512
+        or teacher.actual_expansions > 512
+        or teacher.heuristic_identity != "material-plus-pursuit-v1"
+        or teacher.confidence is not None
+    ):
+        raise ValueError("pilot teacher evidence does not match bounded-search-v1")
+    learner_seat = _int(data["learner_seat"], "example.learner_seat")
+    if learner_seat not in {0, 1} or decision.seat != learner_seat:
+        raise ValueError("pilot learner seat must match decision seat")
+    return StructuredExample(
+        1,
+        decision,
+        target,
+        teacher,
+        identity.scenario_id,
+        identity.contract_hash,
+        identity.encoding_hash,
+        identity.capacity_hash,
+        _text(data["profile_id"], "example.profile_id"),
+        _int(data["episode_seed"], "example.episode_seed"),
+        learner_seat,
+    )
+
+
 def _pilot_configs(
     seed: int,
     device: str,
@@ -466,13 +643,14 @@ def _policy_target_metrics(
     examples: tuple[StructuredExample, ...],
     *,
     batch_size: int = 32,
+    deadline_monotonic: float | None = None,
+    progress_callback=None,
 ) -> PolicyTargetMetrics:
     if type(model) is not TacticalV3Policy:
         raise TypeError("policy metric model must be TacticalV3Policy")
     if not examples:
         raise ValueError("policy metric examples must not be empty")
-    if next(model.parameters()).device.type != "cpu":
-        raise ValueError("policy metric model must be on CPU")
+    device = next(model.parameters()).device
     model.eval()
     total_nll = 0.0
     correct = 0
@@ -480,8 +658,12 @@ def _policy_target_metrics(
     valid = 0
     with torch.inference_mode():
         for offset in range(0, len(examples), batch_size):
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("training deadline reached during policy metrics")
             rows = examples[offset:offset + batch_size]
-            batch = collate_examples(rows, model.config.horizon_turns)
+            batch = _batch_to_device(
+                collate_examples(rows, model.config.horizon_turns), device,
+            )
             logits = model(batch).candidate_logits
             valid_logits = logits[batch.candidates.mask]
             finite += int(torch.isfinite(valid_logits).sum().item())
@@ -494,6 +676,8 @@ def _policy_target_metrics(
             correct += int((
                 logits.argmax(dim=1) == batch.teacher_candidate_index
             ).sum().item())
+            if progress_callback is not None:
+                progress_callback(min(offset + len(rows), len(examples)), len(examples))
     count = len(examples)
     return PolicyTargetMetrics(total_nll / count, correct / count, finite, valid)
 
@@ -515,12 +699,95 @@ def _history_bytes(history: tuple[EpochMetrics, ...]) -> bytes:
     return b"".join(rows)
 
 
+class _PilotTelemetry:
+    def __init__(self, output: Path, max_epochs: int, started: float) -> None:
+        self.output = output
+        self.max_epochs = max_epochs
+        self.started = started
+        self._handle = (output / "telemetry.jsonl").open("xb")
+        self._writer = SummaryWriter(log_dir=str(output / "tensorboard"), flush_secs=1)
+        self._writer.add_scalar("progress/started", 1.0, 0)
+        self._writer.flush()
+        print("pilot telemetry phase=initial_metrics", flush=True)
+
+    def baseline(
+        self,
+        train: PolicyTargetMetrics,
+        validation: PolicyTargetMetrics,
+    ) -> None:
+        self._writer.add_scalar("baseline/train_policy_nll", train.policy_nll, 0)
+        self._writer.add_scalar(
+            "baseline/train_policy_accuracy", train.policy_accuracy, 0,
+        )
+        self._writer.add_scalar(
+            "baseline/validation_policy_nll", validation.policy_nll, 0,
+        )
+        self._writer.add_scalar(
+            "baseline/validation_policy_accuracy", validation.policy_accuracy, 0,
+        )
+        self._writer.flush()
+        print(
+            "pilot telemetry baseline "
+            f"train_policy_nll={train.policy_nll:.6f} "
+            f"validation_policy_nll={validation.policy_nll:.6f}",
+            flush=True,
+        )
+
+    def progress(self, phase: str, completed: int, total: int) -> None:
+        self._writer.add_scalar(f"progress/{phase}_examples", completed, completed)
+        self._writer.flush()
+        if completed == total or completed % 320 == 0:
+            print(
+                f"pilot telemetry phase={phase} examples={completed}/{total}",
+                flush=True,
+            )
+
+    def epoch(self, metric: EpochMetrics) -> None:
+        row = _history_bytes((metric,))
+        self._handle.write(row)
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+        step = metric.epoch + 1
+        for name, value in metric.train.items():
+            self._writer.add_scalar(f"epoch/train_{name}", value, step)
+        for name, value in metric.validation.items():
+            self._writer.add_scalar(f"epoch/validation_{name}", value, step)
+        self._writer.add_scalar(
+            "epoch/validation_policy_nll", metric.validation_policy_nll, step,
+        )
+        self._writer.add_scalar("epoch/improved", float(metric.improved), step)
+        self._writer.flush()
+        print(
+            "pilot telemetry "
+            f"epoch={step}/{self.max_epochs} "
+            f"elapsed_seconds={time.monotonic() - self.started:.1f} "
+            f"train_policy_nll={metric.train['policy']:.6f} "
+            f"validation_policy_nll={metric.validation_policy_nll:.6f} "
+            f"improved={str(metric.improved).lower()}",
+            flush=True,
+        )
+
+    def close(self) -> None:
+        self._handle.close()
+        self._writer.flush()
+        self._writer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
+
+
 def train_pilot(
     collection: PilotCollection,
     evidence: PilotCollectionEvidence,
     output: Path,
     seed: int,
     device: str,
+    *,
+    artifacts_output: Path | None = None,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     _require_collection(collection)
@@ -528,28 +795,58 @@ def train_pilot(
         raise ValueError("pilot training seed must be exactly 227")
     if type(evidence) is not PilotCollectionEvidence:
         raise TypeError("evidence must be PilotCollectionEvidence")
-    output = Path(output)
-    if not output.is_dir() or _is_reparse(output):
+    collection_root = Path(output)
+    if not collection_root.is_dir() or _is_reparse(collection_root):
         raise ValueError("pilot training output must be the plain collection directory")
-    if hashlib.sha256((output / "collection.json").read_bytes()).hexdigest() != (
+    if hashlib.sha256((collection_root / "collection.json").read_bytes()).hexdigest() != (
         evidence.collection_sha256
     ):
         raise ValueError("pilot collection evidence hash does not match output")
+    if artifacts_output is None:
+        output = collection_root
+    else:
+        output = Path(artifacts_output)
+        if output != collection_root / "retry-1":
+            raise ValueError("pilot retry artifacts must use the retry-1 subdirectory")
+        if output.exists() or output.is_symlink():
+            raise FileExistsError("pilot retry artifacts already exist")
+        output.mkdir()
 
     model_config, objective_config, trainer_config = _pilot_configs(seed, device)
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(seed % (2**63 - 1))
-        initial_model = TacticalV3Policy(model_config).cpu().eval()
-    initial_train = _policy_target_metrics(initial_model, collection.train)
-    initial_validation = _policy_target_metrics(initial_model, collection.validation)
+    deadline = started + _TRAINING_DEADLINE_SECONDS
+    metric_device = torch.device(trainer_config.device)
+    with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed % (2**63 - 1))
+            initial_model = TacticalV3Policy(model_config).to(metric_device).eval()
+        initial_train = _policy_target_metrics(
+            initial_model,
+            collection.train,
+            deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: telemetry.progress(
+                "initial_train", completed, total,
+            ),
+        )
+        initial_validation = _policy_target_metrics(
+            initial_model,
+            collection.validation,
+            deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: telemetry.progress(
+                "initial_validation", completed, total,
+            ),
+        )
+        telemetry.baseline(initial_train, initial_validation)
+        del initial_model
 
-    result = train_offline(
-        collection.train,
-        collection.validation,
-        model_config,
-        objective_config,
-        trainer_config,
-    )
+        result = train_offline(
+            collection.train,
+            collection.validation,
+            model_config,
+            objective_config,
+            trainer_config,
+            epoch_callback=telemetry.epoch,
+            deadline_monotonic=deadline,
+        )
     elapsed = time.monotonic() - started
     if elapsed > _TRAINING_DEADLINE_SECONDS:
         raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
@@ -580,7 +877,10 @@ def train_pilot(
         collection.validation[:2],
     )
     with metrics_path.open("xb") as handle:
-        handle.write(_history_bytes(result.history))
+        history_bytes = _history_bytes(result.history)
+        if (output / "telemetry.jsonl").read_bytes() != history_bytes:
+            raise RuntimeError("pilot live telemetry does not match completed history")
+        handle.write(history_bytes)
         handle.flush()
         os.fsync(handle.fileno())
     loaded = load_structured_checkpoint(
@@ -588,8 +888,20 @@ def train_pilot(
         collection.identity.encoding_hash,
         collection.identity.capacity_hash,
     )
-    restored_train = _policy_target_metrics(loaded.model, collection.train)
-    restored_validation = _policy_target_metrics(loaded.model, collection.validation)
+    loaded.model.to(metric_device)
+    try:
+        restored_train = _policy_target_metrics(
+            loaded.model,
+            collection.train,
+            deadline_monotonic=deadline,
+        )
+        restored_validation = _policy_target_metrics(
+            loaded.model,
+            collection.validation,
+            deadline_monotonic=deadline,
+        )
+    finally:
+        loaded.model.cpu()
     duration = time.monotonic() - started
     if duration > _TRAINING_DEADLINE_SECONDS:
         raise TimeoutError(f"pilot training exceeded deadline after {duration:.1f} seconds")
@@ -979,4 +1291,132 @@ def run_pilot(
                 handle.write(failure)
                 handle.flush()
                 os.fsync(handle.fileno())
+        raise
+
+
+def run_pilot_retry(
+    server_cmd: Sequence[str],
+    output: Path,
+    seed: int,
+    device: str,
+    command: Sequence[str],
+) -> Path:
+    started = time.monotonic()
+    output = Path(output)
+    if type(seed) is not int or seed != 227:
+        raise ValueError("pilot retry seed must be exactly 227")
+    _pilot_configs(seed, device)
+    for value, name in ((server_cmd, "server command"), (command, "command")):
+        if (
+            isinstance(value, (str, bytes))
+            or not isinstance(value, Sequence)
+            or not value
+            or any(type(part) is not str or not part for part in value)
+        ):
+            raise ValueError(f"pilot retry {name} must be a non-empty sequence of strings")
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("pilot retry output must be the plain collection directory")
+    attempt = output / "retry-1"
+    if attempt.exists() or attempt.is_symlink():
+        raise FileExistsError("pilot retry-1 artifacts already exist")
+
+    phase = "collection authentication"
+    try:
+        print("pilot telemetry phase=load_collection", flush=True)
+        with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+            identity = client.identity
+        collection, evidence = load_collection_evidence(output, identity)
+        print(
+            "pilot telemetry collection_loaded "
+            f"train_examples={len(collection.train)} "
+            f"validation_examples={len(collection.validation)}",
+            flush=True,
+        )
+
+        phase = "training"
+        training = train_pilot(
+            collection,
+            evidence,
+            output,
+            seed,
+            device,
+            artifacts_output=attempt,
+        )
+        schedule = evaluation_schedule()
+
+        phase = "model evaluation"
+        phase_started = time.monotonic()
+        with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+            model = evaluate_pilot(client, training.loaded, "model", schedule)
+        model_duration = time.monotonic() - phase_started
+
+        phase = "random evaluation"
+        phase_started = time.monotonic()
+        with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+            random_baseline = evaluate_pilot(
+                client, training.loaded, "random", schedule,
+            )
+        random_duration = time.monotonic() - phase_started
+        promising, reasons = pilot_decision(training, model, random_baseline)
+        evaluation: dict[str, object] = {
+            "schema_version": 1,
+            "execution": {
+                "command": list(command),
+                "device": device,
+                "duration_seconds": time.monotonic() - started,
+                "collection_duration_seconds": 0.0,
+                "training_duration_seconds": training.duration_seconds,
+                "model_evaluation_duration_seconds": model_duration,
+                "random_evaluation_duration_seconds": random_duration,
+            },
+            "identity": {
+                "scenario_id": collection.identity.scenario_id,
+                "contract_hash": collection.identity.contract_hash,
+                "encoding_hash": collection.identity.encoding_hash,
+                "capacity_hash": collection.identity.capacity_hash,
+                "environment_kind": collection.identity.environment_kind,
+            },
+            "collection": {
+                "train_games": 28,
+                "validation_games": 14,
+                "train_examples": len(collection.train),
+                "validation_examples": len(collection.validation),
+            },
+            "schedule": [asdict(item) for item in schedule],
+            "initial": {
+                "train": asdict(training.initial_train),
+                "validation": asdict(training.initial_validation),
+            },
+            "restored_best": {
+                "train": asdict(training.restored_train),
+                "validation": asdict(training.restored_validation),
+            },
+            "model": _evaluation_wire(model),
+            "random": _evaluation_wire(random_baseline),
+            "decision": {"promising": promising, "reasons": list(reasons)},
+            "claim_limit": _CLAIM_LIMIT,
+        }
+        with (attempt / "evaluation.json").open("xb") as handle:
+            handle.write(_canonical_bytes(evaluation))
+            handle.flush()
+            os.fsync(handle.fileno())
+        with (attempt / "report.md").open("xb") as handle:
+            handle.write(render_pilot_report(evaluation).encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        return attempt
+    except Exception as error:
+        if attempt.is_dir() and not _is_reparse(attempt):
+            report_path = attempt / "report.md"
+            if not report_path.exists():
+                failure = (
+                    "# Tactical-v3 training-first pilot retry\n\n"
+                    f"Failed during **{phase}** after "
+                    f"{time.monotonic() - started:.1f}s.\n\n"
+                    f"`{type(error).__name__}: {error}`\n"
+                ).encode("utf-8")
+                with report_path.open("xb") as handle:
+                    handle.write(failure)
+                    handle.flush()
+                    os.fsync(handle.fileno())
         raise

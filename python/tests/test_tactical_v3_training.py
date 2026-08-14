@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Iterable, Iterator, Literal, Mapping
 
@@ -15,12 +17,16 @@ from torch import Tensor, nn
 
 import ml_lab.tactical_v3_training as training
 from ml_lab.tactical_v3_batching import CandidateBatch, RaggedBatch, RelationNeighborhoodBatch, TokenTableBatch, collate_examples
-from ml_lab.tactical_v3_corpus import StructuredExample
+from ml_lab.tactical_v3_corpus import StructuredExample, _parse_row
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, PolicyOutput, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, structured_imitation_loss
 from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult, train_offline
-from tests.tactical_v3_fixture_support import load_tiny_corpus_fixture
+from tests.tactical_v3_fixture_support import (
+    TINY_CORPUS_ROOT,
+    load_duel_identity_fixture,
+    load_tiny_corpus_fixture,
+)
 
 METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
 
@@ -52,6 +58,31 @@ def stable_example_identity(example: StructuredExample) -> str:
 def make_trainer_case(*, device: str = "cpu", max_epochs: int = 6, batch_size: int = 4, patience_epochs: int = 6) -> TrainerTestCase:
     corpus = load_tiny_corpus_fixture()
     return TrainerTestCase(corpus.train, corpus.validation, TacticalV3ModelConfig(), ObjectiveConfig(), TrainerConfig(seed=227, batch_size=batch_size, max_epochs=max_epochs, patience_epochs=patience_epochs, device=device))
+
+
+def make_unleased_trainer_case(
+    *, max_epochs: int, patience_epochs: int,
+) -> TrainerTestCase:
+    identity = load_duel_identity_fixture()
+
+    def first_row(name: str) -> StructuredExample:
+        path = Path(TINY_CORPUS_ROOT) / name
+        raw = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        return _parse_row(raw, identity)
+
+    return TrainerTestCase(
+        (first_row("train.jsonl"),),
+        (first_row("validation.jsonl"),),
+        TacticalV3ModelConfig(),
+        ObjectiveConfig(),
+        TrainerConfig(
+            seed=227,
+            batch_size=1,
+            max_epochs=max_epochs,
+            patience_epochs=patience_epochs,
+            device="cpu",
+        ),
+    )
 
 def run_training_case(case: TrainerTestCase) -> TrainingResult:
     return train_offline(case.train, case.validation, case.model_config, case.objective_config, case.trainer_config)
@@ -355,6 +386,49 @@ def test_seed_zero_is_the_only_nonpositive_integer_exception() -> None:
 def test_public_train_offline_interface_binds_a_callable() -> None:
     assert train_offline is training.train_offline
     assert callable(train_offline)
+
+
+def test_train_offline_reports_each_completed_epoch() -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    observed: list[EpochMetrics] = []
+
+    result = train_offline(
+        case.train,
+        case.validation,
+        case.model_config,
+        case.objective_config,
+        case.trainer_config,
+        epoch_callback=observed.append,
+    )
+
+    assert tuple(observed) == result.history
+    assert tuple(metric.epoch for metric in observed) == (0, 1)
+
+
+def test_train_offline_deadline_interrupts_before_an_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    optimizer_steps = 0
+    original = training._after_optimizer_step
+
+    def count_step(model, *, epoch: int, batch_index: int) -> None:
+        nonlocal optimizer_steps
+        original(model, epoch=epoch, batch_index=batch_index)
+        optimizer_steps += 1
+
+    monkeypatch.setattr(training, "_after_optimizer_step", count_step)
+    with pytest.raises(TimeoutError, match="training deadline"):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            deadline_monotonic=0.0,
+        )
+
+    assert optimizer_steps == 0
 
 @pytest.mark.parametrize(("field", "value"), CONFIG_INVALID_CASES)
 def test_every_config_field_rejects_its_invalid_type_and_domain_matrix(

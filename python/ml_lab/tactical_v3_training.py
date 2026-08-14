@@ -6,7 +6,8 @@ import dataclasses
 import math
 import random
 import re
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -109,6 +110,9 @@ def train_offline(
     model_config: TacticalV3ModelConfig,
     objective_config: ObjectiveConfig,
     trainer_config: TrainerConfig,
+    *,
+    epoch_callback: Callable[[EpochMetrics], None] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> TrainingResult:
     return _train_offline_impl(
         train_examples,
@@ -116,6 +120,8 @@ def train_offline(
         model_config,
         objective_config,
         trainer_config,
+        epoch_callback=epoch_callback,
+        deadline_monotonic=deadline_monotonic,
     )
 
 
@@ -232,12 +238,14 @@ def _evaluate_validation(
     device: torch.device,
     *,
     epoch: int,
+    deadline_monotonic: float | None = None,
 ) -> tuple[Mapping[str, float], float]:
     weighted = {name: 0.0 for name in METRIC_KEYS}
     example_count = 0
     model.eval()
     with torch.no_grad():
         for batch_index, start in enumerate(range(0, len(examples), batch_size)):
+            _check_training_deadline(deadline_monotonic)
             rows = examples[start:start + batch_size]
             batch = _batch_to_device(
                 collate_examples(rows, model_config.horizon_turns), device
@@ -269,6 +277,11 @@ def _evaluate_validation(
         name: float(weighted[name] / example_count) for name in METRIC_KEYS
     })
     return metrics, metrics["policy"]
+
+
+def _check_training_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("training deadline reached")
 
 
 def _canonical_split(examples: tuple, label: str) -> tuple[StructuredExample, ...]:
@@ -395,6 +408,9 @@ def _train_offline_impl(
     model_config: TacticalV3ModelConfig,
     objective_config: ObjectiveConfig,
     trainer_config: TrainerConfig,
+    *,
+    epoch_callback: Callable[[EpochMetrics], None] | None,
+    deadline_monotonic: float | None,
 ) -> TrainingResult:
     if type(train_examples) is not tuple:
         raise TypeError("training split must be an immutable tuple")
@@ -410,6 +426,13 @@ def _train_offline_impl(
         raise TypeError("objective_config must be ObjectiveConfig")
     if type(trainer_config) is not TrainerConfig:
         raise TypeError("trainer_config must be TrainerConfig")
+    if epoch_callback is not None and not callable(epoch_callback):
+        raise TypeError("epoch_callback must be callable")
+    if deadline_monotonic is not None and (
+        type(deadline_monotonic) is not float or not math.isfinite(deadline_monotonic)
+    ):
+        raise ValueError("deadline_monotonic must be a finite built-in float")
+    _check_training_deadline(deadline_monotonic)
     train_rows = _canonical_split(train_examples, "training")
     validation_rows = _canonical_split(validation_examples, "validation")
     train_keys = {_canonical_example_key(example) for example in train_rows}
@@ -440,6 +463,7 @@ def _train_offline_impl(
     stopped_early = False
 
     for epoch in range(trainer_config.max_epochs):
+        _check_training_deadline(deadline_monotonic)
         permutation = torch.randperm(len(train_rows), generator=generator).tolist()
         train_weighted = {name: 0.0 for name in METRIC_KEYS}
         train_count = 0
@@ -447,6 +471,7 @@ def _train_offline_impl(
         for batch_index, start in enumerate(
             range(0, len(permutation), trainer_config.batch_size)
         ):
+            _check_training_deadline(deadline_monotonic)
             indices = permutation[start:start + trainer_config.batch_size]
             rows = tuple(train_rows[index] for index in indices)
             batch = _batch_to_device(
@@ -478,6 +503,7 @@ def _train_offline_impl(
                 raise FloatingPointError(f"{context} gradient_norm")
             optimizer.step()
             _after_optimizer_step(model, epoch=epoch, batch_index=batch_index)
+            _check_training_deadline(deadline_monotonic)
             for name, parameter in model.named_parameters():
                 if not bool(torch.isfinite(parameter).all()):
                     raise FloatingPointError(f"{context} parameter={name}")
@@ -489,6 +515,9 @@ def _train_offline_impl(
             train_count += len(rows)
 
         train_metrics = _frozen_metrics(train_weighted, train_count)
+        validation_arguments = {"epoch": epoch}
+        if deadline_monotonic is not None:
+            validation_arguments["deadline_monotonic"] = deadline_monotonic
         validation_metrics, candidate_nll = _evaluate_validation(
             model,
             validation_rows,
@@ -496,7 +525,7 @@ def _train_offline_impl(
             objective_config,
             trainer_config.batch_size,
             device,
-            epoch=epoch,
+            **validation_arguments,
         )
         if type(candidate_nll) is not float or not math.isfinite(candidate_nll):
             raise FloatingPointError(f"epoch={epoch} validation policy")
@@ -508,13 +537,16 @@ def _train_offline_impl(
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
-        history.append(EpochMetrics(
+        metric = EpochMetrics(
             epoch=epoch,
             train=MappingProxyType(dict(train_metrics)),
             validation=MappingProxyType(dict(validation_metrics)),
             validation_policy_nll=candidate_nll,
             improved=improved,
-        ))
+        )
+        history.append(metric)
+        if epoch_callback is not None:
+            epoch_callback(metric)
         if epochs_without_improvement >= trainer_config.patience_epochs:
             stopped_early = True
             break
