@@ -124,6 +124,60 @@ def test_pilot_schedules_are_frozen_balanced_disjoint_and_exact() -> None:
         assert all(seats == [0, 1] for seats in grouped.values())
 
 
+def test_diagnostic_schedule_uses_five_new_reciprocal_seeds_per_profile() -> None:
+    from ml_lab.tactical_v3_pilot import (
+        PILOT_PROFILES, collection_schedule, diagnostic_evaluation_schedule,
+        evaluation_schedule,
+    )
+
+    schedule = diagnostic_evaluation_schedule()
+    prior_seeds = {
+        item.episode_seed
+        for item in (
+            *collection_schedule("train"), *collection_schedule("validation"),
+            *evaluation_schedule(),
+        )
+    }
+
+    assert len(schedule) == 70
+    assert {item.episode_seed for item in schedule}.isdisjoint(prior_seeds)
+    for profile_index, profile in enumerate(PILOT_PROFILES):
+        rows = tuple(item for item in schedule if item.profile_id == profile)
+        assert len(rows) == 10
+        assert {item.episode_seed for item in rows} == {
+            64_000_000 + profile_index * 5 + offset for offset in range(5)
+        }
+        assert [item.learner_seat for item in rows] == [0, 1] * 5
+
+
+def test_validation_metric_breakdown_reports_each_profile_and_seat() -> None:
+    import torch
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+
+    collection = _canonical_collection()
+    model_config, _, _ = module._pilot_configs(227, "cpu")
+    model = TacticalV3Policy(model_config).eval()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+
+    breakdown = module.validation_metric_breakdown(model, collection.validation)
+
+    assert set(breakdown) == set(module.PILOT_PROFILES)
+    for profile in module.PILOT_PROFILES:
+        entry = breakdown[profile]
+        assert entry["all"]["examples"] == 2
+        assert entry["all"]["policy_accuracy"] == pytest.approx(1.0)
+        assert set(entry["seats"]) == {"0", "1"}
+        for seat in ("0", "1"):
+            assert entry["seats"][seat]["examples"] == 1
+            assert entry["seats"][seat]["policy_accuracy"] == pytest.approx(1.0)
+            assert entry["seats"][seat]["finite_logit_count"] == (
+                entry["seats"][seat]["valid_logit_count"]
+            )
+
+
 def test_collect_game_labels_every_teacher_decision_and_backfills_win() -> None:
     from ml_lab.tactical_v3_pilot import PilotScheduleItem, collect_game
 
@@ -397,6 +451,23 @@ def test_matched_evaluation_uses_one_schedule_random_baseline_and_legal_model_ac
     assert all(selection.candidate_id == 0 for selection in model_client.steps)
 
 
+def test_diagnostic_evaluation_uses_only_the_new_frozen_schedule() -> None:
+    from ml_lab.tactical_v3_pilot import (
+        diagnostic_evaluation_schedule, evaluate_pilot,
+    )
+
+    schedule = diagnostic_evaluation_schedule()
+    loaded = SimpleNamespace(model=_EvaluationPolicy(),
+                             metadata=SimpleNamespace(identity=_identity()))
+    model_client = _EvaluationClient()
+
+    model = evaluate_pilot(model_client, loaded, "model", schedule)
+
+    assert tuple(game.schedule for game in model.games) == schedule
+    assert model.aggregate.games == 70
+    assert len(model_client.steps) == 70
+
+
 def test_pilot_decision_requires_metric_improvement_zero_errors_and_ten_point_margin() -> None:
     from ml_lab.tactical_v3_pilot import (
         PilotEvaluation, PilotEvaluationSummary, PilotTrainingArtifacts,
@@ -532,6 +603,130 @@ def test_pilot_retry_cli_routes_existing_collection_without_collection_flags(
     assert seed == 227 and device == "cuda"
     assert captured["kwargs"] == {"attempt_number": 2}
     assert tuple(command[-len(argv):]) == argv
+
+
+def test_pilot_diagnose_cli_routes_frozen_checkpoint_without_training_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import run_tactical_v3_imitation as cli
+
+    server = tmp_path / "GymServer.dll"
+    scenario = tmp_path / "scenario.json"
+    output = tmp_path / "pilot"
+    checkpoint = output / "retry-2" / "checkpoints" / "best.pt"
+    server.write_bytes(b"server")
+    scenario.write_text("{}\n", encoding="utf-8")
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    (output / "collection.json").write_text("{}\n", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(
+        cli, "run_pilot_diagnostics",
+        lambda *args: captured.setdefault("args", args),
+    )
+    argv = (
+        "pilot-diagnose", "--server-dll", str(server), "--scenario", str(scenario),
+        "--output", str(output), "--attempt", "2", "--device", "cuda",
+    )
+
+    assert cli.main(argv) == 0
+
+    server_cmd, actual_output, attempt, device, command = captured["args"]
+    assert server_cmd == ("dotnet", str(server), "--scenario-file", str(scenario))
+    assert actual_output == output
+    assert attempt == 2 and device == "cuda"
+    assert tuple(command[-len(argv):]) == argv
+
+
+def test_run_pilot_diagnostics_reuses_frozen_evidence_and_writes_game_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collection = _canonical_collection()
+    root = tmp_path / "pilot"
+    module.write_collection_evidence(root, collection)
+    checkpoint = root / "retry-2" / "checkpoints" / "best.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    device_calls = []
+
+    class Model:
+        def to(self, device):
+            device_calls.append(str(device))
+            return self
+        def cpu(self):
+            device_calls.append("cpu")
+            return self
+
+    loaded = SimpleNamespace(
+        model=Model(), metadata=SimpleNamespace(identity=collection.identity),
+    )
+
+    class Client:
+        def __init__(self, command, *, environment_kind):
+            assert tuple(command) == ("dotnet", "server.dll")
+            assert environment_kind == "duel"
+            self.identity = collection.identity
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    def fake_load(path, encoding_hash, capacity_hash):
+        assert path == checkpoint
+        assert encoding_hash == collection.identity.encoding_hash
+        assert capacity_hash == collection.identity.capacity_hash
+        return loaded
+
+    breakdown = {"standard-3v3": {"all": {"examples": 2}, "seats": {}}}
+    monkeypatch.setattr(module, "TacticalV3GymClient", Client)
+    monkeypatch.setattr(module, "load_structured_checkpoint", fake_load)
+    monkeypatch.setattr(
+        module, "validation_metric_breakdown",
+        lambda model, examples: breakdown,
+    )
+    controllers = []
+
+    def fake_evaluate(client, actual_loaded, controller, schedule):
+        assert actual_loaded is loaded
+        assert schedule == module.diagnostic_evaluation_schedule()
+        controllers.append(controller)
+        games = tuple(module.PilotEvaluationGame(
+            controller, item, item.learner_seat, "win", True, False, 1, 0, 0,
+        ) for item in schedule)
+        profiles = tuple((
+            profile,
+            module._evaluation_summary(tuple(
+                game for game in games if game.schedule.profile_id == profile
+            )),
+        ) for profile in module.PILOT_PROFILES)
+        return module.PilotEvaluation(
+            controller, games, module._evaluation_summary(games), profiles,
+        )
+
+    monkeypatch.setattr(module, "evaluate_pilot", fake_evaluate)
+    command = ("python", "run_tactical_v3_imitation.py", "pilot-diagnose")
+
+    path = module.run_pilot_diagnostics(
+        ("dotnet", "server.dll"), root, 2, "cuda", command,
+    )
+
+    assert path == root / "retry-2" / "diagnostics.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["schema_version"] == 1
+    assert data["execution"]["command"] == list(command)
+    assert data["checkpoint"]["sha256"] == hashlib.sha256(b"checkpoint").hexdigest()
+    assert data["validation"]["examples"] == len(collection.validation)
+    assert data["validation"]["profiles"] == breakdown
+    assert len(data["schedule"]) == 70
+    assert len(data["model"]["games"]) == 70
+    assert data["model"]["aggregate"]["games"] == 70
+    assert data["random"]["aggregate"]["games"] == 70
+    assert controllers == ["model", "random"]
+    assert device_calls == ["cuda", "cpu"]
+    with pytest.raises(FileExistsError, match="diagnostics"):
+        module.run_pilot_diagnostics(
+            ("dotnet", "server.dll"), root, 2, "cuda", command,
+        )
 
 
 def test_run_pilot_retry_reuses_collection_and_writes_only_retry_subdirectory(

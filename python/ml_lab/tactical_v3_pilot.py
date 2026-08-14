@@ -202,6 +202,16 @@ def evaluation_schedule() -> tuple[PilotScheduleItem, ...]:
     )
 
 
+def diagnostic_evaluation_schedule() -> tuple[PilotScheduleItem, ...]:
+    return tuple(
+        PilotScheduleItem("evaluation", profile, 64_000_000 + profile_index * 5 + offset,
+                          seat, seat)
+        for profile_index, profile in enumerate(PILOT_PROFILES)
+        for offset in range(5)
+        for seat in (0, 1)
+    )
+
+
 def _validate_identity(identity: object) -> TacticalV3SemanticIdentity:
     if type(identity) is not TacticalV3SemanticIdentity:
         raise TypeError("pilot identity must be TacticalV3SemanticIdentity")
@@ -684,6 +694,33 @@ def _policy_target_metrics(
     return PolicyTargetMetrics(total_nll / count, correct / count, finite, valid)
 
 
+def validation_metric_breakdown(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+) -> dict[str, dict[str, object]]:
+    if not examples:
+        raise ValueError("validation metric examples must not be empty")
+
+    def metric_wire(rows: tuple[StructuredExample, ...]) -> dict[str, object]:
+        return {"examples": len(rows), **asdict(_policy_target_metrics(model, rows))}
+
+    result: dict[str, dict[str, object]] = {}
+    for profile in PILOT_PROFILES:
+        profile_rows = tuple(row for row in examples if row.profile_id == profile)
+        if not profile_rows:
+            raise ValueError(f"validation metrics are missing profile {profile}")
+        seats: dict[str, dict[str, object]] = {}
+        for seat in (0, 1):
+            seat_rows = tuple(row for row in profile_rows if row.learner_seat == seat)
+            if not seat_rows:
+                raise ValueError(
+                    f"validation metrics are missing profile {profile} seat {seat}"
+                )
+            seats[str(seat)] = metric_wire(seat_rows)
+        result[profile] = {"all": metric_wire(profile_rows), "seats": seats}
+    return result
+
+
 def _history_bytes(history: tuple[EpochMetrics, ...]) -> bytes:
     if type(history) is not tuple or not history:
         raise ValueError("pilot training history must be a non-empty tuple")
@@ -987,7 +1024,9 @@ def evaluate_pilot(
 ) -> PilotEvaluation:
     if controller not in {"model", "random"}:
         raise ValueError("pilot evaluation controller must be model or random")
-    if tuple(schedule) != evaluation_schedule():
+    if tuple(schedule) not in {
+        evaluation_schedule(), diagnostic_evaluation_schedule(),
+    }:
         raise ValueError("pilot evaluation schedule must be the frozen evaluation schedule")
     started = time.monotonic()
     games: list[PilotEvaluationGame] = []
@@ -1065,6 +1104,121 @@ def evaluate_pilot(
         )),
     ) for profile in PILOT_PROFILES)
     return PilotEvaluation(controller, frozen, aggregate, profiles)
+
+
+def _diagnostic_evaluation_wire(
+    evaluation: PilotEvaluation,
+) -> dict[str, object]:
+    return {
+        **_evaluation_wire(evaluation),
+        "games": [asdict(game) for game in evaluation.games],
+    }
+
+
+def run_pilot_diagnostics(
+    server_cmd: Sequence[str],
+    output: Path,
+    attempt_number: int,
+    device: str,
+    command: Sequence[str],
+) -> Path:
+    started = time.monotonic()
+    output = Path(output)
+    if type(attempt_number) is not int or attempt_number < 1:
+        raise ValueError("pilot diagnostic attempt number must be a positive built-in int")
+    for value, name in ((server_cmd, "server command"), (command, "command")):
+        if (
+            isinstance(value, (str, bytes))
+            or not isinstance(value, Sequence)
+            or not value
+            or any(type(part) is not str or not part for part in value)
+        ):
+            raise ValueError(
+                f"pilot diagnostic {name} must be a non-empty sequence of strings"
+            )
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("pilot diagnostic output must be the plain collection directory")
+    attempt = output / f"retry-{attempt_number}"
+    if not attempt.is_dir() or _is_reparse(attempt):
+        raise ValueError("pilot diagnostic attempt must be a plain directory")
+    diagnostics_path = attempt / "diagnostics.json"
+    if diagnostics_path.exists() or diagnostics_path.is_symlink():
+        raise FileExistsError("pilot diagnostics already exist")
+    checkpoint = attempt / "checkpoints" / "best.pt"
+    if not checkpoint.is_file() or _is_reparse(checkpoint):
+        raise ValueError("pilot diagnostic checkpoint must be a plain file")
+
+    with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+        identity = _validate_identity(client.identity)
+    collection, evidence = load_collection_evidence(output, identity)
+    loaded = load_structured_checkpoint(
+        checkpoint, identity.encoding_hash, identity.capacity_hash,
+    )
+    if loaded.metadata.identity != collection.identity:
+        raise ValueError("pilot diagnostic checkpoint identity does not match collection")
+
+    metric_started = time.monotonic()
+    loaded.model.to(device)
+    try:
+        validation = validation_metric_breakdown(
+            loaded.model, collection.validation,
+        )
+    finally:
+        loaded.model.cpu()
+    metric_duration = time.monotonic() - metric_started
+
+    schedule = diagnostic_evaluation_schedule()
+    model_started = time.monotonic()
+    with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+        model = evaluate_pilot(client, loaded, "model", schedule)
+    model_duration = time.monotonic() - model_started
+    random_started = time.monotonic()
+    with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+        random_baseline = evaluate_pilot(client, loaded, "random", schedule)
+    random_duration = time.monotonic() - random_started
+
+    diagnostics: dict[str, object] = {
+        "schema_version": 1,
+        "execution": {
+            "command": list(command),
+            "device": device,
+            "duration_seconds": time.monotonic() - started,
+            "validation_metric_duration_seconds": metric_duration,
+            "model_evaluation_duration_seconds": model_duration,
+            "random_evaluation_duration_seconds": random_duration,
+        },
+        "identity": {
+            "scenario_id": identity.scenario_id,
+            "contract_hash": identity.contract_hash,
+            "encoding_hash": identity.encoding_hash,
+            "capacity_hash": identity.capacity_hash,
+            "environment_kind": identity.environment_kind,
+        },
+        "checkpoint": {
+            "path": str(checkpoint.relative_to(attempt)).replace("\\", "/"),
+            "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        },
+        "collection_sha256": evidence.collection_sha256,
+        "validation": {
+            "examples": len(collection.validation),
+            "profiles": validation,
+        },
+        "schedule": [asdict(item) for item in schedule],
+        "model": _diagnostic_evaluation_wire(model),
+        "random": _diagnostic_evaluation_wire(random_baseline),
+        "win_rate_margin": (
+            model.aggregate.win_rate - random_baseline.aggregate.win_rate
+        ),
+        "claim_limit": (
+            "diagnostic evidence from one frozen checkpoint and a fixed fresh-seed "
+            "schedule; not a retraining result or statistical significance claim"
+        ),
+    }
+    with diagnostics_path.open("xb") as handle:
+        handle.write(_canonical_bytes(diagnostics))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return diagnostics_path
 
 
 def pilot_decision(
