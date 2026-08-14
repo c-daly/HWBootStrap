@@ -212,6 +212,10 @@ string RequireTacticalV3Command(JsonElement element)
             "cmd", "decision_id", "search_depth", "expansion_budget",
             "heuristic_identity",
         },
+        "duel_dagger_inspect" => new[]
+        {
+            "cmd", "decision_id", "candidate_id",
+        },
         "duel_status" => new[] { "cmd" },
         "duel_save" => new[] { "cmd", "path" },
         "close" => new[] { "cmd" },
@@ -258,6 +262,10 @@ string RequireTacticalV3Command(JsonElement element)
         {
             "cmd", "decision_id", "search_depth", "expansion_budget",
             "heuristic_identity",
+        },
+        "duel_dagger_inspect" => new[]
+        {
+            "cmd", "decision_id", "candidate_id",
         },
         _ => new[] { "cmd" },
     };
@@ -762,6 +770,19 @@ while ((line = Console.ReadLine()) != null)
                 break;
             }
             Send(TacticalV3Wire.OracleQuery(selection));
+            break;
+        }
+
+        case "duel_dagger_inspect":
+        {
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_dagger_inspect requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            int candidateId = root.GetProperty("candidate_id").GetInt32();
+            TacticalV3SelectiveDaggerInspection inspection =
+                tacticalV3Duel!.InspectSelectiveDagger(decisionId, candidateId);
+            Send(TacticalV3Wire.DaggerInspection(inspection));
             break;
         }
 

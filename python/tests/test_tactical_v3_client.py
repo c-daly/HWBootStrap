@@ -85,6 +85,17 @@ for line in sys.stdin:
             "actual_expansions": 17,
             "heuristic_identity": "material-plus-pursuit-v1",
         }})
+    elif request["cmd"] == "duel_dagger_inspect":
+        response = replies.get(request["cmd"], {"inspection": {
+            "decision_id": request["decision_id"],
+            "learner_candidate_id": request["candidate_id"],
+            "reasons": ["wasted_end_turn"],
+            "state_hash": "a" * 64,
+            "state_occurrence": 1,
+            "normalized_advantage": 0.0,
+            "opponent_living_unit_count": 3,
+            "productive_legal_action_count": 4,
+        }})
     elif request["cmd"] == "duel_status":
         response = replies.get(request["cmd"], {"internal_fallback_count": 0})
     elif request["cmd"] == "duel_save":
@@ -157,6 +168,27 @@ def test_duel_oracle_query_sends_exact_request_and_returns_frozen_selection(
         "cmd": "duel_oracle_query", "decision_id": 7,
         "search_depth": 4, "expansion_budget": 512,
         "heuristic_identity": "material-plus-pursuit-v1",
+    }
+
+
+def test_duel_dagger_inspect_sends_exact_request_and_returns_frozen_diagnostics(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient, SelectiveDaggerInspection
+
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(41, "external", "random", 0, "standard-3v3", 0)
+        inspection = client.duel_dagger_inspect(initial.decision.decision_id, 0)
+        assert type(inspection) is SelectiveDaggerInspection
+        assert inspection.reasons == ("wasted_end_turn",)
+        assert inspection.state_hash == "a" * 64
+        assert inspection.state_occurrence == 1
+        assert inspection.productive_legal_action_count == 4
+        with pytest.raises(FrozenInstanceError):
+            inspection.state_occurrence = 2  # type: ignore[misc]
+
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_dagger_inspect", "decision_id": 7, "candidate_id": 0,
     }
 
 

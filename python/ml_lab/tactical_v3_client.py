@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from collections import deque
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import queue
 import subprocess
@@ -46,6 +47,18 @@ class TeacherSelection:
 class OracleStepResult:
     selection: TeacherSelection
     view: TacticalV3View
+
+
+@dataclass(frozen=True, slots=True)
+class SelectiveDaggerInspection:
+    decision_id: int
+    learner_candidate_id: int
+    reasons: tuple[str, ...]
+    state_hash: str
+    state_occurrence: int
+    normalized_advantage: float
+    opponent_living_unit_count: int
+    productive_legal_action_count: int
 
 
 class TacticalV3GymClient:
@@ -160,6 +173,78 @@ class TacticalV3GymClient:
             return self._parse_teacher_selection(
                 payload["selection"], current, decision_id, search_depth,
                 expansion_budget, heuristic_identity,
+            )
+        except BaseException as error:
+            self._raise_after_protocol_error(error)
+
+    def duel_dagger_inspect(
+        self, decision_id: int, learner_candidate_id: int,
+    ) -> SelectiveDaggerInspection:
+        self._require_kind("duel")
+        decision_id = self._int64(decision_id, "decision_id")
+        learner_candidate_id = self._int32(
+            learner_candidate_id, "learner_candidate_id",
+        )
+        current = self._view
+        if current is None:
+            raise RuntimeError("duel_reset must precede duel_dagger_inspect")
+        if current.terminated or current.truncated:
+            raise RuntimeError("duel_dagger_inspect requires a nonterminal view")
+        if decision_id != current.decision.decision_id:
+            raise ValueError("decision_id is stale")
+        if sum(candidate.candidate_id == learner_candidate_id
+               for candidate in current.decision.candidates) != 1:
+            raise ValueError("learner_candidate_id is not present exactly once")
+        payload = self._rpc({
+            "cmd": "duel_dagger_inspect", "decision_id": decision_id,
+            "candidate_id": learner_candidate_id,
+        })
+        try:
+            if set(payload) != {"inspection"}:
+                raise ValueError("GymServer duel_dagger_inspect fields changed")
+            raw = payload["inspection"]
+            expected = {
+                "decision_id", "learner_candidate_id", "reasons", "state_hash",
+                "state_occurrence", "normalized_advantage",
+                "opponent_living_unit_count", "productive_legal_action_count",
+            }
+            if type(raw) is not dict or set(raw) != expected:
+                raise ValueError("GymServer selective DAgger inspection fields changed")
+            parsed_decision = self._int64(raw["decision_id"], "inspection.decision_id")
+            parsed_candidate = self._int32(
+                raw["learner_candidate_id"], "inspection.learner_candidate_id",
+            )
+            reasons = raw["reasons"]
+            allowed = ("conversion", "favorable", "cycle_warning", "wasted_end_turn")
+            if type(reasons) is not list or any(type(reason) is not str for reason in reasons):
+                raise TypeError("inspection.reasons must be a string array")
+            parsed_reasons = tuple(reasons)
+            if tuple(reason for reason in allowed if reason in parsed_reasons) != parsed_reasons:
+                raise ValueError("inspection.reasons are unknown, duplicate, or unordered")
+            state_hash = raw["state_hash"]
+            if type(state_hash) is not str or len(state_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in state_hash
+            ):
+                raise ValueError("inspection.state_hash must be lowercase SHA-256")
+            occurrence = self._int32(raw["state_occurrence"], "inspection.state_occurrence")
+            advantage = raw["normalized_advantage"]
+            if type(advantage) not in {int, float} or not math.isfinite(float(advantage)):
+                raise TypeError("inspection.normalized_advantage must be finite")
+            opponent = self._int32(
+                raw["opponent_living_unit_count"],
+                "inspection.opponent_living_unit_count",
+            )
+            productive = self._int32(
+                raw["productive_legal_action_count"],
+                "inspection.productive_legal_action_count",
+            )
+            if parsed_decision != decision_id or parsed_candidate != learner_candidate_id:
+                raise ValueError("selective DAgger inspection identity changed")
+            if occurrence < 1 or opponent < 0 or productive < 0:
+                raise ValueError("selective DAgger inspection counts are out of range")
+            return SelectiveDaggerInspection(
+                parsed_decision, parsed_candidate, parsed_reasons, state_hash,
+                occurrence, float(advantage), opponent, productive,
             )
         except BaseException as error:
             self._raise_after_protocol_error(error)

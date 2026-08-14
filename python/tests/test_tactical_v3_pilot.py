@@ -129,6 +129,18 @@ class _DaggerClient:
             "material-plus-pursuit-v1",
         )
 
+    def duel_dagger_inspect(self, decision_id, learner_candidate_id):
+        from ml_lab.tactical_v3_client import SelectiveDaggerInspection
+
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        self.events.append(("inspect", decision_id, learner_candidate_id))
+        return SelectiveDaggerInspection(
+            decision_id, learner_candidate_id, ("favorable",),
+            ("e" if self._index == 0 else "f") * 64,
+            1, 0.25, 1, 2,
+        )
+
     def duel_step(self, selection):
         current = self._views[self._index]
         assert selection.decision_id == current.decision.decision_id
@@ -138,6 +150,23 @@ class _DaggerClient:
 
     def duel_status(self):
         return 0
+
+
+class _SelectiveDaggerClient(_DaggerClient):
+    def duel_dagger_inspect(self, decision_id, learner_candidate_id):
+        from ml_lab.tactical_v3_client import SelectiveDaggerInspection
+
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        reasons = () if self._index == 0 else ("favorable",)
+        self.events.append(("inspect", decision_id, learner_candidate_id, reasons))
+        return SelectiveDaggerInspection(
+            decision_id, learner_candidate_id, reasons,
+            ("c" if self._index == 0 else "d") * 64,
+            1, -0.25 if self._index == 0 else 0.25,
+            3 if self._index == 0 else 1,
+            2,
+        )
 
 
 def _canonical_collection():
@@ -217,6 +246,90 @@ def test_diagnostic_schedule_uses_five_new_reciprocal_seeds_per_profile() -> Non
         assert [item.learner_seat for item in rows] == [0, 1] * 5
 
 
+@pytest.mark.parametrize(
+    ("partition", "iteration", "expected_start", "expected_games"),
+    [
+        ("train", 1, 18_000_000, 2_000),
+        ("train", 2, 18_100_000, 2_000),
+        ("train", 3, 18_200_000, 2_000),
+        ("validation", 1, 19_000_000, 200),
+        ("validation", 2, 19_010_000, 200),
+        ("validation", 3, 19_020_000, 200),
+    ],
+)
+def test_selective_dagger_schedule_uses_frozen_seed_banks_reciprocal_70_30_mix(
+    partition: str, iteration: int, expected_start: int, expected_games: int,
+) -> None:
+    from ml_lab.tactical_v3_pilot import selective_dagger_schedule
+
+    schedule = selective_dagger_schedule(partition, iteration)
+
+    assert len(schedule) == expected_games
+    assert schedule[0].episode_seed == expected_start
+    assert schedule[-1].episode_seed == expected_start + expected_games // 2 - 1
+    assert [item.learner_seat for item in schedule] == [0, 1] * (expected_games // 2)
+    pairs = [schedule[index] for index in range(0, len(schedule), 2)]
+    assert sum(item.profile_id == "standard-3v3" for item in pairs) == (
+        len(pairs) * 7 // 10
+    )
+    assert [item.profile_id for item in pairs[:10]] == [
+        "conversion-3v1-near", "standard-3v3", "standard-3v3",
+        "conversion-3v1-far", "standard-3v3", "standard-3v3",
+        "conversion-2v1-near", "standard-3v3", "standard-3v3", "standard-3v3",
+    ]
+    for left, right in zip(schedule[::2], schedule[1::2], strict=True):
+        assert (left.episode_seed, left.profile_id) == (
+            right.episode_seed, right.profile_id,
+        )
+        assert (left.reference_seat, right.reference_seat) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    ("partition", "labels_per_game", "expected_target"),
+    [("train", 10_000, 20_000), ("validation", 1_000, 2_000)],
+)
+def test_selective_collection_stops_only_after_complete_pair_at_fixed_target(
+    partition: str, labels_per_game: int, expected_target: int,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    calls = []
+
+    def collect(item):
+        calls.append(item)
+        summary = module.PilotDaggerGameSummary(
+            item, -1, False, True, labels_per_game, 0, 0, 0,
+        )
+        return module.PilotDaggerEpisode(
+            _identity(), (None,) * labels_per_game, summary,
+            "a" * 64, "b" * 64, 3, 0.125,
+        )
+
+    result = module.collect_selective_dagger_partition(
+        partition, 1, collect,
+    )
+
+    assert result.label_target == expected_target
+    assert result.label_count == expected_target
+    assert result.game_count == 2
+    assert len(calls) == 2
+    assert calls[0].episode_seed == calls[1].episode_seed
+    assert (calls[0].learner_seat, calls[1].learner_seat) == (0, 1)
+
+
+def test_selective_collection_fails_when_frozen_ceiling_cannot_reach_target() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    def collect(item):
+        summary = module.PilotDaggerGameSummary(item, -1, False, True, 0, 0, 0, 0)
+        return module.PilotDaggerEpisode(
+            _identity(), (), summary, "a" * 64, "b" * 64, 3, 0.125,
+        )
+
+    with pytest.raises(RuntimeError, match="20,000.*2,000"):
+        module.collect_selective_dagger_partition("train", 1, collect)
+
+
 def test_validation_metric_breakdown_reports_each_profile_and_seat() -> None:
     import torch
     import ml_lab.tactical_v3_pilot as module
@@ -291,8 +404,8 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     episode = collect(client, loaded, item)
 
     assert client.events[1:] == [
-        ("query", 7, 1), ("step", 7, 0),
-        ("query", 8, 0), ("step", 8, 0),
+        ("inspect", 7, 0), ("query", 7, 1), ("step", 7, 0),
+        ("inspect", 8, 0), ("query", 8, 0), ("step", 8, 0),
     ]
     assert episode.summary.decisions == 2
     assert episode.summary.disagreements == 1
@@ -325,12 +438,45 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     }
     assert set(rows[0]) == {
         "disagreement", "example", "learner_candidate_id",
-        "teacher_candidate_id", "teacher_intervened",
+        "teacher_candidate_id", "teacher_intervened", "eligibility_reasons",
+        "state_hash", "state_occurrence", "normalized_advantage",
+        "opponent_living_unit_count", "productive_legal_action_count",
     }
     assert rows[0]["learner_candidate_id"] == 0
     assert rows[0]["teacher_candidate_id"] == 1
     assert rows[0]["disagreement"] is True
     assert rows[0]["teacher_intervened"] is False
+
+
+def test_dagger_episode_queries_teacher_only_for_selectively_eligible_states() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _SelectiveDaggerClient()
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 18_990_000, 0, 0,
+    )
+
+    episode = module.collect_dagger_game(client, loaded, item)
+
+    assert [event for event in client.events if event[0] == "query"] == [
+        ("query", 8, 0),
+    ]
+    assert [event[:3] for event in client.events if event[0] == "step"] == [
+        ("step", 7, 0), ("step", 8, 0),
+    ]
+    assert episode.summary.decisions == 1
+    assert len(episode.records) == 1
+    assert episode.records[0].eligibility_reasons == ("favorable",)
+    assert episode.records[0].state_hash == "d" * 64
+    assert episode.records[0].example.target.trajectory_index == 1
 
 
 def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -26,7 +26,12 @@ from .tactical_v3_checkpoint import (
     save_structured_checkpoint,
     structured_model_state_sha256,
 )
-from .tactical_v3_client import CandidateSelection, TacticalV3GymClient, TeacherSelection
+from .tactical_v3_client import (
+    CandidateSelection,
+    SelectiveDaggerInspection,
+    TacticalV3GymClient,
+    TeacherSelection,
+)
 from .tactical_v3_corpus import (
     StructuredExample,
     StructuredTarget,
@@ -65,6 +70,24 @@ PILOT_PROFILES = (
     "conversion-1v1-near",
     "conversion-1v1-far",
 )
+
+SELECTIVE_DAGGER_CONVERSION_PROFILES = (
+    "conversion-3v1-near",
+    "conversion-3v1-far",
+    "conversion-2v1-near",
+    "conversion-2v1-far",
+    "conversion-1v1-near",
+    "conversion-1v1-far",
+)
+
+_SELECTIVE_DAGGER_SEED_BANKS = {
+    ("train", 1): (18_000_000, 18_099_999, 2_000),
+    ("train", 2): (18_100_000, 18_199_999, 2_000),
+    ("train", 3): (18_200_000, 18_299_999, 2_000),
+    ("validation", 1): (19_000_000, 19_009_999, 200),
+    ("validation", 2): (19_010_000, 19_019_999, 200),
+    ("validation", 3): (19_020_000, 19_029_999, 200),
+}
 
 _COLLECTION_DEADLINE_SECONDS = 4 * 60 * 60
 _TRAINING_DEADLINE_SECONDS = 2 * 60 * 60
@@ -119,6 +142,12 @@ class PilotDaggerDecision:
     teacher_candidate_id: int
     disagreement: bool
     teacher_intervened: bool
+    eligibility_reasons: tuple[str, ...]
+    state_hash: str
+    state_occurrence: int
+    normalized_advantage: float
+    opponent_living_unit_count: int
+    productive_legal_action_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +183,17 @@ class PilotDaggerTrainingSet:
     dagger_records_sha256: str
     validation_sha256: str
     corpus_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectiveDaggerPartitionCollection:
+    partition: Literal["train", "validation"]
+    iteration: int
+    episodes: tuple[PilotDaggerEpisode, ...]
+    label_count: int
+    game_count: int
+    label_target: int
+    game_ceiling: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +300,78 @@ def dagger_iteration_schedule() -> tuple[PilotScheduleItem, ...]:
     return tuple(
         PilotScheduleItem("train", "standard-3v3", 65_100_000, seat, seat)
         for seat in (0, 1)
+    )
+
+
+def selective_dagger_schedule(
+    partition: Literal["train", "validation"], iteration: int,
+) -> tuple[PilotScheduleItem, ...]:
+    key = (partition, iteration)
+    if key not in _SELECTIVE_DAGGER_SEED_BANKS:
+        raise ValueError("selective DAgger partition or iteration is not frozen")
+    start, stop, game_ceiling = _SELECTIVE_DAGGER_SEED_BANKS[key]
+    if game_ceiling % 2:
+        raise ValueError("selective DAgger game ceiling must contain reciprocal pairs")
+    pair_count = game_ceiling // 2
+    if start + pair_count - 1 > stop:
+        raise ValueError("selective DAgger seed bank is too small")
+
+    scheduled: list[PilotScheduleItem] = []
+    standard_residual = 0
+    conversion_index = 0
+    for pair_index in range(pair_count):
+        standard_residual += 7
+        standard_count = standard_residual // 10
+        standard_residual -= standard_count * 10
+        if standard_count:
+            profile = "standard-3v3"
+        else:
+            profile = SELECTIVE_DAGGER_CONVERSION_PROFILES[
+                conversion_index % len(SELECTIVE_DAGGER_CONVERSION_PROFILES)
+            ]
+            conversion_index += 1
+        seed = start + pair_index
+        for seat in (0, 1):
+            scheduled.append(PilotScheduleItem(
+                partition, profile, seed, seat, seat,
+            ))
+    return tuple(scheduled)
+
+
+def collect_selective_dagger_partition(
+    partition: Literal["train", "validation"],
+    iteration: int,
+    collect_game: Callable[[PilotScheduleItem], PilotDaggerEpisode],
+) -> SelectiveDaggerPartitionCollection:
+    if not callable(collect_game):
+        raise TypeError("collect_game must be callable")
+    schedule = selective_dagger_schedule(partition, iteration)
+    label_target = 20_000 if partition == "train" else 2_000
+    game_ceiling = len(schedule)
+    episodes: list[PilotDaggerEpisode] = []
+    label_count = 0
+    for pair_start in range(0, game_ceiling, 2):
+        pair = schedule[pair_start:pair_start + 2]
+        for item in pair:
+            episode = collect_game(item)
+            if type(episode) is not PilotDaggerEpisode:
+                raise TypeError("selective DAgger collector returned an invalid episode")
+            if episode.summary.schedule != item:
+                raise ValueError("selective DAgger episode schedule drifted")
+            if episode.summary.decisions != len(episode.records):
+                raise ValueError("selective DAgger episode label count drifted")
+            episodes.append(episode)
+            label_count += len(episode.records)
+        if label_count >= label_target:
+            break
+    if label_count < label_target:
+        raise RuntimeError(
+            f"selective DAgger did not reach {label_target:,} labels before "
+            f"the {game_ceiling:,}-game ceiling"
+        )
+    return SelectiveDaggerPartitionCollection(
+        partition, iteration, tuple(episodes), label_count, len(episodes),
+        label_target, game_ceiling,
     )
 
 
@@ -413,8 +525,13 @@ def collect_dagger_game(
         item.episode_seed, p0, p1, item.learner_seat,
         item.profile_id, item.reference_seat,
     )
-    retained: list[tuple[TacticalV3Decision, TeacherSelection, int]] = []
+    retained: list[tuple[
+        TacticalV3Decision, TeacherSelection, int,
+        SelectiveDaggerInspection, int,
+    ]] = []
+    emitted_state_hashes: set[str] = set()
     seen: set[int] = set()
+    learner_decision_index = 0
     while not view.terminated and not view.truncated:
         _validate_view(view, item, identity, client.identity, seen)
         decision = view.decision
@@ -429,15 +546,27 @@ def collect_dagger_game(
         if sum(candidate.candidate_id == learner.candidate_id
                for candidate in decision.candidates) != 1:
             raise ValueError("DAgger learner candidate must occur exactly once")
-        teacher = client.duel_oracle_query(decision.decision_id)
-        _validate_selection(teacher, decision)
-        retained.append((decision, teacher, learner.candidate_id))
+        inspection = client.duel_dagger_inspect(
+            decision.decision_id, learner.candidate_id,
+        )
+        if (
+            inspection.decision_id != decision.decision_id
+            or inspection.learner_candidate_id != learner.candidate_id
+        ):
+            raise ValueError("selective DAgger inspection identity drifted")
+        if inspection.reasons and inspection.state_hash not in emitted_state_hashes:
+            teacher = client.duel_oracle_query(decision.decision_id)
+            _validate_selection(teacher, decision)
+            retained.append((
+                decision, teacher, learner.candidate_id,
+                inspection, learner_decision_index,
+            ))
+            emitted_state_hashes.add(inspection.state_hash)
         view = client.duel_step(CandidateSelection(
             learner.decision_id,
             learner.candidate_id,
         ))
-    if not retained:
-        raise ValueError("DAgger game must contain at least one learner decision")
+        learner_decision_index += 1
     if client.identity != identity or loaded.metadata.identity != identity:
         raise ValueError("DAgger semantic identity drifted during collection")
     if view.start_profile != item.profile_id or view.reference_seat != item.reference_seat:
@@ -461,7 +590,7 @@ def collect_dagger_game(
                 StructuredTarget(
                     teacher.candidate_id,
                     outcome,
-                    index,
+                    decision_index,
                     len(retained) - index if outcome == "win" else None,
                     view.truncated,
                 ),
@@ -482,8 +611,16 @@ def collect_dagger_game(
             teacher.candidate_id,
             learner_candidate_id != teacher.candidate_id,
             False,
+            inspection.reasons,
+            inspection.state_hash,
+            inspection.state_occurrence,
+            inspection.normalized_advantage,
+            inspection.opponent_living_unit_count,
+            inspection.productive_legal_action_count,
         )
-        for index, (decision, teacher, learner_candidate_id) in enumerate(retained)
+        for index, (
+            decision, teacher, learner_candidate_id, inspection, decision_index,
+        ) in enumerate(retained)
     )
     disagreements = sum(record.disagreement for record in records)
     summary = PilotDaggerGameSummary(

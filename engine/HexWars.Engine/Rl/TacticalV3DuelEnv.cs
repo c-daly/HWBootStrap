@@ -13,6 +13,10 @@ namespace HexWars.Engine.Rl
         private readonly IActionResolver _resolver;
         private readonly IRewardContract _reward;
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
+        private readonly Dictionary<string, int> _daggerOccurrences =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly Dictionary<long, (string StateHash, int Occurrence)> _daggerStates =
+            new Dictionary<long, (string StateHash, int Occurrence)>();
         private int _drainedTransitionCount;
 
         private GameState _start = null!;
@@ -143,6 +147,59 @@ namespace HexWars.Engine.Rl
                 teacher.UseHeuristic ? BoundedSearchAgent.HeuristicIdentity : "none");
         }
 
+        public TacticalV3SelectiveDaggerInspection InspectSelectiveDagger(
+            long decisionId, int learnerCandidateId)
+        {
+            RequireReset();
+            if (decisionId != _frame.DecisionId)
+                throw new InvalidOperationException("tactical-v3 decision id is stale");
+            if (IsFinished)
+                throw new InvalidOperationException(
+                    "cannot inspect selective DAgger on a finished tactical-v3 episode");
+            if (Controller(_state.ActivePlayer) != null)
+                throw new InvalidOperationException(
+                    "selective DAgger inspection requires the active seat to be external");
+
+            Command learnerCommand = _resolver.Resolve(
+                _frame, decisionId, learnerCandidateId, _state);
+            if (!_daggerStates.TryGetValue(decisionId, out var stateIdentity))
+            {
+                string stateHash = TacticalV3SelectiveDaggerInspection.HashState(_state);
+                int occurrence = _daggerOccurrences.TryGetValue(
+                    stateHash, out int seen) ? seen + 1 : 1;
+                _daggerOccurrences[stateHash] = occurrence;
+                stateIdentity = (stateHash, occurrence);
+                _daggerStates.Add(decisionId, stateIdentity);
+            }
+
+            PlayerId opponent = _state.Opponent(_state.ActivePlayer).Id;
+            int opponentLiving = _state.Player(opponent).UnitsOnBoard.Count(unit => unit.IsAlive);
+            int productive = _frame.Candidates.Count(
+                candidate => candidate.Kind != TacticalV3CandidateKind.EndTurn);
+            float pointsWeight = _config.Match.PointsWeight;
+            double initialMaterial =
+                TacticalV3SelectiveDaggerInspection.Material(
+                    _start, PlayerId.Player0, pointsWeight) +
+                TacticalV3SelectiveDaggerInspection.Material(
+                    _start, PlayerId.Player1, pointsWeight);
+            double normalizedAdvantage = (
+                TacticalV3SelectiveDaggerInspection.Material(
+                    _state, _state.ActivePlayer, pointsWeight) -
+                TacticalV3SelectiveDaggerInspection.Material(
+                    _state, opponent, pointsWeight)) / Math.Max(1d, initialMaterial);
+
+            DaggerEligibilityReason reasons = DaggerEligibilityReason.None;
+            if (opponentLiving <= 1) reasons |= DaggerEligibilityReason.Conversion;
+            if (normalizedAdvantage > 0d) reasons |= DaggerEligibilityReason.Favorable;
+            if (stateIdentity.Occurrence == 2) reasons |= DaggerEligibilityReason.CycleWarning;
+            if (learnerCommand is EndTurn && productive > 0)
+                reasons |= DaggerEligibilityReason.WastedEndTurn;
+
+            return new TacticalV3SelectiveDaggerInspection(
+                decisionId, learnerCandidateId, reasons, stateIdentity.StateHash,
+                stateIdentity.Occurrence, normalizedAdvantage, opponentLiving, productive);
+        }
+
         public string ToReplay()
         {
             RequireReset();
@@ -180,6 +237,8 @@ namespace HexWars.Engine.Rl
             _referenceSeat = referenceSeat;
             _transitions.Clear();
             _drainedTransitionCount = 0;
+            _daggerOccurrences.Clear();
+            _daggerStates.Clear();
             InternalFallbackCount = 0;
             _hasReset = true;
             _reward.Reset(_state, _learnerSeat);

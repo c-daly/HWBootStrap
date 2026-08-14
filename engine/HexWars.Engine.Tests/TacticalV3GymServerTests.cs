@@ -621,6 +621,59 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Process_DuelDaggerInspectReturnsExactDiagnosticsWithoutAdvancing()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 18_990_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            JsonElement endTurn = reset.GetProperty("candidates").EnumerateArray()
+                .Single(candidate => candidate.GetProperty("kind").GetString() == "end_turn");
+            int candidateId = endTurn.GetProperty("candidate_id").GetInt32();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_dagger_inspect", decision_id = decisionId,
+                candidate_id = candidateId,
+            }));
+
+            AssertProperties(response, "inspection");
+            JsonElement inspection = response.GetProperty("inspection");
+            AssertProperties(inspection,
+                "decision_id", "learner_candidate_id", "reasons", "state_hash",
+                "state_occurrence", "normalized_advantage", "opponent_living_unit_count",
+                "productive_legal_action_count");
+            Assert.That(inspection.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
+            Assert.That(inspection.GetProperty("learner_candidate_id").GetInt32(),
+                Is.EqualTo(candidateId));
+            Assert.That(inspection.GetProperty("reasons").EnumerateArray()
+                .Select(reason => reason.GetString()), Is.EqualTo(new[] { "wasted_end_turn" }));
+            Assert.That(inspection.GetProperty("state_hash").GetString(),
+                Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(inspection.GetProperty("state_occurrence").GetInt32(), Is.EqualTo(1));
+            Assert.That(inspection.GetProperty("opponent_living_unit_count").GetInt32(),
+                Is.EqualTo(3));
+            Assert.That(inspection.GetProperty("productive_legal_action_count").GetInt32(),
+                Is.GreaterThan(0));
+
+            JsonElement repeated = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_dagger_inspect", decision_id = decisionId,
+                candidate_id = candidateId,
+            }));
+            Assert.That(repeated.GetRawText(), Is.EqualTo(response.GetRawText()));
+            JsonElement next = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId, candidate_id = candidateId,
+            }));
+            AssertViewIdentities(next);
+        }
+
+        [Test]
         public void Process_DuelOracleStepStaleDecisionIsRecoverableWithoutAdvancing()
         {
             using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
@@ -1661,6 +1714,41 @@ namespace HexWars.Engine.Tests
             SetAutoProperty(clone, nameof(TacticalV3Contract.Encoding), source.Encoding);
             SetAutoProperty(clone, nameof(TacticalV3Contract.Capacity), source.Capacity);
             return clone;
+        }
+
+        [Test]
+        public void DuelEnv_SelectiveDaggerInspectionIsStateBoundNonmutatingAndIdempotent()
+        {
+            var env = new TacticalV3DuelEnv(TacticalV3Fixtures.ProfiledConfig());
+            TacticalV3View reset = env.Reset(
+                18_990_000, null, new RandomAgent(18_990_002),
+                "standard-3v3", PlayerId.Player0, PlayerId.Player0);
+            TacticalV3Candidate endTurn = reset.Decision.Candidates.Single(
+                candidate => candidate.Kind == TacticalV3CandidateKind.EndTurn);
+            string stateBefore = SelectiveDaggerObserver.CanonicalStateKey(env.State);
+
+            TacticalV3SelectiveDaggerInspection first = env.InspectSelectiveDagger(
+                reset.Decision.DecisionId, endTurn.CandidateId);
+            TacticalV3SelectiveDaggerInspection repeated = env.InspectSelectiveDagger(
+                reset.Decision.DecisionId, endTurn.CandidateId);
+
+            Assert.That(first.DecisionId, Is.EqualTo(reset.Decision.DecisionId));
+            Assert.That(first.LearnerCandidateId, Is.EqualTo(endTurn.CandidateId));
+            Assert.That(first.Reasons, Is.EqualTo(DaggerEligibilityReason.WastedEndTurn));
+            Assert.That(first.OpponentLivingUnitCount, Is.EqualTo(3));
+            Assert.That(first.ProductiveLegalActionCount, Is.GreaterThan(0));
+            Assert.That(first.NormalizedAdvantage, Is.EqualTo(0d).Within(1e-12));
+            Assert.That(first.StateHash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(first.StateOccurrence, Is.EqualTo(1));
+            Assert.That(repeated.StateOccurrence, Is.EqualTo(1));
+            Assert.That(repeated.StateHash, Is.EqualTo(first.StateHash));
+            Assert.That(SelectiveDaggerObserver.CanonicalStateKey(env.State), Is.EqualTo(stateBefore));
+
+            TacticalV3Candidate move = reset.Decision.Candidates.First(
+                candidate => candidate.Kind == TacticalV3CandidateKind.Move);
+            TacticalV3View successor = env.Step(reset.Decision.DecisionId, move.CandidateId);
+            Assert.That(successor.Decision.DecisionId,
+                Is.GreaterThan(reset.Decision.DecisionId));
         }
 
         private static TacticalV3CellToken CellWithController(
