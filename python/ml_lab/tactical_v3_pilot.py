@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import time
 from typing import Literal
@@ -631,8 +632,8 @@ def _pilot_configs(
         seed=seed,
         batch_size=32,
         learning_rate=0.001,
-        max_epochs=100,
-        patience_epochs=12,
+        max_epochs=2,
+        patience_epochs=1,
         gradient_clip_norm=1.0,
         device=device,
     )
@@ -844,8 +845,11 @@ def train_pilot(
         output = collection_root
     else:
         output = Path(artifacts_output)
-        if output != collection_root / "retry-1":
-            raise ValueError("pilot retry artifacts must use the retry-1 subdirectory")
+        if (
+            output.parent != collection_root
+            or re.fullmatch(r"retry-[1-9][0-9]*", output.name) is None
+        ):
+            raise ValueError("pilot retry artifacts must use a numbered retry subdirectory")
         if output.exists() or output.is_symlink():
             raise FileExistsError("pilot retry artifacts already exist")
         output.mkdir()
@@ -1339,11 +1343,15 @@ def run_pilot_retry(
     seed: int,
     device: str,
     command: Sequence[str],
+    *,
+    attempt_number: int = 1,
 ) -> Path:
     started = time.monotonic()
     output = Path(output)
     if type(seed) is not int or seed != 227:
         raise ValueError("pilot retry seed must be exactly 227")
+    if type(attempt_number) is not int or attempt_number < 1:
+        raise ValueError("pilot retry attempt number must be a positive built-in int")
     _pilot_configs(seed, device)
     for value, name in ((server_cmd, "server command"), (command, "command")):
         if (
@@ -1355,9 +1363,9 @@ def run_pilot_retry(
             raise ValueError(f"pilot retry {name} must be a non-empty sequence of strings")
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("pilot retry output must be the plain collection directory")
-    attempt = output / "retry-1"
+    attempt = output / f"retry-{attempt_number}"
     if attempt.exists() or attempt.is_symlink():
-        raise FileExistsError("pilot retry-1 artifacts already exist")
+        raise FileExistsError(f"pilot retry-{attempt_number} artifacts already exist")
 
     phase = "collection authentication"
     try:

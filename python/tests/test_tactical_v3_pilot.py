@@ -277,8 +277,8 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     assert captured["objective"].outcome_coefficient == 0.0
     assert captured["trainer"].batch_size == 32
     assert captured["trainer"].learning_rate == 0.001
-    assert captured["trainer"].max_epochs == 100
-    assert captured["trainer"].patience_epochs == 12
+    assert captured["trainer"].max_epochs == 2
+    assert captured["trainer"].patience_epochs == 1
     assert captured["deadline"] > 0.0
     assert artifacts.loaded.metadata.corpus_sha256 == evidence.collection_sha256
     assert next(artifacts.loaded.model.parameters()).device.type == "cpu"
@@ -309,7 +309,7 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     assert (attempt / "steps.jsonl").read_text(encoding="utf-8") == expected_steps
     console = capsys.readouterr().out
     assert "phase=initial_metrics" in console
-    assert "epoch=1/100" in console
+    assert "epoch=1/2" in console
     assert "validation_policy_nll=1.000000" in console
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     events = EventAccumulator(str(attempt / "tensorboard")).Reload()
@@ -516,11 +516,13 @@ def test_pilot_retry_cli_routes_existing_collection_without_collection_flags(
     (output / "collection.json").write_text("{}\n", encoding="utf-8")
     captured = {}
     monkeypatch.setattr(
-        cli, "run_pilot_retry", lambda *args: captured.setdefault("args", args),
+        cli, "run_pilot_retry",
+        lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs),
     )
     argv = (
         "pilot-retry", "--server-dll", str(server), "--scenario", str(scenario),
         "--output", str(output), "--seed", "227", "--device", "cuda",
+        "--attempt", "2",
     )
 
     assert cli.main(argv) == 0
@@ -528,6 +530,7 @@ def test_pilot_retry_cli_routes_existing_collection_without_collection_flags(
     assert server_cmd == ("dotnet", str(server), "--scenario-file", str(scenario))
     assert actual_output == output
     assert seed == 227 and device == "cuda"
+    assert captured["kwargs"] == {"attempt_number": 2}
     assert tuple(command[-len(argv):]) == argv
 
 
@@ -587,14 +590,15 @@ def test_run_pilot_retry_reuses_collection_and_writes_only_retry_subdirectory(
 
     attempt = module.run_pilot_retry(
         ("dotnet", "server.dll"), root, 227, "cpu", command,
+        attempt_number=2,
     )
 
-    assert attempt == root / "retry-1"
+    assert attempt == root / "retry-2"
     assert captured["collection"] == expected
     assert captured["collection_root"] == root
-    assert captured["artifacts_output"] == root / "retry-1"
+    assert captured["artifacts_output"] == root / "retry-2"
     assert set(path.name for path in root.iterdir()) == {
-        "train.jsonl", "validation.jsonl", "collection.json", "retry-1",
+        "train.jsonl", "validation.jsonl", "collection.json", "retry-2",
     }
     evaluation = json.loads((attempt / "evaluation.json").read_text(encoding="utf-8"))
     assert evaluation["execution"]["command"] == list(command)
