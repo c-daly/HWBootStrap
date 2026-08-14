@@ -88,6 +88,10 @@ _SELECTIVE_DAGGER_SEED_BANKS = {
     ("validation", 2): (19_010_000, 19_019_999, 200),
     ("validation", 3): (19_020_000, 19_029_999, 200),
 }
+_SELECTIVE_DAGGER_LABEL_TARGETS = {
+    "train": 20_000,
+    "validation": 2_000,
+}
 
 _COLLECTION_DEADLINE_SECONDS = 4 * 60 * 60
 _TRAINING_DEADLINE_SECONDS = 2 * 60 * 60
@@ -183,6 +187,8 @@ class PilotDaggerTrainingSet:
     dagger_records_sha256: str
     validation_sha256: str
     corpus_sha256: str
+    validation_episodes: tuple[PilotDaggerEpisode, ...] = ()
+    iteration: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +208,53 @@ class StructuredDaggerMixtureBatch:
     sources: tuple[
         Literal["greedy_standard", "search_conversion", "dagger_targeted"], ...
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class OraclePreflightGame:
+    won: bool
+    cycling_draw: bool
+    labels: int
+    duration_seconds: float
+    deterministic_queries: bool
+    roundtrip_failures: int
+
+    def __post_init__(self) -> None:
+        if type(self.won) is not bool or type(self.cycling_draw) is not bool:
+            raise TypeError("oracle preflight outcomes must be bool")
+        if type(self.labels) is not int or self.labels < 0:
+            raise ValueError("oracle preflight labels must be nonnegative")
+        if (
+            type(self.duration_seconds) is not float
+            or not math.isfinite(self.duration_seconds)
+            or self.duration_seconds <= 0.0
+        ):
+            raise ValueError("oracle preflight duration must be positive and finite")
+        if type(self.deterministic_queries) is not bool:
+            raise TypeError("oracle preflight determinism must be bool")
+        if type(self.roundtrip_failures) is not int or self.roundtrip_failures < 0:
+            raise ValueError("oracle preflight roundtrip failures must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class OraclePreflightCandidate:
+    expansion_budget: Literal[512, 2048]
+    games: int
+    wins: int
+    cycling_draws: int
+    labels: int
+    duration_seconds: float
+    win_rate: float
+    labels_per_second: float
+    deterministic: bool
+    roundtrip_failures: int
+    passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OraclePreflightResult:
+    selected_expansion_budget: Literal[512, 2048]
+    candidates: tuple[OraclePreflightCandidate, ...]
 
 
 class _StructuredRowCycler:
@@ -400,6 +453,150 @@ def diagnostic_evaluation_schedule() -> tuple[PilotScheduleItem, ...]:
     )
 
 
+def oracle_preflight_schedule() -> tuple[PilotScheduleItem, ...]:
+    return tuple(
+        PilotScheduleItem(
+            "evaluation",
+            profile,
+            18_900_000 + profile_index * 20 + offset,
+            seat,
+            seat,
+        )
+        for profile_index, profile in enumerate(SELECTIVE_DAGGER_CONVERSION_PROFILES)
+        for offset in range(20)
+        for seat in (0, 1)
+    )
+
+
+def selective_dagger_evaluation_schedule() -> tuple[PilotScheduleItem, ...]:
+    return tuple(
+        PilotScheduleItem("evaluation", "standard-3v3", seed, seat, seat)
+        for seed in range(20_000_000, 20_000_100)
+        for seat in (0, 1)
+    )
+
+
+def run_physical_oracle_preflight_game(
+    client: TacticalV3GymClient,
+    item: PilotScheduleItem,
+    expansion_budget: Literal[512, 2048],
+) -> OraclePreflightGame:
+    if type(item) is not PilotScheduleItem or item not in oracle_preflight_schedule():
+        raise ValueError("oracle preflight game must use the frozen schedule")
+    if type(expansion_budget) is not int or expansion_budget not in {512, 2048}:
+        raise ValueError("oracle preflight expansion budget must be 512 or 2048")
+    p0, p1 = (
+        ("external", "random")
+        if item.learner_seat == 0
+        else ("random", "external")
+    )
+    view = client.duel_reset(
+        item.episode_seed,
+        p0,
+        p1,
+        item.learner_seat,
+        item.profile_id,
+        item.reference_seat,
+    )
+    labels = 0
+    benchmark_seconds = 0.0
+    deterministic = True
+    cycled = False
+    while not view.terminated and not view.truncated:
+        if (
+            view.start_profile != item.profile_id
+            or view.reference_seat != item.reference_seat
+            or view.seat != item.learner_seat
+            or not view.decision.candidates
+        ):
+            raise ValueError("oracle preflight view drifted")
+        decision_id = view.decision.decision_id
+        started = time.perf_counter()
+        first = client.duel_oracle_query(
+            decision_id, expansion_budget=expansion_budget,
+        )
+        second = client.duel_oracle_query(
+            decision_id, expansion_budget=expansion_budget,
+        )
+        benchmark_seconds += time.perf_counter() - started
+        deterministic = deterministic and first == second
+        matches = sum(
+            candidate.candidate_id == first.candidate_id
+            for candidate in view.decision.candidates
+        )
+        if matches != 1:
+            raise ValueError("oracle preflight label failed authoritative round-trip")
+        inspection = client.duel_dagger_inspect(
+            decision_id, first.candidate_id,
+        )
+        cycled = cycled or inspection.state_occurrence >= 3
+        view = client.duel_step(CandidateSelection(
+            first.decision_id, first.candidate_id,
+        ))
+        labels += 1
+    if labels == 0 or benchmark_seconds <= 0.0:
+        raise ValueError("oracle preflight game produced no benchmark labels")
+    if client.duel_status() != 0:
+        raise ValueError("oracle preflight internal fallback count must remain zero")
+    return OraclePreflightGame(
+        won=view.winner == item.learner_seat,
+        cycling_draw=view.winner not in {0, 1} and cycled,
+        labels=labels,
+        duration_seconds=benchmark_seconds,
+        deterministic_queries=deterministic,
+        roundtrip_failures=0,
+    )
+
+
+def run_oracle_preflight(
+    run_game: Callable[[PilotScheduleItem, Literal[512, 2048]], OraclePreflightGame],
+) -> OraclePreflightResult:
+    if not callable(run_game):
+        raise TypeError("run_game must be callable")
+    schedule = oracle_preflight_schedule()
+    candidates = []
+    for budget in (512, 2048):
+        games = []
+        for item in schedule:
+            game = run_game(item, budget)
+            if type(game) is not OraclePreflightGame:
+                raise TypeError("oracle preflight runner returned an invalid game")
+            games.append(game)
+        wins = sum(game.won for game in games)
+        cycling = sum(game.cycling_draw for game in games)
+        labels = sum(game.labels for game in games)
+        duration = sum(game.duration_seconds for game in games)
+        win_rate = wins / len(games)
+        throughput = labels / duration
+        deterministic = all(game.deterministic_queries for game in games)
+        failures = sum(game.roundtrip_failures for game in games)
+        passed = (
+            win_rate >= 0.85
+            and throughput >= 10.0
+            and deterministic
+            and failures == 0
+        )
+        candidates.append(OraclePreflightCandidate(
+            budget, len(games), wins, cycling, labels, duration,
+            win_rate, throughput, deterministic, failures, passed,
+        ))
+    eligible = [candidate for candidate in candidates if candidate.passed]
+    if not eligible:
+        raise RuntimeError("no oracle candidate passed frozen preflight thresholds")
+    selected = min(
+        eligible,
+        key=lambda candidate: (
+            -candidate.win_rate,
+            candidate.cycling_draws,
+            -candidate.labels_per_second,
+            candidate.expansion_budget,
+        ),
+    )
+    return OraclePreflightResult(
+        selected.expansion_budget, tuple(candidates),
+    )
+
+
 def dagger_iteration_schedule() -> tuple[PilotScheduleItem, ...]:
     return tuple(
         PilotScheduleItem("train", "standard-3v3", 65_100_000, seat, seat)
@@ -450,7 +647,7 @@ def collect_selective_dagger_partition(
     if not callable(collect_game):
         raise TypeError("collect_game must be callable")
     schedule = selective_dagger_schedule(partition, iteration)
-    label_target = 20_000 if partition == "train" else 2_000
+    label_target = _SELECTIVE_DAGGER_LABEL_TARGETS[partition]
     game_ceiling = len(schedule)
     episodes: list[PilotDaggerEpisode] = []
     label_count = 0
@@ -518,7 +715,11 @@ def _numbers(value: object):
         yield value
 
 
-def _validate_selection(selection: TeacherSelection, decision: TacticalV3Decision) -> None:
+def _validate_selection(
+    selection: TeacherSelection,
+    decision: TacticalV3Decision,
+    expected_expansion_budget: Literal[512, 2048] = 512,
+) -> None:
     if type(selection) is not TeacherSelection:
         raise TypeError("pilot oracle selection must be TeacherSelection")
     if selection.decision_id != decision.decision_id:
@@ -526,9 +727,12 @@ def _validate_selection(selection: TeacherSelection, decision: TacticalV3Decisio
     if sum(candidate.candidate_id == selection.candidate_id
            for candidate in decision.candidates) != 1:
         raise ValueError("pilot teacher candidate must occur exactly once")
-    if (selection.search_depth != 4 or selection.expansion_budget != 512 or
+    if expected_expansion_budget not in {512, 2048}:
+        raise ValueError("pilot teacher expansion budget is unsupported")
+    if (selection.search_depth != 4 or
+            selection.expansion_budget != expected_expansion_budget or
             selection.heuristic_identity != "material-plus-pursuit-v1" or
-            not 1 <= selection.actual_expansions <= 512):
+            not 1 <= selection.actual_expansions <= expected_expansion_budget):
         raise ValueError("pilot teacher metadata drifted")
 
 
@@ -622,11 +826,17 @@ def collect_dagger_game(
     client: TacticalV3GymClient,
     loaded: LoadedStructuredPolicy,
     item: PilotScheduleItem,
+    *,
+    oracle_expansion_budget: Literal[512, 2048] = 512,
 ) -> PilotDaggerEpisode:
     if type(item) is not PilotScheduleItem:
         raise TypeError("item must be PilotScheduleItem")
     if item.partition == "evaluation":
         raise ValueError("evaluation schedule is not DAgger collection evidence")
+    if type(oracle_expansion_budget) is not int or (
+        oracle_expansion_budget not in {512, 2048}
+    ):
+        raise ValueError("DAgger oracle expansion budget must be 512 or 2048")
     identity = _validate_identity(client.identity)
     if loaded.metadata.identity != identity:
         raise ValueError("DAgger policy identity does not match GymServer identity")
@@ -673,8 +883,11 @@ def collect_dagger_game(
         ):
             raise ValueError("selective DAgger inspection identity drifted")
         if inspection.reasons and inspection.state_hash not in emitted_state_hashes:
-            teacher = client.duel_oracle_query(decision.decision_id)
-            _validate_selection(teacher, decision)
+            teacher = client.duel_oracle_query(
+                decision.decision_id,
+                expansion_budget=oracle_expansion_budget,
+            )
+            _validate_selection(teacher, decision, oracle_expansion_budget)
             retained.append((
                 decision, teacher, learner.candidate_id,
                 inspection, learner_decision_index,
@@ -775,6 +988,20 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
         record.teacher_intervened for record in episode.records
     ):
         raise ValueError("DAgger evidence must be collected under learner control")
+    teacher = episode.records[0].example.teacher
+    teacher_identity = (
+        teacher.identity,
+        teacher.search_depth,
+        teacher.expansion_budget,
+        teacher.heuristic_identity,
+    )
+    if any((
+        record.example.teacher.identity,
+        record.example.teacher.search_depth,
+        record.example.teacher.expansion_budget,
+        record.example.teacher.heuristic_identity,
+    ) != teacher_identity for record in episode.records):
+        raise ValueError("DAgger episode teacher provenance changed")
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"DAgger episode output already exists: {output}")
@@ -803,9 +1030,9 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
         },
         "teacher": {
             "identity": "bounded-search-v1",
-            "search_depth": 4,
-            "expansion_budget": 512,
-            "heuristic_identity": "material-plus-pursuit-v1",
+            "search_depth": teacher.search_depth,
+            "expansion_budget": teacher.expansion_budget,
+            "heuristic_identity": teacher.heuristic_identity,
         },
         "records": {
             "path": "decisions.jsonl",
@@ -912,6 +1139,171 @@ def build_dagger_training_set(
     )
 
 
+def _selective_partition_rows(
+    partition: SelectiveDaggerPartitionCollection,
+    expected_partition: Literal["train", "validation"],
+    iteration: int,
+) -> tuple[tuple[StructuredExample, ...], bytes]:
+    if type(partition) is not SelectiveDaggerPartitionCollection:
+        raise TypeError("selective DAgger partition evidence has the wrong type")
+    schedule = selective_dagger_schedule(expected_partition, iteration)
+    if (
+        partition.partition != expected_partition
+        or partition.iteration != iteration
+        or partition.label_target
+        != _SELECTIVE_DAGGER_LABEL_TARGETS[expected_partition]
+        or partition.game_ceiling != len(schedule)
+        or partition.game_count != len(partition.episodes)
+        or tuple(episode.summary.schedule for episode in partition.episodes)
+        != schedule[:partition.game_count]
+        or partition.game_count % 2
+    ):
+        raise ValueError("selective DAgger partition evidence is not frozen")
+    rows: list[StructuredExample] = []
+    evidence = bytearray()
+    for episode in partition.episodes:
+        if (
+            type(episode) is not PilotDaggerEpisode
+            or episode.summary.decisions != len(episode.records)
+            or episode.summary.teacher_interventions != 0
+            or episode.summary.internal_fallback_count != 0
+        ):
+            raise ValueError("selective DAgger episode evidence is inconsistent")
+        for record in episode.records:
+            if type(record) is not PilotDaggerDecision or record.teacher_intervened:
+                raise ValueError("selective DAgger record evidence is inconsistent")
+            rows.append(record.example)
+            evidence.extend(_canonical_bytes(asdict(record)))
+    if partition.label_count != len(rows) or partition.label_count < partition.label_target:
+        raise ValueError("selective DAgger partition did not meet its label target")
+    return tuple(rows), bytes(evidence)
+
+
+def build_selective_dagger_training_set(
+    collection: PilotCollection,
+    evidence: PilotCollectionEvidence,
+    train_partition: SelectiveDaggerPartitionCollection,
+    validation_partition: SelectiveDaggerPartitionCollection,
+    *,
+    prior: PilotDaggerTrainingSet | None = None,
+) -> PilotDaggerTrainingSet:
+    _require_collection(collection)
+    if type(evidence) is not PilotCollectionEvidence:
+        raise TypeError("evidence must be PilotCollectionEvidence")
+    iteration = train_partition.iteration
+    if validation_partition.iteration != iteration or iteration not in {1, 2, 3}:
+        raise ValueError("selective DAgger train and validation iterations must match")
+    if prior is None:
+        if iteration != 1:
+            raise ValueError("selective DAgger iteration 1 must start from the base corpus")
+        existing_train = collection.train
+        existing_validation: tuple[StructuredExample, ...] = ()
+        train_episodes: tuple[PilotDaggerEpisode, ...] = ()
+        validation_episodes: tuple[PilotDaggerEpisode, ...] = ()
+        expected_actor_corpus = evidence.collection_sha256
+    else:
+        if (
+            type(prior) is not PilotDaggerTrainingSet
+            or prior.iteration != iteration - 1
+            or prior.identity != collection.identity
+            or prior.base_collection_sha256 != evidence.collection_sha256
+            or prior.train[:len(collection.train)] != collection.train
+        ):
+            raise ValueError("prior selective DAgger training set is not the exact prefix")
+        existing_train = prior.train
+        existing_validation = prior.validation
+        train_episodes = prior.episodes
+        validation_episodes = prior.validation_episodes
+        expected_actor_corpus = prior.corpus_sha256
+
+    train_rows, _ = _selective_partition_rows(
+        train_partition, "train", iteration,
+    )
+    validation_rows, _ = _selective_partition_rows(
+        validation_partition, "validation", iteration,
+    )
+    current_episodes = train_partition.episodes + validation_partition.episodes
+    actor = current_episodes[0]
+    for episode in current_episodes:
+        if episode.identity != collection.identity:
+            raise ValueError("selective DAgger semantic identity changed")
+        if (
+            episode.actor_corpus_sha256 != expected_actor_corpus
+            or episode.actor_model_state_sha256 != actor.actor_model_state_sha256
+            or episode.actor_best_epoch != actor.actor_best_epoch
+            or episode.actor_best_validation_policy_nll
+            != actor.actor_best_validation_policy_nll
+        ):
+            raise ValueError("selective DAgger actor provenance changed")
+
+    combined_train = existing_train + train_rows
+    combined_validation = existing_validation + validation_rows
+    key = lambda row: (
+        row.scenario_id, row.episode_seed, row.learner_seat,
+        row.profile_id, row.decision.decision_id,
+    )
+    train_keys = tuple(map(key, combined_train))
+    validation_keys = tuple(map(key, combined_validation))
+    if (
+        len(set(train_keys)) != len(train_keys)
+        or len(set(validation_keys)) != len(validation_keys)
+        or not set(train_keys).isdisjoint(validation_keys)
+    ):
+        raise ValueError("selective DAgger train and heldout rows overlap")
+
+    all_train_episodes = train_episodes + train_partition.episodes
+    all_validation_episodes = validation_episodes + validation_partition.episodes
+    train_bytes = b"".join(
+        _canonical_bytes(asdict(record))
+        for episode in all_train_episodes for record in episode.records
+    )
+    validation_bytes = b"".join(
+        _canonical_bytes(asdict(record))
+        for episode in all_validation_episodes for record in episode.records
+    )
+    train_hash = hashlib.sha256(train_bytes).hexdigest()
+    validation_hash = hashlib.sha256(validation_bytes).hexdigest()
+    manifest = _selective_dagger_training_manifest(
+        iteration, evidence.collection_sha256, len(collection.train),
+        train_hash, len(combined_train) - len(collection.train),
+        validation_hash, len(combined_validation),
+    )
+    return PilotDaggerTrainingSet(
+        identity=collection.identity,
+        train=combined_train,
+        validation=combined_validation,
+        episodes=all_train_episodes,
+        base_collection_sha256=evidence.collection_sha256,
+        dagger_records_sha256=train_hash,
+        validation_sha256=validation_hash,
+        corpus_sha256=hashlib.sha256(_canonical_bytes(manifest)).hexdigest(),
+        validation_episodes=all_validation_episodes,
+        iteration=iteration,
+    )
+
+
+def _selective_dagger_training_manifest(
+    iteration: int,
+    base_collection_sha256: str,
+    base_train_examples: int,
+    dagger_records_sha256: str,
+    dagger_examples: int,
+    validation_sha256: str,
+    validation_examples: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "kind": "tactical-v3-selective-dagger-training-set",
+        "iteration": iteration,
+        "base_collection_sha256": base_collection_sha256,
+        "base_train_examples": base_train_examples,
+        "dagger_records_sha256": dagger_records_sha256,
+        "dagger_examples": dagger_examples,
+        "validation_sha256": validation_sha256,
+        "validation_examples": validation_examples,
+    }
+
+
 def _dagger_training_manifest(
     base_collection_sha256: str,
     base_train_examples: int,
@@ -949,21 +1341,42 @@ def train_dagger_pilot(
     output.mkdir()
     if _is_reparse(output):
         raise ValueError("DAgger iteration output must be a plain directory")
-    for episode in training_set.episodes:
-        write_dagger_episode(
-            output / f"seat-{episode.summary.schedule.learner_seat}",
-            episode,
+    if training_set.iteration:
+        train_root = output / "train-overlays"
+        validation_root = output / "validation-overlays"
+        train_root.mkdir()
+        validation_root.mkdir()
+        for index, episode in enumerate(training_set.episodes):
+            write_dagger_episode(train_root / f"game-{index:04d}", episode)
+        for index, episode in enumerate(training_set.validation_episodes):
+            write_dagger_episode(validation_root / f"game-{index:04d}", episode)
+        manifest = _selective_dagger_training_manifest(
+            training_set.iteration,
+            training_set.base_collection_sha256,
+            len(training_set.train) - sum(
+                len(episode.records) for episode in training_set.episodes
+            ),
+            training_set.dagger_records_sha256,
+            sum(len(episode.records) for episode in training_set.episodes),
+            training_set.validation_sha256,
+            len(training_set.validation),
         )
-    manifest = _dagger_training_manifest(
-        training_set.base_collection_sha256,
-        len(training_set.train) - sum(
-            len(episode.records) for episode in training_set.episodes
-        ),
-        training_set.dagger_records_sha256,
-        sum(len(episode.records) for episode in training_set.episodes),
-        training_set.validation_sha256,
-        len(training_set.validation),
-    )
+    else:
+        for episode in training_set.episodes:
+            write_dagger_episode(
+                output / f"seat-{episode.summary.schedule.learner_seat}",
+                episode,
+            )
+        manifest = _dagger_training_manifest(
+            training_set.base_collection_sha256,
+            len(training_set.train) - sum(
+                len(episode.records) for episode in training_set.episodes
+            ),
+            training_set.dagger_records_sha256,
+            sum(len(episode.records) for episode in training_set.episodes),
+            training_set.validation_sha256,
+            len(training_set.validation),
+        )
     manifest_bytes = _canonical_bytes(manifest)
     if hashlib.sha256(manifest_bytes).hexdigest() != training_set.corpus_sha256:
         raise ValueError("DAgger training-set evidence hash changed")
@@ -1794,7 +2207,9 @@ def evaluate_pilot(
     if controller not in {"model", "random"}:
         raise ValueError("pilot evaluation controller must be model or random")
     if tuple(schedule) not in {
-        evaluation_schedule(), diagnostic_evaluation_schedule(),
+        evaluation_schedule(),
+        diagnostic_evaluation_schedule(),
+        selective_dagger_evaluation_schedule(),
     }:
         raise ValueError("pilot evaluation schedule must be the frozen evaluation schedule")
     started = time.monotonic()

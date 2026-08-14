@@ -91,7 +91,7 @@ for line in sys.stdin:
     elif request["cmd"] == "duel_oracle_query":
         response = replies.get(request["cmd"], {"selection": {
             "decision_id": request["decision_id"], "candidate_id": 0,
-            "search_depth": 4, "expansion_budget": 512,
+            "search_depth": 4, "expansion_budget": request["expansion_budget"],
             "actual_expansions": 17,
             "heuristic_identity": "material-plus-pursuit-v1",
         }})
@@ -177,6 +177,25 @@ def test_duel_oracle_query_sends_exact_request_and_returns_frozen_selection(
     assert fake_server.requests[-2] == {
         "cmd": "duel_oracle_query", "decision_id": 7,
         "search_depth": 4, "expansion_budget": 512,
+        "heuristic_identity": "material-plus-pursuit-v1",
+    }
+
+
+def test_duel_oracle_query_accepts_frozen_2048_preflight_candidate(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(41, "external", "random", 0, "standard-3v3", 0)
+        selection = client.duel_oracle_query(
+            initial.decision.decision_id, expansion_budget=2048,
+        )
+
+    assert selection.expansion_budget == 2048
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_oracle_query", "decision_id": 7,
+        "search_depth": 4, "expansion_budget": 2048,
         "heuristic_identity": "material-plus-pursuit-v1",
     }
 

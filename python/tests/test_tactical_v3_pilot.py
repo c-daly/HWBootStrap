@@ -43,13 +43,14 @@ def _view_with_two_candidates(
     *,
     seat: int = 0,
     reference_seat: int = 0,
+    profile: str = "standard-3v3",
     terminal: bool = False,
 ):
     payload = minimal_view_payload()
     payload["decision_id"] = decision_id
     payload["seat"] = seat
     payload["reference_seat"] = reference_seat
-    payload["start_profile"] = "standard-3v3"
+    payload["start_profile"] = profile
     payload["candidates"][0]["decision_id"] = decision_id
     if terminal:
         payload["candidates"] = []
@@ -109,17 +110,22 @@ class _FakeClient:
 
 
 class _DaggerClient:
-    def __init__(self, seat: int = 0) -> None:
+    def __init__(self, seat: int = 0, profile: str = "standard-3v3") -> None:
         self._identity = _identity()
         self._views = (
-            _view_with_two_candidates(7, seat=seat, reference_seat=seat),
-            _view_with_two_candidates(8, seat=seat, reference_seat=seat),
             _view_with_two_candidates(
-                9, seat=seat, reference_seat=seat, terminal=True,
+                7, seat=seat, reference_seat=seat, profile=profile,
+            ),
+            _view_with_two_candidates(
+                8, seat=seat, reference_seat=seat, profile=profile,
+            ),
+            _view_with_two_candidates(
+                9, seat=seat, reference_seat=seat, profile=profile, terminal=True,
             ),
         )
         self._index = 0
         self.events = []
+        self.oracle_budgets = []
 
     @property
     def identity(self):
@@ -129,13 +135,14 @@ class _DaggerClient:
         self.events.append(("reset", args))
         return self._views[0]
 
-    def duel_oracle_query(self, decision_id):
+    def duel_oracle_query(self, decision_id, *, expansion_budget=512):
         current = self._views[self._index]
         assert decision_id == current.decision.decision_id
         teacher_candidate = 1 if self._index == 0 else 0
         self.events.append(("query", decision_id, teacher_candidate))
+        self.oracle_budgets.append(expansion_budget)
         return TeacherSelection(
-            decision_id, teacher_candidate, 4, 512, 21 + self._index,
+            decision_id, teacher_candidate, 4, expansion_budget, 21 + self._index,
             "material-plus-pursuit-v1",
         )
 
@@ -177,6 +184,53 @@ class _SelectiveDaggerClient(_DaggerClient):
             3 if self._index == 0 else 1,
             2,
         )
+
+
+class _PreflightClient:
+    def __init__(self, item) -> None:
+        self._views = (
+            _view(7, seat=item.learner_seat, profile=item.profile_id,
+                  reference_seat=item.reference_seat),
+            _view(8, seat=item.learner_seat, profile=item.profile_id,
+                  reference_seat=item.reference_seat),
+            _view(9, seat=item.learner_seat, profile=item.profile_id,
+                  reference_seat=item.reference_seat, truncated=True),
+        )
+        self._index = 0
+        self.events = []
+
+    def duel_reset(self, *args):
+        self.events.append(("reset", args))
+        return self._views[0]
+
+    def duel_oracle_query(self, decision_id, *, expansion_budget):
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        self.events.append(("query", decision_id, expansion_budget))
+        return TeacherSelection(
+            decision_id, current.decision.candidates[0].candidate_id,
+            4, expansion_budget, 17, "material-plus-pursuit-v1",
+        )
+
+    def duel_dagger_inspect(self, decision_id, candidate_id):
+        from ml_lab.tactical_v3_client import SelectiveDaggerInspection
+
+        occurrence = 1 if self._index == 0 else 3
+        self.events.append(("inspect", decision_id, candidate_id))
+        return SelectiveDaggerInspection(
+            decision_id, candidate_id, (),
+            ("a" if self._index == 0 else "b") * 64,
+            occurrence, 0.0, 1, 1,
+        )
+
+    def duel_step(self, selection):
+        self.events.append(("step", selection.decision_id, selection.candidate_id))
+        self._index += 1
+        return self._views[self._index]
+
+    def duel_status(self):
+        self.events.append(("status",))
+        return 0
 
 
 def _canonical_collection():
@@ -254,6 +308,113 @@ def test_diagnostic_schedule_uses_five_new_reciprocal_seeds_per_profile() -> Non
             64_000_000 + profile_index * 5 + offset for offset in range(5)
         }
         assert [item.learner_seat for item in rows] == [0, 1] * 5
+
+
+def test_selective_dagger_preflight_and_evaluation_schedules_are_exact() -> None:
+    from ml_lab.tactical_v3_pilot import (
+        SELECTIVE_DAGGER_CONVERSION_PROFILES,
+        oracle_preflight_schedule,
+        selective_dagger_evaluation_schedule,
+    )
+
+    preflight = oracle_preflight_schedule()
+    assert len(preflight) == 240
+    assert tuple(dict.fromkeys(item.profile_id for item in preflight)) == (
+        SELECTIVE_DAGGER_CONVERSION_PROFILES
+    )
+    assert [(item.episode_seed, item.learner_seat) for item in preflight[:4]] == [
+        (18_900_000, 0), (18_900_000, 1),
+        (18_900_001, 0), (18_900_001, 1),
+    ]
+    assert [(item.episode_seed, item.learner_seat) for item in preflight[-2:]] == [
+        (18_900_119, 0), (18_900_119, 1),
+    ]
+    for profile_index, profile in enumerate(SELECTIVE_DAGGER_CONVERSION_PROFILES):
+        rows = tuple(item for item in preflight if item.profile_id == profile)
+        assert len(rows) == 40
+        assert {item.episode_seed for item in rows} == set(range(
+            18_900_000 + profile_index * 20,
+            18_900_020 + profile_index * 20,
+        ))
+
+    evaluation = selective_dagger_evaluation_schedule()
+    assert len(evaluation) == 200
+    assert all(item.profile_id == "standard-3v3" for item in evaluation)
+    assert [(item.episode_seed, item.learner_seat) for item in evaluation[:4]] == [
+        (20_000_000, 0), (20_000_000, 1),
+        (20_000_001, 0), (20_000_001, 1),
+    ]
+    assert [(item.episode_seed, item.learner_seat) for item in evaluation[-2:]] == [
+        (20_000_099, 0), (20_000_099, 1),
+    ]
+
+
+def test_oracle_preflight_runs_both_candidates_and_applies_frozen_selection() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    calls = []
+
+    def run_game(item, budget):
+        calls.append((item, budget))
+        return module.OraclePreflightGame(
+            won=True,
+            cycling_draw=False,
+            labels=8 if budget == 512 else 12,
+            duration_seconds=0.5,
+            deterministic_queries=True,
+            roundtrip_failures=0,
+        )
+
+    result = module.run_oracle_preflight(run_game)
+
+    assert len(calls) == 480
+    assert tuple(budget for _, budget in calls[:240]) == (512,) * 240
+    assert tuple(budget for _, budget in calls[240:]) == (2048,) * 240
+    assert tuple(item for item, _ in calls[:240]) == module.oracle_preflight_schedule()
+    assert tuple(item for item, _ in calls[240:]) == module.oracle_preflight_schedule()
+    assert result.selected_expansion_budget == 2048
+    assert all(summary.games == 240 and summary.win_rate == 1.0
+               and summary.labels_per_second >= 10.0 and summary.passed
+               for summary in result.candidates)
+
+
+def test_oracle_preflight_fails_closed_when_no_candidate_meets_thresholds() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    def run_game(item, budget):
+        del item, budget
+        return module.OraclePreflightGame(
+            won=False, cycling_draw=False, labels=4, duration_seconds=1.0,
+            deterministic_queries=True, roundtrip_failures=0,
+        )
+
+    with pytest.raises(RuntimeError, match="no oracle candidate"):
+        module.run_oracle_preflight(run_game)
+
+
+def test_physical_oracle_preflight_game_double_queries_and_roundtrips_each_label() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    item = module.oracle_preflight_schedule()[0]
+    client = _PreflightClient(item)
+    result = module.run_physical_oracle_preflight_game(client, item, 2048)
+
+    assert result.labels == 2
+    assert result.deterministic_queries is True
+    assert result.roundtrip_failures == 0
+    assert result.won is False
+    assert result.cycling_draw is True
+    assert client.events == [
+        ("reset", (
+            item.episode_seed, "external", "random", item.learner_seat,
+            item.profile_id, item.reference_seat,
+        )),
+        ("query", 7, 2048), ("query", 7, 2048),
+        ("inspect", 7, 0), ("step", 7, 0),
+        ("query", 8, 2048), ("query", 8, 2048),
+        ("inspect", 8, 0), ("step", 8, 0),
+        ("status",),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -504,6 +665,36 @@ def test_dagger_episode_queries_teacher_only_for_selectively_eligible_states() -
     assert episode.records[0].example.target.trajectory_index == 1
 
 
+def test_dagger_collection_and_evidence_use_selected_2048_oracle(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _DaggerClient()
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 18_990_000, 0, 0,
+    )
+
+    episode = module.collect_dagger_game(
+        client, loaded, item, oracle_expansion_budget=2048,
+    )
+    output = module.write_dagger_episode(tmp_path / "episode", episode)
+    manifest = json.loads((output / "episode.json").read_text(encoding="utf-8"))
+
+    assert client.oracle_budgets == [2048, 2048]
+    assert all(record.example.teacher.expansion_budget == 2048
+               for record in episode.records)
+    assert manifest["teacher"]["expansion_budget"] == 2048
+
+
 def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> None:
     import ml_lab.tactical_v3_pilot as module
 
@@ -548,6 +739,75 @@ def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> No
     assert augmented.base_collection_sha256 == evidence.collection_sha256
     assert len(augmented.dagger_records_sha256) == 64
     assert len(augmented.corpus_sha256) == 64
+
+
+def test_selective_dagger_training_sets_are_cumulative_with_heldout_only_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    build = getattr(module, "build_selective_dagger_training_set", None)
+    assert callable(build), "cumulative selective-DAgger composition is missing"
+    monkeypatch.setattr(
+        module, "_SELECTIVE_DAGGER_LABEL_TARGETS",
+        {"train": 4, "validation": 4},
+    )
+    base = _canonical_collection()
+    evidence = module.PilotCollectionEvidence("1" * 64, "2" * 64, "3" * 64)
+
+    def partition(name, iteration, actor_corpus):
+        loaded = SimpleNamespace(
+            model=_EvaluationPolicy(),
+            metadata=SimpleNamespace(
+                identity=_identity(), model_state_sha256=str(iteration) * 64,
+                corpus_sha256=actor_corpus, best_epoch=iteration,
+                best_validation_policy_nll=0.125,
+            ),
+        )
+        items = module.selective_dagger_schedule(name, iteration)[:2]
+        episodes = tuple(
+                module.collect_dagger_game(
+                    _DaggerClient(item.learner_seat, item.profile_id), loaded, item,
+                )
+            for item in items
+        )
+        return module.SelectiveDaggerPartitionCollection(
+            name, iteration, episodes, 4, 2, 4,
+            len(module.selective_dagger_schedule(name, iteration)),
+        )
+
+    train1 = partition("train", 1, evidence.collection_sha256)
+    heldout1 = partition("validation", 1, evidence.collection_sha256)
+    iteration1 = build(base, evidence, train1, heldout1)
+    train1_rows = tuple(record.example for episode in train1.episodes
+                        for record in episode.records)
+    heldout1_rows = tuple(record.example for episode in heldout1.episodes
+                          for record in episode.records)
+
+    assert iteration1.iteration == 1
+    assert iteration1.train == base.train + train1_rows
+    assert iteration1.validation == heldout1_rows
+    assert all(row not in base.validation for row in iteration1.validation)
+
+    train2 = partition("train", 2, iteration1.corpus_sha256)
+    heldout2 = partition("validation", 2, iteration1.corpus_sha256)
+    iteration2 = build(base, evidence, train2, heldout2, prior=iteration1)
+    train2_rows = tuple(record.example for episode in train2.episodes
+                        for record in episode.records)
+    heldout2_rows = tuple(record.example for episode in heldout2.episodes
+                          for record in episode.records)
+
+    assert iteration2.iteration == 2
+    assert iteration2.train == iteration1.train + train2_rows
+    assert iteration2.validation == iteration1.validation + heldout2_rows
+    assert iteration2.episodes[:len(iteration1.episodes)] == iteration1.episodes
+    assert (iteration2.validation_episodes[:len(iteration1.validation_episodes)]
+            == iteration1.validation_episodes)
+    train_keys = {(row.episode_seed, row.learner_seat, row.decision.decision_id)
+                  for row in iteration2.train}
+    heldout_keys = {(row.episode_seed, row.learner_seat, row.decision.decision_id)
+                    for row in iteration2.validation}
+    assert train_keys.isdisjoint(heldout_keys)
 
 
 def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
@@ -992,6 +1252,25 @@ def test_diagnostic_evaluation_uses_only_the_new_frozen_schedule() -> None:
     assert tuple(game.schedule for game in model.games) == schedule
     assert model.aggregate.games == 70
     assert len(model_client.steps) == 70
+
+
+def test_selective_dagger_evaluation_is_standard_only_and_never_uses_oracle() -> None:
+    from ml_lab.tactical_v3_pilot import (
+        evaluate_pilot, selective_dagger_evaluation_schedule,
+    )
+
+    schedule = selective_dagger_evaluation_schedule()
+    loaded = SimpleNamespace(model=_EvaluationPolicy(),
+                             metadata=SimpleNamespace(identity=_identity()))
+    client = _EvaluationClient()
+
+    evaluation = evaluate_pilot(client, loaded, "model", schedule)
+
+    assert evaluation.aggregate.games == 200
+    assert tuple(game.schedule for game in evaluation.games) == schedule
+    assert len(client.steps) == 200
+    assert all(reset[4] == "standard-3v3" for reset in client.resets)
+    assert not hasattr(client, "duel_oracle_query")
 
 
 def test_pilot_decision_requires_metric_improvement_zero_errors_and_ten_point_margin() -> None:

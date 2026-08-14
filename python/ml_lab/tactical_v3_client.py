@@ -329,7 +329,7 @@ class TacticalV3GymClient:
         expansion_budget = self._int32(expansion_budget, "expansion_budget")
         if type(heuristic_identity) is not str or not heuristic_identity:
             raise TypeError("heuristic_identity must be a non-empty string")
-        if search_depth != 4 or expansion_budget != 512 or (
+        if search_depth != 4 or expansion_budget not in {512, 2048} or (
             heuristic_identity != "material-plus-pursuit-v1"
         ):
             raise ValueError("unsupported tactical-v3 teacher configuration")

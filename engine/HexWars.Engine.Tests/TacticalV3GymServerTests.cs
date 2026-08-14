@@ -621,6 +621,33 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Process_DuelOracleQuerySupportsDeterministic2048PreflightCandidate()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement initial = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 18_900_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "conversion-1v1-near", reference_seat = 0,
+            }));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+            string request = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_query", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 2048,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            });
+
+            JsonElement first = server.Request(request).GetProperty("selection");
+            JsonElement second = server.Request(request).GetProperty("selection");
+
+            Assert.That(second.GetRawText(), Is.EqualTo(first.GetRawText()));
+            Assert.That(first.GetProperty("expansion_budget").GetInt32(), Is.EqualTo(2048));
+            Assert.That(first.GetProperty("actual_expansions").GetInt32(),
+                Is.InRange(1, 2048));
+        }
+
+        [Test]
         public void Process_DuelGreedyStepUsesPersistentGreedyTeacherAndExactProvenance()
         {
             using var server = TacticalV3ServerProcess.Start(CheckedInScenario);

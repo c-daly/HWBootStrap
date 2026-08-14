@@ -288,9 +288,10 @@ string RequireTacticalV3Command(JsonElement element)
         if (element.GetProperty("search_depth").GetInt32() != 4)
             throw new InvalidDataException(
                 $"tactical-v3 {command} search_depth must be 4");
-        if (element.GetProperty("expansion_budget").GetInt32() != 512)
+        int expansionBudget = element.GetProperty("expansion_budget").GetInt32();
+        if (expansionBudget != 512 && expansionBudget != 2048)
             throw new InvalidDataException(
-                $"tactical-v3 {command} expansion_budget must be 512");
+                $"tactical-v3 {command} expansion_budget must be 512 or 2048");
         if (element.GetProperty("heuristic_identity").GetString() !=
             BoundedSearchAgent.HeuristicIdentity)
             throw new InvalidDataException(
@@ -758,8 +759,9 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException(
                     "tactical-v3 duel_oracle_step requires a successful duel_reset");
             long decisionId = root.GetProperty("decision_id").GetInt64();
+            int expansionBudget = root.GetProperty("expansion_budget").GetInt32();
             TacticalV3TeacherSelection selection = tacticalV3Duel!.SelectTeacherCandidate(
-                new BoundedSearchAgent(512, 4, useHeuristic: true));
+                new BoundedSearchAgent(expansionBudget, 4, useHeuristic: true));
             if (selection.DecisionId != decisionId)
             {
                 Send(new { error = "tactical-v3 decision id is stale" });
@@ -798,8 +800,9 @@ while ((line = Console.ReadLine()) != null)
                 throw new InvalidDataException(
                     "tactical-v3 duel_oracle_query requires a successful duel_reset");
             long decisionId = root.GetProperty("decision_id").GetInt64();
+            int expansionBudget = root.GetProperty("expansion_budget").GetInt32();
             TacticalV3TeacherSelection selection = tacticalV3Duel!.SelectTeacherCandidate(
-                new BoundedSearchAgent(512, 4, useHeuristic: true));
+                new BoundedSearchAgent(expansionBudget, 4, useHeuristic: true));
             if (selection.DecisionId != decisionId)
             {
                 Send(new { error = "tactical-v3 decision id is stale" });
