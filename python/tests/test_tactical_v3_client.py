@@ -78,6 +78,16 @@ for line in sys.stdin:
                 "actual_expansions": 17,
                 "heuristic_identity": "material-plus-pursuit-v1",
             }, "view": view}
+    elif request["cmd"] == "duel_greedy_step":
+        view = minimal_view_payload()
+        view["decision_id"] = 8
+        view["candidates"][0]["decision_id"] = 8
+        response = {"selection": {
+            "decision_id": request["decision_id"], "candidate_id": 0,
+            "search_depth": 0, "expansion_budget": 0,
+            "actual_expansions": 0,
+            "heuristic_identity": "greedy-one-ply-v1",
+        }, "view": view}
     elif request["cmd"] == "duel_oracle_query":
         response = replies.get(request["cmd"], {"selection": {
             "decision_id": request["decision_id"], "candidate_id": 0,
@@ -168,6 +178,25 @@ def test_duel_oracle_query_sends_exact_request_and_returns_frozen_selection(
         "cmd": "duel_oracle_query", "decision_id": 7,
         "search_depth": 4, "expansion_budget": 512,
         "heuristic_identity": "material-plus-pursuit-v1",
+    }
+
+
+def test_duel_greedy_step_sends_exact_request_and_advances_with_greedy_provenance(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import OracleStepResult, TacticalV3GymClient
+
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(41, "external", "random", 0, "standard-3v3", 0)
+        result = client.duel_greedy_step(initial.decision.decision_id)
+
+    assert type(result) is OracleStepResult
+    assert result.selection.heuristic_identity == "greedy-one-ply-v1"
+    assert (result.selection.search_depth, result.selection.expansion_budget,
+            result.selection.actual_expansions) == (0, 0, 0)
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_greedy_step", "decision_id": 7,
+        "teacher_identity": "greedy-one-ply-v1",
     }
 
 

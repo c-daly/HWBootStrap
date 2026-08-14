@@ -197,6 +197,110 @@ class SelectiveDaggerPartitionCollection:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuredDaggerMixtureBatch:
+    examples: tuple[StructuredExample, ...]
+    sources: tuple[
+        Literal["greedy_standard", "search_conversion", "dagger_targeted"], ...
+    ]
+
+
+class _StructuredRowCycler:
+    def __init__(
+        self, rows: tuple[StructuredExample, ...], generator: torch.Generator,
+    ) -> None:
+        if not rows:
+            raise ValueError("structured source pool must not be empty")
+        self._rows = rows
+        self._generator = generator
+        self._order: list[int] = []
+        self._offset = 0
+
+    def take(self, count: int) -> tuple[StructuredExample, ...]:
+        selected: list[StructuredExample] = []
+        while len(selected) < count:
+            if self._offset == len(self._order):
+                self._order = torch.randperm(
+                    len(self._rows), generator=self._generator,
+                ).tolist()
+                self._offset = 0
+            available = min(count - len(selected), len(self._order) - self._offset)
+            selected.extend(
+                self._rows[index]
+                for index in self._order[self._offset:self._offset + available]
+            )
+            self._offset += available
+        return tuple(selected)
+
+
+class StructuredDaggerMixtureSampler:
+    _SOURCES = ("greedy_standard", "search_conversion", "dagger_targeted")
+    _FRACTIONS = (0.49, 0.21, 0.30)
+
+    def __init__(
+        self, training_set: PilotDaggerTrainingSet, *, batch_size: int, seed: int,
+    ) -> None:
+        if type(training_set) is not PilotDaggerTrainingSet:
+            raise TypeError("training_set must be PilotDaggerTrainingSet")
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("batch_size must be a positive int")
+        if type(seed) is not int or seed < 0:
+            raise ValueError("seed must be a nonnegative int")
+        targeted_count = sum(len(episode.records) for episode in training_set.episodes)
+        base_count = len(training_set.train) - targeted_count
+        if base_count < 1 or targeted_count < 1:
+            raise ValueError("structured DAgger mixture requires base and targeted rows")
+        base = training_set.train[:base_count]
+        targeted = training_set.train[base_count:]
+        pools = (
+            tuple(row for row in base if row.profile_id == "standard-3v3"),
+            tuple(row for row in base if row.profile_id != "standard-3v3"),
+            targeted,
+        )
+        generators = []
+        for offset in range(4):
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed((seed + offset) % (2**63 - 1))
+            generators.append(generator)
+        self._cyclers = tuple(
+            _StructuredRowCycler(rows, generators[index])
+            for index, rows in enumerate(pools)
+        )
+        self._shuffle = generators[-1]
+        self._batch_size = batch_size
+        self._carry = [0.0, 0.0, 0.0]
+
+    def next_batch(self) -> StructuredDaggerMixtureBatch:
+        targets = [
+            self._batch_size * fraction + carry
+            for fraction, carry in zip(self._FRACTIONS, self._carry, strict=True)
+        ]
+        counts = [math.floor(target) for target in targets]
+        while sum(counts) < self._batch_size:
+            source = max(
+                range(len(counts)),
+                key=lambda index: (targets[index] - counts[index], -index),
+            )
+            counts[source] += 1
+        self._carry = [
+            target - count for target, count in zip(targets, counts, strict=True)
+        ]
+        examples = []
+        sources = []
+        for source, cycler, count in zip(
+            self._SOURCES, self._cyclers, counts, strict=True,
+        ):
+            examples.extend(cycler.take(count))
+            sources.extend((source,) * count)
+        order = torch.randperm(
+            self._batch_size, generator=self._shuffle,
+        ).tolist()
+        return StructuredDaggerMixtureBatch(
+            tuple(examples[index] for index in order),
+            tuple(sources[index] for index in order),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PilotCollectionEvidence:
     train_sha256: str
     validation_sha256: str
@@ -448,8 +552,21 @@ def collect_game(
         _validate_view(view, item, identity, client.identity, seen)
         decision = view.decision
         seen.add(decision.decision_id)
-        result = client.duel_oracle_step(decision.decision_id)
-        _validate_selection(result.selection, decision)
+        standard = item.profile_id == "standard-3v3"
+        result = (
+            client.duel_greedy_step(decision.decision_id)
+            if standard else client.duel_oracle_step(decision.decision_id)
+        )
+        if standard:
+            if (
+                result.selection.search_depth != 0
+                or result.selection.expansion_budget != 0
+                or result.selection.actual_expansions != 0
+                or result.selection.heuristic_identity != "greedy-one-ply-v1"
+            ):
+                raise ValueError("pilot Greedy teacher metadata drifted")
+        else:
+            _validate_selection(result.selection, decision)
         retained.append((decision, result.selection))
         view = result.view
     if not retained:
@@ -481,7 +598,8 @@ def collect_game(
                 view.truncated,
             ),
             TeacherEvidence(
-                "bounded-search-v1", selection.search_depth,
+                ("greedy-one-ply-v1" if item.profile_id == "standard-3v3"
+                 else "bounded-search-v1"), selection.search_depth,
                 selection.expansion_budget, selection.actual_expansions,
                 selection.heuristic_identity, None,
             ),
@@ -816,6 +934,7 @@ def _dagger_training_manifest(
 
 def train_dagger_pilot(
     training_set: PilotDaggerTrainingSet,
+    incoming: LoadedStructuredPolicy,
     output: Path,
     seed: int,
     device: str,
@@ -854,6 +973,20 @@ def train_dagger_pilot(
         os.fsync(handle.fileno())
     training_output = output / "training"
     training_output.mkdir()
+    if incoming.metadata.identity != training_set.identity:
+        raise ValueError("incoming DAgger actor identity does not match training set")
+    trainer_config = TrainerConfig(
+        seed=seed,
+        batch_size=256,
+        learning_rate=3e-4,
+        max_epochs=50,
+        patience_epochs=5,
+        gradient_clip_norm=1.0,
+        device=device,
+    )
+    batch_provider = StructuredDaggerMixtureSampler(
+        training_set, batch_size=trainer_config.batch_size, seed=seed,
+    )
     return _train_pilot_dataset(
         training_set.identity,
         training_set.train,
@@ -862,6 +995,9 @@ def train_dagger_pilot(
         training_output,
         seed,
         device,
+        initial_policy=incoming,
+        trainer_config=trainer_config,
+        batch_provider=batch_provider,
     )
 
 
@@ -928,6 +1064,13 @@ def _require_collection(collection: PilotCollection) -> None:
                 raise ValueError("pilot collection contains mixed identities")
             if (example.profile_id, example.episode_seed, example.learner_seat) not in allowed:
                 raise ValueError("pilot collection row is outside the frozen schedule")
+            expected_source = (
+                "greedy-one-ply-v1"
+                if example.profile_id == "standard-3v3"
+                else "bounded-search-v1"
+            )
+            if example.teacher.identity != expected_source:
+                raise ValueError("pilot collection row has the wrong profile label source")
 
 
 def write_collection_evidence(
@@ -948,8 +1091,11 @@ def write_collection_evidence(
     train_hash = hashlib.sha256(train_bytes).hexdigest()
     validation_hash = hashlib.sha256(validation_bytes).hexdigest()
     manifest = {
-        "schema_version": 1,
-        "label_source": "bounded-search-v1",
+        "schema_version": 2,
+        "label_sources": {
+            "standard-3v3": "greedy-one-ply-v1",
+            "conversion-profiles": "bounded-search-v1",
+        },
         "identity": {
             "scenario_id": collection.identity.scenario_id,
             "contract_hash": collection.identity.contract_hash,
@@ -958,10 +1104,16 @@ def write_collection_evidence(
             "environment_kind": "duel",
         },
         "profiles": list(PILOT_PROFILES),
-        "teacher": {
-            "search_depth": 4,
-            "expansion_budget": 512,
-            "heuristic_identity": "material-plus-pursuit-v1",
+        "teachers": {
+            "greedy": {
+                "identity": "greedy-one-ply-v1",
+            },
+            "bounded_search": {
+                "identity": "bounded-search-v1",
+                "search_depth": 4,
+                "expansion_budget": 512,
+                "heuristic_identity": "material-plus-pursuit-v1",
+            },
         },
         "train": {"games": 28, "examples": len(collection.train), "sha256": train_hash},
         "validation": {
@@ -1008,7 +1160,7 @@ def load_collection_evidence(
     if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
         raise ValueError("pilot collection manifest must be canonical JSON")
     if set(manifest) != {
-        "schema_version", "label_source", "identity", "profiles", "teacher",
+        "schema_version", "label_sources", "identity", "profiles", "teachers",
         "train", "validation", "games",
     }:
         raise ValueError("pilot collection manifest fields are not exact")
@@ -1020,14 +1172,23 @@ def load_collection_evidence(
         "environment_kind": "duel",
     }
     if (
-        manifest["schema_version"] != 1
-        or manifest["label_source"] != "bounded-search-v1"
+        manifest["schema_version"] != 2
+        or manifest["label_sources"] != {
+            "standard-3v3": "greedy-one-ply-v1",
+            "conversion-profiles": "bounded-search-v1",
+        }
         or manifest["identity"] != expected_identity
         or manifest["profiles"] != list(PILOT_PROFILES)
-        or manifest["teacher"] != {
-            "search_depth": 4,
-            "expansion_budget": 512,
-            "heuristic_identity": "material-plus-pursuit-v1",
+        or manifest["teachers"] != {
+            "greedy": {
+                "identity": "greedy-one-ply-v1",
+            },
+            "bounded_search": {
+                "identity": "bounded-search-v1",
+                "search_depth": 4,
+                "expansion_budget": 512,
+                "heuristic_identity": "material-plus-pursuit-v1",
+            },
         }
     ):
         raise ValueError("pilot collection manifest does not match the frozen contract")
@@ -1119,15 +1280,28 @@ def _parse_pilot_row(
         _text(teacher_data["heuristic_identity"], "teacher.heuristic_identity"),
         teacher_data["confidence"],
     )
-    if (
-        teacher.identity != "bounded-search-v1"
-        or teacher.search_depth != 4
-        or teacher.expansion_budget != 512
-        or teacher.actual_expansions > 512
-        or teacher.heuristic_identity != "material-plus-pursuit-v1"
-        or teacher.confidence is not None
-    ):
-        raise ValueError("pilot teacher evidence does not match bounded-search-v1")
+    profile_id = _text(data["profile_id"], "example.profile_id")
+    if profile_id == "standard-3v3":
+        valid_teacher = (
+            teacher.identity == "greedy-one-ply-v1"
+            and teacher.search_depth == 0
+            and teacher.expansion_budget == 0
+            and teacher.actual_expansions == 0
+            and teacher.heuristic_identity == "greedy-one-ply-v1"
+            and teacher.confidence is None
+        )
+    else:
+        valid_teacher = (
+            profile_id in SELECTIVE_DAGGER_CONVERSION_PROFILES
+            and teacher.identity == "bounded-search-v1"
+            and teacher.search_depth == 4
+            and teacher.expansion_budget == 512
+            and 1 <= teacher.actual_expansions <= 512
+            and teacher.heuristic_identity == "material-plus-pursuit-v1"
+            and teacher.confidence is None
+        )
+    if not valid_teacher:
+        raise ValueError("pilot teacher evidence does not match its profile source")
     learner_seat = _int(data["learner_seat"], "example.learner_seat")
     if learner_seat not in {0, 1} or decision.seat != learner_seat:
         raise ValueError("pilot learner seat must match decision seat")
@@ -1140,7 +1314,7 @@ def _parse_pilot_row(
         identity.contract_hash,
         identity.encoding_hash,
         identity.capacity_hash,
-        _text(data["profile_id"], "example.profile_id"),
+        profile_id,
         _int(data["episode_seed"], "example.episode_seed"),
         learner_seat,
     )
@@ -1392,6 +1566,10 @@ def _train_pilot_dataset(
     output: Path,
     seed: int,
     device: str,
+    *,
+    initial_policy: LoadedStructuredPolicy | None = None,
+    trainer_config: TrainerConfig | None = None,
+    batch_provider: StructuredDaggerMixtureSampler | None = None,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     identity = _validate_identity(identity)
@@ -1405,13 +1583,40 @@ def _train_pilot_dataset(
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("pilot training artifacts output must be a plain directory")
 
-    model_config, objective_config, trainer_config = _pilot_configs(seed, device)
+    model_config, objective_config, default_trainer_config = _pilot_configs(seed, device)
+    if trainer_config is None:
+        trainer_config = default_trainer_config
+    elif (
+        type(trainer_config) is not TrainerConfig
+        or trainer_config.seed != seed
+        or trainer_config.device != device
+    ):
+        raise ValueError("pilot trainer override does not match seed/device")
+    if batch_provider is not None and type(batch_provider) is not StructuredDaggerMixtureSampler:
+        raise TypeError("pilot batch_provider must be StructuredDaggerMixtureSampler")
+    initial_state = None
+    if initial_policy is not None:
+        if type(initial_policy) is not LoadedStructuredPolicy:
+            raise TypeError("initial_policy must be LoadedStructuredPolicy")
+        if initial_policy.metadata.identity != identity:
+            raise ValueError("initial policy identity does not match pilot training identity")
+        if initial_policy.model.config != model_config:
+            raise ValueError("initial policy architecture does not match pilot model")
+        initial_state = {
+            name: value.detach().to(device="cpu").contiguous().clone()
+            for name, value in initial_policy.model.state_dict().items()
+        }
     deadline = started + _TRAINING_DEADLINE_SECONDS
     metric_device = torch.device(trainer_config.device)
     with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed % (2**63 - 1))
-            initial_model = TacticalV3Policy(model_config).to(metric_device).eval()
+        if initial_state is None:
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed % (2**63 - 1))
+                initial_model = TacticalV3Policy(model_config).to(metric_device).eval()
+        else:
+            initial_model = TacticalV3Policy(model_config).to(metric_device)
+            initial_model.load_state_dict(initial_state, strict=True)
+            initial_model.eval()
         initial_train = _policy_target_metrics(
             initial_model,
             train,
@@ -1440,6 +1645,11 @@ def _train_pilot_dataset(
             epoch_callback=telemetry.epoch,
             step_callback=telemetry.step,
             deadline_monotonic=deadline,
+            initial_state_dict=initial_state,
+            training_batch_provider=(
+                None if batch_provider is None
+                else lambda epoch, batch_index: batch_provider.next_batch().examples
+            ),
         )
     elapsed = time.monotonic() - started
     if elapsed > _TRAINING_DEADLINE_SECONDS:

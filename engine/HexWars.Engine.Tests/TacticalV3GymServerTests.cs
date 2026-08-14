@@ -621,6 +621,35 @@ namespace HexWars.Engine.Tests
         }
 
         [Test]
+        public void Process_DuelGreedyStepUsesPersistentGreedyTeacherAndExactProvenance()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement initial = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_greedy_step", decision_id = decisionId,
+                teacher_identity = "greedy-one-ply-v1",
+            }));
+
+            AssertProperties(response, "selection", "view");
+            JsonElement selection = response.GetProperty("selection");
+            Assert.That(selection.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
+            Assert.That(selection.GetProperty("search_depth").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("expansion_budget").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("actual_expansions").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("heuristic_identity").GetString(),
+                Is.EqualTo("greedy-one-ply-v1"));
+            AssertViewIdentities(response.GetProperty("view"));
+        }
+
+        [Test]
         public void Process_DuelDaggerInspectReturnsExactDiagnosticsWithoutAdvancing()
         {
             using var server = TacticalV3ServerProcess.Start(CheckedInScenario);

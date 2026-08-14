@@ -125,6 +125,8 @@ def train_offline(
     epoch_callback: Callable[[EpochMetrics], None] | None = None,
     step_callback: Callable[[StepMetrics], None] | None = None,
     deadline_monotonic: float | None = None,
+    initial_state_dict: Mapping[str, Tensor] | None = None,
+    training_batch_provider: Callable[[int, int], tuple] | None = None,
 ) -> TrainingResult:
     return _train_offline_impl(
         train_examples,
@@ -135,6 +137,8 @@ def train_offline(
         epoch_callback=epoch_callback,
         step_callback=step_callback,
         deadline_monotonic=deadline_monotonic,
+        initial_state_dict=initial_state_dict,
+        training_batch_provider=training_batch_provider,
     )
 
 
@@ -439,6 +443,8 @@ def _train_offline_impl(
     epoch_callback: Callable[[EpochMetrics], None] | None,
     step_callback: Callable[[StepMetrics], None] | None,
     deadline_monotonic: float | None,
+    initial_state_dict: Mapping[str, Tensor] | None,
+    training_batch_provider: Callable[[int, int], tuple] | None,
 ) -> TrainingResult:
     if type(train_examples) is not tuple:
         raise TypeError("training split must be an immutable tuple")
@@ -458,6 +464,10 @@ def _train_offline_impl(
         raise TypeError("epoch_callback must be callable")
     if step_callback is not None and not callable(step_callback):
         raise TypeError("step_callback must be callable")
+    if initial_state_dict is not None and not isinstance(initial_state_dict, Mapping):
+        raise TypeError("initial_state_dict must be a tensor mapping")
+    if training_batch_provider is not None and not callable(training_batch_provider):
+        raise TypeError("training_batch_provider must be callable")
     if deadline_monotonic is not None and (
         type(deadline_monotonic) is not float or not math.isfinite(deadline_monotonic)
     ):
@@ -479,6 +489,13 @@ def _train_offline_impl(
     torch.use_deterministic_algorithms(True)
     device = torch.device(trainer_config.device)
     model = TacticalV3Policy(model_config).to(device=device, dtype=torch.float32)
+    if initial_state_dict is not None:
+        copied_state = {
+            name: value.detach().to(device=device).contiguous().clone()
+            if isinstance(value, Tensor) else value
+            for name, value in initial_state_dict.items()
+        }
+        model.load_state_dict(copied_state, strict=True)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=trainer_config.learning_rate, weight_decay=0.0
     )
@@ -496,16 +513,31 @@ def _train_offline_impl(
 
     for epoch in range(trainer_config.max_epochs):
         _check_training_deadline(deadline_monotonic)
-        permutation = torch.randperm(len(train_rows), generator=generator).tolist()
+        permutation = (
+            torch.randperm(len(train_rows), generator=generator).tolist()
+            if training_batch_provider is None else None
+        )
         train_weighted = {name: 0.0 for name in METRIC_KEYS}
         train_count = 0
         model.train()
-        for batch_index, start in enumerate(
-            range(0, len(permutation), trainer_config.batch_size)
-        ):
+        batch_count = math.ceil(len(train_rows) / trainer_config.batch_size)
+        for batch_index in range(batch_count):
             _check_training_deadline(deadline_monotonic)
-            indices = permutation[start:start + trainer_config.batch_size]
-            rows = tuple(train_rows[index] for index in indices)
+            if training_batch_provider is None:
+                start = batch_index * trainer_config.batch_size
+                indices = permutation[start:start + trainer_config.batch_size]
+                rows = tuple(train_rows[index] for index in indices)
+            else:
+                rows = training_batch_provider(epoch, batch_index)
+                if type(rows) is not tuple or not rows:
+                    raise TypeError("training batch provider must return a nonempty tuple")
+                if len(rows) > trainer_config.batch_size:
+                    raise ValueError("training batch provider exceeded configured batch size")
+                for row in rows:
+                    if _canonical_example_key(row) not in train_keys:
+                        raise ValueError(
+                            "training batch provider returned a row outside training split"
+                        )
             batch = _batch_to_device(
                 _collate_training_batch(rows, model_config.horizon_turns), device
             )

@@ -285,6 +285,36 @@ class TacticalV3GymClient:
         self._view = view
         return OracleStepResult(selection, view)
 
+    def duel_greedy_step(self, decision_id: int) -> OracleStepResult:
+        self._require_kind("duel")
+        decision_id = self._int64(decision_id, "decision_id")
+        current = self._view
+        if current is None:
+            raise RuntimeError("duel_reset must precede duel_greedy_step")
+        if current.terminated or current.truncated:
+            raise RuntimeError("duel_greedy_step requires a nonterminal view")
+        if decision_id != current.decision.decision_id:
+            raise ValueError("decision_id is stale")
+        identity = "greedy-one-ply-v1"
+        payload = self._rpc({
+            "cmd": "duel_greedy_step",
+            "decision_id": decision_id,
+            "teacher_identity": identity,
+        })
+        if payload == {"error": "tactical-v3 decision id is stale"}:
+            raise ValueError("tactical-v3 decision id is stale")
+        try:
+            if set(payload) != {"selection", "view"}:
+                raise ValueError("GymServer duel_greedy_step fields changed")
+            selection = self._parse_teacher_selection(
+                payload["selection"], current, decision_id, 0, 0, identity,
+            )
+            view = parse_view(payload["view"], self._identity)
+        except BaseException as error:
+            self._raise_after_protocol_error(error)
+        self._view = view
+        return OracleStepResult(selection, view)
+
     def _prepare_teacher_request(
         self,
         command: str,
@@ -350,7 +380,11 @@ class TacticalV3GymClient:
             selected_heuristic != heuristic_identity
         ):
             raise ValueError("teacher selection configuration does not match request")
-        if not 1 <= actual_expansions <= expansion_budget:
+        if expansion_budget == 0:
+            valid_expansions = actual_expansions == 0
+        else:
+            valid_expansions = 1 <= actual_expansions <= expansion_budget
+        if not valid_expansions:
             raise ValueError("teacher selection actual_expansions is out of range")
         if sum(
             candidate.candidate_id == candidate_id

@@ -411,6 +411,48 @@ def test_train_offline_reports_each_completed_epoch() -> None:
     assert tuple(metric.epoch for metric in observed) == (0, 1)
 
 
+def test_train_offline_loads_initial_actor_before_optimizer_and_uses_batch_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = make_unleased_trainer_case(max_epochs=1, patience_epochs=1)
+    source = TacticalV3Policy(case.model_config)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.add_(0.001)
+    expected = {
+        name: value.detach().clone()
+        for name, value in source.state_dict().items()
+    }
+    calls = []
+    checked = False
+
+    def provider(epoch: int, batch_index: int) -> tuple:
+        calls.append((epoch, batch_index))
+        return case.train[:case.trainer_config.batch_size]
+
+    original = training._after_backward
+
+    def assert_initialized(model, *, epoch, batch_index):
+        nonlocal checked
+        if not checked:
+            assert_state_dict_equal(model.state_dict(), expected)
+            checked = True
+        original(model, epoch=epoch, batch_index=batch_index)
+
+    monkeypatch.setattr(training, "_after_backward", assert_initialized)
+    train_offline(
+        case.train, case.validation, case.model_config, case.objective_config,
+        case.trainer_config,
+        initial_state_dict=expected,
+        training_batch_provider=provider,
+    )
+
+    assert checked
+    assert calls == [(0, index) for index in range(
+        math.ceil(len(case.train) / case.trainer_config.batch_size)
+    )]
+
+
 def test_train_offline_reports_every_completed_train_and_validation_batch() -> None:
     case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
     observed: list[StepMetrics] = []

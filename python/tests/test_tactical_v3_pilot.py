@@ -94,6 +94,16 @@ class _FakeClient:
             self._views[self._index],
         )
 
+    def duel_greedy_step(self, decision_id: int) -> OracleStepResult:
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        self._index += 1
+        return OracleStepResult(
+            TeacherSelection(decision_id, current.decision.candidates[0].candidate_id,
+                             0, 0, 0, "greedy-one-ply-v1"),
+            self._views[self._index],
+        )
+
     def duel_status(self) -> int:
         return self._fallback
 
@@ -370,11 +380,26 @@ def test_collect_game_labels_every_teacher_decision_and_backfills_win() -> None:
     assert [row.target.trajectory_index for row in examples] == [0, 1]
     assert [row.target.remaining_turns_to_victory for row in examples] == [2, 1]
     assert all(row.target.terminal_outcome == "win" and not row.target.truncated for row in examples)
-    assert all(row.teacher.identity == "bounded-search-v1" for row in examples)
-    assert [row.teacher.actual_expansions for row in examples] == [12, 13]
-    assert all(row.teacher.search_depth == 4 and row.teacher.expansion_budget == 512
+    assert all(row.teacher.identity == "greedy-one-ply-v1" for row in examples)
+    assert all(row.teacher.actual_expansions == 0 for row in examples)
+    assert all(row.teacher.search_depth == 0 and row.teacher.expansion_budget == 0
                and row.teacher.confidence is None for row in examples)
     assert summary.decisions == 2 and summary.winner == 0 and summary.internal_fallback_count == 0
+
+
+def test_collect_game_uses_bounded_search_only_for_conversion_profiles() -> None:
+    from ml_lab.tactical_v3_pilot import PilotScheduleItem, collect_game
+
+    item = PilotScheduleItem("train", "conversion-1v1-near", 61_000_012, 0, 0)
+    client = _FakeClient([
+        _view(7, profile=item.profile_id),
+        _view(8, profile=item.profile_id, terminal=True),
+    ])
+    examples, _ = collect_game(client, item)
+
+    assert [row.teacher.identity for row in examples] == ["bounded-search-v1"]
+    assert examples[0].teacher.search_depth == 4
+    assert examples[0].teacher.expansion_budget == 512
 
 
 def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
@@ -554,7 +579,7 @@ def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
     sentinel = object()
 
     def fake_pipeline(identity, train_rows, validation_rows, corpus_sha, output,
-                      seed, device):
+                      seed, device, **kwargs):
         captured.update(
             identity=identity,
             train=train_rows,
@@ -563,16 +588,21 @@ def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
             output=output,
             seed=seed,
             device=device,
+            **kwargs,
         )
         return sentinel
 
     monkeypatch.setattr(module, "_train_pilot_dataset", fake_pipeline, raising=False)
     output = tmp_path / "dagger-iteration-1"
 
-    result = train(augmented, output, 227, "cpu")
+    result = train(augmented, loaded, output, 227, "cpu")
 
     assert result is sentinel
-    assert captured == {
+    assert {
+        key: captured[key]
+        for key in ("identity", "train", "validation", "corpus_sha",
+                    "output", "seed", "device")
+    } == {
         "identity": augmented.identity,
         "train": augmented.train,
         "validation": base.validation,
@@ -581,6 +611,8 @@ def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
         "seed": 227,
         "device": "cpu",
     }
+    assert captured["initial_policy"] is loaded
+    assert isinstance(captured["batch_provider"], module.StructuredDaggerMixtureSampler)
     manifest_path = output / "training-set.json"
     assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == (
         augmented.corpus_sha256
@@ -591,6 +623,93 @@ def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
     assert manifest["validation_examples"] == len(base.validation)
     assert (output / "seat-0" / "episode.json").is_file()
     assert (output / "seat-1" / "episode.json").is_file()
+
+
+def test_structured_dagger_sampler_exposes_exact_49_21_30_and_cycles_uniformly() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    base = _canonical_collection()
+    evidence = module.PilotCollectionEvidence("1" * 64, "2" * 64, "3" * 64)
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256=evidence.collection_sha256, best_epoch=0,
+            best_validation_policy_nll=1.25,
+        ),
+    )
+    episodes = tuple(
+        module.collect_dagger_game(_DaggerClient(item.learner_seat), loaded, item)
+        for item in module.dagger_iteration_schedule()
+    )
+    training_set = module.build_dagger_training_set(base, evidence, episodes)
+    sampler = module.StructuredDaggerMixtureSampler(
+        training_set, batch_size=256, seed=227,
+    )
+
+    counts = {"greedy_standard": 0, "search_conversion": 0, "dagger_targeted": 0}
+    first_batch_targeted = set()
+    for _ in range(100):
+        batch = sampler.next_batch()
+        assert len(batch.examples) == 256
+        for source, example in zip(batch.sources, batch.examples, strict=True):
+            counts[source] += 1
+            if source == "dagger_targeted" and _ == 0:
+                first_batch_targeted.add((
+                    example.episode_seed, example.learner_seat,
+                    example.decision.decision_id,
+                ))
+
+    assert counts == {
+        "greedy_standard": 12_544,
+        "search_conversion": 5_376,
+        "dagger_targeted": 7_680,
+    }
+    assert len(first_batch_targeted) == 4
+
+
+def test_dagger_retrain_warm_starts_incoming_actor_with_frozen_training_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+
+    base = _canonical_collection()
+    evidence = module.PilotCollectionEvidence("1" * 64, "2" * 64, "3" * 64)
+    model = TacticalV3Policy(TacticalV3ModelConfig(
+        hidden_dim=32, categorical_dim=8, cell_message_rounds=1,
+        relation_rounds=1, attention_heads=4, feed_forward_dim=64,
+        candidate_hidden_dim=64, horizon_turns=(4, 8, 16),
+    ))
+    incoming = SimpleNamespace(
+        model=model,
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256=module.structured_model_state_sha256(model),
+            corpus_sha256=evidence.collection_sha256, best_epoch=0,
+            best_validation_policy_nll=1.25,
+        ),
+    )
+    episodes = tuple(
+        module.collect_dagger_game(_DaggerClient(item.learner_seat), incoming, item)
+        for item in module.dagger_iteration_schedule()
+    )
+    training_set = module.build_dagger_training_set(base, evidence, episodes)
+    captured = {}
+
+    def fake_pipeline(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(module, "_train_pilot_dataset", fake_pipeline)
+    module.train_dagger_pilot(training_set, incoming, tmp_path / "iteration", 227, "cuda")
+
+    assert captured["initial_policy"] is incoming
+    assert captured["trainer_config"] == module.TrainerConfig(
+        seed=227, batch_size=256, learning_rate=3e-4, max_epochs=50,
+        patience_epochs=5, gradient_clip_norm=1.0, device="cuda",
+    )
+    assert isinstance(captured["batch_provider"], module.StructuredDaggerMixtureSampler)
 
 
 def test_collect_game_backfills_truncation_without_remaining_turns() -> None:
@@ -645,10 +764,18 @@ def test_collection_evidence_is_canonical_content_addressed_and_write_once(tmp_p
         (output / "validation.jsonl").read_bytes()
     ).hexdigest()
     manifest = json.loads((output / "collection.json").read_text(encoding="utf-8"))
-    assert manifest["label_source"] == "bounded-search-v1"
-    assert manifest["teacher"] == {
-        "search_depth": 4, "expansion_budget": 512,
-        "heuristic_identity": "material-plus-pursuit-v1",
+    assert manifest["schema_version"] == 2
+    assert manifest["label_sources"] == {
+        "standard-3v3": "greedy-one-ply-v1",
+        "conversion-profiles": "bounded-search-v1",
+    }
+    assert manifest["teachers"] == {
+        "greedy": {"identity": "greedy-one-ply-v1"},
+        "bounded_search": {
+            "identity": "bounded-search-v1",
+            "search_depth": 4, "expansion_budget": 512,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        },
     }
     assert (output / "collection.json").read_bytes().endswith(b"\n")
     with pytest.raises(FileExistsError):
@@ -687,7 +814,10 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     def fake_train(
         train, validation, model_config, objective_config, trainer_config,
         *, epoch_callback, step_callback, deadline_monotonic,
+        initial_state_dict, training_batch_provider,
     ):
+        assert initial_state_dict is None
+        assert training_batch_provider is None
         captured.update(train=train, validation=validation, model=model_config,
                         objective=objective_config, trainer=trainer_config,
                         deadline=deadline_monotonic)
@@ -1246,8 +1376,10 @@ def test_real_server_collects_reciprocal_standard_games() -> None:
     assert all(summary.terminated or summary.truncated for _, summary in results)
     assert all(summary.internal_fallback_count == 0 for _, summary in results)
     assert all(
-        example.teacher.search_depth == 4 and
-        example.teacher.expansion_budget == 512 and
-        example.teacher.heuristic_identity == "material-plus-pursuit-v1"
+        example.teacher.identity == "greedy-one-ply-v1" and
+        example.teacher.search_depth == 0 and
+        example.teacher.expansion_budget == 0 and
+        example.teacher.actual_expansions == 0 and
+        example.teacher.heuristic_identity == "greedy-one-ply-v1"
         for examples, _ in results for example in examples
     )

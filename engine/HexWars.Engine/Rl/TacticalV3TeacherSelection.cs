@@ -14,8 +14,8 @@ namespace HexWars.Engine.Rl
         {
             if (decisionId < 0) throw new ArgumentOutOfRangeException(nameof(decisionId));
             if (candidateId < 0) throw new ArgumentOutOfRangeException(nameof(candidateId));
-            if (searchDepth < 1) throw new ArgumentOutOfRangeException(nameof(searchDepth));
-            if (expansionBudget < 1)
+            if (searchDepth < 0) throw new ArgumentOutOfRangeException(nameof(searchDepth));
+            if (expansionBudget < 0)
                 throw new ArgumentOutOfRangeException(nameof(expansionBudget));
             if (actualExpansions < 0 || actualExpansions > expansionBudget)
                 throw new ArgumentOutOfRangeException(nameof(actualExpansions));

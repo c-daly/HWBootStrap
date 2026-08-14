@@ -147,6 +147,24 @@ namespace HexWars.Engine.Rl
                 teacher.UseHeuristic ? BoundedSearchAgent.HeuristicIdentity : "none");
         }
 
+        public TacticalV3TeacherSelection SelectGreedyTeacherCandidate(
+            GreedyAgent teacher)
+        {
+            RequireReset();
+            if (teacher == null) throw new ArgumentNullException(nameof(teacher));
+            if (IsFinished)
+                throw new InvalidOperationException(
+                    "cannot select a teacher candidate from a finished tactical-v3 episode");
+            if (Controller(_state.ActivePlayer) != null)
+                throw new InvalidOperationException(
+                    "teacher selection requires the active tactical-v3 seat to be external");
+
+            Command command = teacher.Decide(State);
+            int candidateId = _frame.RequireUniqueCandidateId(command);
+            return new TacticalV3TeacherSelection(
+                _frame.DecisionId, candidateId, 0, 0, 0, "greedy-one-ply-v1");
+        }
+
         public TacticalV3SelectiveDaggerInspection InspectSelectiveDagger(
             long decisionId, int learnerCandidateId)
         {
