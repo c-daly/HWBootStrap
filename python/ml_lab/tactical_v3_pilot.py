@@ -113,6 +113,38 @@ class PilotCollection:
 
 
 @dataclass(frozen=True, slots=True)
+class PilotDaggerDecision:
+    example: StructuredExample
+    learner_candidate_id: int
+    teacher_candidate_id: int
+    disagreement: bool
+    teacher_intervened: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PilotDaggerGameSummary:
+    schedule: PilotScheduleItem
+    winner: int
+    terminated: bool
+    truncated: bool
+    decisions: int
+    disagreements: int
+    teacher_interventions: int
+    internal_fallback_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PilotDaggerEpisode:
+    identity: TacticalV3SemanticIdentity
+    records: tuple[PilotDaggerDecision, ...]
+    summary: PilotDaggerGameSummary
+    actor_model_state_sha256: str
+    actor_corpus_sha256: str
+    actor_best_epoch: int
+    actor_best_validation_policy_nll: float
+
+
+@dataclass(frozen=True, slots=True)
 class PilotCollectionEvidence:
     train_sha256: str
     validation_sha256: str
@@ -335,6 +367,191 @@ def collect_game(
     return examples, PilotGameSummary(
         item, view.winner, view.terminated, view.truncated, len(examples), fallback,
     )
+
+
+def collect_dagger_game(
+    client: TacticalV3GymClient,
+    loaded: LoadedStructuredPolicy,
+    item: PilotScheduleItem,
+) -> PilotDaggerEpisode:
+    if type(item) is not PilotScheduleItem:
+        raise TypeError("item must be PilotScheduleItem")
+    if item.partition == "evaluation":
+        raise ValueError("evaluation schedule is not DAgger collection evidence")
+    identity = _validate_identity(client.identity)
+    if loaded.metadata.identity != identity:
+        raise ValueError("DAgger policy identity does not match GymServer identity")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", loaded.metadata.model_state_sha256) is None
+        or re.fullmatch(r"[0-9a-f]{64}", loaded.metadata.corpus_sha256) is None
+        or type(loaded.metadata.best_epoch) is not int
+        or loaded.metadata.best_epoch < 0
+        or not math.isfinite(loaded.metadata.best_validation_policy_nll)
+    ):
+        raise ValueError("DAgger actor provenance is invalid")
+    p0, p1 = ("external", "random") if item.learner_seat == 0 else ("random", "external")
+    view = client.duel_reset(
+        item.episode_seed, p0, p1, item.learner_seat,
+        item.profile_id, item.reference_seat,
+    )
+    retained: list[tuple[TacticalV3Decision, TeacherSelection, int]] = []
+    seen: set[int] = set()
+    while not view.terminated and not view.truncated:
+        _validate_view(view, item, identity, client.identity, seen)
+        decision = view.decision
+        seen.add(decision.decision_id)
+        batch = collate_decisions(
+            (decision,),
+            loaded.model.config.horizon_turns,
+        )
+        learner = loaded.model.select(batch)[0]
+        if learner.decision_id != decision.decision_id:
+            raise ValueError("DAgger learner selected a stale decision")
+        if sum(candidate.candidate_id == learner.candidate_id
+               for candidate in decision.candidates) != 1:
+            raise ValueError("DAgger learner candidate must occur exactly once")
+        teacher = client.duel_oracle_query(decision.decision_id)
+        _validate_selection(teacher, decision)
+        retained.append((decision, teacher, learner.candidate_id))
+        view = client.duel_step(CandidateSelection(
+            learner.decision_id,
+            learner.candidate_id,
+        ))
+    if not retained:
+        raise ValueError("DAgger game must contain at least one learner decision")
+    if client.identity != identity or loaded.metadata.identity != identity:
+        raise ValueError("DAgger semantic identity drifted during collection")
+    if view.start_profile != item.profile_id or view.reference_seat != item.reference_seat:
+        raise ValueError("DAgger terminal profile or reference seat drifted")
+    fallback = client.duel_status()
+    if fallback != 0:
+        raise ValueError("DAgger internal fallback count must remain zero")
+
+    outcome: Literal["win", "loss", "draw"]
+    if view.winner == item.learner_seat:
+        outcome = "win"
+    elif view.winner in {0, 1}:
+        outcome = "loss"
+    else:
+        outcome = "draw"
+    records = tuple(
+        PilotDaggerDecision(
+            StructuredExample(
+                1,
+                decision,
+                StructuredTarget(
+                    teacher.candidate_id,
+                    outcome,
+                    index,
+                    len(retained) - index if outcome == "win" else None,
+                    view.truncated,
+                ),
+                TeacherEvidence(
+                    "bounded-search-v1", teacher.search_depth,
+                    teacher.expansion_budget, teacher.actual_expansions,
+                    teacher.heuristic_identity, None,
+                ),
+                identity.scenario_id,
+                identity.contract_hash,
+                identity.encoding_hash,
+                identity.capacity_hash,
+                item.profile_id,
+                item.episode_seed,
+                item.learner_seat,
+            ),
+            learner_candidate_id,
+            teacher.candidate_id,
+            learner_candidate_id != teacher.candidate_id,
+            False,
+        )
+        for index, (decision, teacher, learner_candidate_id) in enumerate(retained)
+    )
+    disagreements = sum(record.disagreement for record in records)
+    summary = PilotDaggerGameSummary(
+        item,
+        view.winner,
+        view.terminated,
+        view.truncated,
+        len(records),
+        disagreements,
+        0,
+        fallback,
+    )
+    return PilotDaggerEpisode(
+        identity,
+        records,
+        summary,
+        loaded.metadata.model_state_sha256,
+        loaded.metadata.corpus_sha256,
+        loaded.metadata.best_epoch,
+        loaded.metadata.best_validation_policy_nll,
+    )
+
+
+def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
+    if type(episode) is not PilotDaggerEpisode or not episode.records:
+        raise ValueError("DAgger episode must contain records")
+    if episode.summary.decisions != len(episode.records):
+        raise ValueError("DAgger episode summary decision count changed")
+    if episode.summary.disagreements != sum(
+        record.disagreement for record in episode.records
+    ):
+        raise ValueError("DAgger episode disagreement count changed")
+    if episode.summary.teacher_interventions != 0 or any(
+        record.teacher_intervened for record in episode.records
+    ):
+        raise ValueError("DAgger evidence must be collected under learner control")
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(f"DAgger episode output already exists: {output}")
+    if not output.parent.is_dir() or _is_reparse(output.parent):
+        raise ValueError("DAgger episode parent must be a plain directory")
+
+    rows = b"".join(_canonical_bytes(asdict(record)) for record in episode.records)
+    rows_hash = hashlib.sha256(rows).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "kind": "tactical-v3-dagger-episode",
+        "identity": {
+            "scenario_id": episode.identity.scenario_id,
+            "contract_hash": episode.identity.contract_hash,
+            "encoding_hash": episode.identity.encoding_hash,
+            "capacity_hash": episode.identity.capacity_hash,
+            "environment_kind": episode.identity.environment_kind,
+        },
+        "actor": {
+            "algorithm": "structured_imitation",
+            "model_state_sha256": episode.actor_model_state_sha256,
+            "corpus_sha256": episode.actor_corpus_sha256,
+            "best_epoch": episode.actor_best_epoch,
+            "best_validation_policy_nll":
+                episode.actor_best_validation_policy_nll,
+        },
+        "teacher": {
+            "identity": "bounded-search-v1",
+            "search_depth": 4,
+            "expansion_budget": 512,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        },
+        "records": {
+            "path": "decisions.jsonl",
+            "count": len(episode.records),
+            "sha256": rows_hash,
+        },
+        "summary": asdict(episode.summary),
+    }
+    output.mkdir()
+    if _is_reparse(output):
+        raise ValueError("DAgger episode output must be a plain directory")
+    for name, data in (
+        ("decisions.jsonl", rows),
+        ("episode.json", _canonical_bytes(manifest)),
+    ):
+        with (output / name).open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    return output
 
 
 def collect_pilot(server_cmd: Sequence[str]) -> PilotCollection:

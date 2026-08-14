@@ -38,6 +38,27 @@ def _view(decision_id: int, *, seat: int = 0, profile: str = "standard-3v3",
     return parse_view(payload, _identity())
 
 
+def _view_with_two_candidates(
+    decision_id: int,
+    *,
+    terminal: bool = False,
+):
+    payload = minimal_view_payload()
+    payload["decision_id"] = decision_id
+    payload["start_profile"] = "standard-3v3"
+    payload["candidates"][0]["decision_id"] = decision_id
+    if terminal:
+        payload["candidates"] = []
+        payload["terminated"] = True
+        payload["winner"] = 0
+        payload["reward"]["finalized"] = True
+    else:
+        second = dict(payload["candidates"][0])
+        second["candidate_id"] = 1
+        payload["candidates"].append(second)
+    return parse_view(payload, _identity())
+
+
 class _FakeClient:
     def __init__(self, views, *, fallback: int = 0, identity_drift: bool = False) -> None:
         self._views = tuple(views)
@@ -71,6 +92,46 @@ class _FakeClient:
 
     def duel_status(self) -> int:
         return self._fallback
+
+
+class _DaggerClient:
+    def __init__(self) -> None:
+        self._identity = _identity()
+        self._views = (
+            _view_with_two_candidates(7),
+            _view_with_two_candidates(8),
+            _view_with_two_candidates(9, terminal=True),
+        )
+        self._index = 0
+        self.events = []
+
+    @property
+    def identity(self):
+        return self._identity
+
+    def duel_reset(self, *args):
+        self.events.append(("reset", args))
+        return self._views[0]
+
+    def duel_oracle_query(self, decision_id):
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        teacher_candidate = 1 if self._index == 0 else 0
+        self.events.append(("query", decision_id, teacher_candidate))
+        return TeacherSelection(
+            decision_id, teacher_candidate, 4, 512, 21 + self._index,
+            "material-plus-pursuit-v1",
+        )
+
+    def duel_step(self, selection):
+        current = self._views[self._index]
+        assert selection.decision_id == current.decision.decision_id
+        self.events.append(("step", selection.decision_id, selection.candidate_id))
+        self._index += 1
+        return self._views[self._index]
+
+    def duel_status(self):
+        return 0
 
 
 def _canonical_collection():
@@ -195,6 +256,75 @@ def test_collect_game_labels_every_teacher_decision_and_backfills_win() -> None:
     assert all(row.teacher.search_depth == 4 and row.teacher.expansion_budget == 512
                and row.teacher.confidence is None for row in examples)
     assert summary.decisions == 2 and summary.winner == 0 and summary.internal_fallback_count == 0
+
+
+def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collect = getattr(module, "collect_dagger_game", None)
+    write = getattr(module, "write_dagger_episode", None)
+    assert callable(collect), "tactical-v3 DAgger collector is missing"
+    assert callable(write), "tactical-v3 DAgger episode writer is missing"
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 65_000_000, 0, 0,
+    )
+    client = _DaggerClient()
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(),
+            model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+
+    episode = collect(client, loaded, item)
+
+    assert client.events[1:] == [
+        ("query", 7, 1), ("step", 7, 0),
+        ("query", 8, 0), ("step", 8, 0),
+    ]
+    assert episode.summary.decisions == 2
+    assert episode.summary.disagreements == 1
+    assert episode.summary.teacher_interventions == 0
+    assert episode.actor_model_state_sha256 == "a" * 64
+    assert episode.actor_corpus_sha256 == "b" * 64
+    assert [record.learner_candidate_id for record in episode.records] == [0, 0]
+    assert [record.teacher_candidate_id for record in episode.records] == [1, 0]
+    assert all(not record.teacher_intervened for record in episode.records)
+    assert [record.example.target.teacher_candidate_id
+            for record in episode.records] == [1, 0]
+
+    output = tmp_path / "dagger-episode"
+    assert write(output, episode) == output
+    manifest = json.loads((output / "episode.json").read_text(encoding="utf-8"))
+    rows = [
+        json.loads(line)
+        for line in (output / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert manifest["schema_version"] == 1
+    assert manifest["kind"] == "tactical-v3-dagger-episode"
+    assert manifest["records"]["count"] == 2
+    assert manifest["summary"]["disagreements"] == 1
+    assert manifest["actor"] == {
+        "algorithm": "structured_imitation",
+        "best_epoch": 3,
+        "best_validation_policy_nll": 0.125,
+        "corpus_sha256": "b" * 64,
+        "model_state_sha256": "a" * 64,
+    }
+    assert set(rows[0]) == {
+        "disagreement", "example", "learner_candidate_id",
+        "teacher_candidate_id", "teacher_intervened",
+    }
+    assert rows[0]["learner_candidate_id"] == 0
+    assert rows[0]["teacher_candidate_id"] == 1
+    assert rows[0]["disagreement"] is True
+    assert rows[0]["teacher_intervened"] is False
 
 
 def test_collect_game_backfills_truncation_without_remaining_turns() -> None:
