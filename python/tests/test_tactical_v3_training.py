@@ -21,7 +21,13 @@ from ml_lab.tactical_v3_corpus import StructuredExample, _parse_row
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_model import CandidateIdentity, PolicyOutput, TacticalV3Policy
 from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, structured_imitation_loss
-from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult, train_offline
+from ml_lab.tactical_v3_training import (
+    EpochMetrics,
+    StepMetrics,
+    TrainerConfig,
+    TrainingResult,
+    train_offline,
+)
 from tests.tactical_v3_fixture_support import (
     TINY_CORPUS_ROOT,
     load_duel_identity_fixture,
@@ -405,6 +411,31 @@ def test_train_offline_reports_each_completed_epoch() -> None:
     assert tuple(metric.epoch for metric in observed) == (0, 1)
 
 
+def test_train_offline_reports_every_completed_train_and_validation_batch() -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    observed: list[StepMetrics] = []
+
+    train_offline(
+        case.train,
+        case.validation,
+        case.model_config,
+        case.objective_config,
+        case.trainer_config,
+        step_callback=observed.append,
+    )
+
+    assert tuple(metric.phase for metric in observed) == (
+        "train", "validation", "train", "validation",
+    )
+    assert tuple(metric.epoch for metric in observed) == (0, 0, 1, 1)
+    assert tuple(metric.batch_index for metric in observed) == (0, 0, 0, 0)
+    assert tuple(metric.global_step for metric in observed) == (1, 1, 2, 2)
+    assert tuple(metric.example_count for metric in observed) == (1, 1, 1, 1)
+    assert all(tuple(metric.metrics) == METRIC_KEYS for metric in observed)
+    with pytest.raises(TypeError):
+        observed[0].metrics["policy"] = 0.0
+
+
 def test_train_offline_deadline_interrupts_before_an_optimizer_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -429,6 +460,36 @@ def test_train_offline_deadline_interrupts_before_an_optimizer_step(
         )
 
     assert optimizer_steps == 0
+
+
+def test_completed_optimizer_step_is_reported_before_deadline_interrupts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    observed: list[StepMetrics] = []
+    deadline_checks = 0
+
+    def expire_after_first_optimizer_step(deadline: float | None) -> None:
+        nonlocal deadline_checks
+        deadline_checks += 1
+        if deadline_checks == 4:
+            raise TimeoutError("training deadline reached")
+
+    monkeypatch.setattr(
+        training, "_check_training_deadline", expire_after_first_optimizer_step,
+    )
+    with pytest.raises(TimeoutError, match="training deadline"):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            step_callback=observed.append,
+            deadline_monotonic=1.0,
+        )
+
+    assert tuple((item.phase, item.global_step) for item in observed) == (("train", 1),)
 
 @pytest.mark.parametrize(("field", "value"), CONFIG_INVALID_CASES)
 def test_every_config_field_rejects_its_invalid_type_and_domain_matrix(

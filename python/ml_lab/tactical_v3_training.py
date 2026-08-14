@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
 
 import numpy as np
 import torch
@@ -90,6 +91,16 @@ class EpochMetrics:
 
 
 @dataclass(frozen=True, slots=True)
+class StepMetrics:
+    phase: Literal["train", "validation"]
+    epoch: int
+    batch_index: int
+    global_step: int
+    example_count: int
+    metrics: Mapping[str, float]
+
+
+@dataclass(frozen=True, slots=True)
 class TrainingResult:
     model: TacticalV3Policy
     model_config: TacticalV3ModelConfig
@@ -112,6 +123,7 @@ def train_offline(
     trainer_config: TrainerConfig,
     *,
     epoch_callback: Callable[[EpochMetrics], None] | None = None,
+    step_callback: Callable[[StepMetrics], None] | None = None,
     deadline_monotonic: float | None = None,
 ) -> TrainingResult:
     return _train_offline_impl(
@@ -121,6 +133,7 @@ def train_offline(
         objective_config,
         trainer_config,
         epoch_callback=epoch_callback,
+        step_callback=step_callback,
         deadline_monotonic=deadline_monotonic,
     )
 
@@ -238,6 +251,8 @@ def _evaluate_validation(
     device: torch.device,
     *,
     epoch: int,
+    step_callback: Callable[[StepMetrics], None] | None = None,
+    global_step_start: int = 0,
     deadline_monotonic: float | None = None,
 ) -> tuple[Mapping[str, float], float]:
     weighted = {name: 0.0 for name in METRIC_KEYS}
@@ -260,6 +275,7 @@ def _evaluate_validation(
                 batch_index=batch_index,
             )
             _validate_losses(losses, device, context)
+            batch_metric_values = {}
             for name in METRIC_KEYS:
                 value = getattr(losses, name)
                 if (
@@ -268,11 +284,22 @@ def _evaluate_validation(
                     or not bool(torch.isfinite(value))
                 ):
                     raise FloatingPointError(f"{context} loss.{name}")
-                contribution = float(value.detach().item()) * len(rows)
+                batch_value = float(value.detach().item())
+                batch_metric_values[name] = batch_value
+                contribution = batch_value * len(rows)
                 if not math.isfinite(contribution):
                     raise FloatingPointError(f"{context} weighted loss.{name}")
                 weighted[name] += contribution
             example_count += len(rows)
+            if step_callback is not None:
+                step_callback(StepMetrics(
+                    phase="validation",
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    global_step=global_step_start + batch_index + 1,
+                    example_count=len(rows),
+                    metrics=MappingProxyType(batch_metric_values),
+                ))
     metrics = MappingProxyType({
         name: float(weighted[name] / example_count) for name in METRIC_KEYS
     })
@@ -410,6 +437,7 @@ def _train_offline_impl(
     trainer_config: TrainerConfig,
     *,
     epoch_callback: Callable[[EpochMetrics], None] | None,
+    step_callback: Callable[[StepMetrics], None] | None,
     deadline_monotonic: float | None,
 ) -> TrainingResult:
     if type(train_examples) is not tuple:
@@ -428,6 +456,8 @@ def _train_offline_impl(
         raise TypeError("trainer_config must be TrainerConfig")
     if epoch_callback is not None and not callable(epoch_callback):
         raise TypeError("epoch_callback must be callable")
+    if step_callback is not None and not callable(step_callback):
+        raise TypeError("step_callback must be callable")
     if deadline_monotonic is not None and (
         type(deadline_monotonic) is not float or not math.isfinite(deadline_monotonic)
     ):
@@ -461,6 +491,8 @@ def _train_offline_impl(
     best_state: Mapping[str, Tensor] | None = None
     epochs_without_improvement = 0
     stopped_early = False
+    train_global_step = 0
+    validation_global_step = 0
 
     for epoch in range(trainer_config.max_epochs):
         _check_training_deadline(deadline_monotonic)
@@ -503,19 +535,37 @@ def _train_offline_impl(
                 raise FloatingPointError(f"{context} gradient_norm")
             optimizer.step()
             _after_optimizer_step(model, epoch=epoch, batch_index=batch_index)
-            _check_training_deadline(deadline_monotonic)
             for name, parameter in model.named_parameters():
                 if not bool(torch.isfinite(parameter).all()):
                     raise FloatingPointError(f"{context} parameter={name}")
+            batch_metric_values = {}
             for name in METRIC_KEYS:
-                contribution = float(getattr(losses, name).detach().item()) * len(rows)
+                batch_value = float(getattr(losses, name).detach().item())
+                batch_metric_values[name] = batch_value
+                contribution = batch_value * len(rows)
                 if not math.isfinite(contribution):
                     raise FloatingPointError(f"{context} weighted loss.{name}")
                 train_weighted[name] += contribution
             train_count += len(rows)
+            train_global_step += 1
+            if step_callback is not None:
+                step_callback(StepMetrics(
+                    phase="train",
+                    epoch=epoch,
+                    batch_index=batch_index,
+                    global_step=train_global_step,
+                    example_count=len(rows),
+                    metrics=MappingProxyType(batch_metric_values),
+                ))
+            _check_training_deadline(deadline_monotonic)
 
         train_metrics = _frozen_metrics(train_weighted, train_count)
         validation_arguments = {"epoch": epoch}
+        if step_callback is not None:
+            validation_arguments.update(
+                step_callback=step_callback,
+                global_step_start=validation_global_step,
+            )
         if deadline_monotonic is not None:
             validation_arguments["deadline_monotonic"] = deadline_monotonic
         validation_metrics, candidate_nll = _evaluate_validation(
@@ -526,6 +576,9 @@ def _train_offline_impl(
             trainer_config.batch_size,
             device,
             **validation_arguments,
+        )
+        validation_global_step += math.ceil(
+            len(validation_rows) / trainer_config.batch_size
         )
         if type(candidate_nll) is not float or not math.isfinite(candidate_nll):
             raise FloatingPointError(f"epoch={epoch} validation policy")

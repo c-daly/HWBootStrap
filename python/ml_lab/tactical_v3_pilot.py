@@ -48,6 +48,7 @@ from .tactical_v3_schema import (
 )
 from .tactical_v3_training import (
     EpochMetrics,
+    StepMetrics,
     TrainerConfig,
     _batch_to_device,
     train_offline,
@@ -705,6 +706,8 @@ class _PilotTelemetry:
         self.max_epochs = max_epochs
         self.started = started
         self._handle = (output / "telemetry.jsonl").open("xb")
+        self._step_handle = (output / "steps.jsonl").open("xb")
+        self._steps_since_sync = 0
         self._writer = SummaryWriter(log_dir=str(output / "tensorboard"), flush_secs=1)
         self._writer.add_scalar("progress/started", 1.0, 0)
         self._writer.flush()
@@ -767,7 +770,42 @@ class _PilotTelemetry:
             flush=True,
         )
 
+    def step(self, metric: StepMetrics) -> None:
+        row = _canonical_bytes({
+            "phase": metric.phase,
+            "epoch": metric.epoch,
+            "batch_index": metric.batch_index,
+            "global_step": metric.global_step,
+            "example_count": metric.example_count,
+            "metrics": dict(metric.metrics),
+        })
+        self._step_handle.write(row)
+        self._step_handle.flush()
+        self._steps_since_sync += 1
+        if self._steps_since_sync >= 10:
+            os.fsync(self._step_handle.fileno())
+            self._steps_since_sync = 0
+        for name, value in metric.metrics.items():
+            self._writer.add_scalar(
+                f"step/{metric.phase}_{name}", value, metric.global_step,
+            )
+        if metric.global_step == 1 or metric.global_step % 5 == 0:
+            self._writer.flush()
+        if metric.global_step == 1 or metric.global_step % 10 == 0:
+            print(
+                "pilot telemetry "
+                f"phase={metric.phase} "
+                f"epoch={metric.epoch + 1}/{self.max_epochs} "
+                f"batch={metric.batch_index + 1} "
+                f"step={metric.global_step} "
+                f"policy_nll={metric.metrics['policy']:.6f}",
+                flush=True,
+            )
+
     def close(self) -> None:
+        self._step_handle.flush()
+        os.fsync(self._step_handle.fileno())
+        self._step_handle.close()
         self._handle.close()
         self._writer.flush()
         self._writer.close()
@@ -845,6 +883,7 @@ def train_pilot(
             objective_config,
             trainer_config,
             epoch_callback=telemetry.epoch,
+            step_callback=telemetry.step,
             deadline_monotonic=deadline,
         )
     elapsed = time.monotonic() - started

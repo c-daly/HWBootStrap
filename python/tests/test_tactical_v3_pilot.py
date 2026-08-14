@@ -227,7 +227,7 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     import ml_lab.tactical_v3_pilot as module
     from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
     from ml_lab.tactical_v3_model import TacticalV3Policy
-    from ml_lab.tactical_v3_training import EpochMetrics, TrainingResult
+    from ml_lab.tactical_v3_training import EpochMetrics, StepMetrics, TrainingResult
 
     collection = _canonical_collection()
     output = tmp_path / "pilot"
@@ -236,7 +236,7 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
 
     def fake_train(
         train, validation, model_config, objective_config, trainer_config,
-        *, epoch_callback, deadline_monotonic,
+        *, epoch_callback, step_callback, deadline_monotonic,
     ):
         captured.update(train=train, validation=validation, model=model_config,
                         objective=objective_config, trainer=trainer_config,
@@ -247,6 +247,10 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
             "horizon": 0.0, "remaining_turns": 0.0,
         })
         history = (EpochMetrics(0, metrics, metrics, 1.0, True),)
+        step_callback(StepMetrics("train", 0, 0, 1, 2, metrics))
+        step_callback(StepMetrics("train", 0, 1, 2, 1, metrics))
+        step_callback(StepMetrics("validation", 0, 0, 1, 2, metrics))
+        step_callback(StepMetrics("validation", 0, 1, 2, 1, metrics))
         epoch_callback(history[0])
         return TrainingResult(model, model_config, objective_config, trainer_config,
                               0, 1.0, False, history)
@@ -288,6 +292,21 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     )
     assert (attempt / "metrics.jsonl").read_text(encoding="utf-8") == expected_history
     assert (attempt / "telemetry.jsonl").read_text(encoding="utf-8") == expected_history
+    expected_steps = (
+        '{"batch_index":0,"epoch":0,"example_count":2,"global_step":1,'
+        '"metrics":{"horizon":0.0,"outcome":0.0,"policy":1.0,'
+        '"remaining_turns":0.0,"total":1.0},"phase":"train"}\n'
+        '{"batch_index":1,"epoch":0,"example_count":1,"global_step":2,'
+        '"metrics":{"horizon":0.0,"outcome":0.0,"policy":1.0,'
+        '"remaining_turns":0.0,"total":1.0},"phase":"train"}\n'
+        '{"batch_index":0,"epoch":0,"example_count":2,"global_step":1,'
+        '"metrics":{"horizon":0.0,"outcome":0.0,"policy":1.0,'
+        '"remaining_turns":0.0,"total":1.0},"phase":"validation"}\n'
+        '{"batch_index":1,"epoch":0,"example_count":1,"global_step":2,'
+        '"metrics":{"horizon":0.0,"outcome":0.0,"policy":1.0,'
+        '"remaining_turns":0.0,"total":1.0},"phase":"validation"}\n'
+    )
+    assert (attempt / "steps.jsonl").read_text(encoding="utf-8") == expected_steps
     console = capsys.readouterr().out
     assert "phase=initial_metrics" in console
     assert "epoch=1/100" in console
@@ -297,6 +316,11 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     assert events.Scalars("baseline/train_policy_nll")[0].value >= 0.0
     assert events.Scalars("epoch/validation_policy_nll")[0].value == pytest.approx(1.0)
     assert events.Scalars("progress/started")[0].value == pytest.approx(1.0)
+    assert [item.step for item in events.Scalars("step/train_policy")] == [1, 2]
+    assert [item.value for item in events.Scalars("step/train_policy")] == pytest.approx(
+        [1.0, 1.0]
+    )
+    assert [item.step for item in events.Scalars("step/validation_policy")] == [1, 2]
 
 
 def test_policy_target_metrics_honors_training_deadline_before_a_batch() -> None:
