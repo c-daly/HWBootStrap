@@ -145,6 +145,18 @@ class PilotDaggerEpisode:
 
 
 @dataclass(frozen=True, slots=True)
+class PilotDaggerTrainingSet:
+    identity: TacticalV3SemanticIdentity
+    train: tuple[StructuredExample, ...]
+    validation: tuple[StructuredExample, ...]
+    episodes: tuple[PilotDaggerEpisode, ...]
+    base_collection_sha256: str
+    dagger_records_sha256: str
+    validation_sha256: str
+    corpus_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class PilotCollectionEvidence:
     train_sha256: str
     validation_sha256: str
@@ -240,6 +252,13 @@ def diagnostic_evaluation_schedule() -> tuple[PilotScheduleItem, ...]:
                           seat, seat)
         for profile_index, profile in enumerate(PILOT_PROFILES)
         for offset in range(5)
+        for seat in (0, 1)
+    )
+
+
+def dagger_iteration_schedule() -> tuple[PilotScheduleItem, ...]:
+    return tuple(
+        PilotScheduleItem("train", "standard-3v3", 65_100_000, seat, seat)
         for seat in (0, 1)
     )
 
@@ -552,6 +571,161 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
     return output
+
+
+def build_dagger_training_set(
+    collection: PilotCollection,
+    evidence: PilotCollectionEvidence,
+    episodes: tuple[PilotDaggerEpisode, ...],
+) -> PilotDaggerTrainingSet:
+    _require_collection(collection)
+    if type(evidence) is not PilotCollectionEvidence:
+        raise TypeError("evidence must be PilotCollectionEvidence")
+    for name in (
+        "train_sha256", "validation_sha256", "collection_sha256",
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", getattr(evidence, name)) is None:
+            raise ValueError("pilot collection evidence hashes must be lowercase SHA-256")
+    if type(episodes) is not tuple or not episodes:
+        raise ValueError("DAgger iteration episodes must be a nonempty tuple")
+    expected_schedule = dagger_iteration_schedule()
+    if tuple(episode.summary.schedule for episode in episodes) != expected_schedule:
+        raise ValueError("DAgger iteration must use the frozen reciprocal schedule")
+
+    actor = episodes[0]
+    appended: list[StructuredExample] = []
+    rows = bytearray()
+    for episode in episodes:
+        if type(episode) is not PilotDaggerEpisode:
+            raise TypeError("DAgger iteration rows must be PilotDaggerEpisode")
+        if episode.identity != collection.identity:
+            raise ValueError("DAgger iteration contains mixed semantic identities")
+        if (
+            episode.actor_model_state_sha256 != actor.actor_model_state_sha256
+            or episode.actor_corpus_sha256 != actor.actor_corpus_sha256
+            or episode.actor_best_epoch != actor.actor_best_epoch
+            or episode.actor_best_validation_policy_nll
+            != actor.actor_best_validation_policy_nll
+        ):
+            raise ValueError("DAgger iteration actor provenance changed between seats")
+        if episode.actor_corpus_sha256 != evidence.collection_sha256:
+            raise ValueError("DAgger actor corpus does not match the base collection")
+        if (
+            not episode.records
+            or episode.summary.decisions != len(episode.records)
+            or episode.summary.disagreements
+            != sum(record.disagreement for record in episode.records)
+            or episode.summary.teacher_interventions != 0
+            or episode.summary.internal_fallback_count != 0
+            or any(record.teacher_intervened for record in episode.records)
+        ):
+            raise ValueError("DAgger iteration episode evidence is inconsistent")
+        for record in episode.records:
+            if type(record) is not PilotDaggerDecision:
+                raise TypeError("DAgger iteration records must be PilotDaggerDecision")
+            appended.append(record.example)
+            rows.extend(_canonical_bytes(asdict(record)))
+
+    combined = collection.train + tuple(appended)
+    keys = tuple((
+        example.scenario_id,
+        example.episode_seed,
+        example.learner_seat,
+        example.profile_id,
+        example.decision.decision_id,
+    ) for example in combined)
+    if len(set(keys)) != len(keys):
+        raise ValueError("DAgger iteration introduces duplicate training decisions")
+    records_hash = hashlib.sha256(rows).hexdigest()
+    corpus_manifest = _dagger_training_manifest(
+        evidence.collection_sha256,
+        len(collection.train),
+        records_hash,
+        len(appended),
+        evidence.validation_sha256,
+        len(collection.validation),
+    )
+    return PilotDaggerTrainingSet(
+        collection.identity,
+        combined,
+        collection.validation,
+        episodes,
+        evidence.collection_sha256,
+        records_hash,
+        evidence.validation_sha256,
+        hashlib.sha256(_canonical_bytes(corpus_manifest)).hexdigest(),
+    )
+
+
+def _dagger_training_manifest(
+    base_collection_sha256: str,
+    base_train_examples: int,
+    dagger_records_sha256: str,
+    dagger_examples: int,
+    validation_sha256: str,
+    validation_examples: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "tactical-v3-dagger-training-set",
+        "base_collection_sha256": base_collection_sha256,
+        "base_train_examples": base_train_examples,
+        "dagger_records_sha256": dagger_records_sha256,
+        "dagger_examples": dagger_examples,
+        "validation_sha256": validation_sha256,
+        "validation_examples": validation_examples,
+    }
+
+
+def train_dagger_pilot(
+    training_set: PilotDaggerTrainingSet,
+    output: Path,
+    seed: int,
+    device: str,
+) -> PilotTrainingArtifacts:
+    if type(training_set) is not PilotDaggerTrainingSet:
+        raise TypeError("training_set must be PilotDaggerTrainingSet")
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(f"DAgger iteration output already exists: {output}")
+    if not output.parent.is_dir() or _is_reparse(output.parent):
+        raise ValueError("DAgger iteration parent must be a plain directory")
+    output.mkdir()
+    if _is_reparse(output):
+        raise ValueError("DAgger iteration output must be a plain directory")
+    for episode in training_set.episodes:
+        write_dagger_episode(
+            output / f"seat-{episode.summary.schedule.learner_seat}",
+            episode,
+        )
+    manifest = _dagger_training_manifest(
+        training_set.base_collection_sha256,
+        len(training_set.train) - sum(
+            len(episode.records) for episode in training_set.episodes
+        ),
+        training_set.dagger_records_sha256,
+        sum(len(episode.records) for episode in training_set.episodes),
+        training_set.validation_sha256,
+        len(training_set.validation),
+    )
+    manifest_bytes = _canonical_bytes(manifest)
+    if hashlib.sha256(manifest_bytes).hexdigest() != training_set.corpus_sha256:
+        raise ValueError("DAgger training-set evidence hash changed")
+    with (output / "training-set.json").open("xb") as handle:
+        handle.write(manifest_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
+    training_output = output / "training"
+    training_output.mkdir()
+    return _train_pilot_dataset(
+        training_set.identity,
+        training_set.train,
+        training_set.validation,
+        training_set.corpus_sha256,
+        training_output,
+        seed,
+        device,
+    )
 
 
 def collect_pilot(server_cmd: Sequence[str]) -> PilotCollection:
@@ -1073,6 +1247,132 @@ class _PilotTelemetry:
         return False
 
 
+def _train_pilot_dataset(
+    identity: TacticalV3SemanticIdentity,
+    train: tuple[StructuredExample, ...],
+    validation: tuple[StructuredExample, ...],
+    corpus_sha256: str,
+    output: Path,
+    seed: int,
+    device: str,
+) -> PilotTrainingArtifacts:
+    started = time.monotonic()
+    identity = _validate_identity(identity)
+    if type(train) is not tuple or not train or type(validation) is not tuple or not validation:
+        raise ValueError("pilot training partitions must be nonempty tuples")
+    if re.fullmatch(r"[0-9a-f]{64}", corpus_sha256) is None:
+        raise ValueError("pilot training corpus hash must be lowercase SHA-256")
+    if type(seed) is not int or seed != 227:
+        raise ValueError("pilot training seed must be exactly 227")
+    output = Path(output)
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("pilot training artifacts output must be a plain directory")
+
+    model_config, objective_config, trainer_config = _pilot_configs(seed, device)
+    deadline = started + _TRAINING_DEADLINE_SECONDS
+    metric_device = torch.device(trainer_config.device)
+    with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed % (2**63 - 1))
+            initial_model = TacticalV3Policy(model_config).to(metric_device).eval()
+        initial_train = _policy_target_metrics(
+            initial_model,
+            train,
+            deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: telemetry.progress(
+                "initial_train", completed, total,
+            ),
+        )
+        initial_validation = _policy_target_metrics(
+            initial_model,
+            validation,
+            deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: telemetry.progress(
+                "initial_validation", completed, total,
+            ),
+        )
+        telemetry.baseline(initial_train, initial_validation)
+        del initial_model
+
+        result = train_offline(
+            train,
+            validation,
+            model_config,
+            objective_config,
+            trainer_config,
+            epoch_callback=telemetry.epoch,
+            step_callback=telemetry.step,
+            deadline_monotonic=deadline,
+        )
+    elapsed = time.monotonic() - started
+    if elapsed > _TRAINING_DEADLINE_SECONDS:
+        raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
+
+    checkpoint_dir = output / "checkpoints"
+    checkpoint = checkpoint_dir / "best.pt"
+    metrics_path = output / "metrics.jsonl"
+    if checkpoint_dir.exists() or checkpoint_dir.is_symlink() or metrics_path.exists():
+        raise FileExistsError("pilot training artifacts already exist")
+    checkpoint_dir.mkdir()
+    metadata = StructuredCheckpointMetadata(
+        format_version=1,
+        algorithm="structured_imitation",
+        identity=identity,
+        model_config=result.model_config,
+        objective_config=result.objective_config,
+        trainer_config=result.trainer_config,
+        corpus_sha256=corpus_sha256,
+        model_state_sha256=structured_model_state_sha256(result.model),
+        best_epoch=result.best_epoch,
+        best_validation_policy_nll=result.best_validation_policy_nll,
+        published_device="cpu",
+    )
+    save_structured_checkpoint(
+        checkpoint,
+        result.model,
+        metadata,
+        validation[:2],
+    )
+    with metrics_path.open("xb") as handle:
+        history_bytes = _history_bytes(result.history)
+        if (output / "telemetry.jsonl").read_bytes() != history_bytes:
+            raise RuntimeError("pilot live telemetry does not match completed history")
+        handle.write(history_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
+    loaded = load_structured_checkpoint(
+        checkpoint,
+        identity.encoding_hash,
+        identity.capacity_hash,
+    )
+    loaded.model.to(metric_device)
+    try:
+        restored_train = _policy_target_metrics(
+            loaded.model,
+            train,
+            deadline_monotonic=deadline,
+        )
+        restored_validation = _policy_target_metrics(
+            loaded.model,
+            validation,
+            deadline_monotonic=deadline,
+        )
+    finally:
+        loaded.model.cpu()
+    duration = time.monotonic() - started
+    if duration > _TRAINING_DEADLINE_SECONDS:
+        raise TimeoutError(f"pilot training exceeded deadline after {duration:.1f} seconds")
+    return PilotTrainingArtifacts(
+        checkpoint,
+        initial_train,
+        initial_validation,
+        restored_train,
+        restored_validation,
+        loaded,
+        duration,
+    )
+
+
 def train_pilot(
     collection: PilotCollection,
     evidence: PilotCollectionEvidence,
@@ -1082,7 +1382,6 @@ def train_pilot(
     *,
     artifacts_output: Path | None = None,
 ) -> PilotTrainingArtifacts:
-    started = time.monotonic()
     _require_collection(collection)
     if type(seed) is not int or seed != 227:
         raise ValueError("pilot training seed must be exactly 227")
@@ -1108,108 +1407,14 @@ def train_pilot(
             raise FileExistsError("pilot retry artifacts already exist")
         output.mkdir()
 
-    model_config, objective_config, trainer_config = _pilot_configs(seed, device)
-    deadline = started + _TRAINING_DEADLINE_SECONDS
-    metric_device = torch.device(trainer_config.device)
-    with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed % (2**63 - 1))
-            initial_model = TacticalV3Policy(model_config).to(metric_device).eval()
-        initial_train = _policy_target_metrics(
-            initial_model,
-            collection.train,
-            deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: telemetry.progress(
-                "initial_train", completed, total,
-            ),
-        )
-        initial_validation = _policy_target_metrics(
-            initial_model,
-            collection.validation,
-            deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: telemetry.progress(
-                "initial_validation", completed, total,
-            ),
-        )
-        telemetry.baseline(initial_train, initial_validation)
-        del initial_model
-
-        result = train_offline(
-            collection.train,
-            collection.validation,
-            model_config,
-            objective_config,
-            trainer_config,
-            epoch_callback=telemetry.epoch,
-            step_callback=telemetry.step,
-            deadline_monotonic=deadline,
-        )
-    elapsed = time.monotonic() - started
-    if elapsed > _TRAINING_DEADLINE_SECONDS:
-        raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
-
-    checkpoint_dir = output / "checkpoints"
-    checkpoint = checkpoint_dir / "best.pt"
-    metrics_path = output / "metrics.jsonl"
-    if checkpoint_dir.exists() or checkpoint_dir.is_symlink() or metrics_path.exists():
-        raise FileExistsError("pilot training artifacts already exist")
-    checkpoint_dir.mkdir()
-    metadata = StructuredCheckpointMetadata(
-        format_version=1,
-        algorithm="structured_imitation",
-        identity=collection.identity,
-        model_config=result.model_config,
-        objective_config=result.objective_config,
-        trainer_config=result.trainer_config,
-        corpus_sha256=evidence.collection_sha256,
-        model_state_sha256=structured_model_state_sha256(result.model),
-        best_epoch=result.best_epoch,
-        best_validation_policy_nll=result.best_validation_policy_nll,
-        published_device="cpu",
-    )
-    save_structured_checkpoint(
-        checkpoint,
-        result.model,
-        metadata,
-        collection.validation[:2],
-    )
-    with metrics_path.open("xb") as handle:
-        history_bytes = _history_bytes(result.history)
-        if (output / "telemetry.jsonl").read_bytes() != history_bytes:
-            raise RuntimeError("pilot live telemetry does not match completed history")
-        handle.write(history_bytes)
-        handle.flush()
-        os.fsync(handle.fileno())
-    loaded = load_structured_checkpoint(
-        checkpoint,
-        collection.identity.encoding_hash,
-        collection.identity.capacity_hash,
-    )
-    loaded.model.to(metric_device)
-    try:
-        restored_train = _policy_target_metrics(
-            loaded.model,
-            collection.train,
-            deadline_monotonic=deadline,
-        )
-        restored_validation = _policy_target_metrics(
-            loaded.model,
-            collection.validation,
-            deadline_monotonic=deadline,
-        )
-    finally:
-        loaded.model.cpu()
-    duration = time.monotonic() - started
-    if duration > _TRAINING_DEADLINE_SECONDS:
-        raise TimeoutError(f"pilot training exceeded deadline after {duration:.1f} seconds")
-    return PilotTrainingArtifacts(
-        checkpoint,
-        initial_train,
-        initial_validation,
-        restored_train,
-        restored_validation,
-        loaded,
-        duration,
+    return _train_pilot_dataset(
+        collection.identity,
+        collection.train,
+        collection.validation,
+        evidence.collection_sha256,
+        output,
+        seed,
+        device,
     )
 
 

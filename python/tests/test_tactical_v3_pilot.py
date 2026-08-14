@@ -41,10 +41,14 @@ def _view(decision_id: int, *, seat: int = 0, profile: str = "standard-3v3",
 def _view_with_two_candidates(
     decision_id: int,
     *,
+    seat: int = 0,
+    reference_seat: int = 0,
     terminal: bool = False,
 ):
     payload = minimal_view_payload()
     payload["decision_id"] = decision_id
+    payload["seat"] = seat
+    payload["reference_seat"] = reference_seat
     payload["start_profile"] = "standard-3v3"
     payload["candidates"][0]["decision_id"] = decision_id
     if terminal:
@@ -95,12 +99,14 @@ class _FakeClient:
 
 
 class _DaggerClient:
-    def __init__(self) -> None:
+    def __init__(self, seat: int = 0) -> None:
         self._identity = _identity()
         self._views = (
-            _view_with_two_candidates(7),
-            _view_with_two_candidates(8),
-            _view_with_two_candidates(9, terminal=True),
+            _view_with_two_candidates(7, seat=seat, reference_seat=seat),
+            _view_with_two_candidates(8, seat=seat, reference_seat=seat),
+            _view_with_two_candidates(
+                9, seat=seat, reference_seat=seat, terminal=True,
+            ),
         )
         self._index = 0
         self.events = []
@@ -325,6 +331,120 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     assert rows[0]["teacher_candidate_id"] == 1
     assert rows[0]["disagreement"] is True
     assert rows[0]["teacher_intervened"] is False
+
+
+def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    schedule = getattr(module, "dagger_iteration_schedule", None)
+    build = getattr(module, "build_dagger_training_set", None)
+    assert callable(schedule), "the bounded reciprocal DAgger schedule is missing"
+    assert callable(build), "the DAgger training-set builder is missing"
+    base = _canonical_collection()
+    base_train = base.train
+    base_validation = base.validation
+    evidence = module.PilotCollectionEvidence("1" * 64, "2" * 64, "3" * 64)
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(),
+            model_state_sha256="a" * 64,
+            corpus_sha256=evidence.collection_sha256,
+            best_epoch=0,
+            best_validation_policy_nll=1.25,
+        ),
+    )
+    items = schedule()
+    episodes = tuple(
+        module.collect_dagger_game(_DaggerClient(item.learner_seat), loaded, item)
+        for item in items
+    )
+
+    augmented = build(base, evidence, episodes)
+
+    assert [(item.profile_id, item.episode_seed, item.learner_seat)
+            for item in items] == [
+        ("standard-3v3", 65_100_000, 0),
+        ("standard-3v3", 65_100_000, 1),
+    ]
+    assert base.train is base_train
+    assert base.validation is base_validation
+    assert augmented.train[:len(base.train)] == base.train
+    assert augmented.train[len(base.train):] == tuple(
+        record.example for episode in episodes for record in episode.records
+    )
+    assert augmented.validation is base.validation
+    assert augmented.base_collection_sha256 == evidence.collection_sha256
+    assert len(augmented.dagger_records_sha256) == 64
+    assert len(augmented.corpus_sha256) == 64
+
+
+def test_dagger_retrain_persists_reciprocal_evidence_and_uses_same_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    train = getattr(module, "train_dagger_pilot", None)
+    assert callable(train), "the bounded DAgger retraining entry point is missing"
+    base = _canonical_collection()
+    evidence = module.PilotCollectionEvidence("1" * 64, "2" * 64, "3" * 64)
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(),
+            model_state_sha256="a" * 64,
+            corpus_sha256=evidence.collection_sha256,
+            best_epoch=0,
+            best_validation_policy_nll=1.25,
+        ),
+    )
+    episodes = tuple(
+        module.collect_dagger_game(_DaggerClient(item.learner_seat), loaded, item)
+        for item in module.dagger_iteration_schedule()
+    )
+    augmented = module.build_dagger_training_set(base, evidence, episodes)
+    captured = {}
+    sentinel = object()
+
+    def fake_pipeline(identity, train_rows, validation_rows, corpus_sha, output,
+                      seed, device):
+        captured.update(
+            identity=identity,
+            train=train_rows,
+            validation=validation_rows,
+            corpus_sha=corpus_sha,
+            output=output,
+            seed=seed,
+            device=device,
+        )
+        return sentinel
+
+    monkeypatch.setattr(module, "_train_pilot_dataset", fake_pipeline, raising=False)
+    output = tmp_path / "dagger-iteration-1"
+
+    result = train(augmented, output, 227, "cpu")
+
+    assert result is sentinel
+    assert captured == {
+        "identity": augmented.identity,
+        "train": augmented.train,
+        "validation": base.validation,
+        "corpus_sha": augmented.corpus_sha256,
+        "output": output / "training",
+        "seed": 227,
+        "device": "cpu",
+    }
+    manifest_path = output / "training-set.json"
+    assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == (
+        augmented.corpus_sha256
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["base_train_examples"] == len(base.train)
+    assert manifest["dagger_examples"] == 4
+    assert manifest["validation_examples"] == len(base.validation)
+    assert (output / "seat-0" / "episode.json").is_file()
+    assert (output / "seat-1" / "episode.json").is_file()
 
 
 def test_collect_game_backfills_truncation_without_remaining_turns() -> None:
