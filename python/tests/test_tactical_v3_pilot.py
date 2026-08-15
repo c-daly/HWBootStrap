@@ -634,6 +634,121 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     assert rows[0]["teacher_intervened"] is False
 
 
+def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    load = getattr(module, "load_dagger_episode", None)
+    assert callable(load), "the strict DAgger episode reader is missing"
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 65_000_000, 0, 0,
+    )
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    expected = module.collect_dagger_game(
+        _DaggerClient(), loaded, item, oracle_expansion_budget=2048,
+    )
+    output = module.write_dagger_episode(tmp_path / "episode", expected)
+
+    assert load(output, _identity(), oracle_expansion_budget=2048) == expected
+
+    records = output / "decisions.jsonl"
+    records.write_bytes(records.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="records|canonical|hash"):
+        load(output, _identity(), oracle_expansion_budget=2048)
+
+
+def test_selective_partition_reader_reopens_exact_overlay_and_rejects_manifest_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    load = getattr(module, "load_selective_dagger_partition", None)
+    assert callable(load), "the strict selective-DAgger partition reader is missing"
+    monkeypatch.setitem(module._SELECTIVE_DAGGER_LABEL_TARGETS, "train", 4)
+    schedule = module.selective_dagger_schedule("train", 1)[:2]
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episodes = tuple(
+        module.collect_dagger_game(
+            _DaggerClient(item.learner_seat, item.profile_id), actor, item,
+            oracle_expansion_budget=2048,
+        )
+        for item in schedule
+    )
+    root = tmp_path / "overlay"
+    root.mkdir()
+    games = []
+    for index, episode in enumerate(episodes):
+        game = module.write_dagger_episode(root / f"game-{index:04d}", episode)
+        games.append({
+            "index": index,
+            "schedule": {
+                "partition": episode.summary.schedule.partition,
+                "profile_id": episode.summary.schedule.profile_id,
+                "episode_seed": episode.summary.schedule.episode_seed,
+                "learner_seat": episode.summary.schedule.learner_seat,
+                "reference_seat": episode.summary.schedule.reference_seat,
+            },
+            "labels": len(episode.records),
+            "episode_sha256": hashlib.sha256(
+                (game / "episode.json").read_bytes(),
+            ).hexdigest(),
+            "records_sha256": hashlib.sha256(
+                (game / "decisions.jsonl").read_bytes(),
+            ).hexdigest(),
+        })
+    manifest = {
+        "schema_version": 1,
+        "kind": "tactical-v3-selective-dagger-overlay",
+        "status": "completed",
+        "partition": "train",
+        "iteration": 1,
+        "label_target": 4,
+        "label_count": 4,
+        "game_ceiling": 2000,
+        "game_count": 2,
+        "oracle_expansion_budget": 2048,
+        "actor_checkpoint_sha256": "c" * 64,
+        "actor_model_state_sha256": "a" * 64,
+        "actor_corpus_sha256": "b" * 64,
+        "repository_commit": "d" * 40,
+        "wall_seconds": 1.25,
+        "games": games,
+    }
+    overlay = root / "overlay.json"
+    overlay.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8", newline="\n",
+    )
+
+    actual = load(root, _identity())
+    assert actual == module.SelectiveDaggerPartitionCollection(
+        "train", 1, episodes, 4, 2, 4, 2000,
+    )
+
+    manifest["games"][0]["episode_sha256"] = "e" * 64
+    overlay.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8", newline="\n",
+    )
+    with pytest.raises(ValueError, match="episode|manifest|hash"):
+        load(root, _identity())
+
+
 def test_dagger_episode_queries_teacher_only_for_selectively_eligible_states() -> None:
     import ml_lab.tactical_v3_pilot as module
 
@@ -969,6 +1084,8 @@ def test_dagger_retrain_warm_starts_incoming_actor_with_frozen_training_contract
         seed=227, batch_size=256, learning_rate=3e-4, max_epochs=50,
         patience_epochs=5, gradient_clip_norm=1.0, device="cuda",
     )
+    assert captured["micro_batch_size"] == 32
+    assert captured["training_deadline_seconds"] == 12 * 60 * 60
     assert isinstance(captured["batch_provider"], module.StructuredDaggerMixtureSampler)
 
 
@@ -1056,6 +1173,65 @@ def test_collection_evidence_round_trips_without_collecting_again(tmp_path: Path
 
     assert actual == expected
     assert actual_evidence == expected_evidence
+
+
+def test_collection_evidence_reopens_frozen_schema1_bounded_search_corpus(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_pilot import (
+        load_collection_evidence,
+        write_collection_evidence,
+    )
+
+    expected = _canonical_collection()
+    output = tmp_path / "pilot"
+    write_collection_evidence(output, expected)
+    manifest_path = output / "collection.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    manifest["label_source"] = "bounded-search-v1"
+    manifest["teacher"] = {
+        "search_depth": 4,
+        "expansion_budget": 512,
+        "heuristic_identity": "material-plus-pursuit-v1",
+    }
+    del manifest["label_sources"]
+    del manifest["teachers"]
+    for partition in ("train", "validation"):
+        path = output / f"{partition}.jsonl"
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            raw = json.loads(line)
+            raw["teacher"] = {
+                "identity": "bounded-search-v1",
+                "search_depth": 4,
+                "expansion_budget": 512,
+                "actual_expansions": 17,
+                "heuristic_identity": "material-plus-pursuit-v1",
+                "confidence": None,
+            }
+            rows.append(
+                json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n",
+            )
+        data = "".join(rows).encode("utf-8")
+        path.write_bytes(data)
+        manifest[partition]["sha256"] = hashlib.sha256(data).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8", newline="\n",
+    )
+
+    actual, evidence = load_collection_evidence(output, expected.identity)
+
+    assert len(actual.train) == len(expected.train)
+    assert len(actual.validation) == len(expected.validation)
+    assert all(row.teacher.identity == "bounded-search-v1" for row in actual.train)
+    assert all(row.teacher.expansion_budget == 512 for row in actual.validation)
+    module._require_collection(actual)
+    assert evidence.collection_sha256 == hashlib.sha256(
+        manifest_path.read_bytes(),
+    ).hexdigest()
 
 
 def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
@@ -1237,6 +1413,37 @@ def test_matched_evaluation_uses_one_schedule_random_baseline_and_legal_model_ac
     assert all(selection.candidate_id == 0 for selection in model_client.steps)
 
 
+def test_evaluation_observer_sees_selected_decisions_and_terminal_views_without_changing_results() -> None:
+    from ml_lab.tactical_v3_pilot import evaluate_pilot, evaluation_schedule
+
+    schedule = evaluation_schedule()
+    loaded = SimpleNamespace(model=_EvaluationPolicy(),
+                             metadata=SimpleNamespace(identity=_identity()))
+    client = _EvaluationClient()
+    events = []
+
+    evaluation = evaluate_pilot(
+        client,
+        loaded,
+        'model',
+        schedule,
+        observation_callback=lambda item, view, selected: events.append(
+            (item, view, selected)
+        ),
+    )
+
+    assert evaluation.aggregate.games == 28
+    assert len(client.steps) == 28
+    assert len(events) == 56
+    for index, item in enumerate(schedule):
+        decision_event, terminal_event = events[index * 2:index * 2 + 2]
+        assert decision_event[0] == terminal_event[0] == item
+        assert decision_event[1].terminated is False
+        assert decision_event[2].candidate_id == client.steps[index].candidate_id
+        assert terminal_event[1].terminated is True
+        assert terminal_event[2] is None
+
+
 def test_diagnostic_evaluation_uses_only_the_new_frozen_schedule() -> None:
     from ml_lab.tactical_v3_pilot import (
         diagnostic_evaluation_schedule, evaluate_pilot,
@@ -1271,6 +1478,64 @@ def test_selective_dagger_evaluation_is_standard_only_and_never_uses_oracle() ->
     assert len(client.steps) == 200
     assert all(reset[4] == "standard-3v3" for reset in client.resets)
     assert not hasattr(client, "duel_oracle_query")
+
+
+def test_point_mobility_diagnostic_schedule_is_exact_standard_reciprocal_subset() -> None:
+    from ml_lab.tactical_v3_pilot import (
+        evaluate_pilot,
+        point_mobility_diagnostic_schedule,
+    )
+
+    schedule = point_mobility_diagnostic_schedule()
+    assert len(schedule) == 20
+    assert [(item.episode_seed, item.learner_seat) for item in schedule] == [
+        (seed, seat)
+        for seed in range(20_000_000, 20_000_010)
+        for seat in (0, 1)
+    ]
+    assert all(item.profile_id == 'standard-3v3' for item in schedule)
+
+    loaded = SimpleNamespace(model=_EvaluationPolicy(),
+                             metadata=SimpleNamespace(identity=_identity()))
+    evaluation = evaluate_pilot(_EvaluationClient(), loaded, 'model', schedule)
+    assert evaluation.aggregate.games == 20
+
+
+def test_evaluation_moves_model_and_decision_batches_to_requested_cuda_device() -> None:
+    import torch
+    from ml_lab.tactical_v3_model import CandidateIdentity
+    from ml_lab.tactical_v3_pilot import evaluate_pilot, evaluation_schedule
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    class CudaEvaluationPolicy(torch.nn.Module):
+        config = SimpleNamespace(horizon_turns=(4, 8, 16))
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.marker = torch.nn.Parameter(torch.zeros(()))
+
+        def select(self, batch):
+            assert self.marker.device.type == "cuda"
+            assert batch.candidates.decision_id.device.type == "cuda"
+            return tuple(CandidateIdentity(
+                int(batch.candidates.decision_id[index, 0].item()),
+                int(batch.candidates.candidate_id[index, 0].item()),
+            ) for index in range(batch.candidates.decision_id.shape[0]))
+
+    loaded = SimpleNamespace(
+        model=CudaEvaluationPolicy(),
+        metadata=SimpleNamespace(identity=_identity()),
+    )
+    client = _EvaluationClient()
+
+    evaluation = evaluate_pilot(
+        client, loaded, "model", evaluation_schedule(), device="cuda",
+    )
+
+    assert evaluation.aggregate.games == 28
+    assert len(client.steps) == 28
 
 
 def test_pilot_decision_requires_metric_improvement_zero_errors_and_ten_point_margin() -> None:

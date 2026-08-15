@@ -127,6 +127,7 @@ def train_offline(
     deadline_monotonic: float | None = None,
     initial_state_dict: Mapping[str, Tensor] | None = None,
     training_batch_provider: Callable[[int, int], tuple] | None = None,
+    micro_batch_size: int | None = None,
 ) -> TrainingResult:
     return _train_offline_impl(
         train_examples,
@@ -139,6 +140,7 @@ def train_offline(
         deadline_monotonic=deadline_monotonic,
         initial_state_dict=initial_state_dict,
         training_batch_provider=training_batch_provider,
+        micro_batch_size=micro_batch_size,
     )
 
 
@@ -445,6 +447,7 @@ def _train_offline_impl(
     deadline_monotonic: float | None,
     initial_state_dict: Mapping[str, Tensor] | None,
     training_batch_provider: Callable[[int, int], tuple] | None,
+    micro_batch_size: int | None,
 ) -> TrainingResult:
     if type(train_examples) is not tuple:
         raise TypeError("training split must be an immutable tuple")
@@ -468,6 +471,16 @@ def _train_offline_impl(
         raise TypeError("initial_state_dict must be a tensor mapping")
     if training_batch_provider is not None and not callable(training_batch_provider):
         raise TypeError("training_batch_provider must be callable")
+    if micro_batch_size is not None and (
+        type(micro_batch_size) is not int
+        or micro_batch_size < 1
+        or micro_batch_size > trainer_config.batch_size
+        or trainer_config.batch_size % micro_batch_size != 0
+    ):
+        raise ValueError(
+            "micro_batch_size must be a positive built-in int that evenly divides "
+            "the configured batch_size"
+        )
     if deadline_monotonic is not None and (
         type(deadline_monotonic) is not float or not math.isfinite(deadline_monotonic)
     ):
@@ -488,6 +501,10 @@ def _train_offline_impl(
         torch.cuda.manual_seed_all(torch_seed)
     torch.use_deterministic_algorithms(True)
     device = torch.device(trainer_config.device)
+    execution_batch_size = (
+        trainer_config.batch_size
+        if micro_batch_size is None else micro_batch_size
+    )
     model = TacticalV3Policy(model_config).to(device=device, dtype=torch.float32)
     if initial_state_dict is not None:
         copied_state = {
@@ -538,17 +555,38 @@ def _train_offline_impl(
                         raise ValueError(
                             "training batch provider returned a row outside training split"
                         )
-            batch = _batch_to_device(
-                _collate_training_batch(rows, model_config.horizon_turns), device
-            )
             context = f"epoch={epoch} batch={batch_index}"
-            _validate_batch_contract(batch, device, context)
             optimizer.zero_grad(set_to_none=True)
-            output = model(batch)
-            _validate_policy_output(output, batch, device, context)
-            losses = structured_imitation_loss(output, batch, objective_config)
-            _validate_losses(losses, device, context)
-            losses.total.backward()
+            batch_weighted = {name: 0.0 for name in METRIC_KEYS}
+            for micro_index, start in enumerate(
+                range(0, len(rows), execution_batch_size)
+            ):
+                micro_rows = rows[start:start + execution_batch_size]
+                micro_context = f"{context} micro_batch={micro_index}"
+                batch = _batch_to_device(
+                    _collate_training_batch(
+                        micro_rows, model_config.horizon_turns,
+                    ),
+                    device,
+                )
+                _validate_batch_contract(batch, device, micro_context)
+                output = model(batch)
+                _validate_policy_output(output, batch, device, micro_context)
+                losses = structured_imitation_loss(
+                    output, batch, objective_config,
+                )
+                _validate_losses(losses, device, micro_context)
+                (
+                    losses.total * (len(micro_rows) / len(rows))
+                ).backward()
+                for name in METRIC_KEYS:
+                    value = float(getattr(losses, name).detach().item())
+                    contribution = value * len(micro_rows)
+                    if not math.isfinite(contribution):
+                        raise FloatingPointError(
+                            f"{micro_context} weighted loss.{name}"
+                        )
+                    batch_weighted[name] += contribution
             _after_backward(model, epoch=epoch, batch_index=batch_index)
             for name, parameter in model.named_parameters():
                 if parameter.grad is not None and not bool(
@@ -570,14 +608,12 @@ def _train_offline_impl(
             for name, parameter in model.named_parameters():
                 if not bool(torch.isfinite(parameter).all()):
                     raise FloatingPointError(f"{context} parameter={name}")
-            batch_metric_values = {}
+            batch_metric_values = {
+                name: batch_weighted[name] / len(rows)
+                for name in METRIC_KEYS
+            }
             for name in METRIC_KEYS:
-                batch_value = float(getattr(losses, name).detach().item())
-                batch_metric_values[name] = batch_value
-                contribution = batch_value * len(rows)
-                if not math.isfinite(contribution):
-                    raise FloatingPointError(f"{context} weighted loss.{name}")
-                train_weighted[name] += contribution
+                train_weighted[name] += batch_weighted[name]
             train_count += len(rows)
             train_global_step += 1
             if step_callback is not None:
@@ -605,12 +641,12 @@ def _train_offline_impl(
             validation_rows,
             model_config,
             objective_config,
-            trainer_config.batch_size,
+            execution_batch_size,
             device,
             **validation_arguments,
         )
         validation_global_step += math.ceil(
-            len(validation_rows) / trainer_config.batch_size
+            len(validation_rows) / execution_batch_size
         )
         if type(candidate_nll) is not float or not math.isfinite(candidate_nll):
             raise FloatingPointError(f"epoch={epoch} validation policy")

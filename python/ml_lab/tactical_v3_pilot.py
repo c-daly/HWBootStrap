@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import stat
 import time
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 import torch.nn.functional as F
@@ -47,6 +47,7 @@ from .tactical_v3_layers import TacticalV3ModelConfig
 from .tactical_v3_model import TacticalV3Policy
 from .tactical_v3_objectives import ObjectiveConfig
 from .tactical_v3_schema import (
+    Candidate,
     TacticalV3Decision,
     TacticalV3SemanticIdentity,
     TacticalV3View,
@@ -95,6 +96,7 @@ _SELECTIVE_DAGGER_LABEL_TARGETS = {
 
 _COLLECTION_DEADLINE_SECONDS = 4 * 60 * 60
 _TRAINING_DEADLINE_SECONDS = 2 * 60 * 60
+_DAGGER_TRAINING_DEADLINE_SECONDS = 12 * 60 * 60
 _EVALUATION_DEADLINE_SECONDS = 4 * 60 * 60
 
 
@@ -604,6 +606,10 @@ def dagger_iteration_schedule() -> tuple[PilotScheduleItem, ...]:
     )
 
 
+def point_mobility_diagnostic_schedule() -> tuple[PilotScheduleItem, ...]:
+    return selective_dagger_evaluation_schedule()[:20]
+
+
 def selective_dagger_schedule(
     partition: Literal["train", "validation"], iteration: int,
 ) -> tuple[PilotScheduleItem, ...]:
@@ -1055,6 +1061,312 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
     return output
 
 
+def load_dagger_episode(
+    output: Path,
+    identity: TacticalV3SemanticIdentity,
+    *,
+    oracle_expansion_budget: int,
+    expected_schedule: PilotScheduleItem | None = None,
+) -> PilotDaggerEpisode:
+    identity = _validate_identity(identity)
+    if type(oracle_expansion_budget) is not int or oracle_expansion_budget <= 0:
+        raise ValueError("DAgger oracle expansion budget must be a positive int")
+    output = Path(output)
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("DAgger episode must be a plain directory")
+    entries = {path.name: path for path in output.iterdir()}
+    if set(entries) != {"episode.json", "decisions.jsonl"} or any(
+        not path.is_file() or _is_reparse(path) for path in entries.values()
+    ):
+        raise ValueError("DAgger episode inventory is not exact")
+
+    manifest_bytes = entries["episode.json"].read_bytes()
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("DAgger episode manifest is invalid JSON") from error
+    if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
+        raise ValueError("DAgger episode manifest must be canonical JSON")
+    manifest = _exact_mapping(manifest, frozenset({
+        "schema_version", "kind", "identity", "actor", "teacher",
+        "records", "summary",
+    }), "DAgger episode manifest")
+    identity_data = _exact_mapping(manifest["identity"], frozenset({
+        "scenario_id", "contract_hash", "encoding_hash", "capacity_hash",
+        "environment_kind",
+    }), "DAgger episode identity")
+    expected_identity = {
+        "scenario_id": identity.scenario_id,
+        "contract_hash": identity.contract_hash,
+        "encoding_hash": identity.encoding_hash,
+        "capacity_hash": identity.capacity_hash,
+        "environment_kind": identity.environment_kind,
+    }
+    actor = _exact_mapping(manifest["actor"], frozenset({
+        "algorithm", "model_state_sha256", "corpus_sha256", "best_epoch",
+        "best_validation_policy_nll",
+    }), "DAgger episode actor")
+    teacher = _exact_mapping(manifest["teacher"], frozenset({
+        "identity", "search_depth", "expansion_budget", "heuristic_identity",
+    }), "DAgger episode teacher")
+    records_meta = _exact_mapping(manifest["records"], frozenset({
+        "path", "count", "sha256",
+    }), "DAgger episode records")
+    if (
+        manifest["schema_version"] != 1
+        or manifest["kind"] != "tactical-v3-dagger-episode"
+        or dict(identity_data) != expected_identity
+        or actor["algorithm"] != "structured_imitation"
+        or teacher != {
+            "identity": "bounded-search-v1",
+            "search_depth": 4,
+            "expansion_budget": oracle_expansion_budget,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        }
+        or records_meta["path"] != "decisions.jsonl"
+    ):
+        raise ValueError("DAgger episode manifest does not match the frozen contract")
+    for name in ("model_state_sha256", "corpus_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(actor[name])) is None:
+            raise ValueError(f"DAgger actor {name} must be lowercase SHA-256")
+    best_epoch = _int(actor["best_epoch"], "DAgger actor best_epoch", nonnegative=True)
+    best_nll = actor["best_validation_policy_nll"]
+    if type(best_nll) not in {int, float} or not math.isfinite(best_nll) or best_nll < 0:
+        raise ValueError("DAgger actor best validation NLL must be finite and nonnegative")
+
+    rows_bytes = entries["decisions.jsonl"].read_bytes()
+    if hashlib.sha256(rows_bytes).hexdigest() != records_meta["sha256"]:
+        raise ValueError("DAgger episode records hash changed")
+    records: list[PilotDaggerDecision] = []
+    for index, line in enumerate(rows_bytes.splitlines(keepends=True)):
+        if not line.endswith(b"\n") or line == b"\n":
+            raise ValueError(f"DAgger record {index} is not canonical JSONL")
+        try:
+            raw = json.loads(line[:-1].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"DAgger record {index} is invalid JSON") from error
+        if line != _canonical_bytes(raw):
+            raise ValueError(f"DAgger record {index} is not canonical JSON")
+        data = _exact_mapping(raw, frozenset({
+            "example", "learner_candidate_id", "teacher_candidate_id",
+            "disagreement", "teacher_intervened", "eligibility_reasons",
+            "state_hash", "state_occurrence", "normalized_advantage",
+            "opponent_living_unit_count", "productive_legal_action_count",
+        }), f"DAgger record {index}")
+        example = _parse_pilot_row(
+            data["example"], identity,
+            dagger_oracle_expansion_budget=oracle_expansion_budget,
+        )
+        learner_candidate_id = _int(
+            data["learner_candidate_id"], f"DAgger record {index} learner candidate",
+            nonnegative=True,
+        )
+        teacher_candidate_id = _int(
+            data["teacher_candidate_id"], f"DAgger record {index} teacher candidate",
+            nonnegative=True,
+        )
+        disagreement = data["disagreement"]
+        teacher_intervened = data["teacher_intervened"]
+        reasons = data["eligibility_reasons"]
+        state_hash = data["state_hash"]
+        state_occurrence = _int(
+            data["state_occurrence"], f"DAgger record {index} state occurrence",
+            nonnegative=True,
+        )
+        advantage = data["normalized_advantage"]
+        opponent_count = _int(
+            data["opponent_living_unit_count"],
+            f"DAgger record {index} opponent count", nonnegative=True,
+        )
+        productive_count = _int(
+            data["productive_legal_action_count"],
+            f"DAgger record {index} productive action count", nonnegative=True,
+        )
+        candidate_ids = {candidate.candidate_id for candidate in example.decision.candidates}
+        if (
+            type(disagreement) is not bool
+            or type(teacher_intervened) is not bool
+            or teacher_intervened
+            or disagreement != (learner_candidate_id != teacher_candidate_id)
+            or type(reasons) is not list
+            or not reasons
+            or any(type(reason) is not str or not reason for reason in reasons)
+            or type(state_hash) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", state_hash) is None
+            or state_occurrence < 1
+            or type(advantage) not in {int, float}
+            or not math.isfinite(advantage)
+            or learner_candidate_id not in candidate_ids
+            or teacher_candidate_id not in candidate_ids
+            or example.target.teacher_candidate_id != teacher_candidate_id
+        ):
+            raise ValueError(f"DAgger record {index} is inconsistent")
+        records.append(PilotDaggerDecision(
+            example, learner_candidate_id, teacher_candidate_id, disagreement,
+            teacher_intervened, tuple(reasons), state_hash, state_occurrence,
+            float(advantage), opponent_count, productive_count,
+        ))
+    if (
+        type(records_meta["count"]) is not int
+        or records_meta["count"] != len(records)
+        or not records
+    ):
+        raise ValueError("DAgger episode records count changed")
+
+    summary_data = _exact_mapping(manifest["summary"], frozenset({
+        "schedule", "winner", "terminated", "truncated", "decisions",
+        "disagreements", "teacher_interventions", "internal_fallback_count",
+    }), "DAgger episode summary")
+    schedule_data = _exact_mapping(summary_data["schedule"], frozenset({
+        "partition", "profile_id", "episode_seed", "learner_seat",
+        "reference_seat",
+    }), "DAgger episode schedule")
+    schedule = PilotScheduleItem(**schedule_data)
+    summary = PilotDaggerGameSummary(
+        schedule,
+        _int(summary_data["winner"], "DAgger winner"),
+        summary_data["terminated"],
+        summary_data["truncated"],
+        _int(summary_data["decisions"], "DAgger decisions", nonnegative=True),
+        _int(summary_data["disagreements"], "DAgger disagreements", nonnegative=True),
+        _int(summary_data["teacher_interventions"], "DAgger interventions", nonnegative=True),
+        _int(summary_data["internal_fallback_count"], "DAgger fallbacks", nonnegative=True),
+    )
+    if (
+        type(summary.terminated) is not bool
+        or type(summary.truncated) is not bool
+        or summary.winner not in {-1, 0, 1}
+        or summary.decisions != len(records)
+        or summary.disagreements != sum(record.disagreement for record in records)
+        or summary.teacher_interventions != 0
+        or summary.internal_fallback_count != 0
+        or (expected_schedule is not None and schedule != expected_schedule)
+    ):
+        raise ValueError("DAgger episode summary is inconsistent")
+    return PilotDaggerEpisode(
+        identity, tuple(records), summary, str(actor["model_state_sha256"]),
+        str(actor["corpus_sha256"]), best_epoch, float(best_nll),
+    )
+
+
+def load_selective_dagger_partition(
+    output: Path,
+    identity: TacticalV3SemanticIdentity,
+) -> SelectiveDaggerPartitionCollection:
+    identity = _validate_identity(identity)
+    output = Path(output)
+    if not output.is_dir() or _is_reparse(output):
+        raise ValueError("selective DAgger overlay must be a plain directory")
+    manifest_path = output / "overlay.json"
+    if not manifest_path.is_file() or _is_reparse(manifest_path):
+        raise ValueError("selective DAgger overlay manifest is missing")
+    manifest_bytes = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("selective DAgger overlay manifest is invalid JSON") from error
+    if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
+        raise ValueError("selective DAgger overlay manifest must be canonical JSON")
+    manifest = _exact_mapping(manifest, frozenset({
+        "schema_version", "kind", "status", "partition", "iteration",
+        "label_target", "label_count", "game_ceiling", "game_count",
+        "oracle_expansion_budget", "actor_checkpoint_sha256",
+        "actor_model_state_sha256", "actor_corpus_sha256",
+        "repository_commit", "wall_seconds", "games",
+    }), "selective DAgger overlay manifest")
+    partition = manifest["partition"]
+    iteration = manifest["iteration"]
+    if partition not in {"train", "validation"} or type(iteration) is not int:
+        raise ValueError("selective DAgger overlay partition or iteration is invalid")
+    schedule = selective_dagger_schedule(partition, iteration)
+    label_target = _SELECTIVE_DAGGER_LABEL_TARGETS[partition]
+    game_ceiling = len(schedule)
+    game_count = manifest["game_count"]
+    label_count = manifest["label_count"]
+    oracle_budget = manifest["oracle_expansion_budget"]
+    wall_seconds = manifest["wall_seconds"]
+    games = manifest["games"]
+    if (
+        manifest["schema_version"] != 1
+        or manifest["kind"] != "tactical-v3-selective-dagger-overlay"
+        or manifest["status"] != "completed"
+        or manifest["label_target"] != label_target
+        or manifest["game_ceiling"] != game_ceiling
+        or type(game_count) is not int
+        or game_count <= 0
+        or game_count > game_ceiling
+        or game_count % 2
+        or type(label_count) is not int
+        or label_count < label_target
+        or oracle_budget != 2048
+        or type(wall_seconds) not in {int, float}
+        or not math.isfinite(wall_seconds)
+        or wall_seconds <= 0
+        or type(games) is not list
+        or len(games) != game_count
+        or re.fullmatch(r"[0-9a-f]{40}", str(manifest["repository_commit"])) is None
+    ):
+        raise ValueError("selective DAgger overlay does not match the frozen contract")
+    for name in (
+        "actor_checkpoint_sha256", "actor_model_state_sha256",
+        "actor_corpus_sha256",
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", str(manifest[name])) is None:
+            raise ValueError(f"selective DAgger {name} must be lowercase SHA-256")
+
+    expected_names = {"overlay.json"} | {
+        f"game-{index:04d}" for index in range(game_count)
+    }
+    entries = {path.name: path for path in output.iterdir()}
+    if set(entries) != expected_names:
+        raise ValueError("selective DAgger overlay inventory is not exact")
+
+    episodes: list[PilotDaggerEpisode] = []
+    total_labels = 0
+    for index, raw_game in enumerate(games):
+        game = _exact_mapping(raw_game, frozenset({
+            "index", "schedule", "labels", "episode_sha256", "records_sha256",
+        }), f"selective DAgger game {index}")
+        schedule_data = _exact_mapping(game["schedule"], frozenset({
+            "partition", "profile_id", "episode_seed", "learner_seat",
+            "reference_seat",
+        }), f"selective DAgger game {index} schedule")
+        expected_schedule = schedule[index]
+        if game["index"] != index or PilotScheduleItem(**schedule_data) != expected_schedule:
+            raise ValueError(f"selective DAgger game {index} schedule changed")
+        episode_path = entries[f"game-{index:04d}"]
+        if not episode_path.is_dir() or _is_reparse(episode_path):
+            raise ValueError(f"selective DAgger game {index} is not a plain directory")
+        episode_bytes = (episode_path / "episode.json").read_bytes()
+        records_bytes = (episode_path / "decisions.jsonl").read_bytes()
+        if (
+            hashlib.sha256(episode_bytes).hexdigest() != game["episode_sha256"]
+            or hashlib.sha256(records_bytes).hexdigest() != game["records_sha256"]
+        ):
+            raise ValueError(f"selective DAgger game {index} file hash changed")
+        episode = load_dagger_episode(
+            episode_path, identity,
+            oracle_expansion_budget=oracle_budget,
+            expected_schedule=expected_schedule,
+        )
+        if (
+            type(game["labels"]) is not int
+            or game["labels"] != len(episode.records)
+            or episode.actor_model_state_sha256
+            != manifest["actor_model_state_sha256"]
+            or episode.actor_corpus_sha256 != manifest["actor_corpus_sha256"]
+        ):
+            raise ValueError(f"selective DAgger game {index} manifest changed")
+        total_labels += len(episode.records)
+        episodes.append(episode)
+    if total_labels != label_count:
+        raise ValueError("selective DAgger overlay label count changed")
+    return SelectiveDaggerPartitionCollection(
+        partition, iteration, tuple(episodes), label_count, game_count,
+        label_target, game_ceiling,
+    )
+
+
 def build_dagger_training_set(
     collection: PilotCollection,
     evidence: PilotCollectionEvidence,
@@ -1411,6 +1723,8 @@ def train_dagger_pilot(
         initial_policy=incoming,
         trainer_config=trainer_config,
         batch_provider=batch_provider,
+        micro_batch_size=32,
+        training_deadline_seconds=_DAGGER_TRAINING_DEADLINE_SECONDS,
     )
 
 
@@ -1452,12 +1766,29 @@ def _is_reparse(path: Path) -> bool:
     )
 
 
-def _require_collection(collection: PilotCollection) -> None:
+def _require_collection(
+    collection: PilotCollection,
+    *,
+    legacy_bounded_search: bool | None = None,
+) -> None:
     if type(collection) is not PilotCollection:
         raise TypeError("collection must be PilotCollection")
     identity = _validate_identity(collection.identity)
     if not collection.train or not collection.validation:
         raise ValueError("pilot collection partitions must not be empty")
+    if legacy_bounded_search is None:
+        standard_sources = {
+            example.teacher.identity
+            for example in collection.train + collection.validation
+            if type(example) is StructuredExample
+            and example.profile_id == "standard-3v3"
+        }
+        if standard_sources == {"bounded-search-v1"}:
+            legacy_bounded_search = True
+        elif standard_sources == {"greedy-one-ply-v1"}:
+            legacy_bounded_search = False
+        else:
+            raise ValueError("pilot collection mixes standard-profile label sources")
     expected_games = collection_schedule("train") + collection_schedule("validation")
     if tuple(game.schedule for game in collection.games) != expected_games:
         raise ValueError("pilot collection game schedule is noncanonical")
@@ -1478,9 +1809,9 @@ def _require_collection(collection: PilotCollection) -> None:
             if (example.profile_id, example.episode_seed, example.learner_seat) not in allowed:
                 raise ValueError("pilot collection row is outside the frozen schedule")
             expected_source = (
-                "greedy-one-ply-v1"
-                if example.profile_id == "standard-3v3"
-                else "bounded-search-v1"
+                "bounded-search-v1"
+                if legacy_bounded_search or example.profile_id != "standard-3v3"
+                else "greedy-one-ply-v1"
             )
             if example.teacher.identity != expected_source:
                 raise ValueError("pilot collection row has the wrong profile label source")
@@ -1572,10 +1903,17 @@ def load_collection_evidence(
     manifest = json.loads(manifest_bytes)
     if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
         raise ValueError("pilot collection manifest must be canonical JSON")
-    if set(manifest) != {
+    schema2_fields = {
         "schema_version", "label_sources", "identity", "profiles", "teachers",
         "train", "validation", "games",
-    }:
+    }
+    schema1_fields = {
+        "schema_version", "label_source", "identity", "profiles", "teacher",
+        "train", "validation", "games",
+    }
+    schema2 = set(manifest) == schema2_fields
+    schema1 = set(manifest) == schema1_fields
+    if not schema1 and not schema2:
         raise ValueError("pilot collection manifest fields are not exact")
     expected_identity = {
         "scenario_id": identity.scenario_id,
@@ -1584,18 +1922,14 @@ def load_collection_evidence(
         "capacity_hash": identity.capacity_hash,
         "environment_kind": "duel",
     }
-    if (
-        manifest["schema_version"] != 2
-        or manifest["label_sources"] != {
+    schema2_contract = (
+        manifest.get("schema_version") == 2
+        and manifest.get("label_sources") == {
             "standard-3v3": "greedy-one-ply-v1",
             "conversion-profiles": "bounded-search-v1",
         }
-        or manifest["identity"] != expected_identity
-        or manifest["profiles"] != list(PILOT_PROFILES)
-        or manifest["teachers"] != {
-            "greedy": {
-                "identity": "greedy-one-ply-v1",
-            },
+        and manifest.get("teachers") == {
+            "greedy": {"identity": "greedy-one-ply-v1"},
             "bounded_search": {
                 "identity": "bounded-search-v1",
                 "search_depth": 4,
@@ -1603,6 +1937,21 @@ def load_collection_evidence(
                 "heuristic_identity": "material-plus-pursuit-v1",
             },
         }
+    )
+    schema1_contract = (
+        manifest.get("schema_version") == 1
+        and manifest.get("label_source") == "bounded-search-v1"
+        and manifest.get("teacher") == {
+            "search_depth": 4,
+            "expansion_budget": 512,
+            "heuristic_identity": "material-plus-pursuit-v1",
+        }
+    )
+    if (
+        (schema2 and not schema2_contract)
+        or (schema1 and not schema1_contract)
+        or manifest["identity"] != expected_identity
+        or manifest["profiles"] != list(PILOT_PROFILES)
     ):
         raise ValueError("pilot collection manifest does not match the frozen contract")
 
@@ -1624,7 +1973,9 @@ def load_collection_evidence(
                     raise ValueError(f"pilot {name} row {index} is invalid JSON") from error
                 if line != _canonical_bytes(raw):
                     raise ValueError(f"pilot {name} row {index} is not canonical JSON")
-                rows.append(_parse_pilot_row(raw, identity))
+                rows.append(_parse_pilot_row(
+                    raw, identity, legacy_bounded_search=schema1,
+                ))
         if digest.hexdigest() != metadata["sha256"] or len(rows) != metadata["examples"]:
             raise ValueError(f"pilot {name} evidence does not match its manifest")
         return tuple(rows)
@@ -1656,7 +2007,7 @@ def load_collection_evidence(
         load_partition("validation"),
         tuple(games),
     )
-    _require_collection(collection)
+    _require_collection(collection, legacy_bounded_search=schema1)
     if len(collection.games) != len(manifest["games"]):
         raise ValueError("pilot game count does not match manifest")
     evidence = PilotCollectionEvidence(
@@ -1670,6 +2021,9 @@ def load_collection_evidence(
 def _parse_pilot_row(
     value: object,
     identity: TacticalV3SemanticIdentity,
+    *,
+    dagger_oracle_expansion_budget: int | None = None,
+    legacy_bounded_search: bool = False,
 ) -> StructuredExample:
     data = _exact_mapping(value, _ROW_FIELDS, "pilot example")
     if _int(data["example_schema_version"], "example.example_schema_version") != 1:
@@ -1694,7 +2048,25 @@ def _parse_pilot_row(
         teacher_data["confidence"],
     )
     profile_id = _text(data["profile_id"], "example.profile_id")
-    if profile_id == "standard-3v3":
+    if dagger_oracle_expansion_budget is not None:
+        valid_teacher = (
+            teacher.identity == "bounded-search-v1"
+            and teacher.search_depth == 4
+            and teacher.expansion_budget == dagger_oracle_expansion_budget
+            and 1 <= teacher.actual_expansions <= dagger_oracle_expansion_budget
+            and teacher.heuristic_identity == "material-plus-pursuit-v1"
+            and teacher.confidence is None
+        )
+    elif legacy_bounded_search:
+        valid_teacher = (
+            teacher.identity == "bounded-search-v1"
+            and teacher.search_depth == 4
+            and teacher.expansion_budget == 512
+            and 1 <= teacher.actual_expansions <= 512
+            and teacher.heuristic_identity == "material-plus-pursuit-v1"
+            and teacher.confidence is None
+        )
+    elif profile_id == "standard-3v3":
         valid_teacher = (
             teacher.identity == "greedy-one-ply-v1"
             and teacher.search_depth == 0
@@ -1983,6 +2355,8 @@ def _train_pilot_dataset(
     initial_policy: LoadedStructuredPolicy | None = None,
     trainer_config: TrainerConfig | None = None,
     batch_provider: StructuredDaggerMixtureSampler | None = None,
+    micro_batch_size: int | None = None,
+    training_deadline_seconds: int = _TRAINING_DEADLINE_SECONDS,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     identity = _validate_identity(identity)
@@ -1992,6 +2366,8 @@ def _train_pilot_dataset(
         raise ValueError("pilot training corpus hash must be lowercase SHA-256")
     if type(seed) is not int or seed != 227:
         raise ValueError("pilot training seed must be exactly 227")
+    if type(training_deadline_seconds) is not int or training_deadline_seconds < 1:
+        raise ValueError("pilot training deadline must be a positive built-in int")
     output = Path(output)
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("pilot training artifacts output must be a plain directory")
@@ -2002,7 +2378,7 @@ def _train_pilot_dataset(
     elif (
         type(trainer_config) is not TrainerConfig
         or trainer_config.seed != seed
-        or trainer_config.device != device
+        or trainer_config.device != default_trainer_config.device
     ):
         raise ValueError("pilot trainer override does not match seed/device")
     if batch_provider is not None and type(batch_provider) is not StructuredDaggerMixtureSampler:
@@ -2019,7 +2395,7 @@ def _train_pilot_dataset(
             name: value.detach().to(device="cpu").contiguous().clone()
             for name, value in initial_policy.model.state_dict().items()
         }
-    deadline = started + _TRAINING_DEADLINE_SECONDS
+    deadline = started + training_deadline_seconds
     metric_device = torch.device(trainer_config.device)
     with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
         if initial_state is None:
@@ -2049,23 +2425,28 @@ def _train_pilot_dataset(
         telemetry.baseline(initial_train, initial_validation)
         del initial_model
 
+        training_arguments: dict[str, object] = {
+            "epoch_callback": telemetry.epoch,
+            "step_callback": telemetry.step,
+            "deadline_monotonic": deadline,
+            "initial_state_dict": initial_state,
+            "training_batch_provider": (
+                None if batch_provider is None
+                else lambda epoch, batch_index: batch_provider.next_batch().examples
+            ),
+        }
+        if micro_batch_size is not None:
+            training_arguments["micro_batch_size"] = micro_batch_size
         result = train_offline(
             train,
             validation,
             model_config,
             objective_config,
             trainer_config,
-            epoch_callback=telemetry.epoch,
-            step_callback=telemetry.step,
-            deadline_monotonic=deadline,
-            initial_state_dict=initial_state,
-            training_batch_provider=(
-                None if batch_provider is None
-                else lambda epoch, batch_index: batch_provider.next_batch().examples
-            ),
+            **training_arguments,
         )
     elapsed = time.monotonic() - started
-    if elapsed > _TRAINING_DEADLINE_SECONDS:
+    if elapsed > training_deadline_seconds:
         raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
 
     checkpoint_dir = output / "checkpoints"
@@ -2120,7 +2501,7 @@ def _train_pilot_dataset(
     finally:
         loaded.model.cpu()
     duration = time.monotonic() - started
-    if duration > _TRAINING_DEADLINE_SECONDS:
+    if duration > training_deadline_seconds:
         raise TimeoutError(f"pilot training exceeded deadline after {duration:.1f} seconds")
     return PilotTrainingArtifacts(
         checkpoint,
@@ -2203,15 +2584,26 @@ def evaluate_pilot(
     loaded: LoadedStructuredPolicy,
     controller: Literal["model", "random"],
     schedule: tuple[PilotScheduleItem, ...],
+    *,
+    device: str | torch.device | None = None,
+    observation_callback: Optional[Callable[
+        [PilotScheduleItem, TacticalV3View, Optional[Candidate]], None
+    ]] = None,
 ) -> PilotEvaluation:
     if controller not in {"model", "random"}:
         raise ValueError("pilot evaluation controller must be model or random")
+    if observation_callback is not None and not callable(observation_callback):
+        raise TypeError('pilot evaluation observation callback must be callable')
     if tuple(schedule) not in {
         evaluation_schedule(),
         diagnostic_evaluation_schedule(),
         selective_dagger_evaluation_schedule(),
+        point_mobility_diagnostic_schedule(),
     }:
         raise ValueError("pilot evaluation schedule must be the frozen evaluation schedule")
+    inference_device = torch.device(device) if device is not None else None
+    if inference_device is not None:
+        loaded.model.to(inference_device)
     started = time.monotonic()
     games: list[PilotEvaluationGame] = []
     for item in schedule:
@@ -2242,20 +2634,25 @@ def evaluate_pilot(
                 candidate_errors += 1
                 raise ValueError("pilot evaluation view drifted or has no candidates")
             batch = collate_decisions(
-                (view.decision,),
-                loaded.model.config.horizon_turns,
+                (view.decision,), loaded.model.config.horizon_turns,
             )
+            if inference_device is not None:
+                batch = _batch_to_device(batch, inference_device)
             selected = loaded.model.select(batch)[0]
             matches = tuple(candidate for candidate in view.decision.candidates
                             if candidate.candidate_id == selected.candidate_id)
             if (selected.decision_id != view.decision.decision_id or len(matches) != 1):
                 candidate_errors += 1
                 raise ValueError("pilot model selected a stale or illegal candidate")
+            if observation_callback is not None:
+                observation_callback(item, view, matches[0])
             view = client.duel_step(CandidateSelection(
                 selected.decision_id,
                 selected.candidate_id,
             ))
         fallback = client.duel_status()
+        if observation_callback is not None:
+            observation_callback(item, view, None)
         if view.winner == item.learner_seat:
             outcome: Literal["win", "loss", "draw"] = "win"
         elif view.winner in {0, 1}:

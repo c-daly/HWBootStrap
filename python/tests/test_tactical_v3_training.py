@@ -453,6 +453,68 @@ def test_train_offline_loads_initial_actor_before_optimizer_and_uses_batch_provi
     )]
 
 
+def test_train_offline_microbatches_one_effective_batch_per_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = load_duel_identity_fixture()
+
+    def fixture_rows(name: str, count: int) -> tuple[StructuredExample, ...]:
+        lines = (Path(TINY_CORPUS_ROOT) / name).read_text(
+            encoding="utf-8"
+        ).splitlines()
+        return tuple(_parse_row(json.loads(line), identity) for line in lines[:count])
+
+    case = TrainerTestCase(
+        fixture_rows("train.jsonl", 4),
+        fixture_rows("validation.jsonl", 2),
+        TacticalV3ModelConfig(),
+        ObjectiveConfig(),
+        TrainerConfig(
+            seed=227, batch_size=4, max_epochs=1,
+            patience_epochs=1, device="cpu",
+        ),
+    )
+    collated_sizes: list[int] = []
+    optimizer_steps = 0
+    observed: list[StepMetrics] = []
+    original_collate = training._collate_training_batch
+    original_after_step = training._after_optimizer_step
+
+    def capture_collate(rows: tuple, horizon_turns: tuple[int, ...]):
+        collated_sizes.append(len(rows))
+        return original_collate(rows, horizon_turns)
+
+    def count_step(model, *, epoch: int, batch_index: int) -> None:
+        nonlocal optimizer_steps
+        optimizer_steps += 1
+        original_after_step(model, epoch=epoch, batch_index=batch_index)
+
+    monkeypatch.setattr(training, "_collate_training_batch", capture_collate)
+    monkeypatch.setattr(training, "_after_optimizer_step", count_step)
+    train_offline(
+        case.train,
+        case.validation,
+        case.model_config,
+        case.objective_config,
+        case.trainer_config,
+        step_callback=observed.append,
+        micro_batch_size=2,
+    )
+
+    effective_batches = math.ceil(
+        len(case.train) / case.trainer_config.batch_size
+    )
+    assert optimizer_steps == effective_batches
+    assert collated_sizes
+    assert max(collated_sizes) <= 2
+    assert sum(
+        metric.example_count for metric in observed if metric.phase == "train"
+    ) == len(case.train)
+    assert len(tuple(metric for metric in observed if metric.phase == "train")) == (
+        effective_batches
+    )
+
+
 def test_train_offline_reports_every_completed_train_and_validation_batch() -> None:
     case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
     observed: list[StepMetrics] = []
@@ -801,7 +863,10 @@ def test_padded_negative_inf_control_and_full_finite_fault_matrix() -> None:
     for stage, field_name, expected_steps in matrix:
         fault = run_fault_case(stage)
         assert isinstance(fault.error, FloatingPointError)
-        assert f"epoch=0 batch=0 {field_name}" in str(fault.error)
+        context = "epoch=0 batch=0"
+        if stage not in {"gradient", "clip", "parameter"}:
+            context += " micro_batch=0"
+        assert f"{context} {field_name}" in str(fault.error)
         assert fault.optimizer_steps == expected_steps
         if expected_steps == 0:
             assert fault.after_state_sha256 == fault.before_state_sha256
