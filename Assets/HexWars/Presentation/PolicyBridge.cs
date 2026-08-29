@@ -140,7 +140,7 @@ namespace HexWars.Presentation
         {
             EnsureRunning();
             var request = new ActionRequest { seat = seat, obs = obs, mask = mask };
-            _proc.StandardInput.WriteLine(JsonUtility.ToJson(request));
+            _proc.StandardInput.WriteLine(PolicyJson.Serialize(request));
             _proc.StandardInput.Flush();
             string response = _proc.StandardOutput.ReadLine();
             if (response == null) throw new InvalidOperationException(WithStderr("policy server closed unexpectedly"));
@@ -160,7 +160,7 @@ namespace HexWars.Presentation
                 seat = seat,
                 decision = decision,
             };
-            _proc.StandardInput.WriteLine(JsonUtility.ToJson(request));
+            _proc.StandardInput.WriteLine(PolicyJson.Serialize(request));
             _proc.StandardInput.Flush();
             string response = _proc.StandardOutput.ReadLine();
             if (response == null)

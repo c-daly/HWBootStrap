@@ -1,4 +1,7 @@
+using System;
 using HexWars.Presentation;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 
 namespace HexWars.Presentation.Tests
@@ -184,6 +187,39 @@ namespace HexWars.Presentation.Tests
             Assert.That(config.ShouldReload(gameEnded: false), Is.False);
             Assert.That(ModelDuelDriver.ShouldReconfigure(previous, next, gameEnded: false),
                 Is.False);
+        }
+        [Test]
+        public void FixedVectorRequest_SerializesExactLegacyProtocolShape()
+        {
+            JObject actual = JObject.Parse(PolicyJson.Serialize(
+                new LegacyActionRequest
+                {
+                    seat = 1,
+                    obs = new[] { 1.25f, -2.5f },
+                    mask = new[] { true, false, true },
+                }));
+
+            Assert.That(actual.Count, Is.EqualTo(3));
+            Assert.That(actual["seat"].Value<int>(), Is.EqualTo(1));
+            Assert.That(actual["obs"].ToObject<float[]>(),
+                Is.EqualTo(new[] { 1.25f, -2.5f }));
+            Assert.That(actual["mask"].ToObject<bool[]>(),
+                Is.EqualTo(new[] { true, false, true }));
+        }
+
+        [Test]
+        public void PolicyJson_RejectsNonFiniteFloat()
+        {
+            Assert.Throws<JsonSerializationException>(() => PolicyJson.Serialize(
+                new LegacyActionRequest { obs = new[] { float.NaN } }));
+        }
+
+        [Serializable]
+        sealed class LegacyActionRequest
+        {
+            public int seat;
+            public float[] obs;
+            public bool[] mask;
         }
     }
 }
