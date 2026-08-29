@@ -5,13 +5,14 @@ import hashlib
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 import torch
 
+import ml_lab.tactical_v3_checkpoint as tactical_v3_checkpoint
 from ml_lab.tactical_v3_batching import collate_examples
 from ml_lab.tactical_v3_checkpoint import (
     StructuredCheckpointMetadata,
@@ -254,6 +255,24 @@ def rewrite_json(path: Path, mutation) -> None:
     path.write_bytes(canonical_json_bytes(value))
 
 
+def rewrite_json_value(path: Path, keys: tuple[str, ...], value: object) -> None:
+    payload = json.loads(path.read_bytes())
+    target = payload
+    for key in keys[:-1]:
+        target = target[key]
+    target[keys[-1]] = value
+    path.write_bytes(canonical_json_bytes(payload))
+
+
+def rewrite_source_scenario(wrapper_path: Path, source_text: str) -> None:
+    wrapper = json.loads(wrapper_path.read_bytes())
+    wrapper["source_scenario_json"] = source_text
+    wrapper["source"]["scenario_sha256"] = hashlib.sha256(
+        source_text.encode("utf-8")
+    ).hexdigest()
+    wrapper_path.write_bytes(canonical_json_bytes(wrapper))
+
+
 def tree_snapshot(root: Path) -> tuple[tuple[str, int, int, str], ...]:
     rows: list[tuple[str, int, int, str]] = []
     for path in sorted(root.rglob("*")):
@@ -262,6 +281,122 @@ def tree_snapshot(root: Path) -> tuple[tuple[str, int, int, str], ...]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
         rows.append((relative, info.st_mode, info.st_size, digest))
     return tuple(rows)
+
+
+@dataclass(frozen=True, slots=True)
+class AdoptionSources:
+    case: CheckpointCase
+    root: Path
+    checkpoint: Path
+    collection: Path
+    training: Path
+    metrics: Path
+    scenario: Path
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def create_adoption_sources(tmp_path: Path) -> AdoptionSources:
+    case = make_case()
+    trainer = replace(case.metadata.trainer_config, max_epochs=1, patience_epochs=1)
+    case = replace(
+        case,
+        metadata=replace(case.metadata, trainer_config=trainer),
+        result=replace(case.result, trainer_config=trainer),
+    )
+    root = tmp_path / "source"
+    checkpoint = save_structured_checkpoint(
+        root / "training" / "checkpoints" / "best.pt",
+        case.model, case.metadata, case.examples,
+    )
+
+    identity = case.metadata.identity
+    collection_value = {
+        "schema_version": 1,
+        "kind": "tactical-v3-custom-closing-dagger",
+        "identity": {
+            name: getattr(identity, name)
+            for name in (
+                "scenario_id", "contract_version", "contract_hash", "encoding_hash",
+                "capacity_hash", "environment_kind",
+            )
+        },
+        "schedule": {"train": [], "validation": []},
+        "partitions": {"train": [], "validation": []},
+        "summary": {
+            "train": {"games": 0, "labels": 0, "disagreements": 0, "reasons": {}},
+            "validation": {
+                "games": 0, "labels": 0, "disagreements": 0, "reasons": {},
+            },
+        },
+    }
+    collection = root / "collection.json"
+    collection.write_bytes(canonical_json_bytes(collection_value))
+
+    training = root / "training" / "dagger-training.json"
+    training.write_bytes(canonical_json_bytes({
+        "schema_version": 2,
+        "kind": "tactical-v3-custom-closing-dagger-training",
+        "actor_checkpoint_sha256": "a" * 64,
+        "actor_model_state_sha256": "b" * 64,
+        "base_collection_sha256": "c" * 64,
+        "prior_manifest_sha256": "d" * 64,
+        "closing_manifest_sha256": sha256_file(collection),
+        "corpus_sha256": case.metadata.corpus_sha256,
+        "definition": {
+            "name": "synthetic-adoption-fixture", "train_seed_start": 75_000_000,
+            "train_pair_count": 1, "train_label_target": 1,
+            "validation_seed_start": 76_000_000, "validation_pair_count": 1,
+            "validation_label_target": 1,
+        },
+        "mixture": {
+            "greedy_standard": 0.35, "search_conversion": 0.35,
+            "dagger_targeted_seat_0": 0.15, "dagger_targeted_seat_1": 0.15,
+        },
+        "validation": {"strategy": "synthetic", "examples": 1},
+        "execution": {
+            "attempt_number": 0, "micro_batch_size": 1,
+            "cuda_allocator_config": "",
+        },
+        "trainer_config": asdict(trainer),
+        "result": {
+            "checkpoint": "checkpoints/best.pt", "best_epoch": case.metadata.best_epoch,
+            "model_state_sha256": case.metadata.model_state_sha256,
+            "best_validation_policy_nll": case.metadata.best_validation_policy_nll,
+        },
+    }))
+    metrics = root / "training" / "metrics.jsonl"
+    metrics.write_bytes(tactical_v3_checkpoint._metrics_jsonl(case.result.history))
+    scenario = root / "scenario.json"
+    scenario.write_bytes(TRAINING_SCENARIO.read_bytes())
+    return AdoptionSources(
+        case, root, checkpoint, collection, training, metrics, scenario
+    )
+
+
+def adopt_sources(
+    run_dir: Path,
+    source: AdoptionSources,
+    *,
+    expected_overrides: dict[str, object] | None = None,
+) -> Path:
+    options: dict[str, object] = {
+        "source_checkpoint_path": source.checkpoint,
+        "source_collection_path": source.collection,
+        "source_training_path": source.training,
+        "source_metrics_path": source.metrics,
+        "training_scenario_path": source.scenario,
+        "expected_identity": source.case.metadata.identity,
+        "expected_checkpoint_sha256": sha256_file(source.checkpoint),
+        "expected_collection_sha256": sha256_file(source.collection),
+        "expected_training_sha256": sha256_file(source.training),
+        "expected_metrics_sha256": sha256_file(source.metrics),
+        "expected_scenario_sha256": sha256_file(source.scenario),
+    }
+    options.update(expected_overrides or {})
+    return tactical_v3_checkpoint.adopt_structured_run(run_dir, **options)
 
 
 def clone_published_run(
@@ -281,6 +416,162 @@ def create_windows_junction(link: Path, target: Path) -> None:
     )
     if completed.returncode:
         pytest.skip(f"Windows junction creation unavailable: {completed.stderr}")
+
+
+def test_adopt_structured_run_preserves_checkpoint_and_binds_source_evidence(
+    tmp_path: Path,
+) -> None:
+    sources = create_adoption_sources(tmp_path)
+    source_before = tree_snapshot(sources.root)
+    run_dir = adopt_sources(tmp_path / "run", sources)
+
+    assert run_dir == tmp_path / "run"
+    assert (run_dir / "checkpoints" / "best.pt").read_bytes() == (
+        sources.checkpoint.read_bytes()
+    )
+    assert (run_dir / "metrics.jsonl").read_bytes() == sources.metrics.read_bytes()
+    assert tree_snapshot(sources.root) == source_before
+
+    wrapper = json.loads((run_dir / "corpus-manifest.json").read_bytes())
+    assert set(wrapper) == {
+        "schema_version", "kind", "provenance_scope",
+        "dataset_manifest_sha256", "source", "published_scenario_sha256",
+        "source_scenario_json", "collection", "training",
+    }
+    assert wrapper["kind"] == "tactical-v3-adopted-dagger-evidence"
+    assert wrapper["provenance_scope"] == "adopted-local-artifact"
+    assert wrapper["dataset_manifest_sha256"] == sources.case.metadata.corpus_sha256
+    assert wrapper["source"] == {
+        f"{name}_sha256": sha256_file(getattr(sources, name))
+        for name in ("checkpoint", "collection", "training", "metrics", "scenario")
+    }
+    assert wrapper["published_scenario_sha256"] == sha256_file(run_dir / "scenario.json")
+    assert wrapper["source_scenario_json"] == sources.scenario.read_text(encoding="utf-8")
+    assert wrapper["source"]["scenario_sha256"] != wrapper["published_scenario_sha256"]
+    assert wrapper["collection"] == json.loads(sources.collection.read_bytes())
+    assert wrapper["training"] == json.loads(sources.training.read_bytes())
+
+    loaded = validate_structured_run(run_dir)
+    assert loaded.metadata == sources.case.metadata
+    assert loaded.fixture.examples == sources.case.examples
+
+
+def test_adopt_structured_run_rejects_untrusted_or_mismatched_sources(
+    tmp_path: Path,
+) -> None:
+    replay = create_adoption_sources(tmp_path / "replay")
+    raw = torch.load(replay.checkpoint, map_location="cpu", weights_only=True)
+    raw["inference_fixture"]["selected_identities"][0]["candidate_id"] += 10_000
+    torch.save(raw, replay.checkpoint)
+    with pytest.raises(ValueError, match="fixture|replay|checkpoint"):
+        adopt_sources(tmp_path / "replay-run", replay)
+
+    hashes = create_adoption_sources(tmp_path / "hashes")
+    with pytest.raises(ValueError, match="SHA-256|hash"):
+        adopt_sources(
+            tmp_path / "hash-run",
+            hashes,
+            expected_overrides={"expected_collection_sha256": "0" * 64},
+        )
+
+    identity = create_adoption_sources(tmp_path / "identity")
+    with pytest.raises(ValueError, match="identity|checkpoint"):
+        adopt_sources(
+            tmp_path / "identity-run",
+            identity,
+            expected_overrides={
+                "expected_identity": replace(
+                    identity.case.metadata.identity,
+                    encoding_hash="0" * 64,
+                )
+            },
+        )
+
+    stale = create_adoption_sources(tmp_path / "stale")
+    raw = torch.load(stale.checkpoint, map_location="cpu", weights_only=True)
+    raw["metadata"]["trainer_config"]["max_epochs"] = 3
+    raw["metadata"]["trainer_config"]["patience_epochs"] = 1
+    torch.save(raw, stale.checkpoint)
+    metric_values = {name: 0.0 for name in METRIC_KEYS}
+    stale.metrics.write_bytes(b"".join(
+        canonical_json_bytes({
+            "epoch": epoch,
+            "train": metric_values,
+            "validation": {**metric_values, "policy": policy_nll},
+            "validation_policy_nll": policy_nll,
+            "improved": epoch == 0,
+        })
+        for epoch, policy_nll in enumerate((0.0, 1.0, 1.0))
+    ))
+    with pytest.raises(ValueError, match="patience|early stopping"):
+        adopt_sources(tmp_path / "stale-run", stale)
+
+    assert not tuple(tmp_path.glob("*-run"))
+
+
+def test_adopt_structured_run_is_atomic_and_refuses_overwrite(
+    tmp_path: Path,
+) -> None:
+    sources = create_adoption_sources(tmp_path)
+    with pytest.raises(ValueError, match="source evidence directory"):
+        adopt_sources(sources.root / "published-run", sources)
+    assert not (sources.root / "published-run").exists()
+
+    run_dir = adopt_sources(tmp_path / "run", sources)
+    run_before = tree_snapshot(run_dir)
+    source_before = tree_snapshot(sources.root)
+
+    with pytest.raises(FileExistsError):
+        adopt_sources(run_dir, sources)
+
+    assert tree_snapshot(run_dir) == run_before
+    assert tree_snapshot(sources.root) == source_before
+    assert {path.name for path in tmp_path.iterdir()} == {"run", "source"}
+
+
+def test_validate_structured_run_rejects_adopted_evidence_tamper(
+    tmp_path: Path,
+) -> None:
+    sources = create_adoption_sources(tmp_path)
+    source_before = tree_snapshot(sources.root)
+    template = adopt_sources(tmp_path / "run", sources)
+
+    hash_run = clone_published_run(template, tmp_path / "hash-tamper")
+    rewrite_json_value(
+        hash_run / "corpus-manifest.json",
+        ("source", "scenario_sha256"),
+        "0" * 64,
+    )
+    with pytest.raises(ValueError, match="scenario|hash"):
+        validate_structured_run(hash_run)
+
+    semantic_run = clone_published_run(template, tmp_path / "semantic-tamper")
+    value = json.loads(sources.scenario.read_bytes())
+    value["id"] = "tampered-scenario"
+    rewrite_source_scenario(
+        semantic_run / "corpus-manifest.json",
+        canonical_json_bytes(value).decode("utf-8"),
+    )
+    with pytest.raises(ValueError, match="scenario|identity"):
+        validate_structured_run(semantic_run)
+
+    typed_run = clone_published_run(template, tmp_path / "typed-tamper")
+    rewrite_json_value(typed_run / "scenario.json", ("board", "width"), 13.0)
+    rewrite_json_value(
+        typed_run / "corpus-manifest.json",
+        ("published_scenario_sha256",),
+        sha256_file(typed_run / "scenario.json"),
+    )
+    with pytest.raises(ValueError, match="scenario"):
+        validate_structured_run(typed_run)
+
+    metrics_run = clone_published_run(template, tmp_path / "metrics-tamper")
+    path = metrics_run / "metrics.jsonl"
+    path.write_bytes(path.read_bytes() + b"tamper\n")
+    with pytest.raises(ValueError, match="metrics|hash|JSON"):
+        validate_structured_run(metrics_run)
+
+    assert tree_snapshot(sources.root) == source_before
 
 
 def test_training_result_preserves_exact_nondefault_configs() -> None:

@@ -4,7 +4,12 @@ import argparse
 import json
 from typing import Sequence
 
-from ml_lab.tactical_v3_checkpoint import publish_structured_run, validate_structured_run
+from ml_lab.tactical_v3_checkpoint import (
+    adopt_structured_run,
+    publish_structured_run,
+    validate_structured_run,
+)
+from ml_lab.tactical_v3_client import TacticalV3GymClient
 from ml_lab.tactical_v3_corpus import create_tiny_corpus, load_corpus
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
@@ -62,6 +67,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     train.add_argument("--device", required=True, type=str)
     validate = subcommands.add_parser("validate-run")
     validate.add_argument("--run-dir", required=True, type=Path)
+    adopt = subcommands.add_parser(
+        "adopt-run",
+        help="Publish an observed custom DAgger artifact as an unsealed ML Lab run.",
+    )
+    adopt.add_argument("--source-artifact", required=True, type=Path)
+    adopt.add_argument("--scenario", required=True, type=Path)
+    adopt.add_argument("--server-dll", required=True, type=Path)
+    adopt.add_argument("--run-dir", required=True, type=Path)
+    for source_name in ("checkpoint", "collection", "training", "metrics", "scenario"):
+        adopt.add_argument(
+            f"--expected-{source_name}-sha256",
+            required=True,
+        )
     args = parser.parse_args(argv)
     if args.command == "build-tiny-corpus":
         create_tiny_corpus(args.output, ["dotnet", str(args.server_dll), "--scenario-file", str(args.scenario)])
@@ -91,6 +109,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "validate-run":
         validate_structured_run(args.run_dir)
+        return 0
+    if args.command == "adopt-run":
+        source = args.source_artifact
+        server_command = [
+            "dotnet",
+            str(args.server_dll),
+            "--scenario-file",
+            str(args.scenario),
+        ]
+        with TacticalV3GymClient(
+            server_command,
+            environment_kind="duel",
+        ) as client:
+            expected_identity = client.identity
+        run_dir = adopt_structured_run(
+            args.run_dir,
+            source_checkpoint_path=source / "training" / "checkpoints" / "best.pt",
+            source_collection_path=source / "collection.json",
+            source_training_path=source / "training" / "dagger-training.json",
+            source_metrics_path=source / "training" / "metrics.jsonl",
+            training_scenario_path=args.scenario,
+            expected_identity=expected_identity,
+            expected_checkpoint_sha256=args.expected_checkpoint_sha256,
+            expected_collection_sha256=args.expected_collection_sha256,
+            expected_training_sha256=args.expected_training_sha256,
+            expected_metrics_sha256=args.expected_metrics_sha256,
+            expected_scenario_sha256=args.expected_scenario_sha256,
+        )
+        loaded = validate_structured_run(run_dir)
+        print(json.dumps({
+            "best_epoch": loaded.metadata.best_epoch,
+            "best_validation_policy_nll": loaded.metadata.best_validation_policy_nll,
+            "checkpoint_sha256": args.expected_checkpoint_sha256,
+            "corpus_sha256": loaded.metadata.corpus_sha256,
+            "model_state_sha256": loaded.metadata.model_state_sha256,
+            "run_dir": str(run_dir),
+        }, sort_keys=True))
         return 0
     raise AssertionError(args.command)
 

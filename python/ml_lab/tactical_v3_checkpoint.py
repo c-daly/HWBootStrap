@@ -61,6 +61,16 @@ _RUN_FIELDS = frozenset({
 _METRICS_FIELDS = frozenset({
     "epoch", "train", "validation", "validation_policy_nll", "improved",
 })
+_ADOPTED_EVIDENCE_KIND = "tactical-v3-adopted-dagger-evidence"
+_ADOPTED_EVIDENCE_FIELDS = frozenset({
+    "schema_version", "kind", "dataset_manifest_sha256", "source",
+    "source_scenario_json", "published_scenario_sha256", "provenance_scope",
+    "collection", "training",
+})
+_ADOPTED_SOURCE_FIELDS = frozenset({
+    "checkpoint_sha256", "collection_sha256", "training_sha256",
+    "metrics_sha256", "scenario_sha256",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +537,93 @@ def _read_canonical_json_file(path: Path, label: str) -> object:
     return value
 
 
+def _bytes_sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file_sha256(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return digest.hexdigest(), byte_count
+
+
+def _stat_token(path: Path) -> tuple[int, int, int, int]:
+    value = path.stat(follow_symlinks=False)
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+
+def _require_destination_outside_source_directories(
+    destination: Path,
+    sources: tuple[Path, ...],
+) -> None:
+    resolved_destination = destination.resolve(strict=False)
+    for source in sources:
+        source_directory = source.parent.resolve(strict=True)
+        if (
+            resolved_destination == source_directory
+            or source_directory in resolved_destination.parents
+        ):
+            raise ValueError(
+                "run destination must not be inside a source evidence directory"
+            )
+
+
+def _require_plain_source_file(path: Path, label: str) -> Path:
+    path = _public_run_path(Path(path), label)
+    _require_plain_lexical_chain(path, label)
+    if _is_reparse(path) or not path.is_file():
+        raise ValueError(f"{label} must be a plain file")
+    return path
+
+
+def _validate_adopted_scenario(
+    value: object,
+    identity: TacticalV3SemanticIdentity,
+) -> None:
+    scenario = _plain_mapping(
+        value,
+        frozenset({
+            "schema_version", "id", "name", "environment", "board", "rules",
+            "episode", "reward", "tactical_v3",
+        }),
+        "adopted tactical-v3 scenario",
+    )
+    if (
+        _int(scenario["schema_version"], "scenario schema_version")
+        != identity.scenario_schema_version
+        or _string(scenario["id"], "scenario id") != identity.scenario_id
+        or _string(scenario["environment"], "scenario environment") != "tactical-v3"
+    ):
+        raise ValueError("adopted scenario identity does not match checkpoint")
+    if not _string(scenario["name"], "scenario name"):
+        raise ValueError("scenario name must not be empty")
+    for name in ("board", "rules", "episode", "reward", "tactical_v3"):
+        if type(scenario[name]) is not dict or not scenario[name]:
+            raise TypeError(f"scenario {name} must be a non-empty object")
+
+
+def _load_self_describing_checkpoint(path: Path) -> LoadedStructuredPolicy:
+    raw = torch.load(Path(path), map_location="cpu", weights_only=True)
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != _TOP_LEVEL_FIELDS
+        or not all(type(key) is str for key in raw)
+    ):
+        raise ValueError(
+            "checkpoint fields must be exactly format_version, metadata, state_dict, inference_fixture"
+        )
+    metadata = _metadata_from_wire(raw["metadata"])
+    return load_structured_checkpoint(
+        path,
+        metadata.identity.encoding_hash,
+        metadata.identity.capacity_hash,
+    )
+
+
 def _metrics_from_jsonl(
     data: bytes,
     best_epoch: int,
@@ -705,6 +802,328 @@ def _authenticated_corpus_manifest(
             return evidence["manifest.json"]
 
 
+def _validate_adopted_evidence(
+    value: object,
+    *,
+    root: Path,
+    loaded: LoadedStructuredPolicy,
+    scenario_value: object,
+    metrics_bytes: bytes,
+) -> str:
+    evidence = _plain_mapping(
+        value,
+        _ADOPTED_EVIDENCE_FIELDS,
+        "adopted DAgger evidence",
+    )
+    if _int(evidence["schema_version"], "adopted evidence schema_version") != 1:
+        raise ValueError("adopted evidence schema_version is invalid")
+    if _string(evidence["kind"], "adopted evidence kind") != _ADOPTED_EVIDENCE_KIND:
+        raise ValueError("adopted evidence kind is invalid")
+    if (
+        _string(evidence["provenance_scope"], "adopted evidence provenance_scope")
+        != "adopted-local-artifact"
+    ):
+        raise ValueError("adopted evidence provenance scope is invalid")
+    dataset_sha256 = _sha256(
+        evidence["dataset_manifest_sha256"],
+        "adopted evidence dataset_manifest_sha256",
+    )
+    if dataset_sha256 != loaded.metadata.corpus_sha256:
+        raise ValueError("adopted dataset identity does not match checkpoint")
+    source = _plain_mapping(
+        evidence["source"],
+        _ADOPTED_SOURCE_FIELDS,
+        "adopted evidence source",
+    )
+    for name in source:
+        _sha256(source[name], f"adopted evidence source.{name}")
+    checkpoint_sha256, _ = _file_sha256(root / "checkpoints" / "best.pt")
+    if source["checkpoint_sha256"] != checkpoint_sha256:
+        raise ValueError("adopted source checkpoint hash is inconsistent")
+    collection_bytes = _canonical_json(evidence["collection"])
+    collection_sha256 = _bytes_sha256(collection_bytes)
+    if source["collection_sha256"] != collection_sha256:
+        raise ValueError("adopted source collection hash is inconsistent")
+    training_bytes = _canonical_json(evidence["training"])
+    if source["training_sha256"] != _bytes_sha256(training_bytes):
+        raise ValueError("adopted source training hash is inconsistent")
+    if source["metrics_sha256"] != _bytes_sha256(metrics_bytes):
+        raise ValueError("adopted source metrics hash is inconsistent")
+    source_scenario_text = _string(
+        evidence["source_scenario_json"],
+        "adopted evidence source_scenario_json",
+    )
+    source_scenario_bytes = source_scenario_text.encode("utf-8")
+    if source["scenario_sha256"] != _bytes_sha256(source_scenario_bytes):
+        raise ValueError("adopted source scenario hash is inconsistent")
+    source_scenario_value = _decode_json_bytes(
+        source_scenario_bytes,
+        "adopted source scenario",
+    )
+    if _canonical_json(source_scenario_value) != _canonical_json(scenario_value):
+        raise ValueError("adopted source and published scenarios differ semantically")
+    published_scenario_sha256 = _sha256(
+        evidence["published_scenario_sha256"],
+        "adopted evidence published_scenario_sha256",
+    )
+    if published_scenario_sha256 != _bytes_sha256(_canonical_json(scenario_value)):
+        raise ValueError("adopted published scenario hash is inconsistent")
+    _validate_adopted_scenario(scenario_value, loaded.metadata.identity)
+    history = _metrics_from_jsonl(
+        metrics_bytes,
+        loaded.metadata.best_epoch,
+        loaded.metadata.best_validation_policy_nll,
+    )
+    trainer = loaded.metadata.trainer_config
+    if len(history) > trainer.max_epochs:
+        raise ValueError("adopted metrics exceed trainer max_epochs")
+    epochs_after_best = history[-1].epoch - loaded.metadata.best_epoch
+    if epochs_after_best > trainer.patience_epochs:
+        raise ValueError("adopted metrics exceed trainer early-stopping patience")
+    if len(history) < trainer.max_epochs:
+        if epochs_after_best != trainer.patience_epochs:
+            raise ValueError("adopted metrics do not match trainer early stopping")
+    return dataset_sha256
+
+
+def _copy_checkpoint_bytes(
+    source: Path,
+    destination: Path,
+) -> tuple[str, int, tuple[int, int, int, int]]:
+    source = _require_plain_source_file(source, "source checkpoint")
+    before = _stat_token(source)
+    digest = hashlib.sha256()
+    size = 0
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        opened = os.fstat(reader.fileno())
+        opened_token = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        if opened_token != before or not stat.S_ISREG(opened.st_mode):
+            raise ValueError("source checkpoint changed before it could be copied")
+        while chunk := reader.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+            writer.write(chunk)
+        writer.flush()
+        os.fsync(writer.fileno())
+    after = _stat_token(source)
+    if before != after or size != before[2]:
+        raise ValueError("source checkpoint changed while it was copied")
+    copied_sha256, copied_size = _file_sha256(destination)
+    if copied_size != size or copied_sha256 != digest.hexdigest():
+        raise ValueError("staged checkpoint bytes do not match source")
+    return copied_sha256, copied_size, after
+
+
+def adopt_structured_run(
+    run_dir: Path,
+    *,
+    source_checkpoint_path: Path,
+    source_collection_path: Path,
+    source_training_path: Path,
+    source_metrics_path: Path,
+    training_scenario_path: Path,
+    expected_identity: TacticalV3SemanticIdentity,
+    expected_checkpoint_sha256: str,
+    expected_collection_sha256: str,
+    expected_training_sha256: str,
+    expected_metrics_sha256: str,
+    expected_scenario_sha256: str,
+) -> Path:
+    """Adopt a directly observed DAgger artifact without rewriting its checkpoint.
+
+    The resulting unsealed run proves that its seven published files remain mutually
+    consistent. Collection and training JSON are retained as opaque, hash-pinned source
+    observations; this deliberately does not claim a tracked, semantically revalidated,
+    or independently reproducible historical training run.
+    """
+
+    run_dir = _public_run_path(run_dir, "run destination")
+    _require_plain_lexical_chain(run_dir.parent, "run destination")
+    if run_dir.exists() or _is_reparse(run_dir):
+        raise FileExistsError(f"refusing to overwrite existing run {run_dir}")
+    parent = run_dir.parent
+    if _is_reparse(parent) or not parent.is_dir():
+        raise ValueError(
+            "run parent must be a plain directory, not a symlink or reparse point"
+        )
+
+    source_collection = _require_plain_source_file(
+        source_collection_path, "source collection manifest"
+    )
+    source_root = source_collection.parent
+    source_training = _require_plain_source_file(
+        source_training_path, "source training provenance"
+    )
+    source_metrics = _require_plain_source_file(
+        source_metrics_path, "source training metrics"
+    )
+    source_scenario = _require_plain_source_file(
+        training_scenario_path, "source training scenario"
+    )
+    source_checkpoint = _require_plain_source_file(
+        source_checkpoint_path, "source checkpoint"
+    )
+    _require_destination_outside_source_directories(
+        run_dir,
+        (
+            source_checkpoint,
+            source_collection,
+            source_training,
+            source_metrics,
+            source_scenario,
+        ),
+    )
+    expected_hashes = {
+        "checkpoint": _sha256(
+            expected_checkpoint_sha256, "expected source checkpoint SHA-256"
+        ),
+        "collection": _sha256(
+            expected_collection_sha256, "expected source collection SHA-256"
+        ),
+        "training": _sha256(
+            expected_training_sha256, "expected source training SHA-256"
+        ),
+        "metrics": _sha256(
+            expected_metrics_sha256, "expected source metrics SHA-256"
+        ),
+        "scenario": _sha256(
+            expected_scenario_sha256, "expected source scenario SHA-256"
+        ),
+    }
+    training_root = source_root / "training"
+    if (
+        source_collection.name != "collection.json"
+        or source_training != training_root / "dagger-training.json"
+        or source_metrics != training_root / "metrics.jsonl"
+        or source_checkpoint != training_root / "checkpoints" / "best.pt"
+    ):
+        raise ValueError("source artifact does not use the expected DAgger layout")
+
+    collection_bytes = source_collection.read_bytes()
+    collection_value = _decode_json_bytes(collection_bytes, "source collection manifest")
+    if collection_bytes != _canonical_json(collection_value):
+        raise ValueError("source collection manifest must be canonical compact JSON")
+    training_bytes = source_training.read_bytes()
+    training_value = _decode_json_bytes(training_bytes, "source training provenance")
+    if training_bytes != _canonical_json(training_value):
+        raise ValueError("source training provenance must be canonical compact JSON")
+    metrics_bytes = source_metrics.read_bytes()
+    scenario_bytes = source_scenario.read_bytes()
+    scenario_value = _decode_json_bytes(scenario_bytes, "source training scenario")
+    scenario_published_bytes = _canonical_json(scenario_value)
+    actual_hashes = {
+        "collection": _bytes_sha256(collection_bytes),
+        "training": _bytes_sha256(training_bytes),
+        "metrics": _bytes_sha256(metrics_bytes),
+        "scenario": _bytes_sha256(scenario_bytes),
+    }
+    for name, actual in actual_hashes.items():
+        if actual != expected_hashes[name]:
+            raise ValueError(f"source {name} SHA-256 does not match expected artifact")
+    source_tokens = {
+        path: _stat_token(path)
+        for path in (
+            source_collection,
+            source_training,
+            source_metrics,
+            source_scenario,
+        )
+    }
+
+    temporary = Path(tempfile.mkdtemp(prefix=f".{run_dir.name}.tmp-", dir=parent))
+    try:
+        checkpoints = temporary / "checkpoints"
+        checkpoints.mkdir()
+        checkpoint = checkpoints / "best.pt"
+        checkpoint_sha256, _, checkpoint_token = _copy_checkpoint_bytes(
+            source_checkpoint, checkpoint
+        )
+        if checkpoint_sha256 != expected_hashes["checkpoint"]:
+            raise ValueError(
+                "source checkpoint SHA-256 does not match expected artifact"
+            )
+        loaded = _load_self_describing_checkpoint(checkpoint)
+        identity = loaded.metadata.identity
+        if type(expected_identity) is not TacticalV3SemanticIdentity:
+            raise TypeError("expected_identity must be TacticalV3SemanticIdentity")
+        if identity != expected_identity:
+            raise ValueError(
+                "checkpoint identity does not match the authoritative scenario probe"
+            )
+        _validate_adopted_scenario(scenario_value, identity)
+        collection_sha256 = _bytes_sha256(collection_bytes)
+        evidence = {
+            "schema_version": 1,
+            "kind": _ADOPTED_EVIDENCE_KIND,
+            "provenance_scope": "adopted-local-artifact",
+            "dataset_manifest_sha256": loaded.metadata.corpus_sha256,
+            "source": {
+                "checkpoint_sha256": checkpoint_sha256,
+                "collection_sha256": collection_sha256,
+                "training_sha256": _bytes_sha256(training_bytes),
+                "metrics_sha256": _bytes_sha256(metrics_bytes),
+                "scenario_sha256": _bytes_sha256(scenario_bytes),
+            },
+            "source_scenario_json": scenario_bytes.decode("utf-8"),
+            "published_scenario_sha256": _bytes_sha256(scenario_published_bytes),
+            "collection": collection_value,
+            "training": training_value,
+        }
+        run_manifest = {
+            "schema_version": 2,
+            "state": "completed",
+            "evidence_status": "unsealed-experimental",
+            "config": {"algorithm": "structured_imitation"},
+            "contract": _identity_manifest(identity),
+            "policy_identity": "policy-identity.json",
+            "latest_checkpoint": "checkpoints/best.pt",
+            "latest_checkpoint_step": loaded.metadata.best_epoch,
+            "dataset_manifest_sha256": loaded.metadata.corpus_sha256,
+            "best_epoch": loaded.metadata.best_epoch,
+            "best_validation_policy_nll": loaded.metadata.best_validation_policy_nll,
+        }
+        _write_bytes(temporary / "run.json", _canonical_json(run_manifest))
+        _write_bytes(temporary / "scenario.json", scenario_published_bytes)
+        _write_bytes(
+            temporary / "policy-identity.json",
+            _canonical_json(_identity_wire(identity)),
+        )
+        _write_bytes(temporary / "corpus-manifest.json", _canonical_json(evidence))
+        _write_bytes(temporary / "metrics.jsonl", metrics_bytes)
+        _write_bytes(temporary / "inference-fixture.json", _canonical_json({
+            "examples": [_example_wire(item) for item in loaded.fixture.examples],
+            "valid_candidate_logits": [
+                list(item) for item in loaded.fixture.valid_candidate_logits
+            ],
+            "selected_identities": [
+                asdict(item) for item in loaded.fixture.selected_identities
+            ],
+        }))
+        validate_structured_run(temporary)
+        if _stat_token(source_checkpoint) != checkpoint_token:
+            raise ValueError("source checkpoint changed during adoption")
+        final_source_sha256, _ = _file_sha256(source_checkpoint)
+        if final_source_sha256 != checkpoint_sha256:
+            raise ValueError("source checkpoint changed during adoption")
+        for path, token in source_tokens.items():
+            if _stat_token(path) != token:
+                raise ValueError(f"source evidence changed during adoption: {path}")
+        _require_plain_lexical_chain(run_dir.parent, "run destination")
+        if run_dir.exists() or _is_reparse(run_dir):
+            raise FileExistsError(f"refusing to overwrite existing run {run_dir}")
+        _publish_no_replace(temporary, run_dir)
+        return run_dir
+    except BaseException:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+
+
 def publish_structured_run(
     run_dir: Path,
     result: TrainingResult,
@@ -830,7 +1249,9 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
     }), "run manifest contract")
     for name in contract:
         _string(contract[name], f"run manifest contract.{name}")
-    _read_canonical_json_file(root / "scenario.json", "training scenario")
+    scenario_value = _read_canonical_json_file(
+        root / "scenario.json", "training scenario"
+    )
     if (
         _validate_relative(
             manifest["policy_identity"], "run manifest policy_identity"
@@ -851,15 +1272,6 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
         manifest["dataset_manifest_sha256"],
         "run manifest dataset_manifest_sha256",
     )
-    corpus_manifest_path = root / "corpus-manifest.json"
-    corpus_manifest_bytes = corpus_manifest_path.read_bytes()
-    corpus_identity, _ = _validate_manifest(
-        root,
-        identity,
-        corpus_manifest_bytes,
-    )
-    if corpus_identity != dataset_sha256:
-        raise ValueError("corpus SHA-256 does not match run manifest")
     best_epoch = _int(manifest["best_epoch"], "run manifest best_epoch", minimum=0)
     latest_step = _int(
         manifest["latest_checkpoint_step"],
@@ -870,12 +1282,50 @@ def validate_structured_run(run_dir: Path) -> LoadedStructuredPolicy:
         manifest["best_validation_policy_nll"],
         "run manifest best_validation_policy_nll",
     )
+    metrics_bytes = (root / "metrics.jsonl").read_bytes()
     _metrics_from_jsonl(
-        (root / "metrics.jsonl").read_bytes(),
+        metrics_bytes,
         best_epoch,
         best_nll,
     )
-    loaded = load_structured_checkpoint(checkpoint, identity.encoding_hash, identity.capacity_hash)
+    corpus_manifest_path = root / "corpus-manifest.json"
+    corpus_manifest_bytes = corpus_manifest_path.read_bytes()
+    corpus_value = _decode_json_bytes(
+        corpus_manifest_bytes, "corpus manifest"
+    )
+    if corpus_manifest_bytes != _canonical_json(corpus_value):
+        raise ValueError("corpus manifest must be canonical compact JSON")
+    if (
+        type(corpus_value) is dict
+        and corpus_value.get("kind") == _ADOPTED_EVIDENCE_KIND
+    ):
+        loaded = load_structured_checkpoint(
+            checkpoint,
+            identity.encoding_hash,
+            identity.capacity_hash,
+        )
+        corpus_identity = _validate_adopted_evidence(
+            corpus_value,
+            root=root,
+            loaded=loaded,
+            scenario_value=scenario_value,
+            metrics_bytes=metrics_bytes,
+        )
+        if corpus_identity != dataset_sha256:
+            raise ValueError("corpus SHA-256 does not match run manifest")
+    else:
+        corpus_identity, _ = _validate_manifest(
+            root,
+            identity,
+            corpus_manifest_bytes,
+        )
+        if corpus_identity != dataset_sha256:
+            raise ValueError("corpus SHA-256 does not match run manifest")
+        loaded = load_structured_checkpoint(
+            checkpoint,
+            identity.encoding_hash,
+            identity.capacity_hash,
+        )
     if loaded.metadata.corpus_sha256 != dataset_sha256:
         raise ValueError("corpus SHA-256 does not match checkpoint")
     if loaded.metadata.identity != identity:
