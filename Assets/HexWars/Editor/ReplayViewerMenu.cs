@@ -224,8 +224,7 @@ namespace HexWars.Presentation.EditorTools
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
             d.Environment = environment;
-            d.Scenario = scenario;
-            d.PresentationPlan = presentationPlan;
+            d.ConfigureLaunchState(scenario, presentationPlan);
             d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 

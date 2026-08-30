@@ -245,6 +245,69 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void MissingPresentationSchedule_StaysNullAcrossUnitySerialization()
+        {
+            var originalObject = new GameObject("original-driver");
+            var restoredObject = new GameObject("restored-driver");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.ConfigureLaunchState(null, null);
+                Assert.That(original.PresentationPlan, Is.Null);
+
+                string json = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(json, restored);
+                InvokePrivate(restored, "RestoreLaunchState");
+
+                Assert.That(restored.Scenario, Is.Null);
+                Assert.That(restored.PresentationPlan, Is.Null);
+                Assert.That(restored.NextPresentationGame(0), Is.Null);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [TestCase("{")]
+        [TestCase("{\"version\":2,\"scenario\":null,\"presentation_plan\":null}")]
+        [TestCase("{\"version\":1,\"scenario\":null}")]
+        public void InvalidLaunchStateSnapshot_FailsWithoutReplacingLiveState(string snapshot)
+        {
+            var driverObject = new GameObject("invalid-launch-state-driver");
+            try
+            {
+                var driver = driverObject.AddComponent<ModelDuelDriver>();
+                TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
+                var plan = new MlPresentationSchedule
+                {
+                    Games = new[]
+                    {
+                        new MlPresentationGame(
+                            "greedy", "random", 0, ModelDuelObserverSeat.Player1,
+                            "Random", scenario),
+                    },
+                };
+                driver.Scenario = scenario;
+                driver.PresentationPlan = plan;
+                SetPrivate(driver, "_launchStateSnapshot", snapshot);
+
+                TargetInvocationException error = Assert.Throws<TargetInvocationException>(
+                    () => InvokePrivate(driver, "RestoreLaunchState"));
+
+                Assert.That(error.InnerException, Is.TypeOf<InvalidOperationException>());
+                Assert.That(driver.Scenario, Is.SameAs(scenario));
+                Assert.That(driver.PresentationPlan, Is.SameAs(plan));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(driverObject);
+            }
+        }
+
+        [Test]
         public void PresentationSchedule_CyclesGamesAndSurvivesUnitySerialization()
         {
             TrainingScenario scenario = TrainingScenario.CreateStandard("tactical-v1");
@@ -612,6 +675,171 @@ namespace HexWars.Presentation.Tests
                 Assert.That(
                     ModelDuelEnvironmentFactory.ContractIdentity(roundTripped).EncodingHash,
                     Is.EqualTo(expectedEncoding));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [Test]
+        public void DriverProfiledTacticalV3ScenarioWithoutSchedule_SurvivesUnitySerialization()
+        {
+            TacticalV2StartProfile[] profiles = TacticalV2StartCatalog.ProfiledSeededV1().ToArray();
+            TacticalV2StartWeight[] weights =
+            {
+                new TacticalV2StartWeight("standard-3v3", 7000),
+                new TacticalV2StartWeight("conversion-3v1-near", 0),
+                new TacticalV2StartWeight("conversion-3v1-medium", 0),
+                new TacticalV2StartWeight("conversion-3v1-far", 0),
+                new TacticalV2StartWeight("conversion-2v1-near", 0),
+                new TacticalV2StartWeight("conversion-2v1-medium", 0),
+                new TacticalV2StartWeight("conversion-2v1-far", 0),
+                new TacticalV2StartWeight("conversion-1v1-near", 0),
+                new TacticalV2StartWeight("conversion-1v1-medium", 0),
+                new TacticalV2StartWeight("conversion-1v1-far", 3000),
+            };
+            TrainingScenario scenario = TrainingScenario.CreateStandard(
+                "tactical-v3", "round-trip-inline-profiled-tactical-v3");
+            scenario.TacticalV3.PlacementPolicy = "profiled-seeded-v1";
+            scenario.TacticalV3.StartProfiles = profiles.ToList();
+            scenario.TacticalV3.StartDistribution = weights.ToList();
+            ModelDuelContractIdentity expected =
+                ModelDuelEnvironmentFactory.ContractIdentity(scenario);
+
+            var originalObject = new GameObject("original-inline-profiled-driver");
+            var restoredObject = new GameObject("restored-inline-profiled-driver");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.Environment = MlEnvironmentContract.TacticalV3;
+                original.ConfigureLaunchState(scenario, null);
+                Assert.That(original.PresentationPlan, Is.Null);
+
+                string json = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(json, restored);
+                InvokePrivate(restored, "RestoreLaunchState");
+                InvokePrivate(restored, "RestoreLaunchState");
+                Assert.That(restored.PresentationPlan, Is.Null);
+
+                TrainingScenario roundTripped = restored.ResolveScenario();
+                ModelDuelContractIdentity actual =
+                    ModelDuelEnvironmentFactory.ContractIdentity(roundTripped);
+
+                Assert.That(actual.Environment, Is.EqualTo(expected.Environment));
+                Assert.That(actual.Version, Is.EqualTo(expected.Version));
+                Assert.That(actual.EncodingHash, Is.EqualTo(expected.EncodingHash));
+                Assert.That(actual.CapacityHash, Is.EqualTo(expected.CapacityHash));
+                Assert.That(roundTripped.TacticalV3.StartProfiles.Select(profile =>
+                    $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}"),
+                    Is.EqualTo(profiles.Select(profile =>
+                        $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}")));
+                Assert.That(roundTripped.TacticalV3.StartDistribution.Select(weight =>
+                    $"{weight.ProfileId}:{weight.BasisPoints}"),
+                    Is.EqualTo(weights.Select(weight => $"{weight.ProfileId}:{weight.BasisPoints}")));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(originalObject);
+                UnityEngine.Object.DestroyImmediate(restoredObject);
+            }
+        }
+
+        [Test]
+        public void DriverProfiledScenarioMatrix_SurvivesUnitySerialization()
+        {
+            TacticalV2StartProfile[] profiles = TacticalV2StartCatalog.ProfiledSeededV1().ToArray();
+            TacticalV2StartWeight[] weights =
+            {
+                new TacticalV2StartWeight("standard-3v3", 7000),
+                new TacticalV2StartWeight("conversion-3v1-near", 0),
+                new TacticalV2StartWeight("conversion-3v1-medium", 0),
+                new TacticalV2StartWeight("conversion-3v1-far", 0),
+                new TacticalV2StartWeight("conversion-2v1-near", 0),
+                new TacticalV2StartWeight("conversion-2v1-medium", 0),
+                new TacticalV2StartWeight("conversion-2v1-far", 0),
+                new TacticalV2StartWeight("conversion-1v1-near", 0),
+                new TacticalV2StartWeight("conversion-1v1-medium", 0),
+                new TacticalV2StartWeight("conversion-1v1-far", 3000),
+            };
+            TrainingScenario tacticalV1 = TrainingScenario.CreateStandard("tactical-v1", "round-trip-tactical-v1");
+            TrainingScenario adaptiveV1 = TrainingScenario.CreateStandard("adaptive-v1", "round-trip-adaptive-v1");
+            TrainingScenario tacticalV2 = TrainingScenario.CreateStandard("tactical-v2", "round-trip-tactical-v2");
+            tacticalV2.TacticalV2.PlacementPolicy = "profiled-seeded-v1";
+            tacticalV2.TacticalV2.StartProfiles = profiles.ToList();
+            tacticalV2.TacticalV2.StartDistribution = weights.ToList();
+            TrainingScenario tacticalV3 = TrainingScenario.CreateStandard("tactical-v3", "round-trip-tactical-v3");
+            tacticalV3.TacticalV3.PlacementPolicy = "profiled-seeded-v1";
+            tacticalV3.TacticalV3.StartProfiles = profiles.ToList();
+            tacticalV3.TacticalV3.StartDistribution = weights.ToList();
+            var cases = new[]
+            {
+                new { Environment = MlEnvironmentContract.TacticalV1, Scenario = tacticalV1 },
+                new { Environment = MlEnvironmentContract.AdaptiveV1, Scenario = adaptiveV1 },
+                new { Environment = MlEnvironmentContract.TacticalV2, Scenario = tacticalV2 },
+                new { Environment = MlEnvironmentContract.TacticalV3, Scenario = tacticalV3 },
+            };
+            ModelDuelContractIdentity[] expectedContracts = cases
+                .Select(item => ModelDuelEnvironmentFactory.ContractIdentity(item.Scenario))
+                .ToArray();
+            var originalObject = new GameObject("original-profiled-driver");
+            var restoredObject = new GameObject("restored-profiled-driver");
+            try
+            {
+                var original = originalObject.AddComponent<ModelDuelDriver>();
+                original.ConfigureLaunchState(null, new MlPresentationSchedule
+                {
+                    Games = cases.Select((item, index) => new MlPresentationGame(
+                        "greedy", "random", index % 2, ModelDuelObserverSeat.Player1,
+                        item.Scenario.Name, item.Scenario)).ToArray(),
+                });
+
+                string json = EditorJsonUtility.ToJson(original);
+                var restored = restoredObject.AddComponent<ModelDuelDriver>();
+                EditorJsonUtility.FromJsonOverwrite(json, restored);
+                InvokePrivate(restored, "RestoreLaunchState");
+
+                Assert.That(restored.PresentationPlan.Games, Has.Length.EqualTo(cases.Length));
+                for (int index = 0; index < cases.Length; index++)
+                {
+                    restored.Environment = cases[index].Environment;
+                    restored.Scenario = restored.NextPresentationGame(index).Scenario;
+                    TrainingScenario roundTripped = restored.ResolveScenario();
+                    ModelDuelContractIdentity expected = expectedContracts[index];
+                    ModelDuelContractIdentity actual =
+                        ModelDuelEnvironmentFactory.ContractIdentity(roundTripped);
+
+                    Assert.That(roundTripped.Id, Is.EqualTo(cases[index].Scenario.Id));
+                    Assert.That(roundTripped.Environment,
+                        Is.EqualTo(MlEnvironmentContracts.CliValue(cases[index].Environment)));
+                    Assert.That(actual.Environment, Is.EqualTo(expected.Environment));
+                    Assert.That(actual.Version, Is.EqualTo(expected.Version));
+                    Assert.That(actual.EncodingHash, Is.EqualTo(expected.EncodingHash));
+                    Assert.That(actual.CapacityHash, Is.EqualTo(expected.CapacityHash));
+
+                    if (cases[index].Environment == MlEnvironmentContract.TacticalV2)
+                    {
+                        Assert.That(roundTripped.TacticalV2.StartProfiles.Select(profile =>
+                            $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}"),
+                            Is.EqualTo(profiles.Select(profile =>
+                                $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}")));
+                        Assert.That(roundTripped.TacticalV2.StartDistribution.Select(weight =>
+                            $"{weight.ProfileId}:{weight.BasisPoints}"),
+                            Is.EqualTo(weights.Select(weight => $"{weight.ProfileId}:{weight.BasisPoints}")));
+                    }
+                    if (cases[index].Environment == MlEnvironmentContract.TacticalV3)
+                    {
+                        Assert.That(roundTripped.TacticalV3.StartProfiles.Select(profile =>
+                            $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}"),
+                            Is.EqualTo(profiles.Select(profile =>
+                                $"{profile.Id}:{profile.LearnerUnitCount}:{profile.OpponentUnitCount}:{profile.Separation}")));
+                        Assert.That(roundTripped.TacticalV3.StartDistribution.Select(weight =>
+                            $"{weight.ProfileId}:{weight.BasisPoints}"),
+                            Is.EqualTo(weights.Select(weight => $"{weight.ProfileId}:{weight.BasisPoints}")));
+                    }
+                }
             }
             finally
             {

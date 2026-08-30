@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using UnityEngine;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -145,6 +147,35 @@ namespace HexWars.Presentation
     [RequireComponent(typeof(ModelArenaIdentityOverlay))]
     public sealed class ModelDuelDriver : MonoBehaviour
     {
+        const int LaunchStateSnapshotVersion = 1;
+
+        static readonly JsonSerializerSettings LaunchStateJsonSettings =
+            new JsonSerializerSettings
+            {
+                Culture = CultureInfo.InvariantCulture,
+                CheckAdditionalContent = true,
+                DateParseHandling = DateParseHandling.None,
+                FloatParseHandling = FloatParseHandling.Double,
+                MaxDepth = 128,
+                MetadataPropertyHandling = MetadataPropertyHandling.Ignore,
+                MissingMemberHandling = MissingMemberHandling.Error,
+                ObjectCreationHandling = ObjectCreationHandling.Replace,
+                TypeNameHandling = TypeNameHandling.None,
+            };
+
+        [JsonObject(MemberSerialization.OptIn)]
+        sealed class LaunchStateSnapshot
+        {
+            [JsonProperty("version", Required = Required.Always)]
+            public int Version;
+
+            [JsonProperty("scenario", Required = Required.AllowNull)]
+            public TrainingScenario Scenario;
+
+            [JsonProperty("presentation_plan", Required = Required.AllowNull)]
+            public MlPresentationSchedule PresentationPlan;
+        }
+
         public string PythonExe;
         public string ServerScript;
         public string WorkingDir;
@@ -155,7 +186,10 @@ namespace HexWars.Presentation
         /// <summary>Spec §"Fog-of-War Indicator" (amended 2026-07-25): the single on/off toggle for the
         /// acting-player fog marking. Default on — the marking is the point of watching a fog run.</summary>
         public bool ShowFogMarking = true;
+        [SerializeReference]
         public MlPresentationSchedule PresentationPlan;
+        [SerializeField, HideInInspector]
+        string _launchStateSnapshot = string.Empty;
         // Removed dead ModelDuelDriver.Observer/ObserverPlayer (Task C review carry): omniscient
         // presentation always passes viewer: null (RenderEntities/InitializeBoard), so the field had no
         // remaining reader besides one test. ModelDuelObserverSeat/ModelDuelObserver.Resolve, and the
@@ -222,6 +256,49 @@ namespace HexWars.Presentation
         public MlPresentationGame NextPresentationGame(int gamesPlayed) =>
             PresentationPlan?.NextPresentationGame(gamesPlayed);
 
+        public void ConfigureLaunchState(
+            TrainingScenario scenario,
+            MlPresentationSchedule presentationPlan)
+        {
+            string snapshot = PolicyJson.Serialize(new LaunchStateSnapshot
+            {
+                Version = LaunchStateSnapshotVersion,
+                Scenario = scenario,
+                PresentationPlan = presentationPlan,
+            });
+            Scenario = scenario;
+            PresentationPlan = presentationPlan;
+            _launchStateSnapshot = snapshot;
+        }
+
+        void RestoreLaunchState()
+        {
+            if (string.IsNullOrWhiteSpace(_launchStateSnapshot)) return;
+
+            LaunchStateSnapshot snapshot;
+            try
+            {
+                snapshot = JsonConvert.DeserializeObject<LaunchStateSnapshot>(
+                    _launchStateSnapshot, LaunchStateJsonSettings);
+                if (snapshot == null)
+                    throw new JsonSerializationException(
+                        "arena launch-state snapshot is empty");
+            }
+            catch (JsonException error)
+            {
+                throw new InvalidOperationException(
+                    "arena launch-state snapshot could not be restored: " +
+                    error.Message, error);
+            }
+            if (snapshot.Version != LaunchStateSnapshotVersion)
+                throw new InvalidOperationException(
+                    "unsupported arena launch-state snapshot version " +
+                    snapshot.Version);
+
+            Scenario = snapshot.Scenario;
+            PresentationPlan = snapshot.PresentationPlan;
+        }
+
         public static bool ShouldReconfigure(
             MlPresentationGame previous,
             MlPresentationGame next,
@@ -257,6 +334,7 @@ namespace HexWars.Presentation
         {
             try
             {
+                RestoreLaunchState();
                 _activePresentationGame = NextPresentationGame(0);
                 if (_activePresentationGame != null)
                     ApplyPresentationGame(_activePresentationGame);
