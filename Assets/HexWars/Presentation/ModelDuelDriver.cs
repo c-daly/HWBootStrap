@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using UnityEngine;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
@@ -141,9 +144,39 @@ namespace HexWars.Presentation
     }
 
     [RequireComponent(typeof(BoardRenderer))]
+    [RequireComponent(typeof(EventConsole))]
     [RequireComponent(typeof(ModelArenaIdentityOverlay))]
     public sealed class ModelDuelDriver : MonoBehaviour
     {
+        const int LaunchStateSnapshotVersion = 1;
+
+        static readonly JsonSerializerSettings LaunchStateJsonSettings =
+            new JsonSerializerSettings
+            {
+                Culture = CultureInfo.InvariantCulture,
+                CheckAdditionalContent = true,
+                DateParseHandling = DateParseHandling.None,
+                FloatParseHandling = FloatParseHandling.Double,
+                MaxDepth = 128,
+                MetadataPropertyHandling = MetadataPropertyHandling.Ignore,
+                MissingMemberHandling = MissingMemberHandling.Error,
+                ObjectCreationHandling = ObjectCreationHandling.Replace,
+                TypeNameHandling = TypeNameHandling.None,
+            };
+
+        [JsonObject(MemberSerialization.OptIn)]
+        sealed class LaunchStateSnapshot
+        {
+            [JsonProperty("version", Required = Required.Always)]
+            public int Version;
+
+            [JsonProperty("scenario", Required = Required.AllowNull)]
+            public TrainingScenario Scenario;
+
+            [JsonProperty("presentation_plan", Required = Required.AllowNull)]
+            public MlPresentationSchedule PresentationPlan;
+        }
+
         public string PythonExe;
         public string ServerScript;
         public string WorkingDir;
@@ -154,7 +187,10 @@ namespace HexWars.Presentation
         /// <summary>Spec §"Fog-of-War Indicator" (amended 2026-07-25): the single on/off toggle for the
         /// acting-player fog marking. Default on — the marking is the point of watching a fog run.</summary>
         public bool ShowFogMarking = true;
+        [SerializeReference]
         public MlPresentationSchedule PresentationPlan;
+        [SerializeField, HideInInspector]
+        string _launchStateSnapshot = string.Empty;
         // Removed dead ModelDuelDriver.Observer/ObserverPlayer (Task C review carry): omniscient
         // presentation always passes viewer: null (RenderEntities/InitializeBoard), so the field had no
         // remaining reader besides one test. ModelDuelObserverSeat/ModelDuelObserver.Resolve, and the
@@ -201,6 +237,7 @@ namespace HexWars.Presentation
             : Array.Empty<HexCoord>();
         public bool ShouldShowArenaOverlays => Environment == MlEnvironmentContract.TacticalV1
             || Environment == MlEnvironmentContract.TacticalV2
+            || Environment == MlEnvironmentContract.TacticalV3
             || (_duel != null && _view.DeploymentComplete);
         public PolicySeatInfo P0Resolved => _bridge?.Seat0;
         public PolicySeatInfo P1Resolved => _bridge?.Seat1;
@@ -219,6 +256,49 @@ namespace HexWars.Presentation
 
         public MlPresentationGame NextPresentationGame(int gamesPlayed) =>
             PresentationPlan?.NextPresentationGame(gamesPlayed);
+
+        public void ConfigureLaunchState(
+            TrainingScenario scenario,
+            MlPresentationSchedule presentationPlan)
+        {
+            string snapshot = PolicyJson.Serialize(new LaunchStateSnapshot
+            {
+                Version = LaunchStateSnapshotVersion,
+                Scenario = scenario,
+                PresentationPlan = presentationPlan,
+            });
+            Scenario = scenario;
+            PresentationPlan = presentationPlan;
+            _launchStateSnapshot = snapshot;
+        }
+
+        void RestoreLaunchState()
+        {
+            if (string.IsNullOrWhiteSpace(_launchStateSnapshot)) return;
+
+            LaunchStateSnapshot snapshot;
+            try
+            {
+                snapshot = JsonConvert.DeserializeObject<LaunchStateSnapshot>(
+                    _launchStateSnapshot, LaunchStateJsonSettings);
+                if (snapshot == null)
+                    throw new JsonSerializationException(
+                        "arena launch-state snapshot is empty");
+            }
+            catch (JsonException error)
+            {
+                throw new InvalidOperationException(
+                    "arena launch-state snapshot could not be restored: " +
+                    error.Message, error);
+            }
+            if (snapshot.Version != LaunchStateSnapshotVersion)
+                throw new InvalidOperationException(
+                    "unsupported arena launch-state snapshot version " +
+                    snapshot.Version);
+
+            Scenario = snapshot.Scenario;
+            PresentationPlan = snapshot.PresentationPlan;
+        }
 
         public static bool ShouldReconfigure(
             MlPresentationGame previous,
@@ -255,6 +335,7 @@ namespace HexWars.Presentation
         {
             try
             {
+                RestoreLaunchState();
                 _activePresentationGame = NextPresentationGame(0);
                 if (_activePresentationGame != null)
                     ApplyPresentationGame(_activePresentationGame);
@@ -296,16 +377,29 @@ namespace HexWars.Presentation
                 scenario.AdaptiveReward = null;
                 scenario.Adaptive = null;
                 scenario.TacticalV2 = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
             }
             else if (scenario.Environment == MlContract.AdaptiveVersion)
             {
                 scenario.TacticalReward = null;
                 scenario.TacticalV2 = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
             }
             else if (scenario.Environment == MlContract.TacticalV2Version)
             {
                 scenario.AdaptiveReward = null;
                 scenario.Adaptive = null;
+                scenario.TacticalV3Reward = null;
+                scenario.TacticalV3 = null;
+            }
+            else if (scenario.Environment == MlContract.TacticalV3Version)
+            {
+                scenario.AdaptiveReward = null;
+                scenario.Adaptive = null;
+                scenario.TacticalReward = null;
+                scenario.TacticalV2 = null;
             }
             IReadOnlyList<string> errors = scenario.Validate();
             if (errors.Count > 0)
@@ -365,8 +459,32 @@ namespace HexWars.Presentation
             if (!seatIsModel) { _done = true; return; }
             try
             {
-                int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
-                _view = _duel.Step(action);
+                if (_duel is IStructuredModelDuelEnvironment structured)
+                {
+                    TacticalV3View decision = _view.StructuredDecision ??
+                        throw new InvalidOperationException(
+                            "structured environment did not expose a tactical-v3 decision");
+                    TacticalV3ViewDto payload = TacticalV3PolicyPayload.From(decision);
+                    PolicyCandidateResult selected =
+                        _bridge.ActStructured(seat, payload);
+                    int matches = decision.Decision.Candidates.Count(candidate =>
+                        candidate.DecisionId == selected.DecisionId &&
+                        candidate.CandidateId == selected.CandidateId);
+                    if (matches != 1)
+                        throw new InvalidOperationException(
+                            "structured policy selected an unknown candidate identity");
+                    _view = structured.Step(
+                        selected.DecisionId, selected.CandidateId);
+                }
+                else
+                {
+                    var legacy = _duel as ILegacyModelDuelEnvironment ??
+                        throw new InvalidOperationException(
+                            "environment exposes neither structured nor legacy stepping");
+                    int action = _bridge.Act(
+                        seat, _view.Observation, _view.ActionMask);
+                    _view = legacy.Step(action);
+                }
                 HandlePresentation();
             }
             catch (Exception error)
@@ -620,6 +738,7 @@ namespace HexWars.Presentation
                 _contractIdentity.Environment,
                 _contractIdentity.Version,
                 _contractIdentity.EncodingHash,
+                _contractIdentity.CapacityHash,
                 PolicyBridge.DefaultStartupTimeoutMs,
                 _startupCancellation.Token);
             IsStarting = false;
@@ -652,6 +771,8 @@ namespace HexWars.Presentation
                 ? MlEnvironmentContract.AdaptiveV1
                 : game.Scenario.Environment == MlContract.TacticalV2Version
                     ? MlEnvironmentContract.TacticalV2
+                    : game.Scenario.Environment == MlContract.TacticalV3Version
+                        ? MlEnvironmentContract.TacticalV3
                     : MlEnvironmentContract.TacticalV1;
         }
 

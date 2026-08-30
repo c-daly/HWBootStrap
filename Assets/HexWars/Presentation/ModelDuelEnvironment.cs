@@ -14,6 +14,7 @@ namespace HexWars.Presentation
         public readonly bool Terminated;
         public readonly bool Truncated;
         public readonly bool DeploymentComplete;
+        public readonly TacticalV3View StructuredDecision;
 
         public ModelDuelView(float[] observation, bool[] actionMask, int seat, int winner,
             bool terminated, bool truncated, bool deploymentComplete)
@@ -25,13 +26,27 @@ namespace HexWars.Presentation
             Terminated = terminated;
             Truncated = truncated;
             DeploymentComplete = deploymentComplete;
+            StructuredDecision = null;
+        }
+
+        public ModelDuelView(TacticalV3View decision)
+        {
+            if (decision == null) throw new ArgumentNullException(nameof(decision));
+            Observation = null;
+            ActionMask = null;
+            Seat = (int)decision.Seat;
+            Winner = decision.Winner;
+            Terminated = decision.Terminated;
+            Truncated = decision.Truncated;
+            DeploymentComplete = true;
+            StructuredDecision = decision;
         }
     }
 
     public interface IModelDuelEnvironment
     {
         MlEnvironmentContract Environment { get; }
-        MlContract Contract { get; }
+        ModelDuelContractIdentity ContractIdentity { get; }
         GameState CurrentState { get; }
         bool RequiresContinuation { get; }
 
@@ -41,12 +56,23 @@ namespace HexWars.Presentation
         bool CaptureTransitions { get; set; }
 
         ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1);
-        ModelDuelView Step(int action);
         ModelDuelView Continue();
 
-        /// <summary>Every accepted-command transition since the last drain (or Reset), in order, then
-        /// clears the queue. See <see cref="DuelTransition"/>.</summary>
+        /// <summary>Every captured accepted-command transition since the last drain (or Reset), in
+        /// order. Draining advances a presentation cursor without removing replay history.</summary>
         IReadOnlyList<DuelTransition> DrainTransitions();
+    }
+
+    public interface ILegacyModelDuelEnvironment : IModelDuelEnvironment
+    {
+        MlContract Contract { get; }
+        ModelDuelView Step(int action);
+    }
+
+    public interface IStructuredModelDuelEnvironment : IModelDuelEnvironment
+    {
+        TacticalV3Contract StructuredContract { get; }
+        ModelDuelView Step(long decisionId, int candidateId);
     }
 
     public static class ModelDuelEnvironmentFactory
@@ -64,8 +90,10 @@ namespace HexWars.Presentation
                 return new TacticalModelDuelEnvironment(scenario.BuildTactical());
             if (scenario.Environment == MlContract.TacticalV2Version)
                 return new TacticalV2ModelDuelEnvironment(scenario.BuildTacticalV2());
+            if (scenario.Environment == MlContract.TacticalV3Version)
+                return new TacticalV3ModelDuelEnvironment(scenario.BuildTacticalV3());
             throw new ArgumentException(
-                "scenario environment must be tactical-v1, tactical-v2, or adaptive-v1",
+                "scenario environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1",
                 nameof(scenario));
         }
 
@@ -78,10 +106,7 @@ namespace HexWars.Presentation
         public static ModelDuelContractIdentity ContractIdentity(TrainingScenario scenario)
         {
             var duel = Create(scenario);
-            return new ModelDuelContractIdentity(
-                scenario.Environment,
-                duel.Contract.Version,
-                duel.Contract.EncodingHash);
+            return duel.ContractIdentity;
         }
     }
 
@@ -100,6 +125,7 @@ namespace HexWars.Presentation
         public bool ShouldRender(bool deploymentComplete) =>
             _environment == MlEnvironmentContract.TacticalV1 ||
             _environment == MlEnvironmentContract.TacticalV2 ||
+            _environment == MlEnvironmentContract.TacticalV3 ||
             deploymentComplete;
 
         public ModelDuelRenderDirective Next(bool deploymentComplete)
@@ -148,10 +174,19 @@ namespace HexWars.Presentation
             else if (!string.Equals(info.EncodingHash, expected.EncodingHash, StringComparison.Ordinal))
                 errors.Add(label + " encoding hash " + info.EncodingHash +
                     " does not match expected " + expected.EncodingHash + ".");
+            if (!string.IsNullOrWhiteSpace(expected.CapacityHash))
+            {
+                if (string.IsNullOrWhiteSpace(info.CapacityHash))
+                    errors.Add(label + " model metadata is missing capacity_hash.");
+                else if (!string.Equals(
+                    info.CapacityHash, expected.CapacityHash, StringComparison.Ordinal))
+                    errors.Add(label + " capacity hash " + info.CapacityHash +
+                        " does not match expected " + expected.CapacityHash + ".");
+            }
         }
     }
 
-    sealed class TacticalModelDuelEnvironment : IModelDuelEnvironment
+    sealed class TacticalModelDuelEnvironment : ILegacyModelDuelEnvironment
     {
         readonly DuelEnv _environment;
 
@@ -160,10 +195,13 @@ namespace HexWars.Presentation
             if (config == null) throw new ArgumentNullException(nameof(config));
             _environment = new DuelEnv(config);
             Contract = MlContract.Create(config, MlEnvironmentKind.Duel);
+            ContractIdentity = new ModelDuelContractIdentity(
+                Contract.Version, Contract.Version, Contract.EncodingHash);
         }
 
         public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV1;
         public MlContract Contract { get; }
+        public ModelDuelContractIdentity ContractIdentity { get; }
         public GameState CurrentState => _environment.State;
         public bool RequiresContinuation => false;
 
@@ -192,7 +230,7 @@ namespace HexWars.Presentation
     /// no hidden deployment phase (rosters are snapshotted and placement is automatic/symmetric), so —
     /// like <see cref="TacticalModelDuelEnvironment"/> — it is immediately renderable from the first
     /// reset and never requires an external continuation.</summary>
-    sealed class TacticalV2ModelDuelEnvironment : IModelDuelEnvironment
+    sealed class TacticalV2ModelDuelEnvironment : ILegacyModelDuelEnvironment
     {
         readonly TacticalV2DuelEnv _environment;
 
@@ -201,10 +239,13 @@ namespace HexWars.Presentation
             if (config == null) throw new ArgumentNullException(nameof(config));
             _environment = new TacticalV2DuelEnv(config);
             Contract = MlContract.CreateTacticalV2(config, MlEnvironmentKind.Duel);
+            ContractIdentity = new ModelDuelContractIdentity(
+                Contract.Version, Contract.Version, Contract.EncodingHash);
         }
 
         public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV2;
         public MlContract Contract { get; }
+        public ModelDuelContractIdentity ContractIdentity { get; }
         public GameState CurrentState => _environment.State;
         public bool RequiresContinuation => false;
 
@@ -230,7 +271,7 @@ namespace HexWars.Presentation
             view.Terminated, view.Truncated, deploymentComplete: true);
     }
 
-    sealed class AdaptiveModelDuelEnvironment : IModelDuelEnvironment
+    sealed class AdaptiveModelDuelEnvironment : ILegacyModelDuelEnvironment
     {
         readonly AdaptiveDuelEnv _environment;
 
@@ -242,6 +283,8 @@ namespace HexWars.Presentation
 
         public MlEnvironmentContract Environment => MlEnvironmentContract.AdaptiveV1;
         public MlContract Contract => _environment.Contract;
+        public ModelDuelContractIdentity ContractIdentity => new ModelDuelContractIdentity(
+            Contract.Version, Contract.Version, Contract.EncodingHash);
         public GameState CurrentState => _environment.DeploymentComplete ? _environment.State : null;
         public bool RequiresContinuation => _environment.AwaitingPostRevealAdvance;
 
@@ -270,5 +313,59 @@ namespace HexWars.Presentation
         static ModelDuelView Convert(AdaptiveDuelEnv.View view) => new ModelDuelView(
             view.Observation, view.ActionMask, view.Seat, view.Winner,
             view.Terminated, view.Truncated, view.DeploymentComplete);
+    }
+
+    sealed class TacticalV3ModelDuelEnvironment : IStructuredModelDuelEnvironment
+    {
+        readonly TacticalV3DuelEnv _environment;
+
+        public TacticalV3ModelDuelEnvironment(TacticalV3Config config)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            _environment = new TacticalV3DuelEnv(config);
+            StructuredContract = TacticalV3Contract.Create(config, MlEnvironmentKind.Duel);
+            ContractIdentity = new ModelDuelContractIdentity(
+                StructuredContract.Version,
+                StructuredContract.Version,
+                StructuredContract.EncodingHash,
+                StructuredContract.CapacityHash);
+        }
+
+        public MlEnvironmentContract Environment => MlEnvironmentContract.TacticalV3;
+        public TacticalV3Contract StructuredContract { get; }
+        public ModelDuelContractIdentity ContractIdentity { get; }
+        public GameState CurrentState => _environment.State;
+        public bool RequiresContinuation => false;
+        public bool CaptureTransitions { get; set; }
+
+        public ModelDuelView Reset(int seed, IAgent controller0, IAgent controller1)
+        {
+            ModelDuelView view = new ModelDuelView(_environment.Reset(
+                seed, controller0, controller1, PlayerId.Player0));
+            DiscardUncapturedTransitions();
+            return view;
+        }
+
+        public ModelDuelView Step(long decisionId, int candidateId)
+        {
+            ModelDuelView view =
+                new ModelDuelView(_environment.Step(decisionId, candidateId));
+            DiscardUncapturedTransitions();
+            return view;
+        }
+
+        public ModelDuelView Step(int action) => throw new InvalidOperationException(
+            "tactical-v3 requires decision and candidate identity stepping");
+
+        public ModelDuelView Continue() => throw new InvalidOperationException(
+            "the tactical-v3 environment has no pending continuation");
+
+        public IReadOnlyList<DuelTransition> DrainTransitions() =>
+            _environment.DrainTransitions();
+
+        void DiscardUncapturedTransitions()
+        {
+            if (!CaptureTransitions) _environment.DrainTransitions();
+        }
     }
 }

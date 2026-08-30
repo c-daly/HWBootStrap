@@ -48,7 +48,7 @@ namespace HexWars.Presentation
         [Header("Opponent")]
         [Tooltip("On = Player 2 is played by the AI; you play Player 1. (How a vs-AI game starts in a build.)")]
         public bool VsAI = false;
-        [Tooltip("Easy = Random, Hard = Greedy (challenging).")]
+        [Tooltip("Greedy is built in. Trained Model uses the selected fixed tactical-v3 package through the local Python policy server.")]
         public AiLevel Difficulty = AiLevel.Hard;
 
         [Header("Demo")]
@@ -122,6 +122,8 @@ namespace HexWars.Presentation
 
             // damageFloor 1 matches GameFactory (the lobby path): a landed hit always deals at least 1,
             // so an attacker with damage > 0 never "does nothing" against high defense
+            bool trainedModelRules = VsAI && Difficulty == AiLevel.TrainedModel &&
+                                     !TerritoryMode && !FogOfWar;
             var config = TerritoryMode
                 ? GameConfig.Default(biomesEnabled: BiomesEnabled,
                                      turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
@@ -130,7 +132,9 @@ namespace HexWars.Presentation
                                      territoryMode: true, damageFloor: 1, fogOfWar: FogOfWar)
                 : GameConfig.Default(biomesEnabled: BiomesEnabled,
                                      turnPolicy: OneActionPerTurn ? new OneActionPolicy() : null,
-                                     damageFloor: 1, fogOfWar: FogOfWar);
+                                     damageFloor: 1, fogOfWar: FogOfWar,
+                                     captureCost: trainedModelRules ? int.MaxValue : 3,
+                                     generatorsEnabled: !trainedModelRules);
             var genConfig = new BoardGenConfig(Width, Height, MaxElevation, ZoneDepth, FlatChance,
                                                PlainsWeight, ForestWeight, RoughWeight, WaterWeight);
             var board = new RandomBoardGenerator(genConfig).Generate(Seed);
@@ -157,8 +161,6 @@ namespace HexWars.Presentation
             var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
 
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer()); // seed the scoreboard at game start
             StateChanged?.Invoke();
         }
 
@@ -173,6 +175,17 @@ namespace HexWars.Presentation
                 return true; // the server validates and echoes APPLY (or REJECT) — state updates there
             }
 
+            var trainedOpponent = GetComponent<AiOpponent>();
+            if (trainedOpponent != null &&
+                trainedOpponent.Level == AiLevel.TrainedModel &&
+                !PlayableModelAdapter.PreservesCapacity(State, cmd, out string capacityReason))
+            {
+                Debug.Log("[HexWars] " + cmd.GetType().Name +
+                          " rejected: " + capacityReason);
+                if (!DemoMode) Toast.Show(capacityReason);
+                return false;
+            }
+
             var result = GameEngine.Apply(State, cmd);
             if (!result.Success)
             {
@@ -183,7 +196,6 @@ namespace HexWars.Presentation
             var prev = State;
             State = result.NewState;
             UpdateSessionBarracks(cmd);
-            if (!DemoMode) EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()), FogViewer());
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             if (!DemoMode) CheckFirstBounty(prev, cmd);
             StateChanged?.Invoke();
@@ -237,21 +249,28 @@ namespace HexWars.Presentation
         /// Used by the lobby's vs-AI option.</summary>
         public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Hard)
         {
-            EndDemo();
-            TipsService.NewGame();
-            Presenter?.ResetQueue();
-            Networked = false; // play locally — TryApply applies here instead of going to the server
             var p0Barracks = SessionBarracksCache.ForLocalPlayer(0).Snapshot();
             var p1Barracks = vsAi
                 ? BarracksCatalog.DefaultTemplates
                 : SessionBarracksCache.ForLocalPlayer(1).Snapshot();
-            State = GameFactory.Build(setup, p0Barracks, p1Barracks);
+            GameState nextState = vsAi && level == AiLevel.TrainedModel
+                ? GameFactory.BuildTacticalV3Compatible(
+                    setup, p0Barracks, p1Barracks)
+                : GameFactory.Build(setup, p0Barracks, p1Barracks);
+            if (vsAi && level == AiLevel.TrainedModel)
+                _ = new PlayableModelAdapter(nextState, PlayerId.Player1);
+
+            // Do not tear down the title demo or publish a partial match until every model-specific
+            // rule/table capacity has passed the exact observation preflight above.
+            EndDemo();
+            TipsService.NewGame();
+            Presenter?.ResetQueue();
+            Networked = false; // play locally — TryApply applies here instead of going to the server
+            State = nextState;
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer());
             StateChanged?.Invoke();
             SoundManager.StartAmbience();
             if (vsAi)
@@ -307,7 +326,6 @@ namespace HexWars.Presentation
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
             if (GetComponent<SpectatorDriver>() == null) gameObject.AddComponent<SpectatorDriver>();
             StateChanged?.Invoke();
         }
@@ -479,8 +497,6 @@ namespace HexWars.Presentation
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer());
             StateChanged?.Invoke();
             SoundManager.StartAmbience();
         }
@@ -492,7 +508,6 @@ namespace HexWars.Presentation
             if (!result.Success) { Debug.LogWarning("[Net] server move rejected locally: " + result.Reason); return; }
             var prev = State;
             State = result.NewState;
-            EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()), FogViewer());
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             CheckFirstBounty(prev, cmd);
             if ((cmd is CreateUnit || cmd is DeleteTemplate) && IsLocalCommand(cmd))

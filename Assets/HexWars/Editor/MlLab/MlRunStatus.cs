@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
@@ -232,7 +233,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public static string[] ReadTail(string runDirectory, int maxLines)
         {
             if (string.IsNullOrWhiteSpace(runDirectory) || maxLines <= 0) return Array.Empty<string>();
-            return MlSharedFileSnapshot.ReadTail(Path.Combine(runDirectory, "train.log"), maxLines);
+            string[] training = MlSharedFileSnapshot.ReadTail(
+                Path.Combine(runDirectory, "train.log"), maxLines);
+            string[] errors = MlSharedFileSnapshot.ReadTail(
+                Path.Combine(runDirectory, "train-err.log"), maxLines);
+            if (errors.Length == 0) return training;
+            return training.Concat(errors.Select(line => "[stderr] " + line))
+                .TakeLast(maxLines).ToArray();
         }
     }
 

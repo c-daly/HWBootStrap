@@ -50,6 +50,80 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Library_ContainsTacticalV3StandardAndFullRosterTemplates()
+        {
+            var library = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath);
+            MlTrainingScenario[] actual = library
+                .Filter(MlEnvironmentContract.TacticalV3)
+                .ToArray();
+            MlTrainingScenario expectedFullRoster = MlTrainingScenarioFile.Load(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            expectedFullRoster.Id = "tactical-v3-full-roster";
+            expectedFullRoster.Name = "Full Roster";
+
+            string actualFullRosterPath = MlTrainingScenarioStore.WriteSessionScenario(
+                Path.Combine(_scratch, "actual-full-roster"), actual[1]);
+            string expectedFullRosterPath = MlTrainingScenarioStore.WriteSessionScenario(
+                Path.Combine(_scratch, "expected-full-roster"), expectedFullRoster);
+            MlTrainingScenarioPreflight standardPreflight =
+                MlTrainingScenarioPreflight.Create(actual[0]);
+
+            Assert.That(actual.Select(item => item.Id), Is.EqualTo(new[]
+            {
+                "tactical-v3-standard",
+                "tactical-v3-full-roster",
+            }));
+            Assert.That(actual.Select(item => item.Name), Is.EqualTo(new[]
+            {
+                "Standard",
+                "Full Roster",
+            }));
+            Assert.That(actual[0].TacticalV3.Templates, Has.Count.EqualTo(3));
+            Assert.That(actual[0].TacticalV3.Templates.Select(item => item.Id),
+                Is.EqualTo(new[] { "custom-a", "custom-b", "custom-c" }));
+            Assert.That(actual[1].TacticalV3.Templates, Has.Count.EqualTo(5));
+            Assert.That(actual[0].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(actual[1].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(standardPreflight.ContractHash, Is.EqualTo(
+                "0848a3149afc5b6b1d4bd059d1829e32642e162523dc7c48c62c48fba8ff289e"));
+            Assert.That(standardPreflight.ContractIdentity.EncodingHash, Is.EqualTo(
+                "e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"));
+            Assert.That(standardPreflight.ContractIdentity.CapacityHash, Is.EqualTo(
+                "7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364"));
+            Assert.That(File.ReadAllText(actualFullRosterPath),
+                Is.EqualTo(File.ReadAllText(expectedFullRosterPath)));
+        }
+
+        [Test]
+        public void LibrarySession_SelectsAndRoundTripsTacticalV3Standard()
+        {
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+
+            session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+            MlTrainingScenarioPreflight before =
+                MlTrainingScenarioPreflight.Create(session.WorkingCopy);
+            string path = MlTrainingScenarioStore.WriteSessionScenario(
+                _projectRoot, session.WorkingCopy);
+            MlTrainingScenario reloaded = MlTrainingScenarioFile.Load(path);
+            MlTrainingScenarioPreflight after =
+                MlTrainingScenarioPreflight.Create(reloaded);
+
+            Assert.That(session.SelectedTemplateId,
+                Is.EqualTo("tactical-v3-standard"));
+            Assert.That(reloaded.Id, Is.EqualTo("tactical-v3-standard"));
+            Assert.That(reloaded.TacticalV3.Templates, Has.Count.EqualTo(3));
+            Assert.That(reloaded.TacticalV3.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(reloaded.TacticalV3.StartDistribution.Sum(
+                item => item.BasisPoints), Is.EqualTo(10000));
+            Assert.That(after.ContractHash, Is.EqualTo(before.ContractHash));
+            Assert.That(after.ContractIdentity.EncodingHash,
+                Is.EqualTo(before.ContractIdentity.EncodingHash));
+            Assert.That(after.ContractIdentity.CapacityHash,
+                Is.EqualTo(before.ContractIdentity.CapacityHash));
+        }
+
+        [Test]
         public void Validation_RejectsInvalidBoardRulesAndEpisodeBoundaries()
         {
             _scenario.Board.Width = 0;
@@ -82,6 +156,19 @@ namespace HexWars.Presentation.Tests
             string path = CopyLibrary(json =>
                 json.Replace("\"id\": \"adaptive-standard\"",
                     "\"id\": \"wrong-standard\""));
+
+            var error = Assert.Throws<InvalidDataException>(
+                () => MlTrainingScenarioLibrary.Load(path));
+
+            Assert.That(error.Message, Does.Contain("does not match its environment"));
+        }
+
+        [Test]
+        public void Library_RejectsUnversionedTacticalV3TemplateId()
+        {
+            string path = CopyLibrary(json =>
+                json.Replace("\"id\": \"tactical-v3-standard\"",
+                    "\"id\": \"tactical-unversioned\""));
 
             var error = Assert.Throws<InvalidDataException>(
                 () => MlTrainingScenarioLibrary.Load(path));
@@ -204,6 +291,34 @@ namespace HexWars.Presentation.Tests
                 () => MlTrainingScenarioStore.WriteSessionScenario(_projectRoot, _scenario));
             Assert.That(MlTrainingScenarioFile.Load(path).Board.Width, Is.EqualTo(13));
             Assert.That(_scenario.Board.Width, Is.Zero);
+        }
+
+        [Test]
+        public void LaunchWriter_UsesRunSpecificScenarioWithoutSharingStagingFile()
+        {
+            string first = MlTrainingScenarioStore.WriteLaunchScenario(
+                _projectRoot, "first-run", _scenario);
+            _scenario.Board.Width = 15;
+            string second = MlTrainingScenarioStore.WriteLaunchScenario(
+                _projectRoot, "second-run", _scenario);
+
+            Assert.That(first, Is.Not.EqualTo(second));
+            Assert.That(first, Does.EndWith(
+                Path.Combine("scenarios", "first-run.json")));
+            Assert.That(MlTrainingScenarioFile.Load(first).Board.Width,
+                Is.EqualTo(13));
+            Assert.That(MlTrainingScenarioFile.Load(second).Board.Width,
+                Is.EqualTo(15));
+        }
+
+        [TestCase("../escape")]
+        [TestCase("bad name")]
+        [TestCase("")]
+        public void LaunchWriter_RejectsUnsafeRunName(string runName)
+        {
+            Assert.Throws<ArgumentException>(() =>
+                MlTrainingScenarioStore.WriteLaunchScenario(
+                    _projectRoot, runName, _scenario));
         }
 
         [Test]
@@ -401,6 +516,132 @@ namespace HexWars.Presentation.Tests
             Assert.That(preflight.DisplayText, Does.Contain("Board 13\u00d79"));
         }
 
+        [Test]
+        public void TacticalV3Scenario_OracleLoadsStructuredPreflight()
+        {
+            string oracle = Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json");
+            MlTrainingScenario parsed = MlTrainingScenarioFile.Load(oracle);
+            string roundTrip = MlTrainingScenarioStore.WriteSessionScenario(
+                _projectRoot, parsed);
+            MlTrainingScenario reloaded = MlTrainingScenarioFile.Load(roundTrip);
+            var engine = MlTrainingScenarioPreflight.ToEngine(reloaded);
+            MlTrainingScenarioPreflight preflight = MlTrainingScenarioPreflight.Create(reloaded);
+
+            Assert.That(parsed.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV3));
+            Assert.That(reloaded.Board.Width, Is.EqualTo(parsed.Board.Width));
+            Assert.That(reloaded.Board.FlatChance, Is.EqualTo(parsed.Board.FlatChance));
+            Assert.That(reloaded.Rules.RoundCap, Is.EqualTo(parsed.Rules.RoundCap));
+            Assert.That(reloaded.Episode.MaxSteps, Is.EqualTo(parsed.Episode.MaxSteps));
+            Assert.That(reloaded.TacticalV3Reward.TerminalWin, Is.EqualTo(parsed.TacticalV3Reward.TerminalWin));
+            Assert.That(reloaded.TacticalV3Reward.TerminalNonWin, Is.EqualTo(parsed.TacticalV3Reward.TerminalNonWin));
+            Assert.That(reloaded.TacticalV3Reward.MaterialAdjustmentBound, Is.EqualTo(parsed.TacticalV3Reward.MaterialAdjustmentBound));
+            Assert.That(reloaded.TacticalV3Reward.TimePressureBound, Is.EqualTo(parsed.TacticalV3Reward.TimePressureBound));
+            Assert.That(reloaded.TacticalV3Reward.PointsWeight, Is.EqualTo(parsed.TacticalV3Reward.PointsWeight));
+            Assert.That(reloaded.TacticalV3.Capacity.MaxCells, Is.EqualTo(512));
+            Assert.That(reloaded.TacticalV3.Capacity.MaxCapabilityAllocations, Is.EqualTo(2048));
+            Assert.That(reloaded.TacticalV3.Capacity.MaxRelations, Is.EqualTo(65536));
+            Assert.That(reloaded.TacticalV3.Capacity.MaxCandidates, Is.EqualTo(32768));
+            Assert.That(reloaded.TacticalV3.Templates, Has.Count.EqualTo(5));
+            Assert.That(reloaded.TacticalV3.Templates[1].Stats.Damage, Is.EqualTo(6));
+            Assert.That(reloaded.TacticalV3.StartProfiles, Has.Count.EqualTo(10));
+            Assert.That(reloaded.TacticalV3.StartProfiles[1].Separation, Is.EqualTo("near"));
+            Assert.That(reloaded.TacticalV3.StartDistribution.Sum(item => item.BasisPoints), Is.EqualTo(10000));
+            Assert.That(engine.TacticalV3.Capacity.MaxCandidates, Is.EqualTo(32768));
+            Assert.That(engine.TacticalV3.Templates, Has.Count.EqualTo(5));
+            Assert.That(preflight.UsesStructuredCandidates, Is.True);
+            Assert.That(preflight.ObservationSize, Is.Null);
+            Assert.That(preflight.ActionSize, Is.Null);
+            Assert.That(preflight.ContractIdentity.CapacityHash, Has.Length.EqualTo(64));
+            Assert.That(preflight.DisplayText, Does.Contain("variable structured candidates"));
+            Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractHash));
+            Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractIdentity.EncodingHash));
+            Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractIdentity.CapacityHash));
+        }
+
+        [Test]
+        public void TacticalV3Scenario_StrictJsonRejectsRequiredExtraAndMistypedFields()
+        {
+            string valid = File.ReadAllText(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            var mutations = new Func<string, string>[]
+            {
+                json => RemoveProperty(json, "terminal_win"),
+                json => RemoveProperty(json, "max_cells"),
+                json => InsertFirstObjectMember(json, "reward", "\"unexpected\": 0,"),
+                json => InsertFirstObjectMember(json, "capacity", "\"unexpected\": 0,"),
+                json => json.Replace("\"max_cells\": 512", "\"max_cells\": \"512\""),
+            };
+            foreach (Func<string, string> mutate in mutations)
+            {
+                string changed = mutate(valid);
+                Assert.That(changed, Is.Not.EqualTo(valid));
+                AssertTacticalV3JsonRejected(changed);
+            }
+        }
+
+        [TestCase("top")]
+        [TestCase("reward")]
+        [TestCase("capacity")]
+        [TestCase("array-row")]
+        public void TacticalV3Scenario_StrictJsonRejectsDuplicateDecodedKeys(string location)
+        {
+            string valid = File.ReadAllText(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            string changed = location == "top"
+                ? valid.Replace("\"schema_version\": 1,", "\"schema_version\": 1,\n  \"schema_version\": 1,")
+                : location == "reward"
+                    ? InsertFirstObjectMember(valid, "reward", "\"terminal_win\": 1.0,")
+                    : location == "capacity"
+                        ? InsertFirstObjectMember(valid, "capacity", "\"max_cells\": 512,")
+                        : valid.Replace("{\"id\": \"standard-3v3\",",
+                            "{\"id\": \"standard-3v3\", \"\\u0069d\": \"standard-3v3\",");
+            string candidate = Path.Combine(_scratch, "duplicate-" + location + ".json");
+            File.WriteAllText(candidate, changed);
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() =>
+                MlTrainingScenarioFile.Load(candidate));
+            Assert.That(error.Message, Does.Contain("duplicate object property"));
+        }
+
+        [Test]
+        public void TacticalV3Scenario_RejectsInvalidStructuredSemantics()
+        {
+            string valid = File.ReadAllText(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            string[] invalid =
+            {
+                valid.Replace("\"max_cells\": 512", "\"max_cells\": 1"),
+                valid.Replace("\"max_controllable_units\": 3", "\"max_controllable_units\": 2"),
+                valid.Replace("\"id\": \"striker-0d7b6999\"", "\"id\": \"brute-85597320\""),
+                valid.Replace("\"basis_points\": 7000", "\"basis_points\": 6999"),
+                valid.Replace("\"profile_id\": \"standard-3v3\"", "\"profile_id\": \"missing\""),
+                valid.Replace("\"fog_of_war\": false", "\"fog_of_war\": true"),
+                valid.Replace("\"biomes_enabled\": false", "\"biomes_enabled\": true"),
+            };
+            foreach (string changed in invalid)
+                AssertTacticalV3JsonRejected(changed);
+        }
+
+        [Test]
+        public void TacticalV3Scenario_StrictJsonRejectsNullNonfiniteAndCrossEnvironmentData()
+        {
+            string valid = File.ReadAllText(Path.Combine(
+                "python", "config", "annihilation-structured-imitation-v1.json"));
+            var mutations = new Func<string, string>[]
+            {
+                json => new Regex("\"capacity\"\\s*:\\s*\\{[^{}]*\\}",
+                    RegexOptions.CultureInvariant).Replace(json, "\"capacity\": null", 1),
+                json => json.Replace("\"terminal_win\": 1.0", "\"terminal_win\": 1e999"),
+                json => InsertBeforeFinalBrace(json, ",\n  \"tactical_v2\": {}"),
+            };
+            foreach (Func<string, string> mutate in mutations)
+            {
+                string changed = mutate(valid);
+                Assert.That(changed, Is.Not.EqualTo(valid));
+                AssertTacticalV3JsonRejected(changed);
+            }
+        }
+
         string CopyLibrary(Func<string, string> transform)
         {
             string path = Path.Combine(_scratch, "training-game-templates.json");
@@ -429,6 +670,14 @@ namespace HexWars.Presentation.Tests
             string candidate = Path.Combine(
                 _scratch, "scenario-" + Guid.NewGuid().ToString("N") + ".json");
             File.WriteAllText(candidate, changed);
+            Assert.Throws<InvalidDataException>(() => MlTrainingScenarioFile.Load(candidate));
+        }
+
+        void AssertTacticalV3JsonRejected(string json)
+        {
+            string candidate = Path.Combine(
+                _scratch, "tactical-v3-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(candidate, json);
             Assert.Throws<InvalidDataException>(() => MlTrainingScenarioFile.Load(candidate));
         }
 

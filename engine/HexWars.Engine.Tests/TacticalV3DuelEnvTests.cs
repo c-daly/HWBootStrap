@@ -11,6 +11,83 @@ namespace HexWars.Engine.Tests
     public class TacticalV3DuelEnvTests
     {
         [Test]
+        public void DrainTransitions_RequiresResetAndResetStartsEmpty()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+
+            Assert.Throws<InvalidOperationException>(() => env.DrainTransitions());
+
+            env.Reset(31, null, null);
+
+            Assert.That(env.DrainTransitions(), Is.Empty);
+        }
+
+        [Test]
+        public void DrainTransitions_ReturnsAcceptedExternalAndScriptedCommandsExactlyOnce()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View view = env.Reset(31, null, new EndTurnAgent());
+            TacticalV3Candidate endTurn = view.Decision.Candidates.Single(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.EndTurn);
+
+            env.Step(view.Decision.DecisionId, endTurn.CandidateId);
+            IReadOnlyList<DuelTransition> first = env.DrainTransitions();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(first, Has.Count.EqualTo(2));
+                Assert.That(first.Select(item => item.Command),
+                    Is.All.TypeOf<EndTurn>());
+                Assert.That(first.Select(item => item.Command.Issuer),
+                    Is.EqualTo(new[] { PlayerId.Player0, PlayerId.Player1 }));
+                Assert.That(env.DrainTransitions(), Is.Empty);
+            });
+        }
+
+        [Test]
+        public void DrainTransitions_DoesNotChangeReplayStateDecisionOrTruncationAccounting()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.MaxSteps = 1;
+            var env = new TacticalV3DuelEnv(config);
+            TacticalV3View view = env.Reset(31, null, null);
+            TacticalV3Candidate endTurn = view.Decision.Candidates.Single(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.EndTurn);
+            TacticalV3View after = env.Step(view.Decision.DecisionId, endTurn.CandidateId);
+            string replay = env.ToReplay();
+            string state = StateSignature(env.State);
+
+            IReadOnlyList<DuelTransition> drained = env.DrainTransitions();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(drained, Has.Count.EqualTo(1));
+                Assert.That(env.ToReplay(), Is.EqualTo(replay));
+                Assert.That(StateSignature(env.State), Is.EqualTo(state));
+                Assert.That(after.Decision.DecisionId, Is.EqualTo(1));
+                Assert.That(after.Truncated, Is.True);
+            });
+        }
+
+        [Test]
+        public void Reset_ClearsTransitionHistoryAndDrainCursor()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View first = env.Reset(31, null, null);
+            EndTurn(env, first);
+            Assert.That(env.DrainTransitions(), Has.Count.EqualTo(1));
+
+            TacticalV3View reset = env.Reset(41, null, null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(env.DrainTransitions(), Is.Empty);
+                Assert.That(ReplayFile.Read(env.ToReplay()).Commands, Is.Empty);
+                Assert.That(reset.Decision.DecisionId, Is.Zero);
+            });
+        }
+
+        [Test]
         public void Reset_SameSeedProducesSameStateDecisionAndCandidateOrder()
         {
             TacticalV3DuelEnv first = TacticalV3Fixtures.Env();
@@ -690,6 +767,114 @@ namespace HexWars.Engine.Tests
                 Assert.That(data.Commands, Has.Count.EqualTo(1));
                 Assert.That(data.Commands[0], Is.EqualTo(new EndTurn(PlayerId.Player0)));
             });
+        }
+
+        [Test]
+        public void TeacherSelection_MapsTheAuthoritativeCommandWithoutMutatingTheDuel()
+        {
+            TacticalV3DuelEnv env = TacticalV3Fixtures.Env();
+            TacticalV3View view = env.Reset(61_000_000, null, new RandomAgent(17));
+            string stateBefore = StateSignature(env.State);
+            string replayBefore = env.ToReplay();
+            var expectedTeacher = new BoundedSearchAgent(512, 4, useHeuristic: true);
+            Command expected = expectedTeacher.Decide(env.State);
+            var teacher = new BoundedSearchAgent(512, 4, useHeuristic: true);
+
+            TacticalV3TeacherSelection first = env.SelectTeacherCandidate(teacher);
+            TacticalV3TeacherSelection second = env.SelectTeacherCandidate(teacher);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(second.DecisionId, Is.EqualTo(first.DecisionId));
+                Assert.That(second.CandidateId, Is.EqualTo(first.CandidateId));
+                Assert.That(first.DecisionId, Is.EqualTo(view.Decision.DecisionId));
+                Assert.That(first.SearchDepth, Is.EqualTo(4));
+                Assert.That(first.ExpansionBudget, Is.EqualTo(512));
+                Assert.That(first.ActualExpansions, Is.InRange(1, 512));
+                Assert.That(first.HeuristicIdentity,
+                    Is.EqualTo(BoundedSearchAgent.HeuristicIdentity));
+                Assert.That(StateSignature(env.State), Is.EqualTo(stateBefore));
+                Assert.That(env.ToReplay(), Is.EqualTo(replayBefore));
+                Assert.That(env.DrainTransitions(), Is.Empty);
+            });
+
+            env.Step(first.DecisionId, first.CandidateId);
+            Assert.That(env.DrainTransitions().First().Command, Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void TeacherSelection_RejectsNullAndFinishedEpisodesBeforeMutation()
+        {
+            TacticalV3Config config = TacticalV3Fixtures.Config();
+            config.Match.MaxSteps = 1;
+            var env = new TacticalV3DuelEnv(config);
+            TacticalV3View view = env.Reset(31, null, null);
+            string before = StateSignature(env.State);
+
+            Assert.Throws<ArgumentNullException>(() => env.SelectTeacherCandidate(null!));
+            Assert.That(StateSignature(env.State), Is.EqualTo(before));
+
+            TacticalV3Candidate endTurn = view.Decision.Candidates.Single(candidate =>
+                candidate.Kind == TacticalV3CandidateKind.EndTurn);
+            env.Step(view.Decision.DecisionId, endTurn.CandidateId);
+            string terminal = StateSignature(env.State);
+
+            InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+                env.SelectTeacherCandidate(new BoundedSearchAgent()))!;
+            Assert.Multiple(() =>
+            {
+                Assert.That(error.Message, Does.Contain("finished"));
+                Assert.That(StateSignature(env.State), Is.EqualTo(terminal));
+            });
+        }
+
+        [Test]
+        public void TeacherCommandMatcher_RejectsMissingAndAmbiguousCommands()
+        {
+            TacticalV3Fixture fixture = TacticalV3Fixture.Standard(31);
+            TacticalV3DecisionFrame source = fixture.Candidates.CreateFrame(
+                fixture.State, PlayerId.Player0, EmptyObservationMemory.Instance, 0);
+            Command selected = new TacticalV3ActionResolver().Resolve(
+                source, source.DecisionId, 0, fixture.State);
+            var duplicate = (TacticalV3DecisionFrame)Activator.CreateInstance(
+                typeof(TacticalV3DecisionFrame),
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic,
+                binder: null,
+                args: new object[]
+                {
+                    fixture.State,
+                    source.DecisionId,
+                    source.Seat,
+                    source.Observation,
+                    source.Candidates.Take(2).ToArray(),
+                    new[] { selected, selected },
+                },
+                culture: null)!;
+
+            InvalidOperationException missing = InvokeTeacherMatcher(
+                source,
+                new MoveUnit(PlayerId.Player0, int.MaxValue, new HexCoord(0, 0)));
+            InvalidOperationException ambiguous = InvokeTeacherMatcher(duplicate, selected);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(missing.Message, Does.Contain("exactly one"));
+                Assert.That(ambiguous.Message, Does.Contain("exactly one"));
+            });
+        }
+
+        private static InvalidOperationException InvokeTeacherMatcher(
+            TacticalV3DecisionFrame frame, Command command)
+        {
+            System.Reflection.MethodInfo method = typeof(TacticalV3DecisionFrame).GetMethod(
+                "RequireUniqueCandidateId",
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic)!;
+            Assert.That(method, Is.Not.Null, "teacher command matcher must exist");
+            var error = Assert.Throws<System.Reflection.TargetInvocationException>(() =>
+                method.Invoke(frame, new object[] { command }))!;
+            return (InvalidOperationException)error.InnerException!;
         }
 
         private static TacticalV3View EndTurn(TacticalV3DuelEnv env, TacticalV3View view)

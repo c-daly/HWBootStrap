@@ -112,6 +112,64 @@ namespace HexWars.GymServer
         public static object View(TacticalV3View view) =>
             View(view, TacticalV3CapacityProfile.ExperimentalDefault());
 
+        public static object OracleStep(
+            TacticalV3TeacherSelection selection,
+            TacticalV3View view,
+            TacticalV3CapacityProfile capacity)
+        {
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+            return new
+            {
+                selection = TeacherSelection(selection),
+                view = View(view, capacity),
+            };
+        }
+
+        public static object OracleQuery(TacticalV3TeacherSelection selection)
+        {
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+            return new { selection = TeacherSelection(selection) };
+        }
+
+        public static object DaggerInspection(TacticalV3SelectiveDaggerInspection inspection)
+        {
+            if (inspection == null) throw new ArgumentNullException(nameof(inspection));
+            string[] reasons = new[]
+            {
+                (DaggerEligibilityReason.Conversion, "conversion"),
+                (DaggerEligibilityReason.Favorable, "favorable"),
+                (DaggerEligibilityReason.CycleWarning, "cycle_warning"),
+                (DaggerEligibilityReason.WastedEndTurn, "wasted_end_turn"),
+            }
+            .Where(item => inspection.Reasons.HasFlag(item.Item1))
+            .Select(item => item.Item2)
+            .ToArray();
+            return new
+            {
+                inspection = new
+                {
+                    decision_id = inspection.DecisionId,
+                    learner_candidate_id = inspection.LearnerCandidateId,
+                    reasons,
+                    state_hash = inspection.StateHash,
+                    state_occurrence = inspection.StateOccurrence,
+                    normalized_advantage = inspection.NormalizedAdvantage,
+                    opponent_living_unit_count = inspection.OpponentLivingUnitCount,
+                    productive_legal_action_count = inspection.ProductiveLegalActionCount,
+                },
+            };
+        }
+
+        private static object TeacherSelection(TacticalV3TeacherSelection selection) => new
+        {
+            decision_id = selection.DecisionId,
+            candidate_id = selection.CandidateId,
+            search_depth = selection.SearchDepth,
+            expansion_budget = selection.ExpansionBudget,
+            actual_expansions = selection.ActualExpansions,
+            heuristic_identity = selection.HeuristicIdentity,
+        };
+
         public static object View(TacticalV3View view, TacticalV3CapacityProfile capacity)
         {
             if (view == null) throw new ArgumentNullException(nameof(view));

@@ -14,6 +14,7 @@ namespace HexWars.Presentation
     /// or back. Set <see cref="ReplayPath"/> before Play, or call <see cref="LoadText"/> at runtime.
     /// </summary>
     [RequireComponent(typeof(BoardRenderer))]
+    [RequireComponent(typeof(EventConsole))]
     public sealed class ReplayPlayer : MonoBehaviour
     {
         public string ReplayPath = "";

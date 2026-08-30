@@ -507,6 +507,284 @@ namespace HexWars.Engine.Tests
             AssertViewIdentities(next);
         }
 
+        [Test]
+        public void Process_DuelOracleStepReturnsExactSelectionSuccessorAndStatus()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            JsonElement initialStatus = server.Request("{\"cmd\":\"duel_status\"}");
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_step",
+                decision_id = decisionId,
+                search_depth = 4,
+                expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+
+            AssertProperties(response, "selection", "view");
+            JsonElement selection = response.GetProperty("selection");
+            AssertProperties(selection,
+                "decision_id", "candidate_id", "search_depth", "expansion_budget",
+                "actual_expansions", "heuristic_identity");
+            int candidateId = selection.GetProperty("candidate_id").GetInt32();
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection.GetProperty("decision_id").GetInt64(),
+                    Is.EqualTo(decisionId));
+                Assert.That(selection.GetProperty("search_depth").GetInt32(), Is.EqualTo(4));
+                Assert.That(selection.GetProperty("expansion_budget").GetInt32(),
+                    Is.EqualTo(512));
+                Assert.That(selection.GetProperty("actual_expansions").GetInt32(),
+                    Is.InRange(1, 512));
+                Assert.That(selection.GetProperty("heuristic_identity").GetString(),
+                    Is.EqualTo(BoundedSearchAgent.HeuristicIdentity));
+                Assert.That(reset.GetProperty("candidates").EnumerateArray().Count(candidate =>
+                    candidate.GetProperty("candidate_id").GetInt32() == candidateId),
+                    Is.EqualTo(1));
+                Assert.That(initialStatus.GetRawText(),
+                    Is.EqualTo("{\"internal_fallback_count\":0}"));
+            });
+            AssertViewIdentities(response.GetProperty("view"));
+            Assert.That(server.Request("{\"cmd\":\"duel_status\"}").GetRawText(),
+                Is.EqualTo("{\"internal_fallback_count\":0}"));
+        }
+
+        [Test]
+        public void Process_DuelOracleQueryLeavesDecisionLiveForDistinctLearnerStep()
+        {
+            using var queried = TacticalV3ServerProcess.Start(CheckedInScenario);
+            using var direct = TacticalV3ServerProcess.Start(CheckedInScenario);
+            using var teacher = TacticalV3ServerProcess.Start(CheckedInScenario);
+            string resetRequest = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            });
+            JsonElement initial = queried.Request(resetRequest);
+            JsonElement directInitial = direct.Request(resetRequest);
+            JsonElement teacherInitial = teacher.Request(resetRequest);
+            Assert.That(directInitial.GetRawText(), Is.EqualTo(initial.GetRawText()));
+            Assert.That(teacherInitial.GetRawText(), Is.EqualTo(initial.GetRawText()));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = queried.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_query", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+
+            AssertProperties(response, "selection");
+            JsonElement selection = response.GetProperty("selection");
+            AssertProperties(selection,
+                "decision_id", "candidate_id", "search_depth", "expansion_budget",
+                "actual_expansions", "heuristic_identity");
+            int teacherCandidateId = selection.GetProperty("candidate_id").GetInt32();
+            int learnerCandidateId = initial.GetProperty("candidates").EnumerateArray()
+                .Select(candidate => candidate.GetProperty("candidate_id").GetInt32())
+                .First(candidateId => candidateId != teacherCandidateId);
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection.GetProperty("decision_id").GetInt64(),
+                    Is.EqualTo(decisionId));
+                Assert.That(initial.GetProperty("candidates").EnumerateArray().Count(candidate =>
+                    candidate.GetProperty("candidate_id").GetInt32() == teacherCandidateId),
+                    Is.EqualTo(1));
+                Assert.That(learnerCandidateId, Is.Not.EqualTo(teacherCandidateId));
+            });
+
+            string learnerStep = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId,
+                candidate_id = learnerCandidateId,
+            });
+            JsonElement afterQuery = queried.Request(learnerStep);
+            JsonElement withoutQuery = direct.Request(learnerStep);
+            JsonElement teacherStep = teacher.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId,
+                candidate_id = teacherCandidateId,
+            }));
+
+            Assert.That(afterQuery.GetRawText(), Is.EqualTo(withoutQuery.GetRawText()));
+            Assert.That(afterQuery.GetRawText(), Is.Not.EqualTo(teacherStep.GetRawText()));
+            AssertViewIdentities(afterQuery);
+        }
+
+        [Test]
+        public void Process_DuelOracleQuerySupportsDeterministic2048PreflightCandidate()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement initial = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 18_900_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "conversion-1v1-near", reference_seat = 0,
+            }));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+            string request = JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_query", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 2048,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            });
+
+            JsonElement first = server.Request(request).GetProperty("selection");
+            JsonElement second = server.Request(request).GetProperty("selection");
+
+            Assert.That(second.GetRawText(), Is.EqualTo(first.GetRawText()));
+            Assert.That(first.GetProperty("expansion_budget").GetInt32(), Is.EqualTo(2048));
+            Assert.That(first.GetProperty("actual_expansions").GetInt32(),
+                Is.InRange(1, 2048));
+        }
+
+        [Test]
+        public void Process_DuelGreedyStepUsesPersistentGreedyTeacherAndExactProvenance()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement initial = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = initial.GetProperty("decision_id").GetInt64();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_greedy_step", decision_id = decisionId,
+                teacher_identity = "greedy-one-ply-v1",
+            }));
+
+            AssertProperties(response, "selection", "view");
+            JsonElement selection = response.GetProperty("selection");
+            Assert.That(selection.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
+            Assert.That(selection.GetProperty("search_depth").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("expansion_budget").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("actual_expansions").GetInt32(), Is.Zero);
+            Assert.That(selection.GetProperty("heuristic_identity").GetString(),
+                Is.EqualTo("greedy-one-ply-v1"));
+            AssertViewIdentities(response.GetProperty("view"));
+        }
+
+        [Test]
+        public void Process_DuelDaggerInspectReturnsExactDiagnosticsWithoutAdvancing()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 18_990_000,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            JsonElement endTurn = reset.GetProperty("candidates").EnumerateArray()
+                .Single(candidate => candidate.GetProperty("kind").GetString() == "end_turn");
+            int candidateId = endTurn.GetProperty("candidate_id").GetInt32();
+
+            JsonElement response = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_dagger_inspect", decision_id = decisionId,
+                candidate_id = candidateId,
+            }));
+
+            AssertProperties(response, "inspection");
+            JsonElement inspection = response.GetProperty("inspection");
+            AssertProperties(inspection,
+                "decision_id", "learner_candidate_id", "reasons", "state_hash",
+                "state_occurrence", "normalized_advantage", "opponent_living_unit_count",
+                "productive_legal_action_count");
+            Assert.That(inspection.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
+            Assert.That(inspection.GetProperty("learner_candidate_id").GetInt32(),
+                Is.EqualTo(candidateId));
+            Assert.That(inspection.GetProperty("reasons").EnumerateArray()
+                .Select(reason => reason.GetString()), Is.EqualTo(new[] { "wasted_end_turn" }));
+            Assert.That(inspection.GetProperty("state_hash").GetString(),
+                Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(inspection.GetProperty("state_occurrence").GetInt32(), Is.EqualTo(1));
+            Assert.That(inspection.GetProperty("opponent_living_unit_count").GetInt32(),
+                Is.EqualTo(3));
+            Assert.That(inspection.GetProperty("productive_legal_action_count").GetInt32(),
+                Is.GreaterThan(0));
+
+            JsonElement repeated = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_dagger_inspect", decision_id = decisionId,
+                candidate_id = candidateId,
+            }));
+            Assert.That(repeated.GetRawText(), Is.EqualTo(response.GetRawText()));
+            JsonElement next = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_step", decision_id = decisionId, candidate_id = candidateId,
+            }));
+            AssertViewIdentities(next);
+        }
+
+        [Test]
+        public void Process_DuelOracleStepStaleDecisionIsRecoverableWithoutAdvancing()
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            JsonElement reset = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_reset", seed = 61_000_001,
+                p0 = "external", p1 = "random", learner = 0,
+                start_profile = "standard-3v3", reference_seat = 0,
+            }));
+            long decisionId = reset.GetProperty("decision_id").GetInt64();
+            var valid = new
+            {
+                cmd = "duel_oracle_step", decision_id = decisionId,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            };
+
+            JsonElement stale = server.Request(JsonSerializer.Serialize(new
+            {
+                cmd = "duel_oracle_step", decision_id = decisionId + 1,
+                search_depth = 4, expansion_budget = 512,
+                heuristic_identity = BoundedSearchAgent.HeuristicIdentity,
+            }));
+            Assert.That(stale.GetRawText(),
+                Is.EqualTo("{\"error\":\"tactical-v3 decision id is stale\"}"));
+
+            JsonElement accepted = server.Request(JsonSerializer.Serialize(valid));
+            Assert.That(accepted.GetProperty("selection").GetProperty("decision_id").GetInt64(),
+                Is.EqualTo(decisionId));
+            AssertViewIdentities(accepted.GetProperty("view"));
+        }
+
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":3,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":511,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"wrong\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\",\"extra\":true}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":null,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4.0,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":2147483648,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        public void Process_DuelOracleStepRejectsMalformedOrUnapprovedRequests(string request)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            Assert.That(server.RejectCommand(request), Is.Not.Empty);
+        }
+
+        [TestCase("{\"cmd\":\"duel_status\"}")]
+        [TestCase("{\"cmd\":\"duel_oracle_step\",\"decision_id\":0,\"search_depth\":4,\"expansion_budget\":512,\"heuristic_identity\":\"material-plus-pursuit-v1\"}")]
+        public void Process_DuelTeacherCommandsRejectBeforeSuccessfulReset(string request)
+        {
+            using var server = TacticalV3ServerProcess.Start(CheckedInScenario);
+            Assert.That(server.RejectCommand(request), Does.Contain("successful duel_reset"));
+        }
+
         [TestCase("step", "decision_id")]
         [TestCase("step", "candidate_id")]
         [TestCase("step", "unknown")]
@@ -1492,6 +1770,41 @@ namespace HexWars.Engine.Tests
             SetAutoProperty(clone, nameof(TacticalV3Contract.Encoding), source.Encoding);
             SetAutoProperty(clone, nameof(TacticalV3Contract.Capacity), source.Capacity);
             return clone;
+        }
+
+        [Test]
+        public void DuelEnv_SelectiveDaggerInspectionIsStateBoundNonmutatingAndIdempotent()
+        {
+            var env = new TacticalV3DuelEnv(TacticalV3Fixtures.ProfiledConfig());
+            TacticalV3View reset = env.Reset(
+                18_990_000, null, new RandomAgent(18_990_002),
+                "standard-3v3", PlayerId.Player0, PlayerId.Player0);
+            TacticalV3Candidate endTurn = reset.Decision.Candidates.Single(
+                candidate => candidate.Kind == TacticalV3CandidateKind.EndTurn);
+            string stateBefore = SelectiveDaggerObserver.CanonicalStateKey(env.State);
+
+            TacticalV3SelectiveDaggerInspection first = env.InspectSelectiveDagger(
+                reset.Decision.DecisionId, endTurn.CandidateId);
+            TacticalV3SelectiveDaggerInspection repeated = env.InspectSelectiveDagger(
+                reset.Decision.DecisionId, endTurn.CandidateId);
+
+            Assert.That(first.DecisionId, Is.EqualTo(reset.Decision.DecisionId));
+            Assert.That(first.LearnerCandidateId, Is.EqualTo(endTurn.CandidateId));
+            Assert.That(first.Reasons, Is.EqualTo(DaggerEligibilityReason.WastedEndTurn));
+            Assert.That(first.OpponentLivingUnitCount, Is.EqualTo(3));
+            Assert.That(first.ProductiveLegalActionCount, Is.GreaterThan(0));
+            Assert.That(first.NormalizedAdvantage, Is.EqualTo(0d).Within(1e-12));
+            Assert.That(first.StateHash, Does.Match("^[0-9a-f]{64}$"));
+            Assert.That(first.StateOccurrence, Is.EqualTo(1));
+            Assert.That(repeated.StateOccurrence, Is.EqualTo(1));
+            Assert.That(repeated.StateHash, Is.EqualTo(first.StateHash));
+            Assert.That(SelectiveDaggerObserver.CanonicalStateKey(env.State), Is.EqualTo(stateBefore));
+
+            TacticalV3Candidate move = reset.Decision.Candidates.First(
+                candidate => candidate.Kind == TacticalV3CandidateKind.Move);
+            TacticalV3View successor = env.Step(reset.Decision.DecisionId, move.CandidateId);
+            Assert.That(successor.Decision.DecisionId,
+                Is.GreaterThan(reset.Decision.DecisionId));
         }
 
         private static TacticalV3CellToken CellWithController(

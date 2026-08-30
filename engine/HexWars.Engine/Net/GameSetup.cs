@@ -80,9 +80,36 @@ namespace HexWars.Engine
         public static GameState Build(GameSetup setup,
                                       IReadOnlyList<UnitTemplate>? p0Barracks,
                                       IReadOnlyList<UnitTemplate>? p1Barracks,
-                                      bool beginInDeployment = true)
+                                      bool beginInDeployment = true) =>
+            BuildCore(setup, p0Barracks, p1Barracks, tacticalV3Compatible: false);
+
+        /// <summary>
+        /// Builds the ordinary configurable annihilation match with the two command families that
+        /// tactical-v3 cannot represent (capture and generators) disabled.  This is intentionally a
+        /// separate entry point: regular and online games keep their existing rules, while a human
+        /// challenge against a structured policy is guaranteed to expose only Attack/Move/Deploy/
+        /// EndTurn for the entire game, including after either player earns bounty points.
+        /// </summary>
+        public static GameState BuildTacticalV3Compatible(
+            GameSetup setup,
+            IReadOnlyList<UnitTemplate>? p0Barracks = null,
+            IReadOnlyList<UnitTemplate>? p1Barracks = null) =>
+            BuildCore(setup, p0Barracks, p1Barracks, tacticalV3Compatible: true);
+
+        private static GameState BuildCore(
+            GameSetup setup,
+            IReadOnlyList<UnitTemplate>? p0Barracks,
+            IReadOnlyList<UnitTemplate>? p1Barracks,
+            bool tacticalV3Compatible)
         {
             setup = setup.Sanitized();
+            if (tacticalV3Compatible &&
+                (setup.Mode != GameMode.Annihilation || setup.Fog))
+            {
+                throw new ArgumentException(
+                    "tactical-v3 playable matches require annihilation without fog",
+                    nameof(setup));
+            }
             // maxElevation 2 keeps climbs within unit vertical budgets (no unclimbable cliffs)
             var board = new RandomBoardGenerator(new BoardGenConfig(setup.Width, setup.Height, maxElevation: 2)).Generate(setup.Seed);
 
@@ -101,7 +128,9 @@ namespace HexWars.Engine
                                      startingPoints: setup.StartingPoints, territoryMode: true, damageFloor: 1,
                                      turnPolicy: turnPolicy, fogOfWar: setup.Fog)
                 : GameConfig.Default(biomesEnabled: false, startingPoints: setup.StartingPoints, damageFloor: 1,
-                                     turnPolicy: turnPolicy, fogOfWar: setup.Fog);
+                                     turnPolicy: turnPolicy, fogOfWar: setup.Fog,
+                                     captureCost: tacticalV3Compatible ? int.MaxValue : 3,
+                                     generatorsEnabled: !tacticalV3Compatible);
 
             if (territory)
             {

@@ -56,6 +56,22 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void DifficultyChoiceOffersGreedyAndTrainedModelInsteadOfRandom()
+        {
+            Button choice = _form.GetComponentsInChildren<Button>(true)
+                .Single(button =>
+                    (button.GetComponentInChildren<Text>()?.text ?? string.Empty)
+                    .StartsWith("AI: "));
+            Assert.That(choice.GetComponentInChildren<Text>().text,
+                Is.EqualTo("AI: Greedy"));
+
+            choice.onClick.Invoke();
+
+            Assert.That(choice.GetComponentInChildren<Text>().text,
+                Is.EqualTo("AI: Trained model"));
+        }
+
+        [Test]
         public void WidthRejectsBlankAndTurnActionsAcceptsBlankAsUnlimited()
         {
             var width = Binding("Map width");

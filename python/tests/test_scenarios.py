@@ -203,7 +203,14 @@ def set_path(document: dict, path: str, value) -> None:
     target[parts[-1]] = value
 
 
-def test_builtin_library_has_three_templates_per_environment() -> None:
+def tactical_v3_document(template_id: str = "tactical-v3-standard") -> dict:
+    library = json.loads(DEFAULT_TEMPLATE_LIBRARY.read_text(encoding="utf-8"))
+    return copy.deepcopy(
+        next(item for item in library["templates"] if item["id"] == template_id)
+    )
+
+
+def test_builtin_library_has_expected_ordered_templates() -> None:
     templates = load_template_library(DEFAULT_TEMPLATE_LIBRARY)
     assert [item.template_id for item in templates] == [
         "tactical-standard",
@@ -215,6 +222,8 @@ def test_builtin_library_has_three_templates_per_environment() -> None:
         "adaptive-standard",
         "adaptive-long-battle",
         "adaptive-large-battle",
+        "tactical-v3-standard",
+        "tactical-v3-full-roster",
     ]
 
 
@@ -246,6 +255,8 @@ def test_builtin_library_presets_have_exact_horizons_and_geometry() -> None:
         ("adaptive-standard", 13, 9, 3, 100, 900),
         ("adaptive-long-battle", 13, 9, 3, 200, 1800),
         ("adaptive-large-battle", 24, 16, 4, 150, 1800),
+        ("tactical-v3-standard", 13, 9, 3, 100, 808),
+        ("tactical-v3-full-roster", 13, 9, 3, 100, 808),
     ]
 
 
@@ -325,6 +336,57 @@ def test_default_and_named_template_resolution_are_environment_scoped() -> None:
             scenario_file=None,
             template_id="adaptive-standard",
         )
+
+
+def test_tactical_v3_default_and_full_roster_templates_resolve_strictly() -> None:
+    standard = resolve_scenario(
+        environment="tactical-v3", scenario_file=None, template_id=None
+    )
+    full_roster = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=None,
+        template_id="tactical-v3-full-roster",
+    )
+
+    assert standard.template_id == "tactical-v3-standard"
+    assert len(standard.document["tactical_v3"]["templates"]) == 3
+    assert full_roster.template_id == "tactical-v3-full-roster"
+    assert len(full_roster.document["tactical_v3"]["templates"]) == 5
+    assert (
+        standard.document["tactical_v3"]["capacity"]
+        == full_roster.document["tactical_v3"]["capacity"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (lambda value: value["reward"].update({"terminal_win": 0.5}),
+         "stage-one value"),
+        (lambda value: value["rules"].update({"fog_of_war": True}),
+         "fog and biomes disabled"),
+        (lambda value: value["episode"].update({"max_steps": 799}),
+         "insufficient to reach the round cap"),
+        (lambda value: value["board"].update({"height": 1, "zone_depth": 1}),
+         "deployment cells must cover starting_unit_count"),
+        (lambda value: value["tactical_v3"]["capacity"].update({"max_cells": 1}),
+         r"capacity\.max_cells must be at least"),
+        (lambda value: value["tactical_v3"]["start_distribution"][0].update(
+            {"basis_points": 6999}), "sum to 10000"),
+        (lambda value: value["tactical_v3"]["start_profiles"].pop(),
+         "exact versioned start profile catalog"),
+        (lambda value: value["tactical_v3"]["templates"][0]["stats"].update(
+            {"health": 0}), "health must be positive"),
+        (lambda value: value["tactical_v3"].update({"unexpected": True}),
+         "unexpected tactical_v3.unexpected"),
+    ],
+)
+def test_tactical_v3_rejects_invalid_contract_documents(mutation, match: str) -> None:
+    document = tactical_v3_document()
+    mutation(document)
+
+    with pytest.raises(ValueError, match=match):
+        validate_scenario_document(document)
 
 
 @pytest.mark.parametrize(
@@ -436,6 +498,11 @@ def test_library_template_id_must_match_its_environment(tmp_path: Path) -> None:
     template["id"] = "tactical-wrong"
     with pytest.raises(ValueError, match="environment"):
         load_template_library(write_library(tmp_path, [template]))
+
+    tactical_v3 = tactical_v3_document()
+    tactical_v3["id"] = "tactical-unversioned"
+    with pytest.raises(ValueError, match="environment"):
+        load_template_library(write_library(tmp_path, [tactical_v3]))
 
 
 def test_template_library_schema_version_is_strict(tmp_path: Path) -> None:

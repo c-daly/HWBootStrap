@@ -10,9 +10,9 @@ import sys
 import time
 import traceback
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Iterator, Sequence, TextIO
 
 from .benchmark import benchmark_gymserver
 from .contracts import RunConfig, request_stop
@@ -26,8 +26,6 @@ from .scenarios import (
     resolve_scenario,
 )
 from .training import run_training
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERVER = PROJECT_ROOT / "engine" / "HexWars.GymServer" / "bin" / "Release" / "net8.0" / "HexWars.GymServer.dll"
 DEFAULT_RUNS_ROOT = PROJECT_ROOT / "python" / "runs"
@@ -124,6 +122,48 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_arguments(train)
     _add_no_console_output_argument(train)
     _add_json_argument(train)
+
+    structured = subcommands.add_parser(
+        "train-structured",
+        help="start a weight-initialized tactical-v3 DAgger continuation",
+    )
+    structured.add_argument("--run", required=True)
+    structured.add_argument("--source-run", type=Path, required=True)
+    structured.add_argument("--scenario-file", type=Path, required=True)
+    structured.add_argument("--opponent", default="greedy")
+    structured.add_argument("--train-labels", type=int, required=True)
+    structured.add_argument("--validation-labels", type=int, required=True)
+    structured.add_argument("--seed", type=int, default=227)
+    structured.add_argument("--device", default="auto")
+    structured.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    structured.add_argument(
+        "--tracker",
+        action="append",
+        help="local, tensorboard, wandb, or custom=module:function",
+    )
+    structured.add_argument("--wandb-project")
+    structured.add_argument("--wandb-entity")
+    structured.add_argument("--wandb-mode")
+    structured.add_argument("--wandb-group")
+    structured.add_argument("--wandb-tag", action="append", default=[])
+    structured.add_argument("--wandb-upload-artifacts", action="store_true")
+    _add_runtime_arguments(structured)
+    _add_no_console_output_argument(structured)
+    _add_json_argument(structured)
+
+    structured_preflight = subcommands.add_parser(
+        "preflight-structured",
+        help="validate a tactical-v3 continuation without creating a run",
+    )
+    structured_preflight.add_argument("--source-run", type=Path, required=True)
+    structured_preflight.add_argument("--scenario-file", type=Path, required=True)
+    structured_preflight.add_argument("--opponent", default="greedy")
+    structured_preflight.add_argument("--seed", type=int, default=227)
+    structured_preflight.add_argument("--device", default="auto")
+    structured_preflight.add_argument("--server", default=str(DEFAULT_SERVER))
+    _add_json_argument(structured_preflight)
 
     resume = subcommands.add_parser(
         "resume", help="continue a metadata-backed run as a new run"
@@ -478,6 +518,127 @@ def inspect_model(raw: str) -> dict[str, Any]:
     return metadata
 
 
+def _structured_preflight_device(requested: str) -> str:
+    """Resolve the training device without allocating model or run state."""
+
+    import torch
+
+    if type(requested) is not str or not requested.strip():
+        raise ValueError("tactical-v3 device is required")
+    if requested == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    try:
+        device = torch.device(requested)
+    except (RuntimeError, TypeError) as error:
+        raise ValueError(f"invalid tactical-v3 device {requested!r}") from error
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "tactical-v3 continuation requested CUDA but it is unavailable"
+            )
+        device_count = torch.cuda.device_count()
+        if device_count < 1:
+            raise RuntimeError(
+                "tactical-v3 continuation requested CUDA but no CUDA devices are visible"
+            )
+        if device.index is not None and device.index >= device_count:
+            raise RuntimeError(
+                "tactical-v3 continuation requested CUDA device "
+                f"{device.index}, but only {device_count} CUDA device(s) are visible"
+            )
+    return str(device)
+
+
+def preflight_structured_continuation(
+    *,
+    source_run: Path,
+    scenario_file: Path,
+    opponent: str,
+    seed: int,
+    device: str,
+    server_cmd: Sequence[str],
+) -> dict[str, Any]:
+    """Authenticate and cross-check a continuation without creating run artifacts."""
+
+    from .tactical_v3_checkpoint import validate_structured_run
+    from .tactical_v3_client import TacticalV3GymClient
+    from .tactical_v3_continuation import (
+        _resolve_opponent,
+        _start_distribution,
+        _validate_model_opponent,
+        _validate_target_scenario_identity,
+    )
+    from .tactical_v3_pilot import (
+        _pilot_configs,
+        _validate_compatible_transfer_identity,
+    )
+
+    if type(seed) is not int or not 0 <= seed <= 20_000:
+        raise ValueError("tactical-v3 seed must be an integer from 0 through 20000")
+    target_scenario = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=Path(scenario_file),
+        template_id=None,
+    )
+    start_distribution = _start_distribution(target_scenario.document)
+    effective_device = _structured_preflight_device(device)
+
+    # This is intentionally the full schema-2 validator, rather than the cheaper
+    # manifest inspection used by the Editor. It authenticates the checkpoint and
+    # all package evidence while loading the exact source architecture on CPU.
+    source = validate_structured_run(Path(source_run))
+    resolved_opponent = _resolve_opponent(opponent)
+    target_model_config, _, _ = _pilot_configs(seed, effective_device)
+    if source.model.config != target_model_config:
+        raise ValueError(
+            "source policy model config does not match the continuation model"
+        )
+
+    with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
+        target_identity = client.identity
+        _validate_target_scenario_identity(
+            target_scenario,
+            target_identity,
+            start_distribution,
+        )
+        _validate_compatible_transfer_identity(
+            source.metadata.identity,
+            target_identity,
+            subject="source policy",
+        )
+        if resolved_opponent.binding is not None:
+            _validate_model_opponent(
+                resolved_opponent.binding.resolved,
+                target_identity,
+            )
+
+    source_identity = source.metadata.identity
+    return {
+        "environment": "tactical-v3",
+        "source": {
+            "run_dir": str(Path(source_run).resolve()),
+            "checkpoint": str((Path(source_run).resolve() / "checkpoints" / "best.pt")),
+            "contract_hash": source_identity.contract_hash,
+            "encoding_hash": source_identity.encoding_hash,
+            "capacity_hash": source_identity.capacity_hash,
+        },
+        "target": {
+            "scenario_file": str(Path(scenario_file).resolve()),
+            "scenario_id": target_scenario.template_id,
+            "scenario_schema_version": target_scenario.schema_version,
+            "contract_hash": target_identity.contract_hash,
+            "encoding_hash": target_identity.encoding_hash,
+            "capacity_hash": target_identity.capacity_hash,
+        },
+        "opponent": dict(resolved_opponent.metadata),
+        "device": {
+            "requested": device,
+            "effective": effective_device,
+        },
+        "model_config": asdict(target_model_config),
+    }
+
+
 def _emit_json(
     stdout: TextIO, command: str, result: dict[str, Any], *, ok: bool = True
 ) -> None:
@@ -504,7 +665,7 @@ def _emit_human(stdout: TextIO, command: str, result: dict[str, Any]) -> None:
             marker = "ok" if check.get("ok") else "unavailable"
             print(f"  {check.get('name')}: {marker} ({check.get('detail', '')})", file=stdout)
         return
-    if command in {"train", "resume", "status"}:
+    if command in {"train", "train-structured", "resume", "status"}:
         run = result.get("run")
         if run is None:
             print(f"run completed: {result['run_dir']}", file=stdout)
@@ -554,6 +715,7 @@ def _dispatch(
     *,
     runner: Callable[..., Path],
     sleeper: Callable[[float], None],
+    structured_runner: Callable[..., Path] | None = None,
     status_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if args.command == "doctor":
@@ -578,6 +740,45 @@ def _dispatch(
                 scenario=scenario,
                 **runner_options,
             )
+        )
+    if args.command == "train-structured":
+        from .tactical_v3_continuation import (
+            StructuredContinuationConfig,
+            run_structured_continuation,
+        )
+
+        config = StructuredContinuationConfig(
+            run_name=args.run,
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            train_label_target=args.train_labels,
+            validation_label_target=args.validation_labels,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            trackers=tuple(_tracker_configs(args)),
+        )
+        return _run_result(
+            (structured_runner or run_structured_continuation)(
+                config,
+                runs_root=Path(args.runs_root),
+                server_cmd=["dotnet", args.server, "--scenario-file", str(args.scenario_file)],
+            )
+        )
+    if args.command == "preflight-structured":
+        return preflight_structured_continuation(
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            seed=args.seed,
+            device=args.device,
+            server_cmd=[
+                "dotnet",
+                args.server,
+                "--scenario-file",
+                str(args.scenario_file),
+            ],
         )
     if args.command == "resume":
         scenario = _resume_scenario(args)
@@ -690,6 +891,7 @@ def main(
     argv: list[str] | None = None,
     *,
     runner: Callable[..., Path] = run_training,
+    structured_runner: Callable[..., Path] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     stdout: TextIO | None = None,
 ) -> int:
@@ -699,7 +901,7 @@ def main(
     no_console_output = getattr(args, "no_console_output", False)
     with ExitStack() as console_stack:
         stderr_log: TextIO | None = None
-        if args.command in {"train", "resume"}:
+        if args.command in {"train", "train-structured", "resume"}:
             stderr_log = console_stack.enter_context(
                 _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
             )
@@ -714,6 +916,7 @@ def main(
                 args,
                 runner=runner,
                 sleeper=sleeper,
+                structured_runner=structured_runner,
                 status_update=(
                     (lambda update: _emit_human(output, "status", update))
                     if human_follow

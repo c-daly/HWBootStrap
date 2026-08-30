@@ -22,6 +22,7 @@ namespace HexWars.Presentation
 
         void OnGUI()
         {
+            if (_driver == null) _driver = GetComponent<ModelDuelDriver>();
             if (!ShouldRender(_driver)) return;
             EnsureStyles();
 

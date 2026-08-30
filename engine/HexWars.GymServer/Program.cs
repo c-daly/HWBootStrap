@@ -81,6 +81,7 @@ DuelEnv? duel = null; // created on first duel_* command (two external controlle
 AdaptiveDuelEnv? adaptiveDuel = null;
 TacticalV2DuelEnv? tacticalV2Duel = null;var tacticalV2Preflight = new BufferedOraclePreflightBenchmarkSink();
 TacticalV3DuelEnv? tacticalV3Duel = null;
+GreedyAgent? tacticalV3GreedyTeacher = null;
 bool tacticalV3DuelHasReset = false;
 OracleEvidenceSession? evidenceSession = null;
 bool evidenceGameOpen = false;
@@ -151,6 +152,8 @@ void RequireTacticalV3FieldValue(JsonProperty property, string? command)
         case "p1":
         case "start_profile":
         case "path":
+        case "heuristic_identity":
+        case "teacher_identity":
             if (property.Value.ValueKind != JsonValueKind.String ||
                 string.IsNullOrEmpty(property.Value.GetString()))
                 throw new InvalidDataException(
@@ -160,6 +163,8 @@ void RequireTacticalV3FieldValue(JsonProperty property, string? command)
         case "learner":
         case "reference_seat":
         case "candidate_id":
+        case "search_depth":
+        case "expansion_budget":
             if (property.Value.ValueKind != JsonValueKind.Number ||
                 !property.Value.TryGetInt32(out _))
                 throw new InvalidDataException(
@@ -199,6 +204,25 @@ string RequireTacticalV3Command(JsonElement element)
             "cmd", "seed", "p0", "p1", "learner", "start_profile", "reference_seat",
         },
         "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_oracle_step" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
+        "duel_oracle_query" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
+        "duel_greedy_step" => new[]
+        {
+            "cmd", "decision_id", "teacher_identity",
+        },
+        "duel_dagger_inspect" => new[]
+        {
+            "cmd", "decision_id", "candidate_id",
+        },
+        "duel_status" => new[] { "cmd" },
         "duel_save" => new[] { "cmd", "path" },
         "close" => new[] { "cmd" },
         _ => null,
@@ -235,12 +259,48 @@ string RequireTacticalV3Command(JsonElement element)
     {
         "step" => new[] { "cmd", "decision_id", "candidate_id" },
         "duel_step" => new[] { "cmd", "decision_id", "candidate_id" },
+        "duel_oracle_step" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
+        "duel_oracle_query" => new[]
+        {
+            "cmd", "decision_id", "search_depth", "expansion_budget",
+            "heuristic_identity",
+        },
+        "duel_greedy_step" => new[]
+        {
+            "cmd", "decision_id", "teacher_identity",
+        },
+        "duel_dagger_inspect" => new[]
+        {
+            "cmd", "decision_id", "candidate_id",
+        },
         _ => new[] { "cmd" },
     };
     if (required.Any(field =>
             !properties.Any(property => property.Name == field)))
         throw new InvalidDataException(
             $"tactical-v3 {command} has unknown or missing fields");
+    if (command == "duel_oracle_step" || command == "duel_oracle_query")
+    {
+        if (element.GetProperty("search_depth").GetInt32() != 4)
+            throw new InvalidDataException(
+                $"tactical-v3 {command} search_depth must be 4");
+        int expansionBudget = element.GetProperty("expansion_budget").GetInt32();
+        if (expansionBudget != 512 && expansionBudget != 2048)
+            throw new InvalidDataException(
+                $"tactical-v3 {command} expansion_budget must be 512 or 2048");
+        if (element.GetProperty("heuristic_identity").GetString() !=
+            BoundedSearchAgent.HeuristicIdentity)
+            throw new InvalidDataException(
+                $"tactical-v3 {command} heuristic_identity is unsupported");
+    }
+    if (command == "duel_greedy_step" &&
+        element.GetProperty("teacher_identity").GetString() != "greedy-one-ply-v1")
+        throw new InvalidDataException(
+            "tactical-v3 duel_greedy_step teacher_identity is unsupported");
     return command;
 }
 
@@ -616,6 +676,8 @@ while ((line = Console.ReadLine()) != null)
                         startProfile,
                         referenceSeat == 1 ? PlayerId.Player1 : PlayerId.Player0,
                         learnerSeat);
+                tacticalV3GreedyTeacher = new GreedyAgent(
+                    seed * 2 + (learner == 1 ? 2 : 1));
                 tacticalV3DuelHasReset = true;
                 Send(TacticalV3Wire.View(view, tacticalV3Config!.Capacity));
             }
@@ -690,6 +752,85 @@ while ((line = Console.ReadLine()) != null)
             }
             break;
         }
+
+        case "duel_oracle_step":
+        {
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_oracle_step requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            int expansionBudget = root.GetProperty("expansion_budget").GetInt32();
+            TacticalV3TeacherSelection selection = tacticalV3Duel!.SelectTeacherCandidate(
+                new BoundedSearchAgent(expansionBudget, 4, useHeuristic: true));
+            if (selection.DecisionId != decisionId)
+            {
+                Send(new { error = "tactical-v3 decision id is stale" });
+                break;
+            }
+            TacticalV3View next = tacticalV3Duel.Step(
+                selection.DecisionId, selection.CandidateId);
+            Send(TacticalV3Wire.OracleStep(
+                selection, next, tacticalV3Config!.Capacity));
+            break;
+        }
+
+        case "duel_greedy_step":
+        {
+            if (!tacticalV3DuelHasReset || tacticalV3GreedyTeacher == null)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_greedy_step requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            TacticalV3TeacherSelection selection =
+                tacticalV3Duel!.SelectGreedyTeacherCandidate(tacticalV3GreedyTeacher);
+            if (selection.DecisionId != decisionId)
+            {
+                Send(new { error = "tactical-v3 decision id is stale" });
+                break;
+            }
+            TacticalV3View next = tacticalV3Duel.Step(
+                selection.DecisionId, selection.CandidateId);
+            Send(TacticalV3Wire.OracleStep(
+                selection, next, tacticalV3Config!.Capacity));
+            break;
+        }
+
+        case "duel_oracle_query":
+        {
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_oracle_query requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            int expansionBudget = root.GetProperty("expansion_budget").GetInt32();
+            TacticalV3TeacherSelection selection = tacticalV3Duel!.SelectTeacherCandidate(
+                new BoundedSearchAgent(expansionBudget, 4, useHeuristic: true));
+            if (selection.DecisionId != decisionId)
+            {
+                Send(new { error = "tactical-v3 decision id is stale" });
+                break;
+            }
+            Send(TacticalV3Wire.OracleQuery(selection));
+            break;
+        }
+
+        case "duel_dagger_inspect":
+        {
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_dagger_inspect requires a successful duel_reset");
+            long decisionId = root.GetProperty("decision_id").GetInt64();
+            int candidateId = root.GetProperty("candidate_id").GetInt32();
+            TacticalV3SelectiveDaggerInspection inspection =
+                tacticalV3Duel!.InspectSelectiveDagger(decisionId, candidateId);
+            Send(TacticalV3Wire.DaggerInspection(inspection));
+            break;
+        }
+
+        case "duel_status":
+            if (!tacticalV3DuelHasReset)
+                throw new InvalidDataException(
+                    "tactical-v3 duel_status requires a successful duel_reset");
+            Send(new { internal_fallback_count = tacticalV3Duel!.InternalFallbackCount });
+            break;
 
         case "duel_trace_enable":
         {            if (evidenceSession != null && !evidenceSession.Ended)

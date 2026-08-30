@@ -1,4 +1,7 @@
+using System;
 using HexWars.Presentation;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
 
 namespace HexWars.Presentation.Tests
@@ -34,6 +37,76 @@ namespace HexWars.Presentation.Tests
             Assert.That(arguments, Does.Contain("--expected-environment adaptive-v1"));
             Assert.That(arguments, Does.Contain("--expected-contract-version adaptive-v1"));
             Assert.That(arguments, Does.Contain("--expected-encoding-hash " + new string('c', 64)));
+        }
+
+        [Test]
+        public void TacticalV3StartupArguments_DeclareCapacityHashOnlyForStructuredEnvironment()
+        {
+            string structured = PolicyBridge.BuildArguments(
+                "policy_server.py", "run:C:/runs/a", null,
+                "tactical-v3", "tactical-v3", new string('c', 64),
+                new string('d', 64));
+            string legacy = PolicyBridge.BuildArguments(
+                "policy_server.py", "run:C:/runs/a", null,
+                "tactical-v2", "tactical-v2", new string('c', 64));
+
+            Assert.That(structured, Does.Contain(
+                "--expected-capacity-hash " + new string('d', 64)));
+            Assert.That(legacy, Does.Not.Contain("--expected-capacity-hash"));
+        }
+
+        [Test]
+        public void StructuredAction_RequiresExactMatchingDecisionAndCandidateIdentity()
+        {
+            PolicyCandidateResult accepted = PolicyBridge.ParseStructuredAction(
+                @"{""decision_id"":9223372036854775806,""candidate_id"":17}",
+                9223372036854775806L);
+
+            Assert.That(accepted.DecisionId, Is.EqualTo(9223372036854775806L));
+            Assert.That(accepted.CandidateId, Is.EqualTo(17));
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(
+                    @"{""decision_id"":9,""candidate_id"":17}", 8));
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(
+                    @"{""decision_id"":8,""candidate_id"":17,""action"":2}", 8));
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(
+                    @"{""decision_id"":8}", 8));
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(
+                    @"{""error"":""selection failed""}", 8));
+        }
+
+        [TestCase(@"{""decision_id"":08,""candidate_id"":1}")]
+        [TestCase(@"{""decision_id"":8,""candidate_id"":01}")]
+        public void StructuredAction_RejectsNonJsonIntegerAndWhitespaceSyntax(string json)
+        {
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(json, 8));
+        }
+
+        [Test]
+        public void StructuredAction_RejectsNonJsonWhitespaceSyntax()
+        {
+            string json = @"{""decision_id"":8," + '\u00a0' +
+                @"""candidate_id"":1}";
+
+            Assert.Throws<System.InvalidOperationException>(() =>
+                PolicyBridge.ParseStructuredAction(json, 8));
+        }
+
+        [Test]
+        public void StructuredAction_AcceptsJsonWhitespaceAndIntegerBounds()
+        {
+            string json = " \t\r\n" +
+                @"{""candidate_id"" " + "\t: -2147483648,\n  " +
+                @"""decision_id"" : 9223372036854775806}" + "\t ";
+            PolicyCandidateResult accepted = PolicyBridge.ParseStructuredAction(
+                json, 9223372036854775806L);
+
+            Assert.That(accepted.DecisionId, Is.EqualTo(9223372036854775806L));
+            Assert.That(accepted.CandidateId, Is.EqualTo(int.MinValue));
         }
 
         [Test]
@@ -114,6 +187,39 @@ namespace HexWars.Presentation.Tests
             Assert.That(config.ShouldReload(gameEnded: false), Is.False);
             Assert.That(ModelDuelDriver.ShouldReconfigure(previous, next, gameEnded: false),
                 Is.False);
+        }
+        [Test]
+        public void FixedVectorRequest_SerializesExactLegacyProtocolShape()
+        {
+            JObject actual = JObject.Parse(PolicyJson.Serialize(
+                new LegacyActionRequest
+                {
+                    seat = 1,
+                    obs = new[] { 1.25f, -2.5f },
+                    mask = new[] { true, false, true },
+                }));
+
+            Assert.That(actual.Count, Is.EqualTo(3));
+            Assert.That(actual["seat"].Value<int>(), Is.EqualTo(1));
+            Assert.That(actual["obs"].ToObject<float[]>(),
+                Is.EqualTo(new[] { 1.25f, -2.5f }));
+            Assert.That(actual["mask"].ToObject<bool[]>(),
+                Is.EqualTo(new[] { true, false, true }));
+        }
+
+        [Test]
+        public void PolicyJson_RejectsNonFiniteFloat()
+        {
+            Assert.Throws<JsonSerializationException>(() => PolicyJson.Serialize(
+                new LegacyActionRequest { obs = new[] { float.NaN } }));
+        }
+
+        [Serializable]
+        sealed class LegacyActionRequest
+        {
+            public int seat;
+            public float[] obs;
+            public bool[] mask;
         }
     }
 }

@@ -17,9 +17,11 @@ import numpy as np
 
 from .contracts import EnvironmentContract
 from .io import read_json
+from .tactical_v3_schema import TacticalV3SemanticIdentity, parse_spaces
 
 
-Algorithm = Literal["maskable_ppo", "masked_dqn"]
+Algorithm = Literal["maskable_ppo", "masked_dqn", "structured_imitation"]
+ControllerContract = EnvironmentContract | TacticalV3SemanticIdentity
 InferenceMode = Literal["deterministic", "stochastic"]
 SCRIPTED_NAMES = frozenset({"bounded-search", "greedy", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
@@ -50,7 +52,7 @@ class ResolvedController:
     path: Path | None
     algorithm: Algorithm | None
     step: int | None
-    contract: EnvironmentContract | None
+    contract: ControllerContract | None
     observation_size: int | None
     action_size: int | None
     legacy: bool
@@ -65,10 +67,20 @@ class ResolvedController:
             "algorithm": self.algorithm,
             "step": self.step,
             "contract_hash": self.contract.contract_hash if self.contract is not None else None,
-            "contract_version": self.contract.version if self.contract is not None else None,
-            "environment": self.contract.environment if self.contract is not None else None,
+            "contract_version": (
+                self.contract.version if isinstance(self.contract, EnvironmentContract)
+                else self.contract.contract_version if self.contract is not None else None
+            ),
+            "environment": (
+                self.contract.environment if isinstance(self.contract, EnvironmentContract)
+                else "tactical-v3" if self.contract is not None else None
+            ),
             "encoding_hash": self.contract.encoding_hash if self.contract is not None else None,
-            "contract": self.contract.to_dict() if self.contract is not None else None,
+            "capacity_hash": (
+                self.contract.capacity_hash if isinstance(self.contract, TacticalV3SemanticIdentity)
+                else None
+            ),
+            "contract": self.contract.to_dict() if isinstance(self.contract, EnvironmentContract) else None,
             "observation_size": self.observation_size,
             "action_size": self.action_size,
             "legacy": self.legacy,
@@ -203,9 +215,16 @@ def _inference_mode_field(raw: Mapping[str, Any]) -> InferenceMode:
 class ControllerResolver:
     """Resolve immutable controller specs against an optional runtime contract."""
 
-    def __init__(self, runtime_contract: EnvironmentContract | None = None, *, model_loader: ModelLoader | None = None):
+    def __init__(
+        self,
+        runtime_contract: EnvironmentContract | None = None,
+        *,
+        model_loader: ModelLoader | None = None,
+        expected_structured_hashes: tuple[str, str] | None = None,
+    ):
         self.runtime_contract = runtime_contract
         self.model_loader = model_loader or load_model
+        self.expected_structured_hashes = expected_structured_hashes
 
     def bind(self, raw: str | Mapping[str, Any] | ControllerSpec) -> "ControllerBinding":
         return ControllerBinding(self, normalize_controller_spec(raw))
@@ -318,12 +337,23 @@ class ControllerResolver:
             manifest = read_json(manifest_path)
         except (OSError, json.JSONDecodeError) as error:
             raise ControllerResolutionError(f"could not read run manifest {manifest_path}") from error
-        if not isinstance(manifest, Mapping) or manifest.get("schema_version") != 1:
-            raise ControllerResolutionError("run manifest must have schema_version 1")
+        if not isinstance(manifest, Mapping):
+            raise ControllerResolutionError("run manifest must be a JSON object")
         config = manifest.get("config")
         if not isinstance(config, Mapping):
             raise ControllerResolutionError("run manifest is missing config metadata")
-        algorithm = _algorithm_field({"algorithm": config.get("algorithm")})
+        declared_algorithm = config.get("algorithm")
+        if declared_algorithm == "structured_imitation":
+            if manifest.get("schema_version") != 2:
+                raise ControllerResolutionError(
+                    "structured run manifest must have schema_version 2"
+                )
+            if requested_algorithm is not None:
+                raise ControllerResolutionError("legacy algorithm does not match the run manifest algorithm")
+            return self._resolve_structured_run(spec, manifest)
+        if manifest.get("schema_version") != 1:
+            raise ControllerResolutionError("run manifest must have schema_version 1")
+        algorithm = _algorithm_field({"algorithm": declared_algorithm})
         if requested_algorithm is not None and requested_algorithm != algorithm:
             raise ControllerResolutionError("legacy algorithm does not match the run manifest algorithm")
         contract = _contract_from_manifest(manifest.get("contract"))
@@ -340,6 +370,51 @@ class ControllerResolver:
         if not checkpoint_path.is_file():
             raise ControllerResolutionError(f"published checkpoint does not exist: {checkpoint_path}")
         return self._load_model(spec, checkpoint_path, algorithm, step, contract, legacy=False)
+
+    def _resolve_structured_run(
+        self, spec: ControllerSpec, manifest: Mapping[str, Any],
+    ) -> ResolvedController:
+        assert spec.path is not None
+        try:
+            if manifest.get("policy_identity") != "policy-identity.json":
+                raise ValueError(
+                    "structured run must declare policy-identity.json"
+                )
+            policy_identity = read_json(spec.path / "policy-identity.json")
+            identity = parse_spaces(policy_identity)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise ControllerResolutionError(
+                "structured run requires a valid policy identity"
+            ) from error
+        from .tactical_v3_controller import load_structured_controller
+
+        try:
+            expected_encoding_hash, expected_capacity_hash = (
+                self.expected_structured_hashes
+                if self.expected_structured_hashes is not None
+                else (identity.encoding_hash, identity.capacity_hash)
+            )
+            structured = load_structured_controller(
+                spec.path, expected_encoding_hash, expected_capacity_hash
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise ControllerResolutionError(str(error)) from error
+        step = manifest.get("latest_checkpoint_step")
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ControllerResolutionError("run manifest is missing latest_checkpoint_step metadata")
+        return ResolvedController(
+            spec=spec,
+            server_controller="external",
+            model=structured,
+            path=structured.checkpoint_path,
+            algorithm="structured_imitation",
+            step=step,
+            contract=structured.identity,
+            observation_size=None,
+            action_size=None,
+            legacy=False,
+            promotable=False,
+        )
 
     def _resolve_legacy_checkpoint(self, spec: ControllerSpec) -> ResolvedController:
         raise ControllerResolutionError(

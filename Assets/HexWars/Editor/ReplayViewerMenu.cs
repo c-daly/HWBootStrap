@@ -90,10 +90,10 @@ namespace HexWars.Presentation.EditorTools
 
         // Challenge the computer: you play Player 1, the AI plays Player 2. AiOpponent auto-attaches on
         // play from these prefs (the saved scene is untouched). In a build, set GameBootstrap.VsAI instead.
-        [MenuItem("HexWars/Play vs AI/Easy (Random)")]
-        public static void PlayVsAiEasy() => PlayVsAi(AiLevel.Easy);
+        [MenuItem("HexWars/Play vs AI/Trained model")]
+        public static void PlayVsAiModel() => PlayVsAi(AiLevel.TrainedModel);
 
-        [MenuItem("HexWars/Play vs AI/Hard (Greedy)")]
+        [MenuItem("HexWars/Play vs AI/Greedy")]
         public static void PlayVsAiHard() => PlayVsAi(AiLevel.Hard);
 
         static void PlayVsAi(AiLevel level)
@@ -224,8 +224,7 @@ namespace HexWars.Presentation.EditorTools
             d.PythonExe = pyExe; d.ServerScript = server; d.WorkingDir = pyDir;
             d.P0Spec = p0; d.P1Spec = p1; d.Seed = seed; d.Loop = loop;
             d.Environment = environment;
-            d.Scenario = scenario;
-            d.PresentationPlan = presentationPlan;
+            d.ConfigureLaunchState(scenario, presentationPlan);
             d.SecondsPerAction = secondsPerAction;
             go.AddComponent<UnitInputController>().ReadOnly = true; // read-only hover/inspect
 

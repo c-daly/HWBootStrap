@@ -5,11 +5,13 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// On-screen overlay for AI matches: a live <b>scoreboard</b> (round, units + value per side, winner)
-    /// plus a scrolling <b>event log</b> (kills, deploys, designs — from <see cref="CombatLog"/>). Drivers
-    /// call <see cref="Report"/> on each state transition. Auto-created per play session (no scene wiring);
-    /// drawn with OnGUI so it also updates while paused.
+    /// On-screen overlay for Arena matches and replay viewing: a live <b>scoreboard</b> (round, units +
+    /// value per side, winner) plus a scrolling <b>event log</b> (kills, deploys, designs — from
+    /// <see cref="CombatLog"/>). The specialized viewer that owns this component calls
+    /// <see cref="Report"/> on each state transition. It is deliberately not created for ordinary
+    /// games, which have their own gameplay HUD; drawn with OnGUI so it also updates while paused.
     /// </summary>
+    [DisallowMultipleComponent]
     public sealed class EventConsole : MonoBehaviour
     {
         const int MaxLines = 30;
@@ -26,15 +28,12 @@ namespace HexWars.Presentation
         string _joinedLog = "";
         string _headerRound = "", _headerArmies = "", _headerSettings = "";
 
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-        static void AutoCreate()
-        {
-            var go = new GameObject("EventConsole");
-            go.AddComponent<EventConsole>();
-            DontDestroyOnLoad(go);
-        }
+        void OnEnable() => _inst = this;
 
-        void Awake() => _inst = this;
+        void OnDisable()
+        {
+            if (_inst == this) _inst = null;
+        }
 
         /// <summary>Update the scoreboard to <paramref name="cur"/> and append any event lines. The
         /// header strings and the joined log text are rebuilt HERE (on a state/event change) instead of

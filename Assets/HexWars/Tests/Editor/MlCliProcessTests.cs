@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading;
 using HexWars.Presentation.EditorTools.MlLab;
 using NUnit.Framework;
 
@@ -91,6 +93,43 @@ namespace HexWars.Presentation.Tests
             Assert.DoesNotThrow(() => process.Start(new ProcessStartInfo("python.exe")));
             Assert.That(process.ProcessId, Is.EqualTo(42));
             process.Dispose();
+        }
+
+        [Test]
+        public void Start_DropsQueuedExitFromPreviousProcessGeneration()
+        {
+            SynchronizationContext previous = SynchronizationContext.Current;
+            var context = new QueuedSynchronizationContext();
+            var first = new FakeProcessAdapter();
+            var second = new FakeProcessAdapter();
+            MlCliProcess process = null;
+            try
+            {
+                SynchronizationContext.SetSynchronizationContext(context);
+                process = new MlCliProcess(
+                    new SequenceProcessFactory(first, second));
+                SynchronizationContext.SetSynchronizationContext(null);
+                int? observedExit = null;
+                process.Exited += code => observedExit = code;
+
+                process.Start(new ProcessStartInfo("first.exe"));
+                first.EmitExit(3);
+                process.Start(new ProcessStartInfo("second.exe"));
+                context.Drain();
+
+                Assert.That(observedExit, Is.Null,
+                    "a queued exit from the replaced process must not be " +
+                    "misattributed to the new command");
+
+                second.EmitExit(7);
+                context.Drain();
+                Assert.That(observedExit, Is.EqualTo(7));
+            }
+            finally
+            {
+                process?.Dispose();
+                SynchronizationContext.SetSynchronizationContext(previous);
+            }
         }
 
         [Test]
@@ -223,6 +262,24 @@ namespace HexWars.Presentation.Tests
             public void EmitOutput(string line) => OutputLine?.Invoke(line);
             public void EmitError(string line) => ErrorLine?.Invoke(line);
             public void EmitExit(int code) { IsRunning = false; ProcessExited?.Invoke(code); }
+        }
+
+        sealed class QueuedSynchronizationContext : SynchronizationContext
+        {
+            readonly Queue<(SendOrPostCallback Callback, object State)> _queue =
+                new Queue<(SendOrPostCallback, object)>();
+
+            public override void Post(SendOrPostCallback callback, object state) =>
+                _queue.Enqueue((callback, state));
+
+            public void Drain()
+            {
+                while (_queue.Count > 0)
+                {
+                    var item = _queue.Dequeue();
+                    item.Callback(item.State);
+                }
+            }
         }
     }
 }

@@ -4,7 +4,8 @@
     "references": [
         "HexWars.Presentation",
         "HexWars.Presentation.Editor",
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "Newtonsoft.Json"
     ],
     "includePlatforms": [
         "Editor"
@@ -14,7 +15,8 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "HexWars.Engine.dll",
-        "nunit.framework.dll"
+        "nunit.framework.dll",
+        "Newtonsoft.Json.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [],

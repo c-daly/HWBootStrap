@@ -4,6 +4,7 @@
     "references": [
         "Unity.InputSystem",
         "UnityEngine.UI",
+        "Newtonsoft.Json",
         "endel.nativewebsocket"
     ],
     "includePlatforms": [],

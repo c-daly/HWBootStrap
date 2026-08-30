@@ -7,16 +7,39 @@ namespace HexWars.Presentation.Tests
     public sealed class ModelArenaIdentityTests
     {
         [Test]
-        public void Driver_AlwaysCarriesIndependentIdentityOverlay()
+        public void Driver_AlwaysCarriesArenaOverlays()
         {
             var go = new GameObject("arena", typeof(BoardRenderer), typeof(ModelDuelDriver));
             try
             {
                 Assert.That(go.GetComponent<ModelArenaIdentityOverlay>(), Is.Not.Null);
+                Assert.That(go.GetComponent<EventConsole>(), Is.Not.Null);
                 var driver = go.GetComponent<ModelDuelDriver>();
                 driver.P0Spec = "greedy";
                 driver.P1Spec = "random";
                 Assert.That(driver.IdentitySnapshot()[0].Controller, Is.EqualTo("Greedy"));
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void OrdinaryGame_DoesNotCarryArenaEventConsole()
+        {
+            var go = new GameObject("ordinary game", typeof(GameBootstrap));
+            try
+            {
+                Assert.That(go.GetComponent<EventConsole>(), Is.Null);
+            }
+            finally { Object.DestroyImmediate(go); }
+        }
+
+        [Test]
+        public void ReplayPlayer_CarriesEventConsole()
+        {
+            var go = new GameObject("replay", typeof(ReplayPlayer));
+            try
+            {
+                Assert.That(go.GetComponent<EventConsole>(), Is.Not.Null);
             }
             finally { Object.DestroyImmediate(go); }
         }
