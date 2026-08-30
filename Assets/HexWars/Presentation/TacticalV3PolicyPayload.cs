@@ -175,7 +175,8 @@ namespace HexWars.Presentation
                     "tactical-v3 view seat does not match decision seat");
             TacticalV3Observation observation = decision.Observation ??
                 throw new InvalidOperationException("tactical-v3 observation is required");
-            Validate(observation, decision.Candidates, decision.DecisionId, view.Reward);
+            TacticalV3RewardDto reward = Reward(view.Reward);
+            Validate(observation, decision.Candidates, decision.DecisionId, reward);
 
             return new TacticalV3ViewDto
             {
@@ -183,12 +184,41 @@ namespace HexWars.Presentation
                 seat = (int)view.Seat,
                 observation = Observation(observation),
                 candidates = decision.Candidates.Select(Candidate).ToArray(),
-                reward = Reward(view.Reward),
+                reward = reward,
                 winner = view.Winner,
                 terminated = view.Terminated,
                 truncated = view.Truncated,
                 start_profile = view.StartProfileId,
                 reference_seat = (int)view.ReferenceSeat,
+            };
+        }
+
+        /// <summary>
+        /// Builds the same wire envelope for inference in an ordinary playable match, where there is
+        /// no RL episode/reward lifecycle.  Reward is therefore a neutral, non-finalized zero while
+        /// the decision, observation, candidates, and identity validation remain byte-for-byte the
+        /// same structured contract used by Arena.
+        /// </summary>
+        public static TacticalV3ViewDto From(TacticalV3DecisionFrame decision)
+        {
+            if (decision == null) throw new ArgumentNullException(nameof(decision));
+            TacticalV3Observation observation = decision.Observation ??
+                throw new InvalidOperationException("tactical-v3 observation is required");
+            var reward = new TacticalV3RewardDto();
+            Validate(observation, decision.Candidates, decision.DecisionId, reward);
+
+            return new TacticalV3ViewDto
+            {
+                decision_id = decision.DecisionId,
+                seat = (int)decision.Seat,
+                observation = Observation(observation),
+                candidates = decision.Candidates.Select(Candidate).ToArray(),
+                reward = reward,
+                winner = -1,
+                terminated = false,
+                truncated = false,
+                start_profile = "playable-game",
+                reference_seat = (int)decision.Seat,
             };
         }
 
@@ -329,7 +359,7 @@ namespace HexWars.Presentation
             TacticalV3Observation observation,
             IReadOnlyList<TacticalV3Candidate> candidates,
             long decisionId,
-            TacticalV3RewardBreakdown reward)
+            TacticalV3RewardDto reward)
         {
             if (observation.Cells == null || observation.Units == null ||
                 observation.Templates == null ||
@@ -383,13 +413,13 @@ namespace HexWars.Presentation
             }
             foreach (TacticalV3RuleToken rule in observation.Rules)
                 Finite(rule.FloatValue, "rule.float_value");
-            Finite(reward.TerminalOutcome, "reward.terminal_outcome");
-            Finite(reward.KnownHealthAdjustedMaterialProgress,
+            Finite(reward.terminal_outcome, "reward.terminal_outcome");
+            Finite(reward.known_health_adjusted_material_progress,
                 "reward.known_health_adjusted_material_progress");
-            Finite(reward.PublicResourceProgress,
+            Finite(reward.public_resource_progress,
                 "reward.public_resource_progress");
-            Finite(reward.TimePressure, "reward.time_pressure");
-            Finite(reward.Total, "reward.total");
+            Finite(reward.time_pressure, "reward.time_pressure");
+            Finite(reward.total, "reward.total");
         }
 
         static void ValidateCandidate(

@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using HexWars.Engine;
 using NUnit.Framework;
 
@@ -57,6 +59,31 @@ namespace HexWars.Engine.Tests
             var b = GameFactory.Build(new GameSetup(GameMode.Annihilation, 9, 7, 0, 42));
             foreach (var t in a.Board.Tiles)
                 Assert.That(b.Board.TileAt(t.Coord).Elevation, Is.EqualTo(t.Elevation));
+        }
+
+        [Test]
+        public void BuildTacticalV3Compatible_DisablesEveryUnsupportedCommandForTheWholeMatch()
+        {
+            var state = GameFactory.BuildTacticalV3Compatible(
+                new GameSetup(GameMode.Annihilation, 9, 7, 12, 7));
+
+            Assert.That(state.Config.CaptureCost, Is.EqualTo(int.MaxValue));
+            Assert.That(state.Config.GeneratorsEnabled, Is.False);
+            Assert.That(LegalMoves.For(state), Has.All.Matches<Command>(command =>
+                command is AttackUnit || command is MoveUnit ||
+                command is DeployUnit || command is EndTurn));
+            Assert.That(LegalMoves.For(state).Any(command => command is CaptureHex), Is.False);
+            Assert.That(LegalMoves.For(state).Any(command => command is BuildGenerator), Is.False);
+        }
+
+        [TestCase(GameMode.Territory, false)]
+        [TestCase(GameMode.Annihilation, true)]
+        public void BuildTacticalV3Compatible_RejectsUnsupportedModes(
+            GameMode mode, bool fog)
+        {
+            Assert.Throws<ArgumentException>(() =>
+                GameFactory.BuildTacticalV3Compatible(
+                    new GameSetup(mode, 9, 7, 12, 7, fog: fog)));
         }
     }
 }

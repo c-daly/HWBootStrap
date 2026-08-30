@@ -154,14 +154,14 @@ namespace HexWars.Presentation
             else
             {
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
-                ToggleBtn("AI: Hard", 120f, y, 250f, 38f, () => _ai == AiLevel.Hard, () =>
+                ToggleBtn(AiLabel(_ai), 120f, y, 250f, 38f, () => _ai == AiLevel.Hard, () =>
                 {
-                    _ai = _ai == AiLevel.Hard ? AiLevel.Easy : AiLevel.Hard;
+                    _ai = _ai == AiLevel.Hard ? AlternateAiLevel() : AiLevel.Hard;
                     RefreshToggles();
                     foreach (var (btn, sel) in _toggles)
                     {
                         var t = btn.GetComponentInChildren<Text>();
-                        if (t != null && t.text.StartsWith("AI: ")) t.text = _ai == AiLevel.Hard ? "AI: Hard" : "AI: Easy";
+                        if (t != null && t.text.StartsWith("AI: ")) t.text = AiLabel(_ai);
                     }
                 });
             }
@@ -280,7 +280,26 @@ namespace HexWars.Presentation
                                       _armySize, _brutes, _strikers, _snipers, _turnActions, _fog);
             if (_mode == SetupMode.VsAi)
             {
-                _game.StartLocalGame(setup, true, _ai);   // form dismisses via Update when State exists
+                if (_ai == AiLevel.TrainedModel &&
+                    !PlayableModelAdapter.Supports(setup, out string reason))
+                {
+                    Toast.Show(reason);
+                    return;
+                }
+                try
+                {
+                    // StartLocalGame performs a full tactical-v3 observation preflight before it
+                    // publishes the state, including cached barracks and table capacities.
+                    _game.StartLocalGame(setup, true, _ai);
+                }
+                catch (Exception error) when (
+                    _ai == AiLevel.TrainedModel &&
+                    (error is ArgumentException || error is InvalidOperationException))
+                {
+                    Toast.Show(error.Message);
+                    return;
+                }
+                // form dismisses via Update when State exists
                 return;
             }
 
@@ -335,6 +354,24 @@ namespace HexWars.Presentation
             int q = page.IndexOf('?');
             if (q >= 0) page = page.Substring(0, q);
             return page + "?room=" + room;
+        }
+
+        static AiLevel AlternateAiLevel()
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            // Browser builds cannot spawn the separate Python policy server.  Keep the existing
+            // shippable Random/Greedy pair until a frozen in-process model is promoted.
+            return AiLevel.Easy;
+#else
+            return AiLevel.TrainedModel;
+#endif
+        }
+
+        static string AiLabel(AiLevel level)
+        {
+            if (level == AiLevel.Hard) return "AI: Greedy";
+            if (level == AiLevel.TrainedModel) return "AI: Trained model";
+            return "AI: Random";
         }
     }
 }
