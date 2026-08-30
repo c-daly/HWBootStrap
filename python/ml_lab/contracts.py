@@ -19,6 +19,7 @@ from .scenarios import ResolvedScenario
 RUN_SCHEMA_VERSION = 1
 RUN_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUN_STATES = {"created", "running", "stopping", "stopped", "completed", "failed"}
+TERMINAL_RUN_STATES = {"stopped", "completed", "failed"}
 PROGRESS_HEADER = ["timestamp", "timesteps", "episodes", "mean_reward", "steps_per_second"]
 MONITOR_HEADER = [
     "worker_id",
@@ -251,11 +252,18 @@ def update_run_state(run_dir: Path, state: str, **fields: Any) -> dict[str, Any]
 
 
 def request_stop(run_dir: Path, *, after_checkpoint: bool) -> dict[str, Any]:
+    run_dir = Path(run_dir)
+    manifest = read_json(run_dir / "run.json")
+    if not isinstance(manifest, Mapping) or manifest.get("state") not in RUN_STATES:
+        raise ValueError("run manifest state is invalid")
+    state = manifest["state"]
+    if state in TERMINAL_RUN_STATES:
+        raise ValueError(f"cannot request stop for terminal run in state {state!r}")
     control = {
         "request": "stop_after_checkpoint" if after_checkpoint else "stop_now",
         "updated_at": utc_now(),
     }
-    atomic_write_json(Path(run_dir) / "control.json", control)
+    atomic_write_json(run_dir / "control.json", control)
     return control
 
 

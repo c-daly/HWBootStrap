@@ -1097,6 +1097,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    public static class MlStopControlPolicy
+    {
+        public static bool CanRequestStop(
+            string selectedRun,
+            MlRunState state,
+            bool hasControlFile) =>
+            !string.IsNullOrWhiteSpace(selectedRun) &&
+            hasControlFile &&
+            state != MlRunState.Stopped &&
+            state != MlRunState.Completed &&
+            state != MlRunState.Failed;
+    }
+
     /// <summary>Outcome of <see cref="MlWatchStartPolicy.Decide"/>: whether the Start & Watch
     /// auto-trigger should launch the viewer now, wait and poll again, give up because training ended
     /// (or the safety-net ceiling passed) before a checkpoint became ready, or silently drop a retry
@@ -2188,7 +2201,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.BeginHorizontal();
-            using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_selectedRun)))
+            bool hasSelectedRun = !string.IsNullOrWhiteSpace(_selectedRun);
+            bool hasControlFile = hasSelectedRun && File.Exists(
+                Path.Combine(_selectedRun, "control.json"));
+            bool canRequestStop = MlStopControlPolicy.CanRequestStop(
+                _selectedRun,
+                _status?.State ?? MlRunState.Unknown,
+                hasControlFile);
+            using (new EditorGUI.DisabledScope(!canRequestStop))
             {
                 if (structuredContinuation)
                 {
@@ -2201,6 +2221,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         RequestStop(false);
                     if (GUILayout.Button("Stop now")) RequestStop(true);
                 }
+            }
+            using (new EditorGUI.DisabledScope(!hasSelectedRun))
+            {
                 if (GUILayout.Button("Open run folder")) EditorUtility.RevealInFinder(_selectedRun);
             }
             EditorGUILayout.EndHorizontal();

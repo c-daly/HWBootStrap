@@ -285,19 +285,58 @@ def test_update_state_preserves_config_and_contract(
     assert updated["latest_message"] == "rollout complete"
 
 
-def test_control_requests_distinguish_graceful_and_immediate_stop(
+@pytest.mark.parametrize("state", ["created", "running", "stopping"])
+def test_active_control_requests_distinguish_graceful_and_immediate_stop(
     tmp_path: Path,
     config: RunConfig,
     contract: EnvironmentContract,
     scenario: ResolvedScenario,
+    state: str,
 ) -> None:
     run = _create_test_run(tmp_path, config, contract, scenario)
+    if state != "created":
+        update_run_state(run, state)
 
     request_stop(run, after_checkpoint=True)
     assert read_json(run / "control.json")["request"] == "stop_after_checkpoint"
 
     request_stop(run, after_checkpoint=False)
     assert read_json(run / "control.json")["request"] == "stop_now"
+
+
+@pytest.mark.parametrize("state", ["completed", "stopped", "failed"])
+def test_request_stop_refuses_terminal_structured_source_without_mutating_inventory(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    run = tmp_path / f"structured-{state}"
+    (run / "checkpoints").mkdir(parents=True)
+    artifacts = {
+        "run.json": json.dumps({"schema_version": 2, "state": state}).encode(),
+        "scenario.json": b"scenario",
+        "corpus-manifest.json": b"corpus",
+        "metrics.jsonl": b"metrics",
+        "inference-fixture.json": b"fixture",
+        "policy-identity.json": b"identity",
+        "checkpoints/best.pt": b"checkpoint",
+    }
+    for relative, contents in artifacts.items():
+        (run / relative).write_bytes(contents)
+    before = {
+        path.relative_to(run).as_posix(): path.read_bytes()
+        for path in run.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(ValueError, match=rf"terminal run.*{state}"):
+        request_stop(run, after_checkpoint=False)
+
+    after = {
+        path.relative_to(run).as_posix(): path.read_bytes()
+        for path in run.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
 
 
 def test_publish_checkpoint_validates_then_atomically_updates_latest(

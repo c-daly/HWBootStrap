@@ -747,6 +747,23 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void StopControlPolicy_ProtectsPublishedAndTerminalRuns()
+        {
+            Assert.That(MlStopControlPolicy.CanRequestStop(
+                @"C:\runs\source", MlRunState.Completed,
+                hasControlFile: true), Is.False);
+            Assert.That(MlStopControlPolicy.CanRequestStop(
+                @"C:\runs\source", MlRunState.Unknown,
+                hasControlFile: false), Is.False);
+            Assert.That(MlStopControlPolicy.CanRequestStop(
+                @"C:\runs\active", MlRunState.Running,
+                hasControlFile: true), Is.True);
+            Assert.That(MlStopControlPolicy.CanRequestStop(
+                @"C:\runs\starting", MlRunState.Unknown,
+                hasControlFile: true), Is.True);
+        }
+
+        [Test]
         public void TrainingFormPolicy_UsesSafeV3DefaultsWithoutOverwritingCustomValues()
         {
             var defaults = MlLabConfig.Default();
