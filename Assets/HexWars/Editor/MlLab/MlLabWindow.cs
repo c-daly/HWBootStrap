@@ -83,6 +83,69 @@ namespace HexWars.Presentation.EditorTools.MlLab
             config.Environment = selected.Environment;
         }
 
+        public static void ApplyModelRunSelection(
+            ModelSeatConfiguration seat, string runDirectory)
+        {
+            if (seat == null) throw new ArgumentNullException(nameof(seat));
+            if (!seat.IsModel) return;
+            seat.Path = ResolveModelRunSelection(runDirectory);
+        }
+
+        /// <summary>
+        /// ML Lab tactical-v3 continuation directories are trainer inventories, not policy-server
+        /// controllers.  Resolve their declared published schema-2 model, or the initialized source
+        /// policy only while no publication is declared, without changing the separately selected Arena scenario.
+        /// Legacy runs and already-published structured models remain exactly as selected.
+        /// </summary>
+        public static string ResolveModelRunSelection(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) return runDirectory ?? string.Empty;
+            try
+            {
+                if (HasDotPathComponent(runDirectory) ||
+                    !IsPlainRunMetadata(runDirectory))
+                    return runDirectory;
+                string manifestPath = Path.Combine(runDirectory, "run.json");
+                ArenaContractManifest manifest = JsonUtility.FromJson<ArenaContractManifest>(
+                    File.ReadAllText(manifestPath));
+                if (manifest == null || manifest.schema_version != 1 ||
+                    !string.Equals(manifest.config?.algorithm, "structured_dagger",
+                        StringComparison.Ordinal) ||
+                    !string.Equals(manifest.contract?.environment, "tactical-v3",
+                        StringComparison.Ordinal))
+                {
+                    return runDirectory;
+                }
+
+                if (!string.IsNullOrWhiteSpace(manifest.published_run))
+                    return manifest.published_run;
+                if (!string.IsNullOrWhiteSpace(manifest.source_policy?.run))
+                    return manifest.source_policy.run;
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is NotSupportedException ||
+                error is System.Security.SecurityException ||
+                error is UnauthorizedAccessException)
+            {
+                // Keep the selected path. The existing Arena preflight will surface its precise
+                // manifest/controller error instead of making selection itself destructive.
+            }
+            return runDirectory;
+        }
+
+        static bool IsPlainRunMetadata(string runDirectory)
+        {
+            var errors = new List<string>();
+            RequirePlainDirectoryChain(runDirectory, "selected run", errors);
+            RequireContainedRegularFile(
+                runDirectory, Path.Combine(runDirectory, "run.json"),
+                "selected run metadata", errors);
+            return errors.Count == 0;
+        }
+
         public static TrainingScenario LoadScenario(ModelDuelConfiguration config)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
@@ -202,6 +265,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
             errors.Add(label + " must be contained by the selected run directory.");
         }
 
+        static void RequirePlainDirectoryChain(
+            string path, string label, List<string> errors)
+        {
+            DirectoryInfo directory = new DirectoryInfo(Path.GetFullPath(path));
+            while (directory != null)
+            {
+                if (!directory.Exists)
+                {
+                    errors.Add(label + " directory does not exist: " + directory.FullName);
+                    return;
+                }
+                if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                    errors.Add(label + " must not traverse a reparse-point directory: " +
+                        directory.FullName);
+                directory = directory.Parent;
+            }
+        }
+
         static bool HasDotPathComponent(string path) =>
             !string.IsNullOrWhiteSpace(path) && path.Split(
                 new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
@@ -289,11 +370,18 @@ namespace HexWars.Presentation.EditorTools.MlLab
             public ArenaContract contract;
             public string policy_identity;
             public string latest_checkpoint;
+            public string published_run;
+            public ArenaSourcePolicy source_policy;
         }
 
         [Serializable] sealed class ArenaRunConfig
         {
             public string algorithm;
+        }
+
+        [Serializable] sealed class ArenaSourcePolicy
+        {
+            public string run;
         }
 
         [Serializable] sealed class ArenaContract
@@ -1110,13 +1198,96 @@ namespace HexWars.Presentation.EditorTools.MlLab
             state != MlRunState.Failed;
     }
 
+    /// <summary>
+    /// Resolves the immutable identity that Start &amp; Watch is currently able to present. Legacy
+    /// trainers become ready when their own validated checkpoint exists. A tactical-v3
+    /// structured_dagger lifecycle is intentionally different: it is never passed to policy_server
+    /// as a controller, and becomes presentable as soon as its valid published model (preferred) or
+    /// valid source policy can be resolved. Returning the resolved model path as the revision also
+    /// lets an explicit Retry pick up a publication that appeared after an earlier source attempt.
+    /// </summary>
+    public static class MlWatchPresentationTarget
+    {
+        public static string ResolveRevision(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) return string.Empty;
+            try
+            {
+                string manifestPath = Path.Combine(runDirectory, "run.json");
+                WatchManifest manifest = JsonUtility.FromJson<WatchManifest>(
+                    File.ReadAllText(manifestPath));
+                if (manifest == null) return string.Empty;
+                if (manifest.schema_version == 1 &&
+                    string.Equals(
+                        manifest.config?.algorithm,
+                        "structured_dagger",
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        manifest.contract?.environment,
+                        "tactical-v3",
+                        StringComparison.Ordinal))
+                {
+                    string modelRun = MlArenaLaunchPlan.ResolveModelRunSelection(
+                        runDirectory);
+                    if (SamePath(modelRun, runDirectory)) return string.Empty;
+                    return "structured-model:" + Path.GetFullPath(modelRun);
+                }
+                if (string.IsNullOrWhiteSpace(manifest.latest_checkpoint))
+                    return string.Empty;
+                string checkpoint = Path.Combine(
+                    runDirectory, manifest.latest_checkpoint);
+                return File.Exists(checkpoint)
+                    ? "checkpoint:" + Path.GetFullPath(checkpoint)
+                    : string.Empty;
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is NotSupportedException ||
+                error is PathTooLongException ||
+                error is UnauthorizedAccessException)
+            {
+                return string.Empty;
+            }
+        }
+
+        static bool SamePath(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+                return string.Equals(left, right, StringComparison.Ordinal);
+            string normalizedLeft = Path.GetFullPath(left).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normalizedRight = Path.GetFullPath(right).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(
+                normalizedLeft,
+                normalizedRight,
+                Environment.OSVersion.Platform == PlatformID.Win32NT
+                    ? StringComparison.OrdinalIgnoreCase
+                    : StringComparison.Ordinal);
+        }
+
+        [Serializable]
+        sealed class WatchManifest
+        {
+            public int schema_version;
+            public WatchConfig config;
+            public WatchContract contract;
+            public string latest_checkpoint;
+        }
+
+        [Serializable] sealed class WatchConfig { public string algorithm; }
+        [Serializable] sealed class WatchContract { public string environment; }
+    }
+
     /// <summary>Outcome of <see cref="MlWatchStartPolicy.Decide"/>: whether the Start & Watch
     /// auto-trigger should launch the viewer now, wait and poll again, give up because training ended
-    /// (or the safety-net ceiling passed) before a checkpoint became ready, or silently drop a retry
+    /// (or the safety-net ceiling passed) before a presentation target became ready, or silently drop a retry
     /// whose target run directory is no longer the current selection.</summary>
     public enum MlWatchStartDecision { WaitAndRetry, Watch, GiveUp, Stale }
 
-    /// <summary>Pure decision for the Start & Watch auto-trigger. run.json is written (with
+    /// <summary>Pure decision for the Start & Watch auto-trigger. For legacy training, run.json is written (with
     /// <c>latest_checkpoint: null</c>) well before the Python trainer publishes its first checkpoint,
     /// so gating on manifest existence alone let <see cref="ReplayViewerMenu.WatchLiveRun"/> launch
     /// against a run that had no checkpoint yet — the policy server then fails closed with "run
@@ -1128,7 +1299,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
     /// (<paramref name="trainingAlive"/>) rather than failing on a fixed short timeout, since a slow
     /// first checkpoint (long checkpoint interval, slow device) is not an error; a <paramref
     /// name="ceilingDeadlinePassed"/> ceiling remains only as a safety net against a genuinely stuck
-    /// wait.</summary>
+    /// wait. For structured_dagger, the same boolean means the lifecycle's published/source strict
+    /// model is ready for a separate presentation game; the lifecycle itself is never treated as a
+    /// controller.</summary>
     public static class MlWatchStartPolicy
     {
         public static MlWatchStartDecision Decide(
@@ -1271,7 +1444,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const string PendingWatchRunDirectoryKey = "HexWars.MlLab.PendingWatchRunDirectory";
         const string PendingWatchDeadlineKey = "HexWars.MlLab.PendingWatchDeadline";
         const double PollIntervalSeconds = 1.0;
-        // Start & Watch retries until a validated checkpoint appears (see MlWatchStartPolicy) for as
+        // Start & Watch retries until a validated presentation target appears (see
+        // MlWatchPresentationTarget and MlWatchStartPolicy) for as
         // long as training is still alive; this ceiling is only a safety net against a genuinely
         // stuck wait (e.g. training hung without ever transitioning to a terminal state), not the
         // normal way out — a slow first checkpoint is not itself an error.
@@ -1558,7 +1732,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 EditorGUILayout.BeginHorizontal();
                 seat.Path = EditorGUILayout.TextField("Run directory", seat.Path);
                 if ((seat.Kind == ModelControllerKind.FixedRun || seat.Kind == ModelControllerKind.LiveRun) &&
-                    GUILayout.Button("Use selected", GUILayout.Width(92))) seat.Path = _selectedRun;
+                    GUILayout.Button("Use selected", GUILayout.Width(92)))
+                    MlArenaLaunchPlan.ApplyModelRunSelection(seat, _selectedRun);
                 EditorGUILayout.EndHorizontal();
             }
         }
@@ -2195,8 +2370,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         MlTrainingFormPolicy.PrimaryActionLabel(
                             _config.Environment, _resume)))
                     StartTraining(false);
-                if (!structuredContinuation &&
-                    GUILayout.Button("Start & Watch"))
+                if (GUILayout.Button("Start & Watch"))
                     StartTraining(true);
             }
             EditorGUILayout.EndHorizontal();
@@ -2235,7 +2409,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     _state.Apply(_status.State, _status.Pid);
                 _nextPoll = 0;
                 _notice =
-                    "Viewer retry requested; the selected run and checkpoint " +
+                    "Viewer retry requested; the selected run and presentation model " +
                     "will be validated again.";
             }
             foreach (string error in formState.Errors)
@@ -2413,7 +2587,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _nextPoll = 0;
                 RefreshKnownRuns();
                 _notice = watch
-                    ? "Training started. The Arena viewer will open after the first validated checkpoint."
+                    ? structuredContinuation
+                        ? "Training started. The Arena viewer is a separate game using the " +
+                          "lifecycle scenario and its current valid published/source model; " +
+                          "it does not replay the trainer's collection episode."
+                        : "Training started. The Arena viewer will open after the first " +
+                          "validated checkpoint."
                     : "Training started headlessly; this window remains attached to local run truth.";
             }
             catch (Exception error) { _state.Fail(error.Message); }
@@ -2498,7 +2677,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _state.Apply(status.State, status.Pid);
             MlRunAttachment.Remember(_selectedRun);
             ReadLatestMetric();
-            if (_watch.TryQueue(status.LatestCheckpoint))
+            string presentationRevision =
+                MlWatchPresentationTarget.ResolveRevision(_selectedRun);
+            if (_watch.TryQueue(presentationRevision))
             {
                 _pendingWatchRunDirectory = _selectedRun;
                 _watchRetryDeadline =
@@ -2508,7 +2689,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             Repaint();
         }
 
-        // Retries the Start & Watch launch until a validated checkpoint is ready, training is no
+        // Retries the Start & Watch launch until a validated presentation target is ready, training is no
         // longer alive, the safety-net ceiling passes, or the pending run directory is superseded by a
         // different selection. See MlWatchStartPolicy for the pure decision; this method is just the
         // editor-main-thread plumbing (file reads, live training/UI state) around it.
@@ -2517,7 +2698,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (this == null || string.IsNullOrEmpty(_pendingWatchRunDirectory)) return;
             string runDirectory = _pendingWatchRunDirectory;
             bool matchesSelection = string.Equals(runDirectory, _selectedRun, StringComparison.Ordinal);
-            bool checkpointReady = RunHasValidatedCheckpoint(runDirectory);
+            bool checkpointReady = !string.IsNullOrWhiteSpace(
+                MlWatchPresentationTarget.ResolveRevision(runDirectory));
             bool trainingAlive = MlTrainerLivenessPolicy.IsAlive(
                 ComputeTrainerLiveness(runDirectory, out _, out _));
             bool ceilingPassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
@@ -2545,33 +2727,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     _pendingWatchRunDirectory = string.Empty;
                     _watch.Apply(
                         MlViewerLaunchResult.Failed(trainingAlive
-                            ? "Start & Watch gave up: no validated checkpoint appeared within " +
+                            ? "Start & Watch gave up: no validated presentation model appeared within " +
                               (WatchCeilingTimeoutSeconds / 60.0).ToString("0", CultureInfo.InvariantCulture) +
                               " minute(s) of the first status."
-                            : "Start & Watch gave up: training ended before a validated checkpoint appeared."),
+                            : "Start & Watch gave up: training ended before a validated presentation model appeared."),
                         _state);
                     Repaint();
                     break;
             }
-        }
-
-        // Mirrors python/ml_lab/controllers.py's ControllerResolver._resolve_run check (the exact
-        // check that raises "run manifest is missing latest_checkpoint metadata"): the manifest must
-        // exist and its latest_checkpoint must be a non-blank string naming a checkpoint file that
-        // actually exists in the run directory. Checking this here — not just run.json's existence —
-        // is what closes the race that let Start & Watch launch a viewer before the policy server had
-        // anything loadable to serve.
-        static bool RunHasValidatedCheckpoint(string runDirectory)
-        {
-            string manifestPath = Path.Combine(runDirectory, "run.json");
-            if (!File.Exists(manifestPath)) return false;
-            try
-            {
-                var manifest = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifestPath));
-                if (manifest == null || string.IsNullOrWhiteSpace(manifest.latest_checkpoint)) return false;
-                return File.Exists(Path.Combine(runDirectory, manifest.latest_checkpoint));
-            }
-            catch (Exception) { return false; }
         }
 
         // Ground truth for D1 ("Lab stops lying about trainers"): whether the trainer tracked for

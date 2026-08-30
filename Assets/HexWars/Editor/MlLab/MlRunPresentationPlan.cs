@@ -17,18 +17,22 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         MlRunPresentationPlan(
             string runDirectory,
+            string learnerRunDirectory,
+            string learnerSpec,
             string learnerSeat,
             IReadOnlyList<OpponentPlan> opponents,
             TrainingScenario scenario)
         {
             RunDirectory = runDirectory;
-            _learnerSpec = ReplayViewerMenu.BuildLiveTrainingSpec(runDirectory);
+            LearnerRunDirectory = learnerRunDirectory;
+            _learnerSpec = learnerSpec;
             _learnerSeat = learnerSeat;
             _opponents = opponents;
             Scenario = scenario;
         }
 
         public string RunDirectory { get; }
+        public string LearnerRunDirectory { get; }
         public TrainingScenario Scenario { get; }
         public string LearnerSeatSchedule => _learnerSeat;
 
@@ -74,11 +78,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
                 TrainingScenario scenario = LoadScenario(
                     runPath, manifest, hasScenarioMetadata);
+                if (string.Equals(
+                        manifest.config?.algorithm,
+                        "structured_dagger",
+                        StringComparison.Ordinal))
+                {
+                    return LoadStructuredLifecycle(
+                        runPath, manifest, learnerSeat, scenario);
+                }
                 ContractDto learnerContract = manifest.contract;
                 IReadOnlyList<OpponentPlan> opponents = ResolveOpponents(
                     manifest.opponent_snapshot, learnerContract, "opponent_snapshot");
                 return new MlRunPresentationPlan(
-                    runPath, learnerSeat, opponents, scenario);
+                    runPath,
+                    runPath,
+                    ReplayViewerMenu.BuildLiveTrainingSpec(runPath),
+                    learnerSeat,
+                    opponents,
+                    scenario);
             }
             catch (InvalidOperationException error)
             {
@@ -94,6 +111,120 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 throw new InvalidOperationException(
                     manifestPath + ": " + error.Message, error);
             }
+        }
+
+        /// <summary>
+        /// A tactical-v3 DAgger directory describes a training lifecycle, not a controller the
+        /// policy server can load.  Presentation deliberately keeps the lifecycle's recorded
+        /// scenario, seat schedule, and opponent, while using its declared published strict model,
+        /// or its authenticated initialization source only before publication. MlArenaLaunchPlan.Create
+        /// supplies the exact same structured-model/scenario validation used by the Arena tab.
+        /// </summary>
+        static MlRunPresentationPlan LoadStructuredLifecycle(
+            string runPath,
+            RunManifestDto manifest,
+            string learnerSeat,
+            TrainingScenario scenario)
+        {
+            if (!string.Equals(
+                    scenario.Environment, "tactical-v3", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "structured_dagger presentation requires a tactical-v3 scenario");
+            ModelSeatConfiguration opponent = ResolveStructuredOpponent(
+                manifest.opponent_snapshot, "opponent_snapshot", out string opponentLabel);
+            string candidate = MlArenaLaunchPlan.ResolveModelRunSelection(runPath);
+            if (SamePath(candidate, runPath))
+                throw new InvalidOperationException(
+                    "structured_dagger presentation has no valid published or source model");
+            try
+            {
+                var learner = new ModelSeatConfiguration
+                {
+                    Kind = ModelControllerKind.LiveRun,
+                    Path = candidate,
+                    InferenceMode = ModelInferenceMode.Stochastic,
+                };
+                var arena = new ModelDuelConfiguration
+                {
+                    Environment = MlEnvironmentContract.TacticalV3,
+                    ScenarioRunPath = runPath,
+                    P0 = learner,
+                    P1 = opponent,
+                };
+                MlArenaLaunchPlan launch = MlArenaLaunchPlan.Create(arena);
+                return new MlRunPresentationPlan(
+                    runPath,
+                    candidate,
+                    launch.P0Spec,
+                    learnerSeat,
+                    new[] { new OpponentPlan(launch.P1Spec, opponentLabel) },
+                    launch.Scenario);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is InvalidOperationException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    candidate + ": " + error.Message, error);
+            }
+        }
+
+        static ModelSeatConfiguration ResolveStructuredOpponent(
+            OpponentDto opponent,
+            string metadataPath,
+            out string label)
+        {
+            if (opponent.kind == "scripted")
+            {
+                if (opponent.name == "greedy")
+                {
+                    label = "Greedy";
+                    return new ModelSeatConfiguration {
+                        Kind = ModelControllerKind.Greedy };
+                }
+                if (opponent.name == "random")
+                {
+                    label = "Random";
+                    return new ModelSeatConfiguration {
+                        Kind = ModelControllerKind.Random };
+                }
+                throw new InvalidOperationException(
+                    metadataPath +
+                    ".name must be 'greedy' or 'random' for a scripted opponent");
+            }
+            bool live = opponent.kind == "live_run";
+            if (!live && opponent.kind != "fixed_run")
+                throw new InvalidOperationException(
+                    metadataPath + ".kind '" +
+                    (opponent.kind ?? "<missing>") +
+                    "' is not supported for structured_dagger presentation");
+            string expectedMode = live ? "live" : "fixed";
+            if (!string.Equals(opponent.mode, expectedMode, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    metadataPath + ".mode must be '" + expectedMode + "'");
+            if (!string.Equals(
+                    opponent.algorithm,
+                    "structured_imitation",
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    metadataPath + ".algorithm must be structured_imitation");
+            if (string.IsNullOrWhiteSpace(opponent.source_run))
+                throw new InvalidOperationException(
+                    metadataPath + ".source_run is required");
+            label = Path.GetFileName(opponent.source_run.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar)) +
+                (live ? " · live" : " · fixed");
+            return new ModelSeatConfiguration
+            {
+                Kind = live
+                    ? ModelControllerKind.LiveRun
+                    : ModelControllerKind.FixedRun,
+                Path = opponent.source_run,
+            };
         }
 
         public MlPresentationGame PlanGame(int gameIndex)
@@ -487,6 +618,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             Environment.OSVersion.Platform == PlatformID.Win32NT
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
+
+        static bool SamePath(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+                return string.Equals(left, right, StringComparison.Ordinal);
+            string normalizedLeft = Path.GetFullPath(left).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string normalizedRight = Path.GetFullPath(right).TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(normalizedLeft, normalizedRight, PathComparison);
+        }
 
         sealed class OpponentPlan
         {

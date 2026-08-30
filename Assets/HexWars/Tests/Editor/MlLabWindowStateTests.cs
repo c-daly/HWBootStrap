@@ -974,6 +974,144 @@ namespace HexWars.Presentation.Tests
             finally { Directory.Delete(fixture.Run, true); }
         }
 
+        [Test]
+        public void ArenaModelSelection_StructuredLifecycleUsesDeclaredPublishedRun()
+        {
+            var published = CreateStructuredArenaRun();
+            string lifecycle = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(lifecycle);
+                File.WriteAllText(Path.Combine(lifecycle, "run.json"),
+                    LifecycleManifest(published.Run, "missing-source"));
+                var seat = new ModelSeatConfiguration {
+                    Kind = ModelControllerKind.LiveRun, Path = "previous-model" };
+                var config = new ModelDuelConfiguration {
+                    ScenarioRunPath = "separately-selected-scenario", P0 = seat };
+
+                MlArenaLaunchPlan.ApplyModelRunSelection(seat, lifecycle);
+
+                Assert.That(seat.Path, Is.EqualTo(published.Run));
+                Assert.That(config.ScenarioRunPath,
+                    Is.EqualTo("separately-selected-scenario"));
+            }
+            finally
+            {
+                if (Directory.Exists(lifecycle)) Directory.Delete(lifecycle, true);
+                Directory.Delete(published.Run, true);
+            }
+        }
+
+        [Test]
+        public void ArenaModelSelection_UnpublishedLifecycleUsesDeclaredSourcePolicy()
+        {
+            var source = CreateStructuredArenaRun();
+            string lifecycle = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(lifecycle);
+                File.WriteAllText(Path.Combine(lifecycle, "run.json"),
+                    LifecycleManifest(string.Empty, source.Run));
+                var seat = new ModelSeatConfiguration {
+                    Kind = ModelControllerKind.FixedRun };
+
+                MlArenaLaunchPlan.ApplyModelRunSelection(seat, lifecycle);
+
+                Assert.That(seat.Path, Is.EqualTo(source.Run));
+            }
+            finally
+            {
+                if (Directory.Exists(lifecycle)) Directory.Delete(lifecycle, true);
+                Directory.Delete(source.Run, true);
+            }
+        }
+
+        [Test]
+        public void ArenaModelSelection_DeclaredPublicationDoesNotFallBackToSourcePolicy()
+        {
+            var source = CreateStructuredArenaRun();
+            string lifecycle = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(lifecycle);
+                File.WriteAllText(Path.Combine(lifecycle, "run.json"),
+                    LifecycleManifest("missing-declared-publication", source.Run));
+                var seat = new ModelSeatConfiguration {
+                    Kind = ModelControllerKind.LiveRun, Path = "previous-model" };
+
+                MlArenaLaunchPlan.ApplyModelRunSelection(seat, lifecycle);
+
+                Assert.That(seat.Path, Is.EqualTo("missing-declared-publication"));
+            }
+            finally
+            {
+                if (Directory.Exists(lifecycle)) Directory.Delete(lifecycle, true);
+                Directory.Delete(source.Run, true);
+            }
+        }
+
+        [Test]
+        public void ArenaModelSelection_DotPathLifecycleCannotRedirectModelSelection()
+        {
+            string lifecycle = Path.Combine(Path.GetTempPath(),
+                "hexwars-v3-lifecycle-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(lifecycle);
+                File.WriteAllText(Path.Combine(lifecycle, "run.json"),
+                    LifecycleManifest("published-model", "missing-source"));
+                string selected = Path.Combine(lifecycle, ".");
+
+                Assert.That(MlArenaLaunchPlan.ResolveModelRunSelection(selected),
+                    Is.EqualTo(selected));
+            }
+            finally
+            {
+                if (Directory.Exists(lifecycle)) Directory.Delete(lifecycle, true);
+            }
+        }
+
+        [Test]
+        public void ArenaModelSelection_PublishedAndLegacyRunsStayAsSelected()
+        {
+            var published = CreateStructuredArenaRun();
+            string legacy = Path.Combine(Path.GetTempPath(),
+                "hexwars-legacy-run-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(legacy);
+                File.WriteAllText(Path.Combine(legacy, "run.json"),
+                    @"{""schema_version"":1,""config"":{""algorithm"":""maskable_ppo""},""contract"":{""environment"":""tactical-v2""}}");
+
+                Assert.That(MlArenaLaunchPlan.ResolveModelRunSelection(published.Run),
+                    Is.EqualTo(published.Run));
+                Assert.That(MlArenaLaunchPlan.ResolveModelRunSelection(legacy),
+                    Is.EqualTo(legacy));
+            }
+            finally
+            {
+                if (Directory.Exists(legacy)) Directory.Delete(legacy, true);
+                Directory.Delete(published.Run, true);
+            }
+        }
+
+        [TestCase(ModelControllerKind.Greedy)]
+        [TestCase(ModelControllerKind.Random)]
+        public void ArenaModelSelection_DoesNotChangeScriptedControllers(
+            ModelControllerKind kind)
+        {
+            var seat = new ModelSeatConfiguration {
+                Kind = kind, Path = "preserved-scripted-path" };
+
+            MlArenaLaunchPlan.ApplyModelRunSelection(seat, "some-selected-run");
+
+            Assert.That(seat.Kind, Is.EqualTo(kind));
+            Assert.That(seat.Path, Is.EqualTo("preserved-scripted-path"));
+        }
+
         static (string Run, string Manifest, ModelDuelConfiguration Config)
             CreateStructuredArenaRun()
         {
@@ -998,6 +1136,35 @@ namespace HexWars.Presentation.Tests
                 P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.FixedRun, Path = run } };
             return (run, manifest, config);
         }
+
+        static string LifecycleManifest(string publishedRun, string sourceRun) =>
+            JsonUtility.ToJson(new LifecycleRunManifest
+            {
+                schema_version = 1,
+                config = new LifecycleRunConfig { algorithm = "structured_dagger" },
+                contract = new LifecycleRunContract { environment = "tactical-v3" },
+                published_run = publishedRun,
+                source_policy = new LifecycleSourcePolicy { run = sourceRun },
+            });
+
+        [System.Serializable]
+        sealed class LifecycleRunManifest
+        {
+            public int schema_version;
+            public LifecycleRunConfig config;
+            public LifecycleRunContract contract;
+            public string published_run;
+            public LifecycleSourcePolicy source_policy;
+        }
+
+        [System.Serializable]
+        sealed class LifecycleRunConfig { public string algorithm; }
+
+        [System.Serializable]
+        sealed class LifecycleRunContract { public string environment; }
+
+        [System.Serializable]
+        sealed class LifecycleSourcePolicy { public string run; }
 
         [TestCase("algorithm")]
         [TestCase("evidence_status")]
