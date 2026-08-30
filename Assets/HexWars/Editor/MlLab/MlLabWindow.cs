@@ -69,6 +69,20 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 config.Observer);
         }
 
+        public static void ApplyScenarioRunSelection(
+            ModelDuelConfiguration config, string runDirectory)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            // The scenario file is authoritative for the environment. Resolve it
+            // before mutating either field so a bad selection cannot leave the
+            // Arena configuration half-updated.
+            MlTrainingScenarioPreflight selected =
+                MlTrainingScenarioPreflight.LoadSourceRun(runDirectory);
+            config.ScenarioRunPath = runDirectory;
+            config.Environment = selected.Environment;
+        }
+
         public static TrainingScenario LoadScenario(ModelDuelConfiguration config)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
@@ -1387,7 +1401,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _arena.ScenarioRunPath = EditorGUILayout.TextField(
                 "Scenario run", _arena.ScenarioRunPath);
             if (GUILayout.Button("Use selected run scenario", GUILayout.Width(174)))
-                _arena.ScenarioRunPath = _selectedRun;
+            {
+                try
+                {
+                    MlArenaLaunchPlan.ApplyScenarioRunSelection(_arena, _selectedRun);
+                    _arenaError = string.Empty;
+                }
+                catch (Exception error)
+                {
+                    _arenaError = error.Message;
+                }
+            }
             EditorGUILayout.EndHorizontal();
             DrawEnvironmentSummary(MlEnvironmentSummary.ForSelection(_arena.Environment), "Arena preflight");
             DrawArenaSeat("Seat 0", _arena.P0);

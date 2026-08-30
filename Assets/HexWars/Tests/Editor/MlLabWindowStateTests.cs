@@ -721,6 +721,72 @@ namespace HexWars.Presentation.Tests
             finally { if (Directory.Exists(run)) Directory.Delete(run, true); }
         }
 
+        [Test]
+        public void ScenarioRunSelection_SynchronizesV3EnvironmentForFixedRunVsGreedy()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                ModelSeatConfiguration p0 = fixture.Config.P0;
+                ModelSeatConfiguration p1 = fixture.Config.P1;
+                fixture.Config.Environment = MlEnvironmentContract.TacticalV2;
+                fixture.Config.ScenarioRunPath = "previous-scenario";
+                fixture.Config.Observer = ModelDuelObserverSeat.Player2;
+                fixture.Config.Seed = 73;
+                fixture.Config.SecondsPerAction = 0.25f;
+                fixture.Config.Loop = false;
+
+                MlArenaLaunchPlan.ApplyScenarioRunSelection(
+                    fixture.Config, fixture.Run);
+                MlArenaLaunchPlan plan = MlArenaLaunchPlan.Create(fixture.Config);
+
+                Assert.That(fixture.Config.Environment,
+                    Is.EqualTo(MlEnvironmentContract.TacticalV3));
+                Assert.That(fixture.Config.ScenarioRunPath, Is.EqualTo(fixture.Run));
+                Assert.That(fixture.Config.P0, Is.SameAs(p0));
+                Assert.That(fixture.Config.P1, Is.SameAs(p1));
+                Assert.That(fixture.Config.Observer,
+                    Is.EqualTo(ModelDuelObserverSeat.Player2));
+                Assert.That(fixture.Config.Seed, Is.EqualTo(73));
+                Assert.That(fixture.Config.SecondsPerAction, Is.EqualTo(0.25f));
+                Assert.That(fixture.Config.Loop, Is.False);
+                Assert.That(plan.Scenario.Environment, Is.EqualTo("tactical-v3"));
+                Assert.That(plan.P0Spec, Is.EqualTo("run:" + fixture.Run));
+                Assert.That(plan.P1Spec, Is.EqualTo("greedy"));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
+        [Test]
+        public void ScenarioRunSelection_InvalidScenarioLeavesArenaConfigurationUntouched()
+        {
+            var fixture = CreateStructuredArenaRun();
+            try
+            {
+                fixture.Config.Environment = MlEnvironmentContract.TacticalV2;
+                fixture.Config.ScenarioRunPath = "previous-scenario";
+                ModelSeatConfiguration p0 = fixture.Config.P0;
+                ModelSeatConfiguration p1 = fixture.Config.P1;
+
+                Assert.Throws<ArgumentException>(() =>
+                    MlArenaLaunchPlan.ApplyScenarioRunSelection(
+                        fixture.Config, " "));
+                File.WriteAllText(
+                    Path.Combine(fixture.Run, "scenario.json"), "{}");
+                Assert.Throws<InvalidDataException>(() =>
+                    MlArenaLaunchPlan.ApplyScenarioRunSelection(
+                        fixture.Config, fixture.Run));
+
+                Assert.That(fixture.Config.Environment,
+                    Is.EqualTo(MlEnvironmentContract.TacticalV2));
+                Assert.That(fixture.Config.ScenarioRunPath,
+                    Is.EqualTo("previous-scenario"));
+                Assert.That(fixture.Config.P0, Is.SameAs(p0));
+                Assert.That(fixture.Config.P1, Is.SameAs(p1));
+            }
+            finally { Directory.Delete(fixture.Run, true); }
+        }
+
         static (string Run, string Manifest, ModelDuelConfiguration Config)
             CreateStructuredArenaRun()
         {
