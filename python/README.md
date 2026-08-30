@@ -132,7 +132,36 @@ Before a full budget, use a new run name and `--timesteps 1000 --checkpoint-ever
 
 `scenario.json` is immutable experiment provenance. Python writes its canonical snapshot before workers start and passes that run-local file to every worker. Do not edit it to tune or repair a run, and do not edit `run.json` to point elsewhere. Change the source experiment file or library entry, then launch a new smoke/full run under a new name. Promote only the exact reviewed checkpoint together with its unmodified `run.json`, `scenario.json`, evaluation, source commit, and approval.
 
-The Unity equivalent is **HexWars > ML Lab > Train**: select **Environment** and **Template**, expand **Advanced game settings**, change the starting army budget and max steps if the hypothesis requires them, enter a new template name/ID, and choose **Save as template**. Set the run, algorithm, opponent, learner seat, workers, timesteps, and checkpoint interval; review **Training preflight**, choose **Doctor**, then **Start & Watch**. Unity writes the edited working copy to a session scenario file and launches the same CLI with `--scenario-file`. Use **Open run folder** to inspect the immutable snapshot, and use the Arena only after a complete checkpoint exists. Watching is a separate rendered match and does not display or pace the learner's headless episodes.
+The Unity equivalent is **HexWars > ML Lab > Train**: select **Environment** and **Template**, expand **Advanced game settings**, change the starting army budget and max steps if the hypothesis requires them, enter a new save-as template name/ID, and choose **Save as template**. Set the run, algorithm, opponent, learner seat, workers, timesteps, and checkpoint interval; review **Training preflight**, choose **Doctor**, then **Start & Watch**. Unity writes the edited working copy to a run-specific staging file and launches the same CLI with `--scenario-file`. Use **Open run folder** to inspect the immutable snapshot, and use the Arena only after a complete checkpoint exists. Watching is a separate rendered match and does not display or pace the learner's headless episodes.
+
+### Tactical-v3 scenario training
+
+Tactical-v3 uses the same Train-tab template workflow, but separates two choices that have different jobs:
+
+- **Source model** supplies the initial learned weights. Select a completed structured model (or a continuation that resolves to its published model) and choose **Use selected model**.
+- **Template** is the target game configuration used for new DAgger collection and training. **Standard** matches the current custom-only tactical-v3 scenario; **Full Roster** is the checked-in five-template scenario. Advanced settings can change the board, match rules, roster, and start-profile weights. The weights must total 10,000 basis points.
+
+The source model does not force its old scenario onto the new run. ML Lab first checks package metadata against the target's encoding and capacity while allowing the target's full match/contract hash to differ. When you start, a foreground preflight asks the separate GymServer to authenticate the target scenario, loads and authenticates the complete source checkpoint package, verifies its model architecture, and does the same for any model opponent. Only a successful preflight starts the detached trainer and creates run artifacts. A failed preflight remains in the ML Lab command log and can be retried with the same run name.
+
+For a new scenario, select **Tactical v3**, choose the closest template, edit only the intended fields, give a saved template an ID beginning with `tactical-v3-`, then select the source model and opponent. Fixed and live model opponents can use the same **Use selected model** lifecycle resolution as the source. A compatible tactical-v3 opponent may use its own network architecture; only the initialization source must match the continuation architecture exactly. Save advanced edits if they must survive closing ML Lab or a script reload. Leave TensorBoard enabled if you want live collection and epoch metrics, and use **Start & Watch** when you also want the separate Arena viewer. The run snapshots the edited target as its own `scenario.json` and records the source model's immutable identity and architecture separately; neither source artifact is overwritten.
+
+The direct CLI equivalent accepts an explicit standalone target scenario:
+
+```powershell
+& .\python\winenv\Scripts\python.exe .\python\hexwars_ml.py train-structured `
+  --run new_scenario_vs_greedy `
+  --source-run .\python\runs\SOURCE_MODEL `
+  --scenario-file .\python\config\annihilation-structured-imitation-v1.json `
+  --opponent greedy `
+  --train-labels 7500 `
+  --validation-labels 3000 `
+  --learner-seat alternating `
+  --device cuda `
+  --tracker local `
+  --tracker tensorboard
+```
+
+Collection follows the target scenario's positive start-profile weights. With alternating seats, each selected profile is used for a reciprocal seat pair before the scheduler advances, so changing the scenario mix changes what is collected without changing the model selector or opponent controls.
 
 ## Tactical v2 rosters
 

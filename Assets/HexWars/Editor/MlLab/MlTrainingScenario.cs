@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using HexWars.Presentation;
 using UnityEngine;
 
@@ -502,7 +503,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         "duplicate template id '" + scenario.Id + "'");
                 string expectedPrefix = scenario.Environment == MlEnvironmentContract.AdaptiveV1
                     ? "adaptive-"
-                    : "tactical-";
+                    : scenario.Environment == MlEnvironmentContract.TacticalV3
+                        ? "tactical-v3-"
+                        : "tactical-";
                 if (!scenario.Id.StartsWith(expectedPrefix, StringComparison.Ordinal))
                     throw new InvalidDataException(
                         "template '" + scenario.Id + "' does not match its environment '" +
@@ -616,6 +619,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public static class MlTrainingScenarioStore
     {
+        static readonly Regex SafeLaunchName = new Regex(
+            "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            RegexOptions.CultureInvariant);
+
         public static string WriteSessionScenario(
             string projectRoot, MlTrainingScenario scenario)
         {
@@ -624,6 +631,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
             string directory = Path.Combine(projectRoot, "Library", "HexWars", "MLLab");
             Directory.CreateDirectory(directory);
             string path = Path.Combine(directory, "scenario.json");
+            WriteScenarioAtomically(path, scenario);
+            return path;
+        }
+
+        public static string WriteLaunchScenario(
+            string projectRoot, string runName, MlTrainingScenario scenario)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot))
+                throw new ArgumentException(
+                    "Project root is required.", nameof(projectRoot));
+            if (string.IsNullOrWhiteSpace(runName) ||
+                !SafeLaunchName.IsMatch(runName))
+                throw new ArgumentException(
+                    "Run name must be safe for scenario staging.", nameof(runName));
+            string directory = Path.Combine(
+                projectRoot, "Library", "HexWars", "MLLab", "scenarios");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, runName + ".json");
             WriteScenarioAtomically(path, scenario);
             return path;
         }

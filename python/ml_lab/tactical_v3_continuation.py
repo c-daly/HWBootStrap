@@ -37,6 +37,7 @@ from .controllers import (
     normalize_controller_spec,
 )
 from .io import atomic_write_json, read_json
+from .scenarios import ResolvedScenario, resolve_scenario
 from .tactical_v3_checkpoint import (
     LoadedStructuredPolicy,
     adopt_structured_run,
@@ -45,20 +46,24 @@ from .tactical_v3_checkpoint import (
 )
 from .tactical_v3_controller import StructuredController
 from .tactical_v3_pilot import (
+    ContinuationScheduleItem,
     PilotDaggerEpisode,
-    PilotScheduleItem,
     PilotTrainingStopRequested,
+    TACTICAL_V3_START_PROFILES,
     _canonical_bytes,
+    _pilot_configs,
     _train_pilot_dataset,
+    _validate_compatible_transfer_identity,
     collect_dagger_game,
     write_dagger_episode,
 )
-from .tactical_v3_schema import TacticalV3SemanticIdentity
+from .tactical_v3_schema import TacticalV3SemanticIdentity, canonical_sha256
 from .tactical_v3_training import TrainerConfig
 from .tactical_v3_client import TacticalV3GymClient
 
 
 OpponentKind = Literal["random", "greedy", "fixed_run", "live_run"]
+_PROFILE_SCHEDULER_IDENTITY = "smooth-weighted-reciprocal-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,11 +86,6 @@ class StructuredContinuationConfig:
             raise FileNotFoundError(self.source_run)
         if not Path(self.scenario_file).is_file():
             raise FileNotFoundError(self.scenario_file)
-        expected_scenario = Path(self.source_run).resolve() / "scenario.json"
-        if Path(self.scenario_file).resolve() != expected_scenario:
-            raise ValueError(
-                "tactical-v3 continuation must use source_run/scenario.json exactly"
-            )
         if type(self.train_label_target) is not int or self.train_label_target < 2:
             raise ValueError("tactical-v3 train label target must be at least 2")
         if (
@@ -115,6 +115,244 @@ class StructuredContinuationConfig:
             )
 
 
+def _start_distribution(
+    scenario: Mapping[str, Any],
+) -> tuple[tuple[str, int], ...]:
+    tactical_v3 = scenario.get("tactical_v3")
+    if not isinstance(tactical_v3, Mapping):
+        raise ValueError("tactical-v3 target scenario has no tactical_v3 section")
+    if tactical_v3.get("placement_policy") != "profiled-seeded-v1":
+        raise ValueError(
+            "tactical-v3 structured continuation requires profiled-seeded-v1"
+        )
+    profiles = tactical_v3.get("start_profiles")
+    distribution = tactical_v3.get("start_distribution")
+    if type(profiles) is not tuple or not profiles:
+        raise ValueError("tactical-v3 target identity has no start profile catalog")
+    if type(distribution) is not tuple or not distribution:
+        raise ValueError("tactical-v3 target identity has no start distribution")
+
+    declared: set[str] = set()
+    for index, raw in enumerate(profiles):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "id", "learner_units", "opponent_units", "separation",
+        }:
+            raise ValueError(
+                f"tactical-v3 target start profile {index} is malformed"
+            )
+        profile_id = raw["id"]
+        if type(profile_id) is not str or not profile_id or profile_id in declared:
+            raise ValueError("tactical-v3 target start profile ids are invalid")
+        declared.add(profile_id)
+
+    rows: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    total = 0
+    for index, raw in enumerate(distribution):
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "profile_id", "basis_points",
+        }:
+            raise ValueError(
+                f"tactical-v3 target start distribution row {index} is malformed"
+            )
+        profile_id = raw["profile_id"]
+        basis_points = raw["basis_points"]
+        if (
+            type(profile_id) is not str
+            or profile_id not in declared
+            or profile_id in seen
+            or type(basis_points) is not int
+            or not 0 <= basis_points <= 10_000
+        ):
+            raise ValueError("tactical-v3 target start distribution is invalid")
+        if profile_id not in TACTICAL_V3_START_PROFILES:
+            raise ValueError(
+                f"tactical-v3 target start profile {profile_id!r} is unsupported"
+            )
+        seen.add(profile_id)
+        total += basis_points
+        rows.append((profile_id, basis_points))
+    if seen != declared or total != 10_000 or not any(weight for _, weight in rows):
+        raise ValueError("tactical-v3 target start distribution is incomplete")
+    return tuple(sorted(rows))
+
+
+def _identity_start_distribution(
+    identity: TacticalV3SemanticIdentity,
+) -> tuple[tuple[str, int], ...]:
+    raw_distribution = identity.match.get("start_distribution")
+    if type(raw_distribution) is not tuple or not raw_distribution:
+        raise ValueError("tactical-v3 target identity has no start distribution")
+    rows: list[tuple[str, int]] = []
+    for raw in raw_distribution:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "profile_id", "basis_points",
+        }:
+            raise ValueError("tactical-v3 target identity start distribution is malformed")
+        profile_id = raw["profile_id"]
+        basis_points = raw["basis_points"]
+        if type(profile_id) is not str or type(basis_points) is not int:
+            raise ValueError("tactical-v3 target identity start distribution is invalid")
+        rows.append((profile_id, basis_points))
+    return tuple(sorted(rows))
+
+
+def _validate_target_scenario_identity(
+    scenario: ResolvedScenario,
+    identity: TacticalV3SemanticIdentity,
+    start_distribution: tuple[tuple[str, int], ...],
+) -> None:
+    if (
+        scenario.environment != "tactical-v3"
+        or identity.contract_version != "tactical-v3"
+        or identity.environment_kind != "duel"
+        or scenario.template_id != identity.scenario_id
+        or scenario.schema_version != identity.scenario_schema_version
+    ):
+        raise ValueError(
+            "selected tactical-v3 scenario identity does not match GymServer"
+        )
+    expected_contract_hash = canonical_sha256({
+        "encoding_hash": identity.encoding_hash,
+        "environment_kind": identity.environment_kind,
+        "match": identity.match,
+        "schema_version": 1,
+        "version": identity.contract_version,
+    })
+    if identity.contract_hash != expected_contract_hash:
+        raise ValueError("GymServer tactical-v3 contract hash is not self-consistent")
+    if _identity_start_distribution(identity) != start_distribution:
+        raise ValueError(
+            "selected tactical-v3 scenario start distribution does not match "
+            "the GymServer identity"
+        )
+
+    document = scenario.document
+    tactical_v3 = document["tactical_v3"]
+    match = identity.match
+    board = match.get("board")
+    game = match.get("game")
+    reward = match.get("reward")
+    if not all(isinstance(value, Mapping) for value in (board, game, reward)):
+        raise ValueError("GymServer tactical-v3 match identity is incomplete")
+    assert isinstance(board, Mapping)
+    assert isinstance(game, Mapping)
+    assert isinstance(reward, Mapping)
+    for key, requested in document["board"].items():
+        if board.get(key) != requested:
+            raise ValueError(
+                f"selected tactical-v3 scenario board.{key} does not match GymServer"
+            )
+    for key, requested in document["rules"].items():
+        expected = None if key == "actions_per_turn" and requested == 0 else requested
+        if game.get(key) != expected:
+            raise ValueError(
+                f"selected tactical-v3 scenario rules.{key} does not match GymServer"
+            )
+    if match.get("max_steps") != document["episode"]["max_steps"]:
+        raise ValueError(
+            "selected tactical-v3 scenario episode.max_steps does not match GymServer"
+        )
+    for key, requested in document["reward"].items():
+        if reward.get(key) != requested:
+            raise ValueError(
+                f"selected tactical-v3 scenario reward.{key} does not match GymServer"
+            )
+    for key in (
+        "starting_unit_count", "max_controllable_units", "placement_policy",
+    ):
+        if match.get(key) != tactical_v3[key]:
+            raise ValueError(
+                f"selected tactical-v3 scenario tactical_v3.{key} does not match GymServer"
+            )
+    if dict(identity.capacity) != dict(tactical_v3["capacity"]):
+        raise ValueError(
+            "selected tactical-v3 scenario capacity does not match GymServer"
+        )
+
+    expected_profiles = tuple(sorted(
+        (
+            row["id"],
+            row["learner_units"],
+            row["opponent_units"],
+            row["separation"],
+        )
+        for row in tactical_v3["start_profiles"]
+    ))
+    actual_profiles = tuple(sorted(
+        (
+            row["id"],
+            row["learner_unit_count"],
+            row["opponent_unit_count"],
+            row["separation"],
+        )
+        for row in match.get("start_profiles", ())
+        if isinstance(row, Mapping)
+    ))
+    if actual_profiles != expected_profiles:
+        raise ValueError(
+            "selected tactical-v3 scenario start profiles do not match GymServer"
+        )
+
+    capabilities = (
+        "health", "damage", "defense", "movement", "vertical_movement",
+        "range", "range_arc", "vision", "vision_arc",
+    )
+    expected_templates = tuple(
+        tuple(
+            (capability, template["stats"][capability])
+            for capability in capabilities
+        )
+        for template in tactical_v3["templates"]
+    )
+    actual_templates = tuple(
+        tuple(
+            (allocation["capability"], allocation["effective_value"])
+            for allocation in template["capability_allocations"]
+        )
+        for template in match.get("templates", ())
+    )
+    if actual_templates != expected_templates:
+        raise ValueError(
+            "selected tactical-v3 scenario templates do not match GymServer"
+        )
+
+
+class _StartProfileScheduler:
+    """Deterministic weighted scheduling at the reciprocal-map boundary."""
+
+    def __init__(self, distribution: tuple[tuple[str, int], ...]) -> None:
+        if (
+            type(distribution) is not tuple
+            or not distribution
+            or any(
+                type(row) is not tuple
+                or len(row) != 2
+                or type(row[0]) is not str
+                or type(row[1]) is not int
+                or not 0 <= row[1] <= 10_000
+                for row in distribution
+            )
+            or sum(weight for _, weight in distribution) != 10_000
+        ):
+            raise ValueError("tactical-v3 continuation distribution is invalid")
+        self.distribution = distribution
+        self._positive = tuple(
+            row for row in self.distribution if row[1] > 0
+        )
+        self._credit = [0 for _ in self._positive]
+
+    def next_profile(self) -> str:
+        for index, (_, basis_points) in enumerate(self._positive):
+            self._credit[index] += basis_points
+        selected = max(
+            range(len(self._positive)),
+            key=lambda index: (self._credit[index], -index),
+        )
+        self._credit[selected] -= 10_000
+        return self._positive[selected][0]
+
+
 @dataclass(frozen=True, slots=True)
 class _Opponent:
     kind: OpponentKind
@@ -128,7 +366,9 @@ class _Opponent:
         if self.binding is None:
             return self.kind
         if self.kind == "live_run":
-            self.binding.reload(lambda value: _validate_model_opponent(value, identity))
+            self.binding.reload(
+                lambda value: _validate_model_opponent(value, identity)
+            )
         resolved = self.binding.resolved
         _validate_model_opponent(resolved, identity)
         assert type(resolved.model) is StructuredController
@@ -332,6 +572,23 @@ def _resolved_opponent_metadata(
     }
 
 
+def _source_policy_provenance(
+    config: StructuredContinuationConfig,
+    source: LoadedStructuredPolicy,
+) -> dict[str, Any]:
+    return {
+        "run": str(Path(config.source_run).resolve()),
+        "semantic_identity": semantic_identity_wire(source.metadata.identity),
+        "model_config": asdict(source.model.config),
+        "model_state_sha256": source.metadata.model_state_sha256,
+        "corpus_sha256": source.metadata.corpus_sha256,
+        "best_epoch": source.metadata.best_epoch,
+        "best_validation_policy_nll": (
+            source.metadata.best_validation_policy_nll
+        ),
+    }
+
+
 def _validate_model_opponent(
     resolved: ResolvedController,
     identity: TacticalV3SemanticIdentity,
@@ -339,11 +596,16 @@ def _validate_model_opponent(
     if (
         resolved.algorithm != "structured_imitation"
         or type(resolved.model) is not StructuredController
-        or resolved.contract != identity
+        or type(resolved.contract) is not TacticalV3SemanticIdentity
     ):
         raise ValueError(
-            "tactical-v3 model opponent must match the source scenario and policy identity"
+            "tactical-v3 model opponent must be a structured tactical-v3 run"
         )
+    _validate_compatible_transfer_identity(
+        resolved.contract,
+        identity,
+        subject="tactical-v3 model opponent",
+    )
 
 
 def _resolve_opponent(raw: str) -> _Opponent:
@@ -362,6 +624,7 @@ def _resolve_opponent(raw: str) -> _Opponent:
 def _create_live_run(
     runs_root: Path,
     config: StructuredContinuationConfig,
+    scenario: ResolvedScenario,
     identity: TacticalV3SemanticIdentity,
     source: LoadedStructuredPolicy,
     opponent: _Opponent,
@@ -380,7 +643,7 @@ def _create_live_run(
     (run_dir / "collection" / "train").mkdir(parents=True)
     (run_dir / "collection" / "validation").mkdir()
     (run_dir / "training").mkdir()
-    scenario_value = json.loads(Path(config.scenario_file).read_text(encoding="utf-8"))
+    scenario_value = json.loads(scenario.canonical_json)
     atomic_write_json(run_dir / "scenario.json", scenario_value)
     atomic_write_json(run_dir / "control.json", {"request": None})
     atomic_write_json(run_dir / "evaluation.json", {})
@@ -423,13 +686,7 @@ def _create_live_run(
         "contract": _contract(identity),
         "scenario": {"path": "scenario.json", "schema_version": identity.scenario_schema_version},
         "opponent_snapshot": dict(opponent.metadata),
-        "source_policy": {
-            "run": str(Path(config.source_run).resolve()),
-            "model_state_sha256": source.metadata.model_state_sha256,
-            "corpus_sha256": source.metadata.corpus_sha256,
-            "best_epoch": source.metadata.best_epoch,
-            "best_validation_policy_nll": source.metadata.best_validation_policy_nll,
-        },
+        "source_policy": _source_policy_provenance(config, source),
         "evidence_status": "unsealed-experimental",
         "tracker_status": [],
     }
@@ -439,6 +696,20 @@ def _create_live_run(
         {"config": manifest["config"], "contract": manifest["contract"]},
     )
     return run_dir
+
+
+def _publication_target(runs_root: Path, run_name: str) -> Path:
+    """Reserve publication identity before spending a collection/training budget."""
+
+    target = Path(runs_root) / f"{run_name}-model"
+    is_junction = getattr(target, "is_junction", None)
+    if os.path.lexists(target) or (
+        is_junction is not None and is_junction()
+    ):
+        raise FileExistsError(
+            f"tactical-v3 publication target already exists: {target}"
+        )
+    return target
 
 
 def _stop_requested(run_dir: Path) -> bool:
@@ -498,6 +769,7 @@ def _collect_partition(
     reasons: Counter[str],
     global_disagreements: list[int],
     global_fallbacks: list[int],
+    start_distribution: tuple[tuple[str, int], ...],
 ) -> tuple[tuple[PilotDaggerEpisode, ...], list[dict[str, Any]], int, int]:
     episodes: list[PilotDaggerEpisode] = []
     evidence: list[dict[str, Any]] = []
@@ -505,17 +777,19 @@ def _collect_partition(
     games = 0
     max_games = max(100, target * 2)
     seats = _seat_sequence(config.learner_seat)
+    profile_scheduler = _StartProfileScheduler(start_distribution)
     while labels < target:
         if games >= max_games:
             raise RuntimeError(
                 f"{partition} collection did not reach {target} labels in {max_games} games"
             )
+        seed = seed_start + games // len(seats)
+        profile = profile_scheduler.next_profile()
         for seat in seats:
             if _stop_requested(run_dir):
                 return tuple(episodes), evidence, labels, games
-            seed = seed_start + games // len(seats)
-            item = PilotScheduleItem(
-                partition, "standard-3v3", seed, seat, seat,
+            item = ContinuationScheduleItem(
+                partition, profile, seed, seat, seat,
             )
             game_opponent = opponent.controller_for_game(client.identity)
             game_metadata = opponent.game_metadata()
@@ -526,6 +800,7 @@ def _collect_partition(
                 item,
                 oracle_expansion_budget=config.oracle_expansion_budget,
                 opponent=game_opponent,
+                allow_compatible_identity_transfer=True,
             )
             duration = time.monotonic() - game_started
             outcome = _outcome(episode)
@@ -639,19 +914,14 @@ def _write_collection_manifest(
     validation_evidence: list[dict[str, Any]],
     train_records: bytes,
     validation_records: bytes,
+    start_distribution: tuple[tuple[str, int], ...],
 ) -> tuple[Path, str]:
     value = {
         "schema_version": 1,
         "kind": "tactical-v3-ml-lab-dagger-continuation-collection",
         "evidence_status": "unsealed-experimental",
         "identity": semantic_identity_wire(identity),
-        "source": {
-            "run": str(Path(config.source_run).resolve()),
-            "model_state_sha256": source.metadata.model_state_sha256,
-            "corpus_sha256": source.metadata.corpus_sha256,
-            "best_epoch": source.metadata.best_epoch,
-            "best_validation_policy_nll": source.metadata.best_validation_policy_nll,
-        },
+        "source": _source_policy_provenance(config, source),
         "opponent": dict(opponent.metadata),
         "oracle": {
             "identity": "bounded-search-v1",
@@ -662,7 +932,11 @@ def _write_collection_manifest(
         "schedule": {
             "seed": config.seed,
             "learner_seat": config.learner_seat,
-            "profile": "standard-3v3",
+            "profile_scheduler": _PROFILE_SCHEDULER_IDENTITY,
+            "start_distribution": [
+                {"profile_id": profile_id, "basis_points": basis_points}
+                for profile_id, basis_points in start_distribution
+            ],
             "train_label_target": config.train_label_target,
             "validation_label_target": config.validation_label_target,
         },
@@ -705,6 +979,7 @@ def _training_manifest(
         "source_run": str(Path(config.source_run).resolve()),
         "source_model_state_sha256": source.metadata.model_state_sha256,
         "source_corpus_sha256": source.metadata.corpus_sha256,
+        "source": _source_policy_provenance(config, source),
         "collection_sha256": collection_sha256,
         "corpus_sha256": corpus_sha256,
         "trainer": {
@@ -766,6 +1041,15 @@ def run_structured_continuation(
     if type(config) is not StructuredContinuationConfig:
         raise TypeError("config must be StructuredContinuationConfig")
     config.validate()
+    publication_target = _publication_target(
+        Path(runs_root), config.run_name,
+    )
+    target_scenario = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=Path(config.scenario_file),
+        template_id=None,
+    )
+    start_distribution = _start_distribution(target_scenario.document)
     if config.device == "auto" or config.device.startswith("cuda"):
         os.environ.setdefault(
             "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True",
@@ -782,17 +1066,34 @@ def run_structured_continuation(
     try:
         with TacticalV3GymClient(server_cmd, environment_kind="duel") as client:
             identity = client.identity
-            if source.metadata.identity != identity:
+            _validate_target_scenario_identity(
+                target_scenario,
+                identity,
+                start_distribution,
+            )
+            _validate_compatible_transfer_identity(
+                source.metadata.identity,
+                identity,
+                subject="source policy",
+            )
+            target_model_config, _, _ = _pilot_configs(
+                config.seed,
+                config.device,
+            )
+            if source.model.config != target_model_config:
                 raise ValueError(
-                    "source policy identity does not match the selected tactical-v3 scenario"
+                    "source policy model config does not match the continuation model"
                 )
             if opponent.binding is not None:
-                _validate_model_opponent(opponent.binding.resolved, identity)
+                _validate_model_opponent(
+                    opponent.binding.resolved,
+                    identity,
+                )
             requested_device = torch.device(config.device)
             if requested_device.type == "cuda" and not torch.cuda.is_available():
                 raise RuntimeError("tactical-v3 continuation requested CUDA but it is unavailable")
             run_dir = _create_live_run(
-                Path(runs_root), config, identity, source, opponent,
+                Path(runs_root), config, target_scenario, identity, source, opponent,
             )
             tensorboard_enabled = any(
                 tracker.get("kind") == "tensorboard" for tracker in config.trackers
@@ -851,6 +1152,7 @@ def run_structured_continuation(
                 reasons=reasons,
                 global_disagreements=disagreements,
                 global_fallbacks=fallbacks,
+                start_distribution=start_distribution,
             )
             if _stop_requested(run_dir):
                 update_run_state(
@@ -879,6 +1181,7 @@ def run_structured_continuation(
                     reasons=reasons,
                     global_disagreements=disagreements,
                     global_fallbacks=fallbacks,
+                    start_distribution=start_distribution,
                 )
             )
         if run_dir is None or telemetry is None:
@@ -902,6 +1205,7 @@ def run_structured_continuation(
             validation_evidence,
             train_records,
             validation_records,
+            start_distribution,
         )
         corpus_value = {
             "schema_version": 1,
@@ -962,10 +1266,11 @@ def run_structured_continuation(
             log_path=run_dir / "train.log",
             tensorboard_enabled=telemetry.enabled,
             stop_requested=lambda: _stop_requested(run_dir),
+            allow_compatible_identity_transfer=True,
         )
         candidate_improved = _candidate_improves_source(artifacts)
         published_run = (
-            run_dir.parent / f"{config.run_name}-model"
+            publication_target
             if candidate_improved else None
         )
         training_value = _training_manifest(

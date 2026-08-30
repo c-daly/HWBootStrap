@@ -167,6 +167,32 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void RunLogTail_IncludesStartupAndNativeErrorLog()
+        {
+            string runDirectory = Path.Combine(Path.GetTempPath(),
+                "hexwars-ml-error-log-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(runDirectory);
+            try
+            {
+                File.WriteAllLines(Path.Combine(runDirectory, "train.log"),
+                    new[] { "training started" });
+                File.WriteAllLines(Path.Combine(runDirectory, "train-err.log"),
+                    new[] { "checkpoint architecture mismatch" });
+
+                Assert.That(MlRunLog.ReadTail(runDirectory, 3),
+                    Is.EqualTo(new[]
+                    {
+                        "training started",
+                        "[stderr] checkpoint architecture mismatch",
+                    }));
+            }
+            finally
+            {
+                Directory.Delete(runDirectory, true);
+            }
+        }
+
+        [Test]
         public void SharedFileSnapshot_ReadsWhileWriterRemainsOpenAndCanAppend()
         {
             string path = Path.Combine(Path.GetTempPath(), "hexwars-ml-shared-" + Guid.NewGuid().ToString("N") + ".log");

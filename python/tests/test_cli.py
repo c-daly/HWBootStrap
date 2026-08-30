@@ -17,6 +17,12 @@ from ml_lab.io import atomic_write_json, read_json
 from ml_lab.scenarios import ResolvedScenario
 
 
+ROOT = Path(__file__).resolve().parents[2]
+TACTICAL_V3_SCENARIO = (
+    ROOT / "python" / "config" / "annihilation-structured-imitation-v1.json"
+)
+
+
 @pytest.fixture
 def contract() -> EnvironmentContract:
     return EnvironmentContract(
@@ -709,12 +715,12 @@ def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets
     assert "api_key" not in json.dumps(received[0].trackers).lower()
 
 
-def test_structured_train_forwards_exact_source_scenario_opponent_and_tensorboard(
+def test_structured_train_forwards_independent_target_scenario_and_tensorboard(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source-policy"
     source.mkdir()
-    scenario = source / "scenario.json"
+    scenario = tmp_path / "target-scenario.json"
     scenario.write_text("{}\n", encoding="utf-8")
     received = []
 
@@ -769,6 +775,289 @@ def test_structured_train_forwards_exact_source_scenario_opponent_and_tensorboar
     assert command == [
         "dotnet", "fake-server.dll", "--scenario-file", str(scenario),
     ]
+
+
+def test_structured_preflight_parser_has_training_compatible_defaults(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    scenario = tmp_path / "scenario.json"
+
+    args = cli_module.build_parser().parse_args([
+        "preflight-structured",
+        "--source-run", str(source),
+        "--scenario-file", str(scenario),
+        "--json",
+    ])
+
+    assert args.command == "preflight-structured"
+    assert args.source_run == source
+    assert args.scenario_file == scenario
+    assert args.opponent == "greedy"
+    assert args.seed == 227
+    assert args.device == "auto"
+    assert args.server == str(cli_module.DEFAULT_SERVER)
+    assert args.json is True
+
+
+def test_structured_preflight_authenticates_and_cross_checks_without_creating_a_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    import ml_lab.tactical_v3_checkpoint as checkpoint_module
+    import ml_lab.tactical_v3_client as client_module
+    from ml_lab.tactical_v3_pilot import _pilot_configs
+    from tests.tactical_v3_fixture_support import load_duel_identity_fixture
+
+    identity = load_duel_identity_fixture()
+    model_config, _, _ = _pilot_configs(227, "cpu")
+    source = tmp_path / "source-policy"
+    validated: list[Path] = []
+    server_starts: list[tuple[list[str], str]] = []
+
+    def validate(run_dir: Path):
+        validated.append(run_dir)
+        return SimpleNamespace(
+            metadata=SimpleNamespace(identity=identity),
+            model=SimpleNamespace(config=model_config),
+        )
+
+    class Client:
+        def __init__(self, server_cmd, *, environment_kind: str):
+            server_starts.append((list(server_cmd), environment_kind))
+            self.identity = identity
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(checkpoint_module, "validate_structured_run", validate)
+    monkeypatch.setattr(client_module, "TacticalV3GymClient", Client)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    exit_code, payload = _invoke_json([
+        "preflight-structured",
+        "--source-run", str(source),
+        "--scenario-file", str(TACTICAL_V3_SCENARIO),
+        "--opponent", "random",
+        "--seed", "227",
+        "--device", "auto",
+        "--server", "fake-server.dll",
+        "--json",
+    ])
+
+    assert exit_code == 0
+    result = _assert_envelope(payload, "preflight-structured")
+    assert result.keys() == {
+        "environment", "source", "target", "opponent", "device", "model_config",
+    }
+    assert result["environment"] == "tactical-v3"
+    assert result["source"] == {
+        "run_dir": str(source.resolve()),
+        "checkpoint": str(source.resolve() / "checkpoints" / "best.pt"),
+        "contract_hash": identity.contract_hash,
+        "encoding_hash": identity.encoding_hash,
+        "capacity_hash": identity.capacity_hash,
+    }
+    assert result["target"] == {
+        "scenario_file": str(TACTICAL_V3_SCENARIO.resolve()),
+        "scenario_id": identity.scenario_id,
+        "scenario_schema_version": identity.scenario_schema_version,
+        "contract_hash": identity.contract_hash,
+        "encoding_hash": identity.encoding_hash,
+        "capacity_hash": identity.capacity_hash,
+    }
+    assert result["opponent"] == {"kind": "scripted", "name": "random"}
+    assert result["device"] == {"requested": "auto", "effective": "cpu"}
+    assert result["model_config"]["hidden_dim"] == 32
+    assert validated == [source]
+    assert server_starts == [([
+        "dotnet", "fake-server.dll", "--scenario-file", str(TACTICAL_V3_SCENARIO),
+    ], "duel")]
+    assert not source.exists()
+
+
+def test_structured_preflight_rejects_corrupt_source_before_starting_gymserver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_checkpoint as checkpoint_module
+    import ml_lab.tactical_v3_client as client_module
+
+    def reject(_run_dir: Path):
+        raise ValueError("checkpoint state hash is inconsistent")
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("GymServer must not start for a corrupt source")
+
+    monkeypatch.setattr(checkpoint_module, "validate_structured_run", reject)
+    monkeypatch.setattr(client_module, "TacticalV3GymClient", Client)
+
+    exit_code, payload = _invoke_json([
+        "preflight-structured",
+        "--source-run", str(tmp_path / "corrupt-source"),
+        "--scenario-file", str(TACTICAL_V3_SCENARIO),
+        "--device", "cpu",
+        "--json",
+    ])
+
+    assert exit_code == 1
+    assert payload == {
+        "schema_version": 1,
+        "command": "preflight-structured",
+        "ok": False,
+        "result": {
+            "error": "ValueError",
+            "message": "checkpoint state hash is inconsistent",
+        },
+    }
+
+
+def test_structured_preflight_rejects_wrong_source_architecture_before_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_checkpoint as checkpoint_module
+    import ml_lab.tactical_v3_client as client_module
+    from ml_lab.tactical_v3_pilot import _pilot_configs
+    from tests.tactical_v3_fixture_support import load_duel_identity_fixture
+
+    identity = load_duel_identity_fixture()
+    expected, _, _ = _pilot_configs(227, "cpu")
+    monkeypatch.setattr(
+        checkpoint_module,
+        "validate_structured_run",
+        lambda _path: SimpleNamespace(
+            metadata=SimpleNamespace(identity=identity),
+            model=SimpleNamespace(config=replace(expected, hidden_dim=64)),
+        ),
+    )
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("GymServer must not start for wrong architecture")
+
+    monkeypatch.setattr(client_module, "TacticalV3GymClient", Client)
+
+    exit_code, payload = _invoke_json([
+        "preflight-structured",
+        "--source-run", str(tmp_path / "wrong-architecture"),
+        "--scenario-file", str(TACTICAL_V3_SCENARIO),
+        "--device", "cpu",
+        "--json",
+    ])
+
+    assert exit_code == 1
+    assert payload["result"] == {
+        "error": "ValueError",
+        "message": "source policy model config does not match the continuation model",
+    }
+
+
+def test_structured_preflight_rejects_unavailable_or_out_of_range_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="CUDA but it is unavailable"):
+        cli_module._structured_preflight_device("cuda:0")
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    assert cli_module._structured_preflight_device("cuda:0") == "cuda:0"
+    with pytest.raises(RuntimeError, match="only 1 CUDA device"):
+        cli_module._structured_preflight_device("cuda:1")
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_kind"),
+    (("fixed", "fixed_run"), ("live", "live_run")),
+)
+def test_structured_preflight_authenticates_fixed_and_live_model_opponents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_kind: str,
+) -> None:
+    import ml_lab.tactical_v3_client as client_module
+    from ml_lab.tactical_v3_checkpoint import publish_structured_run
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+    from ml_lab.tactical_v3_pilot import _pilot_configs
+    from ml_lab.tactical_v3_training import EpochMetrics, TrainingResult
+    from tests.tactical_v3_fixture_support import (
+        load_duel_identity_fixture,
+        load_tiny_corpus_fixture,
+    )
+
+    identity = load_duel_identity_fixture()
+    corpus = load_tiny_corpus_fixture()
+    model_config, objective_config, trainer_config = _pilot_configs(227, "cpu")
+    zero_metrics = {
+        "total": 0.0,
+        "policy": 0.0,
+        "outcome": 0.0,
+        "horizon": 0.0,
+        "remaining_turns": 0.0,
+    }
+    result = TrainingResult(
+        model=TacticalV3Policy(model_config).eval(),
+        model_config=model_config,
+        objective_config=objective_config,
+        trainer_config=trainer_config,
+        best_epoch=0,
+        best_validation_policy_nll=0.0,
+        stopped_early=False,
+        history=(EpochMetrics(0, zero_metrics, zero_metrics, 0.0, True),),
+    )
+    policy_run = publish_structured_run(
+        tmp_path / "policy",
+        result,
+        corpus,
+        training_scenario_path=TACTICAL_V3_SCENARIO,
+        policy_identity=identity,
+    )
+
+    class Client:
+        def __init__(self, _server_cmd, *, environment_kind: str):
+            assert environment_kind == "duel"
+            self.identity = identity
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(client_module, "TacticalV3GymClient", Client)
+    opponent = (
+        str(policy_run)
+        if mode == "fixed"
+        else json.dumps({"kind": "run", "path": str(policy_run), "mode": "live"})
+    )
+
+    exit_code, payload = _invoke_json([
+        "preflight-structured",
+        "--source-run", str(policy_run),
+        "--scenario-file", str(TACTICAL_V3_SCENARIO),
+        "--opponent", opponent,
+        "--device", "cpu",
+        "--json",
+    ])
+
+    assert exit_code == 0
+    resolved = _assert_envelope(payload, "preflight-structured")["opponent"]
+    assert resolved["kind"] == expected_kind
+    assert resolved["mode"] == mode
+    assert resolved["source_run"] == str(policy_run.resolve())
+    assert resolved["checkpoint"] == str(policy_run / "checkpoints" / "best.pt")
+    assert len(resolved["checkpoint_sha256"]) == 64
+    assert resolved["algorithm"] == "structured_imitation"
 
 
 def test_resume_builds_a_new_run_from_authoritative_source_metadata(

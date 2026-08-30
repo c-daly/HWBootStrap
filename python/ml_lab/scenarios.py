@@ -19,7 +19,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TEMPLATE_LIBRARY = (
     PROJECT_ROOT / "python" / "config" / "training-game-templates.json"
 )
-SUPPORTED_ENVIRONMENTS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
+SUPPORTED_ENVIRONMENTS = frozenset(
+    {"tactical-v1", "tactical-v2", "tactical-v3", "adaptive-v1"}
+)
 _LIBRARY_KEYS = frozenset({"schema_version", "templates"})
 _COMMON_SCENARIO_KEYS = frozenset(
     {"schema_version", "id", "name", "environment", "board", "rules", "episode", "reward"}
@@ -63,6 +65,15 @@ _TACTICAL_REWARD_KEYS = frozenset(
 _ADAPTIVE_REWARD_KEYS = frozenset(
     {"intermediate_decision_penalty", "deployment_completion_bonus"}
 )
+_TACTICAL_V3_REWARD_KEYS = frozenset(
+    {
+        "terminal_win",
+        "terminal_non_win",
+        "material_adjustment_bound",
+        "time_pressure_bound",
+        "points_weight",
+    }
+)
 _ADAPTIVE_KEYS = frozenset(
     {"starting_unit_count", "starting_army_budget", "max_design_point_cost"}
 )
@@ -103,6 +114,37 @@ _TACTICAL_V2_STAT_KEYS = frozenset(
         "vision_arc",
     }
 )
+_TACTICAL_V3_KEYS = frozenset(
+    {
+        "starting_unit_count",
+        "max_controllable_units",
+        "placement_policy",
+        "capacity",
+        "templates",
+        "start_profiles",
+        "start_distribution",
+    }
+)
+_TACTICAL_V3_CAPACITY_KEYS = frozenset(
+    {
+        "max_cells",
+        "max_units",
+        "max_templates",
+        "max_capability_definitions",
+        "max_capability_allocations",
+        "max_rules",
+        "max_memory_records",
+        "max_relations",
+        "max_candidates",
+    }
+)
+_TACTICAL_V3_REWARD = {
+    "terminal_win": 1.0,
+    "terminal_non_win": -1.0,
+    "material_adjustment_bound": 0.2,
+    "time_pressure_bound": 0.05,
+    "points_weight": 0.5,
+}
 
 
 @dataclass(frozen=True)
@@ -190,6 +232,7 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
         frozenset({"adaptive"})
         if environment == "adaptive-v1"
         else frozenset({"tactical_v2"}) if environment == "tactical-v2"
+        else frozenset({"tactical_v3"}) if environment == "tactical-v3"
         else frozenset()
     )
     _exact_keys(document, expected_keys, "scenario")
@@ -200,7 +243,9 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
     _text(document["id"], "id")
     _text(document["name"], "name")
     if environment not in SUPPORTED_ENVIRONMENTS:
-        raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
+        raise ValueError(
+            "environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1"
+        )
 
     board = _mapping(document["board"], "board")
     _exact_keys(board, _BOARD_KEYS, "board")
@@ -252,13 +297,25 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
 
     reward = _mapping(document["reward"], "reward")
     reward_keys = (
-        _TACTICAL_REWARD_KEYS
+        _TACTICAL_V3_REWARD_KEYS
+        if environment == "tactical-v3"
+        else _TACTICAL_REWARD_KEYS
         if environment in {"tactical-v1", "tactical-v2"}
         else _ADAPTIVE_REWARD_KEYS
     )
     _exact_keys(reward, reward_keys, "reward")
     for key in reward_keys:
         _number(reward[key], f"reward.{key}")
+
+    if environment == "tactical-v3":
+        _validate_tactical_v3(
+            document,
+            width=width,
+            height=height,
+            zone_depth=zone_depth,
+            round_cap=round_cap,
+            max_steps=max_steps,
+        )
 
     if environment == "tactical-v2":
         tactical_v2 = _mapping(document["tactical_v2"], "tactical_v2")
@@ -361,6 +418,216 @@ def validate_scenario_document(raw: Any) -> Mapping[str, Any]:
         _positive(max_design, "adaptive.max_design_point_cost")
 
     return document
+
+
+def _validate_tactical_v3(
+    document: Mapping[str, Any],
+    *,
+    width: int,
+    height: int,
+    zone_depth: int,
+    round_cap: int,
+    max_steps: int,
+) -> None:
+    section = _mapping(document["tactical_v3"], "tactical_v3")
+    _exact_keys(section, _TACTICAL_V3_KEYS, "tactical_v3")
+    starting_units = _integer(
+        section["starting_unit_count"], "tactical_v3.starting_unit_count"
+    )
+    max_controllable = _integer(
+        section["max_controllable_units"],
+        "tactical_v3.max_controllable_units",
+    )
+    placement = _text(
+        section["placement_policy"], "tactical_v3.placement_policy"
+    )
+    if placement == "profiled-seeded-v1":
+        if starting_units != 3 or max_controllable != 3:
+            raise ValueError(
+                "profiled-seeded-v1 requires tactical_v3.starting_unit_count and "
+                "max_controllable_units to equal 3"
+            )
+        _validate_tactical_v3_start_profiles(section, max_controllable)
+    elif placement == "symmetric-random-v1":
+        if not 1 <= starting_units <= 12:
+            raise ValueError(
+                "tactical_v3.starting_unit_count must be between 1 and 12"
+            )
+        if max_controllable != starting_units:
+            raise ValueError(
+                "tactical_v3.max_controllable_units must equal starting_unit_count"
+            )
+        if section["start_profiles"] or section["start_distribution"]:
+            raise ValueError(
+                "tactical_v3 symmetric-random-v1 must not declare start profiles "
+                "or a start distribution"
+            )
+    else:
+        raise ValueError(
+            "tactical_v3.placement_policy must be 'symmetric-random-v1' or "
+            "'profiled-seeded-v1'"
+        )
+
+    if document["rules"]["fog_of_war"] or document["rules"]["biomes_enabled"]:
+        raise ValueError("tactical-v3 requires fog and biomes disabled")
+    for key, expected in _TACTICAL_V3_REWARD.items():
+        if float(document["reward"][key]) != expected:
+            raise ValueError(
+                f"reward.{key} must equal the tactical-v3 stage-one value {expected}"
+            )
+    minimum_steps = 2 * (starting_units + 1) * round_cap
+    if max_steps < minimum_steps:
+        raise ValueError(
+            "tactical-v3 episode.max_steps is insufficient to reach the round cap; "
+            f"minimum required is {minimum_steps}"
+        )
+
+    raw_templates = section["templates"]
+    if not isinstance(raw_templates, list) or not raw_templates:
+        raise ValueError("tactical_v3.templates must be a non-empty array")
+    seen_template_ids: set[str] = set()
+    for index, raw_template in enumerate(raw_templates):
+        path = f"tactical_v3.templates[{index}]"
+        template = _mapping(raw_template, path)
+        _exact_keys(template, _TACTICAL_V2_TEMPLATE_KEYS, path)
+        template_id = _text(template["id"], f"{path}.id")
+        if template_id in seen_template_ids:
+            raise ValueError(f"duplicate tactical-v3 template id {template_id!r}")
+        seen_template_ids.add(template_id)
+        _text(template["name"], f"{path}.name")
+        stats = _mapping(template["stats"], f"{path}.stats")
+        _exact_keys(stats, _TACTICAL_V2_STAT_KEYS, f"{path}.stats")
+        for key in _TACTICAL_V2_STAT_KEYS:
+            value = _integer(stats[key], f"{path}.stats.{key}")
+            if value < 0 or (key == "health" and value == 0):
+                qualifier = "positive" if key == "health" else "non-negative"
+                raise ValueError(f"{path}.stats.{key} must be {qualifier}")
+
+    capacity = _mapping(section["capacity"], "tactical_v3.capacity")
+    _exact_keys(capacity, _TACTICAL_V3_CAPACITY_KEYS, "tactical_v3.capacity")
+    values = {
+        key: _integer(capacity[key], f"tactical_v3.capacity.{key}")
+        for key in _TACTICAL_V3_CAPACITY_KEYS
+    }
+    for key, value in values.items():
+        _positive(value, f"tactical_v3.capacity.{key}")
+
+    profiles = section["start_profiles"] if placement == "profiled-seeded-v1" else []
+    maximum_total_units = max(
+        [2 * starting_units]
+        + [
+            profile["learner_units"] + profile["opponent_units"]
+            for profile in profiles
+        ]
+    )
+    cell_count = width * height
+    template_rows = 2 * len(raw_templates)
+    allocation_count = (values["max_units"] + template_rows) * 9
+    directed_adjacency = 2 * (
+        width * (height - 1) + (width - 1) * (2 * height - 1)
+    )
+    minimum_relations = (
+        directed_adjacency + values["max_units"] + allocation_count
+    )
+    deployment_cells = height * zone_depth
+    if deployment_cells < starting_units:
+        raise ValueError(
+            "tactical-v3 deployment cells must cover starting_unit_count"
+        )
+    candidate_requirement = (
+        len(raw_templates) * deployment_cells
+        + values["max_units"] * cell_count
+        + values["max_units"] * (values["max_units"] - 1)
+        + 1
+    )
+    requirements = {
+        "max_cells": cell_count,
+        "max_units": maximum_total_units,
+        "max_templates": template_rows,
+        "max_capability_definitions": 9,
+        "max_capability_allocations": allocation_count,
+        "max_rules": 15,
+        "max_memory_records": maximum_total_units,
+        "max_relations": minimum_relations,
+        "max_candidates": candidate_requirement,
+    }
+    for key, minimum in requirements.items():
+        if values[key] < minimum:
+            raise ValueError(
+                f"tactical_v3.capacity.{key} must be at least {minimum} for this scenario"
+            )
+
+
+def _validate_tactical_v3_start_profiles(
+    section: Mapping[str, Any], max_controllable: int
+) -> None:
+    raw_profiles = section["start_profiles"]
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError("tactical_v3.start_profiles must be a non-empty array")
+    actual_profiles: list[tuple[str, int, int, str]] = []
+    seen_profile_ids: set[str] = set()
+    for index, raw_profile in enumerate(raw_profiles):
+        path = f"tactical_v3.start_profiles[{index}]"
+        profile = _mapping(raw_profile, path)
+        _exact_keys(profile, _TACTICAL_V2_START_PROFILE_KEYS, path)
+        profile_id = _text(profile["id"], f"{path}.id")
+        if profile_id in seen_profile_ids:
+            raise ValueError(f"duplicate tactical-v3 start profile id {profile_id!r}")
+        seen_profile_ids.add(profile_id)
+        learner_units = _integer(profile["learner_units"], f"{path}.learner_units")
+        opponent_units = _integer(
+            profile["opponent_units"], f"{path}.opponent_units"
+        )
+        if not 1 <= learner_units <= max_controllable:
+            raise ValueError(
+                f"{path}.learner_units must be between 1 and max_controllable_units"
+            )
+        if not 1 <= opponent_units <= max_controllable:
+            raise ValueError(
+                f"{path}.opponent_units must be between 1 and max_controllable_units"
+            )
+        separation = _text(profile["separation"], f"{path}.separation")
+        if separation not in {"legacy-mirrored", "near", "medium", "far"}:
+            raise ValueError(f"{path}.separation is unknown: {separation!r}")
+        actual_profiles.append(
+            (profile_id, learner_units, opponent_units, separation)
+        )
+    if tuple(actual_profiles) != _TACTICAL_V2_START_PROFILES:
+        raise ValueError(
+            "profiled-seeded-v1 requires the exact versioned start profile catalog"
+        )
+
+    raw_distribution = section["start_distribution"]
+    if not isinstance(raw_distribution, list) or not raw_distribution:
+        raise ValueError("tactical_v3.start_distribution must be a non-empty array")
+    declared = {profile[0] for profile in _TACTICAL_V2_START_PROFILES}
+    seen_weights: set[str] = set()
+    total_basis_points = 0
+    for index, raw_weight in enumerate(raw_distribution):
+        path = f"tactical_v3.start_distribution[{index}]"
+        weight = _mapping(raw_weight, path)
+        _exact_keys(weight, _TACTICAL_V2_START_WEIGHT_KEYS, path)
+        profile_id = _text(weight["profile_id"], f"{path}.profile_id")
+        if profile_id in seen_weights:
+            raise ValueError(
+                f"duplicate tactical-v3 start distribution weight for {profile_id!r}"
+            )
+        seen_weights.add(profile_id)
+        if profile_id not in declared:
+            raise ValueError(
+                f"weight references undeclared start profile {profile_id!r}"
+            )
+        basis_points = _integer(weight["basis_points"], f"{path}.basis_points")
+        if not 0 <= basis_points <= 10000:
+            raise ValueError(f"{path}.basis_points must be within [0,10000]")
+        total_basis_points += basis_points
+    missing = sorted(declared - seen_weights)
+    if missing:
+        raise ValueError(
+            "start distribution is missing declared profile " + repr(missing[0])
+        )
+    if total_basis_points != 10000:
+        raise ValueError("start distribution weights must sum to 10000 basis points")
 
 
 def _validate_tactical_v2_start_profiles(
@@ -528,7 +795,11 @@ def load_template_library(path: Path) -> list[ResolvedScenario]:
         if scenario.template_id in seen:
             raise ValueError(f"duplicate template id {scenario.template_id!r}")
         seen.add(scenario.template_id)
-        expected_prefix = scenario.environment.split("-", 1)[0] + "-"
+        expected_prefix = (
+            "tactical-v3-"
+            if scenario.environment == "tactical-v3"
+            else scenario.environment.split("-", 1)[0] + "-"
+        )
         if not scenario.template_id.startswith(expected_prefix):
             raise ValueError(
                 f"template {scenario.template_id!r} does not match its environment "
@@ -556,15 +827,17 @@ def resolve_scenario(
     steps into an already-truncated episode.
     """
     if environment not in SUPPORTED_ENVIRONMENTS:
-        raise ValueError("environment must be tactical-v1, tactical-v2, or adaptive-v1")
+        raise ValueError(
+            "environment must be tactical-v1, tactical-v2, tactical-v3, or adaptive-v1"
+        )
     if scenario_file is not None and template_id is not None:
         raise ValueError("scenario_file and template_id are mutually exclusive")
     if scenario_file is not None:
         scenario = _resolve_document(_read_document(scenario_file))
     else:
         # tactical-v1/adaptive-v1 default ids drop the "-v1" suffix ("tactical-standard",
-        # "adaptive-standard"); tactical-v2 keeps its full version tag ("tactical-v2-standard")
-        # so its ids never collide with tactical-v1's.
+        # "adaptive-standard"); later tactical contracts keep their full version tag so ids do
+        # not collide with tactical-v1's.
         selected_id = template_id or f"{environment.removesuffix('-v1')}-standard"
         templates = load_template_library(library_path)
         scenario = next(

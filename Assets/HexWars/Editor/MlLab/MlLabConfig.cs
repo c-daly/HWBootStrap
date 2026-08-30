@@ -126,7 +126,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("Opponent path is required for a model or live run.");
             if (structuredContinuation && string.IsNullOrWhiteSpace(ResumeSource))
                 errors.Add(
-                    "A source run is required to initialize a tactical-v3 continuation.");
+                    "A source model is required to initialize a tactical-v3 continuation.");
             if (!structuredContinuation &&
                 !string.IsNullOrEmpty(ResumeSource) &&
                 string.IsNullOrWhiteSpace(ResumeSource))
@@ -190,16 +190,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             return string.Join(" ", args);
         }
 
-        public string BuildStructuredTrainArguments()
+        public string BuildStructuredTrainArguments(string scenarioPath)
         {
             if (Environment != MlEnvironmentContract.TacticalV3)
                 throw new InvalidOperationException(
                     "Structured training is only available for tactical-v3.");
             if (string.IsNullOrWhiteSpace(ResumeSource))
                 throw new InvalidOperationException(
-                    "A source run is required to initialize a tactical-v3 continuation.");
-            string scenarioPath = Path.Combine(
-                ResumeSource, "scenario.json");
+                    "A source model is required to initialize a tactical-v3 continuation.");
+            if (string.IsNullOrWhiteSpace(scenarioPath))
+                throw new ArgumentException(
+                    "Resolved scenario path is required.", nameof(scenarioPath));
 
             var args = new List<string>
             {
@@ -220,6 +221,31 @@ namespace HexWars.Presentation.EditorTools.MlLab
             args.Add("--no-console-output");
             args.Add("--json");
             return string.Join(" ", args);
+        }
+
+        public string BuildStructuredPreflightArguments(string scenarioPath)
+        {
+            if (Environment != MlEnvironmentContract.TacticalV3)
+                throw new InvalidOperationException(
+                    "Structured preflight is only available for tactical-v3.");
+            if (string.IsNullOrWhiteSpace(ResumeSource))
+                throw new InvalidOperationException(
+                    "A source model is required to initialize a tactical-v3 continuation.");
+            if (string.IsNullOrWhiteSpace(scenarioPath))
+                throw new ArgumentException(
+                    "Resolved scenario path is required.", nameof(scenarioPath));
+
+            return string.Join(" ", new[]
+            {
+                "preflight-structured",
+                "--source-run", Q(ResumeSource),
+                "--scenario-file", QAlways(scenarioPath),
+                "--opponent", Q(OpponentValue()),
+                "--seed", Seed.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--device", Q(Device),
+                "--json",
+            });
         }
 
         public string BuildResumeArguments()

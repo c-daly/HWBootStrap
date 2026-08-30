@@ -62,6 +62,19 @@ from .tactical_v3_training import (
 )
 
 
+TACTICAL_V3_START_PROFILES = (
+    "standard-3v3",
+    "conversion-3v1-near",
+    "conversion-3v1-medium",
+    "conversion-3v1-far",
+    "conversion-2v1-near",
+    "conversion-2v1-medium",
+    "conversion-2v1-far",
+    "conversion-1v1-near",
+    "conversion-1v1-medium",
+    "conversion-1v1-far",
+)
+
 PILOT_PROFILES = (
     "standard-3v3",
     "conversion-3v1-near",
@@ -124,6 +137,25 @@ class PilotScheduleItem:
 
 
 @dataclass(frozen=True, slots=True)
+class ContinuationScheduleItem(PilotScheduleItem):
+    """Operational continuation schedule, separate from frozen pilot protocols."""
+
+    def __post_init__(self) -> None:
+        if self.partition not in {"train", "validation"}:
+            raise ValueError("continuation partition must be train or validation")
+        if self.profile_id not in TACTICAL_V3_START_PROFILES:
+            raise ValueError("continuation profile is unsupported")
+        if type(self.episode_seed) is not int or not 0 <= self.episode_seed < 2**31:
+            raise TypeError("continuation episode_seed must be a nonnegative int32")
+        if type(self.learner_seat) is not int or self.learner_seat not in {0, 1}:
+            raise ValueError("continuation learner_seat must be 0 or 1")
+        if type(self.reference_seat) is not int or self.reference_seat not in {0, 1}:
+            raise ValueError("continuation reference_seat must be 0 or 1")
+        if self.learner_seat != self.reference_seat:
+            raise ValueError("continuation learner and reference seats must match")
+
+
+@dataclass(frozen=True, slots=True)
 class PilotGameSummary:
     schedule: PilotScheduleItem
     winner: int
@@ -158,7 +190,7 @@ class PilotDaggerDecision:
 
 @dataclass(frozen=True, slots=True)
 class PilotDaggerGameSummary:
-    schedule: PilotScheduleItem
+    schedule: PilotScheduleItem | ContinuationScheduleItem
     winner: int
     terminated: bool
     truncated: bool
@@ -694,7 +726,35 @@ def _validate_identity(identity: object) -> TacticalV3SemanticIdentity:
     return identity
 
 
-def _validate_view(view: TacticalV3View, item: PilotScheduleItem,
+def _validate_compatible_transfer_identity(
+    source: TacticalV3SemanticIdentity,
+    target: TacticalV3SemanticIdentity,
+    *,
+    subject: str,
+) -> None:
+    """Validate the model-facing boundary for an explicit cross-match transfer.
+
+    Scenario, match, and contract hashes are provenance rather than model input
+    geometry.  Encoding and capacity remain exact requirements, and collection
+    is a Duel-only protocol.
+    """
+
+    if type(source) is not TacticalV3SemanticIdentity:
+        raise TypeError(f"{subject} source identity must be TacticalV3SemanticIdentity")
+    if type(target) is not TacticalV3SemanticIdentity:
+        raise TypeError(f"{subject} target identity must be TacticalV3SemanticIdentity")
+    if source.contract_version != "tactical-v3" or target.contract_version != "tactical-v3":
+        raise ValueError(f"{subject} transfer requires tactical-v3 contract versions")
+    if source.environment_kind != "duel" or target.environment_kind != "duel":
+        raise ValueError(f"{subject} transfer requires duel policy identities")
+    if source.encoding_hash != target.encoding_hash:
+        raise ValueError(f"{subject} transfer encoding hash does not match target")
+    if source.capacity_hash != target.capacity_hash:
+        raise ValueError(f"{subject} transfer capacity hash does not match target")
+
+
+def _validate_view(view: TacticalV3View,
+                   item: PilotScheduleItem | ContinuationScheduleItem,
                    identity: TacticalV3SemanticIdentity, current_identity: object,
                    seen: set[int]) -> None:
     _validate_duel_view_common(view, item, identity, current_identity, seen)
@@ -704,7 +764,7 @@ def _validate_view(view: TacticalV3View, item: PilotScheduleItem,
 
 def _validate_duel_view_common(
     view: TacticalV3View,
-    item: PilotScheduleItem,
+    item: PilotScheduleItem | ContinuationScheduleItem,
     identity: TacticalV3SemanticIdentity,
     current_identity: object,
     seen: set[int],
@@ -845,21 +905,31 @@ def collect_game(
 def collect_dagger_game(
     client: TacticalV3GymClient,
     loaded: LoadedStructuredPolicy,
-    item: PilotScheduleItem,
+    item: PilotScheduleItem | ContinuationScheduleItem,
     *,
     oracle_expansion_budget: Literal[512, 2048] = 512,
     opponent: object = "random",
+    allow_compatible_identity_transfer: bool = False,
 ) -> PilotDaggerEpisode:
-    if type(item) is not PilotScheduleItem:
-        raise TypeError("item must be PilotScheduleItem")
+    if type(item) not in {PilotScheduleItem, ContinuationScheduleItem}:
+        raise TypeError("item must be a pilot or continuation schedule item")
     if item.partition == "evaluation":
         raise ValueError("evaluation schedule is not DAgger collection evidence")
     if type(oracle_expansion_budget) is not int or (
         oracle_expansion_budget not in {512, 2048}
     ):
         raise ValueError("DAgger oracle expansion budget must be 512 or 2048")
+    if type(allow_compatible_identity_transfer) is not bool:
+        raise TypeError("DAgger compatible identity transfer flag must be bool")
     identity = _validate_identity(client.identity)
-    if loaded.metadata.identity != identity:
+    actor_identity = loaded.metadata.identity
+    if allow_compatible_identity_transfer:
+        _validate_compatible_transfer_identity(
+            actor_identity,
+            identity,
+            subject="DAgger policy",
+        )
+    elif actor_identity != identity:
         raise ValueError("DAgger policy identity does not match GymServer identity")
     if (
         re.fullmatch(r"[0-9a-f]{64}", loaded.metadata.model_state_sha256) is None
@@ -879,8 +949,15 @@ def collect_dagger_game(
         raise ValueError(
             "DAgger opponent must be random, greedy, or a structured controller"
         )
-    if structured_opponent is not None and structured_opponent.identity != identity:
-        raise ValueError("DAgger opponent identity does not match GymServer identity")
+    if structured_opponent is not None:
+        if allow_compatible_identity_transfer:
+            _validate_compatible_transfer_identity(
+                structured_opponent.identity,
+                identity,
+                subject="DAgger opponent",
+            )
+        elif structured_opponent.identity != identity:
+            raise ValueError("DAgger opponent identity does not match GymServer identity")
     if structured_opponent is None:
         p0, p1 = (
             ("external", scripted_opponent)
@@ -952,7 +1029,15 @@ def collect_dagger_game(
             learner.candidate_id,
         ))
         learner_decision_index += 1
-    if client.identity != identity or loaded.metadata.identity != identity:
+    if client.identity != identity or loaded.metadata.identity != actor_identity:
+        raise ValueError("DAgger semantic identity drifted during collection")
+    if allow_compatible_identity_transfer:
+        _validate_compatible_transfer_identity(
+            loaded.metadata.identity,
+            identity,
+            subject="DAgger policy",
+        )
+    elif loaded.metadata.identity != identity:
         raise ValueError("DAgger semantic identity drifted during collection")
     if view.start_profile != item.profile_id or view.reference_seat != item.reference_seat:
         raise ValueError("DAgger terminal profile or reference seat drifted")
@@ -2447,6 +2532,7 @@ def _train_pilot_dataset(
     log_path: Path | None = None,
     tensorboard_enabled: bool = True,
     stop_requested: Callable[[], bool] | None = None,
+    allow_compatible_identity_transfer: bool = False,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     identity = _validate_identity(identity)
@@ -2462,6 +2548,8 @@ def _train_pilot_dataset(
         raise TypeError("pilot stop_requested must be callable or None")
     if type(tensorboard_enabled) is not bool:
         raise TypeError("pilot tensorboard_enabled must be bool")
+    if type(allow_compatible_identity_transfer) is not bool:
+        raise TypeError("pilot compatible identity transfer flag must be bool")
     output = Path(output)
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("pilot training artifacts output must be a plain directory")
@@ -2481,7 +2569,13 @@ def _train_pilot_dataset(
     if initial_policy is not None:
         if type(initial_policy) is not LoadedStructuredPolicy:
             raise TypeError("initial_policy must be LoadedStructuredPolicy")
-        if initial_policy.metadata.identity != identity:
+        if allow_compatible_identity_transfer:
+            _validate_compatible_transfer_identity(
+                initial_policy.metadata.identity,
+                identity,
+                subject="initial policy",
+            )
+        elif initial_policy.metadata.identity != identity:
             raise ValueError("initial policy identity does not match pilot training identity")
         if initial_policy.model.config != model_config:
             raise ValueError("initial policy architecture does not match pilot model")

@@ -636,58 +636,14 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void TacticalV3Continuation_UsesExactSourceScenarioWithoutTemplateSession()
+        public void TacticalV3Continuation_RequiresIndependentTargetScenarioSession()
         {
-            string run = Path.Combine(
-                Path.GetTempPath(), "hexwars-v3-training-source-" +
-                Guid.NewGuid().ToString("N"));
+            var source = CreateStructuredArenaRun();
             try
             {
-                Directory.CreateDirectory(run);
-                File.Copy(Path.Combine("python", "config",
-                    "annihilation-structured-imitation-v1.json"),
-                    Path.Combine(run, "scenario.json"));
                 var config = MlLabConfig.Default();
                 config.Environment = MlEnvironmentContract.TacticalV3;
-                config.ResumeSource = run;
-                config.TotalTimesteps = 10;
-                config.CheckpointInterval = 0;
-                config.Workers = 0;
-                config.OpponentKind = MlOpponentKind.Random;
-
-                MlTrainingLaunchFormState state =
-                    MlTrainingLaunchFormState.Evaluate(
-                        config, scenarioSession: null, resume: false);
-                MlTrainingScenarioPreflight preflight =
-                    MlTrainingScenarioPreflight.LoadSourceRun(run);
-
-                Assert.That(state.CanLaunch, Is.True);
-                Assert.That(state.Errors, Is.Empty);
-                Assert.That(preflight.Environment,
-                    Is.EqualTo(MlEnvironmentContract.TacticalV3));
-                Assert.That(preflight.TemplateId,
-                    Is.EqualTo("annihilation-structured-imitation-v1"));
-                Assert.That(preflight.TemplateId,
-                    Is.Not.EqualTo("tactical-v3-standard"));
-            }
-            finally
-            {
-                if (Directory.Exists(run)) Directory.Delete(run, true);
-            }
-        }
-
-        [Test]
-        public void TacticalV3Continuation_RejectsMissingSourceScenario()
-        {
-            string run = Path.Combine(
-                Path.GetTempPath(), "hexwars-v3-missing-source-" +
-                Guid.NewGuid().ToString("N"));
-            try
-            {
-                Directory.CreateDirectory(run);
-                var config = MlLabConfig.Default();
-                config.Environment = MlEnvironmentContract.TacticalV3;
-                config.ResumeSource = run;
+                config.ResumeSource = source.Run;
                 config.OpponentKind = MlOpponentKind.Random;
 
                 MlTrainingLaunchFormState state =
@@ -696,44 +652,117 @@ namespace HexWars.Presentation.Tests
 
                 Assert.That(state.CanLaunch, Is.False);
                 Assert.That(state.Errors,
-                    Has.Some.Contains(Path.Combine(run, "scenario.json")));
+                    Has.Some.Contains("Training scenario session is unavailable"));
             }
             finally
             {
-                if (Directory.Exists(run)) Directory.Delete(run, true);
+                Directory.Delete(source.Run, true);
             }
         }
 
         [Test]
-        public void TacticalV3Continuation_RejectsNonV3SourceScenario()
+        public void TacticalV3Continuation_AcceptsCompatibleSourceForChangedTargetScenario()
         {
-            string run = Path.Combine(
-                Path.GetTempPath(), "hexwars-v3-wrong-source-" +
-                Guid.NewGuid().ToString("N"));
+            var source = CreateStructuredArenaRun();
             try
             {
-                Directory.CreateDirectory(run);
                 var session = new MlTrainingScenarioSession(
                     MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
-                string written = MlTrainingScenarioStore.WriteSessionScenario(
-                    run, session.WorkingCopy);
-                File.Copy(written, Path.Combine(run, "scenario.json"));
+                session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+                session.WorkingCopy.Board.Width += 1;
                 var config = MlLabConfig.Default();
                 config.Environment = MlEnvironmentContract.TacticalV3;
-                config.ResumeSource = run;
+                config.ResumeSource = source.Run;
+                config.OpponentKind = MlOpponentKind.Random;
+
+                MlTrainingScenario sourceScenario = MlTrainingScenarioFile.Load(
+                    Path.Combine(source.Run, "scenario.json"));
+                var sourceIdentity = HexWars.Engine.Rl.TacticalV3Contract.Create(
+                    MlTrainingScenarioPreflight.ToEngine(sourceScenario)
+                        .BuildTacticalV3(),
+                    HexWars.Engine.Rl.MlEnvironmentKind.Duel);
+                var targetIdentity = HexWars.Engine.Rl.TacticalV3Contract.Create(
+                    MlTrainingScenarioPreflight.ToEngine(session.WorkingCopy)
+                        .BuildTacticalV3(),
+                    HexWars.Engine.Rl.MlEnvironmentKind.Duel);
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, session, resume: false);
+
+                Assert.That(targetIdentity.ContractHash,
+                    Is.Not.EqualTo(sourceIdentity.ContractHash));
+                Assert.That(targetIdentity.EncodingHash,
+                    Is.EqualTo(sourceIdentity.EncodingHash));
+                Assert.That(targetIdentity.CapacityHash,
+                    Is.EqualTo(sourceIdentity.CapacityHash));
+                Assert.That(state.CanLaunch, Is.True);
+                Assert.That(state.Errors, Is.Empty);
+            }
+            finally
+            {
+                Directory.Delete(source.Run, true);
+            }
+        }
+
+        [Test]
+        public void TacticalV3Continuation_RejectsIncompatibleTargetCapacity()
+        {
+            var source = CreateStructuredArenaRun();
+            try
+            {
+                var session = new MlTrainingScenarioSession(
+                    MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+                session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+                session.WorkingCopy.TacticalV3.Capacity.MaxCells += 1;
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.ResumeSource = source.Run;
                 config.OpponentKind = MlOpponentKind.Random;
 
                 MlTrainingLaunchFormState state =
                     MlTrainingLaunchFormState.Evaluate(
-                        config, scenarioSession: null, resume: false);
+                        config, session, resume: false);
 
                 Assert.That(state.CanLaunch, Is.False);
                 Assert.That(state.Errors,
-                    Has.Some.Contains("source scenario must use tactical-v3"));
+                    Has.Some.Contains(
+                        "capacity hash does not match the selected scenario"));
             }
             finally
             {
-                if (Directory.Exists(run)) Directory.Delete(run, true);
+                Directory.Delete(source.Run, true);
+            }
+        }
+
+        [Test]
+        public void TacticalV3Continuation_RejectsUncollectableSymmetricTarget()
+        {
+            var source = CreateStructuredArenaRun();
+            try
+            {
+                var session = new MlTrainingScenarioSession(
+                    MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+                session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+                session.WorkingCopy.TacticalV3.PlacementPolicy =
+                    "symmetric-random-v1";
+                session.WorkingCopy.TacticalV3.StartProfiles.Clear();
+                session.WorkingCopy.TacticalV3.StartDistribution.Clear();
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.ResumeSource = source.Run;
+                config.OpponentKind = MlOpponentKind.Random;
+
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, session, resume: false);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains("requires profiled-seeded-v1"));
+            }
+            finally
+            {
+                Directory.Delete(source.Run, true);
             }
         }
 
@@ -750,6 +779,66 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(config.Validate(),
                 Has.Some.Contains("Opponent path"));
+        }
+
+        [Test]
+        public void TrainingRunTarget_AllowsRetryAfterStartupLogOnlyFailure()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-ml-retry-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Assert.That(MlTrainingRunTarget.Validate(run), Is.Empty);
+
+                Directory.CreateDirectory(run);
+                Assert.That(MlTrainingRunTarget.Validate(run), Is.Empty);
+
+                File.WriteAllText(
+                    Path.Combine(run, "train-err.log"),
+                    "checkpoint architecture mismatch");
+                Assert.That(MlTrainingRunTarget.Validate(run), Is.Empty);
+
+                File.WriteAllText(Path.Combine(run, "run.json"), "{}");
+                Assert.That(
+                    MlTrainingRunTarget.Validate(run),
+                    Has.Some.Contains("Run already exists"));
+            }
+            finally
+            {
+                if (Directory.Exists(run)) Directory.Delete(run, true);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void TrainingRunTarget_RejectsOccupiedModelPublicationNamespace(
+            bool directory)
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-ml-publication-" +
+                Guid.NewGuid().ToString("N"));
+            string publication = run + "-model";
+            try
+            {
+                Assert.That(
+                    MlTrainingRunTarget.ValidateContinuation(run), Is.Empty);
+                if (directory) Directory.CreateDirectory(publication);
+                else File.WriteAllText(publication, "occupied");
+
+                Assert.That(
+                    MlTrainingRunTarget.ValidateContinuation(run),
+                    Has.Some.Contains("Publication target already exists"));
+                Assert.That(Directory.Exists(run), Is.False,
+                    "validation must not create the lifecycle run");
+            }
+            finally
+            {
+                if (Directory.Exists(publication))
+                    Directory.Delete(publication, true);
+                else if (File.Exists(publication))
+                    File.Delete(publication);
+            }
         }
 
         [Test]

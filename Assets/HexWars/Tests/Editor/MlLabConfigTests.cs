@@ -270,7 +270,7 @@ namespace HexWars.Presentation.Tests
             var errors = config.Validate();
 
             Assert.That(errors, Has.Some.Contains("DAgger train label target"));
-            Assert.That(errors, Has.Some.Contains("source run"));
+            Assert.That(errors, Has.Some.Contains("source model"));
             Assert.That(errors, Has.None.Contains("Checkpoint interval"));
             Assert.That(errors, Has.None.Contains("Workers"));
             Assert.That(errors, Has.None.Contains("Timesteps"));
@@ -299,15 +299,16 @@ namespace HexWars.Presentation.Tests
             config.Device = "cuda";
             config.LearnerSeat = MlLearnerSeat.Seat1;
             config.Trackers.Add(new MlTrackerConfig("tensorboard"));
+            const string scenarioPath = @"C:\scenarios\new scenario.json";
 
-            string args = config.BuildStructuredTrainArguments();
+            string args = config.BuildStructuredTrainArguments(scenarioPath);
 
             Assert.That(args, Does.StartWith(
                 "train-structured --run dagger-continuation "));
             Assert.That(args, Does.Contain(
                 "--source-run \"C:\\runs\\source run\""));
             Assert.That(args, Does.Contain(
-                "--scenario-file \"C:\\runs\\source run\\scenario.json\""));
+                "--scenario-file \"C:\\scenarios\\new scenario.json\""));
             Assert.That(args, Does.Contain("--opponent random"));
             Assert.That(args, Does.Contain("--train-labels 11"));
             Assert.That(args, Does.Contain("--validation-labels 5"));
@@ -336,7 +337,8 @@ namespace HexWars.Presentation.Tests
             config.OpponentKind = kind;
             config.OpponentPath = @"C:\runs\opponent";
 
-            string args = config.BuildStructuredTrainArguments();
+            string args = config.BuildStructuredTrainArguments(
+                @"C:\scenarios\target.json");
 
             Assert.That(args, Does.Contain("--opponent " + expected));
         }
@@ -350,7 +352,8 @@ namespace HexWars.Presentation.Tests
             config.OpponentKind = MlOpponentKind.LiveRun;
             config.OpponentPath = @"C:\runs\live opponent";
 
-            string args = config.BuildStructuredTrainArguments();
+            string args = config.BuildStructuredTrainArguments(
+                @"C:\scenarios\target.json");
 
             Assert.That(args, Does.Contain("\\\"kind\\\":\\\"run\\\""));
             Assert.That(args, Does.Contain("\\\"mode\\\":\\\"live\\\""));
@@ -365,7 +368,78 @@ namespace HexWars.Presentation.Tests
             config.ResumeSource = " ";
 
             Assert.Throws<InvalidOperationException>(
-                () => config.BuildStructuredTrainArguments());
+                () => config.BuildStructuredTrainArguments(
+                    @"C:\scenarios\target.json"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase(" ")]
+        public void BuildStructuredTrainArguments_RequiresResolvedScenarioPath(
+            string scenarioPath)
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.ResumeSource = @"C:\runs\source";
+
+            ArgumentException error = Assert.Throws<ArgumentException>(
+                () => config.BuildStructuredTrainArguments(scenarioPath));
+
+            Assert.That(error.ParamName, Is.EqualTo("scenarioPath"));
+        }
+
+        [Test]
+        public void BuildStructuredTrainArguments_EscapesEmbeddedQuoteInScenarioPath()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.ResumeSource = @"C:\runs\source";
+
+            string args = config.BuildStructuredTrainArguments(
+                "C:\\scenarios\\a\"b.json");
+
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\scenarios\\a\\\"b.json\""));
+        }
+
+        [Test]
+        public void BuildStructuredTrainArguments_EscapesTrailingBackslashInScenarioPath()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.ResumeSource = @"C:\runs\source";
+
+            string args = config.BuildStructuredTrainArguments(@"C:\scenarios\");
+
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\scenarios\\\\\""));
+        }
+
+        [Test]
+        public void BuildStructuredPreflightArguments_AuthenticatesSameInputsBeforeLaunch()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.ResumeSource = @"C:\runs\source model";
+            config.OpponentKind = MlOpponentKind.LiveRun;
+            config.OpponentPath = @"C:\runs\live opponent";
+            config.Seed = 41;
+            config.Device = "cuda:0";
+
+            string args = config.BuildStructuredPreflightArguments(
+                @"C:\scenarios\target scenario.json");
+
+            Assert.That(args, Does.StartWith("preflight-structured "));
+            Assert.That(args, Does.Contain(
+                "--source-run \"C:\\runs\\source model\""));
+            Assert.That(args, Does.Contain(
+                "--scenario-file \"C:\\scenarios\\target scenario.json\""));
+            Assert.That(args, Does.Contain("\\\"mode\\\":\\\"live\\\""));
+            Assert.That(args, Does.Contain("--seed 41"));
+            Assert.That(args, Does.Contain("--device cuda:0"));
+            Assert.That(args, Does.EndWith("--json"));
+            Assert.That(args, Does.Not.Contain("--run "));
+            Assert.That(args, Does.Not.Contain("--train-labels"));
         }
 
         [Test]

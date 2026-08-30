@@ -93,6 +93,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
         readonly SynchronizationContext _context;
         readonly MlLogBuffer _log;
         IMlProcessAdapter _process;
+        Action<string> _outputHandler;
+        Action<string> _errorHandler;
+        Action<int> _exitHandler;
+        int _generation;
 
         public event Action Changed;
         public event Action<int> Exited;
@@ -117,10 +121,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (startInfo == null) throw new ArgumentNullException(nameof(startInfo));
             if (IsRunning) throw new InvalidOperationException("An ML command is already running.");
             DisposeProcess();
+            int generation = ++_generation;
             _process = _factory.Create();
-            _process.OutputLine += OnOutput;
-            _process.ErrorLine += OnError;
-            _process.ProcessExited += OnExited;
+            _outputHandler = line => OnOutput(generation, line);
+            _errorHandler = line => OnError(generation, line);
+            _exitHandler = code => OnExited(generation, code);
+            _process.OutputLine += _outputHandler;
+            _process.ErrorLine += _errorHandler;
+            _process.ProcessExited += _exitHandler;
             try { _process.Start(startInfo); }
             catch
             {
@@ -129,7 +137,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             if (!string.IsNullOrWhiteSpace(activeRunDirectory))
                 MlRunAttachment.RememberProcess(activeRunDirectory, _process.Id);
-            NotifyChanged();
+            NotifyChanged(generation);
         }
 
         public bool TryQueryAttachedRun(
@@ -200,11 +208,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
             return output.ToString();
         }
 
-        void OnOutput(string line) => AddLine(line);
-        void OnError(string line) => AddLine(line == null ? null : "ERROR: " + line);
-        void AddLine(string line)
+        void OnOutput(int generation, string line) => AddLine(generation, line);
+        void OnError(int generation, string line) => AddLine(
+            generation, line == null ? null : "ERROR: " + line);
+        void AddLine(int generation, string line)
         {
-            if (line == null) return;
+            if (generation != _generation || line == null) return;
             _log.Add(line);
             if (line.Length > 1 && line[0] == '{')
             {
@@ -213,18 +222,21 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     var status = MlRunStatus.Parse(line);
                     if (status != null)
                     {
-                        LastStatus = status;
-                        Post(() => StatusReceived?.Invoke(status));
+                        Post(generation, () =>
+                        {
+                            LastStatus = status;
+                            StatusReceived?.Invoke(status);
+                        });
                     }
                 }
                 catch (Exception) { /* Non-status JSON and partial log lines remain ordinary output. */ }
             }
-            NotifyChanged();
+            NotifyChanged(generation);
         }
 
-        void OnExited(int code)
+        void OnExited(int generation, int code)
         {
-            Post(() =>
+            Post(generation, () =>
             {
                 Changed?.Invoke();
                 Exited?.Invoke(code);
@@ -233,7 +245,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         // Closing the window or reloading assemblies must not kill a headless training run.
         public void Dispose() => DisposeProcess();
-        void NotifyChanged() => Post(() => Changed?.Invoke());
+        void NotifyChanged(int generation) =>
+            Post(generation, () => Changed?.Invoke());
+
+        void Post(int generation, Action action) => Post(() =>
+        {
+            if (generation == _generation) action();
+        });
 
         void Post(Action action)
         {
@@ -243,12 +261,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void DisposeProcess()
         {
+            _generation++;
             if (_process == null) return;
-            _process.OutputLine -= OnOutput;
-            _process.ErrorLine -= OnError;
-            _process.ProcessExited -= OnExited;
+            _process.OutputLine -= _outputHandler;
+            _process.ErrorLine -= _errorHandler;
+            _process.ProcessExited -= _exitHandler;
             _process.Dispose();
             _process = null;
+            _outputHandler = null;
+            _errorHandler = null;
+            _exitHandler = null;
         }
     }
 }

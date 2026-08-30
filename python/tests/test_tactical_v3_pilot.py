@@ -21,6 +21,18 @@ def _identity():
     return parse_spaces(json.loads(DUEL_SPACES.read_text(encoding="utf-8")))
 
 
+def _transfer_identity():
+    identity = _identity()
+    match = dict(identity.match)
+    match["max_steps"] = int(match["max_steps"]) + 8
+    return replace(
+        identity,
+        scenario_id="compatible-transfer-target",
+        contract_hash="f" * 64,
+        match=MappingProxyType(match),
+    )
+
+
 def _view(decision_id: int, *, seat: int = 0, profile: str = "standard-3v3",
           reference_seat: int = 0, terminal: bool = False, truncated: bool = False):
     payload = minimal_view_payload()
@@ -256,7 +268,12 @@ def _canonical_collection():
 
 def test_pilot_schedules_are_frozen_balanced_disjoint_and_exact() -> None:
     from ml_lab.tactical_v3_pilot import (
-        PILOT_PROFILES, collection_schedule, evaluation_schedule,
+        PILOT_PROFILES,
+        TACTICAL_V3_START_PROFILES,
+        ContinuationScheduleItem,
+        PilotScheduleItem,
+        collection_schedule,
+        evaluation_schedule,
     )
 
     assert PILOT_PROFILES == (
@@ -264,6 +281,17 @@ def test_pilot_schedules_are_frozen_balanced_disjoint_and_exact() -> None:
         "conversion-2v1-near", "conversion-2v1-far",
         "conversion-1v1-near", "conversion-1v1-far",
     )
+    assert TACTICAL_V3_START_PROFILES == (
+        "standard-3v3",
+        "conversion-3v1-near", "conversion-3v1-medium", "conversion-3v1-far",
+        "conversion-2v1-near", "conversion-2v1-medium", "conversion-2v1-far",
+        "conversion-1v1-near", "conversion-1v1-medium", "conversion-1v1-far",
+    )
+    with pytest.raises(ValueError, match="pilot profile"):
+        PilotScheduleItem("train", "conversion-2v1-medium", 1, 0, 0)
+    assert ContinuationScheduleItem(
+        "train", "conversion-2v1-medium", 1, 0, 0,
+    ).profile_id == "conversion-2v1-medium"
     train = collection_schedule("train")
     validation = collection_schedule("validation")
     evaluation = evaluation_schedule()
@@ -834,6 +862,155 @@ def test_dagger_collection_uses_selected_greedy_opponent() -> None:
         "reset", (34_540_000, "greedy", "external", 1, "standard-3v3", 1),
     )
     assert episode.summary.schedule == item
+
+
+def test_dagger_compatible_transfer_is_explicit_and_model_facing_only() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    source_identity = _identity()
+    target_identity = _transfer_identity()
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=source_identity,
+            model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 34_540_000, 0, 0,
+    )
+    strict_client = _DaggerClient()
+    strict_client._identity = target_identity
+
+    with pytest.raises(ValueError, match="policy identity"):
+        module.collect_dagger_game(strict_client, loaded, item)
+
+    transfer_client = _DaggerClient()
+    transfer_client._identity = target_identity
+    episode = module.collect_dagger_game(
+        transfer_client,
+        loaded,
+        item,
+        allow_compatible_identity_transfer=True,
+    )
+
+    assert episode.identity == target_identity
+    assert episode.actor_model_state_sha256 == "a" * 64
+
+
+@pytest.mark.parametrize(
+    ("changed", "message"),
+    [
+        ({"encoding_hash": "0" * 64}, "encoding hash"),
+        ({"capacity_hash": "0" * 64}, "capacity hash"),
+        ({"environment_kind": "tactical"}, "duel policy"),
+    ],
+)
+def test_compatible_transfer_rejects_model_interface_drift(
+    changed: dict[str, object],
+    message: str,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    with pytest.raises(ValueError, match=message):
+        module._validate_compatible_transfer_identity(
+            replace(_identity(), **changed),
+            _transfer_identity(),
+            subject="source policy",
+        )
+
+
+def test_pilot_training_transfer_still_requires_the_exact_model_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_checkpoint import LoadedStructuredPolicy
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+
+    source_identity = _identity()
+    target_identity = _transfer_identity()
+    collection = _canonical_collection()
+    train = tuple(
+        replace(
+            row,
+            scenario_id=target_identity.scenario_id,
+            contract_hash=target_identity.contract_hash,
+        )
+        for row in collection.train[:1]
+    )
+    validation = tuple(
+        replace(
+            row,
+            scenario_id=target_identity.scenario_id,
+            contract_hash=target_identity.contract_hash,
+        )
+        for row in collection.validation[:1]
+    )
+    model_config, _, _ = module._pilot_configs(227, "cpu")
+
+    def loaded(model):
+        return LoadedStructuredPolicy(
+            model,
+            SimpleNamespace(identity=source_identity),
+            SimpleNamespace(),
+        )
+
+    strict_output = tmp_path / "strict"
+    strict_output.mkdir()
+    with pytest.raises(ValueError, match="initial policy identity"):
+        module._train_pilot_dataset(
+            target_identity,
+            train,
+            validation,
+            "a" * 64,
+            strict_output,
+            227,
+            "cpu",
+            initial_policy=loaded(TacticalV3Policy(model_config)),
+            tensorboard_enabled=False,
+        )
+
+    wrong_output = tmp_path / "wrong-config"
+    wrong_output.mkdir()
+    wrong_config = replace(model_config, hidden_dim=model_config.hidden_dim * 2)
+    with pytest.raises(ValueError, match="architecture"):
+        module._train_pilot_dataset(
+            target_identity,
+            train,
+            validation,
+            "a" * 64,
+            wrong_output,
+            227,
+            "cpu",
+            initial_policy=loaded(TacticalV3Policy(wrong_config)),
+            tensorboard_enabled=False,
+            allow_compatible_identity_transfer=True,
+        )
+
+    accepted_output = tmp_path / "accepted"
+    accepted_output.mkdir()
+
+    def accepted(*args, **kwargs):
+        raise RuntimeError("compatible transfer reached target metrics")
+
+    monkeypatch.setattr(module, "_policy_target_metrics", accepted)
+    with pytest.raises(RuntimeError, match="reached target metrics"):
+        module._train_pilot_dataset(
+            target_identity,
+            train,
+            validation,
+            "a" * 64,
+            accepted_output,
+            227,
+            "cpu",
+            initial_policy=loaded(TacticalV3Policy(model_config)),
+            tensorboard_enabled=False,
+            allow_compatible_identity_transfer=True,
+        )
 
 
 def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> None:
