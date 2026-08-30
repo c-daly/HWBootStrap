@@ -15,6 +15,8 @@ from typing import Iterator, Sequence, TextIO
 
 _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRAINING_COMMANDS = frozenset({"train", "train-structured", "resume"})
+_STARTUP_BEGAN_PREFIX = "ML Lab startup began with pid "
+_STARTUP_EXITED_PREFIX = "ML Lab startup exited with code "
 
 
 def _option_value(argv: Sequence[str], option: str) -> str | None:
@@ -177,13 +179,16 @@ def run(argv: Sequence[str] | None = None) -> int:
     exit_code = 0
     failed = False
     with stream, _capture_process_stderr(stream):
+        # Invalidate any prior terminal marker before entering main. The inner CLI
+        # may subsequently truncate this line when it installs its native-stderr
+        # capture; either a began marker or no terminal marker is fail-closed in
+        # Unity until this process really exits.
+        print(f"{_STARTUP_BEGAN_PREFIX}{os.getpid()}", file=sys.stderr)
         try:
             from ml_lab.cli import main
 
             exit_code = main(list(effective_argv))
             failed = exit_code != 0
-            if failed:
-                print(f"ML Lab startup exited with code {exit_code}", file=sys.stderr)
         except SystemExit as error:
             if error.code is None:
                 exit_code = 0
@@ -193,8 +198,6 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(error.code, file=sys.stderr)
                 exit_code = 1
             failed = exit_code != 0
-            if failed:
-                print(f"ML Lab startup exited with code {exit_code}", file=sys.stderr)
         except BaseException:
             traceback.print_exc()
             exit_code = 1
@@ -202,6 +205,14 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if failed:
         _redact_startup_log(startup_log, effective_argv)
+    # Append after redaction so even a one-character secret matching the exit code
+    # cannot corrupt the control marker. If this secure reopen fails, no marker is
+    # published and ML Lab safely refuses to reuse the ambiguous startup shell.
+    try:
+        with _open_startup_log(startup_log) as marker_stream:
+            marker_stream.write(f"{_STARTUP_EXITED_PREFIX}{exit_code}\n")
+    except (OSError, ValueError) as error:
+        _record_log_setup_failure(startup_log, error)
     return exit_code
 
 

@@ -782,7 +782,7 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void TrainingRunTarget_AllowsRetryAfterStartupLogOnlyFailure()
+        public void TrainingRunTarget_AllowsRetryOnlyAfterTerminalStartupMarker()
         {
             string run = Path.Combine(
                 Path.GetTempPath(), "hexwars-ml-retry-" +
@@ -796,13 +796,52 @@ namespace HexWars.Presentation.Tests
 
                 File.WriteAllText(
                     Path.Combine(run, "train-err.log"),
-                    "checkpoint architecture mismatch");
+                    "ML Lab startup began with pid 4242\n" +
+                    "checkpoint architecture mismatch\n");
+                Assert.That(
+                    MlTrainingRunTarget.Validate(run),
+                    Has.Some.Contains("has not recorded a terminal exit"));
+
+                File.AppendAllText(
+                    Path.Combine(run, "train-err.log"),
+                    "ML Lab startup exited with code 1\n");
                 Assert.That(MlTrainingRunTarget.Validate(run), Is.Empty);
+
+                Assert.That(
+                    MlTrainingRunTarget.Validate(
+                        run, liveStartupProcess: true),
+                    Has.Some.Contains("already starting"),
+                    "a restored live PID must override an older terminal marker");
 
                 File.WriteAllText(Path.Combine(run, "run.json"), "{}");
                 Assert.That(
                     MlTrainingRunTarget.Validate(run),
                     Has.Some.Contains("Run already exists"));
+            }
+            finally
+            {
+                if (Directory.Exists(run)) Directory.Delete(run, true);
+            }
+        }
+
+        [Test]
+        public void TrainingRunTarget_RejectsLiveOwnerBeforeStartupArtifactsAppear()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-ml-live-shell-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Assert.That(
+                    MlTrainingRunTarget.Validate(
+                        run, liveStartupProcess: true),
+                    Has.Some.Contains("already starting"));
+
+                Directory.CreateDirectory(run);
+                Assert.That(
+                    MlTrainingRunTarget.Validate(
+                        run, liveStartupProcess: true),
+                    Has.Some.Contains("already starting"));
             }
             finally
             {

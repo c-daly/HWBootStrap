@@ -82,6 +82,7 @@ def test_training_argparse_failure_is_retained_in_run_stderr_log(
 
     log_path = tmp_path / "entrypoint-failure" / "train-err.log"
     contents = log_path.read_text(encoding="utf-8")
+    assert "ML Lab startup began with pid " in contents
     assert "--not-a-real-option" in contents
     assert "error: unrecognized arguments:" in contents
     assert "do-not-persist-this-secret" not in contents
@@ -110,7 +111,29 @@ def test_valid_entrypoint_preserves_inner_native_stderr_capture(
             f"--runs-root={tmp_path}",
         ]
     ) == 0
-    assert "native extension stderr reached the run log" in log_path.read_text(
+    contents = log_path.read_text(encoding="utf-8")
+    assert "native extension stderr reached the run log" in contents
+    assert "ML Lab startup exited with code 0" in contents
+
+
+def test_startup_log_is_not_marked_exited_until_main_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_path = tmp_path / "live-startup" / "train-err.log"
+
+    def fake_main(_argv: list[str]) -> int:
+        contents = log_path.read_text(encoding="utf-8")
+        assert "ML Lab startup began with pid " in contents
+        assert "ML Lab startup exited with code " not in contents
+        return 1
+
+    monkeypatch.setattr(cli_module, "main", fake_main)
+
+    assert hexwars_ml.run(
+        ["train", "--run", "live-startup", "--runs-root", str(tmp_path)]
+    ) == 1
+    assert "ML Lab startup exited with code 1" in log_path.read_text(
         encoding="utf-8"
     )
 
@@ -161,6 +184,34 @@ def test_returned_failure_is_marked_and_redacted(
     assert "secret-value" not in contents
     assert "backend rejected [REDACTED]" in contents
     assert "ML Lab startup exited with code 1" in contents
+
+
+def test_terminal_marker_is_appended_after_short_secret_redaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_main(_argv: list[str]) -> int:
+        print("backend rejected 1", file=sys.stderr)
+        return 1
+
+    monkeypatch.setattr(cli_module, "main", fake_main)
+
+    assert hexwars_ml.run(
+        [
+            "train",
+            "--run",
+            "short-secret",
+            "--runs-root",
+            str(tmp_path),
+            "--api-token",
+            "1",
+        ]
+    ) == 1
+    contents = (tmp_path / "short-secret" / "train-err.log").read_text(
+        encoding="utf-8"
+    )
+    assert "backend rejected [REDACTED]" in contents
+    assert contents.rstrip().endswith("ML Lab startup exited with code 1")
 
 
 def test_startup_log_refuses_linked_run_directory(tmp_path: Path) -> None:

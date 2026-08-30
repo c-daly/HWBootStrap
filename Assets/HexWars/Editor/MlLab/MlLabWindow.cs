@@ -1109,10 +1109,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public static class MlTrainingRunTarget
     {
-        /// <summary>A startup-log-only directory is not yet a run. The Python
-        /// entry point creates it before loading ML dependencies so early failures
-        /// remain diagnosable, and the trainer deliberately accepts it on retry.</summary>
-        public static IReadOnlyList<string> Validate(string runDirectory)
+        const string StartupExitedPrefix = "ML Lab startup exited with code ";
+
+        /// <summary>A startup-log-only directory is reusable only after the Python
+        /// entry point records its terminal exit marker. Mere existence of the log
+        /// is not failure evidence: a live detached trainer creates it before
+        /// run.json, including across a Unity domain reload.</summary>
+        public static IReadOnlyList<string> Validate(
+            string runDirectory, bool liveStartupProcess = false)
         {
             var errors = new List<string>();
             if (string.IsNullOrWhiteSpace(runDirectory))
@@ -1122,7 +1126,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             try
             {
-                if (!Directory.Exists(runDirectory)) return errors;
+                if (!Directory.Exists(runDirectory))
+                {
+                    if (liveStartupProcess)
+                        errors.Add("Training is already starting for this run name; " +
+                            "wait for it to create run.json or exit.");
+                    return errors;
+                }
                 var directory = new DirectoryInfo(runDirectory);
                 if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
                 {
@@ -1130,13 +1140,22 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         "Existing runs are never overwritten.");
                     return errors;
                 }
-                bool startupShell = Directory.GetFileSystemEntries(runDirectory)
-                    .All(path =>
-                        string.Equals(Path.GetFileName(path), "train-err.log",
-                            StringComparison.Ordinal) &&
-                        File.Exists(path) &&
-                        (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0);
-                if (!startupShell)
+                string[] entries = Directory.GetFileSystemEntries(runDirectory);
+                bool emptyShell = entries.Length == 0;
+                bool startupLogOnly = entries.Length == 1 &&
+                    string.Equals(Path.GetFileName(entries[0]), "train-err.log",
+                        StringComparison.Ordinal) &&
+                    File.Exists(entries[0]) &&
+                    (File.GetAttributes(entries[0]) & FileAttributes.ReparsePoint) == 0;
+                bool completedStartupShell = startupLogOnly &&
+                    HasTerminalStartupMarker(entries[0]);
+                if (liveStartupProcess)
+                    errors.Add("Training is already starting for this run name; " +
+                        "wait for it to create run.json or exit.");
+                else if (startupLogOnly && !completedStartupShell)
+                    errors.Add("Run startup has not recorded a terminal exit; " +
+                        "it may still be active. Wait for it to finish or choose a new run name.");
+                else if (!emptyShell && !completedStartupShell)
                     errors.Add("Run already exists; choose a new run name. " +
                         "Existing runs are never overwritten.");
             }
@@ -1147,6 +1166,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add("Could not inspect target run directory: " + error.Message);
             }
             return errors;
+        }
+
+        static bool HasTerminalStartupMarker(string logPath)
+        {
+            string marker = MlSharedFileSnapshot.ReadLastNonEmptyLine(logPath);
+            if (string.IsNullOrEmpty(marker) ||
+                !marker.StartsWith(StartupExitedPrefix, StringComparison.Ordinal))
+                return false;
+            return int.TryParse(
+                marker.Substring(StartupExitedPrefix.Length),
+                NumberStyles.Integer, CultureInfo.InvariantCulture, out _);
         }
 
         public static IReadOnlyList<string> ValidatePublication(
@@ -1179,9 +1209,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
 
         public static IReadOnlyList<string> ValidateContinuation(
-            string runDirectory)
+            string runDirectory, bool liveStartupProcess = false)
         {
-            var errors = new List<string>(Validate(runDirectory));
+            var errors = new List<string>(
+                Validate(runDirectory, liveStartupProcess));
             if (!string.IsNullOrWhiteSpace(runDirectory))
                 errors.AddRange(
                     ValidatePublication(runDirectory + "-model"));
@@ -3034,9 +3065,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!File.Exists(CliScript)) errors.Add("ML CLI was not found: " + CliScript);
             if (!File.Exists(GymServer)) errors.Add("Release GymServer was not found: " + GymServer);
             string targetRun = Path.Combine(RunsRoot, _config.RunName ?? string.Empty);
+            bool targetTrainerAlive = IsAttachedTrainerProcessAlive(targetRun);
             errors.AddRange(structuredContinuation
-                ? MlTrainingRunTarget.ValidateContinuation(targetRun)
-                : MlTrainingRunTarget.Validate(targetRun));
+                ? MlTrainingRunTarget.ValidateContinuation(
+                    targetRun, targetTrainerAlive)
+                : MlTrainingRunTarget.Validate(targetRun, targetTrainerAlive));
             if (errors.Count > 0)
             {
                 _state.Fail(string.Join("\n", errors));
@@ -3136,7 +3169,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     _pendingTrainingScenarioPath);
             IReadOnlyList<string> targetErrors =
                 MlTrainingRunTarget.ValidateContinuation(
-                    _pendingTrainingRunDirectory);
+                    _pendingTrainingRunDirectory,
+                    IsAttachedTrainerProcessAlive(
+                        _pendingTrainingRunDirectory));
             if (targetErrors.Count > 0)
                 throw new InvalidOperationException(
                     string.Join("\n", targetErrors));
@@ -3394,6 +3429,19 @@ namespace HexWars.Presentation.EditorTools.MlLab
         // its own). Reattaches via the PID persisted at launch time (MlRunAttachment.RememberProcess),
         // guarded against PID reuse by an existence+name check, and falls back to progress.csv mtime
         // freshness whenever no valid process handle is available.
+        bool IsAttachedTrainerProcessAlive(string runDirectory)
+        {
+            MlRunAttachment attachment = MlRunAttachment.Restore();
+            if (!attachment.HasPid || string.IsNullOrEmpty(runDirectory) ||
+                !MlWatchPresentationTarget.SamePath(
+                    attachment.RunDirectory, runDirectory))
+                return false;
+            return MlTrainerProcessLookup.TryGetRunningProcessName(
+                    attachment.Pid, out string processName) &&
+                MlTrainerProcessLookup.MatchesExpectedExecutable(
+                    processName, PythonExe);
+        }
+
         MlTrainerLivenessState ComputeTrainerLiveness(
             string runDirectory, out bool confirmedExited, out double minutesSinceProgress)
         {
@@ -3467,7 +3515,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     {
                         IReadOnlyList<string> targetErrors =
                             MlTrainingRunTarget.ValidateContinuation(
-                                runDirectory);
+                                runDirectory,
+                                IsAttachedTrainerProcessAlive(runDirectory));
                         if (targetErrors.Count > 0)
                         {
                             _state.Fail(string.Join("\n", targetErrors));
