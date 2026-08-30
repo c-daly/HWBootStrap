@@ -157,8 +157,6 @@ namespace HexWars.Presentation
             var rig = FindAnyObjectByType<CameraRig>();
             if (rig != null) rig.Frame(); // fit the camera once the board exists
 
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer()); // seed the scoreboard at game start
             StateChanged?.Invoke();
         }
 
@@ -183,7 +181,6 @@ namespace HexWars.Presentation
             var prev = State;
             State = result.NewState;
             UpdateSessionBarracks(cmd);
-            if (!DemoMode) EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()), FogViewer());
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             if (!DemoMode) CheckFirstBounty(prev, cmd);
             StateChanged?.Invoke();
@@ -250,8 +247,6 @@ namespace HexWars.Presentation
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer());
             StateChanged?.Invoke();
             SoundManager.StartAmbience();
             if (vsAi)
@@ -307,7 +302,6 @@ namespace HexWars.Presentation
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
             if (GetComponent<SpectatorDriver>() == null) gameObject.AddComponent<SpectatorDriver>();
             StateChanged?.Invoke();
         }
@@ -479,8 +473,6 @@ namespace HexWars.Presentation
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            EventConsole.Clear();
-            EventConsole.Report(State, null, FogViewer());
             StateChanged?.Invoke();
             SoundManager.StartAmbience();
         }
@@ -492,7 +484,6 @@ namespace HexWars.Presentation
             if (!result.Success) { Debug.LogWarning("[Net] server move rejected locally: " + result.Reason); return; }
             var prev = State;
             State = result.NewState;
-            EventConsole.Report(State, CombatLog.Diff(prev, State, FogViewer()), FogViewer());
             Presenter.Enqueue(prev, cmd, State, IsLocalCommand(cmd));
             CheckFirstBounty(prev, cmd);
             if ((cmd is CreateUnit || cmd is DeleteTemplate) && IsLocalCommand(cmd))

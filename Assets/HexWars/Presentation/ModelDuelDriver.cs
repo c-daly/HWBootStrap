@@ -144,6 +144,7 @@ namespace HexWars.Presentation
     }
 
     [RequireComponent(typeof(BoardRenderer))]
+    [RequireComponent(typeof(EventConsole))]
     [RequireComponent(typeof(ModelArenaIdentityOverlay))]
     public sealed class ModelDuelDriver : MonoBehaviour
     {

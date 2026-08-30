@@ -75,6 +75,38 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void StartAndWatch_CanArmBeforeARevisionExists()
+        {
+            var watch = new MlStartAndWatchState();
+            watch.Begin(requested: true);
+
+            Assert.That(watch.TryArm(), Is.True);
+            Assert.That(watch.LaunchPending, Is.True);
+            Assert.That(watch.TryArm(), Is.False,
+                "one watch request must not schedule duplicate launch attempts");
+            Assert.That(watch.TryQueue("checkpoints/step_100.zip"), Is.False,
+                "the polling loop, not a second queue request, resolves an armed watch");
+        }
+
+        [Test]
+        public void StartAndWatch_EarlyArmRecordsFailedRevisionUntilExplicitRetry()
+        {
+            var watch = new MlStartAndWatchState();
+            var ui = new MlLabWindowState();
+            watch.Begin(requested: true);
+            Assert.That(watch.TryArm(), Is.True);
+            watch.RecordPresentationAttempt("source-policy-v1");
+
+            watch.Apply(MlViewerLaunchResult.Failed("viewer failed"), ui);
+
+            Assert.That(watch.CanRetry, Is.True);
+            Assert.That(watch.TryQueue("source-policy-v1"), Is.False,
+                "status polling must not relaunch the same failed model automatically");
+            watch.Retry();
+            Assert.That(watch.TryQueue("source-policy-v1"), Is.True);
+        }
+
+        [Test]
         public void StartAndWatch_SuccessRecordsTheExactPresentationIdentity()
         {
             var watch = new MlStartAndWatchState();

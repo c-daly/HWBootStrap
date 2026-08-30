@@ -1252,7 +1252,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
         }
 
-        static bool SamePath(string left, string right)
+        public static bool SamePath(string left, string right)
         {
             if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
                 return string.Equals(left, right, StringComparison.Ordinal);
@@ -1373,16 +1373,36 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public bool TryQueue(string latestCheckpoint)
         {
-            if (!_requested || _launchPending || _launched ||
-                string.IsNullOrWhiteSpace(latestCheckpoint) ||
+            if (string.IsNullOrWhiteSpace(latestCheckpoint) ||
                 string.Equals(
                     latestCheckpoint,
                     _lastAttemptedCheckpoint,
                     StringComparison.Ordinal))
                 return false;
+            if (!TryArm()) return false;
             _lastAttemptedCheckpoint = latestCheckpoint;
-            _launchPending = true;
             return true;
+        }
+
+        /// <summary>Registers the watch request before a presentation revision exists. This lets the
+        /// window persist and evaluate the request all the way to a validated model, a terminal
+        /// trainer state, or the retry ceiling instead of silently waiting outside the retry state
+        /// machine.</summary>
+        public bool TryArm()
+        {
+            if (!_requested || _launchPending || _launched) return false;
+            _launchPending = true;
+            _canRetry = false;
+            return true;
+        }
+
+        /// <summary>Records which validated model an already-armed request is about to launch. An
+        /// early-armed request has no revision at arm time; recording it here preserves the same
+        /// no-repeat-until-Retry behavior as <see cref="TryQueue"/> if launch fails.</summary>
+        public void RecordPresentationAttempt(string revision)
+        {
+            if (!_launchPending || string.IsNullOrWhiteSpace(revision)) return;
+            _lastAttemptedCheckpoint = revision;
         }
 
         public void Retry()
@@ -1469,6 +1489,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         MlCliProcess _statusQuery;
         MlCliProcess _command;
         MlRunStatus _status;
+        string _statusQueryRunDirectory = string.Empty;
         Vector2 _scroll;
         Vector2 _logScroll;
         string _selectedRun = string.Empty;
@@ -1480,9 +1501,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string _lastMetricTime = string.Empty;
         [SerializeField] MlStartAndWatchState _watch =
             new MlStartAndWatchState();
-        // Run directory for a Start & Watch attempt currently retrying for run.json to appear; empty
-        // when nothing is pending. Keyed to the run directory (not captured via closure) so a stale
-        // retry is dropped if the selection moves to a different run mid-wait. Plain fields, so a
+        // Run directory for a watch attempt currently waiting on a validated presentation model;
+        // empty when nothing is pending. Keyed to the run directory (not captured via closure) so a
+        // stale retry is dropped if the selection moves to a different run mid-wait. Plain fields, so a
         // domain reload wipes them in memory; OnDisable persists them to SessionState (same
         // mechanism as _selectedRun) and OnEnable restores + resumes them, because
         // MlStartAndWatchState.LaunchPending is [SerializeField] and would otherwise survive the
@@ -1702,7 +1723,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.LabelField("Seat 0", DescribeSeat(_arena.P0), EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField("Seat 1", DescribeSeat(_arena.P1), EditorStyles.wordWrappedLabel);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Launch arena", GUILayout.Height(28))) LaunchArena();
+            using (new EditorGUI.DisabledScope(
+                       EditorApplication.isPlayingOrWillChangePlaymode))
+            {
+                if (GUILayout.Button("Launch arena", GUILayout.Height(28)))
+                    EditorApplication.delayCall += LaunchArena;
+            }
             var driver = EditorApplication.isPlaying ? FindAnyObjectByType<ModelDuelDriver>() : null;
             using (new EditorGUI.DisabledScope(driver == null))
             {
@@ -1758,6 +1784,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void LaunchArena()
         {
+            if (EditorApplication.isPlayingOrWillChangePlaymode) return;
             _arenaError = string.Empty;
             _arenaNotice = string.Empty;
             var errors = new List<string>(_arena.Validate());
@@ -2401,16 +2428,30 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 if (GUILayout.Button("Open run folder")) EditorUtility.RevealInFinder(_selectedRun);
             }
             EditorGUILayout.EndHorizontal();
-            if (_watch.CanRetry && GUILayout.Button("Retry viewer"))
+            using (new EditorGUI.DisabledScope(
+                       !hasSelectedRun ||
+                       EditorApplication.isPlayingOrWillChangePlaymode))
             {
-                _watch.Retry();
-                _state.ClearError();
-                if (_status != null && _status.Ok)
-                    _state.Apply(_status.State, _status.Pid);
-                _nextPoll = 0;
-                _notice =
-                    "Viewer retry requested; the selected run and presentation model " +
-                    "will be validated again.";
+                if (GUILayout.Button("Watch selected run"))
+                    WatchSelectedRun();
+            }
+            using (new EditorGUI.DisabledScope(
+                       !hasSelectedRun ||
+                       EditorApplication.isPlayingOrWillChangePlaymode))
+            {
+                if (_watch.CanRetry && GUILayout.Button("Retry viewer"))
+                {
+                    _watch.Retry();
+                    _state.ClearError();
+                    if (_status != null && _status.Ok)
+                        _state.Apply(_status.State, _status.Pid);
+                    if (TryArmPendingWatch(_selectedRun))
+                        EditorApplication.delayCall += AttemptWatch;
+                    _nextPoll = 0;
+                    _notice =
+                        "Viewer retry requested; the selected run and presentation model " +
+                        "will be validated again.";
+                }
             }
             foreach (string error in formState.Errors)
                 EditorGUILayout.HelpBox(error, MessageType.Error);
@@ -2419,6 +2460,25 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!string.IsNullOrWhiteSpace(_state.Error))
                 EditorGUILayout.HelpBox(_state.Error, MessageType.Error);
             EditorGUILayout.EndVertical();
+        }
+
+        void WatchSelectedRun()
+        {
+            if (string.IsNullOrWhiteSpace(_selectedRun) ||
+                EditorApplication.isPlayingOrWillChangePlaymode)
+                return;
+            _notice = string.Empty;
+            _state.ClearError();
+            if (_status != null && _status.Ok)
+                _state.Apply(_status.State, _status.Pid);
+            _watch.Begin(requested: true);
+            if (!TryArmPendingWatch(_selectedRun)) return;
+            _nextPoll = 0;
+            _notice =
+                "Viewer requested; validating the selected run's presentation model.";
+            // Entering Play Mode while an IMGUI layout is still open produces layout errors and can
+            // leave the ML Lab window in a broken draw state. Launch after this OnGUI event unwinds.
+            EditorApplication.delayCall += AttemptWatch;
         }
 
         void DrawStatus()
@@ -2583,7 +2643,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _state.MarkLaunched();
                 _selectedRun = targetRun;
                 SessionState.SetString(SelectedRunKey, _selectedRun);
+                _status = null;
+                _throughput = 0;
+                _lastMetricTime = string.Empty;
                 _watch.Begin(watch);
+                if (watch && TryArmPendingWatch(targetRun))
+                    EditorApplication.delayCall += AttemptWatch;
                 _nextPoll = 0;
                 RefreshKnownRuns();
                 _notice = watch
@@ -2648,8 +2713,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void Tick()
         {
-            if (string.IsNullOrWhiteSpace(_selectedRun) || EditorApplication.timeSinceStartup < _nextPoll) return;
+            if (EditorApplication.timeSinceStartup < _nextPoll) return;
             _nextPoll = EditorApplication.timeSinceStartup + PollIntervalSeconds;
+            if (!string.IsNullOrEmpty(_pendingWatchRunDirectory))
+                AttemptWatch();
+            if (string.IsNullOrWhiteSpace(_selectedRun)) return;
             if (_statusQuery != null && !_statusQuery.IsRunning) QueryStatus();
         }
 
@@ -2658,15 +2726,35 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!Directory.Exists(_selectedRun)) return;
             try
             {
+                string runDirectory = _selectedRun;
                 var info = MlCliProcess.BuildStartInfo(
-                    PythonExe, CliScript, MlCliProcess.BuildStatusArguments(_selectedRun), PythonDir);
+                    PythonExe, CliScript, MlCliProcess.BuildStatusArguments(runDirectory), PythonDir);
+                _statusQueryRunDirectory = runDirectory;
                 _statusQuery.Start(info);
             }
-            catch (Exception error) { _state.Fail(error.Message); }
+            catch (Exception error)
+            {
+                _statusQueryRunDirectory = string.Empty;
+                _state.Fail(error.Message);
+            }
         }
 
         void OnStatusReceived(MlRunStatus status)
         {
+            string queriedRunDirectory = _statusQueryRunDirectory;
+            _statusQueryRunDirectory = string.Empty;
+            bool queryMatchesSelection =
+                MlWatchPresentationTarget.SamePath(
+                    queriedRunDirectory, _selectedRun);
+            bool payloadMatchesSelection =
+                string.IsNullOrWhiteSpace(status?.RunDirectory) ||
+                MlWatchPresentationTarget.SamePath(
+                    status.RunDirectory, _selectedRun);
+            if (!queryMatchesSelection || !payloadMatchesSelection)
+            {
+                Repaint();
+                return;
+            }
             _status = status;
             if (!status.Ok)
             {
@@ -2681,12 +2769,32 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 MlWatchPresentationTarget.ResolveRevision(_selectedRun);
             if (_watch.TryQueue(presentationRevision))
             {
-                _pendingWatchRunDirectory = _selectedRun;
-                _watchRetryDeadline =
-                    EditorApplication.timeSinceStartup + WatchCeilingTimeoutSeconds;
+                SetPendingWatchTarget(_selectedRun);
                 AttemptWatch();
             }
+            else if (_watch.LaunchPending &&
+                     string.Equals(
+                         _pendingWatchRunDirectory,
+                         _selectedRun,
+                         StringComparison.Ordinal))
+                AttemptWatch();
             Repaint();
+        }
+
+        bool TryArmPendingWatch(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory) ||
+                !_watch.TryArm())
+                return false;
+            SetPendingWatchTarget(runDirectory);
+            return true;
+        }
+
+        void SetPendingWatchTarget(string runDirectory)
+        {
+            _pendingWatchRunDirectory = runDirectory;
+            _watchRetryDeadline =
+                EditorApplication.timeSinceStartup + WatchCeilingTimeoutSeconds;
         }
 
         // Retries the Start & Watch launch until a validated presentation target is ready, training is no
@@ -2698,24 +2806,44 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (this == null || string.IsNullOrEmpty(_pendingWatchRunDirectory)) return;
             string runDirectory = _pendingWatchRunDirectory;
             bool matchesSelection = string.Equals(runDirectory, _selectedRun, StringComparison.Ordinal);
-            bool checkpointReady = !string.IsNullOrWhiteSpace(
-                MlWatchPresentationTarget.ResolveRevision(runDirectory));
-            bool trainingAlive = MlTrainerLivenessPolicy.IsAlive(
-                ComputeTrainerLiveness(runDirectory, out _, out _));
+            string presentationRevision =
+                MlWatchPresentationTarget.ResolveRevision(runDirectory);
+            bool checkpointReady =
+                !string.IsNullOrWhiteSpace(presentationRevision);
+            bool reportedTerminal = _status != null && _status.Ok &&
+                (_status.State == MlRunState.Stopped ||
+                 _status.State == MlRunState.Completed ||
+                 _status.State == MlRunState.Failed);
+            bool trainingAlive = !reportedTerminal &&
+                MlTrainerLivenessPolicy.IsAlive(
+                    ComputeTrainerLiveness(runDirectory, out _, out _));
             bool ceilingPassed = EditorApplication.timeSinceStartup >= _watchRetryDeadline;
 
             switch (MlWatchStartPolicy.Decide(matchesSelection, checkpointReady, trainingAlive, ceilingPassed))
             {
                 case MlWatchStartDecision.Stale:
                     _pendingWatchRunDirectory = string.Empty;
+                    _watch.Begin(requested: false);
                     break;
 
                 case MlWatchStartDecision.WaitAndRetry:
-                    EditorApplication.delayCall += AttemptWatch;
+                    // Tick re-evaluates once per poll interval. Avoid a delayCall-per-editor-frame
+                    // busy loop while a slow first checkpoint is legitimately still being written.
                     break;
 
                 case MlWatchStartDecision.Watch:
+                    _watch.RecordPresentationAttempt(presentationRevision);
                     _pendingWatchRunDirectory = string.Empty;
+                    if (EditorApplication.isPlayingOrWillChangePlaymode)
+                    {
+                        _watch.Apply(
+                            MlViewerLaunchResult.Failed(
+                                "Viewer launch paused because Unity entered Play Mode. " +
+                                "Exit Play Mode and click Retry viewer."),
+                            _state);
+                        Repaint();
+                        break;
+                    }
                     MlViewerLaunchResult result = ReplayViewerMenu.WatchLiveRun(runDirectory);
                     _watch.Apply(result, _state);
                     if (result.Success)
@@ -2729,7 +2857,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         MlViewerLaunchResult.Failed(trainingAlive
                             ? "Start & Watch gave up: no validated presentation model appeared within " +
                               (WatchCeilingTimeoutSeconds / 60.0).ToString("0", CultureInfo.InvariantCulture) +
-                              " minute(s) of the first status."
+                              " minute(s) of the viewer request."
                             : "Start & Watch gave up: training ended before a validated presentation model appeared."),
                         _state);
                     Repaint();
