@@ -104,25 +104,45 @@ namespace HexWars.Presentation.EditorTools.MlLab
             IReadOnlyList<MlTrackerConfig> trackers)
         {
             var errors = new List<string>();
-            if (Environment == MlEnvironmentContract.TacticalV3)
-                errors.Add(
-                    "tactical-v3 uses offline imitation; load its structured-imitation run in Arena instead of Train.");
+            bool structuredContinuation =
+                Environment == MlEnvironmentContract.TacticalV3;
             if (string.IsNullOrWhiteSpace(RunName) || !SafeRunName.IsMatch(RunName))
                 errors.Add("Run name must use 1-64 letters, numbers, dots, underscores, or dashes.");
-            if (TotalTimesteps <= 0) errors.Add("Timesteps must be greater than zero.");
-            if (CheckpointInterval <= 0) errors.Add("Checkpoint interval must be greater than zero.");
-            if (Workers <= 0) errors.Add("Workers must be at least one.");
+            if (structuredContinuation && TotalTimesteps < 2)
+                errors.Add(
+                    "DAgger train label target must be at least two.");
+            else if (!structuredContinuation && TotalTimesteps <= 0)
+                errors.Add("Timesteps must be greater than zero.");
+            if (!structuredContinuation && CheckpointInterval <= 0)
+                errors.Add("Checkpoint interval must be greater than zero.");
+            if (!structuredContinuation && Workers <= 0)
+                errors.Add("Workers must be at least one.");
+            if (structuredContinuation && (Seed < 0 || Seed > 20000))
+                errors.Add(
+                    "Tactical-v3 seed must be from 0 through 20000.");
             if (string.IsNullOrWhiteSpace(Device)) errors.Add("Device is required.");
             if ((OpponentKind == MlOpponentKind.FixedRun || OpponentKind == MlOpponentKind.LiveRun) &&
                 string.IsNullOrWhiteSpace(OpponentPath))
                 errors.Add("Opponent path is required for a model or live run.");
-            if (!string.IsNullOrEmpty(ResumeSource) && string.IsNullOrWhiteSpace(ResumeSource))
+            if (structuredContinuation && string.IsNullOrWhiteSpace(ResumeSource))
+                errors.Add(
+                    "A source run is required to initialize a tactical-v3 continuation.");
+            if (!structuredContinuation &&
+                !string.IsNullOrEmpty(ResumeSource) &&
+                string.IsNullOrWhiteSpace(ResumeSource))
                 errors.Add("Resume source cannot be blank.");
             foreach (var tracker in
                      trackers ?? Array.Empty<MlTrackerConfig>())
+            {
                 if (tracker != null && string.Equals(tracker.Kind, "custom", StringComparison.OrdinalIgnoreCase) &&
                     string.IsNullOrWhiteSpace(tracker.Settings))
                     errors.Add("Custom tracker requires a module:function adapter.");
+                if (structuredContinuation && tracker != null &&
+                    !string.Equals(tracker.Kind, "local", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(tracker.Kind, "tensorboard", StringComparison.OrdinalIgnoreCase))
+                    errors.Add(
+                        "Tactical-v3 continuation currently supports local and TensorBoard trackers only.");
+            }
             return errors;
         }
 
@@ -143,7 +163,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (Environment == MlEnvironmentContract.TacticalV3)
                 throw new InvalidOperationException(
-                    "tactical-v3 uses offline imitation; load its structured-imitation run in Arena instead of Train.");
+                    "Use BuildStructuredTrainArguments for a tactical-v3 initialized continuation.");
 
             var args = new List<string>
             {
@@ -164,24 +184,39 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 args.Add("--scenario-file");
                 args.Add(QAlways(scenarioPath));
             }
-            var trackers = Trackers ?? new List<MlTrackerConfig>();
-            foreach (var tracker in trackers)
+            AppendTrackerArguments(args);
+            args.Add("--no-console-output");
+            args.Add("--json");
+            return string.Join(" ", args);
+        }
+
+        public string BuildStructuredTrainArguments()
+        {
+            if (Environment != MlEnvironmentContract.TacticalV3)
+                throw new InvalidOperationException(
+                    "Structured training is only available for tactical-v3.");
+            if (string.IsNullOrWhiteSpace(ResumeSource))
+                throw new InvalidOperationException(
+                    "A source run is required to initialize a tactical-v3 continuation.");
+            string scenarioPath = Path.Combine(
+                ResumeSource, "scenario.json");
+
+            var args = new List<string>
             {
-                if (tracker == null || string.IsNullOrWhiteSpace(tracker.Kind)) continue;
-                args.Add("--tracker");
-                args.Add(Q(tracker.ToCliValue()));
-            }
-            bool hasWandb = trackers.Exists(tracker => tracker != null &&
-                string.Equals(tracker.Kind, "wandb", StringComparison.OrdinalIgnoreCase));
-            if (hasWandb)
-            {
-                AddOption(args, "--wandb-project", WandbProject);
-                AddOption(args, "--wandb-entity", WandbEntity);
-                AddOption(args, "--wandb-mode", WandbMode);
-                AddOption(args, "--wandb-group", WandbGroup);
-                foreach (var tag in WandbTags ?? new List<string>()) AddOption(args, "--wandb-tag", tag);
-                if (WandbUploadArtifacts) args.Add("--wandb-upload-artifacts");
-            }
+                "train-structured",
+                "--run", Q(RunName),
+                "--source-run", Q(ResumeSource),
+                "--scenario-file", QAlways(scenarioPath),
+                "--opponent", Q(OpponentValue()),
+                "--train-labels", TotalTimesteps.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--validation-labels", StructuredValidationLabelTarget().ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--seed", Seed.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "--device", Q(Device),
+                "--learner-seat", SeatValue(LearnerSeat),
+            };
+            AppendTrackerArguments(args);
             args.Add("--no-console-output");
             args.Add("--json");
             return string.Join(" ", args);
@@ -240,6 +275,33 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (value == MlLearnerSeat.Seat0) return "0";
             if (value == MlLearnerSeat.Seat1) return "1";
             return "alternating";
+        }
+
+        long StructuredValidationLabelTarget()
+        {
+            decimal target = decimal.Ceiling(TotalTimesteps * 2m / 5m);
+            return Math.Max(2L, (long)target);
+        }
+
+        void AppendTrackerArguments(List<string> args)
+        {
+            var trackers = Trackers ?? new List<MlTrackerConfig>();
+            foreach (var tracker in trackers)
+            {
+                if (tracker == null || string.IsNullOrWhiteSpace(tracker.Kind)) continue;
+                args.Add("--tracker");
+                args.Add(Q(tracker.ToCliValue()));
+            }
+            bool hasWandb = trackers.Exists(tracker => tracker != null &&
+                string.Equals(tracker.Kind, "wandb", StringComparison.OrdinalIgnoreCase));
+            if (!hasWandb) return;
+            AddOption(args, "--wandb-project", WandbProject);
+            AddOption(args, "--wandb-entity", WandbEntity);
+            AddOption(args, "--wandb-mode", WandbMode);
+            AddOption(args, "--wandb-group", WandbGroup);
+            foreach (var tag in WandbTags ?? new List<string>())
+                AddOption(args, "--wandb-tag", tag);
+            if (WandbUploadArtifacts) args.Add("--wandb-upload-artifacts");
         }
 
         static string Q(string value) => MlCliProcess.QuoteArgument(value ?? string.Empty);

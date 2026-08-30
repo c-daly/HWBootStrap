@@ -164,7 +164,9 @@ def _canonical_json(value: object) -> bytes:
                        allow_nan=False) + "\n").encode("utf-8")
 
 
-def _identity_wire(identity: TacticalV3SemanticIdentity) -> dict[str, object]:
+def semantic_identity_wire(
+    identity: TacticalV3SemanticIdentity,
+) -> dict[str, object]:
     if type(identity) is not TacticalV3SemanticIdentity:
         raise TypeError("metadata.identity must be TacticalV3SemanticIdentity")
     return _wire_plain({field.name: getattr(identity, field.name) for field in fields(identity)})  # type: ignore[return-value]
@@ -349,7 +351,7 @@ def _metadata_wire(metadata: StructuredCheckpointMetadata) -> dict[str, object]:
     _float(metadata.best_validation_policy_nll, "metadata.best_validation_policy_nll")
     return {
         "format_version": _FORMAT_VERSION, "algorithm": "structured_imitation",
-        "identity": _identity_wire(metadata.identity),
+        "identity": semantic_identity_wire(metadata.identity),
         "model_config": _dataclass_wire(metadata.model_config),
         "objective_config": _dataclass_wire(metadata.objective_config),
         "trainer_config": _dataclass_wire(metadata.trainer_config),
@@ -1097,7 +1099,7 @@ def adopt_structured_run(
         _write_bytes(temporary / "scenario.json", scenario_published_bytes)
         _write_bytes(
             temporary / "policy-identity.json",
-            _canonical_json(_identity_wire(identity)),
+            _canonical_json(semantic_identity_wire(identity)),
         )
         _write_bytes(temporary / "corpus-manifest.json", _canonical_json(evidence))
         _write_bytes(temporary / "metrics.jsonl", metrics_bytes)
@@ -1158,7 +1160,7 @@ def publish_structured_run(
         Path(training_scenario_path), "training scenario"
     )
     identity = policy_identity
-    if identity != parse_spaces(_identity_wire(identity)):
+    if identity != parse_spaces(semantic_identity_wire(identity)):
         raise ValueError("policy identity cannot be canonicalized")
     if any((example.encoding_hash, example.capacity_hash) != (identity.encoding_hash, identity.capacity_hash)
            for example in corpus.train + corpus.validation):
@@ -1200,7 +1202,7 @@ def publish_structured_run(
         _write_bytes(temporary / "scenario.json", _canonical_json(scenario_value))
         _write_bytes(
             temporary / "policy-identity.json",
-            _canonical_json(_identity_wire(identity)),
+            _canonical_json(semantic_identity_wire(identity)),
         )
         _write_bytes(temporary / "corpus-manifest.json", corpus_manifest_bytes)
         metrics_bytes = _metrics_jsonl(result.history)

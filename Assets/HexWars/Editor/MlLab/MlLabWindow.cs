@@ -972,6 +972,32 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     ? config.Trackers
                     : trackerSelection.CreateTrackers();
             var errors = new List<string>(config.Validate(trackers));
+            if (MlTrainingFormPolicy.IsStructuredContinuation(
+                    config.Environment))
+            {
+                if (!string.IsNullOrWhiteSpace(config.ResumeSource))
+                {
+                    string scenarioPath = Path.Combine(
+                        config.ResumeSource, "scenario.json");
+                    try
+                    {
+                        MlTrainingScenarioPreflight preflight =
+                            MlTrainingScenarioPreflight.LoadSourceRun(
+                                config.ResumeSource);
+                        if (preflight.Environment !=
+                            MlEnvironmentContract.TacticalV3)
+                            errors.Add(
+                                scenarioPath +
+                                ": source scenario must use tactical-v3.");
+                    }
+                    catch (Exception error)
+                    {
+                        errors.Add(
+                            scenarioPath + ": " + error.Message);
+                    }
+                }
+                return new MlTrainingLaunchFormState(errors);
+            }
             if (resume)
             {
                 if (string.IsNullOrWhiteSpace(config.ResumeSource))
@@ -1009,6 +1035,65 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 }
             }
             return new MlTrainingLaunchFormState(errors);
+        }
+    }
+
+    public static class MlTrainingFormPolicy
+    {
+        const long DefaultSb3Timesteps = 300000;
+        const long DefaultStructuredTrainLabels = 7500;
+        const int DefaultSb3Seed = 1;
+        const int DefaultStructuredSeed = 227;
+
+        public static bool IsStructuredContinuation(
+            MlEnvironmentContract environment) =>
+            environment == MlEnvironmentContract.TacticalV3;
+
+        public static bool RequiresSourceRun(
+            MlEnvironmentContract environment, bool resume) =>
+            IsStructuredContinuation(environment) || resume;
+
+        public static bool ShowsSb3Fields(
+            MlEnvironmentContract environment) =>
+            !IsStructuredContinuation(environment);
+
+        public static bool ShowsOpponent(
+            MlEnvironmentContract environment, bool resume) =>
+            IsStructuredContinuation(environment) || !resume;
+
+        public static string PrimaryActionLabel(
+            MlEnvironmentContract environment, bool resume)
+        {
+            if (IsStructuredContinuation(environment))
+                return "Start continuation";
+            return resume ? "Resume" : "Start";
+        }
+
+        public static void ApplyEnvironmentDefaults(
+            MlLabConfig config, MlEnvironmentContract selected)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            bool enteringStructured =
+                !IsStructuredContinuation(config.Environment) &&
+                IsStructuredContinuation(selected);
+            bool leavingStructured =
+                IsStructuredContinuation(config.Environment) &&
+                !IsStructuredContinuation(selected);
+            if (enteringStructured)
+            {
+                if (config.TotalTimesteps == DefaultSb3Timesteps)
+                    config.TotalTimesteps = DefaultStructuredTrainLabels;
+                if (config.Seed == DefaultSb3Seed)
+                    config.Seed = DefaultStructuredSeed;
+            }
+            else if (leavingStructured)
+            {
+                if (config.TotalTimesteps == DefaultStructuredTrainLabels)
+                    config.TotalTimesteps = DefaultSb3Timesteps;
+                if (config.Seed == DefaultStructuredSeed)
+                    config.Seed = DefaultSb3Seed;
+            }
+            config.Environment = selected;
         }
     }
 
@@ -1163,6 +1248,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             MlEnvironmentContract.TacticalV1,
             MlEnvironmentContract.AdaptiveV1,
             MlEnvironmentContract.TacticalV2,
+            MlEnvironmentContract.TacticalV3,
         };
 
         public static IReadOnlyList<MlEnvironmentContract> TrainEnvironmentChoices =>
@@ -1609,8 +1695,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Training configuration", EditorStyles.boldLabel);
-            _resume = EditorGUILayout.ToggleLeft("Resume a metadata-backed run as a new run", _resume);
-            if (_resume)
+            DrawTrainingEnvironmentSelector();
+            bool structuredContinuation =
+                MlTrainingFormPolicy.IsStructuredContinuation(
+                    _config.Environment);
+            if (structuredContinuation)
+            {
+                EditorGUILayout.HelpBox(
+                    "Initialize a new tactical-v3 DAgger run from the selected " +
+                    "source run. This is a continuation, not an exact optimizer resume.",
+                    MessageType.Info);
+            }
+            else
+            {
+                _resume = EditorGUILayout.ToggleLeft(
+                    "Resume a metadata-backed run as a new run", _resume);
+            }
+            if (MlTrainingFormPolicy.RequiresSourceRun(
+                    _config.Environment, _resume))
             {
                 EditorGUILayout.BeginHorizontal();
                 _config.ResumeSource = EditorGUILayout.TextField("Source run", _config.ResumeSource);
@@ -1623,14 +1725,27 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 DrawScenarioEditor();
             }
             _config.RunName = EditorGUILayout.TextField("New run name", _config.RunName);
-            _config.Algorithm = (MlAlgorithm)EditorGUILayout.EnumPopup("SB3 algorithm", _config.Algorithm);
-            _config.TotalTimesteps = EditorGUILayout.LongField("Target timesteps", _config.TotalTimesteps);
+            if (MlTrainingFormPolicy.ShowsSb3Fields(_config.Environment))
+            {
+                _config.Algorithm = (MlAlgorithm)EditorGUILayout.EnumPopup(
+                    "SB3 algorithm", _config.Algorithm);
+                _config.TotalTimesteps = EditorGUILayout.LongField(
+                    "Target timesteps", _config.TotalTimesteps);
+                _config.CheckpointInterval = EditorGUILayout.IntField(
+                    "Checkpoint interval", _config.CheckpointInterval);
+                _config.Workers = EditorGUILayout.IntField(
+                    "Workers", _config.Workers);
+            }
+            else
+            {
+                _config.TotalTimesteps = EditorGUILayout.LongField(
+                    "DAgger train label target", _config.TotalTimesteps);
+            }
             _config.Seed = EditorGUILayout.IntField("Seed", _config.Seed);
-            _config.CheckpointInterval = EditorGUILayout.IntField("Checkpoint interval", _config.CheckpointInterval);
-            _config.Workers = EditorGUILayout.IntField("Workers", _config.Workers);
             _config.Device = EditorGUILayout.TextField("Device", _config.Device);
             _config.LearnerSeat = (MlLearnerSeat)EditorGUILayout.EnumPopup("Learner seat", _config.LearnerSeat);
-            if (!_resume)
+            if (MlTrainingFormPolicy.ShowsOpponent(
+                    _config.Environment, _resume))
             {
                 _config.OpponentKind = (MlOpponentKind)EditorGUILayout.EnumPopup("Opponent", _config.OpponentKind);
                 if (_config.OpponentKind == MlOpponentKind.FixedRun || _config.OpponentKind == MlOpponentKind.LiveRun)
@@ -1666,10 +1781,43 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.EndVertical();
         }
 
+        void DrawTrainingEnvironmentSelector()
+        {
+            int environmentIndex = Math.Max(
+                0, Array.IndexOf(
+                    TrainEnvironmentValues, _config.Environment));
+            int selectedIndex = EditorGUILayout.Popup(
+                "Environment", environmentIndex,
+                TrainEnvironmentValues.Select(
+                    MlEnvironmentContracts.CliValue).ToArray());
+            MlEnvironmentContract selected =
+                TrainEnvironmentValues[selectedIndex];
+            if (selected == _config.Environment) return;
+            if (selected == MlEnvironmentContract.TacticalV3)
+            {
+                MlTrainingFormPolicy.ApplyEnvironmentDefaults(
+                    _config, selected);
+                return;
+            }
+
+            try
+            {
+                if (_scenarioSession == null) LoadScenarioLibrary();
+                _scenarioSession.SelectEnvironment(selected);
+                MlTrainingFormPolicy.ApplyEnvironmentDefaults(
+                    _config, selected);
+            }
+            catch (Exception error)
+            {
+                _state.Fail(error.Message);
+            }
+        }
+
         void LoadScenarioLibrary()
         {
             _scenarioSession = MlTrainingScenarioSession.Load(TemplateLibraryPath);
-            if (_scenarioSession.CanLaunch)
+            if (_scenarioSession.CanLaunch &&
+                _config.Environment != MlEnvironmentContract.TacticalV3)
             {
                 _scenarioSession.SelectEnvironment(_config.Environment);
                 _config.Environment = _scenarioSession.Environment;
@@ -1684,25 +1832,6 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 EditorGUILayout.HelpBox(
                     _scenarioSession.LibraryError, MessageType.Error);
                 return;
-            }
-
-            int environmentIndex = Math.Max(0,
-                Array.IndexOf(TrainEnvironmentValues, _scenarioSession.Environment));
-            environmentIndex = EditorGUILayout.Popup(
-                "Environment", environmentIndex,
-                TrainEnvironmentValues.Select(MlEnvironmentContracts.CliValue).ToArray());
-            MlEnvironmentContract environment = TrainEnvironmentValues[environmentIndex];
-            if (environment != _scenarioSession.Environment)
-            {
-                try
-                {
-                    _scenarioSession.SelectEnvironment(environment);
-                    _config.Environment = environment;
-                }
-                catch (Exception error)
-                {
-                    _state.Fail(error.Message);
-                }
             }
 
             IReadOnlyList<MlTrainingScenario> templates =
@@ -1976,9 +2105,22 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 MlTrainingScenarioPreflight preflight =
                     MlTrainingScenarioPreflight.LoadSourceRun(
                         _config.ResumeSource);
+                bool structuredContinuation =
+                    MlTrainingFormPolicy.IsStructuredContinuation(
+                        _config.Environment);
+                if (structuredContinuation &&
+                    preflight.Environment !=
+                    MlEnvironmentContract.TacticalV3)
+                    throw new InvalidOperationException(
+                        "Source scenario must use tactical-v3.");
                 EditorGUILayout.HelpBox(
                     preflight.Describe(
-                        "source run", "source run"),
+                        structuredContinuation
+                            ? OpponentLabel(_config.OpponentKind)
+                            : "source run",
+                        structuredContinuation
+                            ? LearnerSeatLabel(_config.LearnerSeat)
+                            : "source run"),
                     MessageType.None);
                 if (preflight.LargeScenarioWarning)
                     EditorGUILayout.HelpBox(
@@ -2018,6 +2160,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void DrawControls()
         {
+            bool structuredContinuation =
+                MlTrainingFormPolicy.IsStructuredContinuation(
+                    _config.Environment);
             MlTrackerSelectionSnapshot trackerSelection =
                 CaptureTrackerSelection();
             MlTrainingLaunchFormState formState =
@@ -2029,19 +2174,33 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Controls", EditorStyles.boldLabel);
             EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Doctor")) RunDoctor();
+            using (new EditorGUI.DisabledScope(structuredContinuation))
+                if (GUILayout.Button("Doctor")) RunDoctor();
             using (new EditorGUI.DisabledScope(!formState.CanLaunch))
             {
-                if (GUILayout.Button(_resume ? "Resume" : "Start"))
+                if (GUILayout.Button(
+                        MlTrainingFormPolicy.PrimaryActionLabel(
+                            _config.Environment, _resume)))
                     StartTraining(false);
-                if (GUILayout.Button("Start & Watch")) StartTraining(true);
+                if (!structuredContinuation &&
+                    GUILayout.Button("Start & Watch"))
+                    StartTraining(true);
             }
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.BeginHorizontal();
             using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_selectedRun)))
             {
-                if (GUILayout.Button("Stop after checkpoint")) RequestStop(false);
-                if (GUILayout.Button("Stop now")) RequestStop(true);
+                if (structuredContinuation)
+                {
+                    if (GUILayout.Button("Stop at safe boundary"))
+                        RequestStop(true);
+                }
+                else
+                {
+                    if (GUILayout.Button("Stop after checkpoint"))
+                        RequestStop(false);
+                    if (GUILayout.Button("Stop now")) RequestStop(true);
+                }
                 if (GUILayout.Button("Open run folder")) EditorUtility.RevealInFinder(_selectedRun);
             }
             EditorGUILayout.EndHorizontal();
@@ -2164,6 +2323,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             _notice = string.Empty;
             _state.BeginValidation();
+            bool structuredContinuation =
+                MlTrainingFormPolicy.IsStructuredContinuation(
+                    _config.Environment);
             MlTrackerSelectionSnapshot trackerSelection =
                 CaptureTrackerSelection();
             var errors = new List<string>(
@@ -2172,7 +2334,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     _scenarioSession,
                     _resume,
                     trackerSelection).Errors);
-            if (!_resume && _scenarioSession?.WorkingCopy != null)
+            if (!structuredContinuation && !_resume &&
+                _scenarioSession?.WorkingCopy != null)
                 _config.Environment =
                     _scenarioSession.WorkingCopy.Environment;
             if (!File.Exists(PythonExe)) errors.Add("Python environment was not found: " + PythonExe);
@@ -2188,15 +2351,22 @@ namespace HexWars.Presentation.EditorTools.MlLab
             SyncTrackers(trackerSelection);
 
             string args;
+            string scenarioPath = structuredContinuation
+                ? Path.Combine(_config.ResumeSource, "scenario.json")
+                : SessionScenarioPath;
             try
             {
-                if (_resume)
+                if (structuredContinuation)
+                {
+                    args = _config.BuildStructuredTrainArguments();
+                }
+                else if (_resume)
                 {
                     args = _config.BuildResumeArguments();
                 }
                 else
                 {
-                    string scenarioPath =
+                    scenarioPath =
                         MlTrainingScenarioStore.WriteSessionScenario(
                             ProjectRoot, _scenarioSession.WorkingCopy);
                     args = _config.BuildTrainArguments(scenarioPath);
@@ -2204,7 +2374,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             catch (Exception error)
             {
-                _state.Fail(SessionScenarioPath + ": " + error.Message);
+                _state.Fail(scenarioPath + ": " + error.Message);
                 return;
             }
             args += " --runs-root " + MlCliProcess.QuoteArgument(RunsRoot) +

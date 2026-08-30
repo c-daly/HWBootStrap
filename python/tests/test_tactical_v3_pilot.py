@@ -810,6 +810,32 @@ def test_dagger_collection_and_evidence_use_selected_2048_oracle(
     assert manifest["teacher"]["expansion_budget"] == 2048
 
 
+def test_dagger_collection_uses_selected_greedy_opponent() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _DaggerClient(seat=1)
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 34_540_000, 1, 1,
+    )
+
+    episode = module.collect_dagger_game(
+        client, loaded, item, opponent="greedy",
+    )
+
+    assert client.events[0] == (
+        "reset", (34_540_000, "greedy", "external", 1, "standard-3v3", 1),
+    )
+    assert episode.summary.schedule == item
+
+
 def test_first_dagger_iteration_is_reciprocal_and_only_augments_training() -> None:
     import ml_lab.tactical_v3_pilot as module
 
@@ -1353,6 +1379,60 @@ def test_policy_target_metrics_honors_training_deadline_before_a_batch() -> None
             collection.train,
             deadline_monotonic=0.0,
         )
+
+
+def test_pilot_training_honors_cooperative_stop_without_tensorboard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_training import StepMetrics
+
+    collection = _canonical_collection()
+    stopped = {"value": False}
+    metrics = MappingProxyType({
+        "total": 1.0,
+        "policy": 1.0,
+        "outcome": 0.0,
+        "horizon": 0.0,
+        "remaining_turns": 0.0,
+    })
+
+    def fake_policy_metrics(model, examples, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback is not None:
+            callback(len(examples), len(examples))
+        return module.PolicyTargetMetrics(1.0, 0.5, len(examples), len(examples))
+
+    def fake_train(*args, step_callback, **kwargs):
+        stopped["value"] = True
+        step_callback(StepMetrics("train", 0, 0, 1, 1, metrics))
+        raise AssertionError("cooperative stop did not interrupt training")
+
+    monkeypatch.setattr(module, "_policy_target_metrics", fake_policy_metrics)
+    monkeypatch.setattr(module, "train_offline", fake_train)
+    output = tmp_path / "training"
+    output.mkdir()
+
+    with pytest.raises(
+        module.PilotTrainingStopRequested,
+        match="training stop requested",
+    ):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            tensorboard_enabled=False,
+            stop_requested=lambda: stopped["value"],
+        )
+
+    assert not (output / "tensorboard").exists()
+    assert not (output / "checkpoints").exists()
+    assert (output / "steps.jsonl").is_file()
 
 
 class _EvaluationClient:

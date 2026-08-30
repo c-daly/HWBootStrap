@@ -381,6 +381,10 @@ class PilotTrainingArtifacts:
     duration_seconds: float
 
 
+class PilotTrainingStopRequested(RuntimeError):
+    """A cooperative ML Lab stop observed at a safe training boundary."""
+
+
 @dataclass(frozen=True, slots=True)
 class PilotEvaluationGame:
     controller: Literal["model", "random"]
@@ -693,12 +697,22 @@ def _validate_identity(identity: object) -> TacticalV3SemanticIdentity:
 def _validate_view(view: TacticalV3View, item: PilotScheduleItem,
                    identity: TacticalV3SemanticIdentity, current_identity: object,
                    seen: set[int]) -> None:
+    _validate_duel_view_common(view, item, identity, current_identity, seen)
+    if view.seat != item.learner_seat:
+        raise ValueError("pilot view learner seat does not match schedule")
+
+
+def _validate_duel_view_common(
+    view: TacticalV3View,
+    item: PilotScheduleItem,
+    identity: TacticalV3SemanticIdentity,
+    current_identity: object,
+    seen: set[int],
+) -> None:
     if current_identity != identity:
         raise ValueError("pilot semantic identity drifted during collection")
     if view.start_profile != item.profile_id:
         raise ValueError("pilot view profile does not match schedule")
-    if view.seat != item.learner_seat:
-        raise ValueError("pilot view learner seat does not match schedule")
     if view.reference_seat != item.reference_seat:
         raise ValueError("pilot view reference seat does not match schedule")
     if view.terminated or view.truncated:
@@ -834,6 +848,7 @@ def collect_dagger_game(
     item: PilotScheduleItem,
     *,
     oracle_expansion_budget: Literal[512, 2048] = 512,
+    opponent: object = "random",
 ) -> PilotDaggerEpisode:
     if type(item) is not PilotScheduleItem:
         raise TypeError("item must be PilotScheduleItem")
@@ -854,7 +869,26 @@ def collect_dagger_game(
         or not math.isfinite(loaded.metadata.best_validation_policy_nll)
     ):
         raise ValueError("DAgger actor provenance is invalid")
-    p0, p1 = ("external", "random") if item.learner_seat == 0 else ("random", "external")
+    from .tactical_v3_controller import StructuredController, select_candidate
+
+    scripted_opponent = opponent if type(opponent) is str else None
+    structured_opponent = opponent if type(opponent) is StructuredController else None
+    if scripted_opponent not in {None, "random", "greedy"} or (
+        scripted_opponent is None and structured_opponent is None
+    ):
+        raise ValueError(
+            "DAgger opponent must be random, greedy, or a structured controller"
+        )
+    if structured_opponent is not None and structured_opponent.identity != identity:
+        raise ValueError("DAgger opponent identity does not match GymServer identity")
+    if structured_opponent is None:
+        p0, p1 = (
+            ("external", scripted_opponent)
+            if item.learner_seat == 0
+            else (scripted_opponent, "external")
+        )
+    else:
+        p0, p1 = "external", "external"
     view = client.duel_reset(
         item.episode_seed, p0, p1, item.learner_seat,
         item.profile_id, item.reference_seat,
@@ -867,9 +901,23 @@ def collect_dagger_game(
     seen: set[int] = set()
     learner_decision_index = 0
     while not view.terminated and not view.truncated:
-        _validate_view(view, item, identity, client.identity, seen)
+        if structured_opponent is None:
+            _validate_view(view, item, identity, client.identity, seen)
+        else:
+            _validate_duel_view_common(
+                view, item, identity, client.identity, seen,
+            )
         decision = view.decision
         seen.add(decision.decision_id)
+        if view.seat != item.learner_seat:
+            if structured_opponent is None:
+                raise ValueError("scripted opponent exposed an external decision")
+            opponent_selection = select_candidate(structured_opponent, view)
+            view = client.duel_step(CandidateSelection(
+                opponent_selection.decision_id,
+                opponent_selection.candidate_id,
+            ))
+            continue
         batch = collate_decisions(
             (decision,),
             loaded.model.config.horizon_turns,
@@ -2225,18 +2273,58 @@ def _history_bytes(history: tuple[EpochMetrics, ...]) -> bytes:
     return b"".join(rows)
 
 
+class _NullSummaryWriter:
+    def add_scalar(self, *args, **kwargs) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 class _PilotTelemetry:
-    def __init__(self, output: Path, max_epochs: int, started: float) -> None:
+    def __init__(
+        self,
+        output: Path,
+        max_epochs: int,
+        started: float,
+        *,
+        tensorboard_dir: Path | None = None,
+        log_path: Path | None = None,
+        tensorboard_enabled: bool = True,
+    ) -> None:
         self.output = output
         self.max_epochs = max_epochs
         self.started = started
         self._handle = (output / "telemetry.jsonl").open("xb")
         self._step_handle = (output / "steps.jsonl").open("xb")
+        self._log_handle = (
+            None
+            if log_path is None
+            else Path(log_path).open("a", encoding="utf-8", buffering=1)
+        )
         self._steps_since_sync = 0
-        self._writer = SummaryWriter(log_dir=str(output / "tensorboard"), flush_secs=1)
+        self._writer = (
+            SummaryWriter(
+                log_dir=str(
+                    output / "tensorboard"
+                    if tensorboard_dir is None else tensorboard_dir
+                ),
+                flush_secs=1,
+            )
+            if tensorboard_enabled
+            else _NullSummaryWriter()
+        )
         self._writer.add_scalar("progress/started", 1.0, 0)
         self._writer.flush()
-        print("pilot telemetry phase=initial_metrics", flush=True)
+        self._emit("pilot telemetry phase=initial_metrics")
+
+    def _emit(self, message: str) -> None:
+        print(message, flush=True)
+        if self._log_handle is not None:
+            self._log_handle.write(message + "\n")
 
     def baseline(
         self,
@@ -2254,20 +2342,18 @@ class _PilotTelemetry:
             "baseline/validation_policy_accuracy", validation.policy_accuracy, 0,
         )
         self._writer.flush()
-        print(
+        self._emit(
             "pilot telemetry baseline "
             f"train_policy_nll={train.policy_nll:.6f} "
-            f"validation_policy_nll={validation.policy_nll:.6f}",
-            flush=True,
+            f"validation_policy_nll={validation.policy_nll:.6f}"
         )
 
     def progress(self, phase: str, completed: int, total: int) -> None:
         self._writer.add_scalar(f"progress/{phase}_examples", completed, completed)
         self._writer.flush()
         if completed == total or completed % 320 == 0:
-            print(
-                f"pilot telemetry phase={phase} examples={completed}/{total}",
-                flush=True,
+            self._emit(
+                f"pilot telemetry phase={phase} examples={completed}/{total}"
             )
 
     def epoch(self, metric: EpochMetrics) -> None:
@@ -2285,14 +2371,13 @@ class _PilotTelemetry:
         )
         self._writer.add_scalar("epoch/improved", float(metric.improved), step)
         self._writer.flush()
-        print(
+        self._emit(
             "pilot telemetry "
             f"epoch={step}/{self.max_epochs} "
             f"elapsed_seconds={time.monotonic() - self.started:.1f} "
             f"train_policy_nll={metric.train['policy']:.6f} "
             f"validation_policy_nll={metric.validation_policy_nll:.6f} "
-            f"improved={str(metric.improved).lower()}",
-            flush=True,
+            f"improved={str(metric.improved).lower()}"
         )
 
     def step(self, metric: StepMetrics) -> None:
@@ -2317,14 +2402,13 @@ class _PilotTelemetry:
         if metric.global_step == 1 or metric.global_step % 5 == 0:
             self._writer.flush()
         if metric.global_step == 1 or metric.global_step % 10 == 0:
-            print(
+            self._emit(
                 "pilot telemetry "
                 f"phase={metric.phase} "
                 f"epoch={metric.epoch + 1}/{self.max_epochs} "
                 f"batch={metric.batch_index + 1} "
                 f"step={metric.global_step} "
-                f"policy_nll={metric.metrics['policy']:.6f}",
-                flush=True,
+                f"policy_nll={metric.metrics['policy']:.6f}"
             )
 
     def close(self) -> None:
@@ -2334,6 +2418,8 @@ class _PilotTelemetry:
         self._handle.close()
         self._writer.flush()
         self._writer.close()
+        if self._log_handle is not None:
+            self._log_handle.close()
 
     def __enter__(self):
         return self
@@ -2357,6 +2443,10 @@ def _train_pilot_dataset(
     batch_provider: StructuredDaggerMixtureSampler | None = None,
     micro_batch_size: int | None = None,
     training_deadline_seconds: int = _TRAINING_DEADLINE_SECONDS,
+    tensorboard_dir: Path | None = None,
+    log_path: Path | None = None,
+    tensorboard_enabled: bool = True,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     identity = _validate_identity(identity)
@@ -2364,10 +2454,14 @@ def _train_pilot_dataset(
         raise ValueError("pilot training partitions must be nonempty tuples")
     if re.fullmatch(r"[0-9a-f]{64}", corpus_sha256) is None:
         raise ValueError("pilot training corpus hash must be lowercase SHA-256")
-    if type(seed) is not int or seed != 227:
-        raise ValueError("pilot training seed must be exactly 227")
+    if type(seed) is not int or not 0 <= seed < 2**31:
+        raise ValueError("pilot training seed must be a nonnegative int32")
     if type(training_deadline_seconds) is not int or training_deadline_seconds < 1:
         raise ValueError("pilot training deadline must be a positive built-in int")
+    if stop_requested is not None and not callable(stop_requested):
+        raise TypeError("pilot stop_requested must be callable or None")
+    if type(tensorboard_enabled) is not bool:
+        raise TypeError("pilot tensorboard_enabled must be bool")
     output = Path(output)
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("pilot training artifacts output must be a plain directory")
@@ -2397,7 +2491,34 @@ def _train_pilot_dataset(
         }
     deadline = started + training_deadline_seconds
     metric_device = torch.device(trainer_config.device)
-    with _PilotTelemetry(output, trainer_config.max_epochs, started) as telemetry:
+
+    def check_stop() -> None:
+        if stop_requested is not None and stop_requested():
+            raise PilotTrainingStopRequested(
+                "tactical-v3 training stop requested"
+            )
+
+    with _PilotTelemetry(
+        output,
+        trainer_config.max_epochs,
+        started,
+        tensorboard_dir=tensorboard_dir,
+        log_path=log_path,
+        tensorboard_enabled=tensorboard_enabled,
+    ) as telemetry:
+        def progress(phase: str, completed: int, total: int) -> None:
+            telemetry.progress(phase, completed, total)
+            check_stop()
+
+        def epoch(metric: EpochMetrics) -> None:
+            telemetry.epoch(metric)
+            check_stop()
+
+        def step(metric: StepMetrics) -> None:
+            telemetry.step(metric)
+            check_stop()
+
+        check_stop()
         if initial_state is None:
             with torch.random.fork_rng(devices=[]):
                 torch.manual_seed(seed % (2**63 - 1))
@@ -2410,7 +2531,7 @@ def _train_pilot_dataset(
             initial_model,
             train,
             deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: telemetry.progress(
+            progress_callback=lambda completed, total: progress(
                 "initial_train", completed, total,
             ),
         )
@@ -2418,7 +2539,7 @@ def _train_pilot_dataset(
             initial_model,
             validation,
             deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: telemetry.progress(
+            progress_callback=lambda completed, total: progress(
                 "initial_validation", completed, total,
             ),
         )
@@ -2426,8 +2547,8 @@ def _train_pilot_dataset(
         del initial_model
 
         training_arguments: dict[str, object] = {
-            "epoch_callback": telemetry.epoch,
-            "step_callback": telemetry.step,
+            "epoch_callback": epoch,
+            "step_callback": step,
             "deadline_monotonic": deadline,
             "initial_state_dict": initial_state,
             "training_batch_provider": (
@@ -2445,6 +2566,7 @@ def _train_pilot_dataset(
             trainer_config,
             **training_arguments,
         )
+        check_stop()
     elapsed = time.monotonic() - started
     if elapsed > training_deadline_seconds:
         raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
@@ -2488,15 +2610,18 @@ def _train_pilot_dataset(
     )
     loaded.model.to(metric_device)
     try:
+        check_stop()
         restored_train = _policy_target_metrics(
             loaded.model,
             train,
             deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: check_stop(),
         )
         restored_validation = _policy_target_metrics(
             loaded.model,
             validation,
             deadline_monotonic=deadline,
+            progress_callback=lambda completed, total: check_stop(),
         )
     finally:
         loaded.model.cpu()

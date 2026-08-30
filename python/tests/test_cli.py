@@ -709,6 +709,68 @@ def test_train_serializes_wandb_and_custom_tracker_configuration_without_secrets
     assert "api_key" not in json.dumps(received[0].trackers).lower()
 
 
+def test_structured_train_forwards_exact_source_scenario_opponent_and_tensorboard(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-policy"
+    source.mkdir()
+    scenario = source / "scenario.json"
+    scenario.write_text("{}\n", encoding="utf-8")
+    received = []
+
+    def structured_runner(config, *, runs_root: Path, server_cmd: list[str]) -> Path:
+        received.append((config, server_cmd))
+        run_dir = runs_root / config.run_name
+        run_dir.mkdir(exist_ok=True)
+        atomic_write_json(run_dir / "run.json", {
+            "schema_version": 1,
+            "state": "completed",
+            "config": {
+                "run_name": config.run_name,
+                "total_timesteps": config.train_label_target,
+                "learner_seat": config.learner_seat,
+            },
+        })
+        return run_dir
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "train-structured",
+            "--run", "latest-vs-greedy",
+            "--source-run", str(source),
+            "--scenario-file", str(scenario),
+            "--opponent", "greedy",
+            "--train-labels", "7500",
+            "--validation-labels", "3000",
+            "--seed", "227",
+            "--device", "cuda:0",
+            "--learner-seat", "alternating",
+            "--tracker", "local",
+            "--tracker", "tensorboard",
+            "--runs-root", str(tmp_path / "runs"),
+            "--server", "fake-server.dll",
+            "--json",
+        ],
+        structured_runner=structured_runner,
+        stdout=output,
+    )
+
+    assert exit_code == 0
+    _assert_envelope(json.loads(output.getvalue()), "train-structured")
+    config, command = received[0]
+    assert config.source_run == source
+    assert config.scenario_file == scenario
+    assert config.opponent == "greedy"
+    assert config.train_label_target == 7500
+    assert config.validation_label_target == 3000
+    assert config.device == "cuda:0"
+    assert config.trackers == ({"kind": "local"}, {"kind": "tensorboard"})
+    assert command == [
+        "dotnet", "fake-server.dll", "--scenario-file", str(scenario),
+    ]
+
+
 def test_resume_builds_a_new_run_from_authoritative_source_metadata(
     tmp_path: Path, contract: EnvironmentContract
 ) -> None:

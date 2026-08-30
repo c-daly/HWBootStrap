@@ -26,8 +26,6 @@ from .scenarios import (
     resolve_scenario,
 )
 from .training import run_training
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SERVER = PROJECT_ROOT / "engine" / "HexWars.GymServer" / "bin" / "Release" / "net8.0" / "HexWars.GymServer.dll"
 DEFAULT_RUNS_ROOT = PROJECT_ROOT / "python" / "runs"
@@ -124,6 +122,36 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_arguments(train)
     _add_no_console_output_argument(train)
     _add_json_argument(train)
+
+    structured = subcommands.add_parser(
+        "train-structured",
+        help="start a weight-initialized tactical-v3 DAgger continuation",
+    )
+    structured.add_argument("--run", required=True)
+    structured.add_argument("--source-run", type=Path, required=True)
+    structured.add_argument("--scenario-file", type=Path, required=True)
+    structured.add_argument("--opponent", default="greedy")
+    structured.add_argument("--train-labels", type=int, required=True)
+    structured.add_argument("--validation-labels", type=int, required=True)
+    structured.add_argument("--seed", type=int, default=227)
+    structured.add_argument("--device", default="auto")
+    structured.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    structured.add_argument(
+        "--tracker",
+        action="append",
+        help="local, tensorboard, wandb, or custom=module:function",
+    )
+    structured.add_argument("--wandb-project")
+    structured.add_argument("--wandb-entity")
+    structured.add_argument("--wandb-mode")
+    structured.add_argument("--wandb-group")
+    structured.add_argument("--wandb-tag", action="append", default=[])
+    structured.add_argument("--wandb-upload-artifacts", action="store_true")
+    _add_runtime_arguments(structured)
+    _add_no_console_output_argument(structured)
+    _add_json_argument(structured)
 
     resume = subcommands.add_parser(
         "resume", help="continue a metadata-backed run as a new run"
@@ -504,7 +532,7 @@ def _emit_human(stdout: TextIO, command: str, result: dict[str, Any]) -> None:
             marker = "ok" if check.get("ok") else "unavailable"
             print(f"  {check.get('name')}: {marker} ({check.get('detail', '')})", file=stdout)
         return
-    if command in {"train", "resume", "status"}:
+    if command in {"train", "train-structured", "resume", "status"}:
         run = result.get("run")
         if run is None:
             print(f"run completed: {result['run_dir']}", file=stdout)
@@ -554,6 +582,7 @@ def _dispatch(
     *,
     runner: Callable[..., Path],
     sleeper: Callable[[float], None],
+    structured_runner: Callable[..., Path] | None = None,
     status_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if args.command == "doctor":
@@ -577,6 +606,31 @@ def _dispatch(
                 config,
                 scenario=scenario,
                 **runner_options,
+            )
+        )
+    if args.command == "train-structured":
+        from .tactical_v3_continuation import (
+            StructuredContinuationConfig,
+            run_structured_continuation,
+        )
+
+        config = StructuredContinuationConfig(
+            run_name=args.run,
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            train_label_target=args.train_labels,
+            validation_label_target=args.validation_labels,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            trackers=tuple(_tracker_configs(args)),
+        )
+        return _run_result(
+            (structured_runner or run_structured_continuation)(
+                config,
+                runs_root=Path(args.runs_root),
+                server_cmd=["dotnet", args.server, "--scenario-file", str(args.scenario_file)],
             )
         )
     if args.command == "resume":
@@ -690,6 +744,7 @@ def main(
     argv: list[str] | None = None,
     *,
     runner: Callable[..., Path] = run_training,
+    structured_runner: Callable[..., Path] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     stdout: TextIO | None = None,
 ) -> int:
@@ -699,7 +754,7 @@ def main(
     no_console_output = getattr(args, "no_console_output", False)
     with ExitStack() as console_stack:
         stderr_log: TextIO | None = None
-        if args.command in {"train", "resume"}:
+        if args.command in {"train", "train-structured", "resume"}:
             stderr_log = console_stack.enter_context(
                 _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
             )
@@ -714,6 +769,7 @@ def main(
                 args,
                 runner=runner,
                 sleeper=sleeper,
+                structured_runner=structured_runner,
                 status_update=(
                     (lambda update: _emit_human(output, "status", update))
                     if human_follow

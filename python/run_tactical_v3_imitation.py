@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Sequence
 
 from ml_lab.tactical_v3_checkpoint import (
@@ -13,6 +14,11 @@ from ml_lab.tactical_v3_client import TacticalV3GymClient
 from ml_lab.tactical_v3_corpus import create_tiny_corpus, load_corpus
 from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
 from ml_lab.tactical_v3_objectives import ObjectiveConfig
+from ml_lab.tactical_v3_pilot import (
+    run_pilot,
+    run_pilot_diagnostics,
+    run_pilot_retry,
+)
 from ml_lab.tactical_v3_schema import parse_spaces
 from ml_lab.tactical_v3_training import TrainerConfig, train_offline
 from pathlib import Path
@@ -67,6 +73,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     train.add_argument("--device", required=True, type=str)
     validate = subcommands.add_parser("validate-run")
     validate.add_argument("--run-dir", required=True, type=Path)
+    pilot = subcommands.add_parser("pilot")
+    pilot.add_argument("--server-dll", required=True, type=Path)
+    pilot.add_argument("--scenario", required=True, type=Path)
+    pilot.add_argument("--output", required=True, type=Path)
+    pilot.add_argument("--seed", required=True, type=int)
+    pilot.add_argument("--device", required=True, type=str)
+    retry = subcommands.add_parser("pilot-retry")
+    retry.add_argument("--server-dll", required=True, type=Path)
+    retry.add_argument("--scenario", required=True, type=Path)
+    retry.add_argument("--output", required=True, type=Path)
+    retry.add_argument("--seed", required=True, type=int)
+    retry.add_argument("--device", required=True, type=str)
+    retry.add_argument("--attempt", type=int, default=1)
+    diagnose = subcommands.add_parser("pilot-diagnose")
+    diagnose.add_argument("--server-dll", required=True, type=Path)
+    diagnose.add_argument("--scenario", required=True, type=Path)
+    diagnose.add_argument("--output", required=True, type=Path)
+    diagnose.add_argument("--attempt", required=True, type=int)
+    diagnose.add_argument("--device", required=True, type=str)
     adopt = subcommands.add_parser(
         "adopt-run",
         help="Publish an observed custom DAgger artifact as an unsealed ML Lab run.",
@@ -80,7 +105,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"--expected-{source_name}-sha256",
             required=True,
         )
-    args = parser.parse_args(argv)
+    effective_argv = tuple(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(effective_argv)
     if args.command == "build-tiny-corpus":
         create_tiny_corpus(args.output, ["dotnet", str(args.server_dll), "--scenario-file", str(args.scenario)])
         return 0
@@ -109,6 +135,69 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "validate-run":
         validate_structured_run(args.run_dir)
+        return 0
+    if args.command == "pilot":
+        if not args.server_dll.is_file():
+            raise ValueError(f"pilot server DLL does not exist: {args.server_dll}")
+        if not args.scenario.is_file():
+            raise ValueError(f"pilot scenario does not exist: {args.scenario}")
+        if args.output.exists() or args.output.is_symlink():
+            raise FileExistsError(f"pilot output already exists: {args.output}")
+        if args.seed != 227:
+            raise ValueError("pilot seed must be exactly 227")
+        run_pilot(
+            ("dotnet", str(args.server_dll), "--scenario-file", str(args.scenario)),
+            args.output,
+            args.seed,
+            args.device,
+            (sys.executable, str(Path(__file__).resolve()), *effective_argv),
+        )
+        return 0
+    if args.command == "pilot-retry":
+        if not args.server_dll.is_file():
+            raise ValueError(f"pilot server DLL does not exist: {args.server_dll}")
+        if not args.scenario.is_file():
+            raise ValueError(f"pilot scenario does not exist: {args.scenario}")
+        if not args.output.is_dir() or not (args.output / "collection.json").is_file():
+            raise ValueError("pilot retry requires an existing collection output")
+        if type(args.attempt) is not int or args.attempt < 1:
+            raise ValueError("pilot retry attempt must be a positive integer")
+        if (args.output / f"retry-{args.attempt}").exists():
+            raise FileExistsError(f"pilot retry-{args.attempt} artifacts already exist")
+        if args.seed != 227:
+            raise ValueError("pilot retry seed must be exactly 227")
+        run_pilot_retry(
+            ("dotnet", str(args.server_dll), "--scenario-file", str(args.scenario)),
+            args.output,
+            args.seed,
+            args.device,
+            (sys.executable, str(Path(__file__).resolve()), *effective_argv),
+            attempt_number=args.attempt,
+        )
+        return 0
+    if args.command == "pilot-diagnose":
+        if not args.server_dll.is_file():
+            raise ValueError(
+                f"pilot diagnostic server DLL does not exist: {args.server_dll}"
+            )
+        if not args.scenario.is_file():
+            raise ValueError(
+                f"pilot diagnostic scenario does not exist: {args.scenario}"
+            )
+        checkpoint = args.output / f"retry-{args.attempt}" / "checkpoints" / "best.pt"
+        if not args.output.is_dir() or not (args.output / "collection.json").is_file():
+            raise ValueError("pilot diagnostic requires an existing collection output")
+        if type(args.attempt) is not int or args.attempt < 1:
+            raise ValueError("pilot diagnostic attempt must be a positive integer")
+        if not checkpoint.is_file():
+            raise ValueError("pilot diagnostic requires an existing best checkpoint")
+        run_pilot_diagnostics(
+            ("dotnet", str(args.server_dll), "--scenario-file", str(args.scenario)),
+            args.output,
+            args.attempt,
+            args.device,
+            (sys.executable, str(Path(__file__).resolve()), *effective_argv),
+        )
         return 0
     if args.command == "adopt-run":
         source = args.source_artifact

@@ -592,14 +592,184 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void TrainEnvironmentChoices_ExcludeOfflineTacticalV3()
+        public void TrainEnvironmentChoices_IncludeSourceInitializedTacticalV3()
         {
             Assert.That(MlLabWindow.TrainEnvironmentChoices,
-                Has.None.EqualTo(MlEnvironmentContract.TacticalV3));
+                Has.Some.EqualTo(MlEnvironmentContract.TacticalV3));
             Assert.That(MlLabWindow.TrainEnvironmentChoices,
                 Is.EqualTo(new[] { MlEnvironmentContract.TacticalV1,
                     MlEnvironmentContract.AdaptiveV1,
-                    MlEnvironmentContract.TacticalV2 }));
+                    MlEnvironmentContract.TacticalV2,
+                    MlEnvironmentContract.TacticalV3 }));
+        }
+
+        [Test]
+        public void TacticalV3Continuation_UsesExactSourceScenarioWithoutTemplateSession()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-v3-training-source-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(run);
+                File.Copy(Path.Combine("python", "config",
+                    "annihilation-structured-imitation-v1.json"),
+                    Path.Combine(run, "scenario.json"));
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.ResumeSource = run;
+                config.TotalTimesteps = 10;
+                config.CheckpointInterval = 0;
+                config.Workers = 0;
+                config.OpponentKind = MlOpponentKind.Random;
+
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, scenarioSession: null, resume: false);
+                MlTrainingScenarioPreflight preflight =
+                    MlTrainingScenarioPreflight.LoadSourceRun(run);
+
+                Assert.That(state.CanLaunch, Is.True);
+                Assert.That(state.Errors, Is.Empty);
+                Assert.That(preflight.Environment,
+                    Is.EqualTo(MlEnvironmentContract.TacticalV3));
+                Assert.That(preflight.TemplateId,
+                    Is.EqualTo("annihilation-structured-imitation-v1"));
+                Assert.That(preflight.TemplateId,
+                    Is.Not.EqualTo("tactical-v3-standard"));
+            }
+            finally
+            {
+                if (Directory.Exists(run)) Directory.Delete(run, true);
+            }
+        }
+
+        [Test]
+        public void TacticalV3Continuation_RejectsMissingSourceScenario()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-v3-missing-source-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(run);
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.ResumeSource = run;
+                config.OpponentKind = MlOpponentKind.Random;
+
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, scenarioSession: null, resume: false);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains(Path.Combine(run, "scenario.json")));
+            }
+            finally
+            {
+                if (Directory.Exists(run)) Directory.Delete(run, true);
+            }
+        }
+
+        [Test]
+        public void TacticalV3Continuation_RejectsNonV3SourceScenario()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-v3-wrong-source-" +
+                Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(run);
+                var session = new MlTrainingScenarioSession(
+                    MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+                string written = MlTrainingScenarioStore.WriteSessionScenario(
+                    run, session.WorkingCopy);
+                File.Copy(written, Path.Combine(run, "scenario.json"));
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.ResumeSource = run;
+                config.OpponentKind = MlOpponentKind.Random;
+
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, scenarioSession: null, resume: false);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains("source scenario must use tactical-v3"));
+            }
+            finally
+            {
+                if (Directory.Exists(run)) Directory.Delete(run, true);
+            }
+        }
+
+        [TestCase(MlOpponentKind.FixedRun)]
+        [TestCase(MlOpponentKind.LiveRun)]
+        public void TacticalV3Continuation_StillRequiresModelOpponentPath(
+            MlOpponentKind opponent)
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.ResumeSource = "source";
+            config.OpponentKind = opponent;
+            config.OpponentPath = string.Empty;
+
+            Assert.That(config.Validate(),
+                Has.Some.Contains("Opponent path"));
+        }
+
+        [Test]
+        public void TrainingFormPolicy_KeepsV3OpponentAndHidesOnlySb3Fields()
+        {
+            Assert.That(MlTrainingFormPolicy.RequiresSourceRun(
+                MlEnvironmentContract.TacticalV3, resume: false), Is.True);
+            Assert.That(MlTrainingFormPolicy.ShowsSb3Fields(
+                MlEnvironmentContract.TacticalV3), Is.False);
+            Assert.That(MlTrainingFormPolicy.ShowsOpponent(
+                MlEnvironmentContract.TacticalV3, resume: true), Is.True);
+            Assert.That(MlTrainingFormPolicy.PrimaryActionLabel(
+                MlEnvironmentContract.TacticalV3, resume: false),
+                Is.EqualTo("Start continuation"));
+
+            Assert.That(MlTrainingFormPolicy.RequiresSourceRun(
+                MlEnvironmentContract.TacticalV2, resume: false), Is.False);
+            Assert.That(MlTrainingFormPolicy.ShowsSb3Fields(
+                MlEnvironmentContract.TacticalV2), Is.True);
+            Assert.That(MlTrainingFormPolicy.ShowsOpponent(
+                MlEnvironmentContract.TacticalV2, resume: false), Is.True);
+            Assert.That(MlTrainingFormPolicy.ShowsOpponent(
+                MlEnvironmentContract.TacticalV2, resume: true), Is.False);
+            Assert.That(MlTrainingFormPolicy.PrimaryActionLabel(
+                MlEnvironmentContract.TacticalV2, resume: true),
+                Is.EqualTo("Resume"));
+        }
+
+        [Test]
+        public void TrainingFormPolicy_UsesSafeV3DefaultsWithoutOverwritingCustomValues()
+        {
+            var defaults = MlLabConfig.Default();
+
+            MlTrainingFormPolicy.ApplyEnvironmentDefaults(
+                defaults, MlEnvironmentContract.TacticalV3);
+
+            Assert.That(defaults.Environment,
+                Is.EqualTo(MlEnvironmentContract.TacticalV3));
+            Assert.That(defaults.TotalTimesteps, Is.EqualTo(7500));
+            Assert.That(defaults.Seed, Is.EqualTo(227));
+
+            MlTrainingFormPolicy.ApplyEnvironmentDefaults(
+                defaults, MlEnvironmentContract.TacticalV2);
+            Assert.That(defaults.TotalTimesteps, Is.EqualTo(300000));
+            Assert.That(defaults.Seed, Is.EqualTo(1));
+
+            defaults.TotalTimesteps = 9000;
+            defaults.Seed = 91;
+            MlTrainingFormPolicy.ApplyEnvironmentDefaults(
+                defaults, MlEnvironmentContract.TacticalV3);
+            Assert.That(defaults.TotalTimesteps, Is.EqualTo(9000));
+            Assert.That(defaults.Seed, Is.EqualTo(91));
         }
 
         [Test]
