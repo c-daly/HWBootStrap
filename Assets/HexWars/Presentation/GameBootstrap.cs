@@ -94,7 +94,9 @@ namespace HexWars.Presentation
         {
             Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
 #if UNITY_WEBGL && !UNITY_EDITOR
-            Networked = true; // the deployed browser build is always the online client
+            // Browser builds enter the title/lobby instead of auto-starting the legacy editor
+            // hotseat game. A title selection may later switch back to local play.
+            Networked = true;
 #endif
             if (Networked)
             {

@@ -8,15 +8,16 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// The game-settings form, opened from the title screen in one of two modes: <b>Host</b> (online —
+    /// The game-settings form, opened from the title screen in one of three modes: <b>Host</b> (online —
     /// adds a Private toggle; Create connects and shows a waiting screen with the room code, share link
-    /// and Cancel) and <b>VsAi</b> (adds a Difficulty row; Create starts the local game immediately).
+    /// and Cancel), <b>VsAi</b> (adds a Difficulty row), and <b>Hotseat</b> (two local humans).
+    /// Both local modes start the game immediately.
     /// Numeric settings use ordinary, prefilled in-game text fields with inline validation.
     /// Removes itself when a real match starts.
     /// </summary>
     public sealed class SetupForm : MonoBehaviour
     {
-        public enum SetupMode { Host, VsAi }
+        public enum SetupMode { Host, VsAi, Hotseat }
 
         GameBootstrap _game;
         SetupMode _mode;
@@ -78,7 +79,7 @@ namespace HexWars.Presentation
                 }
             }
 
-            // a real match started (host's START arrived, or the vs-AI game began) — this form is done
+            // a real match started (host's START arrived, or a local game began) — this form is done
             if (_game != null && _game.State != null && !_game.DemoMode) Close();
         }
 
@@ -103,7 +104,9 @@ namespace HexWars.Presentation
             frt.anchoredPosition = Vector2.zero;
 
             float y = -24f;
-            string title = _mode == SetupMode.Host ? "Host Online Game" : "Play vs AI";
+            string title = _mode == SetupMode.Host
+                ? "Host Online Game"
+                : _mode == SetupMode.VsAi ? "Play vs AI" : "Hotseat Game";
             UiKit.Label(_form.transform, title, 0f, y, 700f, 36f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
             UiKit.Button(_form.transform, "Back", -300f, y - 2f, 90f, 34f, () => { Close(); TitleScreen.Reopen(_game); },
                          UiKit.ButtonStyle.Secondary, UiKit.SizeBody);
@@ -151,7 +154,7 @@ namespace HexWars.Presentation
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
                 ToggleBtn("Private (invite only)", 120f, y, 250f, 38f, () => _private, () => { _private = !_private; RefreshToggles(); });
             }
-            else
+            else if (_mode == SetupMode.VsAi)
             {
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
                 ToggleBtn(AiLabel(_ai), 120f, y, 250f, 38f, () => _ai == AiLevel.Hard, () =>
@@ -164,6 +167,10 @@ namespace HexWars.Presentation
                         if (t != null && t.text.StartsWith("AI: ")) t.text = AiLabel(_ai);
                     }
                 });
+            }
+            else
+            {
+                ToggleBtn("Fog of war", 0f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
             }
             y -= 54f;
 
@@ -299,6 +306,13 @@ namespace HexWars.Presentation
                     Toast.Show(error.Message);
                     return;
                 }
+                // form dismisses via Update when State exists
+                return;
+            }
+
+            if (_mode == SetupMode.Hotseat)
+            {
+                _game.StartLocalGame(setup, false);
                 // form dismisses via Update when State exists
                 return;
             }

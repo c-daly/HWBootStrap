@@ -1,9 +1,12 @@
 using System.Collections;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
+using HexWars.Engine;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.TestTools;
 using UnityEngine.UI;
 
 namespace HexWars.Presentation.Tests
@@ -107,6 +110,99 @@ namespace HexWars.Presentation.Tests
             }
             Assert.Fail("Missing binding " + fieldName);
             return null;
+        }
+
+        static void Invoke(object target, string method) =>
+            target.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(target, null);
+    }
+
+    public sealed class HotseatMenuTests
+    {
+        GameObject _gameObject;
+
+        [TearDown]
+        public void TearDown()
+        {
+            SessionBarracksCache.ResetForTests();
+            if (_gameObject != null) Object.DestroyImmediate(_gameObject);
+            foreach (var canvas in Object.FindObjectsByType<Canvas>(FindObjectsSortMode.None))
+                if (canvas != null) Object.DestroyImmediate(canvas.gameObject);
+            foreach (var eventSystem in Object.FindObjectsByType<EventSystem>(FindObjectsSortMode.None))
+                if (eventSystem != null) Object.DestroyImmediate(eventSystem.gameObject);
+        }
+
+        [Test]
+        public void TitleScreen_HotseatButtonOpensHotseatSetup()
+        {
+            var game = BuildGame();
+            var title = _gameObject.AddComponent<TitleScreen>();
+            Invoke(title, "Start");
+            var hotseat = title.GetComponentsInChildren<Button>(true)
+                .Single(button => button.GetComponentInChildren<Text>()?.text == "Hotseat");
+
+            LogAssert.Expect(LogType.Error,
+                new Regex("TitleCanvas: Destroy may not be called from edit mode!"));
+            LogAssert.Expect(LogType.Error,
+                new Regex("Hotseat menu test: Destroy may not be called from edit mode!"));
+            hotseat.onClick.Invoke();
+
+            var form = _gameObject.GetComponent<SetupForm>();
+            Assert.That(form, Is.Not.Null);
+            Assert.That(Mode(form), Is.EqualTo(SetupForm.SetupMode.Hotseat));
+        }
+
+        [Test]
+        public void HotseatSetup_StartsTwoHumanLocalGameWithoutAiChoice()
+        {
+            var game = BuildGame();
+            SessionBarracksCache.ForLocalPlayer(0).RemoveAt(0);
+            SessionBarracksCache.ForLocalPlayer(1).RemoveAt(1);
+            var form = SetupForm.Open(game, SetupForm.SetupMode.Hotseat);
+            Invoke(form, "Start");
+            var labels = form.GetComponentsInChildren<Text>(true)
+                .Select(label => label.text)
+                .ToArray();
+
+            Assert.That(labels, Does.Contain("Hotseat Game"));
+            Assert.That(labels, Does.Contain("Fog of war"));
+            Assert.That(labels.Any(text => text.StartsWith("AI: ")), Is.False);
+            Assert.That(labels.Any(text => text.StartsWith("Private")), Is.False);
+
+            Invoke(form, "OnCreate");
+
+            Assert.That(game.State, Is.Not.Null);
+            Assert.That(game.Networked, Is.False);
+            Assert.That(_gameObject.GetComponent<AiOpponent>(), Is.Null);
+            Assert.That(game.RematchAvailable, Is.False);
+            Assert.That(game.State.ActivePlayer, Is.EqualTo(PlayerId.Player0));
+            Assert.That(game.WaitingHumanSeat(), Is.Null);
+            Assert.That(game.State.Player(PlayerId.Player0).Barracks.Select(item => item.Name),
+                Does.Not.Contain("Brute"));
+            Assert.That(game.State.Player(PlayerId.Player0).Barracks.Select(item => item.Name),
+                Does.Contain("Striker"));
+            Assert.That(game.State.Player(PlayerId.Player1).Barracks.Select(item => item.Name),
+                Does.Contain("Brute"));
+            Assert.That(game.State.Player(PlayerId.Player1).Barracks.Select(item => item.Name),
+                Does.Not.Contain("Striker"));
+        }
+
+        GameBootstrap BuildGame()
+        {
+            SessionBarracksCache.ResetForTests();
+            _gameObject = new GameObject(
+                "Hotseat menu test", typeof(BoardRenderer), typeof(GameBootstrap));
+            var store = _gameObject.AddComponent<TokenStore>();
+            Invoke(store, "Awake");
+            return _gameObject.GetComponent<GameBootstrap>();
+        }
+
+        static SetupForm.SetupMode Mode(SetupForm form)
+        {
+            var field = typeof(SetupForm).GetField(
+                "_mode", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            return (SetupForm.SetupMode)field.GetValue(form);
         }
 
         static void Invoke(object target, string method) =>
