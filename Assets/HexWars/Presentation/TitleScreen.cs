@@ -6,9 +6,9 @@ using UnityEngine.InputSystem;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// The front door: HEXWARS wordmark + the five main actions, drawn over the live demo game
+    /// The front door: HEXWARS wordmark + the six main actions, drawn over the live demo game
     /// (StartDemo's muted AI-vs-AI match). Owns the demo lifecycle — when the demo game ends it
-    /// waits a beat and starts a fresh one. Opening a sub-screen (Browse / Host / vs AI / Rules)
+    /// waits a beat and starts a fresh one. Opening a sub-screen (Browse / Host / vs AI / Hotseat / Rules)
     /// hides this menu and keeps the demo running behind it; the sub-screens call
     /// <see cref="Reopen"/> to come back. Destroys itself when a real match starts.
     /// </summary>
@@ -131,10 +131,13 @@ namespace HexWars.Presentation
             UiKit.Button(col.transform, "Play vs AI", 0f, y, bw, bh, () =>
             { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.VsAi); }, UiKit.ButtonStyle.Primary); y -= gap;
 
+            UiKit.Button(col.transform, "Hotseat", 0f, y, bw, bh, () =>
+            { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Hotseat); }, UiKit.ButtonStyle.Primary); y -= gap;
+
             UiKit.Button(col.transform, "How to Play", 0f, y, bw, bh, () =>
             { GameRules.Show(_canvasGo.transform, UiKit.Font(), 1100); }, UiKit.ButtonStyle.Secondary); y -= gap;
 
-            UiKit.Label(col.transform, "v" + Application.version + "   ·   two players, two browsers — share a room code",
+            UiKit.Label(col.transform, "v" + Application.version + "   ·   local, AI, or online play",
                         0f, y - 6f, 520f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
 
             var tipsBtn = TipsService.BuildToggle(_canvasGo.transform, 0f, 0f);
