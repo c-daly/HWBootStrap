@@ -17,5 +17,9 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
 COPY --from=build /app ./
 ENV PORT=8080
+# The deployed image is immutable, so live appsettings reload is unnecessary. Disabling it also
+# prevents ASP.NET Core's default configuration providers from allocating inotify watchers on hosts
+# with a low per-user inotify limit (such as Render).
+ENV DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "HexWars.NetServer.dll"]
