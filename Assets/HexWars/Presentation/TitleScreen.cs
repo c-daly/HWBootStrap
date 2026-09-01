@@ -8,7 +8,7 @@ namespace HexWars.Presentation
     /// <summary>
     /// The front door: HEXWARS wordmark + the six main actions, drawn over the live demo game
     /// (StartDemo's muted AI-vs-AI match). Owns the demo lifecycle — when the demo game ends it
-    /// waits a beat and starts a fresh one. Opening a sub-screen (Browse / Host / vs AI / Rules)
+    /// waits a beat and starts a fresh one. Opening a sub-screen (Browse / Host / vs AI / Hotseat / Rules)
     /// hides this menu and keeps the demo running behind it; the sub-screens call
     /// <see cref="Reopen"/> to come back. Destroys itself when a real match starts.
     /// </summary>

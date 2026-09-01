@@ -170,7 +170,8 @@ namespace HexWars.Presentation
             }
             else
             {
-                ToggleBtn("Fog of war", 0f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
+                UiKit.Label(_form.transform, "Fog of war is off for shared-screen play", 0f, y,
+                            500f, 38f, UiKit.SizeBody, TextAnchor.MiddleCenter, UiKit.TextDim);
             }
             y -= 54f;
 
@@ -283,8 +284,9 @@ namespace HexWars.Presentation
                 return;
             }
 
+            bool fog = _mode != SetupMode.Hotseat && _fog;
             var setup = new GameSetup(_gameMode, _w, _h, _pts, _seed,
-                                      _armySize, _brutes, _strikers, _snipers, _turnActions, _fog);
+                                      _armySize, _brutes, _strikers, _snipers, _turnActions, fog);
             if (_mode == SetupMode.VsAi)
             {
                 if (_ai == AiLevel.TrainedModel &&

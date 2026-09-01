@@ -248,7 +248,7 @@ namespace HexWars.Presentation
 
         /// <summary>Start a single-machine game from the lobby's setup (no server). <paramref name="vsAi"/>
         /// adds an AI opponent on Player 2 at <paramref name="level"/>; otherwise it's a local hotseat.
-        /// Used by the lobby's vs-AI option.</summary>
+        /// Used by the lobby's vs-AI and Hotseat options.</summary>
         public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Hard)
         {
             var p0Barracks = SessionBarracksCache.ForLocalPlayer(0).Snapshot();

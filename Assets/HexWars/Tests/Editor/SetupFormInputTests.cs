@@ -165,7 +165,8 @@ namespace HexWars.Presentation.Tests
                 .ToArray();
 
             Assert.That(labels, Does.Contain("Hotseat Game"));
-            Assert.That(labels, Does.Contain("Fog of war"));
+            Assert.That(labels, Does.Not.Contain("Fog of war"));
+            Assert.That(labels, Does.Contain("Fog of war is off for shared-screen play"));
             Assert.That(labels.Any(text => text.StartsWith("AI: ")), Is.False);
             Assert.That(labels.Any(text => text.StartsWith("Private")), Is.False);
 
@@ -177,6 +178,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(game.RematchAvailable, Is.False);
             Assert.That(game.State.ActivePlayer, Is.EqualTo(PlayerId.Player0));
             Assert.That(game.WaitingHumanSeat(), Is.Null);
+            Assert.That(game.State.Config.FogOfWar, Is.False);
             Assert.That(game.State.Player(PlayerId.Player0).Barracks.Select(item => item.Name),
                 Does.Not.Contain("Brute"));
             Assert.That(game.State.Player(PlayerId.Player0).Barracks.Select(item => item.Name),
