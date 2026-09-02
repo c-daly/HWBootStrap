@@ -22,10 +22,14 @@ from .tactical_v3_batching import collate_decisions, collate_examples
 from .tactical_v3_checkpoint import (
     LoadedStructuredPolicy,
     StructuredCheckpointMetadata,
+    load_training_resume_checkpoint,
     load_structured_checkpoint,
+    replace_structured_checkpoint,
+    save_training_resume_checkpoint,
     save_structured_checkpoint,
     structured_model_state_sha256,
 )
+from .io import atomic_write_bytes, atomic_write_json
 from .tactical_v3_client import (
     CandidateSelection,
     SelectiveDaggerInspection,
@@ -56,6 +60,7 @@ from .tactical_v3_schema import (
 from .tactical_v3_training import (
     EpochMetrics,
     StepMetrics,
+    TrainingCheckpointState,
     TrainerConfig,
     _batch_to_device,
     train_offline,
@@ -1354,7 +1359,12 @@ def load_dagger_episode(
         "partition", "profile_id", "episode_seed", "learner_seat",
         "reference_seat",
     }), "DAgger episode schedule")
-    schedule = PilotScheduleItem(**schedule_data)
+    schedule_type = (
+        ContinuationScheduleItem
+        if isinstance(expected_schedule, ContinuationScheduleItem)
+        else PilotScheduleItem
+    )
+    schedule = schedule_type(**schedule_data)
     summary = PilotDaggerGameSummary(
         schedule,
         _int(summary_data["winner"], "DAgger winner"),
@@ -1373,6 +1383,19 @@ def load_dagger_episode(
         or summary.disagreements != sum(record.disagreement for record in records)
         or summary.teacher_interventions != 0
         or summary.internal_fallback_count != 0
+        or any(
+            (
+                record.example.profile_id,
+                record.example.episode_seed,
+                record.example.learner_seat,
+            )
+            != (
+                schedule.profile_id,
+                schedule.episode_seed,
+                schedule.learner_seat,
+            )
+            for record in records
+        )
         or (expected_schedule is not None and schedule != expected_schedule)
     ):
         raise ValueError("DAgger episode summary is inconsistent")
@@ -2358,6 +2381,24 @@ def _history_bytes(history: tuple[EpochMetrics, ...]) -> bytes:
     return b"".join(rows)
 
 
+def _policy_metrics_wire(value: PolicyTargetMetrics) -> dict[str, object]:
+    if type(value) is not PolicyTargetMetrics:
+        raise TypeError("baseline policy metrics must be PolicyTargetMetrics")
+    return asdict(value)
+
+
+def _write_training_baseline(
+    output: Path,
+    train: PolicyTargetMetrics,
+    validation: PolicyTargetMetrics,
+) -> None:
+    atomic_write_json(output / "baseline.json", {
+        "schema_version": 1,
+        "train": _policy_metrics_wire(train),
+        "validation": _policy_metrics_wire(validation),
+    })
+
+
 class _NullSummaryWriter:
     def add_scalar(self, *args, **kwargs) -> None:
         return None
@@ -2379,6 +2420,7 @@ class _PilotTelemetry:
         tensorboard_dir: Path | None = None,
         log_path: Path | None = None,
         tensorboard_enabled: bool = True,
+        history_prefix: tuple[EpochMetrics, ...] = (),
     ) -> None:
         self.output = output
         self.max_epochs = max_epochs
@@ -2403,6 +2445,8 @@ class _PilotTelemetry:
             else _NullSummaryWriter()
         )
         self._writer.add_scalar("progress/started", 1.0, 0)
+        for metric in history_prefix:
+            self._write_epoch(metric, emit=False)
         self._writer.flush()
         self._emit("pilot telemetry phase=initial_metrics")
 
@@ -2442,6 +2486,9 @@ class _PilotTelemetry:
             )
 
     def epoch(self, metric: EpochMetrics) -> None:
+        self._write_epoch(metric, emit=True)
+
+    def _write_epoch(self, metric: EpochMetrics, *, emit: bool) -> None:
         row = _history_bytes((metric,))
         self._handle.write(row)
         self._handle.flush()
@@ -2456,14 +2503,15 @@ class _PilotTelemetry:
         )
         self._writer.add_scalar("epoch/improved", float(metric.improved), step)
         self._writer.flush()
-        self._emit(
-            "pilot telemetry "
-            f"epoch={step}/{self.max_epochs} "
-            f"elapsed_seconds={time.monotonic() - self.started:.1f} "
-            f"train_policy_nll={metric.train['policy']:.6f} "
-            f"validation_policy_nll={metric.validation_policy_nll:.6f} "
-            f"improved={str(metric.improved).lower()}"
-        )
+        if emit:
+            self._emit(
+                "pilot telemetry "
+                f"epoch={step}/{self.max_epochs} "
+                f"elapsed_seconds={time.monotonic() - self.started:.1f} "
+                f"train_policy_nll={metric.train['policy']:.6f} "
+                f"validation_policy_nll={metric.validation_policy_nll:.6f} "
+                f"improved={str(metric.improved).lower()}"
+            )
 
     def step(self, metric: StepMetrics) -> None:
         row = _canonical_bytes({
@@ -2527,12 +2575,18 @@ def _train_pilot_dataset(
     trainer_config: TrainerConfig | None = None,
     batch_provider: StructuredDaggerMixtureSampler | None = None,
     micro_batch_size: int | None = None,
-    training_deadline_seconds: int = _TRAINING_DEADLINE_SECONDS,
+    training_deadline_seconds: int | None = _TRAINING_DEADLINE_SECONDS,
     tensorboard_dir: Path | None = None,
     log_path: Path | None = None,
     tensorboard_enabled: bool = True,
     stop_requested: Callable[[], bool] | None = None,
+    stop_after_checkpoint_requested: Callable[[], bool] | None = None,
     allow_compatible_identity_transfer: bool = False,
+    resume_state: TrainingCheckpointState | None = None,
+    initial_metrics: tuple[PolicyTargetMetrics, PolicyTargetMetrics] | None = None,
+    durable_checkpoint_callback: (
+        Callable[[TrainingCheckpointState, Path, Path | None], None] | None
+    ) = None,
 ) -> PilotTrainingArtifacts:
     started = time.monotonic()
     identity = _validate_identity(identity)
@@ -2542,10 +2596,34 @@ def _train_pilot_dataset(
         raise ValueError("pilot training corpus hash must be lowercase SHA-256")
     if type(seed) is not int or not 0 <= seed < 2**31:
         raise ValueError("pilot training seed must be a nonnegative int32")
-    if type(training_deadline_seconds) is not int or training_deadline_seconds < 1:
-        raise ValueError("pilot training deadline must be a positive built-in int")
+    if training_deadline_seconds is not None and (
+        type(training_deadline_seconds) is not int
+        or training_deadline_seconds < 1
+    ):
+        raise ValueError(
+            "pilot training deadline must be positive seconds or disabled"
+        )
     if stop_requested is not None and not callable(stop_requested):
         raise TypeError("pilot stop_requested must be callable or None")
+    if (
+        stop_after_checkpoint_requested is not None
+        and not callable(stop_after_checkpoint_requested)
+    ):
+        raise TypeError(
+            "pilot stop_after_checkpoint_requested must be callable or None"
+        )
+    if resume_state is not None and type(resume_state) is not TrainingCheckpointState:
+        raise TypeError("pilot resume_state must be TrainingCheckpointState or None")
+    if initial_metrics is not None and (
+        type(initial_metrics) is not tuple
+        or len(initial_metrics) != 2
+        or any(type(value) is not PolicyTargetMetrics for value in initial_metrics)
+    ):
+        raise TypeError("pilot initial_metrics must contain train and validation metrics")
+    if durable_checkpoint_callback is not None and not callable(
+        durable_checkpoint_callback
+    ):
+        raise TypeError("pilot durable checkpoint callback must be callable")
     if type(tensorboard_enabled) is not bool:
         raise TypeError("pilot tensorboard_enabled must be bool")
     if type(allow_compatible_identity_transfer) is not bool:
@@ -2565,6 +2643,8 @@ def _train_pilot_dataset(
         raise ValueError("pilot trainer override does not match seed/device")
     if batch_provider is not None and type(batch_provider) is not StructuredDaggerMixtureSampler:
         raise TypeError("pilot batch_provider must be StructuredDaggerMixtureSampler")
+    if resume_state is not None and batch_provider is not None:
+        raise ValueError("pilot resume cannot restore a stateful batch provider")
     initial_state = None
     if initial_policy is not None:
         if type(initial_policy) is not LoadedStructuredPolicy:
@@ -2583,13 +2663,25 @@ def _train_pilot_dataset(
             name: value.detach().to(device="cpu").contiguous().clone()
             for name, value in initial_policy.model.state_dict().items()
         }
-    deadline = started + training_deadline_seconds
+    deadline = (
+        None
+        if training_deadline_seconds is None
+        else started + training_deadline_seconds
+    )
     metric_device = torch.device(trainer_config.device)
 
-    def check_stop() -> None:
+    def check_stop(*, completed_epoch: bool = False) -> None:
         if stop_requested is not None and stop_requested():
             raise PilotTrainingStopRequested(
                 "tactical-v3 training stop requested"
+            )
+        if (
+            completed_epoch
+            and stop_after_checkpoint_requested is not None
+            and stop_after_checkpoint_requested()
+        ):
+            raise PilotTrainingStopRequested(
+                "tactical-v3 stop-after-checkpoint requested"
             )
 
     with _PilotTelemetry(
@@ -2599,6 +2691,7 @@ def _train_pilot_dataset(
         tensorboard_dir=tensorboard_dir,
         log_path=log_path,
         tensorboard_enabled=tensorboard_enabled,
+        history_prefix=() if resume_state is None else resume_state.history,
     ) as telemetry:
         def progress(phase: str, completed: int, total: int) -> None:
             telemetry.progress(phase, completed, total)
@@ -2606,7 +2699,7 @@ def _train_pilot_dataset(
 
         def epoch(metric: EpochMetrics) -> None:
             telemetry.epoch(metric)
-            check_stop()
+            check_stop(completed_epoch=True)
 
         def step(metric: StepMetrics) -> None:
             telemetry.step(metric)
@@ -2621,30 +2714,92 @@ def _train_pilot_dataset(
             initial_model = TacticalV3Policy(model_config).to(metric_device)
             initial_model.load_state_dict(initial_state, strict=True)
             initial_model.eval()
-        initial_train = _policy_target_metrics(
-            initial_model,
-            train,
-            deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: progress(
-                "initial_train", completed, total,
-            ),
-        )
-        initial_validation = _policy_target_metrics(
-            initial_model,
-            validation,
-            deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: progress(
-                "initial_validation", completed, total,
-            ),
-        )
+        source_model_state_sha256 = structured_model_state_sha256(initial_model)
+        if initial_metrics is None:
+            initial_train = _policy_target_metrics(
+                initial_model,
+                train,
+                deadline_monotonic=deadline,
+                progress_callback=lambda completed, total: progress(
+                    "initial_train", completed, total,
+                ),
+            )
+            initial_validation = _policy_target_metrics(
+                initial_model,
+                validation,
+                deadline_monotonic=deadline,
+                progress_callback=lambda completed, total: progress(
+                    "initial_validation", completed, total,
+                ),
+            )
+        else:
+            initial_train, initial_validation = initial_metrics
         telemetry.baseline(initial_train, initial_validation)
+        _write_training_baseline(
+            output, initial_train, initial_validation,
+        )
         del initial_model
+
+        checkpoint_dir = output / "checkpoints"
+        checkpoint = checkpoint_dir / "best.pt"
+        resume_checkpoint = checkpoint_dir / "last.pt"
+        metrics_path = output / "metrics.jsonl"
+
+        def persist_checkpoint(state: TrainingCheckpointState) -> None:
+            latest_metric = state.history[-1]
+            if latest_metric.improved or not checkpoint.is_file():
+                best_model = TacticalV3Policy(state.model_config).to(device="cpu")
+                best_model.load_state_dict(dict(state.best_state), strict=True)
+                best_model.eval()
+                metadata = StructuredCheckpointMetadata(
+                    format_version=1,
+                    algorithm="structured_imitation",
+                    identity=identity,
+                    model_config=state.model_config,
+                    objective_config=state.objective_config,
+                    trainer_config=state.trainer_config,
+                    corpus_sha256=corpus_sha256,
+                    model_state_sha256=structured_model_state_sha256(best_model),
+                    best_epoch=state.best_epoch,
+                    best_validation_policy_nll=(
+                        state.best_validation_policy_nll
+                    ),
+                    published_device="cpu",
+                )
+                replace_structured_checkpoint(
+                    checkpoint,
+                    best_model,
+                    metadata,
+                    validation[:2],
+                )
+            atomic_write_bytes(metrics_path, _history_bytes(state.history))
+            durable_resume: Path | None = None
+            if not state.uses_external_batch_provider:
+                durable_resume = save_training_resume_checkpoint(
+                    resume_checkpoint,
+                    state,
+                    identity=identity,
+                    corpus_sha256=corpus_sha256,
+                    source_model_state_sha256=source_model_state_sha256,
+                )
+            if durable_checkpoint_callback is not None:
+                durable_checkpoint_callback(state, checkpoint, durable_resume)
+
+        if resume_state is not None:
+            # A retry writes its own independent artifacts before optimization
+            # continues. This also makes an already-converged resume finalizable
+            # without depending on files owned by the stopped source lifecycle.
+            persist_checkpoint(resume_state)
 
         training_arguments: dict[str, object] = {
             "epoch_callback": epoch,
             "step_callback": step,
+            "checkpoint_callback": persist_checkpoint,
             "deadline_monotonic": deadline,
-            "initial_state_dict": initial_state,
+            "initial_state_dict": (
+                initial_state if resume_state is None else None
+            ),
+            "resume_state": resume_state,
             "training_batch_provider": (
                 None if batch_provider is None
                 else lambda epoch, batch_index: batch_provider.next_batch().examples
@@ -2660,43 +2815,23 @@ def _train_pilot_dataset(
             trainer_config,
             **training_arguments,
         )
-        check_stop()
+        check_stop(completed_epoch=True)
     elapsed = time.monotonic() - started
-    if elapsed > training_deadline_seconds:
-        raise TimeoutError(f"pilot training exceeded deadline after {elapsed:.1f} seconds")
+    if (
+        training_deadline_seconds is not None
+        and elapsed > training_deadline_seconds
+    ):
+        raise TimeoutError(
+            f"pilot training exceeded deadline after {elapsed:.1f} seconds"
+        )
 
-    checkpoint_dir = output / "checkpoints"
-    checkpoint = checkpoint_dir / "best.pt"
-    metrics_path = output / "metrics.jsonl"
-    if checkpoint_dir.exists() or checkpoint_dir.is_symlink() or metrics_path.exists():
-        raise FileExistsError("pilot training artifacts already exist")
-    checkpoint_dir.mkdir()
-    metadata = StructuredCheckpointMetadata(
-        format_version=1,
-        algorithm="structured_imitation",
-        identity=identity,
-        model_config=result.model_config,
-        objective_config=result.objective_config,
-        trainer_config=result.trainer_config,
-        corpus_sha256=corpus_sha256,
-        model_state_sha256=structured_model_state_sha256(result.model),
-        best_epoch=result.best_epoch,
-        best_validation_policy_nll=result.best_validation_policy_nll,
-        published_device="cpu",
-    )
-    save_structured_checkpoint(
-        checkpoint,
-        result.model,
-        metadata,
-        validation[:2],
-    )
-    with metrics_path.open("xb") as handle:
-        history_bytes = _history_bytes(result.history)
-        if (output / "telemetry.jsonl").read_bytes() != history_bytes:
-            raise RuntimeError("pilot live telemetry does not match completed history")
-        handle.write(history_bytes)
-        handle.flush()
-        os.fsync(handle.fileno())
+    history_bytes = _history_bytes(result.history)
+    if not checkpoint.is_file() or not metrics_path.is_file():
+        raise RuntimeError("completed training did not retain its best checkpoint")
+    if (output / "telemetry.jsonl").read_bytes() != history_bytes:
+        raise RuntimeError("pilot live telemetry does not match completed history")
+    if metrics_path.read_bytes() != history_bytes:
+        raise RuntimeError("durable training metrics do not match completed history")
     loaded = load_structured_checkpoint(
         checkpoint,
         identity.encoding_hash,
@@ -2704,24 +2839,34 @@ def _train_pilot_dataset(
     )
     loaded.model.to(metric_device)
     try:
-        check_stop()
+        check_stop(completed_epoch=True)
         restored_train = _policy_target_metrics(
             loaded.model,
             train,
             deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: check_stop(),
+            progress_callback=(
+                lambda completed, total: check_stop(completed_epoch=True)
+            ),
         )
         restored_validation = _policy_target_metrics(
             loaded.model,
             validation,
             deadline_monotonic=deadline,
-            progress_callback=lambda completed, total: check_stop(),
+            progress_callback=(
+                lambda completed, total: check_stop(completed_epoch=True)
+            ),
         )
+        check_stop(completed_epoch=True)
     finally:
         loaded.model.cpu()
     duration = time.monotonic() - started
-    if duration > training_deadline_seconds:
-        raise TimeoutError(f"pilot training exceeded deadline after {duration:.1f} seconds")
+    if (
+        training_deadline_seconds is not None
+        and duration > training_deadline_seconds
+    ):
+        raise TimeoutError(
+            f"pilot training exceeded deadline after {duration:.1f} seconds"
+        )
     return PilotTrainingArtifacts(
         checkpoint,
         initial_train,

@@ -10,7 +10,9 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
+import struct
 import tempfile
+from types import MappingProxyType
 from typing import Literal, Mapping
 
 import torch
@@ -36,6 +38,7 @@ from .tactical_v3_schema import TacticalV3SemanticIdentity, canonical_sha256, pa
 from .tactical_v3_training import (
     METRIC_KEYS,
     EpochMetrics,
+    TrainingCheckpointState,
     TrainerConfig,
     TrainingResult,
 )
@@ -70,6 +73,25 @@ _ADOPTED_EVIDENCE_FIELDS = frozenset({
 _ADOPTED_SOURCE_FIELDS = frozenset({
     "checkpoint_sha256", "collection_sha256", "training_sha256",
     "metrics_sha256", "scenario_sha256",
+})
+_RESUME_TOP_LEVEL_FIELDS = frozenset({"format_version", "metadata", "state"})
+_RESUME_METADATA_FIELDS = frozenset({
+    "identity", "model_config", "objective_config", "trainer_config",
+    "micro_batch_size", "corpus_sha256", "source_model_state_sha256",
+})
+_RESUME_STATE_FIELDS = frozenset({
+    "next_epoch", "model_state", "model_state_sha256", "best_state",
+    "best_state_sha256", "optimizer_state", "history_jsonl",
+    "history_sha256", "best_epoch", "best_validation_policy_nll",
+    "epochs_without_improvement", "train_global_step",
+    "validation_global_step", "permutation_generator_state",
+    "python_random_state", "numpy_random_state", "torch_random_state",
+    "cuda_random_states", "uses_external_batch_provider",
+    "state_sha256",
+})
+_PYTHON_RANDOM_FIELDS = frozenset({"version", "values", "gaussian"})
+_NUMPY_RANDOM_FIELDS = frozenset({
+    "bit_generator", "keys", "position", "has_gauss", "cached_gaussian",
 })
 
 
@@ -481,6 +503,552 @@ def load_structured_checkpoint(path: Path, expected_encoding_hash: str, expected
     if actual_logits != fixture.valid_candidate_logits or actual_actions != fixture.selected_identities:
         raise ValueError("checkpoint inference fixture does not replay exactly")
     return LoadedStructuredPolicy(model, metadata, fixture)
+
+
+def _sync_directory(path: Path) -> None:
+    """Best-effort directory sync after an atomic checkpoint replacement."""
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        os.fsync(descriptor)
+    except OSError:
+        # Windows does not permit opening directories this way. The checkpoint
+        # file itself was already flushed and fsynced before os.replace.
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def replace_structured_checkpoint(
+    path: Path,
+    model: TacticalV3Policy,
+    metadata: StructuredCheckpointMetadata,
+    fixture_examples: tuple[StructuredExample, ...],
+) -> Path:
+    """Validate then atomically replace a live strict inference checkpoint."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or _is_reparse(path.parent):
+        raise ValueError("live checkpoint path must be plain")
+    temporary = Path(tempfile.mkdtemp(
+        prefix=f".{path.name}.stage-", dir=path.parent,
+    ))
+    try:
+        staged = save_structured_checkpoint(
+            temporary / path.name,
+            model,
+            metadata,
+            fixture_examples,
+        )
+        loaded = load_structured_checkpoint(
+            staged,
+            metadata.identity.encoding_hash,
+            metadata.identity.capacity_hash,
+        )
+        if loaded.metadata != metadata:
+            raise ValueError("staged live checkpoint metadata changed")
+        os.replace(staged, path)
+        _sync_directory(path.parent)
+        return path
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def _checkpoint_tree_wire(value: object, field: str) -> object:
+    if isinstance(value, Tensor):
+        tensor = value.detach().to(device="cpu").contiguous().clone()
+        if tensor.is_floating_point() and not bool(torch.isfinite(tensor).all()):
+            raise FloatingPointError(f"{field} contains nonfinite tensor values")
+        return tensor
+    if isinstance(value, Mapping):
+        result: dict[object, object] = {}
+        for key, item in value.items():
+            if type(key) not in {str, int}:
+                raise TypeError(f"{field} has a noncanonical mapping key")
+            result[key] = _checkpoint_tree_wire(item, f"{field}.{key}")
+        return result
+    if type(value) is tuple:
+        return tuple(
+            _checkpoint_tree_wire(item, f"{field}[]") for item in value
+        )
+    if type(value) is list:
+        return [
+            _checkpoint_tree_wire(item, f"{field}[]") for item in value
+        ]
+    if value is None or type(value) in {str, int, float, bool}:
+        if type(value) is float and not math.isfinite(value):
+            raise FloatingPointError(f"{field} contains a nonfinite float")
+        return value
+    raise TypeError(f"{field} contains unsupported {type(value).__name__}")
+
+
+def _digest_bytes(digest: "hashlib._Hash", value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _checkpoint_tree_digest(digest: "hashlib._Hash", value: object) -> None:
+    if isinstance(value, Tensor):
+        tensor = value.detach().to(device="cpu").contiguous()
+        digest.update(b"tensor")
+        _digest_bytes(digest, str(tensor.dtype).encode("ascii"))
+        digest.update(len(tensor.shape).to_bytes(8, "big"))
+        for dimension in tensor.shape:
+            digest.update(int(dimension).to_bytes(8, "big", signed=True))
+        _digest_bytes(
+            digest,
+            tensor.reshape(-1).view(torch.uint8).numpy().tobytes(order="C"),
+        )
+        return
+    if isinstance(value, Mapping):
+        digest.update(b"mapping")
+        digest.update(len(value).to_bytes(8, "big"))
+        if any(type(key) not in {str, int} for key in value):
+            raise TypeError("checkpoint digest mapping key is unsupported")
+        for key in sorted(
+            value,
+            key=lambda item: (0, item) if type(item) is int else (1, item),
+        ):
+            _checkpoint_tree_digest(digest, key)
+            _checkpoint_tree_digest(digest, value[key])
+        return
+    if type(value) is tuple:
+        digest.update(b"tuple")
+        digest.update(len(value).to_bytes(8, "big"))
+        for item in value:
+            _checkpoint_tree_digest(digest, item)
+        return
+    if type(value) is list:
+        digest.update(b"list")
+        digest.update(len(value).to_bytes(8, "big"))
+        for item in value:
+            _checkpoint_tree_digest(digest, item)
+        return
+    if value is None:
+        digest.update(b"none")
+        return
+    if type(value) is bool:
+        digest.update(b"bool1" if value else b"bool0")
+        return
+    if type(value) is int:
+        digest.update(b"int")
+        _digest_bytes(digest, str(value).encode("ascii"))
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise FloatingPointError("checkpoint digest contains nonfinite float")
+        digest.update(b"float")
+        digest.update(struct.pack(">d", value))
+        return
+    if type(value) is str:
+        digest.update(b"str")
+        _digest_bytes(digest, value.encode("utf-8"))
+        return
+    raise TypeError(
+        f"checkpoint digest contains unsupported {type(value).__name__}"
+    )
+
+
+def _checkpoint_tree_sha256(value: object) -> str:
+    digest = hashlib.sha256()
+    _checkpoint_tree_digest(digest, value)
+    return digest.hexdigest()
+
+
+def _resume_metadata_wire(
+    state: TrainingCheckpointState,
+    *,
+    identity: TacticalV3SemanticIdentity,
+    corpus_sha256: str,
+    source_model_state_sha256: str,
+) -> dict[str, object]:
+    if type(state) is not TrainingCheckpointState:
+        raise TypeError("training state must be TrainingCheckpointState")
+    if type(identity) is not TacticalV3SemanticIdentity:
+        raise TypeError("training resume identity must be tactical-v3 identity")
+    return {
+        "identity": semantic_identity_wire(identity),
+        "model_config": _dataclass_wire(state.model_config),
+        "objective_config": _dataclass_wire(state.objective_config),
+        "trainer_config": _dataclass_wire(state.trainer_config),
+        "micro_batch_size": state.micro_batch_size,
+        "corpus_sha256": _sha256(corpus_sha256, "resume corpus_sha256"),
+        "source_model_state_sha256": _sha256(
+            source_model_state_sha256,
+            "resume source_model_state_sha256",
+        ),
+    }
+
+
+def _resume_payload(
+    state: TrainingCheckpointState,
+    *,
+    identity: TacticalV3SemanticIdentity,
+    corpus_sha256: str,
+    source_model_state_sha256: str,
+) -> dict[str, object]:
+    if not state.history:
+        raise ValueError("training resume history must not be empty")
+    history = _metrics_jsonl(state.history)
+    model_state = _validate_state(_checkpoint_tree_wire(
+        state.model_state, "resume model_state",
+    ))
+    best_state = _validate_state(_checkpoint_tree_wire(
+        state.best_state, "resume best_state",
+    ))
+    python_version, python_values, python_gaussian = state.python_random_state
+    numpy_name, numpy_keys, numpy_position, numpy_has_gauss, numpy_cached = (
+        state.numpy_random_state
+    )
+    state_value = {
+            "next_epoch": state.next_epoch,
+            "model_state": model_state,
+            "model_state_sha256": _state_sha256(model_state),
+            "best_state": best_state,
+            "best_state_sha256": _state_sha256(best_state),
+            "optimizer_state": _checkpoint_tree_wire(
+                state.optimizer_state, "resume optimizer_state",
+            ),
+            "history_jsonl": torch.tensor(
+                list(history), dtype=torch.uint8, device="cpu",
+            ),
+            "history_sha256": hashlib.sha256(history).hexdigest(),
+            "best_epoch": state.best_epoch,
+            "best_validation_policy_nll": state.best_validation_policy_nll,
+            "epochs_without_improvement": state.epochs_without_improvement,
+            "train_global_step": state.train_global_step,
+            "validation_global_step": state.validation_global_step,
+            "permutation_generator_state": _checkpoint_tree_wire(
+                state.permutation_generator_state,
+                "resume permutation_generator_state",
+            ),
+            "python_random_state": {
+                "version": python_version,
+                "values": torch.tensor(
+                    python_values, dtype=torch.int64, device="cpu",
+                ),
+                "gaussian": python_gaussian,
+            },
+            "numpy_random_state": {
+                "bit_generator": numpy_name,
+                "keys": _checkpoint_tree_wire(
+                    numpy_keys, "resume numpy_random_state.keys",
+                ),
+                "position": numpy_position,
+                "has_gauss": numpy_has_gauss,
+                "cached_gaussian": numpy_cached,
+            },
+            "torch_random_state": _checkpoint_tree_wire(
+                state.torch_random_state, "resume torch_random_state",
+            ),
+            "cuda_random_states": [
+                _checkpoint_tree_wire(value, "resume cuda_random_states[]")
+                for value in state.cuda_random_states
+            ],
+            "uses_external_batch_provider": state.uses_external_batch_provider,
+    }
+    state_value["state_sha256"] = _checkpoint_tree_sha256(state_value)
+    payload = {
+        "format_version": 1,
+        "metadata": _resume_metadata_wire(
+            state,
+            identity=identity,
+            corpus_sha256=corpus_sha256,
+            source_model_state_sha256=source_model_state_sha256,
+        ),
+        "state": state_value,
+    }
+    return payload
+
+
+def save_training_resume_checkpoint(
+    path: Path,
+    state: TrainingCheckpointState,
+    *,
+    identity: TacticalV3SemanticIdentity,
+    corpus_sha256: str,
+    source_model_state_sha256: str,
+) -> Path:
+    """Atomically replace the exact-resume checkpoint for a completed epoch."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or _is_reparse(path.parent):
+        raise ValueError("training resume checkpoint path must be plain")
+    payload = _resume_payload(
+        state,
+        identity=identity,
+        corpus_sha256=corpus_sha256,
+        source_model_state_sha256=source_model_state_sha256,
+    )
+    temporary = Path(tempfile.mkdtemp(
+        prefix=f".{path.name}.stage-", dir=path.parent,
+    ))
+    try:
+        staged = _write_checkpoint(temporary / path.name, payload)
+        load_training_resume_checkpoint(
+            staged,
+            expected_identity=identity,
+            expected_corpus_sha256=corpus_sha256,
+            expected_source_model_state_sha256=source_model_state_sha256,
+        )
+        os.replace(staged, path)
+        _sync_directory(path.parent)
+        return path
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def _resume_configs(
+    value: object,
+) -> tuple[
+    TacticalV3SemanticIdentity,
+    TacticalV3ModelConfig,
+    ObjectiveConfig,
+    TrainerConfig,
+    int | None,
+    str,
+    str,
+]:
+    data = _plain_mapping(value, _RESUME_METADATA_FIELDS, "resume metadata")
+    synthetic = {
+        "format_version": _FORMAT_VERSION,
+        "algorithm": "structured_imitation",
+        "identity": data["identity"],
+        "model_config": data["model_config"],
+        "objective_config": data["objective_config"],
+        "trainer_config": data["trainer_config"],
+        "corpus_sha256": data["corpus_sha256"],
+        "model_state_sha256": "0" * 64,
+        "best_epoch": 0,
+        "best_validation_policy_nll": 0.0,
+        "published_device": "cpu",
+    }
+    parsed = _metadata_from_wire(synthetic)
+    micro_batch_size = data["micro_batch_size"]
+    if micro_batch_size is not None:
+        micro_batch_size = _int(
+            micro_batch_size, "resume metadata.micro_batch_size", minimum=1,
+        )
+    return (
+        parsed.identity,
+        parsed.model_config,
+        parsed.objective_config,
+        parsed.trainer_config,
+        micro_batch_size,
+        parsed.corpus_sha256,
+        _sha256(
+            data["source_model_state_sha256"],
+            "resume metadata.source_model_state_sha256",
+        ),
+    )
+
+
+def _cpu_tensor(value: object, field: str) -> Tensor:
+    if (
+        not isinstance(value, Tensor)
+        or value.device.type != "cpu"
+        or not value.is_contiguous()
+    ):
+        raise TypeError(f"{field} must be a contiguous CPU tensor")
+    return value.detach().clone()
+
+
+def _exact_checkpoint_mapping(
+    value: object, expected: frozenset[str], field: str,
+) -> Mapping[str, object]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected
+        or not all(type(key) is str for key in value)
+    ):
+        raise ValueError(f"{field} fields must be exactly {sorted(expected)}")
+    return value
+
+
+def load_training_resume_checkpoint(
+    path: Path,
+    *,
+    expected_identity: TacticalV3SemanticIdentity,
+    expected_corpus_sha256: str,
+    expected_source_model_state_sha256: str,
+) -> TrainingCheckpointState:
+    """Authenticate a weights-only exact-resume checkpoint."""
+
+    raw = torch.load(Path(path), map_location="cpu", weights_only=True)
+    if not isinstance(raw, Mapping) or set(raw) != _RESUME_TOP_LEVEL_FIELDS:
+        raise ValueError("training resume checkpoint inventory is invalid")
+    if _int(raw["format_version"], "resume format_version") != 1:
+        raise ValueError("training resume checkpoint format is unsupported")
+    (
+        identity,
+        model_config,
+        objective_config,
+        trainer_config,
+        micro_batch_size,
+        corpus_sha256,
+        source_model_state_sha256,
+    ) = _resume_configs(raw["metadata"])
+    if identity != expected_identity:
+        raise ValueError("training resume identity changed")
+    if corpus_sha256 != _sha256(
+        expected_corpus_sha256, "expected resume corpus_sha256",
+    ):
+        raise ValueError("training resume corpus changed")
+    if source_model_state_sha256 != _sha256(
+        expected_source_model_state_sha256,
+        "expected resume source_model_state_sha256",
+    ):
+        raise ValueError("training resume source model changed")
+    state = raw["state"]
+    if not isinstance(state, Mapping) or set(state) != _RESUME_STATE_FIELDS:
+        raise ValueError("training resume state inventory is invalid")
+    state_sha256 = _sha256(state["state_sha256"], "resume state_sha256")
+    authenticated_state = {
+        name: value for name, value in state.items() if name != "state_sha256"
+    }
+    if _checkpoint_tree_sha256(authenticated_state) != state_sha256:
+        raise ValueError("training resume state digest changed")
+    model_state = _validate_state(state["model_state"])
+    best_state = _validate_state(state["best_state"])
+    if _state_sha256(model_state) != _sha256(
+        state["model_state_sha256"], "resume model_state_sha256",
+    ):
+        raise ValueError("training resume current model state changed")
+    if _state_sha256(best_state) != _sha256(
+        state["best_state_sha256"], "resume best_state_sha256",
+    ):
+        raise ValueError("training resume best model state changed")
+    for label, model_values in (
+        ("current", model_state), ("best", best_state),
+    ):
+        model = TacticalV3Policy(model_config).to(device="cpu")
+        try:
+            model.load_state_dict(model_values, strict=True)
+        except (KeyError, RuntimeError, ValueError) as error:
+            raise ValueError(
+                f"training resume {label} model state is incompatible"
+            ) from error
+    history_tensor = _cpu_tensor(state["history_jsonl"], "resume history_jsonl")
+    if history_tensor.dtype != torch.uint8 or history_tensor.ndim != 1:
+        raise TypeError("resume history_jsonl must be a one-dimensional byte tensor")
+    history_bytes = bytes(history_tensor.tolist())
+    if hashlib.sha256(history_bytes).hexdigest() != _sha256(
+        state["history_sha256"], "resume history_sha256",
+    ):
+        raise ValueError("training resume history changed")
+    best_epoch = _int(state["best_epoch"], "resume best_epoch", minimum=0)
+    best_nll = _float(
+        state["best_validation_policy_nll"],
+        "resume best_validation_policy_nll",
+    )
+    history = _metrics_from_jsonl(history_bytes, best_epoch, best_nll)
+    next_epoch = _int(state["next_epoch"], "resume next_epoch", minimum=1)
+    if next_epoch != len(history):
+        raise ValueError("training resume next epoch does not follow history")
+    epochs_without = _int(
+        state["epochs_without_improvement"],
+        "resume epochs_without_improvement",
+        minimum=0,
+    )
+    trailing = 0
+    for metric in reversed(history):
+        if metric.improved:
+            break
+        trailing += 1
+    if epochs_without != trailing:
+        raise ValueError("training resume patience state changed")
+    python_state = _exact_checkpoint_mapping(
+        state["python_random_state"],
+        _PYTHON_RANDOM_FIELDS,
+        "resume python_random_state",
+    )
+    python_values = _cpu_tensor(
+        python_state["values"], "resume python_random_state.values",
+    )
+    if python_values.dtype != torch.int64 or python_values.ndim != 1:
+        raise TypeError("resume Python RNG values must be int64 vector")
+    gaussian = python_state["gaussian"]
+    if gaussian is not None:
+        gaussian = _float(gaussian, "resume python_random_state.gaussian")
+    numpy_state = _exact_checkpoint_mapping(
+        state["numpy_random_state"],
+        _NUMPY_RANDOM_FIELDS,
+        "resume numpy_random_state",
+    )
+    numpy_keys = _cpu_tensor(
+        numpy_state["keys"], "resume numpy_random_state.keys",
+    )
+    if numpy_keys.ndim != 1:
+        raise TypeError("resume NumPy RNG keys must be a vector")
+    cuda_values = state["cuda_random_states"]
+    if type(cuda_values) is not list:
+        raise TypeError("resume CUDA RNG states must be a list")
+    uses_provider = state["uses_external_batch_provider"]
+    if type(uses_provider) is not bool:
+        raise TypeError("resume batch-provider flag must be a built-in bool")
+    optimizer_state = _checkpoint_tree_wire(
+        state["optimizer_state"], "resume optimizer_state",
+    )
+    if not isinstance(optimizer_state, Mapping):
+        raise TypeError("resume optimizer state must be a mapping")
+    return TrainingCheckpointState(
+        model_config=model_config,
+        objective_config=objective_config,
+        trainer_config=trainer_config,
+        micro_batch_size=micro_batch_size,
+        next_epoch=next_epoch,
+        model_state=MappingProxyType(model_state),
+        best_state=MappingProxyType(best_state),
+        optimizer_state=MappingProxyType(dict(optimizer_state)),
+        history=history,
+        best_epoch=best_epoch,
+        best_validation_policy_nll=best_nll,
+        epochs_without_improvement=epochs_without,
+        train_global_step=_int(
+            state["train_global_step"], "resume train_global_step", minimum=0,
+        ),
+        validation_global_step=_int(
+            state["validation_global_step"],
+            "resume validation_global_step",
+            minimum=0,
+        ),
+        permutation_generator_state=_cpu_tensor(
+            state["permutation_generator_state"],
+            "resume permutation_generator_state",
+        ),
+        python_random_state=(
+            _int(python_state["version"], "resume Python RNG version"),
+            tuple(int(value) for value in python_values.tolist()),
+            gaussian,
+        ),
+        numpy_random_state=(
+            _string(
+                numpy_state["bit_generator"],
+                "resume NumPy RNG bit_generator",
+            ),
+            numpy_keys,
+            _int(numpy_state["position"], "resume NumPy RNG position", minimum=0),
+            _int(numpy_state["has_gauss"], "resume NumPy RNG has_gauss", minimum=0),
+            _float(
+                numpy_state["cached_gaussian"],
+                "resume NumPy RNG cached_gaussian",
+            ),
+        ),
+        torch_random_state=_cpu_tensor(
+            state["torch_random_state"], "resume torch_random_state",
+        ),
+        cuda_random_states=tuple(
+            _cpu_tensor(value, "resume cuda_random_states[]")
+            for value in cuda_values
+        ),
+        uses_external_batch_provider=uses_provider,
+    )
 
 
 def _write_bytes(path: Path, data: bytes) -> None:

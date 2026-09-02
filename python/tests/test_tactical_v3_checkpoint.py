@@ -16,8 +16,11 @@ import ml_lab.tactical_v3_checkpoint as tactical_v3_checkpoint
 from ml_lab.tactical_v3_batching import collate_examples
 from ml_lab.tactical_v3_checkpoint import (
     StructuredCheckpointMetadata,
+    load_training_resume_checkpoint,
     load_structured_checkpoint,
     publish_structured_run as publish_schema2_run,
+    replace_structured_checkpoint,
+    save_training_resume_checkpoint,
     save_structured_checkpoint,
     structured_model_state_sha256,
     validate_structured_run,
@@ -31,6 +34,7 @@ from ml_lab.tactical_v3_training import (
     EpochMetrics,
     TrainerConfig,
     TrainingResult,
+    TrainingCheckpointState,
     _batch_to_device,
     train_offline,
 )
@@ -97,6 +101,183 @@ def model_state_sha256(model: TacticalV3Policy) -> str:
         digest.update(header)
         digest.update(cpu.numpy().tobytes(order="C"))
     return digest.hexdigest()
+
+
+def _save_one_epoch_training_resume_checkpoint(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    object,
+    object,
+    TacticalV3ModelConfig,
+    TrainerConfig,
+    TrainingCheckpointState,
+]:
+    corpus = load_tiny_corpus_fixture()
+    identity = load_duel_identity_fixture()
+    model_config = TacticalV3ModelConfig(
+        hidden_dim=16,
+        categorical_dim=4,
+        cell_message_rounds=1,
+        relation_rounds=1,
+    )
+    config = TrainerConfig(
+        seed=227,
+        batch_size=4,
+        max_epochs=3,
+        patience_epochs=3,
+        device="cpu",
+    )
+    captured: list[TrainingCheckpointState] = []
+
+    class SimulatedExit(RuntimeError):
+        pass
+
+    def capture(state: TrainingCheckpointState) -> None:
+        captured.append(state)
+        raise SimulatedExit
+
+    with pytest.raises(SimulatedExit):
+        train_offline(
+            corpus.train,
+            corpus.validation,
+            model_config,
+            ObjectiveConfig(),
+            config,
+            checkpoint_callback=capture,
+        )
+
+    checkpoint = tmp_path / "last.pt"
+    save_training_resume_checkpoint(
+        checkpoint,
+        captured[0],
+        identity=identity,
+        corpus_sha256=corpus.identity,
+        source_model_state_sha256="a" * 64,
+    )
+    loaded = load_training_resume_checkpoint(
+        checkpoint,
+        expected_identity=identity,
+        expected_corpus_sha256=corpus.identity,
+        expected_source_model_state_sha256="a" * 64,
+    )
+    return checkpoint, corpus, identity, model_config, config, loaded
+
+
+def test_training_resume_checkpoint_roundtrip_resumes_exact_trajectory(
+    tmp_path: Path,
+) -> None:
+    _, corpus, _, model_config, config, loaded = (
+        _save_one_epoch_training_resume_checkpoint(tmp_path)
+    )
+    uninterrupted = train_offline(
+        corpus.train,
+        corpus.validation,
+        model_config,
+        ObjectiveConfig(),
+        config,
+    )
+    resumed = train_offline(
+        corpus.train,
+        corpus.validation,
+        model_config,
+        ObjectiveConfig(),
+        config,
+        resume_state=loaded,
+    )
+
+    assert resumed.history == uninterrupted.history
+    assert resumed.best_epoch == uninterrupted.best_epoch
+    assert (
+        resumed.best_validation_policy_nll
+        == uninterrupted.best_validation_policy_nll
+    )
+    assert resumed.stopped_early == uninterrupted.stopped_early
+    assert model_state_sha256(resumed.model) == model_state_sha256(
+        uninterrupted.model,
+    )
+    for name, value in uninterrupted.model.state_dict().items():
+        assert torch.equal(resumed.model.state_dict()[name], value)
+
+
+def test_training_resume_checkpoint_rejects_optimizer_and_rng_tampering(
+    tmp_path: Path,
+) -> None:
+    checkpoint, corpus, identity, _, _, _ = (
+        _save_one_epoch_training_resume_checkpoint(tmp_path)
+    )
+
+    for field in ("optimizer_state", "torch_random_state"):
+        raw = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        state = raw["state"]
+        if field == "optimizer_state":
+            optimizer_states = state["optimizer_state"]["state"]
+            assert optimizer_states
+            parameter_state = next(iter(optimizer_states.values()))
+            tensor_name = next(
+                name
+                for name, value in parameter_state.items()
+                if isinstance(value, torch.Tensor)
+            )
+            changed = parameter_state[tensor_name].clone()
+            changed.reshape(-1)[0].add_(1)
+            parameter_state[tensor_name] = changed
+        else:
+            changed = state[field].clone()
+            changed[0] = int(changed[0].item()) ^ 1
+            state[field] = changed
+        tampered = tmp_path / f"tampered-{field}.pt"
+        torch.save(raw, tampered)
+
+        with pytest.raises(ValueError, match="state digest changed"):
+            load_training_resume_checkpoint(
+                tampered,
+                expected_identity=identity,
+                expected_corpus_sha256=corpus.identity,
+                expected_source_model_state_sha256="a" * 64,
+            )
+
+
+def test_live_structured_best_checkpoint_replaces_atomically(
+    tmp_path: Path,
+) -> None:
+    case = case_from_result(train_offline(
+        load_tiny_corpus_fixture().train,
+        load_tiny_corpus_fixture().validation,
+        TacticalV3ModelConfig(),
+        ObjectiveConfig(),
+        TrainerConfig(
+            seed=227, batch_size=4, max_epochs=1,
+            patience_epochs=1, device="cpu",
+        ),
+    ))
+    path = tmp_path / "best.pt"
+
+    replace_structured_checkpoint(
+        path, case.model, case.metadata, case.examples,
+    )
+    first = path.read_bytes()
+    with torch.no_grad():
+        next(case.model.parameters()).add_(0.01)
+    replacement_metadata = replace(
+        case.metadata,
+        model_state_sha256=structured_model_state_sha256(case.model),
+        best_epoch=case.metadata.best_epoch + 1,
+    )
+    replace_structured_checkpoint(
+        path, case.model, replacement_metadata, case.examples,
+    )
+
+    assert path.read_bytes() != first
+    loaded = load_structured_checkpoint(
+        path,
+        case.metadata.identity.encoding_hash,
+        case.metadata.identity.capacity_hash,
+    )
+    assert loaded.metadata.best_epoch == replacement_metadata.best_epoch
+    assert loaded.metadata.model_state_sha256 == (
+        replacement_metadata.model_state_sha256
+    )
 
 
 def fixture_logits_and_actions(

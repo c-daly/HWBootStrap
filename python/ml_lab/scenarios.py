@@ -471,7 +471,7 @@ def _validate_tactical_v3(
     if document["rules"]["fog_of_war"] or document["rules"]["biomes_enabled"]:
         raise ValueError("tactical-v3 requires fog and biomes disabled")
     for key, expected in _TACTICAL_V3_REWARD.items():
-        if float(document["reward"][key]) != expected:
+        if not _float32_equivalent(document["reward"][key], expected):
             raise ValueError(
                 f"reward.{key} must equal the tactical-v3 stage-one value {expected}"
             )

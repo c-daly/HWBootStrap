@@ -112,6 +112,32 @@ class TrainingResult:
     history: tuple
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingCheckpointState:
+    """Exact state at the end of one fully validated training epoch."""
+
+    model_config: TacticalV3ModelConfig
+    objective_config: ObjectiveConfig
+    trainer_config: TrainerConfig
+    micro_batch_size: int | None
+    next_epoch: int
+    model_state: Mapping[str, Tensor]
+    best_state: Mapping[str, Tensor]
+    optimizer_state: Mapping[str, object]
+    history: tuple[EpochMetrics, ...]
+    best_epoch: int
+    best_validation_policy_nll: float
+    epochs_without_improvement: int
+    train_global_step: int
+    validation_global_step: int
+    permutation_generator_state: Tensor
+    python_random_state: tuple[int, tuple[int, ...], float | None]
+    numpy_random_state: tuple[str, Tensor, int, int, float]
+    torch_random_state: Tensor
+    cuda_random_states: tuple[Tensor, ...]
+    uses_external_batch_provider: bool
+
+
 METRIC_KEYS = ("total", "policy", "outcome", "horizon", "remaining_turns")
 
 
@@ -128,6 +154,8 @@ def train_offline(
     initial_state_dict: Mapping[str, Tensor] | None = None,
     training_batch_provider: Callable[[int, int], tuple] | None = None,
     micro_batch_size: int | None = None,
+    resume_state: TrainingCheckpointState | None = None,
+    checkpoint_callback: Callable[[TrainingCheckpointState], None] | None = None,
 ) -> TrainingResult:
     return _train_offline_impl(
         train_examples,
@@ -141,6 +169,8 @@ def train_offline(
         initial_state_dict=initial_state_dict,
         training_batch_provider=training_batch_provider,
         micro_batch_size=micro_batch_size,
+        resume_state=resume_state,
+        checkpoint_callback=checkpoint_callback,
     )
 
 
@@ -426,6 +456,233 @@ def _snapshot_state(model: TacticalV3Policy) -> Mapping[str, Tensor]:
     })
 
 
+def _cpu_clone_tree(value: object) -> object:
+    if isinstance(value, Tensor):
+        return value.detach().to(device="cpu").contiguous().clone()
+    if isinstance(value, Mapping):
+        return {
+            key: _cpu_clone_tree(item)
+            for key, item in value.items()
+        }
+    if type(value) is tuple:
+        return tuple(_cpu_clone_tree(item) for item in value)
+    if type(value) is list:
+        return [_cpu_clone_tree(item) for item in value]
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    raise TypeError(
+        f"training checkpoint contains unsupported {type(value).__name__}"
+    )
+
+
+def _capture_python_random_state() -> tuple[int, tuple[int, ...], float | None]:
+    version, values, gaussian = random.getstate()
+    if type(version) is not int or type(values) is not tuple:
+        raise TypeError("Python random state is not canonical")
+    if not all(type(value) is int for value in values):
+        raise TypeError("Python random state values are not built-in ints")
+    if gaussian is not None and type(gaussian) is not float:
+        raise TypeError("Python random Gaussian cache is not a built-in float")
+    return version, values, gaussian
+
+
+def _capture_numpy_random_state() -> tuple[str, Tensor, int, int, float]:
+    bit_generator, keys, position, has_gauss, cached_gaussian = np.random.get_state()
+    return (
+        str(bit_generator),
+        torch.from_numpy(keys.copy()).to(device="cpu").contiguous(),
+        int(position),
+        int(has_gauss),
+        float(cached_gaussian),
+    )
+
+
+def _restore_random_states(state: TrainingCheckpointState) -> None:
+    random.setstate(state.python_random_state)
+    numpy_name, numpy_keys, numpy_position, numpy_has_gauss, numpy_cached = (
+        state.numpy_random_state
+    )
+    np.random.set_state((
+        numpy_name,
+        numpy_keys.detach().to(device="cpu").contiguous().numpy().copy(),
+        numpy_position,
+        numpy_has_gauss,
+        numpy_cached,
+    ))
+    torch.set_rng_state(
+        state.torch_random_state.detach().to(device="cpu").contiguous()
+    )
+    if state.cuda_random_states:
+        if not torch.cuda.is_available():
+            raise ValueError(
+                "training resume requires CUDA RNG state but CUDA is unavailable"
+            )
+        if len(state.cuda_random_states) != torch.cuda.device_count():
+            raise ValueError("training resume CUDA RNG device count changed")
+        torch.cuda.set_rng_state_all([
+            value.detach().to(device="cpu").contiguous()
+            for value in state.cuda_random_states
+        ])
+
+
+def _checkpoint_state(
+    *,
+    model: TacticalV3Policy,
+    optimizer: torch.optim.Optimizer,
+    generator: torch.Generator,
+    model_config: TacticalV3ModelConfig,
+    objective_config: ObjectiveConfig,
+    trainer_config: TrainerConfig,
+    micro_batch_size: int | None,
+    next_epoch: int,
+    best_state: Mapping[str, Tensor],
+    history: list[EpochMetrics],
+    best_epoch: int,
+    best_nll: float,
+    epochs_without_improvement: int,
+    train_global_step: int,
+    validation_global_step: int,
+    uses_external_batch_provider: bool,
+) -> TrainingCheckpointState:
+    optimizer_state = _cpu_clone_tree(optimizer.state_dict())
+    if not isinstance(optimizer_state, Mapping):
+        raise TypeError("optimizer state must be a mapping")
+    device = torch.device(trainer_config.device)
+    cuda_states = (
+        tuple(
+            value.detach().to(device="cpu").contiguous().clone()
+            for value in torch.cuda.get_rng_state_all()
+        )
+        if device.type == "cuda" else ()
+    )
+    return TrainingCheckpointState(
+        model_config=model_config,
+        objective_config=objective_config,
+        trainer_config=trainer_config,
+        micro_batch_size=micro_batch_size,
+        next_epoch=next_epoch,
+        model_state=_snapshot_state(model),
+        best_state=MappingProxyType({
+            name: value.detach().to(device="cpu").contiguous().clone()
+            for name, value in best_state.items()
+        }),
+        optimizer_state=MappingProxyType(dict(optimizer_state)),
+        history=tuple(history),
+        best_epoch=best_epoch,
+        best_validation_policy_nll=float(best_nll),
+        epochs_without_improvement=epochs_without_improvement,
+        train_global_step=train_global_step,
+        validation_global_step=validation_global_step,
+        permutation_generator_state=(
+            generator.get_state().detach().to(device="cpu").contiguous().clone()
+        ),
+        python_random_state=_capture_python_random_state(),
+        numpy_random_state=_capture_numpy_random_state(),
+        torch_random_state=(
+            torch.get_rng_state().detach().to(device="cpu").contiguous().clone()
+        ),
+        cuda_random_states=cuda_states,
+        uses_external_batch_provider=uses_external_batch_provider,
+    )
+
+
+def _validate_resume_state(
+    state: TrainingCheckpointState,
+    *,
+    model_config: TacticalV3ModelConfig,
+    objective_config: ObjectiveConfig,
+    trainer_config: TrainerConfig,
+    micro_batch_size: int | None,
+    train_count: int,
+    validation_count: int,
+    validation_batch_size: int,
+) -> None:
+    if type(state) is not TrainingCheckpointState:
+        raise TypeError("resume_state must be TrainingCheckpointState")
+    if (
+        state.model_config != model_config
+        or state.objective_config != objective_config
+        or state.trainer_config != trainer_config
+        or state.micro_batch_size != micro_batch_size
+    ):
+        raise ValueError("training resume configuration changed")
+    if state.uses_external_batch_provider:
+        raise ValueError("training resume cannot restore an external batch provider")
+    if not 1 <= state.next_epoch <= trainer_config.max_epochs:
+        raise ValueError("training resume next epoch is invalid")
+    if (
+        len(state.history) != state.next_epoch
+        or tuple(metric.epoch for metric in state.history)
+        != tuple(range(state.next_epoch))
+        or any(type(metric) is not EpochMetrics for metric in state.history)
+    ):
+        raise ValueError("training resume history is not contiguous")
+    running_best = math.inf
+    best: EpochMetrics | None = None
+    for metric in state.history:
+        expected_improved = (
+            metric.validation_policy_nll < running_best - 1e-12
+        )
+        if metric.improved is not expected_improved:
+            raise ValueError("training resume improvement history is inconsistent")
+        if expected_improved:
+            running_best = metric.validation_policy_nll
+            best = metric
+    if (
+        best is None
+        or state.best_epoch != best.epoch
+        or state.best_validation_policy_nll != best.validation_policy_nll
+    ):
+        raise ValueError("training resume best metric is inconsistent")
+    trailing = 0
+    for metric in reversed(state.history):
+        if metric.improved:
+            break
+        trailing += 1
+    if trailing != state.epochs_without_improvement:
+        raise ValueError("training resume patience state is inconsistent")
+    expected_train_steps = state.next_epoch * math.ceil(
+        train_count / trainer_config.batch_size
+    )
+    expected_validation_steps = state.next_epoch * math.ceil(
+        validation_count / validation_batch_size
+    )
+    if (
+        state.train_global_step != expected_train_steps
+        or state.validation_global_step != expected_validation_steps
+    ):
+        raise ValueError("training resume global steps are inconsistent")
+    for label, tensors in (
+        ("current", state.model_state),
+        ("best", state.best_state),
+    ):
+        if not isinstance(tensors, Mapping) or not tensors:
+            raise TypeError(f"training resume {label} model state is invalid")
+        if any(
+            type(name) is not str
+            or not isinstance(value, Tensor)
+            or value.device.type != "cpu"
+            or not value.is_contiguous()
+            for name, value in tensors.items()
+        ):
+            raise TypeError(
+                f"training resume {label} model state must use contiguous CPU tensors"
+            )
+    if not isinstance(state.optimizer_state, Mapping):
+        raise TypeError("training resume optimizer state is invalid")
+    for label, value in (
+        ("permutation", state.permutation_generator_state),
+        ("torch", state.torch_random_state),
+        ("numpy", state.numpy_random_state[1]),
+    ):
+        if (
+            not isinstance(value, Tensor)
+            or value.device.type != "cpu"
+            or not value.is_contiguous()
+        ):
+            raise TypeError(f"training resume {label} RNG state is invalid")
+
+
 def _restore_state(
     model: TacticalV3Policy, state: Mapping[str, Tensor], device: torch.device,
 ) -> None:
@@ -448,6 +705,8 @@ def _train_offline_impl(
     initial_state_dict: Mapping[str, Tensor] | None,
     training_batch_provider: Callable[[int, int], tuple] | None,
     micro_batch_size: int | None,
+    resume_state: TrainingCheckpointState | None,
+    checkpoint_callback: Callable[[TrainingCheckpointState], None] | None,
 ) -> TrainingResult:
     if type(train_examples) is not tuple:
         raise TypeError("training split must be an immutable tuple")
@@ -471,6 +730,12 @@ def _train_offline_impl(
         raise TypeError("initial_state_dict must be a tensor mapping")
     if training_batch_provider is not None and not callable(training_batch_provider):
         raise TypeError("training_batch_provider must be callable")
+    if checkpoint_callback is not None and not callable(checkpoint_callback):
+        raise TypeError("checkpoint_callback must be callable")
+    if initial_state_dict is not None and resume_state is not None:
+        raise ValueError("initial state and training resume are mutually exclusive")
+    if resume_state is not None and training_batch_provider is not None:
+        raise ValueError("training resume cannot restore an external batch provider")
     if micro_batch_size is not None and (
         type(micro_batch_size) is not int
         or micro_batch_size < 1
@@ -505,8 +770,27 @@ def _train_offline_impl(
         trainer_config.batch_size
         if micro_batch_size is None else micro_batch_size
     )
+    if resume_state is not None:
+        _validate_resume_state(
+            resume_state,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=micro_batch_size,
+            train_count=len(train_rows),
+            validation_count=len(validation_rows),
+            validation_batch_size=execution_batch_size,
+        )
     model = TacticalV3Policy(model_config).to(device=device, dtype=torch.float32)
-    if initial_state_dict is not None:
+    if resume_state is not None:
+        model.load_state_dict(
+            {
+                name: value.detach().to(device=device).contiguous().clone()
+                for name, value in resume_state.model_state.items()
+            },
+            strict=True,
+        )
+    elif initial_state_dict is not None:
         copied_state = {
             name: value.detach().to(device=device).contiguous().clone()
             if isinstance(value, Tensor) else value
@@ -519,16 +803,38 @@ def _train_offline_impl(
     generator = torch.Generator(device="cpu")
     generator.manual_seed(torch_seed)
 
-    history: list[EpochMetrics] = []
-    best_epoch = -1
-    best_nll = math.inf
-    best_state: Mapping[str, Tensor] | None = None
-    epochs_without_improvement = 0
-    stopped_early = False
-    train_global_step = 0
-    validation_global_step = 0
+    if resume_state is None:
+        history: list[EpochMetrics] = []
+        best_epoch = -1
+        best_nll = math.inf
+        best_state: Mapping[str, Tensor] | None = None
+        epochs_without_improvement = 0
+        stopped_early = False
+        train_global_step = 0
+        validation_global_step = 0
+        start_epoch = 0
+    else:
+        optimizer.load_state_dict(dict(resume_state.optimizer_state))
+        generator.set_state(resume_state.permutation_generator_state)
+        history = list(resume_state.history)
+        best_epoch = resume_state.best_epoch
+        best_nll = resume_state.best_validation_policy_nll
+        best_state = MappingProxyType({
+            name: value.detach().to(device="cpu").contiguous().clone()
+            for name, value in resume_state.best_state.items()
+        })
+        epochs_without_improvement = resume_state.epochs_without_improvement
+        stopped_early = (
+            epochs_without_improvement >= trainer_config.patience_epochs
+        )
+        train_global_step = resume_state.train_global_step
+        validation_global_step = resume_state.validation_global_step
+        start_epoch = resume_state.next_epoch
+        _restore_random_states(resume_state)
 
-    for epoch in range(trainer_config.max_epochs):
+    for epoch in range(start_epoch, trainer_config.max_epochs):
+        if stopped_early:
+            break
         _check_training_deadline(deadline_monotonic)
         permutation = (
             torch.randperm(len(train_rows), generator=generator).tolist()
@@ -666,8 +972,36 @@ def _train_offline_impl(
             improved=improved,
         )
         history.append(metric)
-        if epoch_callback is not None:
-            epoch_callback(metric)
+        if best_state is None:
+            raise RuntimeError("completed epoch did not produce a best state")
+        checkpoint_state = _checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=micro_batch_size,
+            next_epoch=epoch + 1,
+            best_state=best_state,
+            history=history,
+            best_epoch=best_epoch,
+            best_nll=best_nll,
+            epochs_without_improvement=epochs_without_improvement,
+            train_global_step=train_global_step,
+            validation_global_step=validation_global_step,
+            uses_external_batch_provider=training_batch_provider is not None,
+        )
+        try:
+            if checkpoint_callback is not None:
+                checkpoint_callback(checkpoint_state)
+            if epoch_callback is not None:
+                epoch_callback(metric)
+        finally:
+            # Checkpoint generation constructs validation models and may otherwise
+            # consume global RNG. An observability callback must not change the
+            # deterministic optimization trajectory.
+            _restore_random_states(checkpoint_state)
         if epochs_without_improvement >= trainer_config.patience_epochs:
             stopped_early = True
             break

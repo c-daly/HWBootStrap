@@ -98,6 +98,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public static MlLabConfig Default() => new MlLabConfig();
 
+        public static bool IsValidRunName(string runName) =>
+            !string.IsNullOrWhiteSpace(runName) &&
+            SafeRunName.IsMatch(runName);
+
         public IReadOnlyList<string> Validate() => Validate(Trackers);
 
         public IReadOnlyList<string> Validate(
@@ -106,7 +110,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             var errors = new List<string>();
             bool structuredContinuation =
                 Environment == MlEnvironmentContract.TacticalV3;
-            if (string.IsNullOrWhiteSpace(RunName) || !SafeRunName.IsMatch(RunName))
+            if (!IsValidRunName(RunName))
                 errors.Add("Run name must use 1-64 letters, numbers, dots, underscores, or dashes.");
             if (structuredContinuation && TotalTimesteps < 2)
                 errors.Add(
@@ -221,6 +225,35 @@ namespace HexWars.Presentation.EditorTools.MlLab
             args.Add("--no-console-output");
             args.Add("--json");
             return string.Join(" ", args);
+        }
+
+        /// <summary>
+        /// Starts a new tactical-v3 lifecycle from an authenticated collection
+        /// already owned by another ML Lab run. The retry command derives the
+        /// source model, scenario, opponent, device, and trackers from that run;
+        /// none of the normal training-form selections participate.
+        /// </summary>
+        public static string BuildStructuredRetryArguments(
+            string collectionRun, string newRunName)
+        {
+            if (string.IsNullOrWhiteSpace(collectionRun))
+                throw new ArgumentException(
+                    "A selected collection run is required.",
+                    nameof(collectionRun));
+            if (!IsValidRunName(newRunName))
+                throw new ArgumentException(
+                    "Fresh run name must use 1-64 letters, numbers, dots, " +
+                    "underscores, or dashes.",
+                    nameof(newRunName));
+
+            return string.Join(" ", new[]
+            {
+                "retry-structured",
+                "--collection-run", Q(collectionRun),
+                "--run", Q(newRunName),
+                "--no-console-output",
+                "--json",
+            });
         }
 
         public string BuildStructuredPreflightArguments(string scenarioPath)
