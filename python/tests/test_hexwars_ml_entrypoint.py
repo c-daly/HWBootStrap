@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -28,6 +29,18 @@ def test_startup_error_path_is_limited_to_safe_training_run_names(
     ) == tmp_path / "continuation-1" / "train-err.log"
 
     assert hexwars_ml._startup_error_path(
+        [
+            "retry-structured",
+            "--collection-run",
+            str(tmp_path / "old-collection"),
+            "--run",
+            "retry-1",
+            "--runs-root",
+            str(tmp_path),
+        ]
+    ) == tmp_path / "retry-1" / "train-err.log"
+
+    assert hexwars_ml._startup_error_path(
         ["evaluate", "--run", "evaluation", "--runs-root", str(tmp_path)]
     ) is None
     assert hexwars_ml._startup_error_path(
@@ -44,6 +57,96 @@ def test_startup_error_path_is_limited_to_safe_training_run_names(
     assert hexwars_ml._startup_error_path(
         ["train", "--", "--run=not-an-option", f"--runs-root={tmp_path}"]
     ) is None
+
+
+@pytest.mark.parametrize("protected_kind", ("selected", "owner", "source"))
+def test_retry_entrypoint_does_not_create_a_log_inside_a_protected_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    selected = runs / "selected"
+    selected.mkdir(parents=True)
+    manifest: dict[str, object] = {}
+    collection: dict[str, object] = {}
+
+    if protected_kind == "selected":
+        runs_root = selected
+        run_name = "child"
+        destination = selected / run_name
+    elif protected_kind == "owner":
+        destination = runs / "owner"
+        destination.mkdir()
+        manifest["collection_source_run"] = r"Z:\archived-runs\owner"
+        runs_root = runs
+        run_name = destination.name
+    else:
+        destination = runs / "source-policy"
+        destination.mkdir()
+        collection["source"] = {"run": r"Z:\archived-runs\source-policy"}
+        runs_root = runs
+        run_name = destination.name
+
+    (selected / "run.json").write_text(
+        json.dumps(manifest), encoding="utf-8",
+    )
+    (selected / "collection.json").write_text(
+        json.dumps(collection), encoding="utf-8",
+    )
+    argv = [
+        "retry-structured",
+        "--collection-run", str(selected),
+        "--run", run_name,
+        "--runs-root", str(runs_root),
+        "--no-console-output",
+        "--json",
+    ]
+    called = False
+
+    def fake_main(_argv: list[str]) -> int:
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(cli_module, "main", fake_main)
+
+    assert hexwars_ml._startup_error_path(argv) is None
+    assert hexwars_ml.run(argv) == 1
+    assert called is True
+    assert not (destination / "train-err.log").exists()
+    if protected_kind == "selected":
+        assert not destination.exists()
+
+
+def test_retry_entrypoint_keeps_normal_sibling_startup_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = tmp_path / "runs"
+    selected = runs / "selected"
+    selected.mkdir(parents=True)
+    (selected / "run.json").write_text("{}\n", encoding="utf-8")
+    direct_source = tmp_path / "archived" / "safe-sibling"
+    direct_source.mkdir(parents=True)
+    (selected / "collection.json").write_text(
+        json.dumps({"source": {"run": str(direct_source)}}),
+        encoding="utf-8",
+    )
+    argv = [
+        "retry-structured",
+        "--collection-run", str(selected),
+        "--run", "safe-sibling",
+        "--runs-root", str(runs),
+    ]
+    monkeypatch.setattr(cli_module, "main", lambda _argv: 0)
+
+    assert hexwars_ml.run(argv) == 0
+    contents = (runs / "safe-sibling" / "train-err.log").read_text(
+        encoding="utf-8",
+    )
+    assert "ML Lab startup began with pid " in contents
+    assert "ML Lab startup exited with code 0" in contents
 
 
 def test_training_argparse_failure_is_retained_in_run_stderr_log(

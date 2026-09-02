@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import re
@@ -14,7 +15,9 @@ from typing import Iterator, Sequence, TextIO
 
 
 _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_TRAINING_COMMANDS = frozenset({"train", "train-structured", "resume"})
+_TRAINING_COMMANDS = frozenset({
+    "train", "train-structured", "retry-structured", "resume",
+})
 _STARTUP_BEGAN_PREFIX = "ML Lab startup began with pid "
 _STARTUP_EXITED_PREFIX = "ML Lab startup exited with code "
 
@@ -31,6 +34,102 @@ def _option_value(argv: Sequence[str], option: str) -> str | None:
     return value
 
 
+def _comparison_path(path: Path) -> Path:
+    return Path(path).resolve(strict=False)
+
+
+def _recorded_run_candidates(value: object, runs_root: Path) -> tuple[Path, ...]:
+    if type(value) is not str or not value.strip():
+        return ()
+    direct = Path(value)
+    basename = Path(value.replace("\\", "/")).name
+    candidates = [direct]
+    if basename:
+        fallback = Path(runs_root) / basename
+        if fallback != direct:
+            candidates.append(fallback)
+    return tuple(candidates)
+
+
+def _recorded_run_protections(value: object, runs_root: Path) -> tuple[Path, ...]:
+    """Protect candidates up to the one strict retry resolution would select."""
+
+    protected: list[Path] = []
+    for candidate in _recorded_run_candidates(value, runs_root):
+        protected.append(candidate)
+        is_junction = getattr(candidate, "is_junction", None)
+        if (
+            candidate.is_dir()
+            and not candidate.is_symlink()
+            and not (is_junction is not None and is_junction())
+        ):
+            break
+    return tuple(protected)
+
+
+def _quiet_json_object(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    return value if type(value) is dict else None
+
+
+def _retry_protected_runs(collection_run: Path, runs_root: Path) -> set[Path]:
+    """Discover retry sources without importing the ML stack or creating a log."""
+
+    selected = _comparison_path(collection_run)
+    protected = {selected}
+    manifest = _quiet_json_object(selected / "run.json")
+    owner_candidates: list[Path] = []
+    if manifest is not None:
+        for candidate in _recorded_run_protections(
+            manifest.get("collection_source_run"), runs_root,
+        ):
+            resolved = _comparison_path(candidate)
+            protected.add(resolved)
+            owner_candidates.append(resolved)
+
+        source_policy = manifest.get("source_policy")
+        if type(source_policy) is dict:
+            for candidate in _recorded_run_protections(
+                source_policy.get("run"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+        config = manifest.get("config")
+        if type(config) is dict:
+            for candidate in _recorded_run_protections(
+                config.get("initialization_source"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+
+    for run in (selected, *owner_candidates):
+        collection = _quiet_json_object(run / "collection.json")
+        if collection is None:
+            continue
+        source = collection.get("source")
+        if type(source) is not dict:
+            continue
+        for candidate in _recorded_run_protections(source.get("run"), runs_root):
+            protected.add(_comparison_path(candidate))
+    return protected
+
+
+def _retry_log_destination_conflicts(
+    argv: Sequence[str], runs_root: Path, destination: Path,
+) -> bool:
+    if not argv or argv[0] != "retry-structured":
+        return False
+    collection_value = _option_value(argv, "--collection-run")
+    if collection_value is None:
+        return False
+    resolved_destination = _comparison_path(destination)
+    return any(
+        resolved_destination == source or source in resolved_destination.parents
+        for source in _retry_protected_runs(Path(collection_value), runs_root)
+    )
+
+
 def _startup_error_path(argv: Sequence[str]) -> Path | None:
     if not argv or argv[0] not in _TRAINING_COMMANDS:
         return None
@@ -39,7 +138,10 @@ def _startup_error_path(argv: Sequence[str]) -> Path | None:
         return None
     runs_root = _option_value(argv, "--runs-root")
     root = Path(runs_root) if runs_root else Path(__file__).resolve().parent / "runs"
-    return root / run_name / "train-err.log"
+    run_dir = root / run_name
+    if _retry_log_destination_conflicts(argv, root, run_dir):
+        return None
+    return run_dir / "train-err.log"
 
 
 def _is_link_like(path: Path) -> bool:

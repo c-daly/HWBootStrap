@@ -325,6 +325,51 @@ namespace HexWars.Presentation.Tests
             Assert.That(args, Does.Not.Contain("--workers"));
         }
 
+        [Test]
+        public void BuildStructuredRetryArguments_UsesOnlySelectedCollectionAndFreshRun()
+        {
+            string args = MlLabConfig.BuildStructuredRetryArguments(
+                @"C:\runs\stopped collection", "replayed-training");
+
+            Assert.That(args, Does.StartWith(
+                "retry-structured --collection-run \"C:\\runs\\stopped collection\" " +
+                "--run replayed-training"));
+            Assert.That(args, Does.EndWith("--no-console-output --json"));
+            Assert.That(args, Does.Not.Contain("--source-run"));
+            Assert.That(args, Does.Not.Contain("--scenario-file"));
+            Assert.That(args, Does.Not.Contain("--opponent"));
+            Assert.That(args, Does.Not.Contain("--device"));
+            Assert.That(args, Does.Not.Contain("--tracker"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase(" ")]
+        public void BuildStructuredRetryArguments_RequiresSelectedCollectionRun(
+            string collectionRun)
+        {
+            ArgumentException error = Assert.Throws<ArgumentException>(() =>
+                MlLabConfig.BuildStructuredRetryArguments(
+                    collectionRun, "replayed-training"));
+
+            Assert.That(error.ParamName, Is.EqualTo("collectionRun"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase("bad name")]
+        [TestCase("../existing")]
+        public void BuildStructuredRetryArguments_RequiresFreshSafeRunName(
+            string runName)
+        {
+            ArgumentException error = Assert.Throws<ArgumentException>(() =>
+                MlLabConfig.BuildStructuredRetryArguments(
+                    @"C:\runs\stopped", runName));
+
+            Assert.That(error.ParamName, Is.EqualTo("newRunName"));
+            Assert.That(error.Message, Does.Contain("Fresh run name"));
+        }
+
         [TestCase(MlOpponentKind.Greedy, "greedy")]
         [TestCase(MlOpponentKind.Random, "random")]
         [TestCase(MlOpponentKind.FixedRun, "run:C:\\runs\\opponent")]

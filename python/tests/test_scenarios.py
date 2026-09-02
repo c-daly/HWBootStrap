@@ -358,6 +358,26 @@ def test_tactical_v3_default_and_full_roster_templates_resolve_strictly() -> Non
     )
 
 
+def test_tactical_v3_accepts_unity_float32_stage_one_reward_values() -> None:
+    document = tactical_v3_document()
+    document["reward"].update(
+        {
+            "material_adjustment_bound": 0.20000000298023225,
+            "time_pressure_bound": 0.05000000074505806,
+        }
+    )
+
+    validate_scenario_document(document)
+
+
+def test_tactical_v3_rejects_a_different_float32_stage_one_reward_value() -> None:
+    document = tactical_v3_document()
+    document["reward"]["material_adjustment_bound"] = 0.20000002
+
+    with pytest.raises(ValueError, match="stage-one value"):
+        validate_scenario_document(document)
+
+
 @pytest.mark.parametrize(
     ("mutation", "match"),
     [

@@ -777,6 +777,138 @@ def test_structured_train_forwards_independent_target_scenario_and_tensorboard(
     ]
 
 
+def test_structured_retry_parser_accepts_the_unity_launch_shape(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    runs = tmp_path / "runs"
+
+    args = cli_module.build_parser().parse_args([
+        "retry-structured",
+        "--collection-run", str(old),
+        "--run", "new-retry",
+        "--no-console-output",
+        "--json",
+        "--runs-root", str(runs),
+        "--server", "ignored-server.dll",
+    ])
+
+    assert args.command == "retry-structured"
+    assert args.collection_run == old
+    assert args.run == "new-retry"
+    assert args.runs_root == runs
+    assert args.server == "ignored-server.dll"
+    assert args.no_console_output and args.json
+
+
+def test_structured_retry_dispatches_only_authenticated_collection_inputs(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    runs = tmp_path / "runs"
+    old.mkdir()
+    direct_source = tmp_path / "archived" / "new-retry"
+    direct_source.mkdir(parents=True)
+    atomic_write_json(old / "collection.json", {
+        "source": {"run": str(direct_source)},
+    })
+    received = []
+
+    def retry_runner(*, collection_run, run_name, runs_root):
+        received.append((collection_run, run_name, runs_root))
+        run_dir = runs_root / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(run_dir / "run.json", {
+            "schema_version": 1,
+            "state": "completed",
+            "config": {"run_name": run_name},
+        })
+        return run_dir
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "retry-structured",
+            "--collection-run", str(old),
+            "--run", "new-retry",
+            "--runs-root", str(runs),
+            "--server", "must-not-be-forwarded.dll",
+            "--json",
+        ],
+        structured_retry_runner=retry_runner,
+        stdout=output,
+    )
+
+    assert exit_code == 0
+    _assert_envelope(json.loads(output.getvalue()), "retry-structured")
+    assert received == [(old, "new-retry", runs)]
+    assert (runs / "new-retry" / "train-err.log").is_file()
+
+
+@pytest.mark.parametrize("protected_kind", ("selected", "owner", "source"))
+def test_structured_retry_rejects_protected_destination_before_opening_log(
+    tmp_path: Path,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    selected = runs / "selected"
+    selected.mkdir(parents=True)
+    manifest: dict[str, object] = {}
+    collection: dict[str, object] = {}
+
+    if protected_kind == "selected":
+        runs_root = selected
+        run_name = "child"
+        destination = selected / run_name
+    elif protected_kind == "owner":
+        destination = runs / "owner"
+        destination.mkdir()
+        # Exercise the same basename fallback used when a recorded absolute path
+        # came from another machine.
+        manifest["collection_source_run"] = r"Z:\archived-runs\owner"
+        runs_root = runs
+        run_name = destination.name
+    else:
+        destination = runs / "source-policy"
+        destination.mkdir()
+        collection["source"] = {"run": r"Z:\archived-runs\source-policy"}
+        runs_root = runs
+        run_name = destination.name
+
+    atomic_write_json(selected / "run.json", manifest)
+    atomic_write_json(selected / "collection.json", collection)
+    called = False
+
+    def retry_runner(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("retry backend must not run for a protected destination")
+
+    exit_code, payload = _invoke_json(
+        [
+            "retry-structured",
+            "--collection-run", str(selected),
+            "--run", run_name,
+            "--runs-root", str(runs_root),
+            "--json",
+        ],
+        structured_retry_runner=retry_runner,
+    )
+
+    assert exit_code == 1
+    assert payload["result"] == {
+        "error": "ValueError",
+        "message": (
+            "structured retry destination must be outside the selected, "
+            "collection-owner, and source-policy runs"
+        ),
+    }
+    assert called is False
+    assert not (destination / "train-err.log").exists()
+    if protected_kind == "selected":
+        assert not destination.exists()
+
+
 def test_structured_preflight_parser_has_training_compatible_defaults(
     tmp_path: Path,
 ) -> None:

@@ -880,6 +880,205 @@ namespace HexWars.Presentation.Tests
             }
         }
 
+        [TestCase("stopped")]
+        [TestCase("completed")]
+        [TestCase("failed")]
+        public void StructuredRetry_AllowsTerminalRunWithCompleteCollection(
+            string terminalState)
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-retry-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, terminalState,
+                    trainLabels: 12, validationLabels: 5);
+
+                MlStructuredRetryFormState state =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "fresh-replay", root);
+
+                Assert.That(state.CanLaunch, Is.True);
+                Assert.That(state.HasDurableCheckpoint, Is.False);
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("restart optimization"));
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("already-collected labels"));
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("will not collect games again"));
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("Future durable last.pt checkpoints"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [Test]
+        public void StructuredRetry_UsesDurableCheckpointWhenPresent()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-resume-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, "stopped",
+                    trainLabels: 12, validationLabels: 5);
+                string checkpointDirectory = Path.Combine(
+                    collectionRun, "training", "checkpoints");
+                Directory.CreateDirectory(checkpointDirectory);
+                File.WriteAllText(
+                    Path.Combine(checkpointDirectory, "last.pt"),
+                    "durable checkpoint");
+
+                MlStructuredRetryFormState state =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "fresh-resume", root);
+
+                Assert.That(state.CanLaunch, Is.True);
+                Assert.That(state.HasDurableCheckpoint, Is.True);
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("Python will authenticate"));
+                Assert.That(state.RecoveryDescription,
+                    Does.Contain("last completed epoch"));
+                Assert.That(state.RecoveryDescription,
+                    Does.Not.Contain("restart optimization"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [TestCase("created")]
+        [TestCase("running")]
+        [TestCase("stopping")]
+        public void StructuredRetry_RejectsNonTerminalCollectionRun(string runState)
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-live-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, runState,
+                    trainLabels: 12, validationLabels: 5);
+
+                MlStructuredRetryFormState state =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "fresh-replay", root);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains("must be stopped, completed, or failed"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [TestCase(9, 5, "Train")]
+        [TestCase(12, 3, "Validation")]
+        public void StructuredRetry_RejectsIncompleteCollection(
+            int trainLabels, int validationLabels, string partition)
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-incomplete-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, "stopped",
+                    trainLabels, validationLabels);
+
+                MlStructuredRetryFormState state =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "fresh-replay", root);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains(partition + " collection is incomplete"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [TestCase("structured_imitation", "tactical-v3", "algorithm")]
+        [TestCase("structured_dagger", "tactical-v2", "environment")]
+        public void StructuredRetry_RejectsWrongLifecycleKind(
+            string algorithm, string environment, string expectedError)
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-kind-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, "stopped",
+                    trainLabels: 12, validationLabels: 5,
+                    algorithm: algorithm, environment: environment);
+
+                MlStructuredRetryFormState state =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "fresh-replay", root);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains(expectedError));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
+        [Test]
+        public void StructuredRetry_RequiresFreshUnoccupiedRunName()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-structured-target-" +
+                Guid.NewGuid().ToString("N"));
+            string collectionRun = Path.Combine(root, "collected");
+            try
+            {
+                CreateStructuredCollectionRun(
+                    collectionRun, "stopped",
+                    trainLabels: 12, validationLabels: 5);
+                Directory.CreateDirectory(Path.Combine(root, "occupied"));
+                File.WriteAllText(
+                    Path.Combine(root, "occupied", "run.json"), "{}");
+
+                MlStructuredRetryFormState occupied =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "occupied", root);
+                MlStructuredRetryFormState unsafeName =
+                    MlStructuredRetryFormState.Evaluate(
+                        collectionRun, "../collected", root);
+
+                Assert.That(occupied.CanLaunch, Is.False);
+                Assert.That(occupied.Errors,
+                    Has.Some.Contains("Run already exists"));
+                Assert.That(unsafeName.CanLaunch, Is.False);
+                Assert.That(unsafeName.Errors,
+                    Has.Some.Contains("Fresh run name"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
         [Test]
         public void TrainingFormPolicy_KeepsV3OpponentAndHidesOnlySb3Fields()
         {
@@ -909,6 +1108,10 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void StopControlPolicy_ProtectsPublishedAndTerminalRuns()
         {
+            Assert.That(
+                MlStopControlPolicy.StructuredStopIsImmediate,
+                Is.False,
+                "The tactical-v3 safe stop must request --after-checkpoint, not --now.");
             Assert.That(MlStopControlPolicy.CanRequestStop(
                 @"C:\runs\source", MlRunState.Completed,
                 hasControlFile: true), Is.False);
@@ -921,6 +1124,28 @@ namespace HexWars.Presentation.Tests
             Assert.That(MlStopControlPolicy.CanRequestStop(
                 @"C:\runs\starting", MlRunState.Unknown,
                 hasControlFile: true), Is.True);
+        }
+
+        [Test]
+        public void StatusQueryPolicy_WaitsForManifestDuringDetachedStartup()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(), "hexwars-status-query-" + Guid.NewGuid());
+            string run = Path.Combine(root, "retry");
+            try
+            {
+                Assert.That(MlRunStatusQueryPolicy.CanQuery(run), Is.False);
+                Directory.CreateDirectory(run);
+                File.WriteAllText(Path.Combine(run, "train-err.log"), string.Empty);
+                Assert.That(MlRunStatusQueryPolicy.CanQuery(run), Is.False);
+
+                File.WriteAllText(Path.Combine(run, "run.json"), "{}\n");
+                Assert.That(MlRunStatusQueryPolicy.CanQuery(run), Is.True);
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
         }
 
         [Test]
@@ -1270,6 +1495,33 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(seat.Kind, Is.EqualTo(kind));
             Assert.That(seat.Path, Is.EqualTo("preserved-scripted-path"));
+        }
+
+        static void CreateStructuredCollectionRun(
+            string runDirectory,
+            string state,
+            int trainLabels,
+            int validationLabels,
+            string algorithm = "structured_dagger",
+            string environment = "tactical-v3")
+        {
+            Directory.CreateDirectory(runDirectory);
+            File.WriteAllText(
+                Path.Combine(runDirectory, "run.json"),
+                "{\"schema_version\":1," +
+                "\"state\":\"" + state + "\"," +
+                "\"config\":{\"algorithm\":\"" + algorithm + "\"}," +
+                "\"contract\":{\"environment\":\"" + environment + "\"}}");
+            File.WriteAllText(
+                Path.Combine(runDirectory, "collection.json"),
+                "{\"schema_version\":1," +
+                "\"kind\":\"tactical-v3-ml-lab-dagger-continuation-collection\"," +
+                "\"schedule\":{\"train_label_target\":10," +
+                "\"validation_label_target\":4}," +
+                "\"train\":{\"labels\":" + trainLabels + "," +
+                "\"records_sha256\":\"train-digest\"}," +
+                "\"validation\":{\"labels\":" + validationLabels + "," +
+                "\"records_sha256\":\"validation-digest\"}}");
         }
 
         static (string Run, string Manifest, ModelDuelConfiguration Config)

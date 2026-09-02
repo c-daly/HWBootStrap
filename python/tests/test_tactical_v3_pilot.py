@@ -7,6 +7,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
+import torch
 
 from ml_lab.tactical_v3_client import OracleStepResult, TeacherSelection
 from ml_lab.tactical_v3_schema import parse_spaces, parse_view
@@ -691,6 +692,38 @@ def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
     records.write_bytes(records.read_bytes() + b" ")
     with pytest.raises(ValueError, match="records|canonical|hash"):
         load(output, _identity(), oracle_expansion_budget=2048)
+
+
+def test_dagger_episode_reader_preserves_continuation_medium_profile(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-medium", 65_000_001, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(
+        _DaggerClient(profile=item.profile_id), actor, item,
+    )
+    output = module.write_dagger_episode(tmp_path / "medium", episode)
+
+    loaded = module.load_dagger_episode(
+        output,
+        _identity(),
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+    )
+
+    assert loaded == episode
+    assert type(loaded.summary.schedule) is module.ContinuationScheduleItem
 
 
 def test_selective_partition_reader_reopens_exact_overlay_and_rejects_manifest_tamper(
@@ -1443,7 +1476,13 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     import ml_lab.tactical_v3_pilot as module
     from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
     from ml_lab.tactical_v3_model import TacticalV3Policy
-    from ml_lab.tactical_v3_training import EpochMetrics, StepMetrics, TrainingResult
+    from ml_lab.tactical_v3_training import (
+        EpochMetrics,
+        StepMetrics,
+        TrainingResult,
+        _checkpoint_state,
+        _snapshot_state,
+    )
 
     collection = _canonical_collection()
     output = tmp_path / "pilot"
@@ -1453,10 +1492,12 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     def fake_train(
         train, validation, model_config, objective_config, trainer_config,
         *, epoch_callback, step_callback, deadline_monotonic,
-        initial_state_dict, training_batch_provider,
+        initial_state_dict, training_batch_provider, checkpoint_callback,
+        resume_state,
     ):
         assert initial_state_dict is None
         assert training_batch_provider is None
+        assert resume_state is None
         captured.update(train=train, validation=validation, model=model_config,
                         objective=objective_config, trainer=trainer_config,
                         deadline=deadline_monotonic)
@@ -1470,6 +1511,29 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
         step_callback(StepMetrics("train", 0, 1, 2, 1, metrics))
         step_callback(StepMetrics("validation", 0, 0, 1, 2, metrics))
         step_callback(StepMetrics("validation", 0, 1, 2, 1, metrics))
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=trainer_config.learning_rate,
+        )
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(trainer_config.seed)
+        checkpoint_callback(_checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=None,
+            next_epoch=1,
+            best_state=_snapshot_state(model),
+            history=list(history),
+            best_epoch=0,
+            best_nll=1.0,
+            epochs_without_improvement=0,
+            train_global_step=1,
+            validation_global_step=1,
+            uses_external_batch_provider=False,
+        ))
         epoch_callback(history[0])
         return TrainingResult(model, model_config, objective_config, trainer_config,
                               0, 1.0, False, history)
@@ -1558,6 +1622,39 @@ def test_policy_target_metrics_honors_training_deadline_before_a_batch() -> None
         )
 
 
+def test_pilot_training_accepts_an_explicitly_disabled_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collection = _canonical_collection()
+    output = tmp_path / "training"
+    output.mkdir()
+    observed = []
+
+    def inspect_deadline(model, examples, *, deadline_monotonic, **kwargs):
+        observed.append(deadline_monotonic)
+        raise RuntimeError("deadline inspected")
+
+    monkeypatch.setattr(module, "_policy_target_metrics", inspect_deadline)
+
+    with pytest.raises(RuntimeError, match="deadline inspected"):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            training_deadline_seconds=None,
+            tensorboard_enabled=False,
+        )
+
+    assert observed == [None]
+
+
 def test_pilot_training_honors_cooperative_stop_without_tensorboard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1610,6 +1707,156 @@ def test_pilot_training_honors_cooperative_stop_without_tensorboard(
     assert not (output / "tensorboard").exists()
     assert not (output / "checkpoints").exists()
     assert (output / "steps.jsonl").is_file()
+
+
+def test_pilot_stop_after_completed_epoch_retains_best_and_resume_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+    from ml_lab.tactical_v3_training import (
+        EpochMetrics,
+        TrainingResult,
+        _checkpoint_state,
+        _snapshot_state,
+    )
+
+    collection = _canonical_collection()
+    stopped = {"value": False}
+    metrics = MappingProxyType({
+        "total": 1.0,
+        "policy": 1.0,
+        "outcome": 0.0,
+        "horizon": 0.0,
+        "remaining_turns": 0.0,
+    })
+
+    def fake_policy_metrics(model, examples, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback is not None:
+            callback(len(examples), len(examples))
+        return module.PolicyTargetMetrics(1.0, 0.5, len(examples), len(examples))
+
+    def fake_train(
+        train, validation, model_config, objective_config, trainer_config,
+        *, checkpoint_callback, epoch_callback, **kwargs,
+    ):
+        del train, validation, kwargs
+        model = TacticalV3Policy(model_config).eval()
+        metric = EpochMetrics(0, metrics, metrics, 1.0, True)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=trainer_config.learning_rate,
+        )
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(trainer_config.seed)
+        checkpoint_callback(_checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=None,
+            next_epoch=1,
+            best_state=_snapshot_state(model),
+            history=[metric],
+            best_epoch=0,
+            best_nll=1.0,
+            epochs_without_improvement=0,
+            train_global_step=1,
+            validation_global_step=1,
+            uses_external_batch_provider=False,
+        ))
+        stopped["value"] = True
+        epoch_callback(metric)
+        return TrainingResult(
+            model, model_config, objective_config, trainer_config,
+            0, 1.0, False, (metric,),
+        )
+
+    monkeypatch.setattr(module, "_policy_target_metrics", fake_policy_metrics)
+    monkeypatch.setattr(module, "train_offline", fake_train)
+    output = tmp_path / "training"
+    output.mkdir()
+
+    with pytest.raises(
+        module.PilotTrainingStopRequested,
+        match="training stop requested",
+    ):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            tensorboard_enabled=False,
+            stop_requested=lambda: stopped["value"],
+        )
+
+    assert (output / "checkpoints" / "best.pt").is_file()
+    assert (output / "checkpoints" / "last.pt").is_file()
+    assert (output / "metrics.jsonl").read_text(encoding="utf-8") == (
+        output / "telemetry.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_pilot_honors_deferred_stop_during_restored_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collection = _canonical_collection()
+    original_metrics = module._policy_target_metrics
+    metric_pass = {"count": 0}
+    deferred_stop = {"requested": False}
+
+    def request_during_restored_metrics(model, examples, **kwargs):
+        metric_pass["count"] += 1
+        progress_callback = kwargs.get("progress_callback")
+        if metric_pass["count"] == 3:
+            def request_then_report(completed, total):
+                deferred_stop["requested"] = True
+                progress_callback(completed, total)
+
+            kwargs["progress_callback"] = request_then_report
+        return original_metrics(model, examples, **kwargs)
+
+    monkeypatch.setattr(
+        module, "_policy_target_metrics", request_during_restored_metrics,
+    )
+    _, _, default_trainer = module._pilot_configs(227, "cpu")
+    trainer = replace(
+        default_trainer, max_epochs=1, patience_epochs=1,
+    )
+    output = tmp_path / "training"
+    output.mkdir()
+
+    with pytest.raises(
+        module.PilotTrainingStopRequested,
+        match="stop-after-checkpoint requested",
+    ):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            trainer_config=trainer,
+            tensorboard_enabled=False,
+            stop_after_checkpoint_requested=(
+                lambda: deferred_stop["requested"]
+            ),
+        )
+
+    assert metric_pass["count"] == 3
+    assert (output / "checkpoints" / "best.pt").is_file()
+    assert (output / "checkpoints" / "last.pt").is_file()
 
 
 class _EvaluationClient:

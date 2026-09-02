@@ -1107,6 +1107,27 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
     }
 
+    public static class MlRunStatusQueryPolicy
+    {
+        /// <summary>The detached entry point creates train-err.log before a slow
+        /// structured retry has authenticated its corpus and published run.json.
+        /// Status is meaningful only after that manifest exists.</summary>
+        public static bool CanQuery(string runDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(runDirectory)) return false;
+            try
+            {
+                return File.Exists(Path.Combine(runDirectory, "run.json"));
+            }
+            catch (Exception error) when (
+                error is ArgumentException || error is IOException ||
+                error is UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+    }
+
     public static class MlTrainingRunTarget
     {
         const string StartupExitedPrefix = "ML Lab startup exited with code ";
@@ -1217,6 +1238,280 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.AddRange(
                     ValidatePublication(runDirectory + "-model"));
             return errors;
+        }
+    }
+
+    /// <summary>
+    /// Admission policy for replaying a completed tactical-v3 DAgger collection
+    /// into a fresh lifecycle run. This intentionally does not inspect or mutate
+    /// the normal training form: collection provenance is authoritative for the
+    /// source model, scenario, opponent, device, and trackers.
+    /// </summary>
+    public sealed class MlStructuredRetryFormState
+    {
+        const string CollectionKind =
+            "tactical-v3-ml-lab-dagger-continuation-collection";
+
+        MlStructuredRetryFormState(
+            IReadOnlyList<string> errors,
+            bool sourceEligible,
+            bool hasDurableCheckpoint)
+        {
+            Errors = errors;
+            HasDurableCheckpoint = sourceEligible && hasDurableCheckpoint;
+            RecoveryDescription = !sourceEligible
+                ? "Select a terminal tactical-v3 structured DAgger run with a " +
+                  "complete train and validation collection."
+                : HasDurableCheckpoint
+                    ? "This run appears to have training/checkpoints/last.pt. " +
+                      "Python will authenticate it before the new run resumes " +
+                      "from its last completed epoch."
+                    : "This older run has no training/checkpoints/last.pt. The " +
+                      "new run will restart optimization from the original source " +
+                      "model using the already-collected labels; it will not " +
+                      "collect games again. Future durable last.pt checkpoints " +
+                      "can resume from their last completed epoch.";
+        }
+
+        public IReadOnlyList<string> Errors { get; }
+        public bool CanLaunch => Errors.Count == 0;
+        public bool HasDurableCheckpoint { get; }
+        public string RecoveryDescription { get; }
+
+        public static MlStructuredRetryFormState Evaluate(
+            string collectionRun,
+            string newRunName,
+            string runsRoot,
+            bool collectionRunLive = false,
+            bool targetRunLive = false)
+        {
+            var errors = new List<string>();
+            bool hasDurableCheckpoint = false;
+            ValidateCollectionRun(
+                collectionRun, collectionRunLive, errors,
+                out hasDurableCheckpoint);
+            bool sourceEligible = errors.Count == 0;
+
+            bool validRunName = MlLabConfig.IsValidRunName(newRunName);
+            if (!validRunName)
+                errors.Add(
+                    "Fresh run name must use 1-64 letters, numbers, dots, " +
+                    "underscores, or dashes.");
+            if (string.IsNullOrWhiteSpace(runsRoot))
+            {
+                errors.Add("Runs root is required for a structured retry.");
+            }
+            else if (validRunName)
+            {
+                try
+                {
+                    errors.AddRange(MlTrainingRunTarget.ValidateContinuation(
+                        Path.Combine(runsRoot, newRunName), targetRunLive));
+                }
+                catch (Exception error) when (
+                    error is ArgumentException ||
+                    error is IOException ||
+                    error is NotSupportedException ||
+                    error is UnauthorizedAccessException)
+                {
+                    errors.Add(
+                        "Could not resolve the fresh run target: " +
+                        error.Message);
+                }
+            }
+
+            return new MlStructuredRetryFormState(
+                errors, sourceEligible, hasDurableCheckpoint);
+        }
+
+        static void ValidateCollectionRun(
+            string runDirectory,
+            bool liveProcess,
+            List<string> errors,
+            out bool hasDurableCheckpoint)
+        {
+            hasDurableCheckpoint = false;
+            if (string.IsNullOrWhiteSpace(runDirectory))
+            {
+                errors.Add("Select a collection run to retry.");
+                return;
+            }
+            if (liveProcess)
+            {
+                errors.Add(
+                    "The selected collection run still has a live trainer; " +
+                    "wait for a terminal state before retrying it.");
+                return;
+            }
+
+            try
+            {
+                if (!Directory.Exists(runDirectory))
+                {
+                    errors.Add(
+                        "Selected collection run does not exist: " +
+                        runDirectory);
+                    return;
+                }
+                if ((File.GetAttributes(runDirectory) &
+                     FileAttributes.ReparsePoint) != 0)
+                {
+                    errors.Add(
+                        "Selected collection run must be a regular local " +
+                        "directory, not a reparse point.");
+                    return;
+                }
+
+                string runManifestPath =
+                    Path.Combine(runDirectory, "run.json");
+                string collectionPath =
+                    Path.Combine(runDirectory, "collection.json");
+                if (!RequireRegularFile(
+                        runManifestPath, "Run metadata", errors) ||
+                    !RequireRegularFile(
+                        collectionPath, "Collection manifest", errors))
+                    return;
+
+                RetryRunManifest run = JsonUtility.FromJson<RetryRunManifest>(
+                    File.ReadAllText(runManifestPath));
+                if (run == null || run.schema_version != 1)
+                    errors.Add(
+                        "Selected collection run must use lifecycle schema 1.");
+                if (!string.Equals(
+                        run?.config?.algorithm,
+                        "structured_dagger",
+                        StringComparison.Ordinal))
+                    errors.Add(
+                        "Selected collection run algorithm must be " +
+                        "structured_dagger.");
+                if (!string.Equals(
+                        run?.contract?.environment,
+                        "tactical-v3",
+                        StringComparison.Ordinal))
+                    errors.Add(
+                        "Selected collection run environment must be " +
+                        "tactical-v3.");
+                if (!IsTerminalState(run?.state))
+                    errors.Add(
+                        "Selected collection run must be stopped, completed, " +
+                        "or failed before retrying.");
+
+                RetryCollectionManifest collection =
+                    JsonUtility.FromJson<RetryCollectionManifest>(
+                        File.ReadAllText(collectionPath));
+                if (collection == null || collection.schema_version != 1 ||
+                    !string.Equals(
+                        collection.kind, CollectionKind,
+                        StringComparison.Ordinal))
+                {
+                    errors.Add(
+                        "Selected run does not contain a supported tactical-v3 " +
+                        "structured DAgger collection.");
+                }
+                else
+                {
+                    ValidatePartition(
+                        "Train", collection.train,
+                        collection.schedule?.train_label_target ?? 0,
+                        errors);
+                    ValidatePartition(
+                        "Validation", collection.validation,
+                        collection.schedule?.validation_label_target ?? 0,
+                        errors);
+                }
+
+                string checkpointPath = Path.Combine(
+                    runDirectory, "training", "checkpoints", "last.pt");
+                hasDurableCheckpoint =
+                    File.Exists(checkpointPath) &&
+                    (File.GetAttributes(checkpointPath) &
+                     FileAttributes.ReparsePoint) == 0;
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is IOException ||
+                error is NotSupportedException ||
+                error is System.Security.SecurityException ||
+                error is UnauthorizedAccessException)
+            {
+                errors.Add(
+                    "Could not inspect selected collection run: " +
+                    error.Message);
+            }
+        }
+
+        static bool RequireRegularFile(
+            string path, string label, List<string> errors)
+        {
+            if (!File.Exists(path))
+            {
+                errors.Add(label + " does not exist: " + path);
+                return false;
+            }
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                errors.Add(label + " must be a regular file.");
+                return false;
+            }
+            return true;
+        }
+
+        static bool IsTerminalState(string state) =>
+            string.Equals(state, "stopped", StringComparison.Ordinal) ||
+            string.Equals(state, "completed", StringComparison.Ordinal) ||
+            string.Equals(state, "failed", StringComparison.Ordinal);
+
+        static void ValidatePartition(
+            string label,
+            RetryCollectionPartition partition,
+            long target,
+            List<string> errors)
+        {
+            if (target < 2 || partition == null ||
+                partition.labels < target ||
+                string.IsNullOrWhiteSpace(partition.records_sha256))
+                errors.Add(
+                    label + " collection is incomplete; a recorded label " +
+                    "total meeting its target and a records digest are required.");
+        }
+
+        [Serializable]
+        sealed class RetryRunManifest
+        {
+            public int schema_version;
+            public string state;
+            public RetryRunConfig config;
+            public RetryRunContract contract;
+        }
+
+        [Serializable]
+        sealed class RetryRunConfig { public string algorithm; }
+
+        [Serializable]
+        sealed class RetryRunContract { public string environment; }
+
+        [Serializable]
+        sealed class RetryCollectionManifest
+        {
+            public int schema_version;
+            public string kind;
+            public RetryCollectionSchedule schedule;
+            public RetryCollectionPartition train;
+            public RetryCollectionPartition validation;
+        }
+
+        [Serializable]
+        sealed class RetryCollectionSchedule
+        {
+            public long train_label_target;
+            public long validation_label_target;
+        }
+
+        [Serializable]
+        sealed class RetryCollectionPartition
+        {
+            public long labels;
+            public string records_sha256;
         }
     }
 
@@ -1381,6 +1676,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public static class MlStopControlPolicy
     {
+        public static bool StructuredStopIsImmediate => false;
+
         public static bool CanRequestStop(
             string selectedRun,
             MlRunState state,
@@ -1676,6 +1973,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [SerializeField] int _tab;
         [SerializeField] int _tacticalRosterPlayer;
         [SerializeField] string _selectedTrainingTemplateId = string.Empty;
+        [SerializeField] string _structuredRetryRunName = "structured-retry";
         [SerializeField] ModelDuelConfiguration _arena = new ModelDuelConfiguration();
 
         MlLabWindowState _state = new MlLabWindowState();
@@ -1692,6 +1990,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string[] _knownRunLabels = Array.Empty<string>();
         int _knownRunIndex;
         double _nextPoll;
+        MlStructuredRetryFormState _structuredRetryFormState;
+        string _structuredRetryFormKey = string.Empty;
+        double _structuredRetryFormRefreshAt;
         double _throughput;
         string _lastMetricTime = string.Empty;
         [SerializeField] MlStartAndWatchState _watch =
@@ -1902,6 +2203,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 DrawTrainingForm();
                 EditorGUILayout.Space(8);
                 DrawControls();
+                EditorGUILayout.Space(8);
+                DrawStructuredRetryControls();
                 EditorGUILayout.Space(8);
                 DrawStatus();
                 EditorGUILayout.Space(8);
@@ -2872,8 +3175,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             {
                 if (structuredContinuation)
                 {
-                    if (GUILayout.Button("Stop at safe boundary"))
-                        RequestStop(true);
+                    if (GUILayout.Button("Stop after completed epoch"))
+                        RequestStop(MlStopControlPolicy.StructuredStopIsImmediate);
                 }
                 else
                 {
@@ -2918,6 +3221,70 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 EditorGUILayout.HelpBox(_notice, MessageType.Info);
             if (!string.IsNullOrWhiteSpace(_state.Error))
                 EditorGUILayout.HelpBox(_state.Error, MessageType.Error);
+            EditorGUILayout.EndVertical();
+        }
+
+        void DrawStructuredRetryControls()
+        {
+            string targetRun = MlLabConfig.IsValidRunName(
+                    _structuredRetryRunName)
+                ? Path.Combine(RunsRoot, _structuredRetryRunName)
+                : string.Empty;
+            bool sourceLive = IsAttachedTrainerProcessAlive(_selectedRun);
+            bool targetLive = !string.IsNullOrWhiteSpace(targetRun) &&
+                IsAttachedTrainerProcessAlive(targetRun);
+            string formKey = string.Join("\n", new[]
+            {
+                _selectedRun ?? string.Empty,
+                _structuredRetryRunName ?? string.Empty,
+                RunsRoot ?? string.Empty,
+                sourceLive.ToString(),
+                targetLive.ToString(),
+            });
+            if (_structuredRetryFormState == null ||
+                !string.Equals(
+                    _structuredRetryFormKey, formKey,
+                    StringComparison.Ordinal) ||
+                EditorApplication.timeSinceStartup >=
+                _structuredRetryFormRefreshAt)
+            {
+                _structuredRetryFormState =
+                    MlStructuredRetryFormState.Evaluate(
+                        _selectedRun,
+                        _structuredRetryRunName,
+                        RunsRoot,
+                        sourceLive,
+                        targetLive);
+                _structuredRetryFormKey = formKey;
+                _structuredRetryFormRefreshAt =
+                    EditorApplication.timeSinceStartup + PollIntervalSeconds;
+            }
+            MlStructuredRetryFormState formState =
+                _structuredRetryFormState;
+
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField(
+                "Recover collected-label training",
+                EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                formState.RecoveryDescription,
+                formState.CanLaunch
+                    ? MessageType.Info
+                    : MessageType.None);
+            _structuredRetryRunName = EditorGUILayout.TextField(
+                "Fresh run name", _structuredRetryRunName);
+            using (new EditorGUI.DisabledScope(
+                       !formState.CanLaunch ||
+                       (_training != null && _training.IsRunning) ||
+                       (_command != null && _command.IsRunning)))
+            {
+                if (GUILayout.Button(
+                        "Restart selected training from collected labels",
+                        GUILayout.Height(28)))
+                    StartStructuredRetry();
+            }
+            foreach (string error in formState.Errors)
+                EditorGUILayout.HelpBox(error, MessageType.Error);
             EditorGUILayout.EndVertical();
         }
 
@@ -3138,6 +3505,61 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
         }
 
+        void StartStructuredRetry()
+        {
+            _notice = string.Empty;
+            if ((_training != null && _training.IsRunning) ||
+                (_command != null && _command.IsRunning))
+            {
+                _state.Fail(
+                    "Wait for the current ML Lab launch or command to finish.");
+                return;
+            }
+
+            _state.BeginValidation();
+            string collectionRun = _selectedRun;
+            string targetRun = MlLabConfig.IsValidRunName(
+                    _structuredRetryRunName)
+                ? Path.Combine(RunsRoot, _structuredRetryRunName)
+                : string.Empty;
+            var errors = new List<string>(
+                MlStructuredRetryFormState.Evaluate(
+                    collectionRun,
+                    _structuredRetryRunName,
+                    RunsRoot,
+                    IsAttachedTrainerProcessAlive(collectionRun),
+                    !string.IsNullOrWhiteSpace(targetRun) &&
+                    IsAttachedTrainerProcessAlive(targetRun)).Errors);
+            if (!File.Exists(PythonExe))
+                errors.Add(
+                    "Python environment was not found: " + PythonExe);
+            if (!File.Exists(CliScript))
+                errors.Add("ML CLI was not found: " + CliScript);
+            if (errors.Count > 0)
+            {
+                _state.Fail(string.Join("\n", errors));
+                return;
+            }
+
+            try
+            {
+                string args = MlLabConfig.BuildStructuredRetryArguments(
+                    collectionRun, _structuredRetryRunName);
+                args += " --runs-root " +
+                        MlCliProcess.QuoteArgument(RunsRoot);
+                LaunchTraining(
+                    MlCliProcess.BuildDetachedStartInfo(
+                        PythonExe, CliScript, args, PythonDir),
+                    targetRun,
+                    watch: false,
+                    structuredContinuation: true);
+            }
+            catch (Exception error)
+            {
+                _state.Fail(error.Message);
+            }
+        }
+
         void ResumePendingStructuredPreflight()
         {
             if (!_pendingTrainingStructured) return;
@@ -3281,7 +3703,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         void QueryStatus()
         {
-            if (!Directory.Exists(_selectedRun)) return;
+            if (!MlRunStatusQueryPolicy.CanQuery(_selectedRun)) return;
             try
             {
                 string runDirectory = _selectedRun;

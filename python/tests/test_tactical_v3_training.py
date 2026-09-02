@@ -24,6 +24,7 @@ from ml_lab.tactical_v3_objectives import LossBreakdown, ObjectiveConfig, struct
 from ml_lab.tactical_v3_training import (
     EpochMetrics,
     StepMetrics,
+    TrainingCheckpointState,
     TrainerConfig,
     TrainingResult,
     train_offline,
@@ -409,6 +410,121 @@ def test_train_offline_reports_each_completed_epoch() -> None:
 
     assert tuple(observed) == result.history
     assert tuple(metric.epoch for metric in observed) == (0, 1)
+
+
+def test_completed_epoch_checkpoint_precedes_a_cooperative_epoch_stop() -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    observed: list[TrainingCheckpointState] = []
+
+    class RequestedStop(RuntimeError):
+        pass
+
+    def stop_after_epoch(metric: EpochMetrics) -> None:
+        del metric
+        raise RequestedStop
+
+    with pytest.raises(RequestedStop):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            checkpoint_callback=observed.append,
+            epoch_callback=stop_after_epoch,
+        )
+
+    assert len(observed) == 1
+    checkpoint = observed[0]
+    assert checkpoint.next_epoch == 1
+    assert tuple(metric.epoch for metric in checkpoint.history) == (0,)
+    assert checkpoint.best_epoch == 0
+    assert checkpoint.history[0].improved is True
+    assert checkpoint.train_global_step == 1
+    assert checkpoint.validation_global_step == 1
+
+
+def test_resume_from_completed_epoch_matches_uninterrupted_training() -> None:
+    case = make_unleased_trainer_case(max_epochs=4, patience_epochs=4)
+    uninterrupted = train_offline(
+        case.train,
+        case.validation,
+        case.model_config,
+        case.objective_config,
+        case.trainer_config,
+    )
+    captured: TrainingCheckpointState | None = None
+
+    class SimulatedExit(RuntimeError):
+        pass
+
+    def exit_after_two_epochs(state: TrainingCheckpointState) -> None:
+        nonlocal captured
+        if state.next_epoch == 2:
+            captured = state
+            raise SimulatedExit
+
+    with pytest.raises(SimulatedExit):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            checkpoint_callback=exit_after_two_epochs,
+        )
+
+    assert captured is not None
+    resumed = train_offline(
+        case.train,
+        case.validation,
+        case.model_config,
+        case.objective_config,
+        case.trainer_config,
+        resume_state=captured,
+    )
+
+    assert resumed.history == uninterrupted.history
+    assert resumed.best_epoch == uninterrupted.best_epoch
+    assert resumed.best_validation_policy_nll == (
+        uninterrupted.best_validation_policy_nll
+    )
+    assert_state_dict_equal(
+        resumed.model.state_dict(), uninterrupted.model.state_dict(),
+    )
+
+
+def test_resume_rejects_a_stateful_external_batch_provider() -> None:
+    case = make_unleased_trainer_case(max_epochs=2, patience_epochs=2)
+    captured: list[TrainingCheckpointState] = []
+
+    class SimulatedExit(RuntimeError):
+        pass
+
+    def capture(state: TrainingCheckpointState) -> None:
+        captured.append(state)
+        raise SimulatedExit
+
+    with pytest.raises(SimulatedExit):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            checkpoint_callback=capture,
+        )
+
+    with pytest.raises(ValueError, match="batch provider"):
+        train_offline(
+            case.train,
+            case.validation,
+            case.model_config,
+            case.objective_config,
+            case.trainer_config,
+            resume_state=captured[0],
+            training_batch_provider=lambda epoch, batch: case.train,
+        )
 
 
 def test_train_offline_loads_initial_actor_before_optimizer_and_uses_batch_provider(

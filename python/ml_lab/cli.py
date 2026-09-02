@@ -33,6 +33,106 @@ TERMINAL_STATES = frozenset({"stopped", "completed", "failed"})
 JSON_SCHEMA_VERSION = 1
 
 
+def _comparison_path(path: Path) -> Path:
+    """Resolve existing ancestors while keeping a missing leaf comparable."""
+
+    return Path(path).resolve(strict=False)
+
+
+def _recorded_run_candidates(value: object, runs_root: Path) -> tuple[Path, ...]:
+    """Return the direct and moved-runs-root interpretations used by retry."""
+
+    if type(value) is not str or not value.strip():
+        return ()
+    direct = Path(value)
+    basename = Path(value.replace("\\", "/")).name
+    candidates = [direct]
+    if basename:
+        fallback = Path(runs_root) / basename
+        if fallback != direct:
+            candidates.append(fallback)
+    return tuple(candidates)
+
+
+def _recorded_run_protections(value: object, runs_root: Path) -> tuple[Path, ...]:
+    """Protect every candidate whose creation could change fallback resolution."""
+
+    protected: list[Path] = []
+    for candidate in _recorded_run_candidates(value, runs_root):
+        protected.append(candidate)
+        is_junction = getattr(candidate, "is_junction", None)
+        if (
+            candidate.is_dir()
+            and not candidate.is_symlink()
+            and not (is_junction is not None and is_junction())
+        ):
+            break
+    return tuple(protected)
+
+
+def _quiet_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = read_json(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return value if type(value) is dict else None
+
+
+def _retry_protected_runs(collection_run: Path, runs_root: Path) -> set[Path]:
+    """Best-effort source discovery that is safe to perform before log creation."""
+
+    selected = _comparison_path(Path(collection_run))
+    protected = {selected}
+    manifest = _quiet_json_object(selected / "run.json")
+    owner_candidates: list[Path] = []
+    if manifest is not None:
+        owner_value = manifest.get("collection_source_run")
+        for candidate in _recorded_run_protections(owner_value, runs_root):
+            resolved = _comparison_path(candidate)
+            protected.add(resolved)
+            owner_candidates.append(resolved)
+
+        source_policy = manifest.get("source_policy")
+        if type(source_policy) is dict:
+            for candidate in _recorded_run_protections(
+                source_policy.get("run"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+        config = manifest.get("config")
+        if type(config) is dict:
+            for candidate in _recorded_run_protections(
+                config.get("initialization_source"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+
+    # The collection manifest is authoritative for the source policy. Inspect the
+    # selected copy and, when recorded, the owner's copy; malformed evidence is
+    # left for the strict backend validator after a safe log destination is chosen.
+    for run in (selected, *owner_candidates):
+        collection = _quiet_json_object(run / "collection.json")
+        if collection is None:
+            continue
+        source = collection.get("source")
+        if type(source) is not dict:
+            continue
+        for candidate in _recorded_run_protections(source.get("run"), runs_root):
+            protected.add(_comparison_path(candidate))
+    return protected
+
+
+def _validate_retry_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command != "retry-structured":
+        return
+    runs_root = Path(args.runs_root)
+    destination = _comparison_path(runs_root / args.run)
+    for source in _retry_protected_runs(Path(args.collection_run), runs_root):
+        if destination == source or source in destination.parents:
+            raise ValueError(
+                "structured retry destination must be outside the selected, "
+                "collection-owner, and source-policy runs"
+            )
+
+
 def controller_config(raw: str | dict[str, Any] | ControllerSpec) -> dict[str, Any]:
     spec = normalize_controller_spec(raw)
     value: dict[str, Any] = {"kind": spec.kind}
@@ -152,6 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_arguments(structured)
     _add_no_console_output_argument(structured)
     _add_json_argument(structured)
+
+    structured_retry = subcommands.add_parser(
+        "retry-structured",
+        help="train a new sibling from an authenticated tactical-v3 collection",
+    )
+    structured_retry.add_argument("--collection-run", type=Path, required=True)
+    structured_retry.add_argument("--run", required=True)
+    _add_runtime_arguments(structured_retry)
+    _add_no_console_output_argument(structured_retry)
+    _add_json_argument(structured_retry)
 
     structured_preflight = subcommands.add_parser(
         "preflight-structured",
@@ -665,7 +775,9 @@ def _emit_human(stdout: TextIO, command: str, result: dict[str, Any]) -> None:
             marker = "ok" if check.get("ok") else "unavailable"
             print(f"  {check.get('name')}: {marker} ({check.get('detail', '')})", file=stdout)
         return
-    if command in {"train", "train-structured", "resume", "status"}:
+    if command in {
+        "train", "train-structured", "retry-structured", "resume", "status",
+    }:
         run = result.get("run")
         if run is None:
             print(f"run completed: {result['run_dir']}", file=stdout)
@@ -716,6 +828,7 @@ def _dispatch(
     runner: Callable[..., Path],
     sleeper: Callable[[float], None],
     structured_runner: Callable[..., Path] | None = None,
+    structured_retry_runner: Callable[..., Path] | None = None,
     status_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if args.command == "doctor":
@@ -779,6 +892,16 @@ def _dispatch(
                 "--scenario-file",
                 str(args.scenario_file),
             ],
+        )
+    if args.command == "retry-structured":
+        from .tactical_v3_continuation import run_structured_retry
+
+        return _run_result(
+            (structured_retry_runner or run_structured_retry)(
+                collection_run=Path(args.collection_run),
+                run_name=args.run,
+                runs_root=Path(args.runs_root),
+            )
         )
     if args.command == "resume":
         scenario = _resume_scenario(args)
@@ -892,6 +1015,7 @@ def main(
     *,
     runner: Callable[..., Path] = run_training,
     structured_runner: Callable[..., Path] | None = None,
+    structured_retry_runner: Callable[..., Path] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     stdout: TextIO | None = None,
 ) -> int:
@@ -899,9 +1023,25 @@ def main(
     output = stdout if stdout is not None else sys.stdout
     human_follow = args.command == "status" and args.follow and not args.json
     no_console_output = getattr(args, "no_console_output", False)
+    try:
+        _validate_retry_prelog_destination(args)
+    except ValueError as error:
+        if no_console_output:
+            return 1
+        if args.json:
+            _emit_json(
+                output,
+                args.command,
+                {"error": type(error).__name__, "message": str(error)},
+                ok=False,
+            )
+            return 1
+        raise
     with ExitStack() as console_stack:
         stderr_log: TextIO | None = None
-        if args.command in {"train", "train-structured", "resume"}:
+        if args.command in {
+            "train", "train-structured", "retry-structured", "resume",
+        }:
             stderr_log = console_stack.enter_context(
                 _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
             )
@@ -917,6 +1057,7 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 structured_runner=structured_runner,
+                structured_retry_runner=structured_retry_runner,
                 status_update=(
                     (lambda update: _emit_human(output, "status", update))
                     if human_follow
