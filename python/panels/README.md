@@ -9,6 +9,11 @@ generated evidence stay local and are ignored by Git. They can be regenerated
 for a new panel, but copying gigabytes of machine-specific output into the
 repository does not make a result more reproducible.
 
+Hashes beside normal source paths record the bytes used when a panel ran; they
+are not assertions that today's file at that path is still byte-identical.
+Likewise, hashes for omitted binaries, checkpoints, and per-match evidence keep
+the historical identity auditable without treating generated files as source.
+
 The July 2026 tactical-v2 panel reports are historical decision evidence. Their
 one-off runners and focused tests targeted the CLI and source identities present
 at the time, so exact copies live under each panel's `historical-source/`

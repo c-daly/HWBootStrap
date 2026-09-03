@@ -2,6 +2,11 @@
   "schema_version": 1,
   "panel": "annihilation-bounded-search-v1",
   "status": "complete",
+  "retention": {
+    "classification": "historical_decision_evidence",
+    "source_hash_semantics": "execution-time identity; current source paths may have evolved",
+    "generated_artifacts": "binaries and per-match evidence remain local and hash-referenced"
+  },
   "outcome": "composite_gate_failed_planner_performance_passed",
   "next_authorized_task": "tactical-v3-afterstate-and-intention-design",
   "scope": "evaluation-only tactical-v2 conversion search diagnostic",
