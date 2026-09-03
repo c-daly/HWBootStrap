@@ -10,7 +10,9 @@ for a new panel, but copying gigabytes of machine-specific output into the
 repository does not make a result more reproducible.
 
 The July 2026 tactical-v2 panel reports are historical decision evidence. Their
-one-off local runners targeted the CLI and source identities present at the time
-and are not maintained as current entry points. A new experiment should use a
-new panel identity and the current ML Lab lifecycle rather than mutating or
-rerunning a completed panel in place.
+one-off runners and focused tests targeted the CLI and source identities present
+at the time, so exact copies live under each panel's `historical-source/`
+directory with a `.py.txt` suffix. They are reviewable records, not maintained
+entry points or active tests. A new experiment should use a new panel identity
+and the current ML Lab lifecycle rather than mutating or rerunning a completed
+panel in place.

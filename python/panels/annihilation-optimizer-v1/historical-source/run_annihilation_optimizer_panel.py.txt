@@ -1,0 +1,362 @@
+"""Run the preregistered reduced-curriculum PPO optimizer panel."""
+
+from __future__ import annotations
+
+import csv
+import json
+import math
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "python" / "hexwars_ml.py"
+RUNS = ROOT / "python" / "runs"
+PANEL = ROOT / "python" / "panels" / "annihilation-optimizer-v1"
+REWARD_PANEL = ROOT / "python" / "panels" / "annihilation-reduced-v1"
+TRAINING_SEEDS = (11, 23, 47)
+TIMESTEPS = 51_200
+CHECKPOINT_INTERVAL = 25_000
+WORKERS = 4
+EVALUATION_SEED_START = 4_000_000
+EVALUATION_SEEDS = 25
+
+CONDITIONS: dict[str, dict[str, Any]] = {
+    "value_default": {
+        "name": "Value-only shaping, PPO defaults",
+        "scenario": "minus_closing.json",
+        "effective_options": {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": None},
+        "cli_options": {},
+        "existing_run": "annihilation-ablation-minus_closing-seed{seed}-tb-v1",
+    },
+    "value_low_lr": {
+        "name": "Value-only shaping, learning rate 1e-4",
+        "scenario": "minus_closing.json",
+        "effective_options": {"learning_rate": 0.0001, "n_epochs": 10, "target_kl": None},
+        "cli_options": {"learning_rate": 0.0001, "n_epochs": 10},
+    },
+    "value_epochs3": {
+        "name": "Value-only shaping, 3 epochs",
+        "scenario": "minus_closing.json",
+        "effective_options": {"learning_rate": 0.0003, "n_epochs": 3, "target_kl": None},
+        "cli_options": {"learning_rate": 0.0003, "n_epochs": 3},
+    },
+    "value_targetkl": {
+        "name": "Value-only shaping, target KL 0.02",
+        "scenario": "minus_closing.json",
+        "effective_options": {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": 0.02},
+        "cli_options": {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": 0.02},
+    },
+    "value_combined": {
+        "name": "Value-only shaping, conservative combined PPO",
+        "scenario": "minus_closing.json",
+        "effective_options": {"learning_rate": 0.0001, "n_epochs": 3, "target_kl": 0.02},
+        "cli_options": {"learning_rate": 0.0001, "n_epochs": 3, "target_kl": 0.02},
+    },
+    "full_default": {
+        "name": "Full no-draw reward, PPO defaults",
+        "scenario": "full_nodraw.json",
+        "effective_options": {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": None},
+        "cli_options": {},
+        "existing_run": "annihilation-ablation-full_nodraw-seed{seed}-tb-v1",
+    },
+    "full_combined": {
+        "name": "Full no-draw reward, conservative combined PPO",
+        "scenario": "full_nodraw.json",
+        "effective_options": {"learning_rate": 0.0001, "n_epochs": 3, "target_kl": 0.02},
+        "cli_options": {"learning_rate": 0.0001, "n_epochs": 3, "target_kl": 0.02},
+    },
+}
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object in {path}")
+    return value
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    temporary.replace(path)
+
+
+def invoke(arguments: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as log:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), *arguments],
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(f"command failed with exit code {completed.returncode}; see {log_path}")
+
+
+def run_name(condition: str, seed: int) -> str:
+    return f"annihilation-optimizer-{condition}-seed{seed}-tb-v1"
+
+
+def scenario_path(condition: str) -> Path:
+    return REWARD_PANEL / "scenarios" / CONDITIONS[condition]["scenario"]
+
+
+def validate_run(run_dir: Path, condition: str) -> Path:
+    manifest = read_json(run_dir / "run.json")
+    if manifest.get("state") != "completed" or manifest.get("latest_checkpoint_step") != TIMESTEPS:
+        raise RuntimeError(f"run is not complete at the required checkpoint: {run_dir}")
+    expected_scenario = read_json(scenario_path(condition))
+    actual_scenario = read_json(run_dir / "scenario.json")
+    for key in ("board", "rules", "episode", "reward", "tactical_v2"):
+        if actual_scenario.get(key) != expected_scenario.get(key):
+            raise RuntimeError(f"run scenario does not match panel condition {condition}: {run_dir}")
+    return run_dir
+
+
+def train(condition: str, seed: int) -> Path:
+    definition = CONDITIONS[condition]
+    existing = definition.get("existing_run")
+    if isinstance(existing, str):
+        run_dir = validate_run(RUNS / existing.format(seed=seed), condition)
+        print(f"TRAIN control {run_dir.name}", flush=True)
+        return run_dir
+    name = run_name(condition, seed)
+    run_dir = RUNS / name
+    if (run_dir / "run.json").is_file():
+        print(f"TRAIN reuse   {name}", flush=True)
+        return validate_run(run_dir, condition)
+    options = definition["cli_options"]
+    arguments = [
+        "train", "--run", name,
+        "--environment", "tactical-v2",
+        "--scenario-file", str(scenario_path(condition)),
+        "--algorithm", "maskable_ppo",
+        "--opponent", "random",
+        "--timesteps", str(TIMESTEPS),
+        "--checkpoint-every", str(CHECKPOINT_INTERVAL),
+        "--workers", str(WORKERS),
+        "--seed", str(seed),
+        "--device", "cuda",
+        "--learner-seat", "alternating",
+        "--tracker", "local", "--tracker", "tensorboard",
+        "--no-console-output", "--json",
+    ]
+    if "learning_rate" in options:
+        arguments.extend(("--ppo-learning-rate", str(options["learning_rate"])))
+    if "n_epochs" in options:
+        arguments.extend(("--ppo-n-epochs", str(options["n_epochs"])))
+    if "target_kl" in options:
+        arguments.extend(("--ppo-target-kl", str(options["target_kl"])))
+    print(f"TRAIN start   {name}", flush=True)
+    invoke(arguments, PANEL / "logs" / f"train-{name}.log")
+    print(f"TRAIN done    {name}", flush=True)
+    return validate_run(run_dir, condition)
+
+
+def snapshot(run_dir: Path) -> Path:
+    manifest = read_json(run_dir / "run.json")
+    checkpoint = manifest["latest_checkpoint"]
+    spec = {
+        "kind": "snapshot",
+        "path": str((run_dir / checkpoint).resolve()),
+        "source_run": str(run_dir.resolve()),
+        "algorithm": "maskable_ppo",
+        "step": TIMESTEPS,
+        "inference_mode": "deterministic",
+    }
+    output = PANEL / "controllers" / f"{run_dir.name}.json"
+    write_json(output, spec)
+    return output
+
+
+def evaluate(condition: str, seed: int, run_dir: Path) -> Path:
+    output = PANEL / "evaluations" / f"{condition}-seed{seed}.json"
+    if output.is_file():
+        result = read_json(output)
+        if result.get("games") == EVALUATION_SEEDS * 2 and result.get("seed_start") == EVALUATION_SEED_START:
+            print(f"EVAL  reuse   {condition} seed {seed}", flush=True)
+            return output
+        raise RuntimeError(f"evaluation schedule mismatch: {output}")
+    controller = snapshot(run_dir)
+    print(f"EVAL  start   {condition} seed {seed}", flush=True)
+    invoke(
+        [
+            "evaluate", "--p0", f"@{controller}", "--p1", "random",
+            "--games", str(EVALUATION_SEEDS),
+            "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats", "--workers", str(WORKERS),
+            "--environment", "tactical-v2", "--output", str(output), "--json",
+        ],
+        PANEL / "logs" / f"evaluate-{condition}-seed{seed}.log",
+    )
+    print(f"EVAL  done    {condition} seed {seed}", flush=True)
+    return output
+
+
+def evaluate_greedy() -> Path:
+    output = PANEL / "controls" / "greedy-v-random.json"
+    if output.is_file():
+        return output
+    invoke(
+        [
+            "evaluate", "--p0", "greedy", "--p1", "random",
+            "--games", str(EVALUATION_SEEDS), "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats", "--workers", str(WORKERS),
+            "--environment", "tactical-v2", "--output", str(output), "--json",
+        ],
+        PANEL / "logs" / "evaluate-greedy-v-random.log",
+    )
+    return output
+
+
+def diagnostics(run_dir: Path) -> dict[str, float]:
+    text = (run_dir / "train.log").read_text(encoding="utf-8")
+    values: dict[str, float] = {}
+    for field in (
+        "approx_kl", "clip_fraction", "explained_variance", "entropy_loss", "n_updates"
+    ):
+        matches = re.findall(rf"\|\s+{field}\s+\|\s+([^\s|]+)", text)
+        if matches:
+            values[field] = float(matches[-1])
+    with (run_dir / "progress.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if rows:
+        values["training_mean_reward"] = float(rows[-1]["mean_reward"])
+        values["steps_per_second"] = float(rows[-1]["steps_per_second"])
+    return values
+
+
+def wilson(successes: int, total: int) -> dict[str, float]:
+    z = 1.959963984540054
+    p = successes / total
+    denominator = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
+    return {"confidence": 0.95, "low": center - margin, "high": center + margin}
+
+
+def exact_sign(left_only: int, right_only: int) -> float:
+    count = left_only + right_only
+    if count == 0:
+        return 1.0
+    tail = min(left_only, right_only)
+    return min(1.0, 2 * sum(math.comb(count, index) for index in range(tail + 1)) / (2 ** count))
+
+
+def paired(
+    results: dict[str, list[tuple[int, Path, Path]]], left: str, right: str, question: str
+) -> dict[str, Any]:
+    left_rows = {seed: read_json(path)["matches"] for seed, path, _ in results[left]}
+    right_rows = {seed: read_json(path)["matches"] for seed, path, _ in results[right]}
+    left_only = right_only = both = neither = 0
+    seed_deltas: dict[str, int] = {}
+    for seed in TRAINING_SEEDS:
+        delta = 0
+        for a, b in zip(left_rows[seed], right_rows[seed], strict=True):
+            if (a["seed"], a["candidate_seat"]) != (b["seed"], b["candidate_seat"]):
+                raise RuntimeError("paired schedules differ")
+            a_win, b_win = a["outcome"] == "win", b["outcome"] == "win"
+            if a_win and b_win:
+                both += 1
+            elif a_win:
+                left_only += 1
+                delta += 1
+            elif b_win:
+                right_only += 1
+                delta -= 1
+            else:
+                neither += 1
+        seed_deltas[str(seed)] = delta
+    return {
+        "question": question, "left": left, "right": right,
+        "both_win": both, "left_only_wins": left_only, "right_only_wins": right_only,
+        "neither_wins": neither, "net_left_wins": left_only - right_only,
+        "seed_net_left_wins": seed_deltas,
+        "two_sided_exact_sign_p": exact_sign(left_only, right_only),
+    }
+
+
+def aggregate(results: dict[str, list[tuple[int, Path, Path]]], greedy: Path) -> Path:
+    output: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "training_seeds": list(TRAINING_SEEDS), "training_timesteps": TIMESTEPS,
+        "evaluation_seed_start": EVALUATION_SEED_START,
+        "evaluation_seed_count": EVALUATION_SEEDS, "conditions": {},
+        "controls": {"greedy_vs_random": read_json(greedy)},
+    }
+    for condition, rows in results.items():
+        models = []
+        totals = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
+        for seed, path, run_dir in rows:
+            result = read_json(path)
+            models.append({
+                "training_seed": seed, "run": run_dir.name,
+                "games": result["games"], "wins": result["wins"],
+                "losses": result["losses"], "draws": result["draws"],
+                "seat_results": result["seat_results"], "diagnostics": diagnostics(run_dir),
+                "evaluation": str(path.relative_to(ROOT)),
+            })
+            for key in totals:
+                totals[key] += int(result[key])
+        totals["win_rate"] = totals["wins"] / totals["games"]
+        totals["win_interval"] = wilson(totals["wins"], totals["games"])
+        output["conditions"][condition] = {
+            "name": CONDITIONS[condition]["name"],
+            "scenario": CONDITIONS[condition]["scenario"],
+            "effective_options": CONDITIONS[condition]["effective_options"],
+            "models": models, "totals": totals,
+        }
+    output["paired_win_comparisons"] = [
+        paired(results, "value_low_lr", "value_default", "lower learning rate"),
+        paired(results, "value_epochs3", "value_default", "fewer optimization epochs"),
+        paired(results, "value_targetkl", "value_default", "KL-limited updates"),
+        paired(results, "value_combined", "value_default", "combined conservative update"),
+        paired(results, "full_combined", "full_default", "combined update on full no-draw reward"),
+        paired(results, "value_combined", "full_combined", "reward choice under combined update"),
+    ]
+    path = PANEL / "aggregate.json"
+    write_json(path, output)
+    return path
+
+
+def write_manifest() -> None:
+    write_json(PANEL / "panel.json", {
+        "schema_version": 1, "panel": "annihilation-optimizer-v1",
+        "scope": "tactical-v2 reduced curriculum, 13x9, three starting units",
+        "algorithm": "maskable_ppo", "policy": "HexCNN", "opponent": "random",
+        "training_seeds": list(TRAINING_SEEDS), "training_timesteps": TIMESTEPS,
+        "evaluation_seed_start": EVALUATION_SEED_START,
+        "evaluation_seed_count": EVALUATION_SEEDS, "reciprocal": True,
+        "conditions": CONDITIONS,
+    })
+
+
+def main() -> int:
+    write_manifest()
+    runs: dict[str, list[tuple[int, Path]]] = {condition: [] for condition in CONDITIONS}
+    for condition in CONDITIONS:
+        for seed in TRAINING_SEEDS:
+            runs[condition].append((seed, train(condition, seed)))
+    results: dict[str, list[tuple[int, Path, Path]]] = {condition: [] for condition in CONDITIONS}
+    for condition, condition_runs in runs.items():
+        for seed, run_dir in condition_runs:
+            results[condition].append((seed, evaluate(condition, seed, run_dir), run_dir))
+    output = aggregate(results, evaluate_greedy())
+    print(f"AGGREGATE {output}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

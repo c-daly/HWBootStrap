@@ -51,8 +51,6 @@ Random. It must convert substantially more games into annihilation wins, do so
 across training seeds and both seats, and avoid degradation hidden by aggregate
 training reward.
 
-Run from PowerShell with:
-
-```powershell
-.\python\winenv\Scripts\python.exe .\python\run_annihilation_ablation_panel.py
-```
+The exact one-off runner is retained for review at
+`historical-source/run_annihilation_ablation_panel.py.txt`. It is a historical
+source snapshot, not a current entry point.

@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import run_annihilation_conversion_panel as panel
+
+
+def _match(
+    *,
+    seed: int,
+    seat: int,
+    outcome: str,
+    training_seed: int = 101,
+    profile: str = "conversion-1v1-far",
+) -> dict:
+    return {
+        "training_seed": training_seed,
+        "seed": seed,
+        "start_profile": profile,
+        "candidate_seat": seat,
+        "outcome": outcome,
+    }
+
+
+@pytest.mark.parametrize(
+    ("left_only", "right_only", "expected"),
+    ((0, 0, 1.0), (0, 4, 0.125), (1, 3, 0.625), (2, 2, 1.0)),
+)
+def test_exact_sign_test(left_only: int, right_only: int, expected: float) -> None:
+    assert panel._exact_sign_test(left_only, right_only) == expected
+    assert panel._exact_sign_test(right_only, left_only) == expected
+
+
+def test_paired_summary_uses_the_locked_schedule_keys() -> None:
+    control = [
+        _match(seed=10, seat=0, outcome="win"),
+        _match(seed=10, seat=1, outcome="draw"),
+        _match(seed=11, seat=0, outcome="loss"),
+        _match(seed=11, seat=1, outcome="draw"),
+    ]
+    mixed = [
+        _match(seed=11, seat=1, outcome="win"),
+        _match(seed=10, seat=0, outcome="draw"),
+        _match(seed=11, seat=0, outcome="draw"),
+        _match(seed=10, seat=1, outcome="win"),
+    ]
+
+    result = panel._paired_summary(control, mixed)
+
+    assert result == {
+        "games": 4,
+        "both_win": 0,
+        "control_only_wins": 1,
+        "mixed_only_wins": 2,
+        "neither_wins": 1,
+        "net_mixed_wins": 1,
+        "two_sided_exact_sign_p": 1.0,
+        "control_only_losses": 1,
+        "mixed_only_losses": 0,
+    }
+
+
+def test_paired_summary_rejects_duplicate_or_mismatched_schedules() -> None:
+    match = _match(seed=10, seat=0, outcome="draw")
+    with pytest.raises(RuntimeError, match="duplicate control pairing key"):
+        panel._paired_summary([match, dict(match)], [match])
+    with pytest.raises(RuntimeError, match="not pairable"):
+        panel._paired_summary([match], [_match(seed=11, seat=0, outcome="draw")])
+
+
+def test_optimizer_diagnostics_uses_the_last_complete_table(tmp_path: Path) -> None:
+    (tmp_path / "train.log").write_text(
+        """
+| approx_kl         | 0.010 |
+| clip_fraction     | 0.100 |
+| explained_variance | 0.20 |
+| entropy_loss      | -2.0 |
+| n_updates         | 10 |
+| approx_kl         | 0.021 |
+| clip_fraction     | 0.150 |
+| explained_variance | 0.30 |
+| entropy_loss      | -1.8 |
+| n_updates         | 20 |
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert panel._last_optimizer_diagnostics(tmp_path) == {
+        "approx_kl": 0.021,
+        "clip_fraction": 0.15,
+        "explained_variance": 0.3,
+        "entropy_loss": -1.8,
+        "n_updates": 20.0,
+    }
+
+
+def test_optimizer_diagnostics_fails_closed_when_a_field_is_missing(tmp_path: Path) -> None:
+    (tmp_path / "train.log").write_text(
+        "| approx_kl | 0.01 |\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="optimizer diagnostics missing"):
+        panel._last_optimizer_diagnostics(tmp_path)

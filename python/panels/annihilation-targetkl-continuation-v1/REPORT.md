@@ -155,4 +155,4 @@ to Greedy.
 - `evaluations/`: nine fixed-checkpoint 50-game evaluations
 - `controllers/`: immutable checkpoint controller specifications
 - `evidence/`: replay-backed seed-11 evidence at all three checkpoints
-- `../../run_annihilation_targetkl_continuation.py`: restart-safe runner
+- `historical-source/run_annihilation_targetkl_continuation.py.txt`: exact source snapshot of the one-off runner

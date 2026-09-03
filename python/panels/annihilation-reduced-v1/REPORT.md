@@ -161,4 +161,4 @@ opponent, and optimizer simultaneously.
 - `controllers/`: immutable 51,200-step controller specifications
 - `scenarios/`: the six materialized reward scenarios
 - `evidence/minus-closing-seed11/`: retained traces and authoritative replays
-- `../../run_annihilation_ablation_panel.py`: restart-safe PowerShell-callable runner
+- `historical-source/run_annihilation_ablation_panel.py.txt`: exact source snapshot of the one-off runner

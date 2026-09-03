@@ -1,0 +1,423 @@
+"""Run the preregistered target-KL annihilation learning-curve continuation."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "python" / "hexwars_ml.py"
+RUNS = ROOT / "python" / "runs"
+PANEL = ROOT / "python" / "panels" / "annihilation-targetkl-continuation-v1"
+REWARD_PANEL = ROOT / "python" / "panels" / "annihilation-reduced-v1"
+TRAINING_SEEDS = (11, 23, 47)
+SOURCE_STEP = 51_200
+INTERMEDIATE_STEP = 75_776
+FINAL_STEP = 100_352
+STUDY_STEPS = (SOURCE_STEP, INTERMEDIATE_STEP, FINAL_STEP)
+EVALUATION_SEED_START = 5_000_000
+EVALUATION_SEEDS = 25
+EVIDENCE_SEEDS = 10
+WORKERS = 4
+EXPECTED_OPTIONS = {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": 0.02}
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object in {path}")
+    return value
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    temporary.replace(path)
+
+
+def invoke(arguments: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as log:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), *arguments],
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(f"command failed with exit code {completed.returncode}; see {log_path}")
+
+
+def source_name(seed: int) -> str:
+    return f"annihilation-optimizer-value_targetkl-seed{seed}-tb-v1"
+
+
+def continuation_name(seed: int) -> str:
+    return f"annihilation-targetkl-continuation-seed{seed}-tb-v1"
+
+
+def expected_scenario() -> dict[str, Any]:
+    return read_json(REWARD_PANEL / "scenarios" / "minus_closing.json")
+
+
+def validate_scenario(run_dir: Path) -> None:
+    expected = expected_scenario()
+    actual = read_json(run_dir / "scenario.json")
+    for key in ("board", "rules", "episode", "reward", "tactical_v2"):
+        if actual.get(key) != expected.get(key):
+            raise RuntimeError(f"scenario mismatch: {run_dir}")
+
+
+def validate_common_config(run_dir: Path, manifest: dict[str, Any]) -> None:
+    config = manifest.get("config")
+    if not isinstance(config, dict):
+        raise RuntimeError(f"missing run config: {run_dir}")
+    if config.get("algorithm") != "maskable_ppo":
+        raise RuntimeError(f"algorithm mismatch: {run_dir}")
+    if config.get("algorithm_options") != EXPECTED_OPTIONS:
+        raise RuntimeError(f"PPO option mismatch: {run_dir}")
+    if config.get("environment") != "tactical-v2":
+        raise RuntimeError(f"environment mismatch: {run_dir}")
+    if config.get("opponent") != {"kind": "scripted", "name": "random"}:
+        raise RuntimeError(f"opponent mismatch: {run_dir}")
+    if config.get("learner_seat") != "alternating" or config.get("workers") != WORKERS:
+        raise RuntimeError(f"training schedule mismatch: {run_dir}")
+    if config.get("timestep_mode") != "absolute":
+        raise RuntimeError(f"resume is not in absolute timestep mode: {run_dir}")
+    validate_scenario(run_dir)
+
+
+def validate_source(seed: int) -> Path:
+    run_dir = RUNS / source_name(seed)
+    manifest = read_json(run_dir / "run.json")
+    validate_common_config(run_dir, manifest)
+    if manifest.get("state") != "completed":
+        raise RuntimeError(f"source run is not complete: {run_dir}")
+    if manifest.get("timesteps") != SOURCE_STEP or manifest.get("latest_checkpoint_step") != SOURCE_STEP:
+        raise RuntimeError(f"source run is not at {SOURCE_STEP}: {run_dir}")
+    checkpoint = run_dir / "checkpoints" / f"step_{SOURCE_STEP:09d}.zip"
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    return run_dir
+
+
+def validate_continuation(seed: int, run_dir: Path, source: Path) -> Path:
+    manifest = read_json(run_dir / "run.json")
+    validate_common_config(run_dir, manifest)
+    config = manifest["config"]
+    if config.get("total_timesteps") != FINAL_STEP:
+        raise RuntimeError(f"continuation target mismatch: {run_dir}")
+    if Path(str(config.get("resume_source", ""))).resolve() != source.resolve():
+        raise RuntimeError(f"continuation source mismatch: {run_dir}")
+    if manifest.get("state") != "completed":
+        raise RuntimeError(f"continuation is not complete: {run_dir}")
+    if manifest.get("timesteps") != FINAL_STEP or manifest.get("latest_checkpoint_step") != FINAL_STEP:
+        raise RuntimeError(f"continuation did not finish at {FINAL_STEP}: {run_dir}")
+    for step in (INTERMEDIATE_STEP, FINAL_STEP):
+        checkpoint = run_dir / "checkpoints" / f"step_{step:09d}.zip"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(checkpoint)
+    return run_dir
+
+
+def continue_training(seed: int, source: Path) -> Path:
+    name = continuation_name(seed)
+    run_dir = RUNS / name
+    if (run_dir / "run.json").is_file():
+        print(f"TRAIN reuse {name}", flush=True)
+        return validate_continuation(seed, run_dir, source)
+    print(f"TRAIN start {name}", flush=True)
+    invoke(
+        [
+            "resume", str(source), "--run", name,
+            "--timesteps", str(FINAL_STEP),
+            "--no-console-output", "--json",
+        ],
+        PANEL / "logs" / f"train-{name}.log",
+    )
+    print(f"TRAIN done  {name}", flush=True)
+    return validate_continuation(seed, run_dir, source)
+
+
+def checkpoint_location(step: int, source: Path, continuation: Path) -> tuple[Path, Path]:
+    run_dir = source if step == SOURCE_STEP else continuation
+    checkpoint = run_dir / "checkpoints" / f"step_{step:09d}.zip"
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    return checkpoint, run_dir
+
+
+def controller(seed: int, step: int, source: Path, continuation: Path) -> Path:
+    checkpoint, run_dir = checkpoint_location(step, source, continuation)
+    output = PANEL / "controllers" / f"seed{seed}-step{step:09d}.json"
+    write_json(
+        output,
+        {
+            "kind": "snapshot",
+            "path": str(checkpoint.resolve()),
+            "source_run": str(run_dir.resolve()),
+            "algorithm": "maskable_ppo",
+            "step": step,
+            "inference_mode": "deterministic",
+        },
+    )
+    return output
+
+
+def validate_evaluation(path: Path, games: int, seed_start: int) -> dict[str, Any]:
+    result = read_json(path)
+    if result.get("games") != games or result.get("seed_start") != seed_start:
+        raise RuntimeError(f"evaluation schedule mismatch: {path}")
+    return result
+
+
+def evaluate(seed: int, step: int, source: Path, continuation: Path) -> Path:
+    output = PANEL / "evaluations" / f"seed{seed}-step{step:09d}.json"
+    if output.is_file():
+        validate_evaluation(output, EVALUATION_SEEDS * 2, EVALUATION_SEED_START)
+        print(f"EVAL  reuse seed {seed} step {step}", flush=True)
+        return output
+    spec = controller(seed, step, source, continuation)
+    print(f"EVAL  start seed {seed} step {step}", flush=True)
+    invoke(
+        [
+            "evaluate", "--p0", f"@{spec}", "--p1", "random",
+            "--games", str(EVALUATION_SEEDS),
+            "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats", "--workers", str(WORKERS),
+            "--environment", "tactical-v2", "--output", str(output), "--json",
+        ],
+        PANEL / "logs" / f"evaluate-seed{seed}-step{step}.log",
+    )
+    validate_evaluation(output, EVALUATION_SEEDS * 2, EVALUATION_SEED_START)
+    print(f"EVAL  done  seed {seed} step {step}", flush=True)
+    return output
+
+
+def evaluate_greedy() -> Path:
+    output = PANEL / "controls" / "greedy-v-random.json"
+    if output.is_file():
+        validate_evaluation(output, EVALUATION_SEEDS * 2, EVALUATION_SEED_START)
+        return output
+    invoke(
+        [
+            "evaluate", "--p0", "greedy", "--p1", "random",
+            "--games", str(EVALUATION_SEEDS),
+            "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats", "--workers", str(WORKERS),
+            "--environment", "tactical-v2", "--output", str(output), "--json",
+        ],
+        PANEL / "logs" / "evaluate-greedy-v-random.log",
+    )
+    validate_evaluation(output, EVALUATION_SEEDS * 2, EVALUATION_SEED_START)
+    return output
+
+
+def capture_evidence(seed: int, step: int, source: Path, continuation: Path) -> Path:
+    evidence_dir = PANEL / "evidence" / f"seed{seed}-step{step:09d}"
+    output = evidence_dir / "evaluation.json"
+    if output.is_file():
+        validate_evaluation(output, EVIDENCE_SEEDS * 2, EVALUATION_SEED_START)
+        print(f"TRACE reuse seed {seed} step {step}", flush=True)
+        return output
+    spec = controller(seed, step, source, continuation)
+    print(f"TRACE start seed {seed} step {step}", flush=True)
+    invoke(
+        [
+            "evaluate", "--p0", f"@{spec}", "--p1", "random",
+            "--games", str(EVIDENCE_SEEDS),
+            "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats", "--workers", str(WORKERS),
+            "--environment", "tactical-v2", "--capture-trace",
+            "--evidence-dir", str(evidence_dir),
+            "--output", str(output), "--json",
+        ],
+        PANEL / "logs" / f"trace-seed{seed}-step{step}.log",
+    )
+    validate_evaluation(output, EVIDENCE_SEEDS * 2, EVALUATION_SEED_START)
+    print(f"TRACE done  seed {seed} step {step}", flush=True)
+    return output
+
+
+def wilson(successes: int, total: int) -> dict[str, float]:
+    z = 1.959963984540054
+    proportion = successes / total
+    denominator = 1 + z * z / total
+    center = (proportion + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt(
+        (proportion * (1 - proportion) + z * z / (4 * total)) / total
+    ) / denominator
+    return {"confidence": 0.95, "low": center - margin, "high": center + margin}
+
+
+def exact_sign(left_only: int, right_only: int) -> float:
+    count = left_only + right_only
+    if count == 0:
+        return 1.0
+    tail = min(left_only, right_only)
+    return min(
+        1.0,
+        2 * sum(math.comb(count, index) for index in range(tail + 1)) / (2**count),
+    )
+
+
+def paired(
+    evaluations: dict[int, list[tuple[int, Path]]], later: int, earlier: int
+) -> dict[str, Any]:
+    later_rows = {seed: read_json(path)["matches"] for seed, path in evaluations[later]}
+    earlier_rows = {seed: read_json(path)["matches"] for seed, path in evaluations[earlier]}
+    left_only = right_only = both = neither = 0
+    seed_deltas: dict[str, int] = {}
+    for seed in TRAINING_SEEDS:
+        delta = 0
+        for left, right in zip(later_rows[seed], earlier_rows[seed], strict=True):
+            if (left["seed"], left["candidate_seat"]) != (right["seed"], right["candidate_seat"]):
+                raise RuntimeError("paired checkpoint schedules differ")
+            left_win = left["outcome"] == "win"
+            right_win = right["outcome"] == "win"
+            if left_win and right_win:
+                both += 1
+            elif left_win:
+                left_only += 1
+                delta += 1
+            elif right_win:
+                right_only += 1
+                delta -= 1
+            else:
+                neither += 1
+        seed_deltas[str(seed)] = delta
+    return {
+        "later_step": later,
+        "earlier_step": earlier,
+        "both_win": both,
+        "later_only_wins": left_only,
+        "earlier_only_wins": right_only,
+        "neither_wins": neither,
+        "net_later_wins": left_only - right_only,
+        "seed_net_later_wins": seed_deltas,
+        "two_sided_exact_sign_p": exact_sign(left_only, right_only),
+    }
+
+
+def aggregate(evaluations: dict[int, list[tuple[int, Path]]], greedy: Path) -> Path:
+    output: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "training_seeds": list(TRAINING_SEEDS),
+        "study_steps": list(STUDY_STEPS),
+        "evaluation_seed_start": EVALUATION_SEED_START,
+        "evaluation_seed_count": EVALUATION_SEEDS,
+        "checkpoints": {},
+        "controls": {"greedy_vs_random": read_json(greedy)},
+    }
+    for step, rows in evaluations.items():
+        models = []
+        totals = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
+        seat_totals = {
+            "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+            "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+        }
+        for seed, path in rows:
+            result = read_json(path)
+            models.append(
+                {
+                    "training_seed": seed,
+                    "games": result["games"],
+                    "wins": result["wins"],
+                    "losses": result["losses"],
+                    "draws": result["draws"],
+                    "seat_results": result["seat_results"],
+                    "evaluation": str(path.relative_to(ROOT)),
+                }
+            )
+            for key in totals:
+                totals[key] += int(result[key])
+            for seat, values in result["seat_results"].items():
+                for outcome in ("wins", "losses", "draws"):
+                    seat_totals[seat][outcome] += int(values[outcome])
+        totals["win_rate"] = totals["wins"] / totals["games"]
+        totals["draw_rate"] = totals["draws"] / totals["games"]
+        totals["win_interval"] = wilson(totals["wins"], totals["games"])
+        output["checkpoints"][str(step)] = {
+            "models": models,
+            "totals": totals,
+            "seat_totals": seat_totals,
+        }
+    output["paired_checkpoint_comparisons"] = [
+        paired(evaluations, INTERMEDIATE_STEP, SOURCE_STEP),
+        paired(evaluations, FINAL_STEP, INTERMEDIATE_STEP),
+        paired(evaluations, FINAL_STEP, SOURCE_STEP),
+    ]
+    path = PANEL / "aggregate.json"
+    write_json(path, output)
+    return path
+
+
+def write_manifest() -> None:
+    write_json(
+        PANEL / "panel.json",
+        {
+            "schema_version": 1,
+            "panel": "annihilation-targetkl-continuation-v1",
+            "scope": "tactical-v2 reduced curriculum, 13x9, three starting units",
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "opponent": "random",
+            "reward": "minus_closing",
+            "algorithm_options": EXPECTED_OPTIONS,
+            "training_seeds": list(TRAINING_SEEDS),
+            "source_step": SOURCE_STEP,
+            "final_step": FINAL_STEP,
+            "study_steps": list(STUDY_STEPS),
+            "evaluation_seed_start": EVALUATION_SEED_START,
+            "evaluation_seed_count": EVALUATION_SEEDS,
+            "reciprocal": True,
+            "evidence_training_seed": 11,
+            "evidence_seed_count": EVIDENCE_SEEDS,
+        },
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--train-only", action="store_true")
+    arguments = parser.parse_args()
+    write_manifest()
+    sources = {seed: validate_source(seed) for seed in TRAINING_SEEDS}
+    if arguments.prepare_only:
+        print(PANEL / "panel.json")
+        return 0
+
+    continuations = {
+        seed: continue_training(seed, sources[seed]) for seed in TRAINING_SEEDS
+    }
+    if arguments.train_only:
+        return 0
+
+    evaluations: dict[int, list[tuple[int, Path]]] = {step: [] for step in STUDY_STEPS}
+    for step in STUDY_STEPS:
+        for seed in TRAINING_SEEDS:
+            path = evaluate(seed, step, sources[seed], continuations[seed])
+            evaluations[step].append((seed, path))
+    output = aggregate(evaluations, evaluate_greedy())
+    for step in STUDY_STEPS:
+        capture_evidence(11, step, sources[11], continuations[11])
+    print(f"AGGREGATE {output}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

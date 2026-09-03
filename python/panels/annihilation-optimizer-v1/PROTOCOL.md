@@ -41,8 +41,6 @@ seeds and seats while reducing approximate KL and clip fraction. A prettier
 training curve or fewer losses to an opponent that almost never wins is not a
 success criterion.
 
-Run from PowerShell with:
-
-```powershell
-.\python\winenv\Scripts\python.exe .\python\run_annihilation_optimizer_panel.py
-```
+The exact one-off runner is retained for review at
+`historical-source/run_annihilation_optimizer_panel.py.txt`. It is a historical
+source snapshot, not a current entry point.

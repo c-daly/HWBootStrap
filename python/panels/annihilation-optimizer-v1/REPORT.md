@@ -178,4 +178,4 @@ more for draws or adding another dense reward term.
 - `controllers/`: immutable controller specifications
 - `../annihilation-reduced-v1/scenarios/`: the reused materialized reward scenarios
 - `evidence/value-targetkl-seed11/`: retained traces and authoritative replays
-- `../../run_annihilation_optimizer_panel.py`: restart-safe PowerShell-callable runner
+- `historical-source/run_annihilation_optimizer_panel.py.txt`: exact source snapshot of the one-off runner
