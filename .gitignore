@@ -92,6 +92,10 @@ engine/**/obj/
 # Local Claude Code tooling (workflow scripts, etc.)
 .claude/
 
+# Local agent/session metadata. Handoffs are working notes, not repository source.
+/.serena/
+/HANDOFF.md
+
 # Local Superpowers brainstorming previews and transient preview-server state
 .superpowers/
 
@@ -139,6 +143,17 @@ python/events.out.tfevents.*
 /python/panels/annihilation-imitation-v1/.final-generations/
 /python/panels/annihilation-imitation-v1/evidence/
 /python/evidence/tactical-v3-training-pilot-v1/
+
+# Generated experiment evidence and per-match panel output. Curated protocols,
+# manifests, aggregate results, and reports remain visible for review.
+/python/evidence/
+/python/panels/*/controllers/
+/python/panels/*/controls/
+/python/panels/*/evaluations/
+/python/panels/*/evidence/
+/python/panels/*/logs/
+/python/panels/*/development-*.json
+/python/panels/*/development-standard-repeat-*/
 
 # Intentionally publishable Task 12 results remain visible to Git.
 !/python/panels/annihilation-imitation-v1/aggregate.json
