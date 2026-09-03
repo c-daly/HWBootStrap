@@ -1,0 +1,3148 @@
+{
+  "comparators": {
+    "greedy": {
+      "by_profile": {
+        "conversion-1v1-far": {
+          "draw": 2,
+          "loss": 3,
+          "win": 15
+        },
+        "conversion-1v1-medium": {
+          "loss": 7,
+          "win": 13
+        },
+        "conversion-1v1-near": {
+          "loss": 1,
+          "win": 19
+        },
+        "conversion-2v1-far": {
+          "draw": 3,
+          "win": 17
+        },
+        "conversion-2v1-medium": {
+          "draw": 1,
+          "win": 19
+        },
+        "conversion-2v1-near": {
+          "win": 20
+        },
+        "conversion-3v1-far": {
+          "win": 20
+        },
+        "conversion-3v1-medium": {
+          "draw": 1,
+          "win": 19
+        },
+        "conversion-3v1-near": {
+          "win": 20
+        }
+      },
+      "by_seat": {
+        "0": {
+          "draw": 2,
+          "loss": 5,
+          "win": 83
+        },
+        "1": {
+          "draw": 5,
+          "loss": 6,
+          "win": 79
+        }
+      },
+      "cycling_draw_incidence": 0.03888888888888889,
+      "cycling_draws": 7,
+      "draw_rate": 0.03888888888888889,
+      "draws": 7,
+      "failed_conversion_draws": 2,
+      "games": 180,
+      "loss_rate": 0.06111111111111111,
+      "losses": 11,
+      "win_rate": 0.9,
+      "wins": 162
+    },
+    "mixed_ppo": {
+      "aggregate_games": 540,
+      "aggregate_win_rate": 0.7333333333333333,
+      "aggregate_wins": 396,
+      "by_training_seed": {
+        "101": {
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 3,
+              "loss": 1,
+              "win": 16
+            },
+            "conversion-1v1-medium": {
+              "draw": 6,
+              "loss": 4,
+              "win": 10
+            },
+            "conversion-1v1-near": {
+              "draw": 2,
+              "loss": 2,
+              "win": 16
+            },
+            "conversion-2v1-far": {
+              "draw": 5,
+              "loss": 1,
+              "win": 14
+            },
+            "conversion-2v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-2v1-near": {
+              "draw": 5,
+              "win": 15
+            },
+            "conversion-3v1-far": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-medium": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-near": {
+              "draw": 4,
+              "win": 16
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 17,
+              "loss": 5,
+              "win": 68
+            },
+            "1": {
+              "draw": 14,
+              "loss": 3,
+              "win": 73
+            }
+          },
+          "cycling_draw_incidence": 0.17222222222222222,
+          "cycling_draws": 31,
+          "draw_rate": 0.17222222222222222,
+          "draws": 31,
+          "failed_conversion_draws": 11,
+          "games": 180,
+          "loss_rate": 0.044444444444444446,
+          "losses": 8,
+          "win_rate": 0.7833333333333333,
+          "wins": 141
+        },
+        "113": {
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 7,
+              "loss": 2,
+              "win": 11
+            },
+            "conversion-1v1-medium": {
+              "draw": 10,
+              "loss": 6,
+              "win": 4
+            },
+            "conversion-1v1-near": {
+              "draw": 4,
+              "loss": 2,
+              "win": 14
+            },
+            "conversion-2v1-far": {
+              "draw": 8,
+              "win": 12
+            },
+            "conversion-2v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-2v1-near": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-far": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-medium": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-near": {
+              "draw": 2,
+              "win": 18
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 19,
+              "loss": 5,
+              "win": 66
+            },
+            "1": {
+              "draw": 21,
+              "loss": 5,
+              "win": 64
+            }
+          },
+          "cycling_draw_incidence": 0.2222222222222222,
+          "cycling_draws": 40,
+          "draw_rate": 0.2222222222222222,
+          "draws": 40,
+          "failed_conversion_draws": 9,
+          "games": 180,
+          "loss_rate": 0.05555555555555555,
+          "losses": 10,
+          "win_rate": 0.7222222222222222,
+          "wins": 130
+        },
+        "127": {
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 10,
+              "loss": 1,
+              "win": 9
+            },
+            "conversion-1v1-medium": {
+              "draw": 7,
+              "loss": 4,
+              "win": 9
+            },
+            "conversion-1v1-near": {
+              "draw": 5,
+              "loss": 1,
+              "win": 14
+            },
+            "conversion-2v1-far": {
+              "draw": 6,
+              "loss": 1,
+              "win": 13
+            },
+            "conversion-2v1-medium": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-2v1-near": {
+              "draw": 6,
+              "win": 14
+            },
+            "conversion-3v1-far": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-3v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-3v1-near": {
+              "draw": 4,
+              "win": 16
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 24,
+              "loss": 5,
+              "win": 61
+            },
+            "1": {
+              "draw": 24,
+              "loss": 2,
+              "win": 64
+            }
+          },
+          "cycling_draw_incidence": 0.26666666666666666,
+          "cycling_draws": 48,
+          "draw_rate": 0.26666666666666666,
+          "draws": 48,
+          "failed_conversion_draws": 14,
+          "games": 180,
+          "loss_rate": 0.03888888888888889,
+          "losses": 7,
+          "win_rate": 0.6944444444444444,
+          "wins": 125
+        }
+      }
+    }
+  },
+  "controllers": {
+    "bounded-search": {
+      "compute": {
+        "decisions": 2612,
+        "expansions": 1008170,
+        "mean_expansions_per_decision": 385.9762633996937,
+        "mean_seconds_per_decision": 0.009014573545176109,
+        "seconds": 23.546066099999997
+      },
+      "outcomes": {
+        "by_profile": {
+          "conversion-1v1-far": {
+            "draw": 2,
+            "win": 18
+          },
+          "conversion-1v1-medium": {
+            "draw": 4,
+            "loss": 3,
+            "win": 13
+          },
+          "conversion-1v1-near": {
+            "draw": 1,
+            "loss": 1,
+            "win": 18
+          },
+          "conversion-2v1-far": {
+            "draw": 1,
+            "win": 19
+          },
+          "conversion-2v1-medium": {
+            "win": 20
+          },
+          "conversion-2v1-near": {
+            "win": 20
+          },
+          "conversion-3v1-far": {
+            "win": 20
+          },
+          "conversion-3v1-medium": {
+            "win": 20
+          },
+          "conversion-3v1-near": {
+            "win": 20
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 3,
+            "loss": 2,
+            "win": 85
+          },
+          "1": {
+            "draw": 5,
+            "loss": 2,
+            "win": 83
+          }
+        },
+        "cycling_draw_incidence": 0.044444444444444446,
+        "cycling_draws": 8,
+        "draw_rate": 0.044444444444444446,
+        "draws": 8,
+        "failed_conversion_draws": 3,
+        "games": 180,
+        "loss_rate": 0.022222222222222223,
+        "losses": 4,
+        "win_rate": 0.9333333333333333,
+        "wins": 168
+      }
+    },
+    "bounded-search-terminal-only": {
+      "outcomes": {
+        "by_profile": {
+          "conversion-1v1-far": {
+            "draw": 9,
+            "win": 11
+          },
+          "conversion-1v1-medium": {
+            "draw": 9,
+            "loss": 1,
+            "win": 10
+          },
+          "conversion-1v1-near": {
+            "draw": 2,
+            "loss": 1,
+            "win": 17
+          },
+          "conversion-2v1-far": {
+            "draw": 2,
+            "win": 18
+          },
+          "conversion-2v1-medium": {
+            "win": 20
+          },
+          "conversion-2v1-near": {
+            "draw": 2,
+            "win": 18
+          },
+          "conversion-3v1-far": {
+            "win": 20
+          },
+          "conversion-3v1-medium": {
+            "win": 20
+          },
+          "conversion-3v1-near": {
+            "win": 20
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 11,
+            "loss": 1,
+            "win": 78
+          },
+          "1": {
+            "draw": 13,
+            "loss": 1,
+            "win": 76
+          }
+        },
+        "cycling_draw_incidence": 0.13333333333333333,
+        "cycling_draws": 24,
+        "draw_rate": 0.13333333333333333,
+        "draws": 24,
+        "failed_conversion_draws": 2,
+        "games": 180,
+        "loss_rate": 0.011111111111111112,
+        "losses": 2,
+        "win_rate": 0.8555555555555555,
+        "wins": 154
+      }
+    }
+  },
+  "decisions": {
+    "confirmation_namespace_consumed": false,
+    "imitation_entry_authorized_under_locked_composite_rule": false,
+    "mechanical_feasibility_positive_control_established": true,
+    "persistent_pursuit_increment_established_at_locked_magnitude": false,
+    "planner_no_gain_over_greedy": false,
+    "planner_succeeds_where_ppo_cycles": true
+  },
+  "diagnostic_only": true,
+  "interpretation_decomposition": {
+    "locked_composite_gate_unchanged": true,
+    "persistent_pursuit_increment_clause_passed": false,
+    "planner_performance_clauses_passed": true,
+    "posthoc_erratum": true,
+    "reason": "The locked report's generic FAIL branch conflated failure of the incremental heuristic-effect threshold with failure of the planner performance clauses."
+  },
+  "paired": {
+    "search_vs_greedy": {
+      "games": 180,
+      "left_only_wins": 9,
+      "net_left_wins": 6,
+      "right_only_wins": 3,
+      "transitions": {
+        "draw_to_draw": 1,
+        "draw_to_loss": 5,
+        "draw_to_win": 2,
+        "loss_to_loss": 3,
+        "loss_to_win": 1,
+        "win_to_draw": 6,
+        "win_to_loss": 3,
+        "win_to_win": 159
+      },
+      "two_sided_exact_sign_p": 0.14599609375
+    },
+    "search_vs_mixed_ppo": {
+      "101": {
+        "games": 180,
+        "left_only_wins": 31,
+        "net_left_wins": 27,
+        "right_only_wins": 4,
+        "transitions": {
+          "draw_to_draw": 6,
+          "draw_to_win": 2,
+          "loss_to_loss": 2,
+          "loss_to_win": 2,
+          "win_to_draw": 25,
+          "win_to_loss": 6,
+          "win_to_win": 137
+        },
+        "two_sided_exact_sign_p": 3.4654513001441956e-06
+      },
+      "113": {
+        "games": 180,
+        "left_only_wins": 39,
+        "net_left_wins": 38,
+        "right_only_wins": 1,
+        "transitions": {
+          "draw_to_draw": 7,
+          "draw_to_win": 1,
+          "loss_to_draw": 1,
+          "loss_to_loss": 3,
+          "win_to_draw": 32,
+          "win_to_loss": 7,
+          "win_to_win": 129
+        },
+        "two_sided_exact_sign_p": 7.457856554538012e-11
+      },
+      "127": {
+        "games": 180,
+        "left_only_wins": 46,
+        "net_left_wins": 43,
+        "right_only_wins": 3,
+        "transitions": {
+          "draw_to_draw": 6,
+          "draw_to_win": 2,
+          "loss_to_loss": 3,
+          "loss_to_win": 1,
+          "win_to_draw": 42,
+          "win_to_loss": 4,
+          "win_to_win": 122
+        },
+        "two_sided_exact_sign_p": 6.981082378842984e-11
+      }
+    },
+    "search_vs_terminal_only": {
+      "games": 180,
+      "left_only_wins": 17,
+      "net_left_wins": 14,
+      "right_only_wins": 3,
+      "transitions": {
+        "draw_to_draw": 7,
+        "draw_to_win": 1,
+        "loss_to_loss": 2,
+        "loss_to_win": 2,
+        "win_to_draw": 17,
+        "win_to_win": 151
+      },
+      "two_sided_exact_sign_p": 0.0025768280029296875
+    }
+  },
+  "panel": "annihilation-bounded-search-v1",
+  "planner_win_ppo_draw_disagreements": [
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000009-seed-9000004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000009-seed-9000004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 1,
+          "final_normalized_advantage": 0.4810126582278481,
+          "maximum_state_repetition": 43,
+          "peak_normalized_advantage": 0.4936708860759494,
+          "terminated": true,
+          "total_damage": 8,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/replays/match-000009-seed-9000004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/traces/match-000009-seed-9000004-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000011-seed-9000005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000011-seed-9000005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.21518987341772153,
+          "maximum_state_repetition": 37,
+          "peak_normalized_advantage": 0.4936708860759494,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/replays/match-000011-seed-9000005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/traces/match-000011-seed-9000005-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9001009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000018-seed-9001009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000018-seed-9001009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.15,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.5,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-medium/replays/match-000018-seed-9001009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-medium/traces/match-000018-seed-9001009-candidate-seat-0.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9002005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000011-seed-9002005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000011-seed-9002005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 8,
+          "final_normalized_advantage": 0.35443037974683544,
+          "maximum_state_repetition": 73,
+          "peak_normalized_advantage": 0.4936708860759494,
+          "terminated": true,
+          "total_damage": 7,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/replays/match-000011-seed-9002005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/traces/match-000011-seed-9002005-candidate-seat-1.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9002006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000012-seed-9002006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000012-seed-9002006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 93,
+          "final_normalized_advantage": 0.4691358024691358,
+          "maximum_state_repetition": 135,
+          "peak_normalized_advantage": 0.5061728395061729,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/replays/match-000012-seed-9002006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/traces/match-000012-seed-9002006-candidate-seat-0.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9002007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000014-seed-9002007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000014-seed-9002007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 88,
+          "final_normalized_advantage": 0.2839506172839506,
+          "maximum_state_repetition": 38,
+          "peak_normalized_advantage": 0.5061728395061729,
+          "terminated": true,
+          "total_damage": 9,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/replays/match-000014-seed-9002007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-3v1-far/traces/match-000014-seed-9002007-candidate-seat-0.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003000,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000000-seed-9003000-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000000-seed-9003000-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.09836065573770492,
+          "maximum_state_repetition": 11,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/replays/match-000000-seed-9003000-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/traces/match-000000-seed-9003000-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000002-seed-9003001-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000002-seed-9003001-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 62,
+          "final_normalized_advantage": 0.22950819672131148,
+          "maximum_state_repetition": 31,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 5,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/replays/match-000002-seed-9003001-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/traces/match-000002-seed-9003001-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000003-seed-9003001-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000003-seed-9003001-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.01639344262295082,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/replays/match-000003-seed-9003001-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/traces/match-000003-seed-9003001-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003002,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000005-seed-9003002-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000005-seed-9003002-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 4,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/replays/match-000005-seed-9003002-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/traces/match-000005-seed-9003002-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000008-seed-9003004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000008-seed-9003004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.15254237288135594,
+          "maximum_state_repetition": 60,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/replays/match-000008-seed-9003004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-near/traces/match-000008-seed-9003004-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9004008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000017-seed-9004008-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000017-seed-9004008-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 70,
+          "final_normalized_advantage": 0.18032786885245902,
+          "maximum_state_repetition": 35,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-medium/replays/match-000017-seed-9004008-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-medium/traces/match-000017-seed-9004008-candidate-seat-1.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9004009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000018-seed-9004009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000018-seed-9004009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 86,
+          "final_normalized_advantage": 0.2833333333333333,
+          "maximum_state_repetition": 14,
+          "peak_normalized_advantage": 0.3,
+          "terminated": true,
+          "total_damage": 10,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-medium/replays/match-000018-seed-9004009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-medium/traces/match-000018-seed-9004009-candidate-seat-0.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005003,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000006-seed-9005003-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000006-seed-9005003-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 91,
+          "final_normalized_advantage": 0.1774193548387097,
+          "maximum_state_repetition": 45,
+          "peak_normalized_advantage": 0.3548387096774194,
+          "terminated": true,
+          "total_damage": 9,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/replays/match-000006-seed-9005003-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/traces/match-000006-seed-9005003-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.06779661016949153,
+          "maximum_state_repetition": 16,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 7,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000014-seed-9005007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000014-seed-9005007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.18032786885245902,
+          "maximum_state_repetition": 8,
+          "peak_normalized_advantage": 0.3114754098360656,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/replays/match-000014-seed-9005007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/traces/match-000014-seed-9005007-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 51,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 51,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 113,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 113,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.07142857142857142,
+          "maximum_state_repetition": 4,
+          "peak_normalized_advantage": 0.07142857142857142,
+          "terminated": true,
+          "total_damage": 1,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed101/conversion-conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 101
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 48,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 48,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9001003,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000006-seed-9001003-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000006-seed-9001003-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.525,
+          "maximum_state_repetition": 48,
+          "peak_normalized_advantage": 0.525,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/replays/match-000006-seed-9001003-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/traces/match-000006-seed-9001003-candidate-seat-0.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9001003,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000007-seed-9001003-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000007-seed-9001003-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.525,
+          "maximum_state_repetition": 48,
+          "peak_normalized_advantage": 0.525,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/replays/match-000007-seed-9001003-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/traces/match-000007-seed-9001003-candidate-seat-1.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9001006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000013-seed-9001006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000013-seed-9001006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 1,
+          "final_normalized_advantage": 0.11688311688311688,
+          "maximum_state_repetition": 59,
+          "peak_normalized_advantage": 0.4805194805194805,
+          "terminated": true,
+          "total_damage": 6,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "mobility_stalemate",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/replays/match-000013-seed-9001006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-medium/traces/match-000013-seed-9001006-candidate-seat-1.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9002008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000016-seed-9002008-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000016-seed-9002008-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 81,
+          "final_normalized_advantage": 0.20512820512820512,
+          "maximum_state_repetition": 13,
+          "peak_normalized_advantage": 0.48717948717948717,
+          "terminated": true,
+          "total_damage": 9,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-far/replays/match-000016-seed-9002008-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-3v1-far/traces/match-000016-seed-9002008-candidate-seat-0.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003000,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000000-seed-9003000-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000000-seed-9003000-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.14754098360655737,
+          "maximum_state_repetition": 6,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/replays/match-000000-seed-9003000-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/traces/match-000000-seed-9003000-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000014-seed-9003007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000014-seed-9003007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 1,
+          "final_normalized_advantage": -0.03571428571428571,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.32142857142857145,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "mobility_stalemate",
+          "cycling"
+        ],
+        "primary": "mobility_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/replays/match-000014-seed-9003007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/traces/match-000014-seed-9003007-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000017-seed-9003008-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000017-seed-9003008-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 2,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 4,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/replays/match-000017-seed-9003008-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-near/traces/match-000017-seed-9003008-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9004005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000010-seed-9004005-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000010-seed-9004005-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 51,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-medium/replays/match-000010-seed-9004005-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-medium/traces/match-000010-seed-9004005-candidate-seat-0.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9004005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000011-seed-9004005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000011-seed-9004005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 51,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-medium/replays/match-000011-seed-9004005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-medium/traces/match-000011-seed-9004005-candidate-seat-1.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005000,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000000-seed-9005000-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000000-seed-9005000-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.05084745762711865,
+          "maximum_state_repetition": 62,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000000-seed-9005000-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000000-seed-9005000-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005002,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000004-seed-9005002-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000004-seed-9005002-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.08196721311475409,
+          "maximum_state_repetition": 18,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "balanced_attrition"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000004-seed-9005002-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000004-seed-9005002-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005003,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000007-seed-9005003-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000007-seed-9005003-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 84,
+          "final_normalized_advantage": 0.016129032258064516,
+          "maximum_state_repetition": 5,
+          "peak_normalized_advantage": 0.3548387096774194,
+          "terminated": true,
+          "total_damage": 11,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "action_waste",
+          "balanced_attrition"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000007-seed-9005003-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000007-seed-9005003-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.05084745762711865,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000009-seed-9005004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000009-seed-9005004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 59,
+          "final_normalized_advantage": 0.288135593220339,
+          "maximum_state_repetition": 10,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 5,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000009-seed-9005004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000009-seed-9005004-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000013-seed-9005006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000013-seed-9005006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 92,
+          "final_normalized_advantage": 0.3114754098360656,
+          "maximum_state_repetition": 36,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 7,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000013-seed-9005006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000013-seed-9005006-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 148,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 148,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000012-seed-9006006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000012-seed-9006006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 12,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/replays/match-000012-seed-9006006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/traces/match-000012-seed-9006006-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000011-seed-9007005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000011-seed-9007005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.024390243902439025,
+          "maximum_state_repetition": 7,
+          "peak_normalized_advantage": -0.024390243902439025,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/replays/match-000011-seed-9007005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/traces/match-000011-seed-9007005-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9007009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000018-seed-9007009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000018-seed-9007009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 148,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/replays/match-000018-seed-9007009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/traces/match-000018-seed-9007009-candidate-seat-0.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000019-seed-9007009-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000019-seed-9007009-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 148,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/replays/match-000019-seed-9007009-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-medium/traces/match-000019-seed-9007009-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000002-seed-9008001-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000002-seed-9008001-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.14285714285714285,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.14285714285714285,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/replays/match-000002-seed-9008001-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/traces/match-000002-seed-9008001-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.07142857142857142,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "balanced_attrition"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000008-seed-9008004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000008-seed-9008004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/replays/match-000008-seed-9008004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/traces/match-000008-seed-9008004-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000009-seed-9008004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000009-seed-9008004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/replays/match-000009-seed-9008004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/traces/match-000009-seed-9008004-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000017-seed-9008008-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000017-seed-9008008-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.2857142857142857,
+          "maximum_state_repetition": 5,
+          "peak_normalized_advantage": 0.2857142857142857,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/replays/match-000017-seed-9008008-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed113/conversion-conversion-1v1-far/traces/match-000017-seed-9008008-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 113
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000003-seed-9000001-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000003-seed-9000001-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.175,
+          "maximum_state_repetition": 7,
+          "peak_normalized_advantage": 0.5,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/replays/match-000003-seed-9000001-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/traces/match-000003-seed-9000001-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9000004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000008-seed-9000004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000008-seed-9000004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 76,
+          "final_normalized_advantage": 0.4050632911392405,
+          "maximum_state_repetition": 76,
+          "peak_normalized_advantage": 0.4936708860759494,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/replays/match-000008-seed-9000004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/traces/match-000008-seed-9000004-candidate-seat-0.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/replays/match-000012-seed-9000006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/traces/match-000012-seed-9000006-candidate-seat-0.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9000006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.5128205128205128,
+          "maximum_state_repetition": 50,
+          "peak_normalized_advantage": 0.5128205128205128,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/replays/match-000013-seed-9000006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-near/traces/match-000013-seed-9000006-candidate-seat-1.json",
+      "profile": "conversion-3v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9001005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000011-seed-9001005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000011-seed-9001005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 63,
+          "final_normalized_advantage": 0.06097560975609756,
+          "maximum_state_repetition": 18,
+          "peak_normalized_advantage": 0.5121951219512195,
+          "terminated": true,
+          "total_damage": 13,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "action_waste",
+          "balanced_attrition"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-medium/replays/match-000011-seed-9001005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-medium/traces/match-000011-seed-9001005-candidate-seat-1.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9001008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/replays/match-000017-seed-9001008-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-medium/traces/match-000017-seed-9001008-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 91,
+          "final_normalized_advantage": 0.5,
+          "maximum_state_repetition": 29,
+          "peak_normalized_advantage": 0.5,
+          "terminated": true,
+          "total_damage": 5,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-medium/replays/match-000017-seed-9001008-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-medium/traces/match-000017-seed-9001008-candidate-seat-1.json",
+      "profile": "conversion-3v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9002006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000012-seed-9002006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000012-seed-9002006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.19753086419753085,
+          "maximum_state_repetition": 27,
+          "peak_normalized_advantage": 0.5061728395061729,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/replays/match-000012-seed-9002006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/traces/match-000012-seed-9002006-candidate-seat-0.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9002006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000013-seed-9002006-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000013-seed-9002006-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 90,
+          "final_normalized_advantage": 0.4567901234567901,
+          "maximum_state_repetition": 45,
+          "peak_normalized_advantage": 0.5061728395061729,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/replays/match-000013-seed-9002006-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/traces/match-000013-seed-9002006-candidate-seat-1.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9002007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000015-seed-9002007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000015-seed-9002007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.16049382716049382,
+          "maximum_state_repetition": 15,
+          "peak_normalized_advantage": 0.5061728395061729,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/replays/match-000015-seed-9002007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/traces/match-000015-seed-9002007-candidate-seat-1.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9002008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/replays/match-000016-seed-9002008-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-3v1-far/traces/match-000016-seed-9002008-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 85,
+          "final_normalized_advantage": 0.48717948717948717,
+          "maximum_state_repetition": 107,
+          "peak_normalized_advantage": 0.48717948717948717,
+          "terminated": true,
+          "total_damage": 5,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/replays/match-000016-seed-9002008-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-3v1-far/traces/match-000016-seed-9002008-candidate-seat-0.json",
+      "profile": "conversion-3v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000002-seed-9003001-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000002-seed-9003001-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 70,
+          "final_normalized_advantage": 0.22950819672131148,
+          "maximum_state_repetition": 104,
+          "peak_normalized_advantage": 0.3442622950819672,
+          "terminated": true,
+          "total_damage": 5,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000002-seed-9003001-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000002-seed-9003001-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003002,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000005-seed-9003002-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000005-seed-9003002-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.42857142857142855,
+          "maximum_state_repetition": 8,
+          "peak_normalized_advantage": 0.42857142857142855,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000005-seed-9003002-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000005-seed-9003002-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000008-seed-9003004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000008-seed-9003004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 84,
+          "final_normalized_advantage": 0.2033898305084746,
+          "maximum_state_repetition": 17,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000008-seed-9003004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000008-seed-9003004-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000009-seed-9003004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000009-seed-9003004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.03389830508474576,
+          "maximum_state_repetition": 16,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000009-seed-9003004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000009-seed-9003004-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9003007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000014-seed-9003007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000014-seed-9003007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.32142857142857145,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.32142857142857145,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000014-seed-9003007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000014-seed-9003007-candidate-seat-0.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9003007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/replays/match-000015-seed-9003007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-near/traces/match-000015-seed-9003007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.32142857142857145,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.32142857142857145,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/replays/match-000015-seed-9003007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-near/traces/match-000015-seed-9003007-candidate-seat-1.json",
+      "profile": "conversion-2v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9004005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000010-seed-9004005-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000010-seed-9004005-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 98,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/replays/match-000010-seed-9004005-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/traces/match-000010-seed-9004005-candidate-seat-0.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9004005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000011-seed-9004005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000011-seed-9004005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 98,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/replays/match-000011-seed-9004005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/traces/match-000011-seed-9004005-candidate-seat-1.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9004007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000014-seed-9004007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000014-seed-9004007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 98,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/replays/match-000014-seed-9004007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/traces/match-000014-seed-9004007-candidate-seat-0.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9004007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/replays/match-000015-seed-9004007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-medium/traces/match-000015-seed-9004007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3333333333333333,
+          "maximum_state_repetition": 98,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/replays/match-000015-seed-9004007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-medium/traces/match-000015-seed-9004007-candidate-seat-1.json",
+      "profile": "conversion-2v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000002-seed-9005001-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000002-seed-9005001-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 63,
+          "final_normalized_advantage": 0.21666666666666667,
+          "maximum_state_repetition": 6,
+          "peak_normalized_advantage": 0.3333333333333333,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling",
+          "action_waste"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000002-seed-9005001-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000002-seed-9005001-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 15,
+          "final_normalized_advantage": 0.2033898305084746,
+          "maximum_state_repetition": 8,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 4,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000008-seed-9005004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000008-seed-9005004-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000009-seed-9005004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000009-seed-9005004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.1016949152542373,
+          "maximum_state_repetition": 70,
+          "peak_normalized_advantage": 0.3220338983050847,
+          "terminated": true,
+          "total_damage": 7,
+          "truncated": false
+        },
+        "flags": [
+          "damage_stalemate",
+          "cycling"
+        ],
+        "primary": "damage_stalemate"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000009-seed-9005004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000009-seed-9005004-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000015-seed-9005007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000015-seed-9005007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.14754098360655737,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.5081967213114754,
+          "terminated": true,
+          "total_damage": 6,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000015-seed-9005007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000015-seed-9005007-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 85,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000018-seed-9005009-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000018-seed-9005009-candidate-seat-0.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9005009,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.3559322033898305,
+          "maximum_state_repetition": 85,
+          "peak_normalized_advantage": 0.3559322033898305,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "failed_conversion",
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "failed_conversion"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/replays/match-000019-seed-9005009-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-2v1-far/traces/match-000019-seed-9005009-candidate-seat-1.json",
+      "profile": "conversion-2v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000010-seed-9006005-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000010-seed-9006005-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/replays/match-000010-seed-9006005-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/traces/match-000010-seed-9006005-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9006005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000011-seed-9006005-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000011-seed-9006005-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/replays/match-000011-seed-9006005-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/traces/match-000011-seed-9006005-candidate-seat-1.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000012-seed-9006006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000012-seed-9006006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.14285714285714285,
+          "maximum_state_repetition": 8,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/replays/match-000012-seed-9006006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/traces/match-000012-seed-9006006-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/replays/match-000014-seed-9006007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/traces/match-000014-seed-9006007-candidate-seat-0.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9006007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/replays/match-000015-seed-9006007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-near/traces/match-000015-seed-9006007-candidate-seat-1.json",
+      "profile": "conversion-1v1-near",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007000,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000001-seed-9007000-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000001-seed-9007000-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.024390243902439025,
+          "maximum_state_repetition": 4,
+          "peak_normalized_advantage": -0.024390243902439025,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/replays/match-000001-seed-9007000-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/traces/match-000001-seed-9007000-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/replays/match-000014-seed-9007007-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/traces/match-000014-seed-9007007-candidate-seat-0.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9007007,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 99,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/replays/match-000015-seed-9007007-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-medium/traces/match-000015-seed-9007007-candidate-seat-1.json",
+      "profile": "conversion-1v1-medium",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000002-seed-9008001-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000002-seed-9008001-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.14285714285714285,
+          "maximum_state_repetition": 3,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 2,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000002-seed-9008001-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000002-seed-9008001-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008001,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 4,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000003-seed-9008001-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000003-seed-9008001-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000008-seed-9008004-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000008-seed-9008004-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 97,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000008-seed-9008004-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000008-seed-9008004-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008004,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000009-seed-9008004-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000009-seed-9008004-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.02564102564102564,
+          "maximum_state_repetition": 97,
+          "peak_normalized_advantage": 0.02564102564102564,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000009-seed-9008004-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000009-seed-9008004-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008005,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000010-seed-9008005-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000010-seed-9008005-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.024390243902439025,
+          "maximum_state_repetition": 7,
+          "peak_normalized_advantage": 0.024390243902439025,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000010-seed-9008005-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000010-seed-9008005-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008006,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000012-seed-9008006-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000012-seed-9008006-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 10,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000012-seed-9008006-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000012-seed-9008006-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 0,
+      "map_seed": 9008008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000016-seed-9008008-candidate-seat-0.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000016-seed-9008008-candidate-seat-0.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": -0.21428571428571427,
+          "maximum_state_repetition": 5,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 3,
+          "truncated": false
+        },
+        "flags": [
+          "cycling"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000016-seed-9008008-candidate-seat-0.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000016-seed-9008008-candidate-seat-0.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    },
+    {
+      "candidate_seat": 1,
+      "map_seed": 9008008,
+      "planner_replay": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/replays/match-000017-seed-9008008-candidate-seat-1.replay",
+      "planner_trace": "python/panels/annihilation-bounded-search-v1/evidence/bounded-search/conversion-1v1-far/traces/match-000017-seed-9008008-candidate-seat-1.json",
+      "ppo_draw_classification": {
+        "evidence": {
+          "candidate_wasted_end_turns": 0,
+          "final_normalized_advantage": 0.0,
+          "maximum_state_repetition": 6,
+          "peak_normalized_advantage": 0.0,
+          "terminated": true,
+          "total_damage": 0,
+          "truncated": false
+        },
+        "flags": [
+          "cycling",
+          "avoidance"
+        ],
+        "primary": "cycling"
+      },
+      "ppo_replay": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/replays/match-000017-seed-9008008-candidate-seat-1.replay",
+      "ppo_trace": "python/panels/annihilation-conversion-curriculum-v1/evaluations/models/mixed_conversion-seed127/conversion-conversion-1v1-far/traces/match-000017-seed-9008008-candidate-seat-1.json",
+      "profile": "conversion-1v1-far",
+      "training_seed": 127
+    }
+  ],
+  "positive_control_gate": {
+    "clauses": [
+      {
+        "name": "aggregate win rate",
+        "observed": 0.9333333333333333,
+        "passed": true,
+        "required": 0.85
+      },
+      {
+        "name": "win-rate improvement over mixed PPO",
+        "observed": 0.20000000000000007,
+        "passed": true,
+        "required": 0.1
+      },
+      {
+        "name": "cycling draw incidence",
+        "observed": 0.044444444444444446,
+        "passed": true,
+        "required_max": 0.05
+      },
+      {
+        "name": "win rate in each candidate seat",
+        "observed": {
+          "0": 0.9444444444444444,
+          "1": 0.9222222222222223
+        },
+        "passed": true,
+        "required": 0.8
+      },
+      {
+        "name": "held-out medium win rate",
+        "observed": 0.8833333333333333,
+        "passed": true,
+        "required": 0.8
+      },
+      {
+        "name": "improvement over terminal-only search",
+        "observed": 0.07777777777777783,
+        "passed": false,
+        "required": 0.15
+      }
+    ],
+    "passed": false,
+    "retained_disagreements": 99,
+    "retained_disagreements_required": true
+  },
+  "schema_version": 1
+}

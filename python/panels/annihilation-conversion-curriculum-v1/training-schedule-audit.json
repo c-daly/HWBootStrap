@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "panel": "annihilation-conversion-curriculum-v1",
+  "frozen_before_locked_evaluation": true,
+  "training_seed_roots": [101, 113, 127],
+  "interpretation": {
+    "selector_bias_check": "The profiled-seeded-v1 selector was also checked over 10,000 consecutive seeds and was close to the declared distribution; the panel skew is local to the selected episode-seed ranges, not evidence of a globally biased mixer.",
+    "replicate_scope": "The three models remain independent optimizer and policy-initialization replicates under paired treatments, but they are not independent map-exposure replicates because their incrementing episode-seed ranges overlap heavily.",
+    "treatment_scope": "The realized mixed treatment is 42.55 percent standard and 57.45 percent conversion. Far profiles received 36.36 percent of episodes and near profiles 21.09 percent, rather than the nominal 30/30 split. Locked results must be reported against realized exposure and must not be used to retune weights."
+  },
+  "episode_seed_overlap": {
+    "profiled_standard": {
+      "101-113": {"intersection": 156, "union": 180, "jaccard": 0.8666666666666667},
+      "101-127": {"intersection": 142, "union": 197, "jaccard": 0.7208121827411168},
+      "113-127": {"intersection": 153, "union": 186, "jaccard": 0.8225806451612904}
+    },
+    "mixed_conversion": {
+      "101-113": {"intersection": 256, "union": 281, "jaccard": 0.9110320284697508},
+      "101-127": {"intersection": 246, "union": 286, "jaccard": 0.8601398601398601},
+      "113-127": {"intersection": 240, "union": 275, "jaccard": 0.8727272727272727}
+    }
+  },
+  "mixed_profile_exposure": {
+    "expected_basis_points": {
+      "standard-3v3": 4000,
+      "conversion-3v1-near": 1000,
+      "conversion-3v1-medium": 0,
+      "conversion-3v1-far": 1000,
+      "conversion-2v1-near": 1000,
+      "conversion-2v1-medium": 0,
+      "conversion-2v1-far": 1000,
+      "conversion-1v1-near": 1000,
+      "conversion-1v1-medium": 0,
+      "conversion-1v1-far": 1000
+    },
+    "aggregate_completed_episodes": 792,
+    "aggregate_counts": {
+      "standard-3v3": 337,
+      "conversion-3v1-near": 61,
+      "conversion-3v1-medium": 0,
+      "conversion-3v1-far": 117,
+      "conversion-2v1-near": 47,
+      "conversion-2v1-medium": 0,
+      "conversion-2v1-far": 99,
+      "conversion-1v1-near": 59,
+      "conversion-1v1-medium": 0,
+      "conversion-1v1-far": 72
+    },
+    "aggregate_observed_basis_points": {
+      "standard-3v3": 4255,
+      "conversion-3v1-near": 770,
+      "conversion-3v1-medium": 0,
+      "conversion-3v1-far": 1477,
+      "conversion-2v1-near": 593,
+      "conversion-2v1-medium": 0,
+      "conversion-2v1-far": 1250,
+      "conversion-1v1-near": 745,
+      "conversion-1v1-medium": 0,
+      "conversion-1v1-far": 909
+    },
+    "per_seed": {
+      "101": {"episodes": 277, "standard": 118, "conversion": 159},
+      "113": {"episodes": 260, "standard": 111, "conversion": 149},
+      "127": {"episodes": 255, "standard": 108, "conversion": 147}
+    },
+    "warnings": [
+      "All required nonzero profiles appeared and all zero-weight medium profiles remained absent.",
+      "The realized near/far and unit-count mix is materially noisier than the nominal distribution and is correlated across roots by schedule overlap."
+    ]
+  },
+  "checkpoints": {
+    "profiled_standard": {
+      "101": "b00b5a0aa1274dd3cdacef36807d5145f98fd12c7472e31427811a4b9af635e9",
+      "113": "035f375ecd53a004839134f64675da1dddca0b7f8d95c4042ec33a0b3d6f6f1f",
+      "127": "aae276780a6a1ad323a56813476b983efbca570a54dd9bc8dc05306ba587c0e3"
+    },
+    "mixed_conversion": {
+      "101": "f00a8fd085249f789c797c14d665f2533588cf533d9e89713ee2c2d3bfaee2d5",
+      "113": "42f955365913b60beaf8e44e2081346dba2ecb562b18e7fb3ad9f70dca7a9f8e",
+      "127": "b985b7fe54bcaaacf835a60ea81d4d535259fa853b32d6fa0ea0f4b6d84c9187"
+    }
+  }
+}

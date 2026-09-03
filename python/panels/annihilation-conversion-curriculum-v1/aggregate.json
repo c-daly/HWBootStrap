@@ -1,0 +1,1852 @@
+{
+  "controls": {
+    "greedy": {
+      "conversion": {
+        "action_waste": 607,
+        "by_profile": {
+          "conversion-1v1-far": {
+            "draw": 2,
+            "loss": 3,
+            "win": 15
+          },
+          "conversion-1v1-medium": {
+            "loss": 7,
+            "win": 13
+          },
+          "conversion-1v1-near": {
+            "loss": 1,
+            "win": 19
+          },
+          "conversion-2v1-far": {
+            "draw": 3,
+            "win": 17
+          },
+          "conversion-2v1-medium": {
+            "draw": 1,
+            "win": 19
+          },
+          "conversion-2v1-near": {
+            "win": 20
+          },
+          "conversion-3v1-far": {
+            "win": 20
+          },
+          "conversion-3v1-medium": {
+            "draw": 1,
+            "win": 19
+          },
+          "conversion-3v1-near": {
+            "win": 20
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 2,
+            "loss": 5,
+            "win": 83
+          },
+          "1": {
+            "draw": 5,
+            "loss": 6,
+            "win": 79
+          }
+        },
+        "cycling_draw_incidence": 0.03888888888888889,
+        "cycling_draws": 7,
+        "draw_rate": 0.03888888888888889,
+        "draws": 7,
+        "failed_conversion_draws": 2,
+        "games": 180,
+        "inference_seconds": 0.0,
+        "loss_rate": 0.06111111111111111,
+        "losses": 11,
+        "mean_inference_seconds_per_decision": 0.0,
+        "mean_rounds_to_win": 3.8641975308641974,
+        "model_decisions": 0,
+        "win_rate": 0.9,
+        "wins": 162
+      },
+      "standard": {
+        "action_waste": 4621,
+        "by_profile": {
+          "standard-3v3": {
+            "draw": 52,
+            "win": 48
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 26,
+            "win": 24
+          },
+          "1": {
+            "draw": 26,
+            "win": 24
+          }
+        },
+        "cycling_draw_incidence": 0.51,
+        "cycling_draws": 51,
+        "draw_rate": 0.52,
+        "draws": 52,
+        "failed_conversion_draws": 12,
+        "games": 100,
+        "inference_seconds": 0.0,
+        "loss_rate": 0.0,
+        "losses": 0,
+        "mean_inference_seconds_per_decision": 0.0,
+        "mean_rounds_to_win": 14.229166666666666,
+        "model_decisions": 0,
+        "win_rate": 0.48,
+        "wins": 48
+      }
+    },
+    "random": {
+      "conversion": {
+        "action_waste": 4803,
+        "by_profile": {
+          "conversion-1v1-far": {
+            "draw": 6,
+            "loss": 4,
+            "win": 10
+          },
+          "conversion-1v1-medium": {
+            "draw": 3,
+            "loss": 10,
+            "win": 7
+          },
+          "conversion-1v1-near": {
+            "draw": 2,
+            "loss": 8,
+            "win": 10
+          },
+          "conversion-2v1-far": {
+            "draw": 10,
+            "loss": 2,
+            "win": 8
+          },
+          "conversion-2v1-medium": {
+            "draw": 5,
+            "loss": 1,
+            "win": 14
+          },
+          "conversion-2v1-near": {
+            "draw": 10,
+            "win": 10
+          },
+          "conversion-3v1-far": {
+            "draw": 3,
+            "win": 17
+          },
+          "conversion-3v1-medium": {
+            "draw": 4,
+            "win": 16
+          },
+          "conversion-3v1-near": {
+            "draw": 7,
+            "win": 13
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 29,
+            "loss": 12,
+            "win": 49
+          },
+          "1": {
+            "draw": 21,
+            "loss": 13,
+            "win": 56
+          }
+        },
+        "cycling_draw_incidence": 0.2722222222222222,
+        "cycling_draws": 49,
+        "draw_rate": 0.2777777777777778,
+        "draws": 50,
+        "failed_conversion_draws": 21,
+        "games": 180,
+        "inference_seconds": 0.0,
+        "loss_rate": 0.1388888888888889,
+        "losses": 25,
+        "mean_inference_seconds_per_decision": 0.0,
+        "mean_rounds_to_win": 24.39047619047619,
+        "model_decisions": 0,
+        "win_rate": 0.5833333333333334,
+        "wins": 105
+      },
+      "standard": {
+        "action_waste": 8012,
+        "by_profile": {
+          "standard-3v3": {
+            "draw": 100
+          }
+        },
+        "by_seat": {
+          "0": {
+            "draw": 50
+          },
+          "1": {
+            "draw": 50
+          }
+        },
+        "cycling_draw_incidence": 0.98,
+        "cycling_draws": 98,
+        "draw_rate": 1.0,
+        "draws": 100,
+        "failed_conversion_draws": 0,
+        "games": 100,
+        "inference_seconds": 0.0,
+        "loss_rate": 0.0,
+        "losses": 0,
+        "mean_inference_seconds_per_decision": 0.0,
+        "mean_rounds_to_win": null,
+        "model_decisions": 0,
+        "win_rate": 0.0,
+        "wins": 0
+      }
+    }
+  },
+  "curriculum_gate": {
+    "clauses": [
+      {
+        "evidence": {
+          "control": 0.7055555555555556,
+          "delta_percentage_points": 2.777777777777768,
+          "mixed": 0.7333333333333333
+        },
+        "name": "aggregate conversion win rate improves by at least 15 percentage points",
+        "passed": false
+      },
+      {
+        "evidence": {
+          "by_seed": {
+            "101": {
+              "control": 126,
+              "mixed": 141
+            },
+            "113": {
+              "control": 117,
+              "mixed": 130
+            },
+            "127": {
+              "control": 138,
+              "mixed": 125
+            }
+          }
+        },
+        "name": "conversion wins improve for every training seed",
+        "passed": false
+      },
+      {
+        "evidence": {
+          "control": 123,
+          "mixed": 119,
+          "relative_reduction": 0.032520325203252036
+        },
+        "name": "cycling draw incidence falls by at least 25 percent relative",
+        "passed": false
+      },
+      {
+        "evidence": {
+          "control_wins": 122,
+          "mixed_wins": 129
+        },
+        "name": "held-out medium separation conversion improves",
+        "passed": true
+      },
+      {
+        "evidence": {
+          "control": 0.20333333333333334,
+          "drop_percentage_points": -2.3333333333333317,
+          "mixed": 0.22666666666666666
+        },
+        "name": "standard win rate drop is at most 5 percentage points",
+        "passed": true
+      },
+      {
+        "evidence": {
+          "by_seed": {
+            "101": {
+              "control": 0.16,
+              "mixed": 0.2
+            },
+            "113": {
+              "control": 0.19,
+              "mixed": 0.24
+            },
+            "127": {
+              "control": 0.26,
+              "mixed": 0.24
+            }
+          }
+        },
+        "name": "no seed loses more than 15 percentage points on standard",
+        "passed": true
+      },
+      {
+        "evidence": {
+          "control": 0.06666666666666667,
+          "increase_percentage_points": -2.037037037037037,
+          "mixed": 0.046296296296296294
+        },
+        "name": "conversion loss rate rises by at most 5 percentage points",
+        "passed": true
+      },
+      {
+        "evidence": {
+          "by_seat": {
+            "0": {
+              "control_wins": 191,
+              "mixed_wins": 195
+            },
+            "1": {
+              "control_wins": 190,
+              "mixed_wins": 201
+            }
+          }
+        },
+        "name": "conversion effect appears in both candidate seats",
+        "passed": true
+      }
+    ],
+    "passed": false
+  },
+  "diagnostic_only": true,
+  "models": {
+    "mixed_conversion": {
+      "101": {
+        "conversion": {
+          "action_waste": 515,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 3,
+              "loss": 1,
+              "win": 16
+            },
+            "conversion-1v1-medium": {
+              "draw": 6,
+              "loss": 4,
+              "win": 10
+            },
+            "conversion-1v1-near": {
+              "draw": 2,
+              "loss": 2,
+              "win": 16
+            },
+            "conversion-2v1-far": {
+              "draw": 5,
+              "loss": 1,
+              "win": 14
+            },
+            "conversion-2v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-2v1-near": {
+              "draw": 5,
+              "win": 15
+            },
+            "conversion-3v1-far": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-medium": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-near": {
+              "draw": 4,
+              "win": 16
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 17,
+              "loss": 5,
+              "win": 68
+            },
+            "1": {
+              "draw": 14,
+              "loss": 3,
+              "win": 73
+            }
+          },
+          "cycling_draw_incidence": 0.17222222222222222,
+          "cycling_draws": 31,
+          "draw_rate": 0.17222222222222222,
+          "draws": 31,
+          "failed_conversion_draws": 11,
+          "games": 180,
+          "inference_seconds": 39.774356300302316,
+          "loss_rate": 0.044444444444444446,
+          "losses": 8,
+          "mean_inference_seconds_per_decision": 0.002245743114465717,
+          "mean_rounds_to_win": 14.893617021276595,
+          "model_decisions": 17711,
+          "win_rate": 0.7833333333333333,
+          "wins": 141
+        },
+        "standard": {
+          "action_waste": 5198,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 80,
+              "win": 20
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 42,
+              "win": 8
+            },
+            "1": {
+              "draw": 38,
+              "win": 12
+            }
+          },
+          "cycling_draw_incidence": 0.8,
+          "cycling_draws": 80,
+          "draw_rate": 0.8,
+          "draws": 80,
+          "failed_conversion_draws": 13,
+          "games": 100,
+          "inference_seconds": 85.35017410625005,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.0023385531442652835,
+          "mean_rounds_to_win": 30.3,
+          "model_decisions": 36497,
+          "win_rate": 0.2,
+          "wins": 20
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "f00a8fd085249f789c797c14d665f2533588cf533d9e89713ee2c2d3bfaee2d5",
+          "environment_steps": 51200,
+          "episodes": 277,
+          "final_approx_kl": 0.021664474,
+          "final_clip_fraction": 0.171,
+          "final_entropy_loss": -1.92,
+          "final_explained_variance": 0.0275,
+          "optimizer_updates": 116,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "conversion-1v1-far": 13,
+                "conversion-1v1-near": 11,
+                "conversion-2v1-far": 12,
+                "conversion-2v1-near": 7,
+                "conversion-3v1-far": 22,
+                "conversion-3v1-near": 9,
+                "standard-3v3": 65
+              },
+              "1": {
+                "conversion-1v1-far": 13,
+                "conversion-1v1-near": 12,
+                "conversion-2v1-far": 21,
+                "conversion-2v1-near": 9,
+                "conversion-3v1-far": 20,
+                "conversion-3v1-near": 10,
+                "standard-3v3": 53
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "conversion-1v1-far": 5,
+                "conversion-1v1-near": 1,
+                "conversion-2v1-far": 7,
+                "conversion-2v1-near": 4,
+                "conversion-3v1-far": 10,
+                "conversion-3v1-near": 2,
+                "standard-3v3": 70
+              },
+              "loss": {
+                "conversion-1v1-far": 3,
+                "conversion-1v1-near": 5,
+                "conversion-2v1-far": 1,
+                "conversion-2v1-near": 1
+              },
+              "unknown": {},
+              "win": {
+                "conversion-1v1-far": 18,
+                "conversion-1v1-near": 17,
+                "conversion-2v1-far": 25,
+                "conversion-2v1-near": 11,
+                "conversion-3v1-far": 32,
+                "conversion-3v1-near": 17,
+                "standard-3v3": 48
+              }
+            },
+            "by_worker": {
+              "0": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 6,
+                "conversion-2v1-far": 10,
+                "conversion-2v1-near": 3,
+                "conversion-3v1-far": 10,
+                "conversion-3v1-near": 7,
+                "standard-3v3": 29
+              },
+              "1": {
+                "conversion-1v1-far": 8,
+                "conversion-1v1-near": 8,
+                "conversion-2v1-far": 6,
+                "conversion-2v1-near": 4,
+                "conversion-3v1-far": 8,
+                "conversion-3v1-near": 6,
+                "standard-3v3": 30
+              },
+              "2": {
+                "conversion-1v1-far": 9,
+                "conversion-1v1-near": 3,
+                "conversion-2v1-far": 12,
+                "conversion-2v1-near": 7,
+                "conversion-3v1-far": 8,
+                "conversion-3v1-near": 4,
+                "standard-3v3": 29
+              },
+              "3": {
+                "conversion-1v1-far": 3,
+                "conversion-1v1-near": 6,
+                "conversion-2v1-far": 5,
+                "conversion-2v1-near": 2,
+                "conversion-3v1-far": 16,
+                "conversion-3v1-near": 2,
+                "standard-3v3": 30
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 26,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 23,
+              "conversion-2v1-far": 33,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 16,
+              "conversion-3v1-far": 42,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 19,
+              "standard-3v3": 118
+            },
+            "episodes": 277,
+            "expected_basis_points": {
+              "conversion-1v1-far": 1000,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 1000,
+              "conversion-2v1-far": 1000,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 1000,
+              "conversion-3v1-far": 1000,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 1000,
+              "standard-3v3": 4000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 939,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 830,
+              "conversion-2v1-far": 1191,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 578,
+              "conversion-3v1-far": 1516,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 686,
+              "standard-3v3": 4260
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-mixed_conversion-seed101-tb-v1",
+          "steps_per_second": 393.01327557875,
+          "training_mean_reward": -0.25049999967999403,
+          "wall_clock_seconds": 148.243615
+        }
+      },
+      "113": {
+        "conversion": {
+          "action_waste": 354,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 7,
+              "loss": 2,
+              "win": 11
+            },
+            "conversion-1v1-medium": {
+              "draw": 10,
+              "loss": 6,
+              "win": 4
+            },
+            "conversion-1v1-near": {
+              "draw": 4,
+              "loss": 2,
+              "win": 14
+            },
+            "conversion-2v1-far": {
+              "draw": 8,
+              "win": 12
+            },
+            "conversion-2v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-2v1-near": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-far": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-medium": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-near": {
+              "draw": 2,
+              "win": 18
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 19,
+              "loss": 5,
+              "win": 66
+            },
+            "1": {
+              "draw": 21,
+              "loss": 5,
+              "win": 64
+            }
+          },
+          "cycling_draw_incidence": 0.2222222222222222,
+          "cycling_draws": 40,
+          "draw_rate": 0.2222222222222222,
+          "draws": 40,
+          "failed_conversion_draws": 9,
+          "games": 180,
+          "inference_seconds": 44.06268239876954,
+          "loss_rate": 0.05555555555555555,
+          "losses": 10,
+          "mean_inference_seconds_per_decision": 0.002232604499329628,
+          "mean_rounds_to_win": 13.592307692307692,
+          "model_decisions": 19736,
+          "win_rate": 0.7222222222222222,
+          "wins": 130
+        },
+        "standard": {
+          "action_waste": 5292,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 76,
+              "win": 24
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 38,
+              "win": 12
+            },
+            "1": {
+              "draw": 38,
+              "win": 12
+            }
+          },
+          "cycling_draw_incidence": 0.74,
+          "cycling_draws": 74,
+          "draw_rate": 0.76,
+          "draws": 76,
+          "failed_conversion_draws": 11,
+          "games": 100,
+          "inference_seconds": 87.83107500016922,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.002379536588013579,
+          "mean_rounds_to_win": 34.208333333333336,
+          "model_decisions": 36911,
+          "win_rate": 0.24,
+          "wins": 24
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "42f955365913b60beaf8e44e2081346dba2ecb562b18e7fb3ad9f70dca7a9f8e",
+          "environment_steps": 51200,
+          "episodes": 260,
+          "final_approx_kl": 0.019308323,
+          "final_clip_fraction": 0.158,
+          "final_entropy_loss": -2.02,
+          "final_explained_variance": 0.0456,
+          "optimizer_updates": 119,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "conversion-1v1-far": 11,
+                "conversion-1v1-near": 9,
+                "conversion-2v1-far": 21,
+                "conversion-2v1-near": 8,
+                "conversion-3v1-far": 21,
+                "conversion-3v1-near": 10,
+                "standard-3v3": 50
+              },
+              "1": {
+                "conversion-1v1-far": 12,
+                "conversion-1v1-near": 9,
+                "conversion-2v1-far": 12,
+                "conversion-2v1-near": 7,
+                "conversion-3v1-far": 19,
+                "conversion-3v1-near": 10,
+                "standard-3v3": 61
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "conversion-1v1-far": 3,
+                "conversion-1v1-near": 1,
+                "conversion-2v1-far": 8,
+                "conversion-2v1-near": 5,
+                "conversion-3v1-far": 10,
+                "conversion-3v1-near": 3,
+                "standard-3v3": 71
+              },
+              "loss": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 4,
+                "conversion-2v1-near": 2
+              },
+              "unknown": {},
+              "win": {
+                "conversion-1v1-far": 14,
+                "conversion-1v1-near": 13,
+                "conversion-2v1-far": 25,
+                "conversion-2v1-near": 8,
+                "conversion-3v1-far": 30,
+                "conversion-3v1-near": 17,
+                "standard-3v3": 40
+              }
+            },
+            "by_worker": {
+              "0": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 6,
+                "conversion-2v1-far": 10,
+                "conversion-2v1-near": 3,
+                "conversion-3v1-far": 10,
+                "conversion-3v1-near": 8,
+                "standard-3v3": 29
+              },
+              "1": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 6,
+                "conversion-2v1-far": 6,
+                "conversion-2v1-near": 4,
+                "conversion-3v1-far": 8,
+                "conversion-3v1-near": 6,
+                "standard-3v3": 26
+              },
+              "2": {
+                "conversion-1v1-far": 8,
+                "conversion-1v1-near": 2,
+                "conversion-2v1-far": 12,
+                "conversion-2v1-near": 7,
+                "conversion-3v1-far": 8,
+                "conversion-3v1-near": 4,
+                "standard-3v3": 27
+              },
+              "3": {
+                "conversion-1v1-far": 3,
+                "conversion-1v1-near": 4,
+                "conversion-2v1-far": 5,
+                "conversion-2v1-near": 1,
+                "conversion-3v1-far": 14,
+                "conversion-3v1-near": 2,
+                "standard-3v3": 29
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 23,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 18,
+              "conversion-2v1-far": 33,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 15,
+              "conversion-3v1-far": 40,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 20,
+              "standard-3v3": 111
+            },
+            "episodes": 260,
+            "expected_basis_points": {
+              "conversion-1v1-far": 1000,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 1000,
+              "conversion-2v1-far": 1000,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 1000,
+              "conversion-3v1-far": 1000,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 1000,
+              "standard-3v3": 4000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 885,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 692,
+              "conversion-2v1-far": 1269,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 577,
+              "conversion-3v1-far": 1538,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 769,
+              "standard-3v3": 4269
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-mixed_conversion-seed113-tb-v1",
+          "steps_per_second": 356.50396751442133,
+          "training_mean_reward": -0.07594999872999494,
+          "wall_clock_seconds": 148.050221
+        }
+      },
+      "127": {
+        "conversion": {
+          "action_waste": 664,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 10,
+              "loss": 1,
+              "win": 9
+            },
+            "conversion-1v1-medium": {
+              "draw": 7,
+              "loss": 4,
+              "win": 9
+            },
+            "conversion-1v1-near": {
+              "draw": 5,
+              "loss": 1,
+              "win": 14
+            },
+            "conversion-2v1-far": {
+              "draw": 6,
+              "loss": 1,
+              "win": 13
+            },
+            "conversion-2v1-medium": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-2v1-near": {
+              "draw": 6,
+              "win": 14
+            },
+            "conversion-3v1-far": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-3v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-3v1-near": {
+              "draw": 4,
+              "win": 16
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 24,
+              "loss": 5,
+              "win": 61
+            },
+            "1": {
+              "draw": 24,
+              "loss": 2,
+              "win": 64
+            }
+          },
+          "cycling_draw_incidence": 0.26666666666666666,
+          "cycling_draws": 48,
+          "draw_rate": 0.26666666666666666,
+          "draws": 48,
+          "failed_conversion_draws": 14,
+          "games": 180,
+          "inference_seconds": 53.39790639001876,
+          "loss_rate": 0.03888888888888889,
+          "losses": 7,
+          "mean_inference_seconds_per_decision": 0.0022238934817383183,
+          "mean_rounds_to_win": 13.272,
+          "model_decisions": 24011,
+          "win_rate": 0.6944444444444444,
+          "wins": 125
+        },
+        "standard": {
+          "action_waste": 5295,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 76,
+              "win": 24
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 38,
+              "win": 12
+            },
+            "1": {
+              "draw": 38,
+              "win": 12
+            }
+          },
+          "cycling_draw_incidence": 0.76,
+          "cycling_draws": 76,
+          "draw_rate": 0.76,
+          "draws": 76,
+          "failed_conversion_draws": 12,
+          "games": 100,
+          "inference_seconds": 90.93713290285086,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.002371118400679257,
+          "mean_rounds_to_win": 32.583333333333336,
+          "model_decisions": 38352,
+          "win_rate": 0.24,
+          "wins": 24
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "b985b7fe54bcaaacf835a60ea81d4d535259fa853b32d6fa0ea0f4b6d84c9187",
+          "environment_steps": 51200,
+          "episodes": 255,
+          "final_approx_kl": 0.022730455,
+          "final_clip_fraction": 0.0621,
+          "final_entropy_loss": -1.68,
+          "final_explained_variance": 0.177,
+          "optimizer_updates": 123,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "conversion-1v1-far": 11,
+                "conversion-1v1-near": 11,
+                "conversion-2v1-far": 16,
+                "conversion-2v1-near": 5,
+                "conversion-3v1-far": 18,
+                "conversion-3v1-near": 11,
+                "standard-3v3": 55
+              },
+              "1": {
+                "conversion-1v1-far": 12,
+                "conversion-1v1-near": 7,
+                "conversion-2v1-far": 17,
+                "conversion-2v1-near": 11,
+                "conversion-3v1-far": 17,
+                "conversion-3v1-near": 11,
+                "standard-3v3": 53
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "conversion-1v1-far": 5,
+                "conversion-1v1-near": 3,
+                "conversion-2v1-far": 11,
+                "conversion-2v1-near": 4,
+                "conversion-3v1-far": 8,
+                "conversion-3v1-near": 2,
+                "standard-3v3": 65
+              },
+              "loss": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 1,
+                "conversion-3v1-far": 1
+              },
+              "unknown": {},
+              "win": {
+                "conversion-1v1-far": 12,
+                "conversion-1v1-near": 14,
+                "conversion-2v1-far": 22,
+                "conversion-2v1-near": 12,
+                "conversion-3v1-far": 26,
+                "conversion-3v1-near": 20,
+                "standard-3v3": 43
+              }
+            },
+            "by_worker": {
+              "0": {
+                "conversion-1v1-far": 8,
+                "conversion-1v1-near": 2,
+                "conversion-2v1-far": 12,
+                "conversion-2v1-near": 7,
+                "conversion-3v1-far": 7,
+                "conversion-3v1-near": 5,
+                "standard-3v3": 29
+              },
+              "1": {
+                "conversion-1v1-far": 3,
+                "conversion-1v1-near": 3,
+                "conversion-2v1-far": 4,
+                "conversion-2v1-near": 1,
+                "conversion-3v1-far": 12,
+                "conversion-3v1-near": 2,
+                "standard-3v3": 28
+              },
+              "2": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 6,
+                "conversion-2v1-far": 10,
+                "conversion-2v1-near": 3,
+                "conversion-3v1-far": 9,
+                "conversion-3v1-near": 7,
+                "standard-3v3": 23
+              },
+              "3": {
+                "conversion-1v1-far": 6,
+                "conversion-1v1-near": 7,
+                "conversion-2v1-far": 7,
+                "conversion-2v1-near": 5,
+                "conversion-3v1-far": 7,
+                "conversion-3v1-near": 8,
+                "standard-3v3": 28
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 23,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 18,
+              "conversion-2v1-far": 33,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 16,
+              "conversion-3v1-far": 35,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 22,
+              "standard-3v3": 108
+            },
+            "episodes": 255,
+            "expected_basis_points": {
+              "conversion-1v1-far": 1000,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 1000,
+              "conversion-2v1-far": 1000,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 1000,
+              "conversion-3v1-far": 1000,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 1000,
+              "standard-3v3": 4000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 902,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 706,
+              "conversion-2v1-far": 1294,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 627,
+              "conversion-3v1-far": 1373,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 863,
+              "standard-3v3": 4235
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-mixed_conversion-seed127-tb-v1",
+          "steps_per_second": 394.1881727304007,
+          "training_mean_reward": -0.13075000044999466,
+          "wall_clock_seconds": 153.690201
+        }
+      }
+    },
+    "profiled_standard": {
+      "101": {
+        "conversion": {
+          "action_waste": 427,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 10,
+              "loss": 1,
+              "win": 9
+            },
+            "conversion-1v1-medium": {
+              "draw": 8,
+              "loss": 6,
+              "win": 6
+            },
+            "conversion-1v1-near": {
+              "draw": 6,
+              "loss": 3,
+              "win": 11
+            },
+            "conversion-2v1-far": {
+              "draw": 4,
+              "loss": 1,
+              "win": 15
+            },
+            "conversion-2v1-medium": {
+              "draw": 6,
+              "win": 14
+            },
+            "conversion-2v1-near": {
+              "draw": 4,
+              "loss": 1,
+              "win": 15
+            },
+            "conversion-3v1-far": {
+              "win": 20
+            },
+            "conversion-3v1-medium": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-near": {
+              "draw": 3,
+              "win": 17
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 19,
+              "loss": 6,
+              "win": 65
+            },
+            "1": {
+              "draw": 23,
+              "loss": 6,
+              "win": 61
+            }
+          },
+          "cycling_draw_incidence": 0.23333333333333334,
+          "cycling_draws": 42,
+          "draw_rate": 0.23333333333333334,
+          "draws": 42,
+          "failed_conversion_draws": 8,
+          "games": 180,
+          "inference_seconds": 45.75866709841648,
+          "loss_rate": 0.06666666666666667,
+          "losses": 12,
+          "mean_inference_seconds_per_decision": 0.0022180643285708425,
+          "mean_rounds_to_win": 13.238095238095237,
+          "model_decisions": 20630,
+          "win_rate": 0.7,
+          "wins": 126
+        },
+        "standard": {
+          "action_waste": 5906,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 84,
+              "win": 16
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 40,
+              "win": 10
+            },
+            "1": {
+              "draw": 44,
+              "win": 6
+            }
+          },
+          "cycling_draw_incidence": 0.84,
+          "cycling_draws": 84,
+          "draw_rate": 0.84,
+          "draws": 84,
+          "failed_conversion_draws": 12,
+          "games": 100,
+          "inference_seconds": 94.93054280395154,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.0022879791473801917,
+          "mean_rounds_to_win": 38.25,
+          "model_decisions": 41491,
+          "win_rate": 0.16,
+          "wins": 16
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "b00b5a0aa1274dd3cdacef36807d5145f98fd12c7472e31427811a4b9af635e9",
+          "environment_steps": 51200,
+          "episodes": 168,
+          "final_approx_kl": 0.015744533,
+          "final_clip_fraction": 0.106,
+          "final_entropy_loss": -2.02,
+          "final_explained_variance": 0.00731,
+          "optimizer_updates": 115,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "standard-3v3": 85
+              },
+              "1": {
+                "standard-3v3": 83
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "standard-3v3": 102
+              },
+              "loss": {},
+              "unknown": {},
+              "win": {
+                "standard-3v3": 66
+              }
+            },
+            "by_worker": {
+              "0": {
+                "standard-3v3": 43
+              },
+              "1": {
+                "standard-3v3": 42
+              },
+              "2": {
+                "standard-3v3": 41
+              },
+              "3": {
+                "standard-3v3": 42
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 168
+            },
+            "episodes": 168,
+            "expected_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-profiled_standard-seed101-tb-v1",
+          "steps_per_second": 445.24098907841943,
+          "training_mean_reward": -0.7190499995199918,
+          "wall_clock_seconds": 128.958199
+        }
+      },
+      "113": {
+        "conversion": {
+          "action_waste": 1322,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 9,
+              "loss": 3,
+              "win": 8
+            },
+            "conversion-1v1-medium": {
+              "draw": 6,
+              "loss": 10,
+              "win": 4
+            },
+            "conversion-1v1-near": {
+              "draw": 8,
+              "loss": 1,
+              "win": 11
+            },
+            "conversion-2v1-far": {
+              "draw": 6,
+              "loss": 1,
+              "win": 13
+            },
+            "conversion-2v1-medium": {
+              "draw": 2,
+              "win": 18
+            },
+            "conversion-2v1-near": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-3v1-far": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-medium": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-3v1-near": {
+              "draw": 7,
+              "win": 13
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 25,
+              "loss": 7,
+              "win": 58
+            },
+            "1": {
+              "draw": 23,
+              "loss": 8,
+              "win": 59
+            }
+          },
+          "cycling_draw_incidence": 0.26666666666666666,
+          "cycling_draws": 48,
+          "draw_rate": 0.26666666666666666,
+          "draws": 48,
+          "failed_conversion_draws": 17,
+          "games": 180,
+          "inference_seconds": 46.456213594647124,
+          "loss_rate": 0.08333333333333333,
+          "losses": 15,
+          "mean_inference_seconds_per_decision": 0.002234438631842967,
+          "mean_rounds_to_win": 12.581196581196581,
+          "model_decisions": 20791,
+          "win_rate": 0.65,
+          "wins": 117
+        },
+        "standard": {
+          "action_waste": 5422,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 81,
+              "win": 19
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 43,
+              "win": 7
+            },
+            "1": {
+              "draw": 38,
+              "win": 12
+            }
+          },
+          "cycling_draw_incidence": 0.81,
+          "cycling_draws": 81,
+          "draw_rate": 0.81,
+          "draws": 81,
+          "failed_conversion_draws": 14,
+          "games": 100,
+          "inference_seconds": 85.42585110204527,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.0023565101956372313,
+          "mean_rounds_to_win": 34.63157894736842,
+          "model_decisions": 36251,
+          "win_rate": 0.19,
+          "wins": 19
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "035f375ecd53a004839134f64675da1dddca0b7f8d95c4042ec33a0b3d6f6f1f",
+          "environment_steps": 51200,
+          "episodes": 168,
+          "final_approx_kl": 0.02114944,
+          "final_clip_fraction": 0.147,
+          "final_entropy_loss": -1.81,
+          "final_explained_variance": 0.0737,
+          "optimizer_updates": 126,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "standard-3v3": 84
+              },
+              "1": {
+                "standard-3v3": 84
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "standard-3v3": 102
+              },
+              "loss": {},
+              "unknown": {},
+              "win": {
+                "standard-3v3": 66
+              }
+            },
+            "by_worker": {
+              "0": {
+                "standard-3v3": 40
+              },
+              "1": {
+                "standard-3v3": 42
+              },
+              "2": {
+                "standard-3v3": 42
+              },
+              "3": {
+                "standard-3v3": 44
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 168
+            },
+            "episodes": 168,
+            "expected_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-profiled_standard-seed113-tb-v1",
+          "steps_per_second": 460.9939159389908,
+          "training_mean_reward": -0.5189499997399928,
+          "wall_clock_seconds": 129.935856
+        }
+      },
+      "127": {
+        "conversion": {
+          "action_waste": 463,
+          "by_profile": {
+            "conversion-1v1-far": {
+              "draw": 10,
+              "loss": 1,
+              "win": 9
+            },
+            "conversion-1v1-medium": {
+              "draw": 5,
+              "loss": 6,
+              "win": 9
+            },
+            "conversion-1v1-near": {
+              "draw": 2,
+              "loss": 1,
+              "win": 17
+            },
+            "conversion-2v1-far": {
+              "draw": 3,
+              "win": 17
+            },
+            "conversion-2v1-medium": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-2v1-near": {
+              "draw": 4,
+              "win": 16
+            },
+            "conversion-3v1-far": {
+              "draw": 1,
+              "loss": 1,
+              "win": 18
+            },
+            "conversion-3v1-medium": {
+              "draw": 1,
+              "win": 19
+            },
+            "conversion-3v1-near": {
+              "draw": 3,
+              "win": 17
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 16,
+              "loss": 6,
+              "win": 68
+            },
+            "1": {
+              "draw": 17,
+              "loss": 3,
+              "win": 70
+            }
+          },
+          "cycling_draw_incidence": 0.18333333333333332,
+          "cycling_draws": 33,
+          "draw_rate": 0.18333333333333332,
+          "draws": 33,
+          "failed_conversion_draws": 8,
+          "games": 180,
+          "inference_seconds": 40.69155879877508,
+          "loss_rate": 0.05,
+          "losses": 9,
+          "mean_inference_seconds_per_decision": 0.0022563801041796095,
+          "mean_rounds_to_win": 12.608695652173912,
+          "model_decisions": 18034,
+          "win_rate": 0.7666666666666667,
+          "wins": 138
+        },
+        "standard": {
+          "action_waste": 4901,
+          "by_profile": {
+            "standard-3v3": {
+              "draw": 74,
+              "win": 26
+            }
+          },
+          "by_seat": {
+            "0": {
+              "draw": 34,
+              "win": 16
+            },
+            "1": {
+              "draw": 40,
+              "win": 10
+            }
+          },
+          "cycling_draw_incidence": 0.74,
+          "cycling_draws": 74,
+          "draw_rate": 0.74,
+          "draws": 74,
+          "failed_conversion_draws": 7,
+          "games": 100,
+          "inference_seconds": 89.2481942041195,
+          "loss_rate": 0.0,
+          "losses": 0,
+          "mean_inference_seconds_per_decision": 0.00231789409422708,
+          "mean_rounds_to_win": 29.615384615384617,
+          "model_decisions": 38504,
+          "win_rate": 0.26,
+          "wins": 26
+        },
+        "training": {
+          "checkpoint": "checkpoints/step_000051200.zip",
+          "checkpoint_sha256": "aae276780a6a1ad323a56813476b983efbca570a54dd9bc8dc05306ba587c0e3",
+          "environment_steps": 51200,
+          "episodes": 171,
+          "final_approx_kl": 0.019280527,
+          "final_clip_fraction": 0.132,
+          "final_entropy_loss": -2.27,
+          "final_explained_variance": 0.304,
+          "optimizer_updates": 117,
+          "profile_sampling": {
+            "by_learner_seat": {
+              "0": {
+                "standard-3v3": 85
+              },
+              "1": {
+                "standard-3v3": 86
+              }
+            },
+            "by_outcome": {
+              "draw": {
+                "standard-3v3": 96
+              },
+              "loss": {},
+              "unknown": {},
+              "win": {
+                "standard-3v3": 75
+              }
+            },
+            "by_worker": {
+              "0": {
+                "standard-3v3": 45
+              },
+              "1": {
+                "standard-3v3": 41
+              },
+              "2": {
+                "standard-3v3": 48
+              },
+              "3": {
+                "standard-3v3": 37
+              }
+            },
+            "counts": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 171
+            },
+            "episodes": 171,
+            "expected_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "observed_basis_points": {
+              "conversion-1v1-far": 0,
+              "conversion-1v1-medium": 0,
+              "conversion-1v1-near": 0,
+              "conversion-2v1-far": 0,
+              "conversion-2v1-medium": 0,
+              "conversion-2v1-near": 0,
+              "conversion-3v1-far": 0,
+              "conversion-3v1-medium": 0,
+              "conversion-3v1-near": 0,
+              "standard-3v3": 10000
+            },
+            "warnings": []
+          },
+          "run": "annihilation-conversion-profiled_standard-seed127-tb-v1",
+          "steps_per_second": 401.66965918045963,
+          "training_mean_reward": -0.5446000010599917,
+          "wall_clock_seconds": 128.837879
+        }
+      }
+    }
+  },
+  "paired_comparisons": {
+    "by_profile": {
+      "conversion-1v1-far": {
+        "both_win": 22,
+        "control_only_losses": 3,
+        "control_only_wins": 4,
+        "games": 60,
+        "mixed_only_losses": 2,
+        "mixed_only_wins": 14,
+        "neither_wins": 20,
+        "net_mixed_wins": 10,
+        "two_sided_exact_sign_p": 0.0308837890625
+      },
+      "conversion-1v1-medium": {
+        "both_win": 18,
+        "control_only_losses": 11,
+        "control_only_wins": 1,
+        "games": 60,
+        "mixed_only_losses": 3,
+        "mixed_only_wins": 5,
+        "neither_wins": 36,
+        "net_mixed_wins": 4,
+        "two_sided_exact_sign_p": 0.21875
+      },
+      "conversion-1v1-near": {
+        "both_win": 34,
+        "control_only_losses": 2,
+        "control_only_wins": 5,
+        "games": 60,
+        "mixed_only_losses": 2,
+        "mixed_only_wins": 10,
+        "neither_wins": 11,
+        "net_mixed_wins": 5,
+        "two_sided_exact_sign_p": 0.3017578125
+      },
+      "conversion-2v1-far": {
+        "both_win": 32,
+        "control_only_losses": 2,
+        "control_only_wins": 13,
+        "games": 60,
+        "mixed_only_losses": 2,
+        "mixed_only_wins": 7,
+        "neither_wins": 8,
+        "net_mixed_wins": -6,
+        "two_sided_exact_sign_p": 0.26317596435546875
+      },
+      "conversion-2v1-medium": {
+        "both_win": 46,
+        "control_only_losses": 0,
+        "control_only_wins": 2,
+        "games": 60,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 6,
+        "neither_wins": 6,
+        "net_mixed_wins": 4,
+        "two_sided_exact_sign_p": 0.2890625
+      },
+      "conversion-2v1-near": {
+        "both_win": 39,
+        "control_only_losses": 1,
+        "control_only_wins": 8,
+        "games": 60,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 7,
+        "neither_wins": 6,
+        "net_mixed_wins": -1,
+        "two_sided_exact_sign_p": 1.0
+      },
+      "conversion-3v1-far": {
+        "both_win": 48,
+        "control_only_losses": 1,
+        "control_only_wins": 7,
+        "games": 60,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 4,
+        "neither_wins": 1,
+        "net_mixed_wins": -3,
+        "two_sided_exact_sign_p": 0.548828125
+      },
+      "conversion-3v1-medium": {
+        "both_win": 49,
+        "control_only_losses": 0,
+        "control_only_wins": 6,
+        "games": 60,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 5,
+        "neither_wins": 0,
+        "net_mixed_wins": -1,
+        "two_sided_exact_sign_p": 1.0
+      },
+      "conversion-3v1-near": {
+        "both_win": 44,
+        "control_only_losses": 0,
+        "control_only_wins": 3,
+        "games": 60,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 6,
+        "neither_wins": 7,
+        "net_mixed_wins": 3,
+        "two_sided_exact_sign_p": 0.5078125
+      }
+    },
+    "by_training_seed": {
+      "101": {
+        "conversion": {
+          "both_win": 112,
+          "control_only_losses": 9,
+          "control_only_wins": 14,
+          "games": 180,
+          "mixed_only_losses": 5,
+          "mixed_only_wins": 29,
+          "neither_wins": 25,
+          "net_mixed_wins": 15,
+          "two_sided_exact_sign_p": 0.03153949735315109
+        },
+        "standard": {
+          "both_win": 9,
+          "control_only_losses": 0,
+          "control_only_wins": 7,
+          "games": 100,
+          "mixed_only_losses": 0,
+          "mixed_only_wins": 11,
+          "neither_wins": 73,
+          "net_mixed_wins": 4,
+          "two_sided_exact_sign_p": 0.480682373046875
+        }
+      },
+      "113": {
+        "conversion": {
+          "both_win": 104,
+          "control_only_losses": 7,
+          "control_only_wins": 13,
+          "games": 180,
+          "mixed_only_losses": 2,
+          "mixed_only_wins": 26,
+          "neither_wins": 37,
+          "net_mixed_wins": 13,
+          "two_sided_exact_sign_p": 0.05325191409792751
+        },
+        "standard": {
+          "both_win": 11,
+          "control_only_losses": 0,
+          "control_only_wins": 8,
+          "games": 100,
+          "mixed_only_losses": 0,
+          "mixed_only_wins": 13,
+          "neither_wins": 68,
+          "net_mixed_wins": 5,
+          "two_sided_exact_sign_p": 0.38331031799316406
+        }
+      },
+      "127": {
+        "conversion": {
+          "both_win": 116,
+          "control_only_losses": 4,
+          "control_only_wins": 22,
+          "games": 180,
+          "mixed_only_losses": 2,
+          "mixed_only_wins": 9,
+          "neither_wins": 33,
+          "net_mixed_wins": -13,
+          "two_sided_exact_sign_p": 0.029449373483657837
+        },
+        "standard": {
+          "both_win": 15,
+          "control_only_losses": 0,
+          "control_only_wins": 11,
+          "games": 100,
+          "mixed_only_losses": 0,
+          "mixed_only_wins": 9,
+          "neither_wins": 65,
+          "net_mixed_wins": -2,
+          "two_sided_exact_sign_p": 0.8238029479980469
+        }
+      }
+    },
+    "overall": {
+      "conversion": {
+        "both_win": 332,
+        "control_only_losses": 20,
+        "control_only_wins": 49,
+        "games": 540,
+        "mixed_only_losses": 9,
+        "mixed_only_wins": 64,
+        "neither_wins": 95,
+        "net_mixed_wins": 15,
+        "two_sided_exact_sign_p": 0.18759872474577588
+      },
+      "standard": {
+        "both_win": 35,
+        "control_only_losses": 0,
+        "control_only_wins": 26,
+        "games": 300,
+        "mixed_only_losses": 0,
+        "mixed_only_wins": 33,
+        "neither_wins": 206,
+        "net_mixed_wins": 7,
+        "two_sided_exact_sign_p": 0.4349928051221534
+      }
+    },
+    "pairing_keys": [
+      "training_seed",
+      "map_seed",
+      "start_profile",
+      "candidate_seat"
+    ]
+  },
+  "panel": "annihilation-conversion-curriculum-v1",
+  "schema_version": 1,
+  "training_schedule_audit": {
+    "interpretation": {
+      "replicate_scope": "The three models remain independent optimizer and policy-initialization replicates under paired treatments, but they are not independent map-exposure replicates because their incrementing episode-seed ranges overlap heavily.",
+      "selector_bias_check": "The profiled-seeded-v1 selector was also checked over 10,000 consecutive seeds and was close to the declared distribution; the panel skew is local to the selected episode-seed ranges, not evidence of a globally biased mixer.",
+      "treatment_scope": "The realized mixed treatment is 42.55 percent standard and 57.45 percent conversion. Far profiles received 36.36 percent of episodes and near profiles 21.09 percent, rather than the nominal 30/30 split. Locked results must be reported against realized exposure and must not be used to retune weights."
+    },
+    "path": "python/panels/annihilation-conversion-curriculum-v1/training-schedule-audit.json",
+    "sha256": "a3af8ac5d7d0a777db799b491684186e2f2e1a9ab5344ebdbde7974ed4e3ba94"
+  }
+}

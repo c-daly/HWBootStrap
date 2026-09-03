@@ -1,0 +1,682 @@
+{
+  "candidate": {
+    "action_size": null,
+    "algorithm": null,
+    "contract": null,
+    "contract_hash": null,
+    "contract_version": null,
+    "encoding_hash": null,
+    "environment": null,
+    "inference_mode": "deterministic",
+    "kind": "scripted",
+    "legacy": false,
+    "name": "bounded-search",
+    "observation_size": null,
+    "path": null,
+    "promotable": false,
+    "step": null
+  },
+  "confidence_intervals": {
+    "draw": {
+      "confidence": 0.95,
+      "high": 0.6576197724933468,
+      "low": 0.0
+    },
+    "loss": {
+      "confidence": 0.95,
+      "high": 0.6576197724933468,
+      "low": 0.0
+    },
+    "win": {
+      "confidence": 0.95,
+      "high": 1.0,
+      "low": 0.3423802275066532
+    }
+  },
+  "draws": 0,
+  "environment_contract": {
+    "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+    "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+    "version": "tactical-v2"
+  },
+  "games": 2,
+  "generated_at": "2026-07-29T15:45:39.444320Z",
+  "inference": {
+    "mean_seconds_per_decision": 0.0,
+    "model_decisions": 0,
+    "seconds": 0.0
+  },
+  "losses": 0,
+  "matches": [
+    {
+      "candidate_seat": 0,
+      "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+      "controller_diagnostics": {
+        "p0": {
+          "controller": "bounded-search",
+          "decision_diagnostics": [
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 0,
+              "search_seconds": 0.0243694,
+              "selected_command": "move:1@6,3",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@6,3",
+                  "expansions": 18,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@4,3",
+                  "expansions": 18,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "MoveUnit",
+                  "value": 0.013717948717948715
+                },
+                {
+                  "command": "move:1@7,2",
+                  "expansions": 19,
+                  "immediate_value": 0.011794871794871799,
+                  "kind": "MoveUnit",
+                  "value": 0.013717948717948715
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 174,
+              "heuristic_enabled": true,
+              "index": 1,
+              "search_seconds": 0.0053639,
+              "selected_command": "end-turn",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 174,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "EndTurn",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 2,
+              "search_seconds": 0.019407,
+              "selected_command": "move:1@3,4",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@3,4",
+                  "expansions": 18,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@6,4",
+                  "expansions": 21,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@6,5",
+                  "expansions": 21,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 141,
+              "heuristic_enabled": true,
+              "index": 3,
+              "search_seconds": 0.0041297,
+              "selected_command": "end-turn",
+              "selected_value": 0.21033458411507194,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 141,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "EndTurn",
+                  "value": 0.21033458411507194
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 4,
+              "search_seconds": 0.0179123,
+              "selected_command": "move:1@2,6",
+              "selected_value": 0.21033458411507194,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@2,6",
+                  "expansions": 19,
+                  "immediate_value": 0.013717948717948715,
+                  "kind": "MoveUnit",
+                  "value": 0.21033458411507194
+                },
+                {
+                  "command": "move:1@3,6",
+                  "expansions": 20,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "MoveUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "move:1@0,7",
+                  "expansions": 18,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 108,
+              "heuristic_enabled": true,
+              "index": 5,
+              "search_seconds": 0.0037788,
+              "selected_command": "move:1@3,6",
+              "selected_value": 0.04125086625086626,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@3,6",
+                  "expansions": 34,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "MoveUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "move:1@1,6",
+                  "expansions": 23,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@2,5",
+                  "expansions": 27,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 180,
+              "heuristic_enabled": true,
+              "index": 6,
+              "search_seconds": 0.0047246,
+              "selected_command": "attack:1->2",
+              "selected_value": 0.04125086625086626,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "attack:1->2",
+                  "expansions": 6,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "AttackUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "end-turn",
+                  "expansions": 174,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "EndTurn",
+                  "value": 0.04125086625086626
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 6,
+              "heuristic_enabled": true,
+              "index": 7,
+              "search_seconds": 0.0001657,
+              "selected_command": "end-turn",
+              "selected_value": 1,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 6,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "EndTurn",
+                  "value": 1
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 477,
+              "heuristic_enabled": true,
+              "index": 8,
+              "search_seconds": 0.0162653,
+              "selected_command": "attack:1->2",
+              "selected_value": 1,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "attack:1->2",
+                  "expansions": 1,
+                  "immediate_value": 1,
+                  "kind": "AttackUnit",
+                  "value": 1
+                },
+                {
+                  "command": "move:1@4,6",
+                  "expansions": 9,
+                  "immediate_value": 0.04125086625086626,
+                  "kind": "MoveUnit",
+                  "value": 1
+                },
+                {
+                  "command": "move:1@4,5",
+                  "expansions": 22,
+                  "immediate_value": 0.04060984060984062,
+                  "kind": "MoveUnit",
+                  "value": 1
+                }
+              ]
+            }
+          ],
+          "decisions": 9,
+          "depth": 4,
+          "expansion_budget_per_decision": 512,
+          "expansions": 2622,
+          "heuristic_enabled": true,
+          "search_seconds": 0.0961167
+        }
+      },
+      "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+      "inference_seconds": 0.0,
+      "model_decisions": 0,
+      "outcome": "win",
+      "reference_seat": 0,
+      "scenario_sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+      "seed": 6000008,
+      "start_profile": "conversion-1v1-far",
+      "winner": 0
+    },
+    {
+      "candidate_seat": 1,
+      "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+      "controller_diagnostics": {
+        "p1": {
+          "controller": "bounded-search",
+          "decision_diagnostics": [
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 0,
+              "search_seconds": 0.0176134,
+              "selected_command": "move:1@6,3",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@6,3",
+                  "expansions": 18,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@4,3",
+                  "expansions": 18,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "MoveUnit",
+                  "value": 0.013717948717948715
+                },
+                {
+                  "command": "move:1@7,2",
+                  "expansions": 19,
+                  "immediate_value": 0.011794871794871799,
+                  "kind": "MoveUnit",
+                  "value": 0.013717948717948715
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 174,
+              "heuristic_enabled": true,
+              "index": 1,
+              "search_seconds": 0.004981,
+              "selected_command": "end-turn",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 174,
+                  "immediate_value": 0.012435897435897438,
+                  "kind": "EndTurn",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 2,
+              "search_seconds": 0.0184068,
+              "selected_command": "move:1@3,4",
+              "selected_value": 0.01435897435897436,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@3,4",
+                  "expansions": 18,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@6,4",
+                  "expansions": 21,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@6,5",
+                  "expansions": 21,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 141,
+              "heuristic_enabled": true,
+              "index": 3,
+              "search_seconds": 0.0037409,
+              "selected_command": "end-turn",
+              "selected_value": 0.21033458411507194,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 141,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "EndTurn",
+                  "value": 0.21033458411507194
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 512,
+              "heuristic_enabled": true,
+              "index": 4,
+              "search_seconds": 0.018448,
+              "selected_command": "move:1@2,6",
+              "selected_value": 0.21033458411507194,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@2,6",
+                  "expansions": 19,
+                  "immediate_value": 0.013717948717948715,
+                  "kind": "MoveUnit",
+                  "value": 0.21033458411507194
+                },
+                {
+                  "command": "move:1@3,6",
+                  "expansions": 20,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "MoveUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "move:1@0,7",
+                  "expansions": 18,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 108,
+              "heuristic_enabled": true,
+              "index": 5,
+              "search_seconds": 0.0036702,
+              "selected_command": "move:1@3,6",
+              "selected_value": 0.04125086625086626,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "move:1@3,6",
+                  "expansions": 34,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "MoveUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "move:1@1,6",
+                  "expansions": 23,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                },
+                {
+                  "command": "move:1@2,5",
+                  "expansions": 27,
+                  "immediate_value": 0.013076923076923076,
+                  "kind": "MoveUnit",
+                  "value": 0.01435897435897436
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 180,
+              "heuristic_enabled": true,
+              "index": 6,
+              "search_seconds": 0.0047938,
+              "selected_command": "attack:1->2",
+              "selected_value": 0.04125086625086626,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "attack:1->2",
+                  "expansions": 6,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "AttackUnit",
+                  "value": 0.04125086625086626
+                },
+                {
+                  "command": "end-turn",
+                  "expansions": 174,
+                  "immediate_value": 0.01435897435897436,
+                  "kind": "EndTurn",
+                  "value": 0.04125086625086626
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 6,
+              "heuristic_enabled": true,
+              "index": 7,
+              "search_seconds": 0.0001709,
+              "selected_command": "end-turn",
+              "selected_value": 1,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "end-turn",
+                  "expansions": 6,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "EndTurn",
+                  "value": 1
+                }
+              ]
+            },
+            {
+              "depth": 4,
+              "expansion_budget": 512,
+              "expansions": 482,
+              "heuristic_enabled": true,
+              "index": 8,
+              "search_seconds": 0.0157752,
+              "selected_command": "attack:1->2",
+              "selected_value": 1,
+              "target_unit_id": 2,
+              "top_branches": [
+                {
+                  "command": "attack:1->2",
+                  "expansions": 1,
+                  "immediate_value": 1,
+                  "kind": "AttackUnit",
+                  "value": 1
+                },
+                {
+                  "command": "end-turn",
+                  "expansions": 6,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "EndTurn",
+                  "value": 1
+                },
+                {
+                  "command": "move:1@4,6",
+                  "expansions": 9,
+                  "immediate_value": 0.21033458411507194,
+                  "kind": "MoveUnit",
+                  "value": 1
+                }
+              ]
+            }
+          ],
+          "decisions": 9,
+          "depth": 4,
+          "expansion_budget_per_decision": 512,
+          "expansions": 2627,
+          "heuristic_enabled": true,
+          "search_seconds": 0.0876002
+        }
+      },
+      "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+      "inference_seconds": 0.0,
+      "model_decisions": 0,
+      "outcome": "win",
+      "reference_seat": 1,
+      "scenario_sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+      "seed": 6000008,
+      "start_profile": "conversion-1v1-far",
+      "winner": 1
+    }
+  ],
+  "opponent": {
+    "action_size": null,
+    "algorithm": null,
+    "contract": null,
+    "contract_hash": null,
+    "contract_version": null,
+    "encoding_hash": null,
+    "environment": null,
+    "inference_mode": "deterministic",
+    "kind": "scripted",
+    "legacy": false,
+    "name": "random",
+    "observation_size": null,
+    "path": null,
+    "promotable": false,
+    "step": null
+  },
+  "rates": {
+    "draw": 0.0,
+    "loss": 0.0,
+    "win": 1.0
+  },
+  "reciprocal": true,
+  "scenario": {
+    "id": "tactical-v2-annihilation-profiled-mixed",
+    "path": "python/config/experiments/annihilation-profiled-mixed.json",
+    "sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76"
+  },
+  "schedule": {
+    "reciprocal": true,
+    "reference_seat_policy": "candidate-seat",
+    "seed_count": 1,
+    "seed_start": 6000008,
+    "start_profile": "conversion-1v1-far"
+  },
+  "schema_version": 1,
+  "search": {
+    "controller": "bounded-search",
+    "decisions": 18,
+    "depth": 4,
+    "expansion_budget_per_decision": 512,
+    "expansions": 5249,
+    "heuristic_enabled": true,
+    "mean_expansions_per_decision": 291.6111111111111,
+    "mean_seconds_per_decision": 0.010206494444444445,
+    "seconds": 0.18371690000000002
+  },
+  "seat_results": {
+    "candidate_as_p0": {
+      "draws": 0,
+      "losses": 0,
+      "wins": 1
+    },
+    "candidate_as_p1": {
+      "draws": 0,
+      "losses": 0,
+      "wins": 1
+    }
+  },
+  "seed_start": 6000008,
+  "seeds": [
+    6000008
+  ],
+  "wins": 2
+}
