@@ -1,7 +1,9 @@
 # Annihilation learning-path decision
 
-**Date:** 2026-07-29  
-**Status:** Accepted  
+**Date:** 2026-07-29
+
+**Status:** Accepted
+
 **Scope:** Tactical-v2 annihilation diagnostics and the next research architecture; not production-AI promotion
 
 ## Decision

@@ -162,4 +162,3 @@ opponent, and optimizer simultaneously.
 - `scenarios/`: the six materialized reward scenarios
 - `evidence/minus-closing-seed11/`: retained traces and authoritative replays
 - `../../run_annihilation_ablation_panel.py`: restart-safe PowerShell-callable runner
-

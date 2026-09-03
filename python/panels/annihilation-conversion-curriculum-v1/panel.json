@@ -145,11 +145,11 @@
     "effect_required_in_both_candidate_seats": true
   },
   "locked_evidence": [
-    {"path": "python/panels/annihilation-reduced-v1/REPORT.md", "sha256": "de30fa4fe14f6bec36bdfd7f6f3e6b077064ddca81336824731c1b444e8a6aa5"},
+    {"path": "python/panels/annihilation-reduced-v1/REPORT.md", "sha256": "6b9acae2a2f21dbf9a7a5b7394b1e8ba66771eac4b509cb50b4ff3276177913a"},
     {"path": "python/panels/annihilation-reduced-v1/aggregate.json", "sha256": "3d57117c7c59f514fc22ebaceee3077e9fb4e5beffe91aefc2d1246110b8d87c"},
     {"path": "python/panels/annihilation-optimizer-v1/REPORT.md", "sha256": "4131b64d9da897ce9a36316a7b65f260f2eb2110d9849e56bd1212f684445b40"},
     {"path": "python/panels/annihilation-optimizer-v1/aggregate.json", "sha256": "0af29382f583ef360e5e3b7a39efaf7a49b892b7e864c8cda0255d396d2b9ace"},
-    {"path": "python/panels/annihilation-targetkl-continuation-v1/REPORT.md", "sha256": "757858a8579e2e3cc478f6b111e3a37e90b8a419c52135dcf200060b6a69a427"},
+    {"path": "python/panels/annihilation-targetkl-continuation-v1/REPORT.md", "sha256": "545ae3b5c9cf1f01695148492a57d016466d01b22ada38a0b011d5142d466faf"},
     {"path": "python/panels/annihilation-targetkl-continuation-v1/aggregate.json", "sha256": "9720decffb2e10fee471643b1e89597914b2172e1f9298b65e22a76bb157cca3"},
     {"path": "python/runs/annihilation-optimizer-value_targetkl-seed11-tb-v1/checkpoints/step_000051200.zip", "sha256": "b248a279741fbcc27884971dd2037fcb79b0c98aadf8f188fa1ddd9ee9724517"},
     {"path": "python/runs/annihilation-optimizer-value_targetkl-seed11-tb-v1/run.json", "sha256": "04434abc3b80444e69761103d06d328a6f2d78aab9c5cc646ea5dae457aab937"},

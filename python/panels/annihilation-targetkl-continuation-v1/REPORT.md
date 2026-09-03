@@ -156,4 +156,3 @@ to Greedy.
 - `controllers/`: immutable checkpoint controller specifications
 - `evidence/`: replay-backed seed-11 evidence at all three checkpoints
 - `../../run_annihilation_targetkl_continuation.py`: restart-safe runner
-

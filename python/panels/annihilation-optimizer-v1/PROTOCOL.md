@@ -46,4 +46,3 @@ Run from PowerShell with:
 ```powershell
 .\python\winenv\Scripts\python.exe .\python\run_annihilation_optimizer_panel.py
 ```
-

@@ -102,6 +102,6 @@
   "result_evidence": [
     {"path": "python/panels/annihilation-bounded-search-v1/aggregate.json", "sha256": "c83c3a488561d5997ebe75785041e79b2f8f6b7a130f9928b709790bd7d20a68"},
     {"path": "python/panels/annihilation-bounded-search-v1/REPORT.md", "sha256": "c89f33daa638021eb1150d4f661582820be81e5aece0cd5a1543ca9d1c58d838"},
-    {"path": "docs/superpowers/decisions/2026-07-29-annihilation-learning-path.md", "sha256": "1cf63870b2f3e10e75d3f5091a14eb6db901bbbe3e642f7efe2900c6bdc60ac8"}
+    {"path": "docs/superpowers/decisions/2026-07-29-annihilation-learning-path.md", "sha256": "c851300d9a0feca87625d47a98698f30ebc451346f4fe9021593960c0bd045bf"}
   ]
 }
