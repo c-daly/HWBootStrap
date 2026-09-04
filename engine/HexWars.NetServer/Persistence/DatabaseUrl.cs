@@ -12,18 +12,35 @@ namespace HexWars.NetServer.Persistence
     public static class DatabaseUrl
     {
         const int DefaultPort = 5432;
+
+        /// <summary>Npgsql accepts Server as an alias for Host and DB as an alias for Database; a
+        /// connection string that names neither a host nor a database cannot reach a server.</summary>
+        static readonly string[] HostKeys = { "host", "server" };
+        static readonly string[] DatabaseKeys = { "database", "db" };
         const string DoubleQuote = "\u0022";
         const string SingleQuote = "\u0027";
 
-        /// <summary>Accepts a postgres:// or postgresql:// URI, or an existing Npgsql Key=Value string
-        /// (returned unchanged). Anything else throws <see cref="FormatException"/>.</summary>
+        /// <summary>Accepts a postgres:// or postgresql:// URI, or an Npgsql Key=Value string that actually
+        /// names a host and a database (returned unchanged, trimmed). Anything else — including a stray
+        /// "foo=bar" that merely contains an equals sign — throws <see cref="FormatException"/>, so a bad
+        /// value fails startup instead of letting the server come up without a reachable database.</summary>
         public static string ToNpgsqlConnectionString(string databaseUrl)
         {
             string raw = (databaseUrl ?? string.Empty).Trim();
             if (raw.Length == 0) throw new FormatException("The database URL is empty.");
             if (raw.Contains("://", StringComparison.Ordinal)) return Compose(ParseUri(raw));
-            if (raw.Contains("=", StringComparison.Ordinal)) return raw;
+            if (raw.Contains("=", StringComparison.Ordinal))
+            {
+                RequireHostAndDatabase(ParseKeyValue(raw));
+                return raw;
+            }
             throw new FormatException("The database URL is neither a postgres:// URL nor a key=value connection string.");
+        }
+
+        static void RequireHostAndDatabase(IReadOnlyDictionary<string, string> pairs)
+        {
+            if (Lookup(pairs, HostKeys) is null || Lookup(pairs, DatabaseKeys) is null)
+                throw new FormatException("DATABASE_URL key=value form must include Host and Database");
         }
 
         /// <summary>host:port/database, for logs and the environment report. Never credentials, and never
@@ -42,9 +59,10 @@ namespace HexWars.NetServer.Persistence
                 if (raw.Contains("=", StringComparison.Ordinal))
                 {
                     var pairs = ParseKeyValue(raw);
-                    string host = Lookup(pairs, "host", "server", "data source") ?? "unknown";
+                    RequireHostAndDatabase(pairs);
+                    string host = Lookup(pairs, HostKeys) ?? "unknown";
                     string port = Lookup(pairs, "port") ?? DefaultPort.ToString(CultureInfo.InvariantCulture);
-                    string? database = Lookup(pairs, "database", "initial catalog");
+                    string? database = Lookup(pairs, DatabaseKeys);
                     return Format(host, port, database);
                 }
             }
@@ -201,15 +219,20 @@ namespace HexWars.NetServer.Persistence
             return DoubleQuote + value.Replace(DoubleQuote, DoubleQuote + DoubleQuote) + DoubleQuote;
         }
 
+        /// <summary>Strict on purpose: a segment that is not key=value means the whole string was never a
+        /// connection string, and silently skipping it is how "foo=bar" used to pass validation.</summary>
         static Dictionary<string, string> ParseKeyValue(string raw)
         {
             var pairs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (string part in raw.Split(";", StringSplitOptions.RemoveEmptyEntries))
             {
-                int equals = part.IndexOf("=", StringComparison.Ordinal);
-                if (equals <= 0) continue;
-                string key = part.Substring(0, equals).Trim();
-                string value = part.Substring(equals + 1).Trim();
+                string segment = part.Trim();
+                if (segment.Length == 0) continue;
+                int equals = segment.IndexOf("=", StringComparison.Ordinal);
+                if (equals <= 0)
+                    throw new FormatException("The database connection string has a segment that is not key=value.");
+                string key = segment.Substring(0, equals).Trim();
+                string value = segment.Substring(equals + 1).Trim();
                 if (value.Length >= 2
                     && value.StartsWith(DoubleQuote, StringComparison.Ordinal)
                     && value.EndsWith(DoubleQuote, StringComparison.Ordinal))
@@ -217,7 +240,9 @@ namespace HexWars.NetServer.Persistence
                     value = value.Substring(1, value.Length - 2)
                                  .Replace(DoubleQuote + DoubleQuote, DoubleQuote);
                 }
-                if (key.Length > 0) pairs[key] = value;
+                if (key.Length == 0)
+                    throw new FormatException("The database connection string has a segment with an empty key.");
+                pairs[key] = value;
             }
             return pairs;
         }
