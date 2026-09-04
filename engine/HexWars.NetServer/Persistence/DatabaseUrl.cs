@@ -1,80 +1,119 @@
 using System.Globalization;
-using System.Text;
+using Npgsql;
 
 namespace HexWars.NetServer.Persistence
 {
     /// <summary>
     /// Translates the DATABASE_URL that hosting platforms hand out (Render, Heroku, Fly all give a
-    /// postgres:// URI) into the Key=Value string Npgsql wants, and describes it without leaking
-    /// credentials. Pure string handling: this file deliberately takes no Npgsql dependency, so the
-    /// configuration layer can reject a bad connection string long before anything tries to connect.
+    /// postgres:// URI) into the connection string Npgsql wants, and describes it without leaking
+    /// credentials.
+    ///
+    /// Both forms end up in an <see cref="NpgsqlConnectionStringBuilder"/>, which is the only component
+    /// that agrees with Npgsql about what a valid connection string is. A hand-rolled semicolon split does
+    /// not: it cuts a quoted password in half, so Password="foo;Port=SECRET;X=bar" used to be described as
+    /// host:SECRET/database and printed in the startup log. Letting Npgsql parse also means an invalid
+    /// port or an unsupported keyword fails validation at boot instead of at the first connection attempt.
     /// </summary>
     public static class DatabaseUrl
     {
         const int DefaultPort = 5432;
 
-        /// <summary>Npgsql accepts Server as an alias for Host and DB as an alias for Database; a
-        /// connection string that names neither a host nor a database cannot reach a server.</summary>
-        static readonly string[] HostKeys = { "host", "server" };
-        static readonly string[] DatabaseKeys = { "database", "db" };
-        const string DoubleQuote = "\u0022";
-        const string SingleQuote = "\u0027";
+        /// <summary>Accepts a postgres:// or postgresql:// URI, or an Npgsql key=value connection string
+        /// that actually names a host and a database, and returns the normalised connection string.
+        /// Anything Npgsql would reject throws <see cref="FormatException"/>, so a bad value fails startup
+        /// instead of letting the server come up without a reachable database.</summary>
+        public static string ToNpgsqlConnectionString(string databaseUrl) => Build(databaseUrl).ConnectionString;
 
-        /// <summary>Accepts a postgres:// or postgresql:// URI, or an Npgsql Key=Value string that actually
-        /// names a host and a database (returned unchanged, trimmed). Anything else — including a stray
-        /// "foo=bar" that merely contains an equals sign — throws <see cref="FormatException"/>, so a bad
-        /// value fails startup instead of letting the server come up without a reachable database.</summary>
-        public static string ToNpgsqlConnectionString(string databaseUrl)
-        {
-            string raw = (databaseUrl ?? string.Empty).Trim();
-            if (raw.Length == 0) throw new FormatException("The database URL is empty.");
-            if (raw.Contains("://", StringComparison.Ordinal)) return Compose(ParseUri(raw));
-            if (raw.Contains("=", StringComparison.Ordinal))
-            {
-                RequireHostAndDatabase(ParseKeyValue(raw));
-                return raw;
-            }
-            throw new FormatException("The database URL is neither a postgres:// URL nor a key=value connection string.");
-        }
-
-        static void RequireHostAndDatabase(IReadOnlyDictionary<string, string> pairs)
-        {
-            if (Lookup(pairs, HostKeys) is null || Lookup(pairs, DatabaseKeys) is null)
-                throw new FormatException("DATABASE_URL key=value form must include Host and Database");
-        }
-
-        /// <summary>host:port/database, for logs and the environment report. Never credentials, and never
-        /// throws: an unusable value is reported as invalid so a health report still renders.</summary>
+        /// <summary>host:port/database, for logs and the environment report. Never a username, never a
+        /// password, and never throws: an unusable value is reported as invalid so a health report still
+        /// renders.</summary>
         public static string DescribeTarget(string databaseUrl)
         {
             string raw = (databaseUrl ?? string.Empty).Trim();
             if (raw.Length == 0) return "none";
             try
             {
-                if (raw.Contains("://", StringComparison.Ordinal))
-                {
-                    var parsed = ParseUri(raw);
-                    return Format(parsed.Host, parsed.Port.ToString(CultureInfo.InvariantCulture), parsed.Database);
-                }
-                if (raw.Contains("=", StringComparison.Ordinal))
-                {
-                    var pairs = ParseKeyValue(raw);
-                    RequireHostAndDatabase(pairs);
-                    string host = Lookup(pairs, HostKeys) ?? "unknown";
-                    string port = Lookup(pairs, "port") ?? DefaultPort.ToString(CultureInfo.InvariantCulture);
-                    string? database = Lookup(pairs, DatabaseKeys);
-                    return Format(host, port, database);
-                }
+                var builder = Build(raw);
+                string target = builder.Host + ":" + builder.Port.ToString(CultureInfo.InvariantCulture);
+                return string.IsNullOrEmpty(builder.Database) ? target : target + "/" + builder.Database;
             }
             catch (FormatException)
             {
                 return "invalid";
             }
-            return "invalid";
         }
 
-        static string Format(string host, string port, string? database) =>
-            string.IsNullOrEmpty(database) ? host + ":" + port : host + ":" + port + "/" + database;
+        static NpgsqlConnectionStringBuilder Build(string databaseUrl)
+        {
+            string raw = (databaseUrl ?? string.Empty).Trim();
+            if (raw.Length == 0) throw new FormatException("The database URL is empty.");
+            // The SCHEME PREFIX selects the format, not the mere presence of a scheme separator: a key=value
+            // string may legitimately carry :// inside a value, such as a password or a search_path option.
+            if (IsPostgresUri(raw)) return FromUri(raw);
+            if (raw.Contains("=", StringComparison.Ordinal)) return FromKeyValue(raw);
+            throw new FormatException("The database URL is neither a postgres:// URL nor a key=value connection string.");
+        }
+
+        static bool IsPostgresUri(string raw) =>
+            raw.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
+            || raw.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Npgsql is the parser. Its failure messages name the offending KEYWORD and never echo a
+        /// value, so quoting one here cannot leak a password.</summary>
+        static NpgsqlConnectionStringBuilder FromKeyValue(string raw)
+        {
+            NpgsqlConnectionStringBuilder builder;
+            try
+            {
+                builder = new NpgsqlConnectionStringBuilder(raw);
+            }
+            catch (Exception ex) when (ex is ArgumentException or KeyNotFoundException or FormatException)
+            {
+                throw new FormatException("DATABASE_URL is not a valid Npgsql connection string: " + ex.Message);
+            }
+
+            if (string.IsNullOrEmpty(builder.Host) || string.IsNullOrEmpty(builder.Database))
+                throw new FormatException("DATABASE_URL key=value form must include Host and Database");
+
+            return builder;
+        }
+
+        static NpgsqlConnectionStringBuilder FromUri(string raw)
+        {
+            var parts = ParseUri(raw);
+            var builder = new NpgsqlConnectionStringBuilder
+            {
+                Host = parts.Host,
+                Port = parts.Port,
+            };
+            if (!string.IsNullOrEmpty(parts.Database)) builder.Database = parts.Database;
+            if (!string.IsNullOrEmpty(parts.User)) builder.Username = parts.User;
+            if (!string.IsNullOrEmpty(parts.Password)) builder.Password = parts.Password;
+
+            if (parts.Query.TryGetValue("sslmode", out string? sslMode))
+            {
+                builder.SslMode = ParseSslMode(sslMode);
+                // Managed Postgres (Render, Heroku) presents a chain the container does not trust;
+                // sslmode=require means encrypt-but-do-not-verify. verify-ca and verify-full do verify.
+                // Npgsql 8 folds that meaning into SslMode.Require itself and marks the flag obsolete, so
+                // this keeps the emitted connection string explicit about the intent; it changes nothing.
+#pragma warning disable CS0618
+                if (builder.SslMode == SslMode.Require) builder.TrustServerCertificate = true;
+#pragma warning restore CS0618
+            }
+
+            return builder;
+        }
+
+        /// <summary>libpq spells the modes with hyphens (verify-ca), Npgsql spells them as enum members
+        /// (VerifyCA). An unrecognised mode is a configuration error, not something to silently ignore.</summary>
+        static SslMode ParseSslMode(string raw)
+        {
+            string name = raw.Trim().Replace("-", string.Empty, StringComparison.Ordinal);
+            if (!Enum.TryParse(name, ignoreCase: true, out SslMode mode) || !Enum.IsDefined(mode))
+                throw new FormatException("The database URL has an unsupported sslmode.");
+            return mode;
+        }
 
         readonly record struct UriParts(string? User, string? Password, string Host, int Port, string? Database,
             IReadOnlyDictionary<string, string> Query);
@@ -166,92 +205,6 @@ namespace HexWars.NetServer.Persistence
                 || port <= 0 || port > 65535)
                 throw new FormatException("The database URL has an invalid port.");
             return port;
-        }
-
-        static string Compose(UriParts parts)
-        {
-            var sb = new StringBuilder();
-            Append(sb, "Host", parts.Host);
-            Append(sb, "Port", parts.Port.ToString(CultureInfo.InvariantCulture));
-            if (!string.IsNullOrEmpty(parts.Database)) Append(sb, "Database", parts.Database!);
-            if (!string.IsNullOrEmpty(parts.User)) Append(sb, "Username", parts.User!);
-            if (!string.IsNullOrEmpty(parts.Password)) Append(sb, "Password", parts.Password!);
-
-            if (parts.Query.TryGetValue("sslmode", out string? sslMode))
-            {
-                switch (sslMode.Trim().ToLowerInvariant())
-                {
-                    case "require":
-                        Append(sb, "SSL Mode", "Require");
-                        // Managed Postgres (Render, Heroku) presents a chain the container does not trust;
-                        // sslmode=require means encrypt-but-do-not-verify. verify-ca/verify-full verify.
-                        Append(sb, "Trust Server Certificate", "true");
-                        break;
-                    case "prefer": Append(sb, "SSL Mode", "Prefer"); break;
-                    case "disable": Append(sb, "SSL Mode", "Disable"); break;
-                    case "verify-ca": Append(sb, "SSL Mode", "VerifyCA"); break;
-                    case "verify-full": Append(sb, "SSL Mode", "VerifyFull"); break;
-                    default: break;   // unknown modes fall through to the Npgsql default rather than failing startup
-                }
-            }
-
-            return sb.ToString();
-        }
-
-        static void Append(StringBuilder sb, string key, string value)
-        {
-            if (sb.Length > 0) sb.Append(";");
-            sb.Append(key).Append("=").Append(Escape(value));
-        }
-
-        /// <summary>Npgsql (like every DbConnectionStringBuilder) reads a value verbatim unless it is
-        /// quoted, so only wrap the values that would otherwise re-split the string.</summary>
-        static string Escape(string value)
-        {
-            bool needsQuoting = value.Length == 0
-                || value.Contains(";", StringComparison.Ordinal)
-                || value.Contains("=", StringComparison.Ordinal)
-                || value.Contains(SingleQuote, StringComparison.Ordinal)
-                || value.Contains(DoubleQuote, StringComparison.Ordinal)
-                || char.IsWhiteSpace(value[0])
-                || char.IsWhiteSpace(value[value.Length - 1]);
-            if (!needsQuoting) return value;
-            return DoubleQuote + value.Replace(DoubleQuote, DoubleQuote + DoubleQuote) + DoubleQuote;
-        }
-
-        /// <summary>Strict on purpose: a segment that is not key=value means the whole string was never a
-        /// connection string, and silently skipping it is how "foo=bar" used to pass validation.</summary>
-        static Dictionary<string, string> ParseKeyValue(string raw)
-        {
-            var pairs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string part in raw.Split(";", StringSplitOptions.RemoveEmptyEntries))
-            {
-                string segment = part.Trim();
-                if (segment.Length == 0) continue;
-                int equals = segment.IndexOf("=", StringComparison.Ordinal);
-                if (equals <= 0)
-                    throw new FormatException("The database connection string has a segment that is not key=value.");
-                string key = segment.Substring(0, equals).Trim();
-                string value = segment.Substring(equals + 1).Trim();
-                if (value.Length >= 2
-                    && value.StartsWith(DoubleQuote, StringComparison.Ordinal)
-                    && value.EndsWith(DoubleQuote, StringComparison.Ordinal))
-                {
-                    value = value.Substring(1, value.Length - 2)
-                                 .Replace(DoubleQuote + DoubleQuote, DoubleQuote);
-                }
-                if (key.Length == 0)
-                    throw new FormatException("The database connection string has a segment with an empty key.");
-                pairs[key] = value;
-            }
-            return pairs;
-        }
-
-        static string? Lookup(IReadOnlyDictionary<string, string> pairs, params string[] keys)
-        {
-            foreach (string key in keys)
-                if (pairs.TryGetValue(key, out string? value) && value.Length > 0) return value;
-            return null;
         }
     }
 }

@@ -39,9 +39,14 @@ namespace HexWars.NetServer.Configuration
                 EngineContract.Version,
                 CachedEngineHash.Value,
                 string.IsNullOrWhiteSpace(match.DatabaseUrl) ? "none" : DatabaseUrl.DescribeTarget(match.DatabaseUrl),
-                match.PublicBaseUrl?.ToString());
+                match.PublicBaseUrl is null ? null : WithoutSecrets(match.PublicBaseUrl));
 
         public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
+
+        /// <summary>Scheme, authority and path only. GetLeftPart(UriPartial.Path) is NOT enough: it keeps
+        /// the userinfo section, so a base URL carrying credentials would still print them here.</summary>
+        static string WithoutSecrets(Uri uri) =>
+            uri.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped);
 
         /// <summary>The full SHA-256 digest of the loaded HexWars.Engine assembly, formatted
         /// sha256:&lt;64 lowercase hex&gt;, or "unavailable" when the assembly has no on-disk location. The

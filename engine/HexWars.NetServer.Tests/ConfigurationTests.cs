@@ -304,7 +304,7 @@ namespace HexWars.NetServer.Tests
             Assert.That(cs, Does.Contain("Username=hex@user"));
             Assert.That(cs, Does.Contain("Password=p@ss:w0rd"));
             Assert.That(cs, Does.Contain("SSL Mode=Require"));
-            Assert.That(cs, Does.Contain("Trust Server Certificate=true"));
+            Assert.That(cs, Does.Contain("Trust Server Certificate=True"));
         }
 
         [Test]
@@ -340,8 +340,9 @@ namespace HexWars.NetServer.Tests
         public void DatabaseUrl_KeyValueFormAcceptsBothHostAndDatabaseAliases()
         {
             Assert.That(DatabaseUrl.ToNpgsqlConnectionString("Host=db;Database=x"), Is.EqualTo("Host=db;Database=x"));
+            // Npgsql accepts Server and DB as aliases and normalises them to Host and Database.
             Assert.That(DatabaseUrl.ToNpgsqlConnectionString("  Server=db;DB=x;Username=u;Password=p  "),
-                Is.EqualTo("Server=db;DB=x;Username=u;Password=p"));
+                Is.EqualTo("Host=db;Database=x;Username=u;Password=p"));
         }
 
         [TestCase("foo=bar")]
