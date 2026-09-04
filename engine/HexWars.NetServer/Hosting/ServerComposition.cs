@@ -1,9 +1,11 @@
 using System.Text;
 using HexWars.Engine;
+using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace HexWars.NetServer.Hosting
@@ -28,10 +30,22 @@ namespace HexWars.NetServer.Hosting
 
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
 
+            // One clock for everything that needs one, so a test can wind it forward instead of waiting for
+            // an expiry. TryAdd rather than Add: a host that has already supplied its own keeps it.
+            builder.Services.TryAddSingleton(TimeProvider.System);
+
             // Read straight from configuration rather than the bound options: this runs before validation,
             // and a legacy deployment with no DATABASE_URL must not pull Npgsql into the container at all.
             if (!string.IsNullOrWhiteSpace(builder.Configuration["DATABASE_URL"]))
+            {
                 builder.Services.AddHexWarsPostgres();
+
+                // Registered next to the store rather than unconditionally, because it cannot be built
+                // without one. In Development the container is validated at build time, so registering it
+                // for a legacy deployment with no database would turn a service nobody resolves into a
+                // startup failure. Singleton for the same reason the store is: it holds no state itself.
+                builder.Services.AddSingleton<IMatchCredentialService, MatchCredentialService>();
+            }
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
             // Legacy-only deployment with no Steam credentials is unaffected by it being here.
