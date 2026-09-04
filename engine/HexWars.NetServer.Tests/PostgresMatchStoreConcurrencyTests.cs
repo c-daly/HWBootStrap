@@ -267,6 +267,49 @@ namespace HexWars.NetServer.Tests
                 "a cancelled allocation must not leave a match behind");
         }
 
+        // ---- an append cannot outlive the game ----------------------------------
+
+        [Test]
+        public async Task AppendCommand_QueuedBehindACompletion_IsRefusedOnceThatCompletionCommits()
+        {
+            var match = await NewActiveMatchAsync();
+
+            // Hold the match row, so the append cannot get past its own SELECT ... FOR UPDATE. This is the
+            // interleaving that matters and the one a plain concurrent test cannot force: the append has
+            // read nothing yet when the game ends underneath it.
+            await using NpgsqlConnection holder = await _db.DataSource.OpenConnectionAsync();
+            await using NpgsqlTransaction holding = await holder.BeginTransactionAsync();
+
+            await using (var takeLock = new NpgsqlCommand(
+                "SELECT status FROM matches WHERE match_id = @matchId FOR UPDATE", holder, holding))
+            {
+                takeLock.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await takeLock.ExecuteScalarAsync(), Is.EqualTo("active"));
+            }
+
+            Task<AppendResult> append =
+                _store.AppendCommandAsync(match.MatchId, 1, "E 0", match.Seat0, Move1, Ct);
+
+            Task first = await Task.WhenAny(append, Task.Delay(BlockedFor));
+            Assert.That(first, Is.Not.SameAs(append),
+                "an append must take the match row lock, so it cannot run while a completion holds it");
+
+            await using (var complete = new NpgsqlCommand(
+                "UPDATE matches SET status = 'completed', completed_at = now(), winner_seat = 0, "
+                + "last_activity_at = now() WHERE match_id = @matchId", holder, holding))
+            {
+                complete.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await complete.ExecuteNonQueryAsync(), Is.EqualTo(1));
+            }
+
+            await holding.CommitAsync();
+
+            Assert.That(await append, Is.EqualTo(new AppendResult(AppendStatus.MatchNotActive, 1)),
+                "the append woke up in a finished game and must say so, not report an ordering problem");
+            Assert.That((await _store.LoadJournalAsync(match.MatchId, Ct))!.Commands, Is.Empty,
+                "a command must not land in a game that ended while it was waiting for the row");
+        }
+
         // ---- one connection is enough ------------------------------------------
 
         [Test]
@@ -340,6 +383,14 @@ namespace HexWars.NetServer.Tests
             CreateMatchResult created = await _store.CreateMatchForLobbyAsync(request, Ct);
             return (created.Match.MatchId, request.SteamLobbyId, request.Players[0].SteamId,
                 request.Players[1].SteamId);
+        }
+
+        async Task<(Guid MatchId, string Lobby, string Seat0, string Seat1)> NewActiveMatchAsync()
+        {
+            var match = await NewWaitingMatchAsync();
+            bool started = await _store.TryStartMatchAsync(match.MatchId, "START-REPLAY", Started, Ct);
+            Assert.That(started, Is.True, "the fixture could not start the match it just created");
+            return match;
         }
 
         async Task ExpireAsync(Guid matchId)

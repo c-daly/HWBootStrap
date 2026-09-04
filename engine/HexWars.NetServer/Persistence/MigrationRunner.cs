@@ -19,6 +19,10 @@ namespace HexWars.NetServer.Persistence
 
         const string ResourcePrefix = "HexWars.NetServer.Migrations.";
 
+        /// <summary>Test hook: runs with the advisory lock held and before any migration work, so a test
+        /// can cancel at the one moment where a leaked lock would block every other instance.</summary>
+        internal Func<Task>? AfterLockAcquiredForTests { get; set; }
+
         const string CreateLedger =
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             + "version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())";
@@ -87,6 +91,9 @@ namespace HexWars.NetServer.Persistence
             await ExecuteAsync(connection, "SELECT pg_advisory_lock(" + AdvisoryLockKey + ")", ct).ConfigureAwait(false);
             try
             {
+                if (AfterLockAcquiredForTests is not null)
+                    await AfterLockAcquiredForTests().ConfigureAwait(false);
+
                 await ExecuteAsync(connection, CreateLedger, ct).ConfigureAwait(false);
                 HashSet<string> applied = await AppliedVersionsAsync(connection, ct).ConfigureAwait(false);
 

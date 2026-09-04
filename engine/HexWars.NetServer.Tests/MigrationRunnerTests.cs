@@ -132,15 +132,44 @@ namespace HexWars.NetServer.Tests
             // The lock is session level and every instance takes the same one at startup. A run that gave
             // up while holding it would queue every other instance behind a connection nobody will use
             // again, and the deploy would look like a hung migration rather than a cancelled one.
-            Assert.That(await ScalarAsync<long>(
-                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"),
-                Is.EqualTo(0L), "the cancelled run left an advisory lock held");
+            Assert.That(await AdvisoryLocksAsync(), Is.EqualTo(0L),
+                "the cancelled run left an advisory lock held");
 
             Task<IReadOnlyList<string>> next = Runner().ApplyAsync(CancellationToken.None);
             Task first = await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(10)));
 
             Assert.That(first, Is.SameAs(next), "the next apply queued behind the cancelled run's lock");
             Assert.That(await next, Is.EqualTo(new[] { OnlyMigration }));
+        }
+
+        [Test]
+        public async Task ApplyCancelledWhileHoldingTheLock_StillReleasesIt()
+        {
+            using var cancelling = new CancellationTokenSource();
+            MigrationRunner runner = Runner();
+            long locksWhileRunning = -1;
+
+            // Cancelling before the lock is taken proves nothing: the interesting moment is the one where
+            // the lock is already held, because that is when giving up without releasing would queue every
+            // other instance behind a connection nobody is going to use again.
+            runner.AfterLockAcquiredForTests = async () =>
+            {
+                locksWhileRunning = await AdvisoryLocksAsync();
+                await cancelling.CancelAsync();
+            };
+
+            Assert.CatchAsync<OperationCanceledException>(() => runner.ApplyAsync(cancelling.Token));
+
+            Assert.That(locksWhileRunning, Is.EqualTo(1L), "the hook must run with the lock actually held");
+            Assert.That(await AdvisoryLocksAsync(), Is.EqualTo(0L),
+                "the cancelled run left the advisory lock held");
+
+            Task<IReadOnlyList<string>> next = Runner().ApplyAsync(CancellationToken.None);
+            Task first = await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(10)));
+
+            Assert.That(first, Is.SameAs(next), "the next apply queued behind the cancelled run's lock");
+            Assert.That(await next, Is.EqualTo(new[] { OnlyMigration }),
+                "and it still had the whole migration left to do");
         }
 
         // ---- schema shape ------------------------------------------------------
@@ -553,6 +582,12 @@ namespace HexWars.NetServer.Tests
                 + "VALUES (@hash, @id, @steam, @expires)",
                 ("hash", new byte[32]), ("id", matchId), ("steam", steamId),
                 ("expires", DateTimeOffset.UtcNow.AddMinutes(15)));
+
+        /// <summary>How many advisory locks this database is holding right now, read from a connection
+        /// other than the one under test. The suite runs one fixture at a time against one database, so
+        /// anything counted here belongs to the code being tested.</summary>
+        Task<long> AdvisoryLocksAsync() =>
+            ScalarAsync<long>("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'");
 
         static async Task OnConnectionAsync(NpgsqlConnection connection, string sql)
         {
