@@ -1,5 +1,6 @@
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Persistence;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Options;
 
@@ -15,6 +16,12 @@ namespace HexWars.NetServer.Hosting
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+
+            // Read straight from configuration rather than the bound options: this runs before validation,
+            // and a legacy deployment with no DATABASE_URL must not pull Npgsql into the container at all.
+            if (!string.IsNullOrWhiteSpace(builder.Configuration["DATABASE_URL"]))
+                builder.Services.AddHexWarsPostgres();
+
             return builder;
         }
 

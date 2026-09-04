@@ -517,6 +517,13 @@ namespace HexWars.NetServer.Tests
                 builder.UseSetting("DATABASE_URL", "postgres://hexwars:s3cr3t@db.internal:5432/hexwars");
                 builder.UseSetting("MATCH_PUBLIC_BASE_URL", "https://match.hexwars.invalid");
                 builder.UseSetting("MATCH_BUILD_ID", "build-42");
+                builder.ConfigureServices(services =>
+                {
+                    // This test is about which endpoints get mapped, not about storage. The DATABASE_URL
+                    // above names a host that does not resolve, so drop the startup migration that would
+                    // otherwise (correctly) refuse to boot. PostgresStartupTests covers that behaviour.
+                    services.Remove(services.Single(d => d.ImplementationType == typeof(MigrationHostedService)));
+                });
             });
             using var client = factory.CreateClient();
 
