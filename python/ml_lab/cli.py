@@ -133,6 +133,50 @@ def _validate_retry_prelog_destination(args: argparse.Namespace) -> None:
             )
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = _comparison_path(left)
+    right = _comparison_path(right)
+    return left == right or left in right.parents or right in left.parents
+
+
+def _outcome_protected_sources(args: argparse.Namespace) -> tuple[Path, ...]:
+    if args.command != "train-outcome":
+        return ()
+    protected: list[Path] = []
+    if args.source_run is not None:
+        protected.append(Path(args.source_run))
+    try:
+        opponent = normalize_controller_spec(args.opponent)
+    except (OSError, ValueError):
+        # Strict controller validation still reports malformed specs later. This
+        # best-effort pass only identifies valid source paths before log creation.
+        return tuple(protected)
+    if opponent.kind == "run" and opponent.path is not None:
+        protected.append(opponent.path)
+    # Outcome training currently accepts run controllers only. Protect legacy
+    # checkpoint and snapshot sources too so logging remains fail-closed before
+    # the strict backend validator reports that they are unsupported.
+    elif opponent.kind == "snapshot" and opponent.source_run is not None:
+        protected.append(opponent.source_run)
+    elif opponent.kind == "checkpoint" and opponent.path is not None:
+        protected.append(opponent.path)
+    return tuple(protected)
+
+
+def _validate_outcome_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command != "train-outcome":
+        return
+    destination = Path(args.runs_root) / args.run
+    if any(
+        _paths_overlap(destination, source)
+        for source in _outcome_protected_sources(args)
+    ):
+        raise ValueError(
+            "outcome training destination must be outside initialization and "
+            "model-opponent sources"
+        )
+
+
 def _validate_training_prelog_destination(args: argparse.Namespace) -> None:
     if args.command not in {
         "train", "train-structured", "train-outcome", "retry-structured",
@@ -145,6 +189,7 @@ def _validate_training_prelog_destination(args: argparse.Namespace) -> None:
     if destination.parent != runs_root:
         raise ValueError("training run destination must be a direct child of runs root")
     _validate_retry_prelog_destination(args)
+    _validate_outcome_prelog_destination(args)
 
 
 def controller_config(raw: str | dict[str, Any] | ControllerSpec) -> dict[str, Any]:

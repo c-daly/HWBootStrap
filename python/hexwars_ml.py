@@ -18,6 +18,9 @@ _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRAINING_COMMANDS = frozenset({
     "train", "train-structured", "train-outcome", "retry-structured", "resume",
 })
+_SCRIPTED_CONTROLLER_NAMES = frozenset({
+    "bounded-search", "greedy", "passive", "random",
+})
 _STARTUP_BEGAN_PREFIX = "ML Lab startup began with pid "
 _STARTUP_EXITED_PREFIX = "ML Lab startup exited with code "
 
@@ -130,6 +133,63 @@ def _retry_log_destination_conflicts(
     )
 
 
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = _comparison_path(left)
+    right = _comparison_path(right)
+    return left == right or left in right.parents or right in left.parents
+
+
+def _controller_source_path(value: str | None) -> Path | None:
+    if value is None or not value.strip():
+        return None
+    raw = value.strip()
+    if raw in _SCRIPTED_CONTROLLER_NAMES:
+        return None
+    document: dict | None = None
+    if raw.startswith("run:"):
+        path = raw[4:]
+        return Path(path) if path.strip() else None
+    if raw.startswith("ppo:") or raw.startswith("dqn:"):
+        path = raw.split(":", 1)[1]
+        return Path(path) if path.strip() else None
+    if raw.startswith("@"):
+        document = _quiet_json_object(Path(raw[1:]))
+    elif raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        document = parsed if type(parsed) is dict else None
+    else:
+        candidate = Path(raw)
+        if candidate.is_dir() and (candidate / "run.json").is_file():
+            return candidate
+        return None
+    if document is None:
+        return None
+    kind = document.get("kind")
+    field = "source_run" if kind == "snapshot" else "path"
+    path = document.get(field)
+    if kind not in {"run", "checkpoint", "snapshot"}:
+        return None
+    return Path(path) if type(path) is str and path.strip() else None
+
+
+def _outcome_log_destination_conflicts(
+    argv: Sequence[str], destination: Path,
+) -> bool:
+    if not argv or argv[0] != "train-outcome":
+        return False
+    sources = []
+    source_run = _option_value(argv, "--source-run")
+    if source_run is not None:
+        sources.append(Path(source_run))
+    opponent = _controller_source_path(_option_value(argv, "--opponent"))
+    if opponent is not None:
+        sources.append(opponent)
+    return any(_paths_overlap(destination, source) for source in sources)
+
+
 def _startup_error_path(argv: Sequence[str]) -> Path | None:
     if not argv or argv[0] not in _TRAINING_COMMANDS:
         return None
@@ -139,7 +199,10 @@ def _startup_error_path(argv: Sequence[str]) -> Path | None:
     runs_root = _option_value(argv, "--runs-root")
     root = Path(runs_root) if runs_root else Path(__file__).resolve().parent / "runs"
     run_dir = root / run_name
-    if _retry_log_destination_conflicts(argv, root, run_dir):
+    if (
+        _retry_log_destination_conflicts(argv, root, run_dir)
+        or _outcome_log_destination_conflicts(argv, run_dir)
+    ):
         return None
     return run_dir / "train-err.log"
 

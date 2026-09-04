@@ -880,6 +880,76 @@ def test_outcome_train_rejects_run_traversal_before_creating_stderr_log(
     assert not (tmp_path / "escaped" / "train-err.log").exists()
 
 
+@pytest.mark.parametrize(
+    "protected_kind",
+    (
+        "initialization",
+        "fixed_opponent",
+        "live_opponent",
+        "direct_opponent",
+        "file_opponent",
+    ),
+)
+def test_outcome_train_rejects_source_overlap_before_opening_stderr_log(
+    tmp_path: Path,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    source = runs / "protected"
+    source.mkdir(parents=True)
+    stderr_log = source / "train-err.log"
+    stderr_log.write_text("source diagnostics\n", encoding="utf-8")
+    (source / "run.json").write_text("{}\n", encoding="utf-8")
+    scenario = tmp_path / "minigame.json"
+    scenario.write_text("{}\n", encoding="utf-8")
+    spec_file = tmp_path / "opponent.json"
+    spec_file.write_text(
+        json.dumps({"kind": "run", "path": str(source), "mode": "fixed"}),
+        encoding="utf-8",
+    )
+    opponent_values = {
+        "fixed_opponent": f"run:{source}",
+        "live_opponent": json.dumps({
+            "kind": "run", "path": str(source), "mode": "live",
+        }),
+        "direct_opponent": str(source),
+        "file_opponent": f"@{spec_file}",
+    }
+    source_arguments = ["--source-run", str(source)] if (
+        protected_kind == "initialization"
+    ) else ["--opponent", opponent_values[protected_kind]]
+    called = False
+
+    def outcome_runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("protected source must not reach the outcome backend")
+
+    exit_code, payload = _invoke_json(
+        [
+            "train-outcome",
+            "--run", source.name,
+            "--scenario-file", str(scenario),
+            "--timesteps", "64",
+            "--runs-root", str(runs),
+            *source_arguments,
+            "--json",
+        ],
+        outcome_runner=outcome_runner,
+    )
+
+    assert exit_code == 1
+    assert payload["result"] == {
+        "error": "ValueError",
+        "message": (
+            "outcome training destination must be outside initialization and "
+            "model-opponent sources"
+        ),
+    }
+    assert called is False
+    assert stderr_log.read_text(encoding="utf-8") == "source diagnostics\n"
+
+
 def test_outcome_train_source_is_optional_and_preflight_shape_matches_unity(
     tmp_path: Path,
 ) -> None:
