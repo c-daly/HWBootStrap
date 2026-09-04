@@ -15,4 +15,8 @@
     <ProjectReference Include="..\HexWars.Engine\HexWars.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HexWars.NetServer.Tests" />
+  </ItemGroup>
+
 </Project>
