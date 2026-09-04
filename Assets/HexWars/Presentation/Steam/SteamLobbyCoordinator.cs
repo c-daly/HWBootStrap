@@ -1,0 +1,883 @@
+#nullable enable
+using System;
+using System.Collections.Generic;
+using HexWars.Engine;
+
+namespace HexWars.Presentation
+{
+    /// <summary>Tunables for <see cref="SteamLobbyCoordinator"/>.</summary>
+    public sealed class SteamLobbyConfig
+    {
+        /// <summary>The Steam App ID advertised in <see cref="SteamLobbyKeys.App"/>.</summary>
+        public uint AppId { get; set; }
+
+        /// <summary>The match protocol version advertised in <see cref="SteamLobbyKeys.Protocol"/>.</summary>
+        public int ProtocolVersion { get; set; } = 2;
+
+        /// <summary>This client build, usually <c>Application.version</c>.</summary>
+        public string ClientBuild { get; set; } = string.Empty;
+
+        /// <summary>Rolls the board seed for a Quick Match lobby. Defaults to a fixed in-range seed.</summary>
+        public Func<int>? RollSeed { get; set; }
+
+        /// <summary>How long a lobby search runs before this client hosts instead.</summary>
+        public double SearchTimeoutSeconds { get; set; } = 8;
+
+        /// <summary>How long a match-service allocation or join may take before it is abandoned.</summary>
+        public double AllocationTimeoutSeconds { get; set; } = 15;
+
+        /// <summary>A rolled seed, clamped into the advertised range.</summary>
+        public int NextSeed()
+        {
+            var roll = RollSeed;
+            return SteamLobbyRules.ClampSeed(roll == null ? SteamLobbyRules.MinSeed : roll());
+        }
+    }
+
+    /// <summary>
+    /// Drives the whole Steam matchmaking flow: find or host a lobby, agree readiness, have the owner
+    /// allocate a server match, and hand both players a <see cref="SteamMatchTicket"/>.
+    /// <para>
+    /// Everything here is pure C#: it talks to Steam through <see cref="ISteamLobbyClient"/> and to the
+    /// match service through <see cref="ISteamMatchApi"/>, so the entire state machine is unit testable.
+    /// Call <see cref="Tick"/> once per frame, after pumping the Steam client, so timeouts fire.
+    /// </para>
+    /// <para>
+    /// Every asynchronous callback captures the generation counter that was current when it was issued.
+    /// Cancelling, retrying or starting a new operation bumps that counter, so a result belonging to an
+    /// abandoned attempt is dropped instead of moving the flow somewhere the player did not ask for.
+    /// </para>
+    /// </summary>
+    public sealed class SteamLobbyCoordinator : IDisposable
+    {
+        enum Operation
+        {
+            None,
+            QuickMatch,
+            Host,
+            Invite,
+            JoinInvited,
+            Reconnect,
+        }
+
+        readonly ISteamLobbyClient _steam;
+        readonly ISteamMatchApi _api;
+        readonly SteamLobbyConfig _config;
+        readonly Action<SteamLobbyStatus>? _onStatus;
+        readonly Action<SteamMatchTicket>? _onMatchReady;
+
+        int _generation;
+        double _now;
+        double _deadline;
+        bool _hasDeadline;
+        bool _disposed;
+        bool _idleAfterCancel;
+
+        Operation _operation = Operation.None;
+        GameSetup _lastHostSetup = GameSetup.Default;
+        SteamLobbyVisibility _lastHostVisibility = SteamLobbyVisibility.Public;
+        string? _lastInvitedLobbyId;
+        string? _lastReconnectMatchId;
+
+        string _pendingRuleset = SteamLobbyRules.QuickRuleset;
+        string _pendingSetupWire = string.Empty;
+
+        SteamLobbyPhase _phase = SteamLobbyPhase.Idle;
+        string _message = SteamLobbyMessages.Idle;
+        string? _lobbyId;
+        string? _matchId;
+        bool _isOwner;
+        bool _localReady;
+        bool _remoteReady;
+        string? _opponentName;
+
+        string? _joinRequestedMatchId;
+        bool _allocationStarted;
+
+        SteamLobbyStatus _status;
+
+        public SteamLobbyCoordinator(
+            ISteamLobbyClient steam,
+            ISteamMatchApi api,
+            SteamLobbyConfig config,
+            Action<SteamLobbyStatus>? onStatus,
+            Action<SteamMatchTicket>? onMatchReady)
+        {
+            if (steam == null) throw new ArgumentNullException(nameof(steam));
+            if (api == null) throw new ArgumentNullException(nameof(api));
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            _steam = steam;
+            _api = api;
+            _config = config;
+            _onStatus = onStatus;
+            _onMatchReady = onMatchReady;
+            _status = BuildStatus();
+
+            _steam.LobbyDataChanged += OnLobbyDataChanged;
+            _steam.MemberJoined += OnMemberJoined;
+            _steam.MemberLeft += OnMemberLeft;
+            _steam.InviteAccepted += OnInviteAccepted;
+        }
+
+        /// <summary>The current immutable snapshot. A new instance is published on every change.</summary>
+        public SteamLobbyStatus Status { get { return _status; } }
+
+        // ----- operations ----------------------------------------------------------------------
+
+        /// <summary>Finds an open <c>quick-v1</c> lobby, or hosts one when there is none.</summary>
+        public void QuickMatch()
+        {
+            if (!EnsureSteam()) return;
+
+            BeginOperation(Operation.QuickMatch);
+            _pendingRuleset = SteamLobbyRules.QuickRuleset;
+            _pendingSetupWire = SteamLobbyRules.QuickMatchSetup(_config.NextSeed()).ToWire();
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.Searching);
+            SetDeadline(_config.SearchTimeoutSeconds);
+            Publish();
+
+            var required = SteamLobbyRules.RequiredSearchMetadata(
+                _config.AppId, _config.ProtocolVersion, SteamLobbyRules.QuickRuleset);
+            _steam.RequestLobbyList(required, results => OnLobbyList(generation, results));
+        }
+
+        /// <summary>Hosts a lobby with a host-configured setup.</summary>
+        public void HostGame(GameSetup setup, SteamLobbyVisibility visibility)
+        {
+            if (!EnsureSteam()) return;
+
+            BeginOperation(Operation.Host);
+            _lastHostSetup = setup;
+            _lastHostVisibility = visibility;
+            _pendingRuleset = SteamLobbyRules.CustomRuleset;
+            _pendingSetupWire = setup.Sanitized().ToWire();
+            CreateLobbyForCurrentOperation();
+        }
+
+        /// <summary>Hosts a friends-only Quick Match lobby and opens the Steam invite overlay.</summary>
+        public void InviteFriend()
+        {
+            if (!EnsureSteam()) return;
+
+            BeginOperation(Operation.Invite);
+            _pendingRuleset = SteamLobbyRules.QuickRuleset;
+            _pendingSetupWire = SteamLobbyRules.QuickMatchSetup(_config.NextSeed()).ToWire();
+            CreateLobbyForCurrentOperation();
+        }
+
+        /// <summary>Joins a lobby the player was invited to.</summary>
+        public void JoinInvited(string lobbyId)
+        {
+            if (!EnsureSteam()) return;
+            if (string.IsNullOrEmpty(lobbyId)) return;
+
+            BeginOperation(Operation.JoinInvited);
+            _lastInvitedLobbyId = lobbyId;
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.Searching);
+            SetDeadline(_config.SearchTimeoutSeconds);
+            Publish();
+            _steam.JoinLobby(lobbyId, ok => OnLobbyJoined(generation, lobbyId, ok));
+        }
+
+        /// <summary>Publishes the local readiness flag into member data.</summary>
+        public void SetReady(bool ready)
+        {
+            if (!EnsureSteam()) return;
+            if (string.IsNullOrEmpty(_lobbyId)) return;
+
+            _localReady = ready;
+            Publish();
+            _steam.SetMemberData(_lobbyId!, SteamLobbyKeys.MemberReady,
+                ready ? SteamLobbyKeys.ReadyTrue : SteamLobbyKeys.ReadyFalse);
+        }
+
+        /// <summary>
+        /// Tries the failed step again. While the lobby is still held this re-runs the allocation or
+        /// join without leaving it; otherwise it repeats the operation that started the flow.
+        /// </summary>
+        public void Retry()
+        {
+            if (!EnsureSteam()) return;
+
+            if (!string.IsNullOrEmpty(_lobbyId) && IsRetryableInLobby(_phase))
+            {
+                _generation++;
+                _allocationStarted = false;
+                _joinRequestedMatchId = null;
+                ClearDeadline();
+                // Always reset the line: a stale server message must not survive the retry.
+                SetPhase(SteamLobbyPhase.WaitingForReady, SteamLobbyMessages.WaitingForReady);
+                RefreshFromLobby();
+                return;
+            }
+
+            switch (_operation)
+            {
+                case Operation.QuickMatch:
+                    QuickMatch();
+                    break;
+                case Operation.Host:
+                    HostGame(_lastHostSetup, _lastHostVisibility);
+                    break;
+                case Operation.Invite:
+                    InviteFriend();
+                    break;
+                case Operation.JoinInvited:
+                    if (!string.IsNullOrEmpty(_lastInvitedLobbyId)) JoinInvited(_lastInvitedLobbyId!);
+                    break;
+                case Operation.Reconnect:
+                    if (!string.IsNullOrEmpty(_lastReconnectMatchId)) Reconnect(_lastReconnectMatchId!);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Abandons whatever is in flight from any non-idle phase and leaves the lobby. Every callback
+        /// belonging to the abandoned attempt is dropped. The next <see cref="Tick"/> returns to idle.
+        /// </summary>
+        public void Cancel()
+        {
+            if (_disposed) return;
+            if (_phase == SteamLobbyPhase.Idle) return;
+
+            _generation++;
+            _api.Cancel();
+            _steam.CancelAuthTicket();
+            if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
+
+            ClearSession();
+            _idleAfterCancel = true;
+            SetPhase(SteamLobbyPhase.Cancelled);
+            Publish();
+        }
+
+        /// <summary>Rejoins an already allocated match, obtaining a fresh join credential.</summary>
+        public void Reconnect(string matchId)
+        {
+            if (!EnsureSteam()) return;
+            if (string.IsNullOrEmpty(matchId)) return;
+
+            BeginOperation(Operation.Reconnect);
+            _lastReconnectMatchId = matchId;
+            _matchId = matchId;
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.RequestingTicket);
+            SetDeadline(_config.AllocationTimeoutSeconds);
+            Publish();
+            _steam.RequestAuthTicket(ticket => OnReconnectTicket(generation, matchId, ticket));
+        }
+
+        /// <summary>Advances time. Call once per frame, after <c>steam.Pump()</c>.</summary>
+        public void Tick(double nowSeconds)
+        {
+            _now = nowSeconds;
+            if (_disposed) return;
+
+            if (_idleAfterCancel && _phase == SteamLobbyPhase.Cancelled)
+            {
+                _idleAfterCancel = false;
+                SetPhase(SteamLobbyPhase.Idle);
+                Publish();
+                return;
+            }
+
+            if (!_hasDeadline || _now < _deadline) return;
+
+            if (_phase == SteamLobbyPhase.Searching)
+            {
+                ClearDeadline();
+                _generation++;
+                if (_operation == Operation.QuickMatch)
+                {
+                    CreateLobbyForCurrentOperation();
+                }
+                else
+                {
+                    SetPhase(SteamLobbyPhase.Failed);
+                    Publish();
+                }
+                return;
+            }
+
+            if (IsMatchServicePhase(_phase))
+            {
+                ClearDeadline();
+                _generation++;
+                _allocationStarted = false;
+                _joinRequestedMatchId = null;
+                _api.Cancel();
+                SetPhase(SteamLobbyPhase.BackendUnavailable);
+                Publish();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _generation++;
+            _steam.LobbyDataChanged -= OnLobbyDataChanged;
+            _steam.MemberJoined -= OnMemberJoined;
+            _steam.MemberLeft -= OnMemberLeft;
+            _steam.InviteAccepted -= OnInviteAccepted;
+        }
+
+        // ----- lobby discovery -----------------------------------------------------------------
+
+        void OnLobbyList(int generation, IReadOnlyList<SteamLobbySearchResult> results)
+        {
+            if (!IsCurrent(generation)) return;
+            if (_phase != SteamLobbyPhase.Searching) return;
+
+            var chosen = ChooseLobby(results);
+            if (chosen == null)
+            {
+                ClearDeadline();
+                CreateLobbyForCurrentOperation();
+                return;
+            }
+
+            _steam.JoinLobby(chosen, ok => OnLobbyJoined(generation, chosen, ok));
+        }
+
+        string? ChooseLobby(IReadOnlyList<SteamLobbySearchResult>? results)
+        {
+            if (results == null) return null;
+            foreach (var result in results)
+            {
+                if (result == null || string.IsNullOrEmpty(result.LobbyId)) continue;
+                if (!SteamLobbyRules.IsCompatible(result.Metadata, _config.AppId, _config.ProtocolVersion)) continue;
+                if (result.MemberCount != 1) continue;
+                if (SteamLobbyRules.HasMatch(result.Metadata)) continue;
+                return result.LobbyId;
+            }
+            return null;
+        }
+
+        void CreateLobbyForCurrentOperation()
+        {
+            var visibility = _operation == Operation.Host ? _lastHostVisibility
+                : _operation == Operation.Invite ? SteamLobbyVisibility.FriendsOnly
+                : SteamLobbyVisibility.Public;
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.CreatingLobby);
+            Publish();
+            _steam.CreateLobby(visibility, 2, lobbyId => OnLobbyCreated(generation, lobbyId));
+        }
+
+        void OnLobbyCreated(int generation, string? lobbyId)
+        {
+            if (!IsCurrent(generation))
+            {
+                // The player moved on while Steam was still creating: do not strand an empty lobby.
+                if (!string.IsNullOrEmpty(lobbyId)) _steam.LeaveLobby(lobbyId!);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(lobbyId))
+            {
+                SetPhase(SteamLobbyPhase.Failed);
+                Publish();
+                return;
+            }
+
+            _lobbyId = lobbyId;
+            _isOwner = true;
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.App, SteamLobbyRules.Decimal(_config.AppId));
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Protocol, SteamLobbyRules.Decimal(_config.ProtocolVersion));
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Build, _config.ClientBuild ?? string.Empty);
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Ruleset, _pendingRuleset);
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Setup, _pendingSetupWire);
+            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Name, _steam.LocalDisplayName ?? string.Empty);
+
+            if (_operation == Operation.Invite) _steam.OpenInviteOverlay(lobbyId!);
+
+            SetPhase(SteamLobbyPhase.WaitingForPlayer);
+            RefreshFromLobby();
+        }
+
+        void OnLobbyJoined(int generation, string lobbyId, bool ok)
+        {
+            if (!IsCurrent(generation)) return;
+
+            ClearDeadline();
+            if (!ok)
+            {
+                // A Quick Match race (somebody else took the slot) simply becomes hosting.
+                if (_operation == Operation.QuickMatch) CreateLobbyForCurrentOperation();
+                else FailWith(SteamLobbyPhase.Failed, null);
+                return;
+            }
+
+            var snapshot = _steam.GetLobby(lobbyId);
+            if (snapshot == null)
+            {
+                FailWith(SteamLobbyPhase.Failed, null);
+                return;
+            }
+
+            if (!SteamLobbyRules.IsCompatible(snapshot.Metadata, _config.AppId, _config.ProtocolVersion))
+            {
+                _steam.LeaveLobby(lobbyId);
+                FailWith(SteamLobbyPhase.VersionMismatch, null);
+                return;
+            }
+
+            _lobbyId = lobbyId;
+            RefreshFromLobby();
+        }
+
+        // ----- lobby events --------------------------------------------------------------------
+
+        void OnLobbyDataChanged(string lobbyId)
+        {
+            if (!IsCurrentLobby(lobbyId)) return;
+            RefreshFromLobby();
+        }
+
+        void OnMemberJoined(string lobbyId, string steamId)
+        {
+            if (!IsCurrentLobby(lobbyId)) return;
+            RefreshFromLobby();
+        }
+
+        void OnMemberLeft(string lobbyId, string steamId)
+        {
+            if (!IsCurrentLobby(lobbyId)) return;
+            if (string.Equals(steamId, _steam.LocalSteamId, StringComparison.Ordinal)) return;
+            HandleOpponentLeft();
+        }
+
+        void OnInviteAccepted(string lobbyId)
+        {
+            if (_disposed) return;
+            JoinInvited(lobbyId);
+        }
+
+        void HandleOpponentLeft()
+        {
+            if (_disposed) return;
+            if (_phase == SteamLobbyPhase.MatchReady || _phase == SteamLobbyPhase.Idle
+                || _phase == SteamLobbyPhase.Cancelled) return;
+
+            if (IsMatchServicePhase(_phase))
+            {
+                _api.Cancel();
+                _generation++;
+            }
+
+            ClearDeadline();
+            _allocationStarted = false;
+            _joinRequestedMatchId = null;
+            _matchId = null;
+            _localReady = false;
+            _remoteReady = false;
+            _opponentName = null;
+
+            var snapshot = string.IsNullOrEmpty(_lobbyId) ? null : _steam.GetLobby(_lobbyId!);
+            if (snapshot != null)
+            {
+                _isOwner = string.Equals(snapshot.OwnerSteamId, _steam.LocalSteamId, StringComparison.Ordinal);
+            }
+
+            SetPhase(SteamLobbyPhase.WaitingForPlayer);
+            Publish();
+
+            // Clear our own ready flag in Steam so the next player does not walk into a stale "1".
+            if (_isOwner && !string.IsNullOrEmpty(_lobbyId))
+            {
+                _steam.SetMemberData(_lobbyId!, SteamLobbyKeys.MemberReady, SteamLobbyKeys.ReadyFalse);
+            }
+        }
+
+        /// <summary>Re-reads the lobby and moves the flow on when the handshake is complete.</summary>
+        void RefreshFromLobby()
+        {
+            if (_disposed || string.IsNullOrEmpty(_lobbyId)) return;
+
+            var snapshot = _steam.GetLobby(_lobbyId!);
+            if (snapshot == null) return;
+
+            _isOwner = string.Equals(snapshot.OwnerSteamId, _steam.LocalSteamId, StringComparison.Ordinal);
+
+            var other = OtherMember(snapshot);
+            _localReady = IsReady(MemberOf(snapshot, _steam.LocalSteamId));
+            _remoteReady = IsReady(other);
+            _opponentName = other == null
+                ? null
+                : (string.IsNullOrEmpty(other.DisplayName) ? other.SteamId : other.DisplayName);
+
+            if (!IsLobbyPhase(_phase))
+            {
+                Publish();
+                return;
+            }
+
+            string? matchId;
+            snapshot.Metadata.TryGetValue(SteamLobbyKeys.Match, out matchId);
+            var hasMatch = !string.IsNullOrEmpty(matchId);
+
+            if (hasMatch && !_isOwner)
+            {
+                BeginGuestJoin(matchId!);
+                return;
+            }
+
+            SetPhase(snapshot.Members.Count >= 2
+                ? SteamLobbyPhase.WaitingForReady
+                : SteamLobbyPhase.WaitingForPlayer);
+
+            if (_isOwner && _localReady && _remoteReady && !hasMatch && !_allocationStarted
+                && snapshot.Members.Count >= 2)
+            {
+                BeginAllocation(snapshot);
+                return;
+            }
+
+            Publish();
+        }
+
+        // ----- match allocation ----------------------------------------------------------------
+
+        void BeginAllocation(SteamLobbySnapshot snapshot)
+        {
+            _allocationStarted = true;
+            string? setupWire;
+            snapshot.Metadata.TryGetValue(SteamLobbyKeys.Setup, out setupWire);
+            _pendingSetupWire = setupWire ?? _pendingSetupWire;
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.RequestingTicket);
+            SetDeadline(_config.AllocationTimeoutSeconds);
+            Publish();
+            _steam.RequestAuthTicket(ticket => OnOwnerTicket(generation, ticket));
+        }
+
+        void OnOwnerTicket(int generation, string? ticket)
+        {
+            if (!IsCurrent(generation)) return;
+            if (string.IsNullOrEmpty(ticket))
+            {
+                _allocationStarted = false;
+                ClearDeadline();
+                FailWith(SteamLobbyPhase.Failed, null);
+                return;
+            }
+
+            SetPhase(SteamLobbyPhase.AllocatingMatch);
+            Publish();
+            _api.CreateMatch(_lobbyId ?? string.Empty, ticket!, _pendingSetupWire,
+                result => OnCreateMatchDone(generation, result));
+        }
+
+        void OnCreateMatchDone(int generation, SteamMatchApiResult result)
+        {
+            if (!IsCurrent(generation)) return;
+
+            ClearDeadline();
+            if (result != null && result.Ok)
+            {
+                if (!string.IsNullOrEmpty(_lobbyId) && !string.IsNullOrEmpty(result.MatchId))
+                {
+                    _steam.SetLobbyData(_lobbyId!, SteamLobbyKeys.Match, result.MatchId!);
+                }
+                CompleteMatch(result);
+                return;
+            }
+
+            MapApiFailure(result);
+        }
+
+        void BeginGuestJoin(string matchId)
+        {
+            if (string.Equals(_joinRequestedMatchId, matchId, StringComparison.Ordinal))
+            {
+                Publish();
+                return;
+            }
+
+            _joinRequestedMatchId = matchId;
+            _matchId = matchId;
+
+            var generation = _generation;
+            SetPhase(SteamLobbyPhase.RequestingTicket);
+            SetDeadline(_config.AllocationTimeoutSeconds);
+            Publish();
+            _steam.RequestAuthTicket(ticket => OnGuestTicket(generation, matchId, ticket));
+        }
+
+        void OnGuestTicket(int generation, string matchId, string? ticket)
+        {
+            if (!IsCurrent(generation)) return;
+            if (string.IsNullOrEmpty(ticket))
+            {
+                _joinRequestedMatchId = null;
+                ClearDeadline();
+                FailWith(SteamLobbyPhase.Failed, null);
+                return;
+            }
+
+            SetPhase(SteamLobbyPhase.JoiningMatch);
+            Publish();
+            _api.JoinMatch(matchId, ticket!, result => OnJoinMatchDone(generation, result));
+        }
+
+        void OnReconnectTicket(int generation, string matchId, string? ticket)
+        {
+            if (!IsCurrent(generation)) return;
+            if (string.IsNullOrEmpty(ticket))
+            {
+                ClearDeadline();
+                FailWith(SteamLobbyPhase.Failed, null);
+                return;
+            }
+
+            SetPhase(SteamLobbyPhase.Reconnecting);
+            Publish();
+            _api.JoinMatch(matchId, ticket!, result => OnJoinMatchDone(generation, result));
+        }
+
+        void OnJoinMatchDone(int generation, SteamMatchApiResult result)
+        {
+            if (!IsCurrent(generation)) return;
+
+            ClearDeadline();
+            if (result != null && result.Ok)
+            {
+                CompleteMatch(result);
+                return;
+            }
+
+            MapApiFailure(result);
+        }
+
+        void CompleteMatch(SteamMatchApiResult result)
+        {
+            _matchId = result.MatchId;
+            SetPhase(SteamLobbyPhase.MatchReady);
+            Publish();
+            var handler = _onMatchReady;
+            if (handler != null)
+            {
+                handler(new SteamMatchTicket(result.MatchId, result.WebsocketUrl, result.JoinCredential, result.Seat));
+            }
+        }
+
+        /// <summary>Turns a match-service error body into the phase the player sees.</summary>
+        void MapApiFailure(SteamMatchApiResult? result)
+        {
+            _allocationStarted = false;
+            _joinRequestedMatchId = null;
+
+            var code = result == null ? string.Empty : (result.ErrorCode ?? string.Empty);
+            var serverMessage = result == null || string.IsNullOrEmpty(result.Message) ? null : result.Message;
+
+            if (string.Equals(code, SteamMatchErrorCodes.IncompatibleVersion, StringComparison.Ordinal))
+            {
+                FailWith(SteamLobbyPhase.VersionMismatch, null);
+                return;
+            }
+
+            if (string.Equals(code, SteamMatchErrorCodes.ServiceUnavailable, StringComparison.Ordinal)
+                || string.Equals(code, SteamMatchErrorCodes.RateLimited, StringComparison.Ordinal)
+                || (result != null && result.HttpStatus == 0))
+            {
+                FailWith(SteamLobbyPhase.BackendUnavailable, null);
+                return;
+            }
+
+            if (string.Equals(code, SteamMatchErrorCodes.LobbyChanged, StringComparison.Ordinal))
+            {
+                // The server saw a different lobby than we did. Drop our own ready so the retry is a
+                // deliberate act by the player instead of an immediate re-allocation loop.
+                _matchId = null;
+                _localReady = false;
+                SetPhase(SteamLobbyPhase.WaitingForReady, serverMessage ?? SteamLobbyMessages.WaitingForReady);
+                Publish();
+                if (!string.IsNullOrEmpty(_lobbyId))
+                {
+                    _steam.SetMemberData(_lobbyId!, SteamLobbyKeys.MemberReady, SteamLobbyKeys.ReadyFalse);
+                }
+                return;
+            }
+
+            FailWith(SteamLobbyPhase.Failed, serverMessage);
+        }
+
+        // ----- state plumbing ------------------------------------------------------------------
+
+        bool EnsureSteam()
+        {
+            if (_disposed) return false;
+            if (_steam.IsAvailable) return true;
+
+            SetPhase(SteamLobbyPhase.SteamUnavailable);
+            Publish();
+            return false;
+        }
+
+        void BeginOperation(Operation operation)
+        {
+            _generation++;
+            _operation = operation;
+            _idleAfterCancel = false;
+            _allocationStarted = false;
+            _joinRequestedMatchId = null;
+            ClearDeadline();
+
+            if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
+            ClearSession();
+        }
+
+        void ClearSession()
+        {
+            _lobbyId = null;
+            _matchId = null;
+            _isOwner = false;
+            _localReady = false;
+            _remoteReady = false;
+            _opponentName = null;
+            _allocationStarted = false;
+            _joinRequestedMatchId = null;
+            ClearDeadline();
+        }
+
+        /// <summary>Moves to a terminal phase, preferring the player-safe server message when there is one.</summary>
+        void FailWith(SteamLobbyPhase phase, string? serverMessage)
+        {
+            SetPhase(phase, serverMessage ?? SteamLobbyMessages.For(phase));
+            Publish();
+        }
+
+        void SetPhase(SteamLobbyPhase phase)
+        {
+            if (_phase == phase) return;
+            _phase = phase;
+            _message = SteamLobbyMessages.For(phase);
+        }
+
+        void SetPhase(SteamLobbyPhase phase, string message)
+        {
+            _phase = phase;
+            _message = message ?? string.Empty;
+        }
+
+        void SetDeadline(double seconds)
+        {
+            _hasDeadline = true;
+            _deadline = _now + seconds;
+        }
+
+        void ClearDeadline()
+        {
+            _hasDeadline = false;
+            _deadline = 0;
+        }
+
+        bool IsCurrent(int generation)
+        {
+            return !_disposed && generation == _generation;
+        }
+
+        bool IsCurrentLobby(string lobbyId)
+        {
+            return !_disposed
+                && !string.IsNullOrEmpty(_lobbyId)
+                && string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal);
+        }
+
+        void Publish()
+        {
+            var next = BuildStatus();
+            if (next.Matches(_status)) return;
+            _status = next;
+            var handler = _onStatus;
+            if (handler != null) handler(next);
+        }
+
+        SteamLobbyStatus BuildStatus()
+        {
+            return new SteamLobbyStatus(
+                _phase,
+                _message,
+                _lobbyId,
+                _matchId,
+                _isOwner,
+                _localReady,
+                _remoteReady,
+                _opponentName,
+                CanCancelIn(_phase),
+                CanRetryIn(_phase),
+                _phase == SteamLobbyPhase.WaitingForReady);
+        }
+
+        static bool IsLobbyPhase(SteamLobbyPhase phase)
+        {
+            return phase == SteamLobbyPhase.Searching
+                || phase == SteamLobbyPhase.CreatingLobby
+                || phase == SteamLobbyPhase.WaitingForPlayer
+                || phase == SteamLobbyPhase.WaitingForReady;
+        }
+
+        static bool IsMatchServicePhase(SteamLobbyPhase phase)
+        {
+            return phase == SteamLobbyPhase.RequestingTicket
+                || phase == SteamLobbyPhase.AllocatingMatch
+                || phase == SteamLobbyPhase.JoiningMatch
+                || phase == SteamLobbyPhase.Reconnecting;
+        }
+
+        static bool IsRetryableInLobby(SteamLobbyPhase phase)
+        {
+            return phase == SteamLobbyPhase.BackendUnavailable
+                || phase == SteamLobbyPhase.Failed
+                || phase == SteamLobbyPhase.WaitingForReady;
+        }
+
+        static bool CanCancelIn(SteamLobbyPhase phase)
+        {
+            return phase != SteamLobbyPhase.Idle
+                && phase != SteamLobbyPhase.Cancelled
+                && phase != SteamLobbyPhase.SteamUnavailable
+                && phase != SteamLobbyPhase.MatchReady;
+        }
+
+        static bool CanRetryIn(SteamLobbyPhase phase)
+        {
+            return phase == SteamLobbyPhase.BackendUnavailable || phase == SteamLobbyPhase.Failed;
+        }
+
+        static bool IsReady(SteamLobbyMemberSnapshot? member)
+        {
+            if (member == null) return false;
+            string? value;
+            return member.Data.TryGetValue(SteamLobbyKeys.MemberReady, out value)
+                && string.Equals(value, SteamLobbyKeys.ReadyTrue, StringComparison.Ordinal);
+        }
+
+        static SteamLobbyMemberSnapshot? MemberOf(SteamLobbySnapshot snapshot, string steamId)
+        {
+            foreach (var member in snapshot.Members)
+            {
+                if (string.Equals(member.SteamId, steamId, StringComparison.Ordinal)) return member;
+            }
+            return null;
+        }
+
+        SteamLobbyMemberSnapshot? OtherMember(SteamLobbySnapshot snapshot)
+        {
+            foreach (var member in snapshot.Members)
+            {
+                if (!string.Equals(member.SteamId, _steam.LocalSteamId, StringComparison.Ordinal)) return member;
+            }
+            return null;
+        }
+    }
+}
