@@ -32,6 +32,12 @@
     <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamLobbyClient.cs" Link="Presentation/Steam/ISteamLobbyClient.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamLobbyClient.cs" Link="Presentation/Steam/FakeSteamLobbyClient.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/FakeSteamLobbyClientTests.cs" Link="Presentation/Steam/FakeSteamLobbyClientTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyRules.cs" Link="Presentation/Steam/SteamLobbyRules.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyStatus.cs" Link="Presentation/Steam/SteamLobbyStatus.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamMatchApi.cs" Link="Presentation/Steam/ISteamMatchApi.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyCoordinator.cs" Link="Presentation/Steam/SteamLobbyCoordinator.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamMatchApi.cs" Link="Presentation/Steam/FakeSteamMatchApi.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamLobbyCoordinatorTests.cs" Link="Presentation/Steam/SteamLobbyCoordinatorTests.cs" />
   </ItemGroup>
 
 </Project>

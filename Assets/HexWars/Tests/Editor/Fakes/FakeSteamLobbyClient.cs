@@ -52,6 +52,12 @@ namespace HexWars.Presentation.Tests
 
         public string? LastInviteOverlayLobbyId { get; private set; }
 
+        /// <summary>Visibility passed to the most recent CreateLobby call, or null when there was none.</summary>
+        public SteamLobbyVisibility? LastCreateVisibility { get; private set; }
+
+        /// <summary>Member cap passed to the most recent CreateLobby call.</summary>
+        public int LastCreateMaxMembers { get; private set; }
+
         public int CreateLobbyCalls { get; private set; }
         public int RequestLobbyListCalls { get; private set; }
         public int JoinLobbyCalls { get; private set; }
@@ -84,6 +90,8 @@ namespace HexWars.Presentation.Tests
         public void CreateLobby(SteamLobbyVisibility visibility, int maxMembers, Action<string?> onDone)
         {
             CreateLobbyCalls++;
+            LastCreateVisibility = visibility;
+            LastCreateMaxMembers = maxMembers;
             if (!IsAvailable || _disposed)
             {
                 Enqueue(() => onDone(null));
