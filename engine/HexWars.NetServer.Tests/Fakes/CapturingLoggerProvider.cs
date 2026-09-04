@@ -4,45 +4,51 @@ using Microsoft.Extensions.Logging;
 namespace HexWars.NetServer.Tests.Fakes
 {
     /// <summary>
-    /// Captures every formatted line the host logs, from every category, so a test can assert on what a
-    /// real DI-composed server would have written to a real sink rather than on what one hand-built
-    /// object does in isolation. It is registered as an ordinary provider, which is the point: anything
-    /// the framework logs on the way to the wire lands here too.
+    /// Keeps every formatted log message the host writes, so a test can assert that a secret never reached
+    /// a log line. Thread-safe on purpose: the host logs from several threads while it starts.
     /// </summary>
     public sealed class CapturingLoggerProvider : ILoggerProvider
     {
         readonly ConcurrentQueue<string> _messages = new();
 
-        /// <summary>Every captured line, "Category: message", oldest first.</summary>
+        /// <summary>A snapshot of everything captured so far, oldest first.</summary>
         public IReadOnlyList<string> Messages => _messages.ToArray();
+
+        public bool Any(string fragment) =>
+            _messages.ToArray().Any(m => m.Contains(fragment, StringComparison.Ordinal));
 
         public ILogger CreateLogger(string categoryName) => new CapturingLogger(categoryName, _messages);
 
-        public void Dispose()
-        {
-        }
+        public void Dispose() { }
 
-        sealed class CapturingLogger(string category, ConcurrentQueue<string> messages) : ILogger
+        sealed class CapturingLogger : ILogger
         {
-            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            readonly string _category;
+            readonly ConcurrentQueue<string> _messages;
 
-            // Never a filter of its own: the whole question a test asks of this class is what the
-            // configured filters let through, so it must not add one.
+            public CapturingLogger(string category, ConcurrentQueue<string> messages)
+            {
+                _category = category;
+                _messages = messages;
+            }
+
+            public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+
             public bool IsEnabled(LogLevel logLevel) => true;
 
-            public void Log<TState>(
-                LogLevel logLevel,
-                EventId eventId,
-                TState state,
-                Exception? exception,
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
                 Func<TState, Exception?, string> formatter)
             {
-                // The exception is captured as well as the message: a failed request URL reaches a log
-                // through the exception a sink renders, not only through the format string.
-                var line = category + ": " + formatter(state, exception);
-                if (exception is not null) line += " " + exception;
-                messages.Enqueue(line);
+                _messages.Enqueue(_category + ": " + formatter(state, exception));
+                if (exception is not null) _messages.Enqueue(_category + ": " + exception);
             }
+        }
+
+        sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+
+            public void Dispose() { }
         }
     }
 }

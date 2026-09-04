@@ -67,7 +67,7 @@ names, bound by the server configuration layer.
 | `STEAM_PUBLISHER_WEB_API_KEY` | string | none | when Steam is enabled, or in Production | **YES** | Publisher Web API key. Exists only in the Render secret store and the server process. Never logged, never returned by any endpoint. |
 | `STEAM_WEB_API_BASE_URL` | URL | `https://partner.steam-api.com` | no | no | Base URL for Steamworks Web API calls. Tests point this at a fake endpoint. |
 | `DATABASE_URL` | `postgres://` URI, or an Npgsql keyword/value string | none | when Steam is enabled, or in Production | **YES** | Postgres connection target. Only `host:port/db` may ever be echoed back; credentials never are. |
-| `MATCH_PUBLIC_BASE_URL` | absolute URL, https in Production | none | when Steam is enabled, or in Production | no | The externally reachable base URL. The server derives the websocket URL from it by mapping `http` to `ws` and `https` to `wss`, then appending `/ws/v2`. |
+| `MATCH_PUBLIC_BASE_URL` | absolute URL, https in Production, no credentials, query, or fragment | none | when Steam is enabled, or in Production | no | The externally reachable base URL. The server derives the websocket URL from it by mapping `http` to `ws` and `https` to `wss`, then appending `/ws/v2`. Startup rejects a value carrying userinfo, a query string, or a fragment, because this value is echoed into the environment report and logged; the report renders scheme, authority and path only. |
 | `MATCH_JOIN_TOKEN_TTL_SECONDS` | int | `900` | no | no | Lifetime of an issued join credential. Valid range 60..86400. |
 | `MATCH_BUILD_ID` | string | none | yes | no | Identifies the running build. On Render, set it from `RENDER_GIT_COMMIT`. |
 | `MATCH_PROTOCOL_VERSION` | int | `2` | no | no | Wire protocol version advertised to clients and stored on each match. |
@@ -185,6 +185,16 @@ Postgres-backed tests run against a real Postgres, never a mock and never a shar
 - `HEXWARS_TEST_DATABASE_URL`, when set, overrides the container and points the fixture at an existing
   database. This is for CI runners and hosts without a Docker daemon.
 - Automated tests never use Render credentials, and never reach the live Valve API.
+
+### The test project does not run on the production runtime
+
+`engine/HexWars.NetServer.Tests` targets **`net10.0`**, because only the .NET 10 runtime is installed in the
+development environment and ASP.NET Core 8 TestHost cannot serve the System.Text.Json 10 responses it would
+produce. The server itself targets `net8.0` and production runs it on the `aspnet:8.0` image. A green
+`dotnet test` therefore proves the behaviour, not the production runtime: the **Docker image smoke test in
+the deployment verification script is the runtime gate**, and it is the step that catches an API that exists
+on .NET 10 but not on .NET 8. Anything that must be observed on the deployed image, such as serving a build
+with no `wwwroot`, belongs in that smoke test rather than in the test project.
 
 ## 8. External inputs requiring owner action
 
