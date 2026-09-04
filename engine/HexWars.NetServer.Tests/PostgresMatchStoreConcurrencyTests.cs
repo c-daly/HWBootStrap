@@ -135,6 +135,59 @@ namespace HexWars.NetServer.Tests
                 "the save lost the race and must have done nothing at all");
         }
 
+        // ---- 3. allocation survives a close/create race -------------------------
+
+        [Test]
+        public async Task CreateMatch_RetriesWhenTheMatchItCollidedWithClosesBeforeItCanBeReadBack()
+        {
+            string lobby = NextLobbyId();
+            CreateMatchResult first = await _store.CreateMatchForLobbyAsync(Request(lobby), Ct);
+
+            int conflicts = 0;
+            _store.OnCreateConflictForTests = async () =>
+            {
+                conflicts++;
+                await ExpireAsync(first.Match.MatchId);
+            };
+
+            CreateMatchResult second = await _store.CreateMatchForLobbyAsync(Request(lobby), Ct);
+
+            Assert.That(conflicts, Is.EqualTo(1), "the first insert must have collided exactly once");
+            Assert.That(second.Created, Is.True, "the lobby was free again, so the retry must have allocated");
+            Assert.That(second.Match.MatchId, Is.Not.EqualTo(first.Match.MatchId));
+            Assert.That(second.Match.Status, Is.EqualTo(MatchStatus.Waiting));
+        }
+
+        [Test]
+        public async Task CreateMatch_GivesUpAfterThreeAttempts_WhenTheLobbyKeepsChurning()
+        {
+            string lobby = NextLobbyId();
+            Guid open = (await _store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
+
+            int conflicts = 0, retries = 0;
+
+            // Close the match the insert collided with, so the re-read finds nothing...
+            _store.OnCreateConflictForTests = async () =>
+            {
+                conflicts++;
+                await ExpireAsync(open);
+            };
+
+            // ...then open another one before the retry, so the next insert collides again.
+            _store.OnCreateRetryForTests = async () =>
+            {
+                retries++;
+                open = await InsertWaitingMatchAsync(lobby);
+            };
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                () => _store.CreateMatchForLobbyAsync(Request(lobby), Ct));
+
+            Assert.That(conflicts, Is.EqualTo(3), "three attempts, three collisions");
+            Assert.That(retries, Is.EqualTo(2),
+                "the third collision gives up rather than retrying a fourth time");
+        }
+
         // ---- helpers ------------------------------------------------------------
 
         static string NextLobbyId() =>
@@ -153,6 +206,32 @@ namespace HexWars.NetServer.Tests
             CreateMatchResult created = await _store.CreateMatchForLobbyAsync(request, Ct);
             return (created.Match.MatchId, request.SteamLobbyId, request.Players[0].SteamId,
                 request.Players[1].SteamId);
+        }
+
+        async Task ExpireAsync(Guid matchId)
+        {
+            await using var command = _db.DataSource.CreateCommand(
+                "UPDATE matches SET status = 'expired', completed_at = now(), last_activity_at = now() "
+                + "WHERE match_id = @matchId");
+            command.Parameters.AddWithValue("matchId", matchId);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        async Task<Guid> InsertWaitingMatchAsync(string lobbyId)
+        {
+            var matchId = Guid.NewGuid();
+            await using var command = _db.DataSource.CreateCommand(
+                "INSERT INTO matches (match_id, steam_lobby_id, status, setup_wire, engine_version, "
+                + "protocol_version, build_id, created_at, last_activity_at) "
+                + "VALUES (@matchId, @lobbyId, 'waiting', @setup, @engine, @protocol, @build, now(), now())");
+            command.Parameters.AddWithValue("matchId", matchId);
+            command.Parameters.AddWithValue("lobbyId", lobbyId);
+            command.Parameters.AddWithValue("setup", SetupWire);
+            command.Parameters.AddWithValue("engine", EngineVersion);
+            command.Parameters.AddWithValue("protocol", ProtocolVersion);
+            command.Parameters.AddWithValue("build", BuildId);
+            await command.ExecuteNonQueryAsync();
+            return matchId;
         }
     }
 }

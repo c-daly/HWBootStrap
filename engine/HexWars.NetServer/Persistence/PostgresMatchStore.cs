@@ -21,6 +21,11 @@ namespace HexWars.NetServer.Persistence
         /// error, it is the answer "someone else allocated this lobby first".</summary>
         public const string OpenLobbyIndex = "ux_matches_open_lobby";
 
+        /// <summary>How many times allocation will re-try an insert that collided with a match which had
+        /// closed again by the time it was read back. Three is enough for any real close/create race and
+        /// small enough that a genuinely pathological lobby fails loudly instead of spinning.</summary>
+        public const int CreateAttempts = 3;
+
         const string MatchColumns =
             "match_id, steam_lobby_id, status, setup_wire, start_replay, engine_version, protocol_version, "
             + "build_id, created_at, started_at, completed_at, last_activity_at, winner_seat";
@@ -54,63 +59,92 @@ namespace HexWars.NetServer.Persistence
             MatchStoreGuard.ValidatePlayers(request.Players);
 
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
-            await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-            try
+            // A collision on the open-lobby index normally means somebody else allocated first, and the
+            // answer is their match. But the match it collided with can reach a terminal status before we
+            // read it back, and then there is no match to return and no reason not to allocate after all.
+            // That is a legal sequence of events, not a failure, so it is retried rather than thrown.
+            for (int attempt = 1; attempt <= CreateAttempts; attempt++)
             {
-                PersistedMatch created;
-                await using (var insert = new NpgsqlCommand(
-                    "INSERT INTO matches (" + MatchColumns + ") VALUES "
-                    + "(@matchId, @lobbyId, @status, @setupWire, NULL, @engineVersion, @protocolVersion, "
-                    + "@buildId, @createdAt, NULL, NULL, @createdAt, NULL) RETURNING " + MatchColumns,
-                    connection, transaction))
+                await using NpgsqlTransaction transaction =
+                    await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+                try
                 {
-                    insert.Parameters.AddWithValue("matchId", Guid.NewGuid());
-                    insert.Parameters.AddWithValue("lobbyId", request.SteamLobbyId);
-                    insert.Parameters.AddWithValue("status", MatchStatusText.ToDb(MatchStatus.Waiting));
-                    insert.Parameters.AddWithValue("setupWire", request.SetupWire);
-                    insert.Parameters.AddWithValue("engineVersion", request.EngineVersion);
-                    insert.Parameters.AddWithValue("protocolVersion", request.ProtocolVersion);
-                    insert.Parameters.AddWithValue("buildId", request.BuildId);
-                    insert.Parameters.Add(Timestamp("createdAt", request.CreatedAt));
-
-                    await using NpgsqlDataReader reader =
-                        await insert.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                    await reader.ReadAsync(ct).ConfigureAwait(false);
-                    created = ReadMatch(reader);
+                    PersistedMatch created =
+                        await InsertMatchAsync(connection, transaction, request, ct).ConfigureAwait(false);
+                    await transaction.CommitAsync(ct).ConfigureAwait(false);
+                    return new CreateMatchResult(created, true);
                 }
-
-                foreach ((string steamId, int seat) in request.Players)
+                catch (PostgresException ex)
+                    when (ex.SqlState == PostgresErrorCodes.UniqueViolation && ex.ConstraintName == OpenLobbyIndex)
                 {
-                    await using var insertPlayer = new NpgsqlCommand(
-                        "INSERT INTO match_players (" + PlayerColumns + ") "
-                        + "VALUES (@matchId, @steamId, @seat, NULL, @joinedAt, NULL)", connection, transaction);
-                    insertPlayer.Parameters.AddWithValue("matchId", created.MatchId);
-                    insertPlayer.Parameters.AddWithValue("steamId", steamId);
-                    insertPlayer.Parameters.AddWithValue("seat", seat);
-                    insertPlayer.Parameters.Add(Timestamp("joinedAt", created.CreatedAt));
-                    await insertPlayer.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-                }
+                    await transaction.RollbackAsync(ct).ConfigureAwait(false);
 
-                await transaction.CommitAsync(ct).ConfigureAwait(false);
-                return new CreateMatchResult(created, true);
+                    if (OnCreateConflictForTests is not null) await OnCreateConflictForTests().ConfigureAwait(false);
+
+                    PersistedMatch? existing =
+                        await FindOpenMatchAsync(connection, null, request.SteamLobbyId, ct).ConfigureAwait(false);
+
+                    if (existing is not null)
+                    {
+                        logger.LogInformation(
+                            "Lobby already had match {MatchId} allocated; returning it instead of creating another.",
+                            Short(existing.MatchId));
+                        return new CreateMatchResult(existing, false);
+                    }
+
+                    logger.LogInformation(
+                        "Lobby allocation collided with a match that had closed by the time it was read back; "
+                        + "retrying (attempt {Attempt} of {Attempts}).", attempt, CreateAttempts);
+
+                    if (OnCreateRetryForTests is not null && attempt < CreateAttempts)
+                        await OnCreateRetryForTests().ConfigureAwait(false);
+                }
             }
-            catch (PostgresException ex)
-                when (ex.SqlState == PostgresErrorCodes.UniqueViolation && ex.ConstraintName == OpenLobbyIndex)
+
+            throw new InvalidOperationException(
+                "Could not allocate a match for that Steam lobby after " + CreateAttempts + " attempts: every "
+                + "insert collided with an open match that had closed again before it could be read back.");
+        }
+
+        static async Task<PersistedMatch> InsertMatchAsync(NpgsqlConnection connection,
+            NpgsqlTransaction transaction, CreateMatchRequest request, CancellationToken ct)
+        {
+            PersistedMatch created;
+            await using (var insert = new NpgsqlCommand(
+                "INSERT INTO matches (" + MatchColumns + ") VALUES "
+                + "(@matchId, @lobbyId, @status, @setupWire, NULL, @engineVersion, @protocolVersion, "
+                + "@buildId, @createdAt, NULL, NULL, @createdAt, NULL) RETURNING " + MatchColumns,
+                connection, transaction))
             {
-                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                insert.Parameters.AddWithValue("matchId", Guid.NewGuid());
+                insert.Parameters.AddWithValue("lobbyId", request.SteamLobbyId);
+                insert.Parameters.AddWithValue("status", MatchStatusText.ToDb(MatchStatus.Waiting));
+                insert.Parameters.AddWithValue("setupWire", request.SetupWire);
+                insert.Parameters.AddWithValue("engineVersion", request.EngineVersion);
+                insert.Parameters.AddWithValue("protocolVersion", request.ProtocolVersion);
+                insert.Parameters.AddWithValue("buildId", request.BuildId);
+                insert.Parameters.Add(Timestamp("createdAt", request.CreatedAt));
 
-                PersistedMatch existing =
-                    await FindOpenMatchAsync(connection, null, request.SteamLobbyId, ct).ConfigureAwait(false)
-                    ?? throw new InvalidOperationException(
-                        "The open-lobby index rejected the insert but no open match for that lobby could be "
-                        + "read back; the match it collided with was closed in between.", ex);
-
-                logger.LogInformation(
-                    "Lobby already had match {MatchId} allocated; returning it instead of creating another.",
-                    Short(existing.MatchId));
-                return new CreateMatchResult(existing, false);
+                await using NpgsqlDataReader reader = await insert.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                await reader.ReadAsync(ct).ConfigureAwait(false);
+                created = ReadMatch(reader);
             }
+
+            foreach ((string steamId, int seat) in request.Players)
+            {
+                await using var insertPlayer = new NpgsqlCommand(
+                    "INSERT INTO match_players (" + PlayerColumns + ") "
+                    + "VALUES (@matchId, @steamId, @seat, NULL, @joinedAt, NULL)", connection, transaction);
+                insertPlayer.Parameters.AddWithValue("matchId", created.MatchId);
+                insertPlayer.Parameters.AddWithValue("steamId", steamId);
+                insertPlayer.Parameters.AddWithValue("seat", seat);
+                insertPlayer.Parameters.Add(Timestamp("joinedAt", created.CreatedAt));
+                await insertPlayer.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            return created;
         }
 
         // ---- reads -----------------------------------------------------------
