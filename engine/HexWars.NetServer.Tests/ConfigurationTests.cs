@@ -444,8 +444,17 @@ namespace HexWars.NetServer.Tests
             Assert.That(root.GetProperty("publicBaseUrl").GetString(),
                 Does.StartWith("https://match.hexwars.invalid"));
 
-            string hash = root.GetProperty("engineAssemblyHash").GetString()!;
-            Assert.That(hash == "unavailable" || hash.Length == 16, Is.True, hash);
+            Assert.That(root.GetProperty("engineAssemblyHash").GetString(),
+                Does.Match("^sha256:[0-9a-f]{64}$"));
+        }
+
+        [Test]
+        public void EnvironmentReport_EngineAssemblyHash_IsTheFullSha256Digest()
+        {
+            var result = Read(ValidSteamSettings());
+            var report = EnvironmentReport.Describe(result.Steam, result.Match, Env());
+
+            Assert.That(report.EngineAssemblyHash, Does.Match("^sha256:[0-9a-f]{64}$"));
         }
 
         [Test]

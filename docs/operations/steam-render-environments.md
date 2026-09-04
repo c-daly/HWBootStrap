@@ -129,9 +129,12 @@ Sample output, with fabricated values for illustration only:
 }
 ```
 
-`engineVersion` is the engine contract string `hexwars-engine/1`. `engineAssemblyHash` identifies the exact
-engine assembly, so a match journal replayed on a different build can be proven to have been replayed
-against identical rules.
+`engineVersion` is the engine contract string `hexwars-engine/1`. `engineAssemblyHash` is the full SHA-256
+digest of the loaded engine assembly, always printed as `sha256:` followed by 64 lowercase hexadecimal
+characters, exactly as in the sample above (or the literal `unavailable` when the assembly has no on-disk
+location). It identifies the exact engine assembly, so a match journal replayed on a different build can be
+proven to have been replayed against identical rules; the digest is never truncated, because a prefix is not
+enough to identify a replay build long after it shipped.
 
 ## 6. Steamworks Unity wrapper decision
 
