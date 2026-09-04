@@ -75,6 +75,14 @@ namespace HexWars.NetServer.Tests
         const string AuthWithStringVacBanned =
             """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":"1","publisherbanned":false}}}""";
 
+        // An absent ban flag is not a false ban flag. A body that never says whether the account is
+        // banned is a body no player may be seated on, so both flags must be present booleans.
+        const string AuthWithoutAnyBanFlags =
+            """{"response":{"params":{"result":"OK","steamid":"76561197960287930"}}}""";
+
+        const string AuthWithoutPublisherBanned =
+            """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":false}}}""";
+
         // An errorcode that is not a number: copying it into the detail would put a ticket in a log.
         const string AuthErrorCodeCarryingATicket =
             """{"response":{"error":{"errorcode":"ticket=deadbeef","errordesc":"Invalid ticket"}}}""";
@@ -93,6 +101,10 @@ namespace HexWars.NetServer.Tests
 
         const string OwnershipUnparseableOwner =
             """{"appownership":{"result":"OK","ownsapp":true,"ownersteamid":"bogus"}}""";
+
+        // result is the verdict on the whole answer, so an absent one is not an answer we may act on.
+        const string OwnershipWithoutResult =
+            """{"appownership":{"ownsapp":true}}""";
 
         // Family sharing: a different owner is legitimate, so it is allowed and merely noted.
         const string OwnershipFamilyShared =
@@ -261,6 +273,20 @@ namespace HexWars.NetServer.Tests
             var ex = Assert.ThrowsAsync<SteamApiException>(
                 () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
 
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [TestCase(AuthWithoutAnyBanFlags, TestName = "Auth_WithoutAnyBanFlag_IsMalformedResponse")]
+        [TestCase(AuthWithoutPublisherBanned, TestName = "Auth_WithoutPublisherBanned_IsMalformedResponse")]
+        public void Auth_MissingBanFlag_IsMalformedResponse(string body)
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, body);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            // Reading an absent flag as false would sign in a banned account on a truncated body.
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
         }
 
@@ -442,6 +468,19 @@ namespace HexWars.NetServer.Tests
             var ex = Assert.ThrowsAsync<SteamApiException>(
                 () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
 
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void Ownership_WithoutResult_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipWithoutResult);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            // A licence check with no verdict field is not a licence check we may act on.
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
         }
 

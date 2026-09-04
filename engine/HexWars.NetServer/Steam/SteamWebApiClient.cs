@@ -145,11 +145,13 @@ namespace HexWars.NetServer.Steam
 
             var ownership = RequireObject(document.RootElement, "appownership");
 
-            // result is optional here, but when Valve sends one it is the verdict on the whole answer:
-            // a FAILED body that still carries an ownsapp field is not a licence check we may act on.
-            if (TryGetProperty(ownership, "result", out _) && !IsResultOk(ownership))
+            // result is the verdict on the whole answer, so it has to be there and it has to say OK. A
+            // FAILED body that still carries an ownsapp field is not a licence check we may act on, and
+            // neither is a body that never states a verdict at all.
+            if (!IsResultOk(ownership))
             {
-                throw new SteamApiException(SteamFailure.MalformedResponse, "appownership.result was not OK");
+                throw new SteamApiException(
+                    SteamFailure.MalformedResponse, "appownership.result was missing or not OK");
             }
 
             // Strictly a JSON boolean: a 2, or the string "true", is not Valve answering this question.
@@ -577,14 +579,16 @@ namespace HexWars.NetServer.Steam
             }
         }
 
-        /// <summary>An absent flag is false; a present one that is not a boolean is a malformed response.</summary>
+        /// <summary>
+        /// A flag that has to be there. Treating an absent one as false is how a truncated or shaped body
+        /// signs in an account whose ban state Valve never actually stated, so absence fails closed too.
+        /// </summary>
         static bool RequireBool(JsonElement parent, string path, string name)
         {
-            if (!TryGetProperty(parent, name, out _)) return false;
             if (TryReadStrictBool(parent, name, out var value)) return value;
 
             throw new SteamApiException(
-                SteamFailure.MalformedResponse, path + "." + name + " was not a boolean");
+                SteamFailure.MalformedResponse, path + "." + name + " was missing or not a boolean");
         }
 
         /// <summary>True only for a literal string result of OK. Valve spells success exactly one way.</summary>
