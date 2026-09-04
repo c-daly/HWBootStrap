@@ -18,7 +18,20 @@ CREATE TABLE IF NOT EXISTS matches (
   started_at TIMESTAMPTZ NULL,
   completed_at TIMESTAMPTZ NULL,
   last_activity_at TIMESTAMPTZ NOT NULL,
-  winner_seat INTEGER NULL CHECK (winner_seat IN (0,1))
+  winner_seat INTEGER NULL CHECK (winner_seat IN (0,1)),
+
+  -- The status column and the columns that describe it must agree, because recovery trusts the status
+  -- word before it looks at anything else. An active or completed match without a start replay cannot
+  -- be replayed at all; a terminal match without completed_at never ages out of the retention window;
+  -- and a winner on anything but a completed match is a score for a game that was never finished.
+  CONSTRAINT ck_matches_active_has_replay
+    CHECK (status <> 'active' OR start_replay IS NOT NULL),
+  CONSTRAINT ck_matches_completed_has_replay
+    CHECK (status <> 'completed' OR start_replay IS NOT NULL),
+  CONSTRAINT ck_matches_terminal_has_completed_at
+    CHECK (status IN ('waiting','active') OR completed_at IS NOT NULL),
+  CONSTRAINT ck_matches_winner_only_when_completed
+    CHECK (winner_seat IS NULL OR status = 'completed')
 );
 
 -- At most one open match per lobby. Completed and expired rows drop out of the index, so the same
@@ -40,21 +53,33 @@ CREATE TABLE IF NOT EXISTS match_players (
   UNIQUE (match_id, seat)
 );
 
+-- The issuer is a seat, not a free-text label: a command whose issuer holds no seat in this match could
+-- never have been accepted, and on replay there would be nobody to attribute it to.
 CREATE TABLE IF NOT EXISTS match_commands (
   match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL CHECK (sequence >= 1),
   command_wire TEXT NOT NULL,
   accepted_at TIMESTAMPTZ NOT NULL,
   issuer_steam_id TEXT NOT NULL,
-  PRIMARY KEY (match_id, sequence)
+  PRIMARY KEY (match_id, sequence),
+  CONSTRAINT fk_match_commands_issuer_seat
+    FOREIGN KEY (match_id, issuer_steam_id) REFERENCES match_players(match_id, steam_id)
+    ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- Same rule for credentials: a join token is issued to a seat, so it dies with the seat.
 CREATE TABLE IF NOT EXISTS match_join_credentials (
   credential_hash BYTEA PRIMARY KEY CHECK (octet_length(credential_hash) = 32),
   match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
   steam_id TEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
-  revoked_at TIMESTAMPTZ NULL
+  revoked_at TIMESTAMPTZ NULL,
+  CONSTRAINT fk_match_join_credentials_seat
+    FOREIGN KEY (match_id, steam_id) REFERENCES match_players(match_id, steam_id)
+    ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS ix_join_credentials_match_player ON match_join_credentials (match_id, steam_id);
+
+-- The expired-credential purge sweeps on expires_at alone.
+CREATE INDEX IF NOT EXISTS ix_join_credentials_expires ON match_join_credentials (expires_at);

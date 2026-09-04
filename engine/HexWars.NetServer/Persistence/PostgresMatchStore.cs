@@ -292,6 +292,12 @@ namespace HexWars.NetServer.Persistence
 
         public async Task<bool> TryCompleteMatchAsync(Guid matchId, MatchStatus terminal, int? winnerSeat, DateTimeOffset completedAt, CancellationToken ct)
         {
+            MatchStoreGuard.ValidateWinnerSeat(winnerSeat, nameof(winnerSeat));
+
+            // Only a completed match is scored. Expired and abandoned games ended without anyone winning, and
+            // the schema will not hold a winner on one, so this is a refusal rather than a failed write.
+            if (winnerSeat is not null && terminal != MatchStatus.Completed) return false;
+
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
 
             // The allowed edges are the WHERE clause. An UPDATE that matches no row is the refusal, so there
@@ -343,17 +349,31 @@ namespace HexWars.NetServer.Persistence
 
         public async Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence, string commandWire, string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
         {
+            MatchStoreGuard.ValidateSteamId(issuerSteamId, nameof(issuerSteamId));
+
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
             // FOR UPDATE serialises appends for this match against every other instance. Without it the
             // status check below and the INSERT that follows are two separate decisions, and a match that
             // completes in between would accept one more command.
-            string? status = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
+            (string? status, bool issuerHoldsSeat) =
+                await ReadStatusAndSeatForUpdateAsync(connection, transaction, matchId, issuerSteamId, ct)
+                    .ConfigureAwait(false);
+
             if (status is null || MatchStatusText.FromDb(status) != MatchStatus.Active)
             {
                 await transaction.RollbackAsync(ct).ConfigureAwait(false);
                 return new AppendResult(AppendStatus.MatchNotActive, expectedSequence);
+            }
+
+            // Checked here rather than left to the foreign key: the INSERT below writes nothing at all when
+            // the sequence is stale, and a seatless issuer would then be answered with an ordering result it
+            // could act on instead of the refusal it deserves.
+            if (!issuerHoldsSeat)
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(issuerSteamId));
             }
 
             int inserted;
@@ -370,6 +390,13 @@ namespace HexWars.NetServer.Persistence
                 insert.Parameters.Add(Timestamp("acceptedAt", acceptedAt));
                 insert.Parameters.AddWithValue("issuerSteamId", issuerSteamId);
                 inserted = await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+            {
+                // The issuer holds no seat in this match. Nobody could have submitted this command, so it is
+                // a caller mistake rather than an ordering answer the caller could act on.
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(issuerSteamId), ex);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
             {
@@ -542,6 +569,24 @@ namespace HexWars.NetServer.Persistence
                     reader.GetGuid(0), reader.GetInt32(1), reader.GetString(2), ReadTimestamp(reader, 3),
                     reader.GetString(4)));
             return commands;
+        }
+
+        /// <summary>The match status and whether that Steam id holds a seat, read together under the same
+        /// row lock so the two answers cannot come from different moments.</summary>
+        static async Task<(string? Status, bool HoldsSeat)> ReadStatusAndSeatForUpdateAsync(
+            NpgsqlConnection connection, NpgsqlTransaction transaction, Guid matchId, string steamId,
+            CancellationToken ct)
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT m.status, EXISTS (SELECT 1 FROM match_players p "
+                + "WHERE p.match_id = m.match_id AND p.steam_id = @steamId) "
+                + "FROM matches m WHERE m.match_id = @matchId FOR UPDATE", connection, transaction);
+            command.Parameters.AddWithValue("matchId", matchId);
+            command.Parameters.AddWithValue("steamId", steamId);
+
+            await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return (null, false);
+            return (reader.GetString(0), reader.GetBoolean(1));
         }
 
         static async Task<string?> ReadStatusForUpdateAsync(NpgsqlConnection connection,

@@ -17,6 +17,8 @@ namespace HexWars.NetServer.Tests
     {
         const string OnlyMigration = "001_match_journal";
         const string LobbyId = "109775240000000001";
+        const string Seat0Steam = "76561190000000001";
+        const string Seat1Steam = "76561190000000002";
 
         PostgresTestDatabase _db = null!;
 
@@ -114,8 +116,11 @@ namespace HexWars.NetServer.Tests
             var clash = Assert.ThrowsAsync<PostgresException>(() => InsertMatchAsync(second, LobbyId, "waiting"));
             Assert.That(clash!.SqlState, Is.EqualTo(PostgresErrorCodes.UniqueViolation));
 
-            await ExecuteAsync("UPDATE matches SET status = @status WHERE match_id = @id",
-                ("status", "completed"), ("id", first));
+            // waiting to expired is one of the two edges the store allows out of waiting, and it is the one
+            // the retention sweeper uses. A raw jump to completed would break the lifecycle CHECKs.
+            await ExecuteAsync(
+                "UPDATE matches SET status = 'expired', completed_at = now() WHERE match_id = @id",
+                ("id", first));
 
             Assert.DoesNotThrowAsync(() => InsertMatchAsync(second, LobbyId, "waiting"));
         }
@@ -139,6 +144,7 @@ namespace HexWars.NetServer.Tests
             await _db.ApplyMigrationsAsync();
             var match = Guid.NewGuid();
             await InsertMatchAsync(match, null, "active");
+            await InsertPlayerAsync(match, Seat0Steam, 0);
             await InsertCommandAsync(match, 1, "MOVE 0 0 1 1");
 
             var clash = Assert.ThrowsAsync<PostgresException>(() => InsertCommandAsync(match, 1, "MOVE 1 1 2 2"));
@@ -179,16 +185,117 @@ namespace HexWars.NetServer.Tests
             Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.CheckViolation));
         }
 
+        // ---- the lifecycle the schema enforces ------------------------------------
+
+        [Test]
+        public async Task AnActiveMatchWithoutAStartReplay_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+
+            var bad = Assert.ThrowsAsync<PostgresException>(() => InsertMatchRowAsync(
+                Guid.NewGuid(), null, "active", winnerSeat: null, startReplay: null, completedAt: null));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.CheckViolation),
+                "an active match with no start replay cannot be replayed, so it must not be storable");
+        }
+
+        [Test]
+        public async Task ACompletedMatchWithoutAStartReplay_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+
+            var bad = Assert.ThrowsAsync<PostgresException>(() => InsertMatchRowAsync(
+                Guid.NewGuid(), null, "completed", winnerSeat: 0, startReplay: null,
+                completedAt: DateTimeOffset.UtcNow));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.CheckViolation));
+        }
+
+        [Test]
+        public async Task ATerminalMatchWithoutACompletedAt_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+
+            var bad = Assert.ThrowsAsync<PostgresException>(() => InsertMatchRowAsync(
+                Guid.NewGuid(), null, "expired", winnerSeat: null, startReplay: null, completedAt: null));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.CheckViolation),
+                "the retention purge keys off completed_at, so a terminal row without one never ages out");
+        }
+
+        [Test]
+        public async Task AWinnerSeatOnAMatchThatDidNotComplete_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+
+            var bad = Assert.ThrowsAsync<PostgresException>(() => InsertMatchRowAsync(
+                Guid.NewGuid(), null, "abandoned", winnerSeat: 0, startReplay: "REPLAY",
+                completedAt: DateTimeOffset.UtcNow));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.CheckViolation),
+                "only a completed match has a winner; an abandoned one was never scored");
+        }
+
+        // ---- commands and credentials belong to a seat -----------------------------
+
+        [Test]
+        public async Task ACommandFromASteamIdWithNoSeat_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, null, "active");
+            await InsertPlayerAsync(match, Seat0Steam, 0);
+
+            var bad = Assert.ThrowsAsync<PostgresException>(
+                () => InsertCommandAsync(match, 1, "MOVE 0 0 1 1", issuer: "76561190000000009"));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.ForeignKeyViolation));
+        }
+
+        [Test]
+        public async Task ACredentialForASteamIdWithNoSeat_IsRejected()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, null, "waiting");
+            await InsertPlayerAsync(match, Seat0Steam, 0);
+
+            var bad = Assert.ThrowsAsync<PostgresException>(
+                () => InsertCredentialAsync(match, "76561190000000009"));
+
+            Assert.That(bad!.SqlState, Is.EqualTo(PostgresErrorCodes.ForeignKeyViolation));
+        }
+
+        [Test]
+        public async Task DeletingAPlayer_CascadesToTheirCommandsAndCredentials()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, "active");
+            await InsertPlayerAsync(match, Seat0Steam, 0);
+            await InsertPlayerAsync(match, Seat1Steam, 1);
+            await InsertCommandAsync(match, 1, "MOVE 0 0 1 1");
+            await InsertCredentialAsync(match, Seat0Steam);
+
+            await ExecuteAsync("DELETE FROM match_players WHERE match_id = @id AND steam_id = @steam",
+                ("id", match), ("steam", Seat0Steam));
+
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_commands"), Is.EqualTo(0L));
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_join_credentials"), Is.EqualTo(0L));
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM matches"), Is.EqualTo(1L),
+                "losing a seat must not take the match row with it");
+        }
+
         [Test]
         public async Task DeletingAMatch_CascadesToPlayersCommandsAndCredentials()
         {
             await _db.ApplyMigrationsAsync();
             var match = Guid.NewGuid();
             await InsertMatchAsync(match, LobbyId, "active");
-            await InsertPlayerAsync(match, "76561190000000001", 0);
-            await InsertPlayerAsync(match, "76561190000000002", 1);
+            await InsertPlayerAsync(match, Seat0Steam, 0);
+            await InsertPlayerAsync(match, Seat1Steam, 1);
             await InsertCommandAsync(match, 1, "MOVE 0 0 1 1");
-            await InsertCredentialAsync(match, "76561190000000001");
+            await InsertCredentialAsync(match, Seat0Steam);
 
             await ExecuteAsync("DELETE FROM matches WHERE match_id = @id", ("id", match));
 
@@ -212,26 +319,38 @@ namespace HexWars.NetServer.Tests
 
         // ---- helpers ---------------------------------------------------------------
 
+        /// <summary>Inserts a row that satisfies the lifecycle CHECKs for the status asked for, so a test
+        /// about one constraint is never tripped by another.</summary>
         Task InsertMatchAsync(Guid matchId, string? lobbyId, string status, int? winnerSeat = null) =>
+            InsertMatchRowAsync(matchId, lobbyId, status, winnerSeat,
+                startReplay: status is "active" or "completed" ? "REPLAY" : null,
+                completedAt: status is "waiting" or "active" ? null : DateTimeOffset.UtcNow);
+
+        /// <summary>Every column spelled out, for the tests that mean to violate something.</summary>
+        Task InsertMatchRowAsync(Guid matchId, string? lobbyId, string status, int? winnerSeat,
+            string? startReplay, DateTimeOffset? completedAt) =>
             ExecuteAsync(
-                "INSERT INTO matches (match_id, steam_lobby_id, status, setup_wire, engine_version, "
-                + "protocol_version, build_id, created_at, last_activity_at, winner_seat) "
-                + "VALUES (@id, @lobby, @status, @setup, @engine, @protocol, @build, @now, @now, @winner)",
+                "INSERT INTO matches (match_id, steam_lobby_id, status, setup_wire, start_replay, "
+                + "engine_version, protocol_version, build_id, created_at, completed_at, last_activity_at, "
+                + "winner_seat) "
+                + "VALUES (@id, @lobby, @status, @setup, @replay, @engine, @protocol, @build, @now, "
+                + "@completed, @now, @winner)",
                 ("id", matchId), ("lobby", lobbyId), ("status", status),
-                ("setup", "Annihilation 9 7 0 5 3 1 1 1 3 0"), ("engine", "hexwars-engine/1"),
-                ("protocol", 2), ("build", "test-build"), ("now", DateTimeOffset.UtcNow), ("winner", winnerSeat));
+                ("setup", "Annihilation 9 7 0 5 3 1 1 1 3 0"), ("replay", startReplay),
+                ("engine", "hexwars-engine/1"), ("protocol", 2), ("build", "test-build"),
+                ("now", DateTimeOffset.UtcNow), ("completed", completedAt), ("winner", winnerSeat));
 
         Task InsertPlayerAsync(Guid matchId, string steamId, int seat) =>
             ExecuteAsync(
                 "INSERT INTO match_players (match_id, steam_id, seat, joined_at) VALUES (@id, @steam, @seat, @now)",
                 ("id", matchId), ("steam", steamId), ("seat", seat), ("now", DateTimeOffset.UtcNow));
 
-        Task InsertCommandAsync(Guid matchId, int sequence, string wire) =>
+        Task InsertCommandAsync(Guid matchId, int sequence, string wire, string issuer = Seat0Steam) =>
             ExecuteAsync(
                 "INSERT INTO match_commands (match_id, sequence, command_wire, accepted_at, issuer_steam_id) "
                 + "VALUES (@id, @seq, @wire, @now, @issuer)",
                 ("id", matchId), ("seq", sequence), ("wire", wire), ("now", DateTimeOffset.UtcNow),
-                ("issuer", "76561190000000001"));
+                ("issuer", issuer));
 
         Task InsertCredentialAsync(Guid matchId, string steamId) =>
             ExecuteAsync(

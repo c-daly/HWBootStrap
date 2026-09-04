@@ -187,6 +187,8 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task<bool> TryCompleteMatchAsync(Guid matchId, MatchStatus terminal, int? winnerSeat, DateTimeOffset completedAt, CancellationToken ct)
         {
+            ValidateWinnerSeat(winnerSeat, nameof(winnerSeat));
+
             lock (_gate)
             {
                 BeginWrite();
@@ -200,6 +202,11 @@ namespace HexWars.NetServer.Tests.Fakes
                         row.Status is MatchStatus.Active or MatchStatus.Waiting,
                     _ => false
                 };
+
+                // Only a completed match is scored; the schema refuses a winner on any other status. A
+                // completed match MAY still have a null winner, which is how a draw is recorded.
+                if (winnerSeat is not null && terminal != MatchStatus.Completed) allowed = false;
+
                 if (!allowed) return Task.FromResult(false);
 
                 row.Status = terminal;
@@ -236,6 +243,11 @@ namespace HexWars.NetServer.Tests.Fakes
 
                 if (!_matches.TryGetValue(matchId, out MatchRow? row) || row.Status != MatchStatus.Active)
                     return Task.FromResult(new AppendResult(AppendStatus.MatchNotActive, expectedSequence));
+
+                // The composite foreign key on match_commands: an issuer with no seat could never have had a
+                // command accepted, and Postgres refuses the same insert.
+                if (Player(matchId, issuerSteamId) is null)
+                    throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(issuerSteamId));
 
                 int next = row.Commands.Count == 0 ? 1 : row.Commands[^1].Sequence + 1;
 
