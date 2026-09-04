@@ -48,6 +48,7 @@ namespace HexWars.NetServer.Configuration
         public const string MatchTrustForwardedHeadersKey = "MATCH_TRUST_FORWARDED_HEADERS";
         public const string MatchBlockedSteamIdsKey = "MATCH_BLOCKED_STEAM_IDS";
         public const string MatchMetricsTokenKey = "MATCH_METRICS_TOKEN";
+        public const string MatchLogPseudonymKeyKey = "MATCH_LOG_PSEUDONYM_KEY";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -109,6 +110,19 @@ namespace HexWars.NetServer.Configuration
             match.AllowedWebOrigins = ReadList(config, AllowedWebOriginsKey);
             match.CompatibleClientBuilds = ReadList(config, MatchCompatibleClientBuildsKey);
             match.BlockedSteamIds = ReadList(config, MatchBlockedSteamIdsKey);
+
+            // Optional: without one the process generates a random key, which is a working default and
+            // only costs cross-restart correlation. A short one, though, is worse than none, because it
+            // reads as protection while staying cheap to brute force.
+            string? pseudonymKeyRaw = Value(config, MatchLogPseudonymKeyKey);
+            if (pseudonymKeyRaw is not null)
+            {
+                if (pseudonymKeyRaw.Length >= MatchHostingOptions.MinLogPseudonymKeyLength)
+                    match.LogPseudonymKey = pseudonymKeyRaw;
+                else
+                    errors.Add(MatchLogPseudonymKeyKey + ": must be at least "
+                        + MatchHostingOptions.MinLogPseudonymKeyLength + " characters");
+            }
 
             string? protocolRaw = Value(config, MatchProtocolVersionKey);
             if (protocolRaw is not null)
@@ -276,6 +290,7 @@ namespace HexWars.NetServer.Configuration
             target.TrustForwardedHeaders = source.TrustForwardedHeaders;
             target.BlockedSteamIds = source.BlockedSteamIds;
             target.MetricsToken = source.MetricsToken;
+            target.LogPseudonymKey = source.LogPseudonymKey;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

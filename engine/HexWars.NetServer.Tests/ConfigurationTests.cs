@@ -290,6 +290,29 @@ namespace HexWars.NetServer.Tests
                 Is.EqualTo("abc"));
         }
 
+        [Test]
+        public void LogPseudonymKey_IsOptionalButMustBeLongEnoughWhenSet()
+        {
+            // Absent means a random per-process key, which is a usable default rather than an error.
+            Assert.That(Read(new Dictionary<string, string?>()).Match.LogPseudonymKey, Is.Null);
+
+            var configured = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_LOG_PSEUDONYM_KEY"] = "0123456789abcdef",
+            });
+            Assert.That(configured.IsValid, Is.True, Joined(configured));
+            Assert.That(configured.Match.LogPseudonymKey, Is.EqualTo("0123456789abcdef"));
+
+            var tooShort = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_LOG_PSEUDONYM_KEY"] = "tooshort",
+            });
+            Assert.That(tooShort.IsValid, Is.False);
+            Assert.That(tooShort.Errors, Has.Some.StartsWith("MATCH_LOG_PSEUDONYM_KEY:"));
+            // Like every other configuration error, it names the key and never the value.
+            Assert.That(Joined(tooShort), Does.Not.Contain("tooshort"));
+        }
+
         // ---- DATABASE_URL ---------------------------------------------------
 
         [Test]
