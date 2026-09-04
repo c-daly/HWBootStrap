@@ -484,6 +484,38 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task Touch_WithAnOlderTimestamp_DoesNotMoveActivityBackwards()
+        {
+            var match = await NewWaitingMatchAsync();
+            await Store.TouchAsync(match.MatchId, match.Seat0, Move2, Ct);
+
+            // The heartbeat that arrives second is not necessarily the one that was sent second: a client
+            // retries a dropped call, a slow instance finally lands its write. Taking the newer of the two
+            // is the only rule that cannot be lost to a race, and the alternative is a live match whose
+            // activity has been dragged into the past far enough for the reaper to abandon it.
+            await Store.TouchAsync(match.MatchId, match.Seat0, Move1, Ct);
+
+            Assert.That((await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt, Is.EqualTo(Move2),
+                "a late heartbeat from the past must not age a match that is still being played");
+            Assert.That((await Store.GetPlayerAsync(match.MatchId, match.Seat0, Ct))!.LastSeenAt,
+                Is.EqualTo(Move2), "and it must not un-see a player who was already seen later than that");
+        }
+
+        [Test]
+        public async Task AppendCommand_WithAnOlderTimestamp_DoesNotMoveActivityBackwards()
+        {
+            var match = await NewActiveMatchAsync();
+            await Store.TouchAsync(match.MatchId, match.Seat0, Move2, Ct);
+
+            AppendResult appended =
+                await Store.AppendCommandAsync(match.MatchId, 1, "E 0", match.Seat0, Move1, Ct);
+
+            Assert.That(appended.Status, Is.EqualTo(AppendStatus.Appended),
+                "the command is still accepted; only the activity clock refuses to go backwards");
+            Assert.That((await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt, Is.EqualTo(Move2));
+        }
+
+        [Test]
         public async Task ListOpenMatchIds_ListsWaitingAndActiveInCreationOrder()
         {
             var waiting = await NewWaitingMatchAsync(Created);

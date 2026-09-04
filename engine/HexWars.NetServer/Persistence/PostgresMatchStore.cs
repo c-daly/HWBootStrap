@@ -14,6 +14,12 @@ namespace HexWars.NetServer.Persistence
     ///
     /// Timestamps go in as UTC timestamptz and come back as UTC, so nothing here depends on the timezone of
     /// the server or of the database session.
+    ///
+    /// last_activity_at and last_seen_at only ever move forward. Every write that bumps them takes the
+    /// GREATEST of the stored value and the new one, because these are the columns the retention sweeper
+    /// reads: two instances writing the same match, or one client retrying a dropped heartbeat, can land an
+    /// older timestamp last, and a match dragged far enough into the past gets abandoned while it is still
+    /// being played.
     /// </summary>
     public sealed class PostgresMatchStore(NpgsqlDataSource dataSource, ILogger<PostgresMatchStore> logger) : IMatchStore
     {
@@ -282,7 +288,8 @@ namespace HexWars.NetServer.Persistence
             // No caller timestamp reaches this method, so the database clock decides. It only has to keep the
             // reaper away from a lobby whose players are still choosing.
             await using (var touch = new NpgsqlCommand(
-                "UPDATE matches SET last_activity_at = now() WHERE match_id = @matchId", connection, transaction))
+                "UPDATE matches SET last_activity_at = GREATEST(last_activity_at, now()) "
+                + "WHERE match_id = @matchId", connection, transaction))
             {
                 touch.Parameters.AddWithValue("matchId", matchId);
                 await touch.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -296,7 +303,8 @@ namespace HexWars.NetServer.Persistence
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using var command = new NpgsqlCommand(
                 "UPDATE matches SET status = @active, start_replay = @startReplay, started_at = @startedAt, "
-                + "last_activity_at = @startedAt WHERE match_id = @matchId AND status = @waiting", connection);
+                + "last_activity_at = GREATEST(last_activity_at, @startedAt) "
+                + "WHERE match_id = @matchId AND status = @waiting", connection);
             command.Parameters.AddWithValue("active", MatchStatusText.Active);
             command.Parameters.AddWithValue("startReplay", startReplay);
             command.Parameters.Add(Timestamp("startedAt", startedAt));
@@ -320,7 +328,7 @@ namespace HexWars.NetServer.Persistence
             // is no window between deciding a transition is legal and performing it.
             await using var command = new NpgsqlCommand(
                 "UPDATE matches SET status = @terminal, completed_at = @completedAt, winner_seat = @winnerSeat, "
-                + "last_activity_at = @completedAt WHERE match_id = @matchId AND ("
+                + "last_activity_at = GREATEST(last_activity_at, @completedAt) WHERE match_id = @matchId AND ("
                 + "  (status = @active AND @terminal IN (@completed, @expired, @abandoned))"
                 + "  OR (status = @waiting AND @terminal IN (@expired, @abandoned)))", connection);
             command.Parameters.AddWithValue("terminal", MatchStatusText.ToDb(terminal));
@@ -344,7 +352,8 @@ namespace HexWars.NetServer.Persistence
             await using var batch = new NpgsqlBatch(connection);
 
             var match = new NpgsqlBatchCommand(
-                "UPDATE matches SET last_activity_at = @seenAt WHERE match_id = @matchId");
+                "UPDATE matches SET last_activity_at = GREATEST(last_activity_at, @seenAt) "
+                + "WHERE match_id = @matchId");
             match.Parameters.Add(Timestamp("seenAt", seenAt));
             match.Parameters.AddWithValue("matchId", matchId);
             batch.BatchCommands.Add(match);
@@ -352,7 +361,7 @@ namespace HexWars.NetServer.Persistence
             if (steamId is not null)
             {
                 var player = new NpgsqlBatchCommand(
-                    "UPDATE match_players SET last_seen_at = @seenAt "
+                    "UPDATE match_players SET last_seen_at = GREATEST(COALESCE(last_seen_at, @seenAt), @seenAt) "
                     + "WHERE match_id = @matchId AND steam_id = @steamId");
                 player.Parameters.Add(Timestamp("seenAt", seenAt));
                 player.Parameters.AddWithValue("matchId", matchId);
@@ -428,8 +437,8 @@ namespace HexWars.NetServer.Persistence
             if (inserted == 1)
             {
                 await using (var touch = new NpgsqlCommand(
-                    "UPDATE matches SET last_activity_at = @acceptedAt WHERE match_id = @matchId",
-                    connection, transaction))
+                    "UPDATE matches SET last_activity_at = GREATEST(last_activity_at, @acceptedAt) "
+                    + "WHERE match_id = @matchId", connection, transaction))
                 {
                     touch.Parameters.Add(Timestamp("acceptedAt", acceptedAt));
                     touch.Parameters.AddWithValue("matchId", matchId);
