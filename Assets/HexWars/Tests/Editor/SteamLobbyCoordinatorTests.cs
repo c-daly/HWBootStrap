@@ -17,6 +17,13 @@ namespace HexWars.Presentation.Tests
         const int Seed = 1234;
         const string Wss = "wss://match.invalid/ws/v2";
 
+        /// <summary>
+        /// A realistic starting clock. Deadlines are relative and anchored on the first Tick that
+        /// observes them, so nothing here primes the clock: a test ticks once to start a deadline
+        /// running, and again past its duration to fire it.
+        /// </summary>
+        const double Clock = 1000;
+
         FakeSteamLobbyClient _steam = null!;
         FakeSteamMatchApi _api = null!;
         SteamLobbyConfig _config = null!;
@@ -48,7 +55,6 @@ namespace HexWars.Presentation.Tests
             _statuses = new List<SteamLobbyStatus>();
             _tickets = new List<SteamMatchTicket>();
             _sut = new SteamLobbyCoordinator(_steam, _api, _config, s => _statuses.Add(s), t => _tickets.Add(t));
-            _sut.Tick(0);
         }
 
         [TearDown]
@@ -208,7 +214,12 @@ namespace HexWars.Presentation.Tests
             _steam.AvailableLobbies.Add(OpenLobby("109775240000000301"));
 
             _sut.QuickMatch();
-            _sut.Tick(9);
+            _sut.Tick(Clock);            // the first tick starts the search deadline running
+            _sut.Tick(Clock + 3);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Searching),
+                "a deadline is counted from when it is first observed, not from an unprimed zero");
+
+            _sut.Tick(Clock + 9);
 
             Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.CreatingLobby));
             Pump();
@@ -428,12 +439,12 @@ namespace HexWars.Presentation.Tests
         {
             var lobbyId = CreateOwnedLobbyWithOpponent();
             _api.Deferred = true;
-            _sut.Tick(100);
 
             ReadyUpBothPlayers(lobbyId);
             Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.AllocatingMatch));
 
-            _sut.Tick(116);
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + 16);
 
             Assert.That(_api.CancelCalls, Is.EqualTo(1));
             Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
@@ -460,7 +471,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1));
             Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1));
 
-            _sut.Tick(1);
+            _sut.Tick(Clock);
             Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Idle));
             Assert.That(_sut.Status.CanCancel, Is.False);
         }
@@ -473,7 +484,7 @@ namespace HexWars.Presentation.Tests
 
             _sut.Cancel();
             Pump();
-            _sut.Tick(1);
+            _sut.Tick(Clock);
 
             Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Idle));
             Assert.That(_steam.JoinLobbyCalls, Is.Zero, "the late search result must be ignored");
@@ -492,7 +503,7 @@ namespace HexWars.Presentation.Tests
 
             _sut.Cancel();
             Pump();
-            _sut.Tick(1);
+            _sut.Tick(Clock);
 
             Assert.That(_api.Calls, Is.Empty);
             Assert.That(_tickets, Is.Empty);
@@ -657,6 +668,160 @@ namespace HexWars.Presentation.Tests
                 Assert.That(_statuses[i].Matches(_statuses[i - 1]), Is.False, "no duplicate publication");
             }
             Assert.That(_sut.Status, Is.SameAs(_statuses[_statuses.Count - 1]));
+        }
+
+        [Test]
+        public void AJoinIssuedBeforeTheSearchDeadline_IsNotOvertakenByIt()
+        {
+            const string lobbyId = "109775240000000901";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+
+            _sut.QuickMatch();
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + 7.9);
+            _steam.Pump();                 // the search result lands, and a join goes out
+            _sut.Tick(Clock + 8);          // the moment the search deadline would have fired
+            Pump();                        // the join completes
+
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(1));
+            Assert.That(_steam.CreateLobbyCalls, Is.Zero, "an in-flight join must end the search");
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId));
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero);
+        }
+
+        [Test]
+        public void ALobbyJoinedAfterACancel_IsLeftAgain()
+        {
+            const string lobbyId = "109775240000000902";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+
+            _sut.QuickMatch();
+            _steam.Pump();                 // the search result lands, and a join goes out
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(1));
+
+            _sut.Cancel();
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero, "nothing is held yet");
+
+            Pump();                        // the join lands behind the cancel
+            _sut.Tick(Clock);
+
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1), "an abandoned join must not strand a lobby");
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Idle));
+        }
+
+        [Test]
+        public void AnInviteAcceptedOutsideIdle_IsIgnored()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.MatchReady));
+            var joinsBefore = _steam.JoinLobbyCalls;
+
+            _steam.AvailableLobbies.Add(OpenLobby("109775240000000903"));
+            _steam.RaiseInviteAccepted("109775240000000903");
+            Pump();
+
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(joinsBefore),
+                "an invite must not tear down a match that is already under way");
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.MatchReady));
+            Assert.That(_tickets, Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public void WhenTheLobbyMetadataCannotBePublished_TheLobbyIsLeftAndTheFlowFails()
+        {
+            _steam.FailNextSetLobbyData = true;
+
+            _sut.QuickMatch();
+            Pump();
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Failed));
+            Assert.That(_sut.Status.Message, Is.EqualTo(SteamLobbyMessages.PublishFailed));
+            Assert.That(_sut.Status.CanRetry, Is.True);
+            Assert.That(_sut.Status.LobbyId, Is.Null);
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void AMatchKeyWriteThatFailsTwice_AbandonsTheAllocationAndLeavesTheLobby()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _steam.FailSetLobbyDataForKey = SteamLobbyKeys.Match;
+            var leftBefore = _steam.LeaveLobbyCalls;
+
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_api.CreateMatchCalls, Is.EqualTo(1));
+            Assert.That(_tickets, Is.Empty, "a guest cannot see a match nobody published");
+
+            _sut.Tick(Clock);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.AllocatingMatch));
+
+            _sut.Tick(Clock + 1);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Failed));
+            Assert.That(_sut.Status.Message, Is.EqualTo(SteamLobbyMessages.PublishFailed));
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(leftBefore + 1));
+            Assert.That(_tickets, Is.Empty);
+        }
+
+        [Test]
+        public void AMatchKeyWriteThatSucceedsOnRetry_StillHandsOverTheTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _steam.FailNextSetLobbyData = true;   // only the first hw_match write is refused
+
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_tickets, Is.Empty);
+
+            _sut.Tick(Clock);
+
+            Assert.That(_tickets, Has.Count.EqualTo(1));
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.MatchReady));
+            Assert.That(_steam.GetLobby(lobbyId)!.Metadata[SteamLobbyKeys.Match], Is.Not.Empty);
+        }
+
+        [Test]
+        public void EveryMatchServiceExchange_ReleasesItsAuthTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            var cancelsBefore = _steam.CancelAuthTicketCalls;
+
+            ReadyUpBothPlayers(lobbyId);
+
+            Assert.That(_steam.RequestAuthTicketCalls, Is.EqualTo(1));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(cancelsBefore + 1),
+                "a Web API ticket is spent by one exchange and must not outlive it");
+        }
+
+        [Test]
+        public void Dispose_ReleasesTheWholeSession()
+        {
+            _sut.QuickMatch();
+            Pump();
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.WaitingForPlayer));
+
+            _sut.Dispose();
+
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1));
+            Assert.That(_api.CancelCalls, Is.EqualTo(1));
+            Assert.That(_steam.HasEventSubscribers, Is.False);
+        }
+
+        [Test]
+        public void Detach_StopsSteamEventsButKeepsTheLobby()
+        {
+            CreateOwnedLobbyWithOpponent();
+
+            _sut.Detach();
+
+            Assert.That(_steam.HasEventSubscribers, Is.False);
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero, "the lobby is released by Dispose, not by Detach");
+
+            _steam.AvailableLobbies.Add(OpenLobby("109775240000000904"));
+            _steam.RaiseInviteAccepted("109775240000000904");
+            Pump();
+            Assert.That(_steam.JoinLobbyCalls, Is.Zero);
         }
 
         // ----- helpers -------------------------------------------------------------------------

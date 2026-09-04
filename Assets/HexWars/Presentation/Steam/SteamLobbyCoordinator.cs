@@ -68,10 +68,21 @@ namespace HexWars.Presentation
 
         int _generation;
         double _now;
-        double _deadline;
+        // Deadlines are relative: the duration is stored when the operation starts and anchored on the
+        // first Tick that observes it. An absolute deadline built from an unprimed clock (which reads
+        // zero until the first Tick) fires the instant the real game clock arrives.
+        double _deadlineSeconds;
+        double? _deadlineAnchor;
         bool _hasDeadline;
         bool _disposed;
+        bool _detached;
         bool _idleAfterCancel;
+
+        // The hw_match write is what tells the guest a match exists. A refused write is retried on the
+        // next two Ticks before the allocation is abandoned.
+        string? _pendingMatchKey;
+        SteamMatchApiResult? _pendingMatchResult;
+        int _matchKeyWritesLeft;
 
         Operation _operation = Operation.None;
         GameSetup _lastHostSetup = GameSetup.Default;
@@ -287,7 +298,9 @@ namespace HexWars.Presentation
                 return;
             }
 
-            if (!_hasDeadline || _now < _deadline) return;
+            if (_matchKeyWritesLeft > 0) { RetryMatchKeyWrite(); return; }
+
+            if (!DeadlineExpired()) return;
 
             if (_phase == SteamLobbyPhase.Searching)
             {
@@ -317,11 +330,32 @@ namespace HexWars.Presentation
             }
         }
 
+        /// <summary>
+        /// Full release: abandons the in-flight request, cancels the auth ticket, leaves the lobby this
+        /// client still holds, and unsubscribes. Anything less strands an empty lobby in Steam and a
+        /// live auth ticket on the account.
+        /// </summary>
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             _generation++;
+            _api.Cancel();
+            _steam.CancelAuthTicket();
+            if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
+            ClearSession();
+            Detach();
+        }
+
+        /// <summary>
+        /// Unsubscribes from Steam without releasing the session. The screen calls this the moment the
+        /// match ticket is handed over, so a lobby event (an accepted invite above all) can no longer
+        /// steer a coordinator whose work is done. The lobby is left later, by <see cref="Dispose"/>.
+        /// </summary>
+        public void Detach()
+        {
+            if (_detached) return;
+            _detached = true;
             _steam.LobbyDataChanged -= OnLobbyDataChanged;
             _steam.MemberJoined -= OnMemberJoined;
             _steam.MemberLeft -= OnMemberLeft;
@@ -343,6 +377,9 @@ namespace HexWars.Presentation
                 return;
             }
 
+            // The search is over the moment a join goes out. Leaving the deadline armed lets it fire
+            // between the join and its answer, which hosts a second lobby while the first one lands.
+            ClearDeadline();
             _steam.JoinLobby(chosen, ok => OnLobbyJoined(generation, chosen, ok));
         }
 
@@ -390,12 +427,24 @@ namespace HexWars.Presentation
 
             _lobbyId = lobbyId;
             _isOwner = true;
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.App, SteamLobbyRules.Decimal(_config.AppId));
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Protocol, SteamLobbyRules.Decimal(_config.ProtocolVersion));
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Build, _config.ClientBuild ?? string.Empty);
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Ruleset, _pendingRuleset);
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Setup, _pendingSetupWire);
-            _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Name, _steam.LocalDisplayName ?? string.Empty);
+            // Steam refuses these writes when the local user is not the owner, or when the lobby has
+            // already gone. An unpublished lobby is invisible to every search, so it must not be shown
+            // to the player as one waiting for an opponent.
+            var published =
+                _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.App, SteamLobbyRules.Decimal(_config.AppId))
+                & _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Protocol, SteamLobbyRules.Decimal(_config.ProtocolVersion))
+                & _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Build, _config.ClientBuild ?? string.Empty)
+                & _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Ruleset, _pendingRuleset)
+                & _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Setup, _pendingSetupWire)
+                & _steam.SetLobbyData(lobbyId!, SteamLobbyKeys.Name, _steam.LocalDisplayName ?? string.Empty);
+
+            if (!published)
+            {
+                _steam.LeaveLobby(lobbyId!);
+                ClearSession();
+                FailWith(SteamLobbyPhase.Failed, SteamLobbyMessages.PublishFailed);
+                return;
+            }
 
             if (_operation == Operation.Invite) _steam.OpenInviteOverlay(lobbyId!);
 
@@ -405,7 +454,13 @@ namespace HexWars.Presentation
 
         void OnLobbyJoined(int generation, string lobbyId, bool ok)
         {
-            if (!IsCurrent(generation)) return;
+            if (!IsCurrent(generation))
+            {
+                // Cancelled or timed out while Steam was still joining: the join still succeeded, so
+                // this client is sitting in a lobby nobody is watching. Leave it.
+                if (ok && !string.IsNullOrEmpty(lobbyId)) _steam.LeaveLobby(lobbyId);
+                return;
+            }
 
             ClearDeadline();
             if (!ok)
@@ -419,7 +474,10 @@ namespace HexWars.Presentation
             var snapshot = _steam.GetLobby(lobbyId);
             if (snapshot == null)
             {
-                FailWith(SteamLobbyPhase.Failed, null);
+                // Joined something Steam cannot describe. Do not hold it: leave, and let the player
+                // try again rather than sit in a lobby with no readable state.
+                _steam.LeaveLobby(lobbyId);
+                FailWith(SteamLobbyPhase.BackendUnavailable, null);
                 return;
             }
 
@@ -455,9 +513,14 @@ namespace HexWars.Presentation
             HandleOpponentLeft();
         }
 
+        /// <summary>
+        /// An accepted invite starts a join only when nothing else is going on. Honouring it from any
+        /// other phase would tear down a lobby the player is already in, or replace a live match.
+        /// </summary>
         void OnInviteAccepted(string lobbyId)
         {
             if (_disposed) return;
+            if (_phase != SteamLobbyPhase.Idle && _phase != SteamLobbyPhase.Cancelled) return;
             JoinInvited(lobbyId);
         }
 
@@ -582,17 +645,57 @@ namespace HexWars.Presentation
             if (!IsCurrent(generation)) return;
 
             ClearDeadline();
+            _steam.CancelAuthTicket();   // one ticket per exchange: it is spent now, whatever happened
             if (result != null && result.Ok)
             {
-                if (!string.IsNullOrEmpty(_lobbyId) && !string.IsNullOrEmpty(result.MatchId))
+                if (!string.IsNullOrEmpty(_lobbyId) && !string.IsNullOrEmpty(result.MatchId)
+                    && !_steam.SetLobbyData(_lobbyId!, SteamLobbyKeys.Match, result.MatchId!))
                 {
-                    _steam.SetLobbyData(_lobbyId!, SteamLobbyKeys.Match, result.MatchId!);
+                    // Without hw_match the guest never learns the match exists, so the owner must not
+                    // walk into it alone. Try again on the next two Ticks before abandoning it.
+                    _pendingMatchKey = result.MatchId;
+                    _pendingMatchResult = result;
+                    _matchKeyWritesLeft = 2;
+                    Publish();
+                    return;
                 }
                 CompleteMatch(result);
                 return;
             }
 
             MapApiFailure(result);
+        }
+
+        /// <summary>One more attempt at the hw_match write, from <see cref="Tick"/>.</summary>
+        void RetryMatchKeyWrite()
+        {
+            var key = _pendingMatchKey;
+            if (!string.IsNullOrEmpty(_lobbyId) && !string.IsNullOrEmpty(key)
+                && _steam.SetLobbyData(_lobbyId!, SteamLobbyKeys.Match, key!))
+            {
+                var result = _pendingMatchResult!;
+                ClearPendingMatchKey();
+                CompleteMatch(result);
+                return;
+            }
+
+            _matchKeyWritesLeft--;
+            if (_matchKeyWritesLeft > 0) return;
+
+            ClearPendingMatchKey();
+            _generation++;
+            _api.Cancel();
+            if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
+            ClearSession();
+            // The allocated match is left for the server retention sweep to reclaim.
+            FailWith(SteamLobbyPhase.Failed, SteamLobbyMessages.PublishFailed);
+        }
+
+        void ClearPendingMatchKey()
+        {
+            _matchKeyWritesLeft = 0;
+            _pendingMatchKey = null;
+            _pendingMatchResult = null;
         }
 
         void BeginGuestJoin(string matchId)
@@ -649,6 +752,7 @@ namespace HexWars.Presentation
             if (!IsCurrent(generation)) return;
 
             ClearDeadline();
+            _steam.CancelAuthTicket();   // one ticket per exchange: it is spent now, whatever happened
             if (result != null && result.Ok)
             {
                 CompleteMatch(result);
@@ -746,6 +850,7 @@ namespace HexWars.Presentation
             _opponentName = null;
             _allocationStarted = false;
             _joinRequestedMatchId = null;
+            ClearPendingMatchKey();
             ClearDeadline();
         }
 
@@ -769,16 +874,27 @@ namespace HexWars.Presentation
             _message = message ?? string.Empty;
         }
 
+        /// <summary>Arms a relative deadline. It starts running on the next <see cref="Tick"/>.</summary>
         void SetDeadline(double seconds)
         {
             _hasDeadline = true;
-            _deadline = _now + seconds;
+            _deadlineSeconds = seconds;
+            _deadlineAnchor = null;
         }
 
         void ClearDeadline()
         {
             _hasDeadline = false;
-            _deadline = 0;
+            _deadlineSeconds = 0;
+            _deadlineAnchor = null;
+        }
+
+        /// <summary>True when an armed deadline has been observed for its full duration.</summary>
+        bool DeadlineExpired()
+        {
+            if (!_hasDeadline) return false;
+            if (_deadlineAnchor == null) { _deadlineAnchor = _now; return false; }
+            return _now >= _deadlineAnchor.Value + _deadlineSeconds;
         }
 
         bool IsCurrent(int generation)

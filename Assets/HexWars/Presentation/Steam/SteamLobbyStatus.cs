@@ -141,6 +141,9 @@ namespace HexWars.Presentation
         public const string BackendUnavailable = "The match service is unavailable \u2014 try again.";
         public const string VersionMismatch = "Your game version is out of date \u2014 update HexWars in Steam.";
         public const string Failed = "Could not start the match.";
+
+        /// <summary>Steam refused a lobby metadata write, so nobody else could ever see the lobby.</summary>
+        public const string PublishFailed = "Could not publish the lobby.";
         public const string Cancelled = "Cancelled.";
 
         public static string For(SteamLobbyPhase phase)
