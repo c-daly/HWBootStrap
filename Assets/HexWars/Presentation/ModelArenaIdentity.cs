@@ -52,7 +52,8 @@ namespace HexWars.Presentation
             string controllerLabel, int points)
         {
             bool scripted = string.Equals(spec, "greedy", StringComparison.OrdinalIgnoreCase)
-                           || string.Equals(spec, "random", StringComparison.OrdinalIgnoreCase);
+                           || string.Equals(spec, "random", StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(spec, "passive", StringComparison.OrdinalIgnoreCase);
             return new ModelArenaSeatIdentity
             {
                 Player = seat == 0 ? "P1" : "P2",
@@ -95,6 +96,7 @@ namespace HexWars.Presentation
             "maskable_ppo" => "Maskable PPO",
             "masked_dqn" => "Masked DQN",
             "structured_imitation" => "Structured PyTorch policy",
+            "structured_policy_gradient" => "Outcome candidate",
             _ => string.IsNullOrWhiteSpace(value) ? "unknown algorithm" : value,
         };
 

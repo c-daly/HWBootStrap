@@ -361,6 +361,9 @@ def test_config_rejects_unsafe_targets_seed_and_model_free_checkpoint(
 def test_scripted_opponents_and_learner_seats_preserve_existing_choices() -> None:
     assert _resolve_opponent("greedy").kind == "greedy"
     assert _resolve_opponent("random").kind == "random"
+    passive = _resolve_opponent("passive")
+    assert passive.kind == "passive"
+    assert passive.metadata == {"kind": "scripted", "name": "passive"}
     assert _seat_sequence("alternating") == (0, 1)
     assert _seat_sequence("0") == (0,)
     assert _seat_sequence("1") == (1,)

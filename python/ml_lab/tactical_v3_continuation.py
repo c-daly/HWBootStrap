@@ -74,7 +74,8 @@ from .tactical_v3_training import (
 from .tactical_v3_client import TacticalV3GymClient
 
 
-OpponentKind = Literal["random", "greedy", "fixed_run", "live_run"]
+OpponentKind = Literal["random", "greedy", "passive", "fixed_run", "live_run"]
+_SCRIPTED_OPPONENT_KINDS = frozenset({"random", "greedy", "passive"})
 _PROFILE_SCHEDULER_IDENTITY = "smooth-weighted-reciprocal-v1"
 _ML_LAB_TRAINING_DEADLINE_SECONDS = None
 
@@ -636,7 +637,9 @@ def _validate_model_opponent(
     identity: TacticalV3SemanticIdentity,
 ) -> None:
     if (
-        resolved.algorithm != "structured_imitation"
+        resolved.algorithm not in {
+            "structured_imitation", "structured_policy_gradient",
+        }
         or type(resolved.model) is not StructuredController
         or type(resolved.contract) is not TacticalV3SemanticIdentity
     ):
@@ -653,8 +656,10 @@ def _validate_model_opponent(
 def _resolve_opponent(raw: str) -> _Opponent:
     spec = normalize_controller_spec(raw)
     if spec.kind == "scripted":
-        if spec.name not in {"random", "greedy"}:
-            raise ValueError("tactical-v3 continuation opponent must be random or greedy")
+        if spec.name not in _SCRIPTED_OPPONENT_KINDS:
+            raise ValueError(
+                "tactical-v3 continuation opponent must be random, greedy, or passive"
+            )
         return _Opponent(spec.name, None, {"kind": "scripted", "name": spec.name})
     if spec.kind != "run":
         raise ValueError("tactical-v3 model opponent must be a metadata-backed run")
@@ -721,7 +726,7 @@ def _opponent_from_collection(value: object) -> tuple[_Opponent, str]:
             value, frozenset({"kind", "name"}), "reusable scripted opponent",
         )
         name = evidence["name"]
-        if name not in {"random", "greedy"}:
+        if name not in _SCRIPTED_OPPONENT_KINDS:
             raise ValueError("reusable scripted opponent is unsupported")
         return _Opponent(name, None, dict(evidence)), str(name)
     if kind not in {"fixed_run", "live_run"}:
@@ -748,7 +753,9 @@ def _opponent_from_collection(value: object) -> tuple[_Opponent, str]:
         "reusable model opponent checkpoint hash",
     )
     _nonnegative_int(evidence["step"], "reusable model opponent step")
-    if evidence["algorithm"] != "structured_imitation":
+    if evidence["algorithm"] not in {
+        "structured_imitation", "structured_policy_gradient",
+    }:
         raise ValueError("reusable model opponent algorithm changed")
     spec = json.dumps({"kind": "run", "path": source_run, "mode": mode})
     normalize_controller_spec(spec)
@@ -1509,7 +1516,9 @@ def _load_reusable_partition(
                 f"structured retry {partition} game {index} summary is invalid"
             )
         game_opponent = game["opponent"]
-        if header.opponent.kind in {"random", "greedy", "fixed_run"}:
+        if header.opponent.kind in {
+            "random", "greedy", "passive", "fixed_run",
+        }:
             if game_opponent != dict(header.opponent.metadata):
                 raise ValueError(
                     f"structured retry {partition} game {index} opponent changed"
@@ -1528,7 +1537,9 @@ def _load_reusable_partition(
                 or live["mode"] != "live"
                 or live["source_run"]
                 != header.opponent.metadata["source_run"]
-                or live["algorithm"] != "structured_imitation"
+                or live["algorithm"] not in {
+                    "structured_imitation", "structured_policy_gradient",
+                }
                 or type(live["checkpoint"]) is not str
                 or not live["checkpoint"].strip()
             ):

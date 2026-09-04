@@ -897,6 +897,32 @@ def test_dagger_collection_uses_selected_greedy_opponent() -> None:
     assert episode.summary.schedule == item
 
 
+def test_dagger_collection_uses_selected_passive_opponent() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _DaggerClient(seat=1)
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 34_540_001, 1, 1,
+    )
+
+    episode = module.collect_dagger_game(
+        client, loaded, item, opponent="passive",
+    )
+
+    assert client.events[0] == (
+        "reset", (34_540_001, "passive", "external", 1, "standard-3v3", 1),
+    )
+    assert episode.summary.schedule == item
+
+
 def test_dagger_compatible_transfer_is_explicit_and_model_facing_only() -> None:
     import ml_lab.tactical_v3_pilot as module
 

@@ -20,6 +20,7 @@ namespace HexWars.Presentation.Tests
     {
         [TestCase(ModelControllerKind.Greedy, "", "greedy")]
         [TestCase(ModelControllerKind.Random, "", "random")]
+        [TestCase(ModelControllerKind.Passive, "", "passive")]
         [TestCase(ModelControllerKind.FixedRun, "C:/runs/a", "run:C:/runs/a")]
         public void SeatSpec_BuildsExplicitControllerIdentity(
             ModelControllerKind kind, string path, string expected)
@@ -27,6 +28,21 @@ namespace HexWars.Presentation.Tests
             var seat = new ModelSeatConfiguration { Kind = kind, Path = path };
 
             Assert.That(seat.BuildSpec(), Is.EqualTo(expected));
+        }
+
+        [Test]
+        public void PassiveSpec_UsesScriptedPassiveAgentWithoutModelPath()
+        {
+            var seat = new ModelSeatConfiguration {
+                Kind = ModelControllerKind.Passive };
+            MethodInfo factory = typeof(ModelDuelDriver).GetMethod(
+                "Scripted", BindingFlags.Static | BindingFlags.NonPublic);
+
+            Assert.That(seat.ValidationError("Seat 0"), Is.Empty);
+            Assert.That(ModelDuelDriver.IsModel(seat.BuildSpec()), Is.False);
+            Assert.That(factory, Is.Not.Null);
+            Assert.That(factory.Invoke(null, new object[] { "passive", 7 }),
+                Is.TypeOf<PassiveAgent>());
         }
 
         [Test]
@@ -154,13 +170,42 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void LiveTrainingViewerExplicitlyRequestsStochasticInference()
+        public void LiveTrainingViewerRequestsStochasticInferenceForSb3OrUnknownRun()
         {
             string spec = HexWars.Presentation.EditorTools.ReplayViewerMenu
                 .BuildLiveTrainingSpec("C:/runs/training");
 
             Assert.That(spec, Does.Contain("\"mode\":\"live\""));
             Assert.That(spec, Does.Contain("\"inference_mode\":\"stochastic\""));
+        }
+
+        [TestCase("structured_imitation")]
+        [TestCase("structured_policy_gradient")]
+        public void LiveTrainingViewerRequestsHonestDeterministicStructuredInference(
+            string algorithm)
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(),
+                "hexwars-live-structured-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(run);
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"schema_version\":2,\"config\":{\"algorithm\":\"" +
+                    algorithm + "\"}}");
+
+                string spec = ReplayViewerMenu.BuildLiveTrainingSpec(run);
+
+                Assert.That(spec, Does.Contain("\"mode\":\"live\""));
+                Assert.That(spec,
+                    Does.Contain("\"inference_mode\":\"deterministic\""));
+            }
+            finally
+            {
+                if (Directory.Exists(run))
+                    Directory.Delete(run, recursive: true);
+            }
         }
 
         // ---- Arena AudioListener (batch fix: LaunchDuel's fresh scene had no listener at all, so

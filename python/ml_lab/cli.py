@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TextIO
 
 from .benchmark import benchmark_gymserver
-from .contracts import RunConfig, request_stop
+from .contracts import RunConfig, request_stop, validate_run_name
 from .controllers import ControllerResolver, ControllerSpec, normalize_controller_spec
 from .doctor import doctor_environment
 from .evaluation import DEFAULT_HELD_OUT_SEED, evaluate_controllers, publish_candidate
@@ -131,6 +131,20 @@ def _validate_retry_prelog_destination(args: argparse.Namespace) -> None:
                 "structured retry destination must be outside the selected, "
                 "collection-owner, and source-policy runs"
             )
+
+
+def _validate_training_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command not in {
+        "train", "train-structured", "train-outcome", "retry-structured",
+        "resume",
+    }:
+        return
+    validate_run_name(args.run)
+    runs_root = _comparison_path(Path(args.runs_root))
+    destination = _comparison_path(Path(args.runs_root) / args.run)
+    if destination.parent != runs_root:
+        raise ValueError("training run destination must be a direct child of runs root")
+    _validate_retry_prelog_destination(args)
 
 
 def controller_config(raw: str | dict[str, Any] | ControllerSpec) -> dict[str, Any]:
@@ -253,6 +267,40 @@ def build_parser() -> argparse.ArgumentParser:
     _add_no_console_output_argument(structured)
     _add_json_argument(structured)
 
+    outcome = subcommands.add_parser(
+        "train-outcome",
+        help="train a tactical-v3 candidate from complete-game outcomes",
+    )
+    outcome.add_argument("--run", required=True)
+    outcome.add_argument("--source-run", type=Path)
+    outcome.add_argument("--scenario-file", type=Path, required=True)
+    outcome.add_argument("--opponent", default="passive")
+    outcome.add_argument("--timesteps", type=int, required=True)
+    outcome.add_argument("--seed", type=int, default=227)
+    outcome.add_argument("--device", default="auto")
+    outcome.add_argument("--rollout-decisions", type=int, default=64)
+    outcome.add_argument("--validation-games", type=int, default=32)
+    outcome.add_argument("--validation-every-updates", type=int, default=8)
+    outcome.add_argument("--micro-batch-size", type=int, default=32)
+    outcome.add_argument("--learning-rate", type=float, default=3e-4)
+    outcome.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    outcome.add_argument(
+        "--tracker",
+        action="append",
+        help="local or tensorboard",
+    )
+    outcome.add_argument("--wandb-project")
+    outcome.add_argument("--wandb-entity")
+    outcome.add_argument("--wandb-mode")
+    outcome.add_argument("--wandb-group")
+    outcome.add_argument("--wandb-tag", action="append", default=[])
+    outcome.add_argument("--wandb-upload-artifacts", action="store_true")
+    _add_runtime_arguments(outcome)
+    _add_no_console_output_argument(outcome)
+    _add_json_argument(outcome)
+
     structured_retry = subcommands.add_parser(
         "retry-structured",
         help="train a new sibling from an authenticated tactical-v3 collection",
@@ -274,6 +322,26 @@ def build_parser() -> argparse.ArgumentParser:
     structured_preflight.add_argument("--device", default="auto")
     structured_preflight.add_argument("--server", default=str(DEFAULT_SERVER))
     _add_json_argument(structured_preflight)
+
+    outcome_preflight = subcommands.add_parser(
+        "preflight-outcome",
+        help="validate tactical-v3 outcome training without creating a run",
+    )
+    outcome_preflight.add_argument("--source-run", type=Path)
+    outcome_preflight.add_argument("--scenario-file", type=Path, required=True)
+    outcome_preflight.add_argument("--opponent", default="passive")
+    outcome_preflight.add_argument("--seed", type=int, default=227)
+    outcome_preflight.add_argument("--device", default="auto")
+    outcome_preflight.add_argument("--rollout-decisions", type=int, default=64)
+    outcome_preflight.add_argument("--validation-games", type=int, default=32)
+    outcome_preflight.add_argument("--validation-every-updates", type=int, default=8)
+    outcome_preflight.add_argument("--micro-batch-size", type=int, default=32)
+    outcome_preflight.add_argument("--learning-rate", type=float, default=3e-4)
+    outcome_preflight.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    outcome_preflight.add_argument("--server", default=str(DEFAULT_SERVER))
+    _add_json_argument(outcome_preflight)
 
     resume = subcommands.add_parser(
         "resume", help="continue a metadata-backed run as a new run"
@@ -776,7 +844,8 @@ def _emit_human(stdout: TextIO, command: str, result: dict[str, Any]) -> None:
             print(f"  {check.get('name')}: {marker} ({check.get('detail', '')})", file=stdout)
         return
     if command in {
-        "train", "train-structured", "retry-structured", "resume", "status",
+        "train", "train-structured", "train-outcome", "retry-structured",
+        "resume", "status",
     }:
         run = result.get("run")
         if run is None:
@@ -828,6 +897,7 @@ def _dispatch(
     runner: Callable[..., Path],
     sleeper: Callable[[float], None],
     structured_runner: Callable[..., Path] | None = None,
+    outcome_runner: Callable[..., Path] | None = None,
     structured_retry_runner: Callable[..., Path] | None = None,
     status_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -879,6 +949,38 @@ def _dispatch(
                 server_cmd=["dotnet", args.server, "--scenario-file", str(args.scenario_file)],
             )
         )
+    if args.command == "train-outcome":
+        from .tactical_v3_outcome import (
+            OutcomeTrainingConfig,
+            run_outcome_training,
+        )
+
+        config = OutcomeTrainingConfig(
+            run_name=args.run,
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            total_decisions=args.timesteps,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            trackers=tuple(_tracker_configs(args)),
+            rollout_decisions=args.rollout_decisions,
+            validation_games=args.validation_games,
+            validation_every_updates=args.validation_every_updates,
+            micro_batch_size=args.micro_batch_size,
+            learning_rate=args.learning_rate,
+        )
+        return _run_result(
+            (outcome_runner or run_outcome_training)(
+                config,
+                runs_root=Path(args.runs_root),
+                server_cmd=[
+                    "dotnet", args.server,
+                    "--scenario-file", str(args.scenario_file),
+                ],
+            )
+        )
     if args.command == "preflight-structured":
         return preflight_structured_continuation(
             source_run=args.source_run,
@@ -892,6 +994,26 @@ def _dispatch(
                 "--scenario-file",
                 str(args.scenario_file),
             ],
+        )
+    if args.command == "preflight-outcome":
+        from .tactical_v3_outcome import preflight_outcome_training
+
+        return preflight_outcome_training(
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            server_cmd=[
+                "dotnet", args.server,
+                "--scenario-file", str(args.scenario_file),
+            ],
+            rollout_decisions=args.rollout_decisions,
+            validation_games=args.validation_games,
+            validation_every_updates=args.validation_every_updates,
+            micro_batch_size=args.micro_batch_size,
+            learning_rate=args.learning_rate,
         )
     if args.command == "retry-structured":
         from .tactical_v3_continuation import run_structured_retry
@@ -1015,6 +1137,7 @@ def main(
     *,
     runner: Callable[..., Path] = run_training,
     structured_runner: Callable[..., Path] | None = None,
+    outcome_runner: Callable[..., Path] | None = None,
     structured_retry_runner: Callable[..., Path] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     stdout: TextIO | None = None,
@@ -1024,7 +1147,7 @@ def main(
     human_follow = args.command == "status" and args.follow and not args.json
     no_console_output = getattr(args, "no_console_output", False)
     try:
-        _validate_retry_prelog_destination(args)
+        _validate_training_prelog_destination(args)
     except ValueError as error:
         if no_console_output:
             return 1
@@ -1040,7 +1163,8 @@ def main(
     with ExitStack() as console_stack:
         stderr_log: TextIO | None = None
         if args.command in {
-            "train", "train-structured", "retry-structured", "resume",
+            "train", "train-structured", "train-outcome", "retry-structured",
+            "resume",
         }:
             stderr_log = console_stack.enter_context(
                 _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
@@ -1057,6 +1181,7 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 structured_runner=structured_runner,
+                outcome_runner=outcome_runner,
                 structured_retry_runner=structured_retry_runner,
                 status_update=(
                     (lambda update: _emit_human(output, "status", update))

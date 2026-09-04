@@ -17,7 +17,6 @@ from ml_lab.tactical_v3_objectives import ObjectiveConfig
 from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity, TacticalV3View, parse_view
 from ml_lab.tactical_v3_training import EpochMetrics, TrainerConfig, TrainingResult
 from tests.tactical_v3_fixture_support import (
-    DUEL_IDENTITY_FIXTURE,
     TINY_CORPUS_ROOT,
     load_duel_identity_fixture,
 )
@@ -114,6 +113,7 @@ def test_load_structured_controller_is_cpu_eval_and_selects_exact_legal_identity
 
     assert first.run_dir == case.run_dir.resolve()
     assert first.checkpoint_path == case.run_dir / "checkpoints" / "best.pt"
+    assert first.checkpoint_step == 0
     assert first.identity == case.identity
     assert first.policy.training is False
     assert next(first.policy.parameters()).device.type == "cpu"

@@ -16,7 +16,7 @@ from typing import Iterator, Sequence, TextIO
 
 _SAFE_RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRAINING_COMMANDS = frozenset({
-    "train", "train-structured", "retry-structured", "resume",
+    "train", "train-structured", "train-outcome", "retry-structured", "resume",
 })
 _STARTUP_BEGAN_PREFIX = "ML Lab startup began with pid "
 _STARTUP_EXITED_PREFIX = "ML Lab startup exited with code "

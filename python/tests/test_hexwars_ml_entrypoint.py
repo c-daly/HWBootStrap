@@ -41,6 +41,14 @@ def test_startup_error_path_is_limited_to_safe_training_run_names(
     ) == tmp_path / "retry-1" / "train-err.log"
 
     assert hexwars_ml._startup_error_path(
+        [
+            "train-outcome",
+            "--run", "close-candidate",
+            "--runs-root", str(tmp_path),
+        ]
+    ) == tmp_path / "close-candidate" / "train-err.log"
+
+    assert hexwars_ml._startup_error_path(
         ["evaluate", "--run", "evaluation", "--runs-root", str(tmp_path)]
     ) is None
     assert hexwars_ml._startup_error_path(

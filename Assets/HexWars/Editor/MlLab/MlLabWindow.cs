@@ -14,6 +14,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public sealed class MlArenaLaunchPlan
     {
+        const string OutcomeAlgorithm = "structured_policy_gradient";
+
         MlArenaLaunchPlan(
             TrainingScenario scenario,
             string p0Spec,
@@ -145,10 +147,12 @@ namespace HexWars.Presentation.EditorTools.MlLab
         }
 
         /// <summary>
-        /// ML Lab tactical-v3 continuation directories are trainer inventories, not policy-server
-        /// controllers.  Resolve their declared published schema-2 model, or the initialized source
-        /// policy only while no publication is declared, without changing the separately selected Arena scenario.
-        /// Legacy runs and already-published structured models remain exactly as selected.
+        /// ML Lab tactical-v3 DAgger continuation directories are trainer inventories, not
+        /// policy-server controllers. Resolve their declared published schema-2 model, or the
+        /// initialized source policy only while no publication is declared, without changing the
+        /// separately selected Arena scenario. Outcome candidates are inference-bearing runs and
+        /// therefore remain selected so their own latest validated checkpoint is used. Legacy runs
+        /// and already-published structured models also remain exactly as selected.
         /// </summary>
         public static string ResolveModelRunSelection(string runDirectory)
         {
@@ -161,6 +165,18 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 string manifestPath = Path.Combine(runDirectory, "run.json");
                 ArenaContractManifest manifest = JsonUtility.FromJson<ArenaContractManifest>(
                     File.ReadAllText(manifestPath));
+                if (manifest != null && manifest.schema_version == 1 &&
+                    string.Equals(
+                        manifest.config?.algorithm,
+                        OutcomeAlgorithm,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        manifest.contract?.environment,
+                        "tactical-v3",
+                        StringComparison.Ordinal))
+                {
+                    return runDirectory;
+                }
                 if (manifest == null || manifest.schema_version != 1 ||
                     !string.Equals(manifest.config?.algorithm, "structured_dagger",
                         StringComparison.Ordinal) ||
@@ -353,10 +369,37 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add(label + " run metadata is empty: " + manifestPath);
                 return;
             }
-            if (manifest.schema_version != 2)
-                errors.Add(label + " run schema version must be 2.");
-            if (!string.Equals(manifest.config?.algorithm, "structured_imitation", StringComparison.Ordinal))
-                errors.Add(label + " algorithm must be structured_imitation.");
+            bool outcomeCandidate = string.Equals(
+                manifest.config?.algorithm,
+                OutcomeAlgorithm,
+                StringComparison.Ordinal);
+            if (outcomeCandidate)
+            {
+                if (manifest.schema_version != 1)
+                    errors.Add(label + " outcome candidate run schema version must be 1.");
+                if (manifest.state != "running" &&
+                    manifest.state != "stopping" &&
+                    manifest.state != "stopped" &&
+                    manifest.state != "completed")
+                {
+                    errors.Add(
+                        label +
+                        " outcome candidate state must be running, stopping, " +
+                        "stopped, or completed.");
+                }
+            }
+            else
+            {
+                if (manifest.schema_version != 2)
+                    errors.Add(label + " run schema version must be 2.");
+                if (!string.Equals(
+                        manifest.config?.algorithm,
+                        "structured_imitation",
+                        StringComparison.Ordinal))
+                {
+                    errors.Add(label + " algorithm must be structured_imitation.");
+                }
+            }
             if (!string.Equals(manifest.evidence_status, "unsealed-experimental", StringComparison.Ordinal))
                 errors.Add(label + " evidence status must be unsealed-experimental.");
             ArenaContract contract = manifest.contract;
@@ -381,11 +424,25 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     manifestJson, manifestPath, "contract",
                     "observation_size", "action_size"))
                 errors.Add(label + " tactical-v3 contract must not declare fixed observation_size or action_size.");
-            if (!string.Equals(manifest.latest_checkpoint, "checkpoints/best.pt", StringComparison.Ordinal))
-                errors.Add(label + " latest checkpoint must be checkpoints/best.pt.");
-            RequireContainedRegularFile(runPath,
-                Path.Combine(runPath, "checkpoints", "best.pt"),
-                label + " checkpoint", errors);
+            if (outcomeCandidate)
+            {
+                ValidateOutcomeCheckpoint(
+                    runPath, manifest.latest_checkpoint, label, errors);
+            }
+            else
+            {
+                if (!string.Equals(
+                        manifest.latest_checkpoint,
+                        "checkpoints/best.pt",
+                        StringComparison.Ordinal))
+                {
+                    errors.Add(
+                        label + " latest checkpoint must be checkpoints/best.pt.");
+                }
+                RequireContainedRegularFile(runPath,
+                    Path.Combine(runPath, "checkpoints", "best.pt"),
+                    label + " checkpoint", errors);
+            }
             if (!string.Equals(
                     manifest.policy_identity, "policy-identity.json",
                     StringComparison.Ordinal))
@@ -409,6 +466,40 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 errors.Add(label + " policy identity does not match run contract.");
         }
 
+        static void ValidateOutcomeCheckpoint(
+            string runPath,
+            string relativeCheckpoint,
+            string label,
+            List<string> errors)
+        {
+            if (string.IsNullOrWhiteSpace(relativeCheckpoint))
+            {
+                errors.Add(label + " outcome candidate has no latest checkpoint.");
+                return;
+            }
+
+            string checkpoint = Path.GetFullPath(
+                Path.Combine(runPath, relativeCheckpoint));
+            string checkpointDirectory = Path.GetFullPath(
+                Path.Combine(runPath, "checkpoints"));
+            if (!string.Equals(
+                    Path.GetDirectoryName(checkpoint),
+                    checkpointDirectory,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    Path.GetExtension(checkpoint),
+                    ".pt",
+                    StringComparison.Ordinal))
+            {
+                errors.Add(
+                    label +
+                    " outcome candidate latest checkpoint must name a checkpoints/*.pt file.");
+                return;
+            }
+            RequireContainedRegularFile(
+                runPath, checkpoint, label + " checkpoint", errors);
+        }
+
         static bool IsLowerSha256(string value) =>
             value != null && value.Length == 64 &&
             value.All(character =>
@@ -418,6 +509,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [Serializable] sealed class ArenaContractManifest
         {
             public int schema_version;
+            public string state;
             public string evidence_status;
             public ArenaRunConfig config;
             public ArenaContract contract;
@@ -1239,6 +1331,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     ValidatePublication(runDirectory + "-model"));
             return errors;
         }
+
+        public static IReadOnlyList<string> ValidateTacticalV3Training(
+            string runDirectory,
+            bool outcomeCandidate,
+            bool liveStartupProcess = false) =>
+            outcomeCandidate
+                ? Validate(runDirectory, liveStartupProcess)
+                : ValidateContinuation(runDirectory, liveStartupProcess);
     }
 
     /// <summary>
@@ -1537,9 +1637,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     ? config.Trackers
                     : trackerSelection.CreateTrackers();
             var errors = new List<string>(config.Validate(trackers));
-            bool structured = MlTrainingFormPolicy.IsStructuredContinuation(
+            bool tacticalV3 = MlTrainingFormPolicy.IsTacticalV3(
                 config.Environment);
-            if (resume && !structured)
+            bool daggerContinuation =
+                MlTrainingFormPolicy.IsDaggerContinuation(config);
+            if (resume && !tacticalV3)
             {
                 if (string.IsNullOrWhiteSpace(config.ResumeSource))
                     errors.Add("A source run is required to resume.");
@@ -1562,10 +1664,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             else
             {
-                if (structured && scenarioSession.WorkingCopy.Environment !=
+                if (tacticalV3 && scenarioSession.WorkingCopy.Environment !=
                     MlEnvironmentContract.TacticalV3)
                     errors.Add("Target scenario must use tactical-v3.");
-                if (structured &&
+                if (tacticalV3 &&
                     scenarioSession.WorkingCopy.TacticalV3 != null &&
                     (!string.Equals(
                          scenarioSession.WorkingCopy.TacticalV3.PlacementPolicy,
@@ -1575,7 +1677,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
                      scenarioSession.WorkingCopy.TacticalV3.StartDistribution == null ||
                      scenarioSession.WorkingCopy.TacticalV3.StartDistribution.Count == 0))
                     errors.Add(
-                        "Tactical-v3 continuation requires profiled-seeded-v1 " +
+                        (daggerContinuation
+                            ? "Tactical-v3 continuation"
+                            : "Tactical-v3 outcome training") +
+                        " requires profiled-seeded-v1 " +
                         "placement with a non-empty start-profile distribution.");
                 errors.AddRange(
                     scenarioSession.WorkingCopy.Validate());
@@ -1584,7 +1689,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     MlTrainingScenarioPreflight.Create(
                         scenarioSession.WorkingCopy);
                     scenarioReady = scenarioSession.WorkingCopy.Validate().Count == 0 &&
-                        (!structured || scenarioSession.WorkingCopy.Environment ==
+                        (!tacticalV3 || scenarioSession.WorkingCopy.Environment ==
                             MlEnvironmentContract.TacticalV3);
                 }
                 catch (Exception error)
@@ -1594,14 +1699,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         error.Message);
                 }
             }
-            if (structured && scenarioReady &&
-                !string.IsNullOrWhiteSpace(config.ResumeSource))
+            if (tacticalV3 && scenarioReady)
             {
-                errors.AddRange(
-                    MlArenaLaunchPlan.ValidateStructuredModelRun(
-                        config.ResumeSource,
-                        scenarioSession.WorkingCopy,
-                        "Source model"));
+                if (!string.IsNullOrWhiteSpace(config.ResumeSource))
+                    errors.AddRange(
+                        MlArenaLaunchPlan.ValidateStructuredModelRun(
+                            config.ResumeSource,
+                            scenarioSession.WorkingCopy,
+                            "Source model"));
                 if ((config.OpponentKind == MlOpponentKind.FixedRun ||
                      config.OpponentKind == MlOpponentKind.LiveRun) &&
                     !string.IsNullOrWhiteSpace(config.OpponentPath))
@@ -1622,28 +1727,57 @@ namespace HexWars.Presentation.EditorTools.MlLab
         const int DefaultSb3Seed = 1;
         const int DefaultStructuredSeed = 227;
 
-        public static bool IsStructuredContinuation(
+        public static bool IsTacticalV3(
             MlEnvironmentContract environment) =>
             environment == MlEnvironmentContract.TacticalV3;
 
+        public static bool IsStructuredContinuation(
+            MlEnvironmentContract environment) => IsTacticalV3(environment);
+
+        public static bool IsDaggerContinuation(MlLabConfig config) =>
+            config != null && IsTacticalV3(config.Environment) &&
+            config.TacticalV3TrainingMode ==
+                MlTacticalV3TrainingMode.DaggerContinuation;
+
+        public static bool IsOutcomeCandidate(MlLabConfig config) =>
+            config != null && IsTacticalV3(config.Environment) &&
+            config.TacticalV3TrainingMode ==
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+
         public static bool RequiresSourceRun(
-            MlEnvironmentContract environment, bool resume) =>
-            IsStructuredContinuation(environment) || resume;
+            MlEnvironmentContract environment,
+            MlTacticalV3TrainingMode tacticalV3Mode,
+            bool resume) =>
+            (IsTacticalV3(environment) &&
+             tacticalV3Mode == MlTacticalV3TrainingMode.DaggerContinuation) ||
+            (!IsTacticalV3(environment) && resume);
 
         public static bool ShowsSb3Fields(
             MlEnvironmentContract environment) =>
-            !IsStructuredContinuation(environment);
+            !IsTacticalV3(environment);
 
         public static bool ShowsOpponent(
             MlEnvironmentContract environment, bool resume) =>
-            IsStructuredContinuation(environment) || !resume;
+            IsTacticalV3(environment) || !resume;
 
         public static string PrimaryActionLabel(
-            MlEnvironmentContract environment, bool resume)
+            MlEnvironmentContract environment,
+            MlTacticalV3TrainingMode tacticalV3Mode,
+            bool resume)
         {
-            if (IsStructuredContinuation(environment))
-                return "Start continuation";
+            if (IsTacticalV3(environment))
+                return tacticalV3Mode ==
+                    MlTacticalV3TrainingMode.OutcomeCandidate
+                    ? "Start outcome training"
+                    : "Start continuation";
             return resume ? "Resume" : "Start";
+        }
+
+        public static void ApplyTacticalV3TrainingMode(
+            MlLabConfig config, MlTacticalV3TrainingMode selected)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+            config.TacticalV3TrainingMode = selected;
         }
 
         public static void ApplyEnvironmentDefaults(
@@ -1651,11 +1785,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
             bool enteringStructured =
-                !IsStructuredContinuation(config.Environment) &&
-                IsStructuredContinuation(selected);
+                !IsTacticalV3(config.Environment) &&
+                IsTacticalV3(selected);
             bool leavingStructured =
-                IsStructuredContinuation(config.Environment) &&
-                !IsStructuredContinuation(selected);
+                IsTacticalV3(config.Environment) &&
+                !IsTacticalV3(selected);
             if (enteringStructured)
             {
                 if (config.TotalTimesteps == DefaultSb3Timesteps)
@@ -1676,7 +1810,80 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
     public static class MlStopControlPolicy
     {
+        const string DaggerAlgorithm = "structured_dagger";
+        const string OutcomeAlgorithm = "structured_policy_gradient";
+
         public static bool StructuredStopIsImmediate => false;
+
+        public static MlStopControlPlan ForRun(string runDirectory)
+        {
+            string algorithm = null;
+            int manifestSchemaVersion = 0;
+            string manifestState = null;
+            string configEnvironment = null;
+            string contractEnvironment = null;
+            try
+            {
+                string manifestPath = Path.Combine(runDirectory ?? string.Empty, "run.json");
+                if (File.Exists(manifestPath))
+                {
+                    StopRunManifest manifest = JsonUtility.FromJson<StopRunManifest>(
+                        File.ReadAllText(manifestPath));
+                    algorithm = manifest?.config?.algorithm;
+                    manifestSchemaVersion = manifest?.schema_version ?? 0;
+                    manifestState = manifest?.state;
+                    configEnvironment = manifest?.config?.environment;
+                    contractEnvironment = manifest?.contract?.environment;
+                }
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is IOException ||
+                error is NotSupportedException ||
+                error is System.Security.SecurityException ||
+                error is UnauthorizedAccessException)
+            {
+                // A missing or unreadable identity must fail closed: a deferred stop
+                // remains available, but the potentially lossy immediate stop does not.
+            }
+
+            bool coherentManifest =
+                manifestSchemaVersion == 1 &&
+                IsKnownState(manifestState) &&
+                !string.IsNullOrWhiteSpace(configEnvironment) &&
+                string.Equals(
+                    configEnvironment,
+                    contractEnvironment,
+                    StringComparison.Ordinal);
+            if (coherentManifest &&
+                string.Equals(configEnvironment, "tactical-v3", StringComparison.Ordinal) &&
+                string.Equals(algorithm, DaggerAlgorithm, StringComparison.Ordinal))
+                return new MlStopControlPlan("Stop after completed epoch", false);
+            if (coherentManifest &&
+                string.Equals(configEnvironment, "tactical-v3", StringComparison.Ordinal) &&
+                string.Equals(algorithm, OutcomeAlgorithm, StringComparison.Ordinal))
+                return new MlStopControlPlan("Stop after completed update", false);
+            bool knownImmediateAlgorithm =
+                coherentManifest &&
+                IsLegacyEnvironment(configEnvironment) &&
+                (string.Equals(algorithm, "maskable_ppo", StringComparison.Ordinal) ||
+                 string.Equals(algorithm, "masked_dqn", StringComparison.Ordinal));
+            return new MlStopControlPlan(
+                "Stop after checkpoint", knownImmediateAlgorithm);
+        }
+
+        static bool IsKnownState(string state) =>
+            string.Equals(state, "created", StringComparison.Ordinal) ||
+            string.Equals(state, "running", StringComparison.Ordinal) ||
+            string.Equals(state, "stopping", StringComparison.Ordinal) ||
+            string.Equals(state, "stopped", StringComparison.Ordinal) ||
+            string.Equals(state, "completed", StringComparison.Ordinal) ||
+            string.Equals(state, "failed", StringComparison.Ordinal);
+
+        static bool IsLegacyEnvironment(string environment) =>
+            string.Equals(environment, "tactical-v1", StringComparison.Ordinal) ||
+            string.Equals(environment, "tactical-v2", StringComparison.Ordinal) ||
+            string.Equals(environment, "adaptive-v1", StringComparison.Ordinal);
 
         public static bool CanRequestStop(
             string selectedRun,
@@ -1687,6 +1894,48 @@ namespace HexWars.Presentation.EditorTools.MlLab
             state != MlRunState.Stopped &&
             state != MlRunState.Completed &&
             state != MlRunState.Failed;
+
+        [Serializable]
+        sealed class StopRunManifest
+        {
+            public int schema_version;
+            public string state;
+            public StopRunConfig config;
+            public StopRunContract contract;
+        }
+
+        [Serializable]
+        sealed class StopRunConfig
+        {
+            public string algorithm;
+            public string environment;
+        }
+
+        [Serializable]
+        sealed class StopRunContract { public string environment; }
+    }
+
+    public sealed class MlStopControlPlan
+    {
+        public MlStopControlPlan(string deferredLabel, bool allowsImmediate)
+        {
+            DeferredLabel = deferredLabel;
+            AllowsImmediate = allowsImmediate;
+        }
+
+        public string DeferredLabel { get; }
+        public bool AllowsImmediate { get; }
+    }
+
+    public static class MlCheckpointDisplayPolicy
+    {
+        public static string UnitForAlgorithm(string algorithm) =>
+            string.Equals(
+                algorithm,
+                "structured_policy_gradient",
+                StringComparison.Ordinal)
+                ? "update"
+                : "step";
     }
 
     /// <summary>
@@ -1699,6 +1948,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
     /// </summary>
     public static class MlWatchPresentationTarget
     {
+        const string OutcomeAlgorithm = "structured_policy_gradient";
+
         public static string ResolveRevision(string runDirectory)
         {
             if (string.IsNullOrWhiteSpace(runDirectory)) return string.Empty;
@@ -1723,6 +1974,26 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     if (SamePath(modelRun, runDirectory)) return string.Empty;
                     return "structured-model:" + Path.GetFullPath(modelRun);
                 }
+                if (manifest.schema_version == 1 &&
+                    string.Equals(
+                        manifest.config?.algorithm,
+                        OutcomeAlgorithm,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        manifest.contract?.environment,
+                        "tactical-v3",
+                        StringComparison.Ordinal))
+                {
+                    if (manifest.state != "running" &&
+                        manifest.state != "stopping" &&
+                        manifest.state != "stopped" &&
+                        manifest.state != "completed")
+                    {
+                        return string.Empty;
+                    }
+                    return ResolveOutcomeCheckpointRevision(
+                        runDirectory, manifest.latest_checkpoint);
+                }
                 if (string.IsNullOrWhiteSpace(manifest.latest_checkpoint))
                     return string.Empty;
                 string checkpoint = Path.Combine(
@@ -1741,6 +2012,33 @@ namespace HexWars.Presentation.EditorTools.MlLab
             {
                 return string.Empty;
             }
+        }
+
+        static string ResolveOutcomeCheckpointRevision(
+            string runDirectory, string relativeCheckpoint)
+        {
+            if (string.IsNullOrWhiteSpace(relativeCheckpoint))
+                return string.Empty;
+            string runPath = Path.GetFullPath(runDirectory);
+            string checkpoint = Path.GetFullPath(
+                Path.Combine(runPath, relativeCheckpoint));
+            string checkpointDirectory = Path.GetFullPath(
+                Path.Combine(runPath, "checkpoints"));
+            if (!string.Equals(
+                    Path.GetDirectoryName(checkpoint),
+                    checkpointDirectory,
+                    Environment.OSVersion.Platform == PlatformID.Win32NT
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal) ||
+                !string.Equals(
+                    Path.GetExtension(checkpoint),
+                    ".pt",
+                    StringComparison.Ordinal) ||
+                !File.Exists(checkpoint))
+            {
+                return string.Empty;
+            }
+            return "outcome-checkpoint:" + checkpoint;
         }
 
         public static bool SamePath(string left, string right)
@@ -1763,6 +2061,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         sealed class WatchManifest
         {
             public int schema_version;
+            public string state;
             public WatchConfig config;
             public WatchContract contract;
             public string latest_checkpoint;
@@ -2016,6 +2315,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         [SerializeField] string _pendingTrainingRunDirectory = string.Empty;
         [SerializeField] bool _pendingTrainingWatch;
         [SerializeField] bool _pendingTrainingStructured;
+        [SerializeField] bool _pendingTrainingOutcomeCandidate;
         [NonSerialized] bool _assemblyReloadPending;
 
         enum CommandKind { None, Doctor, Control, StructuredPreflight }
@@ -2186,6 +2486,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             _pendingTrainingRunDirectory = string.Empty;
             _pendingTrainingWatch = false;
             _pendingTrainingStructured = false;
+            _pendingTrainingOutcomeCandidate = false;
         }
 
         void OnGUI()
@@ -2311,8 +2612,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 var data = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifest));
                 var environment = MlEnvironmentSummary.FromRunManifest(File.ReadAllText(manifest));
                 string mode = seat.Kind == ModelControllerKind.LiveRun ? "live (reloads between games)" : "fixed";
+                string checkpointUnit = MlCheckpointDisplayPolicy.UnitForAlgorithm(
+                    data?.config?.algorithm);
                 return $"{mode} · {environment.ContractVersion} · {data?.config?.algorithm ?? "unknown algorithm"} · " +
-                       $"step {data?.latest_checkpoint_step ?? 0:N0} · {data?.latest_checkpoint ?? "no checkpoint"}";
+                       $"{checkpointUnit} {data?.latest_checkpoint_step ?? 0:N0} · {data?.latest_checkpoint ?? "no checkpoint"}";
             }
             catch (Exception error) { return "invalid run metadata · " + error.Message; }
         }
@@ -2394,28 +2697,36 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 MlTrainerStatusFormatter.Describe(confirmedExited, minutesSinceProgress, step, targetStep));
         }
 
-        static (long Step, long TargetStep) ReadRunProgress(string runDirectory)
+        public static (long Step, long TargetStep) ReadRunProgress(
+            string runDirectory)
         {
             try
             {
                 string manifestPath = Path.Combine(runDirectory, "run.json");
                 if (!File.Exists(manifestPath)) return (0, 0);
                 var manifest = JsonUtility.FromJson<ArenaRunManifest>(File.ReadAllText(manifestPath));
-                return (manifest?.latest_checkpoint_step ?? 0, manifest?.config?.total_timesteps ?? 0);
+                long step = manifest?.timesteps ?? 0;
+                if (step == 0) step = manifest?.latest_checkpoint_step ?? 0;
+                return (step, manifest?.config?.total_timesteps ?? 0);
             }
             catch (Exception) { return (0, 0); }
         }
 
-        static string FormatResolved(PolicySeatInfo info) => info == null
-            ? "scripted or loading"
-            : $"{info.Algorithm} · step {info.Step:N0} · {info.Path} · " +
-              $"{info.ContractVersion} contract {info.ContractHash}";
+        static string FormatResolved(PolicySeatInfo info)
+        {
+            if (info == null) return "scripted or loading";
+            string checkpointUnit = MlCheckpointDisplayPolicy.UnitForAlgorithm(
+                info.Algorithm);
+            return $"{info.Algorithm} · {checkpointUnit} {info.Step:N0} · " +
+                   $"{info.Path} · {info.ContractVersion} contract {info.ContractHash}";
+        }
 
         [Serializable] sealed class ArenaRunManifest
         {
             public ArenaRunConfig config;
             public string latest_checkpoint;
             public long latest_checkpoint_step;
+            public long timesteps;
         }
         [Serializable] sealed class ArenaRunConfig { public string algorithm; public long total_timesteps; }
 
@@ -2449,15 +2760,28 @@ namespace HexWars.Presentation.EditorTools.MlLab
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.LabelField("Training configuration", EditorStyles.boldLabel);
             DrawTrainingEnvironmentSelector();
-            bool structuredContinuation =
-                MlTrainingFormPolicy.IsStructuredContinuation(
-                    _config.Environment);
-            if (structuredContinuation)
+            bool tacticalV3 = MlTrainingFormPolicy.IsTacticalV3(
+                _config.Environment);
+            if (tacticalV3)
             {
+                MlTacticalV3TrainingMode selectedMode =
+                    (MlTacticalV3TrainingMode)EditorGUILayout.EnumPopup(
+                        "Training mode", _config.TacticalV3TrainingMode);
+                if (selectedMode != _config.TacticalV3TrainingMode)
+                    MlTrainingFormPolicy.ApplyTacticalV3TrainingMode(
+                        _config, selectedMode);
+                bool outcomeCandidate =
+                    MlTrainingFormPolicy.IsOutcomeCandidate(_config);
                 EditorGUILayout.HelpBox(
-                    "Initialize a new tactical-v3 DAgger run from a published source " +
-                    "model on the independently selected target scenario. This is a " +
-                    "weights-only continuation, not an exact optimizer resume.",
+                    outcomeCandidate
+                        ? "Train an experimental tactical-v3 candidate from complete " +
+                          "learner games on the selected scenario. An initial model is " +
+                          "optional; leaving it blank starts from fresh weights. " +
+                          "A saved checkpoint can initialize another run, but does not " +
+                          "resume optimizer state."
+                        : "Initialize a new tactical-v3 DAgger run from a published source " +
+                          "model on the independently selected target scenario. This is a " +
+                          "weights-only continuation, not an exact optimizer resume.",
                     MessageType.Info);
             }
             else
@@ -2465,20 +2789,24 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _resume = EditorGUILayout.ToggleLeft(
                     "Resume a metadata-backed run as a new run", _resume);
             }
-            if (MlTrainingFormPolicy.RequiresSourceRun(
-                    _config.Environment, _resume))
+            bool showSource = tacticalV3 || _resume;
+            if (showSource)
             {
+                bool outcomeCandidate =
+                    MlTrainingFormPolicy.IsOutcomeCandidate(_config);
                 EditorGUILayout.BeginHorizontal();
                 _config.ResumeSource = EditorGUILayout.TextField(
-                    structuredContinuation ? "Source model" : "Source run",
+                    outcomeCandidate
+                        ? "Initial model (optional)"
+                        : tacticalV3 ? "Source model" : "Source run",
                     _config.ResumeSource);
                 if (GUILayout.Button(
-                        structuredContinuation ? "Use selected model" : "Use selected",
-                        GUILayout.Width(structuredContinuation ? 132 : 92)))
+                        tacticalV3 ? "Use selected model" : "Use selected",
+                        GUILayout.Width(tacticalV3 ? 132 : 92)))
                 {
                     try
                     {
-                        _config.ResumeSource = structuredContinuation
+                        _config.ResumeSource = tacticalV3
                             ? MlArenaLaunchPlan.ResolveModelRunSelection(_selectedRun)
                             : _selectedRun;
                         _state.ClearError();
@@ -2489,15 +2817,18 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     }
                 }
                 EditorGUILayout.EndHorizontal();
-                if (!structuredContinuation)
+                if (!tacticalV3)
                     DrawSourceRunScenarioPreflight();
             }
             if (!MlTrainingFormPolicy.RequiresSourceRun(
-                    _config.Environment, _resume) || structuredContinuation)
+                    _config.Environment,
+                    _config.TacticalV3TrainingMode,
+                    _resume) || tacticalV3)
             {
                 DrawScenarioEditor();
             }
-            if (structuredContinuation)
+            if (tacticalV3 &&
+                !string.IsNullOrWhiteSpace(_config.ResumeSource))
                 DrawStructuredSourceModelPreflight();
             _config.RunName = EditorGUILayout.TextField("New run name", _config.RunName);
             if (MlTrainingFormPolicy.ShowsSb3Fields(_config.Environment))
@@ -2514,7 +2845,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
             else
             {
                 _config.TotalTimesteps = EditorGUILayout.LongField(
-                    "DAgger train label target", _config.TotalTimesteps);
+                    MlTrainingFormPolicy.IsOutcomeCandidate(_config)
+                        ? "Learner decision target"
+                        : "DAgger train label target",
+                    _config.TotalTimesteps);
             }
             _config.Seed = EditorGUILayout.IntField("Seed", _config.Seed);
             _config.Device = EditorGUILayout.TextField("Device", _config.Device);
@@ -3114,6 +3448,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             switch (opponent)
             {
                 case MlOpponentKind.Random: return "Random";
+                case MlOpponentKind.Passive: return "Passive";
                 case MlOpponentKind.FixedRun: return "Fixed run";
                 case MlOpponentKind.LiveRun: return "Live run";
                 default: return "Greedy";
@@ -3155,7 +3490,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             {
                 if (GUILayout.Button(
                         MlTrainingFormPolicy.PrimaryActionLabel(
-                            _config.Environment, _resume)))
+                            _config.Environment,
+                            _config.TacticalV3TrainingMode,
+                            _resume)))
                     StartTraining(false);
                 if (GUILayout.Button("Start & Watch"))
                     StartTraining(true);
@@ -3169,21 +3506,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 _selectedRun,
                 _status?.State ?? MlRunState.Unknown,
                 hasControlFile);
+            MlStopControlPlan stopPlan = MlStopControlPolicy.ForRun(_selectedRun);
             using (new EditorGUI.DisabledScope(
                        !canRequestStop ||
                        (_command != null && _command.IsRunning)))
             {
-                if (structuredContinuation)
-                {
-                    if (GUILayout.Button("Stop after completed epoch"))
-                        RequestStop(MlStopControlPolicy.StructuredStopIsImmediate);
-                }
-                else
-                {
-                    if (GUILayout.Button("Stop after checkpoint"))
-                        RequestStop(false);
-                    if (GUILayout.Button("Stop now")) RequestStop(true);
-                }
+                if (GUILayout.Button(stopPlan.DeferredLabel))
+                    RequestStop(MlStopControlPolicy.StructuredStopIsImmediate);
+                if (stopPlan.AllowsImmediate && GUILayout.Button("Stop now"))
+                    RequestStop(true);
             }
             using (new EditorGUI.DisabledScope(!hasSelectedRun))
             {
@@ -3414,8 +3745,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
             _state.BeginValidation();
             bool structuredContinuation =
-                MlTrainingFormPolicy.IsStructuredContinuation(
-                    _config.Environment);
+                MlTrainingFormPolicy.IsTacticalV3(_config.Environment);
+            bool outcomeCandidate =
+                MlTrainingFormPolicy.IsOutcomeCandidate(_config);
             MlTrackerSelectionSnapshot trackerSelection =
                 CaptureTrackerSelection();
             var errors = new List<string>(
@@ -3434,8 +3766,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
             string targetRun = Path.Combine(RunsRoot, _config.RunName ?? string.Empty);
             bool targetTrainerAlive = IsAttachedTrainerProcessAlive(targetRun);
             errors.AddRange(structuredContinuation
-                ? MlTrainingRunTarget.ValidateContinuation(
-                    targetRun, targetTrainerAlive)
+                ? MlTrainingRunTarget.ValidateTacticalV3Training(
+                    targetRun, outcomeCandidate, targetTrainerAlive)
                 : MlTrainingRunTarget.Validate(targetRun, targetTrainerAlive));
             if (errors.Count > 0)
             {
@@ -3454,7 +3786,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                         MlTrainingScenarioStore.WriteLaunchScenario(
                             ProjectRoot, _config.RunName,
                             _scenarioSession.WorkingCopy);
-                    args = _config.BuildStructuredTrainArguments(scenarioPath);
+                    args = outcomeCandidate
+                        ? _config.BuildOutcomeTrainArguments(scenarioPath)
+                        : _config.BuildStructuredTrainArguments(scenarioPath);
                 }
                 else if (_resume)
                 {
@@ -3482,13 +3816,16 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 {
                     _pendingTrainingArguments = args;
                     _pendingTrainingPreflightArguments =
-                        _config.BuildStructuredPreflightArguments(scenarioPath) +
+                        (outcomeCandidate
+                            ? _config.BuildOutcomePreflightArguments(scenarioPath)
+                            : _config.BuildStructuredPreflightArguments(scenarioPath)) +
                         " --server " +
                         MlCliProcess.QuoteArgument(GymServer);
                     _pendingTrainingScenarioPath = scenarioPath;
                     _pendingTrainingRunDirectory = targetRun;
                     _pendingTrainingWatch = watch;
                     _pendingTrainingStructured = true;
+                    _pendingTrainingOutcomeCandidate = outcomeCandidate;
                     StartPendingStructuredPreflight(resumed: false);
                     return;
                 }
@@ -3590,8 +3927,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     "The staged target scenario is unavailable.",
                     _pendingTrainingScenarioPath);
             IReadOnlyList<string> targetErrors =
-                MlTrainingRunTarget.ValidateContinuation(
+                MlTrainingRunTarget.ValidateTacticalV3Training(
                     _pendingTrainingRunDirectory,
+                    _pendingTrainingOutcomeCandidate,
                     IsAttachedTrainerProcessAlive(
                         _pendingTrainingRunDirectory));
             if (targetErrors.Count > 0)
@@ -3932,12 +4270,15 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     string runDirectory = _pendingTrainingRunDirectory;
                     bool watch = _pendingTrainingWatch;
                     bool structured = _pendingTrainingStructured;
+                    bool outcomeCandidate =
+                        _pendingTrainingOutcomeCandidate;
                     ClearPendingTrainingLaunch();
                     try
                     {
                         IReadOnlyList<string> targetErrors =
-                            MlTrainingRunTarget.ValidateContinuation(
+                            MlTrainingRunTarget.ValidateTacticalV3Training(
                                 runDirectory,
+                                outcomeCandidate,
                                 IsAttachedTrainerProcessAlive(runDirectory));
                         if (targetErrors.Count > 0)
                         {

@@ -17,7 +17,7 @@ using HexWars.GymServer;
 //          {"cmd":"step","action":5}        -> {"obs":[...],"reward":r,"terminated":b,"truncated":b,"mask":[...]}
 //          {"cmd":"close"}                  -> (exits)
 //
-// Args: --opponent greedy|random   --seat 0|1   --environment tactical-v1|adaptive-v1
+// Args: --opponent greedy|random|passive   --seat 0|1   --environment tactical-v1|adaptive-v1
 string opponent = "greedy";
 int seat = 0;
 string environment = "tactical-v1";
@@ -59,6 +59,8 @@ TacticalV3Config? tacticalV3Config = environment == MlContract.TacticalV3Version
 
 Func<int, IAgent> opponentFactory = opponent == "random"
     ? (s => new RandomAgent(s))
+    : opponent == "passive"
+        ? (_ => new PassiveAgent())
     : (s => new GreedyAgent(s));
 
 PlayerId learningSeat = seat == 1 ? PlayerId.Player1 : PlayerId.Player0;
@@ -337,6 +339,7 @@ IAgent? MakeController(string? spec, int agentSeed)
 {
     if (spec == "greedy") return new GreedyAgent(agentSeed);
     if (spec == "random") return new RandomAgent(agentSeed);
+    if (spec == "passive") return new PassiveAgent();
     if (spec == "bounded-search")
         return new BoundedSearchAgent(
             BoundedSearchAgent.DefaultExpansionBudget,
@@ -347,7 +350,7 @@ IAgent? MakeController(string? spec, int agentSeed)
 void RequireTacticalV3ControllerSpec(string? spec, string field)
 {
     if (spec == null || spec == "external" || spec == "greedy" ||
-        spec == "random" || spec == "bounded-search")
+        spec == "random" || spec == "passive" || spec == "bounded-search")
         return;
     throw new InvalidDataException(
         $"tactical-v3 duel_reset {field} controller '{spec}' is unsupported");

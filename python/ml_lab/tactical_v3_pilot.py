@@ -948,11 +948,11 @@ def collect_dagger_game(
 
     scripted_opponent = opponent if type(opponent) is str else None
     structured_opponent = opponent if type(opponent) is StructuredController else None
-    if scripted_opponent not in {None, "random", "greedy"} or (
+    if scripted_opponent not in {None, "random", "greedy", "passive"} or (
         scripted_opponent is None and structured_opponent is None
     ):
         raise ValueError(
-            "DAgger opponent must be random, greedy, or a structured controller"
+            "DAgger opponent must be random, greedy, passive, or a structured controller"
         )
     if structured_opponent is not None:
         if allow_compatible_identity_transfer:

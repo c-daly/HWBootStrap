@@ -26,7 +26,6 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from typing import Mapping
 
 from ml_lab.controllers import (
     ControllerResolutionError,
@@ -245,7 +244,9 @@ def main():
                     "policy request seat must be a built-in int"
                 )
             seat = seats[request_seat]
-            if seat.resolved.algorithm == "structured_imitation":
+            if seat.resolved.algorithm in {
+                "structured_imitation", "structured_policy_gradient",
+            }:
                 if set(msg) != {"seat", "decision"}:
                     raise ControllerResolutionError(
                         "structured policy request fields must be exactly seat and decision"

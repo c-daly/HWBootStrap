@@ -20,10 +20,15 @@ from .io import read_json
 from .tactical_v3_schema import TacticalV3SemanticIdentity, parse_spaces
 
 
-Algorithm = Literal["maskable_ppo", "masked_dqn", "structured_imitation"]
+Algorithm = Literal[
+    "maskable_ppo",
+    "masked_dqn",
+    "structured_imitation",
+    "structured_policy_gradient",
+]
 ControllerContract = EnvironmentContract | TacticalV3SemanticIdentity
 InferenceMode = Literal["deterministic", "stochastic"]
-SCRIPTED_NAMES = frozenset({"bounded-search", "greedy", "random"})
+SCRIPTED_NAMES = frozenset({"bounded-search", "greedy", "passive", "random"})
 ALGORITHM_ALIASES: dict[str, Algorithm] = {"ppo": "maskable_ppo", "dqn": "masked_dqn"}
 SUPPORTED_ENCODING_VERSIONS = frozenset({"tactical-v1", "tactical-v2", "adaptive-v1"})
 
@@ -343,10 +348,16 @@ class ControllerResolver:
         if not isinstance(config, Mapping):
             raise ControllerResolutionError("run manifest is missing config metadata")
         declared_algorithm = config.get("algorithm")
-        if declared_algorithm == "structured_imitation":
-            if manifest.get("schema_version") != 2:
+        if declared_algorithm in {
+            "structured_imitation", "structured_policy_gradient",
+        }:
+            expected_schema = (
+                2 if declared_algorithm == "structured_imitation" else 1
+            )
+            if manifest.get("schema_version") != expected_schema:
                 raise ControllerResolutionError(
-                    "structured run manifest must have schema_version 2"
+                    f"{declared_algorithm} run manifest must have "
+                    f"schema_version {expected_schema}"
                 )
             if requested_algorithm is not None:
                 raise ControllerResolutionError("legacy algorithm does not match the run manifest algorithm")
@@ -375,6 +386,11 @@ class ControllerResolver:
         self, spec: ControllerSpec, manifest: Mapping[str, Any],
     ) -> ResolvedController:
         assert spec.path is not None
+        if spec.inference_mode != "deterministic":
+            raise ControllerResolutionError(
+                "structured tactical-v3 controllers currently support only "
+                "deterministic inference"
+            )
         try:
             if manifest.get("policy_identity") != "policy-identity.json":
                 raise ValueError(
@@ -399,15 +415,17 @@ class ControllerResolver:
             )
         except (OSError, TypeError, ValueError) as error:
             raise ControllerResolutionError(str(error)) from error
-        step = manifest.get("latest_checkpoint_step")
+        step = structured.checkpoint_step
         if isinstance(step, bool) or not isinstance(step, int) or step < 0:
-            raise ControllerResolutionError("run manifest is missing latest_checkpoint_step metadata")
+            raise ControllerResolutionError(
+                "validated structured controller is missing its checkpoint step"
+            )
         return ResolvedController(
             spec=spec,
             server_controller="external",
             model=structured,
             path=structured.checkpoint_path,
-            algorithm="structured_imitation",
+            algorithm=structured.algorithm,
             step=step,
             contract=structured.identity,
             observation_size=None,

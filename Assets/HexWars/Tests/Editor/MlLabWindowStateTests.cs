@@ -46,6 +46,27 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void ArenaTrainerProgress_UsesDecisionProgressNotOptimizerUpdate()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-arena-progress-" +
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(run);
+            try
+            {
+                File.WriteAllText(Path.Combine(run, "run.json"),
+                    "{\"timesteps\":512,\"latest_checkpoint_step\":8," +
+                    "\"config\":{\"total_timesteps\":7500}}");
+
+                (long step, long target) = MlLabWindow.ReadRunProgress(run);
+
+                Assert.That(step, Is.EqualTo(512));
+                Assert.That(target, Is.EqualTo(7500));
+            }
+            finally { Directory.Delete(run, true); }
+        }
+
+        [Test]
         public void FailurePreservesInlineMessageAndCanReturnToIdle()
         {
             var state = new MlLabWindowState();
@@ -734,6 +755,41 @@ namespace HexWars.Presentation.Tests
             }
         }
 
+        [TestCase(MlOpponentKind.FixedRun)]
+        [TestCase(MlOpponentKind.LiveRun)]
+        public void TacticalV3OutcomeFromScratch_RejectsIncompatibleModelOpponent(
+            MlOpponentKind opponentKind)
+        {
+            var opponent = CreateStructuredArenaRun();
+            try
+            {
+                var session = new MlTrainingScenarioSession(
+                    MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+                session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+                session.WorkingCopy.TacticalV3.Capacity.MaxCells += 1;
+                var config = MlLabConfig.Default();
+                config.Environment = MlEnvironmentContract.TacticalV3;
+                config.TacticalV3TrainingMode =
+                    MlTacticalV3TrainingMode.OutcomeCandidate;
+                config.ResumeSource = string.Empty;
+                config.OpponentKind = opponentKind;
+                config.OpponentPath = opponent.Run;
+
+                MlTrainingLaunchFormState state =
+                    MlTrainingLaunchFormState.Evaluate(
+                        config, session, resume: false);
+
+                Assert.That(state.CanLaunch, Is.False);
+                Assert.That(state.Errors,
+                    Has.Some.Contains(
+                        "Opponent model capacity hash does not match the selected scenario"));
+            }
+            finally
+            {
+                Directory.Delete(opponent.Run, true);
+            }
+        }
+
         [Test]
         public void TacticalV3Continuation_RejectsUncollectableSymmetricTarget()
         {
@@ -877,6 +933,33 @@ namespace HexWars.Presentation.Tests
                     Directory.Delete(publication, true);
                 else if (File.Exists(publication))
                     File.Delete(publication);
+            }
+        }
+
+        [Test]
+        public void TrainingRunTarget_OutcomeDoesNotReserveDaggerPublicationNamespace()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-ml-outcome-target-" +
+                Guid.NewGuid().ToString("N"));
+            string daggerPublication = run + "-model";
+            try
+            {
+                Directory.CreateDirectory(daggerPublication);
+
+                Assert.That(
+                    MlTrainingRunTarget.ValidateTacticalV3Training(
+                        run, outcomeCandidate: true),
+                    Is.Empty);
+                Assert.That(
+                    MlTrainingRunTarget.ValidateTacticalV3Training(
+                        run, outcomeCandidate: false),
+                    Has.Some.Contains("Publication target already exists"));
+            }
+            finally
+            {
+                if (Directory.Exists(daggerPublication))
+                    Directory.Delete(daggerPublication, true);
             }
         }
 
@@ -1083,17 +1166,33 @@ namespace HexWars.Presentation.Tests
         public void TrainingFormPolicy_KeepsV3OpponentAndHidesOnlySb3Fields()
         {
             Assert.That(MlTrainingFormPolicy.RequiresSourceRun(
-                MlEnvironmentContract.TacticalV3, resume: false), Is.True);
+                MlEnvironmentContract.TacticalV3,
+                MlTacticalV3TrainingMode.DaggerContinuation,
+                resume: false), Is.True);
             Assert.That(MlTrainingFormPolicy.ShowsSb3Fields(
                 MlEnvironmentContract.TacticalV3), Is.False);
             Assert.That(MlTrainingFormPolicy.ShowsOpponent(
                 MlEnvironmentContract.TacticalV3, resume: true), Is.True);
             Assert.That(MlTrainingFormPolicy.PrimaryActionLabel(
-                MlEnvironmentContract.TacticalV3, resume: false),
+                MlEnvironmentContract.TacticalV3,
+                MlTacticalV3TrainingMode.DaggerContinuation,
+                resume: false),
                 Is.EqualTo("Start continuation"));
 
             Assert.That(MlTrainingFormPolicy.RequiresSourceRun(
-                MlEnvironmentContract.TacticalV2, resume: false), Is.False);
+                MlEnvironmentContract.TacticalV3,
+                MlTacticalV3TrainingMode.OutcomeCandidate,
+                resume: false), Is.False);
+            Assert.That(MlTrainingFormPolicy.PrimaryActionLabel(
+                MlEnvironmentContract.TacticalV3,
+                MlTacticalV3TrainingMode.OutcomeCandidate,
+                resume: false),
+                Is.EqualTo("Start outcome training"));
+
+            Assert.That(MlTrainingFormPolicy.RequiresSourceRun(
+                MlEnvironmentContract.TacticalV2,
+                MlTacticalV3TrainingMode.DaggerContinuation,
+                resume: false), Is.False);
             Assert.That(MlTrainingFormPolicy.ShowsSb3Fields(
                 MlEnvironmentContract.TacticalV2), Is.True);
             Assert.That(MlTrainingFormPolicy.ShowsOpponent(
@@ -1101,8 +1200,29 @@ namespace HexWars.Presentation.Tests
             Assert.That(MlTrainingFormPolicy.ShowsOpponent(
                 MlEnvironmentContract.TacticalV2, resume: true), Is.False);
             Assert.That(MlTrainingFormPolicy.PrimaryActionLabel(
-                MlEnvironmentContract.TacticalV2, resume: true),
+                MlEnvironmentContract.TacticalV2,
+                MlTacticalV3TrainingMode.DaggerContinuation,
+                resume: true),
                 Is.EqualTo("Resume"));
+        }
+
+        [Test]
+        public void TrainingFormPolicy_ModeSwitchPreservesDecisionTarget()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TotalTimesteps = 9137;
+
+            MlTrainingFormPolicy.ApplyTacticalV3TrainingMode(
+                config, MlTacticalV3TrainingMode.OutcomeCandidate);
+
+            Assert.That(config.TacticalV3TrainingMode,
+                Is.EqualTo(MlTacticalV3TrainingMode.OutcomeCandidate));
+            Assert.That(config.TotalTimesteps, Is.EqualTo(9137));
+
+            MlTrainingFormPolicy.ApplyTacticalV3TrainingMode(
+                config, MlTacticalV3TrainingMode.DaggerContinuation);
+            Assert.That(config.TotalTimesteps, Is.EqualTo(9137));
         }
 
         [Test]
@@ -1124,6 +1244,125 @@ namespace HexWars.Presentation.Tests
             Assert.That(MlStopControlPolicy.CanRequestStop(
                 @"C:\runs\starting", MlRunState.Unknown,
                 hasControlFile: true), Is.True);
+        }
+
+        [TestCase("structured_dagger", "Stop after completed epoch", false)]
+        [TestCase("structured_policy_gradient", "Stop after completed update", false)]
+        [TestCase("maskable_ppo", "Stop after checkpoint", true)]
+        [TestCase("masked_dqn", "Stop after checkpoint", true)]
+        public void StopControlPolicy_DerivesButtonsFromSelectedRun(
+            string algorithm,
+            string expectedLabel,
+            bool expectedImmediate)
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-stop-plan-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(run);
+            try
+            {
+                string environment = algorithm.StartsWith(
+                    "structured_", StringComparison.Ordinal)
+                    ? "tactical-v3"
+                    : "tactical-v2";
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"schema_version\":1,\"state\":\"running\"," +
+                    "\"config\":{\"algorithm\":\"" + algorithm + "\"," +
+                    "\"environment\":\"" + environment + "\"}," +
+                    "\"contract\":{\"environment\":\"" + environment + "\"}}");
+
+                MlStopControlPlan plan = MlStopControlPolicy.ForRun(run);
+
+                Assert.That(plan.DeferredLabel, Is.EqualTo(expectedLabel));
+                Assert.That(plan.AllowsImmediate, Is.EqualTo(expectedImmediate));
+            }
+            finally { Directory.Delete(run, true); }
+        }
+
+        [Test]
+        public void StopControlPolicy_OutcomeRunWinsOverEditableV2Form()
+        {
+            var editableForm = MlLabConfig.Default();
+            editableForm.Environment = MlEnvironmentContract.TacticalV2;
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-stop-mismatch-" +
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(run);
+            try
+            {
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"schema_version\":1,\"state\":\"running\"," +
+                    "\"config\":{\"algorithm\":\"structured_policy_gradient\"," +
+                    "\"environment\":\"tactical-v3\"}," +
+                    "\"contract\":{\"environment\":\"tactical-v3\"}}");
+
+                Assert.That(
+                    MlTrainingFormPolicy.IsStructuredContinuation(
+                        editableForm.Environment),
+                    Is.False,
+                    "The regression requires the editable form to disagree with the run.");
+                MlStopControlPlan plan = MlStopControlPolicy.ForRun(run);
+                Assert.That(plan.DeferredLabel, Is.EqualTo("Stop after completed update"));
+                Assert.That(plan.AllowsImmediate, Is.False);
+            }
+            finally { Directory.Delete(run, true); }
+        }
+
+        [Test]
+        public void StopControlPolicy_UnknownOrUnreadableRunFailsClosed()
+        {
+            string run = Path.Combine(
+                Path.GetTempPath(), "hexwars-stop-unknown-" +
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(run);
+            try
+            {
+                MlStopControlPlan missing = MlStopControlPolicy.ForRun(run);
+                Assert.That(missing.DeferredLabel, Is.EqualTo("Stop after checkpoint"));
+                Assert.That(missing.AllowsImmediate, Is.False);
+
+                File.WriteAllText(Path.Combine(run, "run.json"), "{");
+                MlStopControlPlan malformed = MlStopControlPolicy.ForRun(run);
+                Assert.That(malformed.AllowsImmediate, Is.False);
+
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"config\":{\"algorithm\":\"future_algorithm\"}}");
+                MlStopControlPlan unknown = MlStopControlPolicy.ForRun(run);
+                Assert.That(unknown.AllowsImmediate, Is.False);
+
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"config\":{\"algorithm\":\"maskable_ppo\"}}");
+                MlStopControlPlan incomplete = MlStopControlPolicy.ForRun(run);
+                Assert.That(incomplete.AllowsImmediate, Is.False);
+
+                File.WriteAllText(
+                    Path.Combine(run, "run.json"),
+                    "{\"schema_version\":1,\"state\":\"running\"," +
+                    "\"config\":{\"algorithm\":\"maskable_ppo\"," +
+                    "\"environment\":\"tactical-v3\"}," +
+                    "\"contract\":{\"environment\":\"tactical-v3\"}}");
+                MlStopControlPlan mismatched = MlStopControlPolicy.ForRun(run);
+                Assert.That(mismatched.AllowsImmediate, Is.False);
+            }
+            finally { Directory.Delete(run, true); }
+        }
+
+        [Test]
+        public void CheckpointDisplayPolicy_UsesUpdateOnlyForOutcomeModels()
+        {
+            Assert.That(
+                MlCheckpointDisplayPolicy.UnitForAlgorithm(
+                    "structured_policy_gradient"),
+                Is.EqualTo("update"));
+            Assert.That(
+                MlCheckpointDisplayPolicy.UnitForAlgorithm("structured_dagger"),
+                Is.EqualTo("step"));
+            Assert.That(
+                MlCheckpointDisplayPolicy.UnitForAlgorithm("maskable_ppo"),
+                Is.EqualTo("step"));
         }
 
         [Test]

@@ -11,6 +11,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
 {
     public sealed class MlRunPresentationPlan
     {
+        const string OutcomeAlgorithm = "structured_policy_gradient";
+
         readonly string _learnerSpec;
         readonly string _learnerSeat;
         readonly IReadOnlyList<OpponentPlan> _opponents;
@@ -86,6 +88,14 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     return LoadStructuredLifecycle(
                         runPath, manifest, learnerSeat, scenario);
                 }
+                if (string.Equals(
+                        manifest.config?.algorithm,
+                        OutcomeAlgorithm,
+                        StringComparison.Ordinal))
+                {
+                    return LoadOutcomeCandidate(
+                        runPath, manifest, learnerSeat, scenario);
+                }
                 ContractDto learnerContract = manifest.contract;
                 IReadOnlyList<OpponentPlan> opponents = ResolveOpponents(
                     manifest.opponent_snapshot, learnerContract, "opponent_snapshot");
@@ -142,7 +152,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 {
                     Kind = ModelControllerKind.LiveRun,
                     Path = candidate,
-                    InferenceMode = ModelInferenceMode.Stochastic,
+                    InferenceMode = ModelInferenceMode.Deterministic,
                 };
                 var arena = new ModelDuelConfiguration
                 {
@@ -172,9 +182,82 @@ namespace HexWars.Presentation.EditorTools.MlLab
             }
         }
 
+        /// <summary>
+        /// An outcome candidate is itself an inference-bearing tactical-v3 run. Present its own
+        /// latest validated checkpoint in live mode, while retaining its recorded scenario, seat
+        /// schedule, and opponent. Unlike a DAgger lifecycle, it must never resolve through an
+        /// initialization source or a separately published model.
+        /// </summary>
+        static MlRunPresentationPlan LoadOutcomeCandidate(
+            string runPath,
+            RunManifestDto manifest,
+            string learnerSeat,
+            TrainingScenario scenario)
+        {
+            if (!string.Equals(
+                    scenario.Environment, "tactical-v3", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    OutcomeAlgorithm +
+                    " presentation requires a tactical-v3 scenario");
+            }
+            ModelSeatConfiguration opponent = ResolveStructuredOpponent(
+                manifest.opponent_snapshot,
+                "opponent_snapshot",
+                OutcomeAlgorithm,
+                out string opponentLabel);
+            try
+            {
+                var learner = new ModelSeatConfiguration
+                {
+                    Kind = ModelControllerKind.LiveRun,
+                    Path = runPath,
+                    InferenceMode = ModelInferenceMode.Deterministic,
+                };
+                var arena = new ModelDuelConfiguration
+                {
+                    Environment = MlEnvironmentContract.TacticalV3,
+                    ScenarioRunPath = runPath,
+                    P0 = learner,
+                    P1 = opponent,
+                };
+                MlArenaLaunchPlan launch = MlArenaLaunchPlan.Create(arena);
+                return new MlRunPresentationPlan(
+                    runPath,
+                    runPath,
+                    launch.P0Spec,
+                    learnerSeat,
+                    new[] { new OpponentPlan(launch.P1Spec, opponentLabel) },
+                    launch.Scenario);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is InvalidDataException ||
+                error is IOException ||
+                error is InvalidOperationException ||
+                error is UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException(
+                    runPath + ": " + error.Message, error);
+            }
+        }
+
         static ModelSeatConfiguration ResolveStructuredOpponent(
             OpponentDto opponent,
             string metadataPath,
+            out string label)
+        {
+            return ResolveStructuredOpponent(
+                opponent,
+                metadataPath,
+                "structured_dagger",
+                out label);
+        }
+
+        static ModelSeatConfiguration ResolveStructuredOpponent(
+            OpponentDto opponent,
+            string metadataPath,
+            string presentationAlgorithm,
             out string label)
         {
             if (opponent.kind == "scripted")
@@ -191,16 +274,23 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     return new ModelSeatConfiguration {
                         Kind = ModelControllerKind.Random };
                 }
+                if (opponent.name == "passive")
+                {
+                    label = "Passive";
+                    return new ModelSeatConfiguration {
+                        Kind = ModelControllerKind.Passive };
+                }
                 throw new InvalidOperationException(
                     metadataPath +
-                    ".name must be 'greedy' or 'random' for a scripted opponent");
+                    ".name must be 'greedy', 'random', or 'passive' for a scripted opponent");
             }
             bool live = opponent.kind == "live_run";
             if (!live && opponent.kind != "fixed_run")
                 throw new InvalidOperationException(
                     metadataPath + ".kind '" +
                     (opponent.kind ?? "<missing>") +
-                    "' is not supported for structured_dagger presentation");
+                    "' is not supported for " +
+                    presentationAlgorithm + " presentation");
             string expectedMode = live ? "live" : "fixed";
             if (!string.Equals(opponent.mode, expectedMode, StringComparison.Ordinal))
                 throw new InvalidOperationException(
@@ -208,15 +298,27 @@ namespace HexWars.Presentation.EditorTools.MlLab
             if (!string.Equals(
                     opponent.algorithm,
                     "structured_imitation",
+                    StringComparison.Ordinal) &&
+                !string.Equals(
+                    opponent.algorithm,
+                    OutcomeAlgorithm,
                     StringComparison.Ordinal))
                 throw new InvalidOperationException(
-                    metadataPath + ".algorithm must be structured_imitation");
+                    metadataPath +
+                    ".algorithm must be structured_imitation or " +
+                    OutcomeAlgorithm);
             if (string.IsNullOrWhiteSpace(opponent.source_run))
                 throw new InvalidOperationException(
                     metadataPath + ".source_run is required");
             label = Path.GetFileName(opponent.source_run.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar)) +
+                (string.Equals(
+                    opponent.algorithm,
+                    OutcomeAlgorithm,
+                    StringComparison.Ordinal)
+                    ? " · outcome candidate"
+                    : string.Empty) +
                 (live ? " · live" : " · fixed");
             return new ModelSeatConfiguration
             {
@@ -427,13 +529,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             if (opponent.kind == "scripted")
             {
-                if (opponent.name != "greedy" && opponent.name != "random")
+                if (opponent.name != "greedy" &&
+                    opponent.name != "random" &&
+                    opponent.name != "passive")
                     throw new InvalidOperationException(
                         metadataPath +
-                        ".name must be 'greedy' or 'random' for a scripted opponent");
+                        ".name must be 'greedy', 'random', or 'passive' for a scripted opponent");
                 return new OpponentPlan(
                     opponent.name,
-                    opponent.name == "greedy" ? "Greedy" : "Random");
+                    opponent.name == "greedy"
+                        ? "Greedy"
+                        : opponent.name == "random" ? "Random" : "Passive");
             }
             if (opponent.kind == "snapshot")
                 return ResolveSnapshot(opponent, learnerContract, metadataPath);
