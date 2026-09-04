@@ -220,6 +220,54 @@ namespace HexWars.NetServer.Tests
                 "the last collision gives up rather than retrying a ninth time");
         }
 
+        // ---- one connection is enough ------------------------------------------
+
+        [Test]
+        public async Task StoreJoinCredential_RetriedOnAPoolOfOne_ReadsBackOnTheConnectionItAlreadyHas()
+        {
+            // A pool of exactly one is the smallest honest model of a pool under load: if the retry path
+            // wants a second connection while holding the first, it can only wait for itself. On a real
+            // deployment that is not a slow call, it is every caller on the credential path deadlocked.
+            await using NpgsqlDataSource single = new NpgsqlDataSourceBuilder(
+                _db.ConnectionString + ";Maximum Pool Size=1;Timeout=5").Build();
+            var store = new PostgresMatchStore(single, NullLogger<PostgresMatchStore>.Instance);
+
+            CreateMatchRequest request = Request(NextLobbyId());
+            CreateMatchResult match = await store.CreateMatchForLobbyAsync(request, Ct);
+            byte[] hash = Hash(11);
+
+            await store.StoreJoinCredentialAsync(
+                hash, match.Match.MatchId, request.Players[0].SteamId, Created.AddMinutes(15), Ct);
+
+            // The same issue arriving twice, which is what a credential service does after a dropped reply.
+            Assert.DoesNotThrowAsync(() => store.StoreJoinCredentialAsync(
+                hash, match.Match.MatchId, request.Players[0].SteamId, Created.AddMinutes(30), Ct));
+
+            JoinCredentialRecord stored = (await store.FindJoinCredentialAsync(hash, Ct))!;
+            Assert.That(stored.SteamId, Is.EqualTo(request.Players[0].SteamId));
+            Assert.That(stored.ExpiresAt, Is.EqualTo(Created.AddMinutes(15)),
+                "a retry keeps the credential that was already issued, expiry and all");
+        }
+
+        [Test]
+        public async Task StoreJoinCredential_ClashingWithAnotherSeatOnAPoolOfOne_IsStillRefusedPromptly()
+        {
+            await using NpgsqlDataSource single = new NpgsqlDataSourceBuilder(
+                _db.ConnectionString + ";Maximum Pool Size=1;Timeout=5").Build();
+            var store = new PostgresMatchStore(single, NullLogger<PostgresMatchStore>.Instance);
+
+            CreateMatchRequest request = Request(NextLobbyId());
+            CreateMatchResult match = await store.CreateMatchForLobbyAsync(request, Ct);
+            byte[] hash = Hash(23);
+
+            await store.StoreJoinCredentialAsync(
+                hash, match.Match.MatchId, request.Players[0].SteamId, Created.AddMinutes(15), Ct);
+
+            // The refusal comes from the same read-back, so it must not need a second connection either.
+            Assert.ThrowsAsync<InvalidOperationException>(() => store.StoreJoinCredentialAsync(
+                hash, match.Match.MatchId, request.Players[1].SteamId, Created.AddMinutes(15), Ct));
+        }
+
         // ---- helpers ------------------------------------------------------------
 
         static string NextLobbyId() =>
@@ -231,6 +279,13 @@ namespace HexWars.NetServer.Tests
         static CreateMatchRequest Request(string lobbyId) =>
             new(lobbyId, SetupWire, EngineVersion, ProtocolVersion, BuildId,
                 new[] { (NextSteamId(), 0), (NextSteamId(), 1) }, Created);
+
+        static byte[] Hash(byte seed)
+        {
+            var hash = new byte[32];
+            for (int i = 0; i < hash.Length; i++) hash[i] = (byte)(seed + i);
+            return hash;
+        }
 
         async Task<(Guid MatchId, string Lobby, string Seat0, string Seat1)> NewWaitingMatchAsync()
         {

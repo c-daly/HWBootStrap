@@ -603,6 +603,9 @@ namespace HexWars.NetServer.Tests
         [TestCase("abc")]
         [TestCase("7656119000000000a")]
         [TestCase("765611900000000001234")]
+        // Digits with a trailing newline. The column refuses it, so a store that took it would be a store
+        // whose guard is looser than the schema it writes to.
+        [TestCase("123\n")]
         public async Task ASteamIdThatIsNotOneToTwentyDigits_IsRejectedWhereverOneIsTaken(string steamId)
         {
             var match = await NewActiveMatchAsync();

@@ -331,7 +331,7 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task DeletingAPlayer_CascadesToTheirCommandsAndCredentials()
+        public async Task DeletingAPlayerWhoIssuedCommands_IsRefused()
         {
             await _db.ApplyMigrationsAsync();
             var match = Guid.NewGuid();
@@ -339,13 +339,38 @@ namespace HexWars.NetServer.Tests
             await InsertPlayerAsync(match, Seat0Steam, 0);
             await InsertPlayerAsync(match, Seat1Steam, 1);
             await InsertCommandAsync(match, 1, "MOVE 0 0 1 1");
+
+            // The journal is the recovery story. Deleting the seat that issued a command out from under a
+            // match that still exists would leave a log which replays into a different game, so the seat is
+            // pinned by its commands rather than taking them with it.
+            var refused = Assert.ThrowsAsync<PostgresException>(
+                () => ExecuteAsync("DELETE FROM match_players WHERE match_id = @id AND steam_id = @steam",
+                    ("id", match), ("steam", Seat0Steam)));
+
+            Assert.That(refused!.SqlState, Is.EqualTo(PostgresErrorCodes.ForeignKeyViolation));
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_commands"), Is.EqualTo(1L),
+                "a refused delete must leave the journal exactly as it was");
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_players"), Is.EqualTo(2L));
+        }
+
+        [Test]
+        public async Task DeletingAPlayerWhoIssuedNoCommands_TakesOnlyTheirCredentials()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, "active");
+            await InsertPlayerAsync(match, Seat0Steam, 0);
+            await InsertPlayerAsync(match, Seat1Steam, 1);
+            await InsertCommandAsync(match, 1, "MOVE 0 0 1 1", issuer: Seat1Steam);
             await InsertCredentialAsync(match, Seat0Steam);
 
             await ExecuteAsync("DELETE FROM match_players WHERE match_id = @id AND steam_id = @steam",
                 ("id", match), ("steam", Seat0Steam));
 
-            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_commands"), Is.EqualTo(0L));
-            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_join_credentials"), Is.EqualTo(0L));
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_join_credentials"), Is.EqualTo(0L),
+                "a join token is issued to a seat, so it dies with the seat");
+            Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_commands"), Is.EqualTo(1L),
+                "somebody else issued that command");
             Assert.That(await ScalarAsync<long>("SELECT count(*) FROM matches"), Is.EqualTo(1L),
                 "losing a seat must not take the match row with it");
         }

@@ -132,9 +132,15 @@ namespace HexWars.NetServer.Persistence
         /// be able to tell which store it is talking to.</summary>
         public const string NoSeatMessage = "steam id holds no seat in this match";
 
-        /// <summary>The same expression as the CHECK on match_players.steam_id.</summary>
+        /// <summary>The same expression as the CHECK on match_players.steam_id.
+        ///
+        /// The end anchor is the end of the string, not the end of a line. In .NET the dollar anchor also
+        /// matches immediately before a trailing newline, so an id with one on the end would satisfy the
+        /// guard and then be refused by the column: the in-memory double would accept a value Postgres
+        /// rejects, which is the one thing this class exists to prevent. Postgres anchors its own dollar at
+        /// the end of the string, so the string anchor is what actually mirrors the CHECK.</summary>
         static readonly Regex SteamIdPattern =
-            new("^[0-9]{1,20}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+            new(@"^[0-9]{1,20}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         public static void ValidatePlayers(IReadOnlyList<(string SteamId, int Seat)> players)
         {

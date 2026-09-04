@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS match_players (
 
 -- The issuer is a seat, not a free-text label: a command whose issuer holds no seat in this match could
 -- never have been accepted, and on replay there would be nobody to attribute it to.
+--
+-- RESTRICT rather than CASCADE on the seat, deliberately. The journal is the recovery story: cascading
+-- from a seat would let one DELETE of a player silently punch a hole in the middle of a command log that
+-- still has a match attached to it, and the replay would then reproduce a different game. Deleting the
+-- MATCH still removes the whole journal (the match-level cascade above), which is the only deletion that
+-- makes sense; deleting a seat out from under a live journal is refused.
 CREATE TABLE IF NOT EXISTS match_commands (
   match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL CHECK (sequence >= 1),
@@ -71,7 +77,7 @@ CREATE TABLE IF NOT EXISTS match_commands (
   PRIMARY KEY (match_id, sequence),
   CONSTRAINT fk_match_commands_issuer_seat
     FOREIGN KEY (match_id, issuer_steam_id) REFERENCES match_players(match_id, steam_id)
-    ON DELETE CASCADE ON UPDATE CASCADE
+    ON DELETE RESTRICT ON UPDATE CASCADE
 );
 
 -- Same rule for credentials: a join token is issued to a seat, so it dies with the seat.

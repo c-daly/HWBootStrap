@@ -511,8 +511,12 @@ namespace HexWars.NetServer.Persistence
 
             if (inserted == 1) return;
 
+            // Read back on the connection we are already holding rather than through the public finder,
+            // which would open a second one. A pool sized for the load can be entirely checked out by
+            // callers sitting exactly here, and then every one of them is waiting for a connection that only
+            // another one of them could release: the retry path would deadlock under the load it exists for.
             JoinCredentialRecord? stored =
-                await FindJoinCredentialAsync(credentialHash, ct).ConfigureAwait(false);
+                await ReadJoinCredentialAsync(connection, null, credentialHash, ct).ConfigureAwait(false);
 
             if (stored is not null
                 && stored.MatchId == matchId
@@ -529,9 +533,18 @@ namespace HexWars.NetServer.Persistence
             MatchStoreGuard.ValidateCredentialHash(credentialHash, nameof(credentialHash));
 
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
+            return await ReadJoinCredentialAsync(connection, null, credentialHash, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>The credential read itself, on a connection the caller already owns. Everything that
+        /// needs a credential row while holding a connection uses this; nothing inside this class opens a
+        /// second connection to answer a question the first one could have.</summary>
+        static async Task<JoinCredentialRecord?> ReadJoinCredentialAsync(NpgsqlConnection connection,
+            NpgsqlTransaction? transaction, byte[] credentialHash, CancellationToken ct)
+        {
             await using var command = new NpgsqlCommand(
                 "SELECT credential_hash, match_id, steam_id, expires_at, revoked_at "
-                + "FROM match_join_credentials WHERE credential_hash = @credentialHash", connection);
+                + "FROM match_join_credentials WHERE credential_hash = @credentialHash", connection, transaction);
             command.Parameters.AddWithValue("credentialHash", credentialHash);
 
             await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
