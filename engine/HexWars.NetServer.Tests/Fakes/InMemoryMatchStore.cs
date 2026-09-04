@@ -375,9 +375,15 @@ namespace HexWars.NetServer.Tests.Fakes
             candidate > current ? candidate : current;
 
         /// <summary>What Postgres would have stored: an instant, truncated to the microsecond timestamptz
-        /// holds. Without this the double compares equal where the database would not.</summary>
+        /// holds. Without this the double compares equal where the database would not.
+        ///
+        /// The two extremes are not instants and are not rounded. Npgsql maps them onto the timestamptz
+        /// infinities and reads them back as exactly these values, so truncating MaxValue down to the
+        /// microsecond would have the double return a timestamp the database never could.</summary>
         static DateTimeOffset Stored(DateTimeOffset value)
         {
+            if (value == DateTimeOffset.MaxValue || value == DateTimeOffset.MinValue) return value;
+
             DateTime utc = value.UtcDateTime;
             return new DateTimeOffset(utc.AddTicks(-(utc.Ticks % TicksPerMicrosecond)), TimeSpan.Zero);
         }

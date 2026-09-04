@@ -516,6 +516,65 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task Touch_WithTheLatestTimestampThereIs_RoundTripsUnchanged()
+        {
+            var match = await NewWaitingMatchAsync();
+
+            // Postgres has a value beyond every date, and Npgsql maps this one onto it and reads it back
+            // unchanged. The double must agree: rounding it down to the microsecond, as it does with every
+            // ordinary instant, invents a timestamp the database would never have returned.
+            await Store.TouchAsync(match.MatchId, match.Seat0, DateTimeOffset.MaxValue, Ct);
+
+            Assert.That((await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt,
+                Is.EqualTo(DateTimeOffset.MaxValue));
+            Assert.That((await Store.GetPlayerAsync(match.MatchId, match.Seat0, Ct))!.LastSeenAt,
+                Is.EqualTo(DateTimeOffset.MaxValue));
+        }
+
+        [Test]
+        public async Task SaveCatalog_DoesNotLowerActivityThatIsAlreadyAhead()
+        {
+            var match = await NewWaitingMatchAsync();
+            DateTimeOffset ahead = Created.AddYears(1);
+            await Store.TouchAsync(match.MatchId, match.Seat0, ahead, Ct);
+
+            // No caller timestamp reaches this one: it stamps the clock, which is behind what is stored.
+            await Store.SaveCatalogAsync(match.MatchId, match.Seat0, "catalog", Ct);
+
+            Assert.That((await Store.GetPlayerAsync(match.MatchId, match.Seat0, Ct))!.CatalogWire,
+                Is.EqualTo("catalog"), "the catalogue is still saved");
+            Assert.That((await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt, Is.EqualTo(ahead));
+        }
+
+        [Test]
+        public async Task StartMatch_DoesNotLowerActivityThatIsAlreadyAhead()
+        {
+            var match = await NewWaitingMatchAsync();
+            await Store.TouchAsync(match.MatchId, match.Seat0, Move2, Ct);
+
+            Assert.That(await Store.TryStartMatchAsync(match.MatchId, "START-REPLAY", Started, Ct), Is.True);
+
+            PersistedMatch stored = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(stored.StartedAt, Is.EqualTo(Started), "the start is when the caller says it was");
+            Assert.That(stored.LastActivityAt, Is.EqualTo(Move2), "but activity does not go backwards");
+        }
+
+        [Test]
+        public async Task CompleteMatch_DoesNotLowerActivityThatIsAlreadyAhead()
+        {
+            var match = await NewActiveMatchAsync();
+            DateTimeOffset ahead = Ended.AddMinutes(10);
+            await Store.TouchAsync(match.MatchId, match.Seat0, ahead, Ct);
+
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct),
+                Is.True);
+
+            PersistedMatch stored = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(stored.CompletedAt, Is.EqualTo(Ended), "the game ended when the caller says it did");
+            Assert.That(stored.LastActivityAt, Is.EqualTo(ahead), "but activity does not go backwards");
+        }
+
+        [Test]
         public async Task ListOpenMatchIds_ListsWaitingAndActiveInCreationOrder()
         {
             var waiting = await NewWaitingMatchAsync(Created);
