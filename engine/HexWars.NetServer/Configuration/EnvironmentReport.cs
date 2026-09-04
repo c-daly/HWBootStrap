@@ -43,8 +43,10 @@ namespace HexWars.NetServer.Configuration
 
         public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 
-        /// <summary>First 16 hex characters of SHA-256 over the loaded HexWars.Engine assembly. Two servers
-        /// that disagree here cannot be trusted to replay the same journal to the same state.</summary>
+        /// <summary>The full SHA-256 digest of the loaded HexWars.Engine assembly, formatted
+        /// sha256:&lt;64 lowercase hex&gt;, or "unavailable" when the assembly has no on-disk location. The
+        /// complete digest is what proves two servers replay a journal against identical rules; a truncated
+        /// prefix is not a digest a replay build can be identified by years later.</summary>
         static string ComputeEngineAssemblyHash()
         {
             try
@@ -52,7 +54,7 @@ namespace HexWars.NetServer.Configuration
                 string path = typeof(HexWars.Engine.GameSetup).Assembly.Location;
                 if (string.IsNullOrEmpty(path) || !File.Exists(path)) return "unavailable";
                 using var stream = File.OpenRead(path);
-                return Convert.ToHexString(SHA256.HashData(stream)).Substring(0, 16).ToLowerInvariant();
+                return "sha256:" + Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
             }
             catch (Exception)
             {
