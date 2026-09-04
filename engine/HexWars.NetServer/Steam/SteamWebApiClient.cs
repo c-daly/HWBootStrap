@@ -33,6 +33,9 @@ namespace HexWars.NetServer.Steam
         static readonly TimeSpan BaseBackoff = TimeSpan.FromMilliseconds(200);
         static readonly TimeSpan MaxHonouredRetryAfter = TimeSpan.FromSeconds(2);
 
+        /// <summary>The widest spread added to a retry wait, and so the headroom the cap has to leave.</summary>
+        static readonly TimeSpan MaxJitter = TimeSpan.FromMilliseconds(100);
+
         /// <summary>The shortest wait between attempts, so Retry-After: 0 cannot become a tight loop.</summary>
         static readonly TimeSpan MinBackoff = TimeSpan.FromMilliseconds(50);
 
@@ -477,7 +480,7 @@ namespace HexWars.NetServer.Steam
             return null;
         }
 
-        static TimeSpan NextDelay(int attempt, TimeSpan? retryAfter)
+        TimeSpan NextDelay(int attempt, TimeSpan? retryAfter)
         {
             if (retryAfter.HasValue)
             {
@@ -488,17 +491,27 @@ namespace HexWars.NetServer.Steam
                 var honoured = retryAfter.Value;
                 if (honoured < MinBackoff) honoured = MinBackoff;
 
-                // The cap is on the total wait. Applied before the jitter it is not a cap at all: the
-                // thread still parks for the ceiling plus whatever the jitter adds on top.
-                var total = honoured + Jitter();
-                return total > MaxHonouredRetryAfter ? MaxHonouredRetryAfter : total;
+                // The cap goes on the base, with the jitter headroom left free. Capping the total instead
+                // would keep the ceiling but throw away the spread: every request told to wait 30 seconds
+                // would clamp to exactly the ceiling and the fleet would come back as one wave, which is
+                // the thing the jitter exists to prevent.
+                var ceiling = MaxHonouredRetryAfter - MaxJitter;
+                if (honoured > ceiling) honoured = ceiling;
+                return honoured + Jitter();
             }
 
             var backoff = TimeSpan.FromMilliseconds(BaseBackoff.TotalMilliseconds * Math.Pow(2, attempt));
             return backoff + Jitter();
         }
 
-        static TimeSpan Jitter() => TimeSpan.FromMilliseconds(Random.Shared.Next(0, 101));
+        /// <summary>
+        /// The spread on a retry wait, injectable so a test can pin both ends of its range rather than
+        /// assert on a window and hope.
+        /// </summary>
+        internal Func<TimeSpan> JitterSource { get; set; } =
+            () => TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)MaxJitter.TotalMilliseconds + 1));
+
+        TimeSpan Jitter() => JitterSource();
 
         static bool IsSuccess(HttpStatusCode status) => (int)status >= 200 && (int)status < 300;
 
@@ -653,6 +666,31 @@ namespace HexWars.NetServer.Steam
             return "error object";
         }
 
+        static SteamApiException DuplicateMetadataKey() =>
+            new(SteamFailure.MalformedResponse, "duplicate metadata key");
+
+        /// <summary>
+        /// System.Text.Json keeps the LAST of a repeated property and TryGetProperty never reports the
+        /// collision, so a second member_metadata silently wins over the first and the bag we read is not
+        /// the bag that was sent. Counting the properties by hand is the only way to see it. Both
+        /// spellings of one bag arriving together is the same trick wearing two names, so it goes too.
+        /// </summary>
+        static void RequireNoRepeatedContainer(JsonElement parent, string[] names)
+        {
+            if (parent.ValueKind != JsonValueKind.Object) return;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var containers = 0;
+
+            foreach (var property in parent.EnumerateObject())
+            {
+                if (!seen.Add(property.Name)) throw DuplicateMetadataKey();
+                if (Array.IndexOf(names, property.Name) >= 0) containers++;
+            }
+
+            if (containers > 1) throw DuplicateMetadataKey();
+        }
+
         /// <summary>
         /// Steam expresses key/value bags three ways depending on the endpoint and the era of the docs:
         /// an array of key_name/key_value pairs (what ILobbyMatchmakingService documents), an array of
@@ -664,6 +702,8 @@ namespace HexWars.NetServer.Steam
         /// </summary>
         static IReadOnlyDictionary<string, string> ReadKeyValues(JsonElement parent, params string[] names)
         {
+            RequireNoRepeatedContainer(parent, names);
+
             var result = new Dictionary<string, string>(StringComparer.Ordinal);
 
             void Add(string key, string value)
@@ -671,7 +711,7 @@ namespace HexWars.NetServer.Steam
                 if (result.TryAdd(key, value)) return;
 
                 // The key itself is Valve or player supplied text, so the detail names none of it.
-                throw new SteamApiException(SteamFailure.MalformedResponse, "duplicate metadata key");
+                throw DuplicateMetadataKey();
             }
 
             foreach (var name in names)

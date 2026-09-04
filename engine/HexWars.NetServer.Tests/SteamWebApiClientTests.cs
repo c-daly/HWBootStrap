@@ -124,6 +124,21 @@ namespace HexWars.NetServer.Tests
         const string LobbyWithADuplicateMetadataKey =
             """{"response":{"steamid_owner":"76561197960287930","lobby_metadata":[{"key":"hw_setup","value":"Annihilation 9 7 0 1234 3 1 1 1 3 0"},{"key":"hw_setup","value":"Annihilation 3 3 0 1 1 1 1 1 1 0"}],"members":[{"steamid":"76561197960287930"}]}}""";
 
+        // Reviewer input: the bag repeated as a property rather than a key inside it. System.Text.Json
+        // keeps the last of a repeated property, so TryGetProperty reads this member as ready.
+        const string LobbyWithADuplicateMemberContainer =
+            """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930","member_metadata":{"hw_ready":"0"},"member_metadata":{"hw_ready":"1"}}]}}""";
+
+        const string LobbyWithADuplicateLobbyContainer =
+            """{"response":{"steamid_owner":"76561197960287930","lobby_metadata":{"hw_setup":"Annihilation 9 7 0 1234 3 1 1 1 3 0"},"lobby_metadata":{"hw_setup":"Annihilation 3 3 0 1 1 1 1 1 1 0"},"members":[{"steamid":"76561197960287930"}]}}""";
+
+        // The same trick spelled with the two aliases the client accepts for one bag.
+        const string LobbyWithBothMemberAliases =
+            """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930","member_metadata":{"hw_ready":"0"},"member_data":{"hw_ready":"1"}}]}}""";
+
+        const string LobbyWithBothLobbyAliases =
+            """{"response":{"steamid_owner":"76561197960287930","lobby_metadata":{"hw_setup":"a"},"lobby_data":{"hw_setup":"b"},"members":[{"steamid":"76561197960287930"}]}}""";
+
         const string LobbyWithANonObjectMember =
             """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"},{"steamid":"76561197985812219"},7]}}""";
 
@@ -673,6 +688,28 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void Lobby_RateLimitedThroughout_StillSpreadsTheDelaysUnderTheCap()
+        {
+            using var h = new Harness();
+            h.Handler.RespondRetryAfter(FakeSteamHandler.LobbyPath, HttpStatusCode.TooManyRequests, 30);
+
+            // Both ends of the jitter range in turn. Capping the total instead of the base would collapse
+            // them onto the same 2000 ms, and a fleet told to wait 30 seconds would come back as one wave.
+            var jitter = new Queue<TimeSpan>(new[] { TimeSpan.Zero, TimeSpan.FromMilliseconds(100) });
+            h.Client.JitterSource = jitter.Dequeue;
+
+            Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            Assert.That(h.Delays, Is.EqualTo(new[]
+            {
+                TimeSpan.FromMilliseconds(1900),
+                TimeSpan.FromMilliseconds(2000),
+            }));
+            Assert.That(h.Delays, Is.All.LessThanOrEqualTo(TimeSpan.FromMilliseconds(2000)));
+        }
+
+        [Test]
         public void Lobby_NotFound_MapsToLobbyChangedWithoutRetrying()
         {
             using var h = new Harness();
@@ -764,6 +801,24 @@ namespace HexWars.NetServer.Tests
             // setup string, so a repeated key is a body to reject rather than one to resolve.
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
             Assert.That(ex.Detail, Does.Contain("duplicate metadata key"));
+        }
+
+        [TestCase(LobbyWithADuplicateMemberContainer, TestName = "Lobby_RepeatedMemberMetadataProperty_IsMalformedResponse")]
+        [TestCase(LobbyWithADuplicateLobbyContainer, TestName = "Lobby_RepeatedLobbyMetadataProperty_IsMalformedResponse")]
+        [TestCase(LobbyWithBothMemberAliases, TestName = "Lobby_BothMemberDataAliases_IsMalformedResponse")]
+        [TestCase(LobbyWithBothLobbyAliases, TestName = "Lobby_BothLobbyDataAliases_IsMalformedResponse")]
+        public void Lobby_DuplicateMetadataContainer_IsMalformedResponse(string body)
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, body);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            // Reading the bag through TryGetProperty hands back whichever copy came last, so the ready
+            // flag and the match setup become a matter of which one the sender put second.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+            Assert.That(ex.Detail, Is.EqualTo("duplicate metadata key"));
         }
 
         // ---- transport ------------------------------------------------------
