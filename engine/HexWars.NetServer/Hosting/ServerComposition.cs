@@ -1,5 +1,6 @@
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Options;
 
@@ -15,6 +16,9 @@ namespace HexWars.NetServer.Hosting
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+            // Registered unconditionally: the typed client resolves its options lazily, so a
+            // Legacy-only deployment with no Steam credentials is unaffected by it being here.
+            builder.Services.AddSteamWebApi();
             return builder;
         }
 
