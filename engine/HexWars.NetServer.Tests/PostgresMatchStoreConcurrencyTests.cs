@@ -159,7 +159,37 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task CreateMatch_GivesUpAfterThreeAttempts_WhenTheLobbyKeepsChurning()
+        public async Task CreateMatch_KeepsAllocatingWhileTheLobbyChurns_AndSucceedsOnceItStops()
+        {
+            string lobby = NextLobbyId();
+            Guid open = (await _store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
+
+            int conflicts = 0, retries = 0;
+
+            _store.OnCreateConflictForTests = async () =>
+            {
+                conflicts++;
+                await ExpireAsync(open);
+            };
+
+            // Three rounds of somebody else winning the race and then closing their match, and then the
+            // lobby is left alone. Three collisions is well inside what a busy lobby reaches by accident, so
+            // allocation has to come back with a match rather than an exception.
+            _store.OnCreateRetryForTests = async () =>
+            {
+                retries++;
+                if (retries <= 2) open = await InsertWaitingMatchAsync(lobby);
+            };
+
+            CreateMatchResult allocated = await _store.CreateMatchForLobbyAsync(Request(lobby), Ct);
+
+            Assert.That(conflicts, Is.EqualTo(3), "three collisions before the lobby was left alone");
+            Assert.That(allocated.Created, Is.True, "the fourth insert had a free lobby and must have taken it");
+            Assert.That(allocated.Match.Status, Is.EqualTo(MatchStatus.Waiting));
+        }
+
+        [Test]
+        public async Task CreateMatch_GivesUpOnlyAfterEightAttempts_WhenTheLobbyNeverStopsChurning()
         {
             string lobby = NextLobbyId();
             Guid open = (await _store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
@@ -173,7 +203,7 @@ namespace HexWars.NetServer.Tests
                 await ExpireAsync(open);
             };
 
-            // ...then open another one before the retry, so the next insert collides again.
+            // ...then open another one before the retry, so the next insert collides again. Forever.
             _store.OnCreateRetryForTests = async () =>
             {
                 retries++;
@@ -183,9 +213,11 @@ namespace HexWars.NetServer.Tests
             Assert.ThrowsAsync<InvalidOperationException>(
                 () => _store.CreateMatchForLobbyAsync(Request(lobby), Ct));
 
-            Assert.That(conflicts, Is.EqualTo(3), "three attempts, three collisions");
-            Assert.That(retries, Is.EqualTo(2),
-                "the third collision gives up rather than retrying a fourth time");
+            Assert.That(conflicts, Is.EqualTo(PostgresMatchStore.CreateAttempts),
+                "every attempt must have been made before giving up");
+            Assert.That(conflicts, Is.EqualTo(8), "a lobby gets eight tries, not three");
+            Assert.That(retries, Is.EqualTo(7),
+                "the last collision gives up rather than retrying a ninth time");
         }
 
         // ---- helpers ------------------------------------------------------------
