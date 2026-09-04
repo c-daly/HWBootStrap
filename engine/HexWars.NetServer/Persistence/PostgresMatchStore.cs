@@ -34,6 +34,18 @@ namespace HexWars.NetServer.Persistence
         static readonly string OpenStatuses =
             "('" + MatchStatusText.Waiting + "', '" + MatchStatusText.Active + "')";
 
+        /// <summary>Test hook: runs once the journal read has taken its snapshot and before the rest
+        /// of the journal is read, so a test can commit a start and an append into that window.</summary>
+        internal Func<Task>? OnJournalSnapshotForTests { get; set; }
+
+        /// <summary>Test hook: runs after the open-lobby index rejected an insert and before the open
+        /// match is read back, so a test can close that match in between.</summary>
+        internal Func<Task>? OnCreateConflictForTests { get; set; }
+
+        /// <summary>Test hook: runs after the re-read found nothing and before the insert is retried,
+        /// so a test can put a new open match in the way.</summary>
+        internal Func<Task>? OnCreateRetryForTests { get; set; }
+
         // ---- allocation ------------------------------------------------------
 
         public async Task<CreateMatchResult> CreateMatchForLobbyAsync(CreateMatchRequest request, CancellationToken ct)
@@ -138,14 +150,30 @@ namespace HexWars.NetServer.Persistence
         {
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
 
-            PersistedMatch? match = await ReadMatchAsync(connection, null, matchId, ct).ConfigureAwait(false);
-            if (match is null) return null;
+            // One snapshot for all three reads. Under read committed each query sees whatever is committed
+            // when it starts, so a start or an append landing between them would hand the caller a journal
+            // that never existed: a waiting match with commands in it, or an active one with none. Repeatable
+            // read takes the snapshot at the first statement and keeps it for the rest of the transaction.
+            await using NpgsqlTransaction transaction = await connection
+                .BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct).ConfigureAwait(false);
+
+            PersistedMatch? match =
+                await ReadMatchAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
+
+            if (OnJournalSnapshotForTests is not null) await OnJournalSnapshotForTests().ConfigureAwait(false);
+
+            if (match is null)
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return null;
+            }
 
             IReadOnlyList<PersistedPlayer> players =
-                await ReadPlayersAsync(connection, null, matchId, ct).ConfigureAwait(false);
+                await ReadPlayersAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
             IReadOnlyList<PersistedCommand> commands =
-                await ReadCommandsAsync(connection, matchId, ct).ConfigureAwait(false);
+                await ReadCommandsAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
 
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
             return new MatchJournal(match, players, commands);
         }
 
@@ -444,11 +472,11 @@ namespace HexWars.NetServer.Persistence
         }
 
         static async Task<IReadOnlyList<PersistedCommand>> ReadCommandsAsync(NpgsqlConnection connection,
-            Guid matchId, CancellationToken ct)
+            NpgsqlTransaction? transaction, Guid matchId, CancellationToken ct)
         {
             await using var command = new NpgsqlCommand(
                 "SELECT " + CommandColumns + " FROM match_commands WHERE match_id = @matchId ORDER BY sequence",
-                connection);
+                connection, transaction);
             command.Parameters.AddWithValue("matchId", matchId);
 
             var commands = new List<PersistedCommand>();
