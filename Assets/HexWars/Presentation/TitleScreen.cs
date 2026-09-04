@@ -22,6 +22,8 @@ namespace HexWars.Presentation
         Text _roomCodeError;
         string _committedRoomCode = "";
         float _overSince = -1f;
+        bool _steamBuild;      // evaluated once in Build() — the Steam menu replaces browse/join-by-code
+        bool _steamSubscribed; // an accepted invite must reach exactly one live title screen
         bool _dead; // set the moment this screen closes/hides — Destroy is deferred to end-of-frame,
                     // and a dying component's Update must not fire the self-heal (it would StartDemo()
                     // mid-frame right after join-by-code's Hide()+StartNetGame, clobbering the connection)
@@ -35,6 +37,14 @@ namespace HexWars.Presentation
         {
             _game = GetComponent<GameBootstrap>();
             if (_game == null) _game = FindAnyObjectByType<GameBootstrap>();
+            if (SteamRuntime.IsSteamBuild)
+            {
+                // the client (and its per-frame pump) must exist before the first lobby call, and an
+                // invite accepted from the overlay has to find a listener while we are the front door
+                SteamRuntime.EnsureCreated();
+                SteamRuntime.Client.InviteAccepted += OnInviteAccepted;
+                _steamSubscribed = true;
+            }
             Build();
         }
 
@@ -79,14 +89,32 @@ namespace HexWars.Presentation
         void Close()
         {
             _dead = true;
+            UnsubscribeSteam();
             if (_canvasGo != null) Destroy(_canvasGo);
             Destroy(this);
+        }
+
+        void OnDestroy() => UnsubscribeSteam(); // Destroy(this) is deferred; a destroyed screen must not hold the event
+
+        void UnsubscribeSteam()
+        {
+            if (!_steamSubscribed) return;
+            _steamSubscribed = false;
+            SteamRuntime.Client.InviteAccepted -= OnInviteAccepted;
+        }
+
+        void OnInviteAccepted(string lobbyId)
+        {
+            if (_dead || string.IsNullOrEmpty(lobbyId)) return;
+            Hide();
+            SteamLobbyScreen.OpenInvited(_game, lobbyId);
         }
 
         void Hide() => Close(); // sub-screen takeover — semantically "step aside", the demo keeps playing
 
         void Build()
         {
+            _steamBuild = SteamRuntime.IsSteamBuild;
             UiKit.EnsureEventSystem();
             _canvasGo = UiKit.Canvas("TitleCanvas", UiKit.OrderMenu, transform);
 
@@ -112,21 +140,37 @@ namespace HexWars.Presentation
 
             float y = -170f;
             const float bw = 380f, bh = 52f, gap = 62f;
-            UiKit.Button(col.transform, "Browse Games", 0f, y, bw, bh, () =>
-            { Hide(); GameBrowser.Open(_game); }, UiKit.ButtonStyle.Cta); y -= gap;
+            if (_steamBuild)
+            {
+                // Steam owns matchmaking here: no server room codes, no public browser — friends and
+                // quick match come through the lobby screen instead
+                UiKit.Button(col.transform, "Quick Match", 0f, y, bw, bh, () =>
+                { Hide(); SteamLobbyScreen.OpenQuickMatch(_game); }, UiKit.ButtonStyle.Cta); y -= gap;
 
-            UiKit.Button(col.transform, "Host Game", 0f, y, bw, bh, () =>
-            { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Host); }, UiKit.ButtonStyle.Primary); y -= gap;
+                UiKit.Button(col.transform, "Invite Friend", 0f, y, bw, bh, () =>
+                { Hide(); SteamLobbyScreen.OpenInvite(_game); }, UiKit.ButtonStyle.Primary); y -= gap;
 
-            _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 245f, bh,
-                                               "Room code");
-            _roomCodeField.gameObject.name = "Room code";
-            _roomCodeField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreRoomCodeEdit;
-            _roomCodeField.onSubmit.AddListener(_ => OnJoinByCode());
-            _roomCodeError = UiKit.Label(col.transform, "", -65f, y - 39f, 245f, 18f,
-                                         UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.Danger);
-            UiKit.Button(col.transform, "Join", 135f, y, 125f, bh, OnJoinByCode,
-                         UiKit.ButtonStyle.Primary); y -= gap;
+                UiKit.Button(col.transform, "Host Game", 0f, y, bw, bh, () =>
+                { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Host); }, UiKit.ButtonStyle.Primary); y -= gap;
+            }
+            else
+            {
+                UiKit.Button(col.transform, "Browse Games", 0f, y, bw, bh, () =>
+                { Hide(); GameBrowser.Open(_game); }, UiKit.ButtonStyle.Cta); y -= gap;
+
+                UiKit.Button(col.transform, "Host Game", 0f, y, bw, bh, () =>
+                { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Host); }, UiKit.ButtonStyle.Primary); y -= gap;
+
+                _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 245f, bh,
+                                                   "Room code");
+                _roomCodeField.gameObject.name = "Room code";
+                _roomCodeField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreRoomCodeEdit;
+                _roomCodeField.onSubmit.AddListener(_ => OnJoinByCode());
+                _roomCodeError = UiKit.Label(col.transform, "", -65f, y - 39f, 245f, 18f,
+                                             UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.Danger);
+                UiKit.Button(col.transform, "Join", 135f, y, 125f, bh, OnJoinByCode,
+                             UiKit.ButtonStyle.Primary); y -= gap;
+            }
 
             UiKit.Button(col.transform, "Play vs AI", 0f, y, bw, bh, () =>
             { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.VsAi); }, UiKit.ButtonStyle.Primary); y -= gap;
