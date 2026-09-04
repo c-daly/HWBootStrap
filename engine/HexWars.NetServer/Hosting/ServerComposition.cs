@@ -19,6 +19,9 @@ namespace HexWars.NetServer.Hosting
             // Registered unconditionally: the typed client resolves its options lazily, so a
             // Legacy-only deployment with no Steam credentials is unaffected by it being here.
             builder.Services.AddSteamWebApi();
+            // Stateless and options-driven: one instance serves every request, and resolving it here
+            // rather than constructing it in an endpoint keeps the lobby rules out of the HTTP layer.
+            builder.Services.AddSingleton<SteamLobbyValidator>();
             return builder;
         }
 
