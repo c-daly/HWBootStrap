@@ -19,6 +19,12 @@
     <PackageReference Include="Npgsql" Version="8.0.5" />
   </ItemGroup>
 
+  <!-- The schema travels inside the assembly: a container deploy has no SQL files to copy and the
+       migrations can never drift from the binary that applies them. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Persistence\Migrations\*.sql" LogicalName="HexWars.NetServer.Migrations.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="HexWars.NetServer.Tests" />
   </ItemGroup>
