@@ -82,6 +82,23 @@ namespace HexWars.NetServer.Tests
             return hash;
         }
 
+        /// <summary>Two appends that both claim the same sequence, submitted the way this store is actually
+        /// able to be raced.
+        ///
+        /// The answer must be the same either way, which is the point of putting the test here: the double
+        /// is a lock around a dictionary, so issuing them together would only ever serialise, while Postgres
+        /// really does have two connections deciding at once. The Postgres fixture overrides this to run
+        /// them concurrently; the base runs them in order.</summary>
+        protected virtual async Task<AppendResult[]> RaceAppendsAsync(Guid matchId, int expectedSequence,
+            (string Wire, string Issuer) first, (string Wire, string Issuer) second)
+        {
+            AppendResult one = await Store.AppendCommandAsync(
+                matchId, expectedSequence, first.Wire, first.Issuer, Move1, Ct);
+            AppendResult two = await Store.AppendCommandAsync(
+                matchId, expectedSequence, second.Wire, second.Issuer, Move1, Ct);
+            return new[] { one, two };
+        }
+
         // ---- creation --------------------------------------------------------
 
         [Test]
@@ -345,6 +362,45 @@ namespace HexWars.NetServer.Tests
             Assert.That(onWaiting, Is.EqualTo(new AppendResult(AppendStatus.MatchNotActive, 1)));
             Assert.That(onUnknown.Status, Is.EqualTo(AppendStatus.MatchNotActive));
             Assert.That((await Store.LoadJournalAsync(waiting.MatchId, Ct))!.Commands, Is.Empty);
+        }
+
+        [Test]
+        public async Task AppendCommand_AfterTheMatchWasCompleted_IsRefused()
+        {
+            var match = await NewActiveMatchAsync();
+            await Store.AppendCommandAsync(match.MatchId, 1, "E 0", match.Seat0, Move1, Ct);
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct),
+                Is.True);
+
+            AppendResult after =
+                await Store.AppendCommandAsync(match.MatchId, 2, "E 1", match.Seat1, Move2, Ct);
+
+            Assert.That(after, Is.EqualTo(new AppendResult(AppendStatus.MatchNotActive, 2)),
+                "a finished game is not an ordering problem, it is a closed one");
+            Assert.That((await Store.LoadJournalAsync(match.MatchId, Ct))!.Commands.Count, Is.EqualTo(1),
+                "a command arriving after the result must not reach the journal");
+        }
+
+        [Test]
+        public async Task TwoAppendsClaimingTheSameSequence_LeaveExactlyOneWinner()
+        {
+            var match = await NewActiveMatchAsync();
+
+            AppendResult[] results = await RaceAppendsAsync(
+                match.MatchId, 1, ("E 0", match.Seat0), ("M 0 2 3 0", match.Seat1));
+
+            Assert.That(results.Count(r => r.Status == AppendStatus.Appended), Is.EqualTo(1),
+                "two different commands cannot both own sequence 1");
+
+            AppendResult loser = results.Single(r => r.Status != AppendStatus.Appended);
+            Assert.That(loser.Status, Is.EqualTo(AppendStatus.Conflict),
+                "the other command is different content, not a retry of the winner");
+            Assert.That(loser.Sequence, Is.EqualTo(2),
+                "a conflict carries the sequence the journal actually wants next, so the caller can resync");
+
+            MatchJournal journal = (await Store.LoadJournalAsync(match.MatchId, Ct))!;
+            Assert.That(journal.Commands.Count, Is.EqualTo(1));
+            Assert.That(journal.Commands[0].Sequence, Is.EqualTo(1));
         }
 
         // ---- terminal statuses -----------------------------------------------
@@ -692,6 +748,14 @@ namespace HexWars.NetServer.Tests
             await database.ApplyMigrationsAsync();
             return new PostgresMatchStore(database.DataSource, NullLogger<PostgresMatchStore>.Instance);
         }
+
+        /// <summary>Really concurrent, because this store really can be: two connections take the match row
+        /// lock in whichever order the database decides and the loser must still be told the truth.</summary>
+        protected override Task<AppendResult[]> RaceAppendsAsync(Guid matchId, int expectedSequence,
+            (string Wire, string Issuer) first, (string Wire, string Issuer) second) =>
+            Task.WhenAll(
+                Store.AppendCommandAsync(matchId, expectedSequence, first.Wire, first.Issuer, Move1, Ct),
+                Store.AppendCommandAsync(matchId, expectedSequence, second.Wire, second.Issuer, Move1, Ct));
 
         [Test]
         public async Task TryCompleteMatch_OnAnEdgeTheSchemaTriggerForbids_IsStillARefusalRatherThanAnError()

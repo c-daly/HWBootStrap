@@ -121,6 +121,28 @@ namespace HexWars.NetServer.Tests
             Assert.That(await pending, Is.EqualTo(new[] { OnlyMigration }));
         }
 
+        [Test]
+        public async Task CancelledApply_LeavesNoAdvisoryLockHeld_SoTheNextApplyStillRuns()
+        {
+            using var cancelled = new CancellationTokenSource();
+            await cancelled.CancelAsync();
+
+            Assert.CatchAsync<OperationCanceledException>(() => Runner().ApplyAsync(cancelled.Token));
+
+            // The lock is session level and every instance takes the same one at startup. A run that gave
+            // up while holding it would queue every other instance behind a connection nobody will use
+            // again, and the deploy would look like a hung migration rather than a cancelled one.
+            Assert.That(await ScalarAsync<long>(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"),
+                Is.EqualTo(0L), "the cancelled run left an advisory lock held");
+
+            Task<IReadOnlyList<string>> next = Runner().ApplyAsync(CancellationToken.None);
+            Task first = await Task.WhenAny(next, Task.Delay(TimeSpan.FromSeconds(10)));
+
+            Assert.That(first, Is.SameAs(next), "the next apply queued behind the cancelled run's lock");
+            Assert.That(await next, Is.EqualTo(new[] { OnlyMigration }));
+        }
+
         // ---- schema shape ------------------------------------------------------
 
         [Test]
