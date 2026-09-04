@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="NUnit" Version="3.14.0" />
     <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
   </ItemGroup>
@@ -38,6 +39,9 @@
     <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyCoordinator.cs" Link="Presentation/Steam/SteamLobbyCoordinator.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamMatchApi.cs" Link="Presentation/Steam/FakeSteamMatchApi.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamLobbyCoordinatorTests.cs" Link="Presentation/Steam/SteamLobbyCoordinatorTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchApiContracts.cs" Link="Presentation/Steam/SteamMatchApiContracts.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchApiContractsTests.cs" Link="Presentation/Steam/SteamMatchApiContractsTests.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchProtocolTests.cs" Link="Presentation/Steam/SteamMatchProtocolTests.cs" />
   </ItemGroup>
 
 </Project>
