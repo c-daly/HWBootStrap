@@ -33,11 +33,15 @@ namespace HexWars.Presentation
 
         public bool IsConfigured { get { return _baseUrl.Length > 0; } }
 
+        /// <summary>The wire version this build speaks. A reply on another one is refused.</summary>
+        public int ProtocolVersion { get; set; } = SteamMatchConfig.DefaultProtocolVersion;
+
         /// <summary>Adds a configured client to a scene object.</summary>
-        public static SteamMatchApiClient Attach(GameObject host, string baseUrl)
+        public static SteamMatchApiClient Attach(GameObject host, string baseUrl, int protocolVersion)
         {
             var client = host.AddComponent<SteamMatchApiClient>();
             client.BaseUrl = baseUrl;
+            client.ProtocolVersion = protocolVersion > 0 ? protocolVersion : SteamMatchConfig.DefaultProtocolVersion;
             return client;
         }
 
@@ -105,7 +109,7 @@ namespace HexWars.Presentation
 
             Debug.Log("[SteamMatch] POST " + PathOf(url) + " -> " + status
                       + (transportError.Length == 0 ? string.Empty : " (" + transportError + ")"));
-            onDone(SteamMatchApiContracts.Parse(status, body));
+            onDone(SteamMatchApiContracts.Parse(status, body, ProtocolVersion));
         }
 
         /// <summary>Stops the coroutine first, so the aborted request is never touched after Dispose.</summary>

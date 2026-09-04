@@ -68,7 +68,7 @@ namespace HexWars.Presentation.Tests
         {
             var result = SteamMatchApiContracts.Parse(200,
                 @"{""matchId"":""m-1"",""protocolVersion"":2,""websocketUrl"":""wss://match.hexwars.test/ws/v2"","
-                + @"""seat"":1,""joinCredential"":""cred-1"",""credentialExpiresAt"":""2026-09-04T12:00:00Z""}");
+                + @"""seat"":1,""joinCredential"":""cred-1"",""credentialExpiresAt"":""2026-09-04T12:00:00Z""}", 2);
 
             Assert.That(result.Ok, Is.True);
             Assert.That(result.HttpStatus, Is.EqualTo(200));
@@ -83,7 +83,7 @@ namespace HexWars.Presentation.Tests
         public void Parse_SuccessWithoutACredentialIsMalformed()
         {
             var result = SteamMatchApiContracts.Parse(200,
-                @"{""matchId"":""m-1"",""websocketUrl"":""wss://match.hexwars.test/ws/v2"",""seat"":0}");
+                @"{""matchId"":""m-1"",""websocketUrl"":""wss://match.hexwars.test/ws/v2"",""seat"":0}", 2);
 
             Assert.That(result.Ok, Is.False);
             Assert.That(result.HttpStatus, Is.EqualTo(200));
@@ -94,7 +94,7 @@ namespace HexWars.Presentation.Tests
         public void Parse_AuthenticationFailureKeepsTheCodeAndPlayerMessage()
         {
             var result = SteamMatchApiContracts.Parse(401,
-                @"{""error"":""authentication_failed"",""message"":""Steam sign-in could not be verified.""}");
+                @"{""error"":""authentication_failed"",""message"":""Steam sign-in could not be verified.""}", 2);
 
             Assert.That(result.Ok, Is.False);
             Assert.That(result.HttpStatus, Is.EqualTo(401));
@@ -108,7 +108,7 @@ namespace HexWars.Presentation.Tests
         public void Parse_ServiceUnavailableKeepsItsCode()
         {
             var result = SteamMatchApiContracts.Parse(503,
-                @"{""error"":""service_unavailable"",""message"":""The match service is temporarily unavailable.""}");
+                @"{""error"":""service_unavailable"",""message"":""The match service is temporarily unavailable.""}", 2);
 
             Assert.That(result.Ok, Is.False);
             Assert.That(result.HttpStatus, Is.EqualTo(503));
@@ -119,7 +119,7 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void Parse_UnreadableErrorBodyIsMalformed()
         {
-            var result = SteamMatchApiContracts.Parse(500, "<html>bad gateway</html>");
+            var result = SteamMatchApiContracts.Parse(500, "<html>bad gateway</html>", 2);
 
             Assert.That(result.Ok, Is.False);
             Assert.That(result.HttpStatus, Is.EqualTo(500));
@@ -130,7 +130,7 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void Parse_ErrorBodyWithoutACodeIsMalformed()
         {
-            var result = SteamMatchApiContracts.Parse(409, @"{""message"":""no code here""}");
+            var result = SteamMatchApiContracts.Parse(409, @"{""message"":""no code here""}", 2);
 
             Assert.That(result.ErrorCode, Is.EqualTo(SteamMatchApiContracts.MalformedErrorCode));
         }
@@ -138,7 +138,7 @@ namespace HexWars.Presentation.Tests
         [Test]
         public void Parse_StatusZeroIsANetworkFailure()
         {
-            var result = SteamMatchApiContracts.Parse(0, "");
+            var result = SteamMatchApiContracts.Parse(0, "", 2);
 
             Assert.That(result.Ok, Is.False);
             Assert.That(result.HttpStatus, Is.EqualTo(0));
@@ -193,6 +193,58 @@ namespace HexWars.Presentation.Tests
             Assert.That(SteamMatchConfig.FromBaseUrl("  https://match.hexwars.test/  ").BaseUrl,
                 Is.EqualTo("https://match.hexwars.test"));
             Assert.That(SteamMatchConfig.FromBaseUrl("http://127.0.0.1:5234").IsConfigured, Is.True);
+        }
+
+        [Test]
+        public void Parse_AReplyOnAnotherProtocolVersion_IsAVersionMismatch()
+        {
+            var mismatch = SteamMatchApiContracts.Parse(200,
+                @"{""matchId"":""m-1"",""protocolVersion"":3,""websocketUrl"":""wss://match.hexwars.test/ws/v2"","
+                + @"""seat"":0,""joinCredential"":""cred-1""}", 2);
+
+            Assert.That(mismatch.Ok, Is.False);
+            Assert.That(mismatch.ErrorCode, Is.EqualTo(SteamMatchErrorCodes.IncompatibleVersion));
+
+            var missing = SteamMatchApiContracts.Parse(200,
+                @"{""matchId"":""m-1"",""websocketUrl"":""wss://match.hexwars.test/ws/v2"","
+                + @"""seat"":0,""joinCredential"":""cred-1""}", 2);
+
+            Assert.That(missing.ErrorCode, Is.EqualTo(SteamMatchErrorCodes.IncompatibleVersion),
+                "an absent protocolVersion reads as 0, which is not a version this build speaks");
+        }
+
+        [Test]
+        public void Parse_AnUnencryptedSocketUrl_IsRefused()
+        {
+            var result = SteamMatchApiContracts.Parse(200,
+                @"{""matchId"":""m-1"",""protocolVersion"":2,""websocketUrl"":""ws://match.hexwars.test/ws/v2"","
+                + @"""seat"":0,""joinCredential"":""cred-1""}", 2);
+
+            Assert.That(result.Ok, Is.False);
+            Assert.That(result.ErrorCode, Is.EqualTo(SteamMatchApiContracts.InsecureTransportErrorCode));
+            Assert.That(result.JoinCredential, Is.Null, "a credential must never ride a plaintext socket");
+        }
+
+        [Test]
+        public void Parse_ALoopbackDevelopmentSocket_IsStillAccepted()
+        {
+            foreach (var host in new[] { "127.0.0.1:5234", "localhost:5234", "[::1]:5234" })
+            {
+                var result = SteamMatchApiContracts.Parse(200,
+                    @"{""matchId"":""m-1"",""protocolVersion"":2,""websocketUrl"":""ws://" + host + @"/ws/v2"","
+                    + @"""seat"":0,""joinCredential"":""cred-1""}", 2);
+
+                Assert.That(result.Ok, Is.True, host);
+            }
+        }
+
+        [Test]
+        public void FromBaseUrl_RequiresHttpsAwayFromLoopback()
+        {
+            Assert.That(SteamMatchConfig.FromBaseUrl("http://match.hexwars.test").IsConfigured, Is.False);
+            Assert.That(SteamMatchConfig.FromBaseUrl("https://match.hexwars.test").IsConfigured, Is.True);
+            Assert.That(SteamMatchConfig.FromBaseUrl("http://localhost:5234").IsConfigured, Is.True);
+            Assert.That(SteamMatchConfig.FromBaseUrl("http://[::1]:5234").IsConfigured, Is.True);
         }
     }
 }

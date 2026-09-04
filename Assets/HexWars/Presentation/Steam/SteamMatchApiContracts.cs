@@ -70,6 +70,15 @@ namespace HexWars.Presentation
         /// <summary>This build has no match-service URL, so Steam play is switched off.</summary>
         public const string NotConfiguredErrorCode = "not_configured";
 
+        /// <summary>The service handed out a socket URL that is not encrypted.</summary>
+        public const string InsecureTransportErrorCode = "insecure_transport";
+
+        public const string InsecureTransportMessage =
+            "The match service offered an unencrypted connection, so it was refused.";
+
+        public const string IncompatibleVersionMessage =
+            "The match service speaks a different protocol version. Update HexWars in Steam.";
+
         public const string MalformedMessage =
             "The match service sent a reply this build could not read. Try again shortly.";
 
@@ -116,7 +125,7 @@ namespace HexWars.Presentation
         /// match id, a socket URL and a credential to count as success; anything unreadable in either
         /// direction is reported as <see cref="MalformedErrorCode"/> rather than guessed at.
         /// </summary>
-        public static SteamMatchApiResult Parse(long httpStatus, string? body)
+        public static SteamMatchApiResult Parse(long httpStatus, string? body, int expectedProtocolVersion)
         {
             if (httpStatus == 0) return SteamMatchApiResult.Failure(0, NetworkErrorCode, NetworkMessage);
 
@@ -129,6 +138,22 @@ namespace HexWars.Presentation
                     || string.IsNullOrEmpty(ok.JoinCredential))
                 {
                     return SteamMatchApiResult.Failure(httpStatus, MalformedErrorCode, MalformedMessage);
+                }
+
+                // A service on another protocol version would deal frames this build cannot read. A
+                // missing field arrives as 0, which is a mismatch too, not a free pass.
+                var expected = expectedProtocolVersion > 0 ? expectedProtocolVersion : SteamMatchConfig.DefaultProtocolVersion;
+                if (ok.ProtocolVersion != expected)
+                {
+                    return SteamMatchApiResult.Failure(
+                        httpStatus, SteamMatchErrorCodes.IncompatibleVersion, IncompatibleVersionMessage);
+                }
+
+                // The AUTH frame carries a single-use credential, so the socket has to be encrypted
+                // everywhere except a loopback development server.
+                if (!IsSecureSocketUrl(ok.WebsocketUrl))
+                {
+                    return SteamMatchApiResult.Failure(httpStatus, InsecureTransportErrorCode, InsecureTransportMessage);
                 }
 
                 return SteamMatchApiResult.Success(ok.MatchId!, ok.WebsocketUrl!, ok.JoinCredential!, ok.Seat);
@@ -152,6 +177,27 @@ namespace HexWars.Presentation
         internal static string NormalizeBase(string? baseUrl)
         {
             return (baseUrl ?? string.Empty).Trim().TrimEnd(TrailingSlash);
+        }
+
+        /// <summary>True for wss://, and for ws:// only when it points at this machine.</summary>
+        internal static bool IsSecureSocketUrl(string? url)
+        {
+            if (string.IsNullOrEmpty(url)) return false;
+
+            Uri? uri;
+            if (!Uri.TryCreate(url!.Trim(), UriKind.Absolute, out uri)) return false;
+            if (string.Equals(uri.Scheme, "wss", StringComparison.Ordinal)) return true;
+            return string.Equals(uri.Scheme, "ws", StringComparison.Ordinal) && IsLoopbackHost(uri.Host);
+        }
+
+        /// <summary>True for the three ways a URL names this machine. Nothing else is loopback.</summary>
+        internal static bool IsLoopbackHost(string? host)
+        {
+            if (string.IsNullOrEmpty(host)) return false;
+            var bare = host!.Replace("[", string.Empty).Replace("]", string.Empty);
+            return string.Equals(bare, "localhost", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(bare, "127.0.0.1", StringComparison.Ordinal)
+                || string.Equals(bare, "::1", StringComparison.Ordinal);
         }
     }
 
@@ -212,11 +258,13 @@ namespace HexWars.Presentation
 
             Uri? uri;
             if (!Uri.TryCreate(trimmed, UriKind.Absolute, out uri)) return SteamMatchSettings.NotConfigured;
-            if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
-                && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
-            {
-                return SteamMatchSettings.NotConfigured;
-            }
+            var isHttps = string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal);
+            var isHttp = string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal);
+            if (!isHttp && !isHttps) return SteamMatchSettings.NotConfigured;
+
+            // Auth tickets and join credentials travel in these request bodies. Plain http is only
+            // ever acceptable against a development server on this machine.
+            if (isHttp && !SteamMatchApiContracts.IsLoopbackHost(uri.Host)) return SteamMatchSettings.NotConfigured;
 
             return new SteamMatchSettings(trimmed, protocolVersion > 0 ? protocolVersion : DefaultProtocolVersion);
         }
