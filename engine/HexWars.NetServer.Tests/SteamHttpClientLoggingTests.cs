@@ -26,8 +26,12 @@ namespace HexWars.NetServer.Tests
         const string AuthOk =
             """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":false,"publisherbanned":false}}}""";
 
-        /// <summary>A second named client, to prove the log filter is scoped to the Steam one.</summary>
-        const string ProbeClientName = "probe";
+        /// <summary>
+        /// A second named client, to prove the log filter is scoped to the Steam one. Named so that it
+        /// starts with the Steam client name: the filter category is a prefix match, so a name the Steam
+        /// one is a prefix of is exactly the client a filter without a terminating dot would silence.
+        /// </summary>
+        const string ProbeClientName = SteamWebApiRegistration.HttpClientName + "Metrics";
 
         static WebApplicationFactory<Program> Host(
             FakeSteamHandler handler,
@@ -155,7 +159,7 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(
                 captured.Messages.Any(m => m.StartsWith(
-                    FrameworkCategory + SteamWebApiRegistration.HttpClientName, StringComparison.Ordinal)),
+                    FrameworkCategory + SteamWebApiRegistration.HttpClientName + ".", StringComparison.Ordinal)),
                 Is.False,
                 "the Steam request URI carries the publisher key and the auth ticket");
         }

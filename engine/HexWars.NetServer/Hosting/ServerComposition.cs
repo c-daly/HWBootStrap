@@ -20,8 +20,10 @@ namespace HexWars.NetServer.Hosting
             // request URI at Information, and for the Steam client that URI is the publisher key and the
             // auth ticket. Scoped to that one client on purpose - only its requests carry secrets, and a
             // filter on the whole prefix would silently blind every other client this server ever adds.
+            // The trailing dot matters: the category is matched by prefix, so without it this would also
+            // silence any client whose name merely starts with this one, such as SteamWebApiMetrics.
             builder.Logging.AddFilter(
-                "System.Net.Http.HttpClient." + SteamWebApiRegistration.HttpClientName, LogLevel.None);
+                "System.Net.Http.HttpClient." + SteamWebApiRegistration.HttpClientName + ".", LogLevel.None);
 
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
             // Registered unconditionally: the typed client resolves its options lazily, so a
