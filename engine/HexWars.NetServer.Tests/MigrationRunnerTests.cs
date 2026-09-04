@@ -368,6 +368,78 @@ namespace HexWars.NetServer.Tests
             Assert.That(await ScalarAsync<long>("SELECT count(*) FROM match_join_credentials"), Is.EqualTo(0L));
         }
 
+        // ---- the lifecycle is a one-way street ------------------------------------
+
+        [Test]
+        public async Task ACompletedDraw_CannotBeSetBackToActive()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, "active");
+            await SetStatusAsync(match, "completed", "completed_at = now()");
+
+            // A draw, so no winner_seat CHECK can be the thing that refuses this: the only reason left is
+            // the trigger. A finished game that can be nudged back to active starts accepting commands.
+            var refused = Assert.ThrowsAsync<PostgresException>(() => SetStatusAsync(match, "active"));
+
+            Assert.That(refused!.SqlState, Is.EqualTo(PostgresErrorCodes.RaiseException));
+            Assert.That(refused.MessageText, Does.Contain("illegal match status transition"));
+            Assert.That(await StatusAsync(match), Is.EqualTo("completed"));
+        }
+
+        [Test]
+        public async Task WaitingStraightToCompleted_IsRejectedEvenWithAReplayAndACompletedAt()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, "waiting");
+
+            // Everything the lifecycle CHECKs want is supplied, so this row would satisfy the column
+            // constraints. It is still a result for a game nobody played.
+            var refused = Assert.ThrowsAsync<PostgresException>(
+                () => SetStatusAsync(match, "completed", "start_replay = 'REPLAY', completed_at = now()"));
+
+            Assert.That(refused!.SqlState, Is.EqualTo(PostgresErrorCodes.RaiseException));
+            Assert.That(refused.MessageText, Does.Contain("illegal match status transition"));
+            Assert.That(await StatusAsync(match), Is.EqualTo("waiting"));
+        }
+
+        [TestCase("waiting", "active")]
+        [TestCase("waiting", "expired")]
+        [TestCase("waiting", "abandoned")]
+        [TestCase("active", "completed")]
+        [TestCase("active", "expired")]
+        [TestCase("active", "abandoned")]
+        public async Task EveryEdgeTheStoreTakes_IsAccepted(string from, string to)
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, from);
+
+            // Whatever the destination status needs, so the trigger is the only thing under test.
+            string extra = to switch
+            {
+                "active" => "start_replay = 'REPLAY'",
+                _ => "start_replay = COALESCE(start_replay, 'REPLAY'), completed_at = now()",
+            };
+
+            Assert.DoesNotThrowAsync(() => SetStatusAsync(match, to, extra));
+            Assert.That(await StatusAsync(match), Is.EqualTo(to));
+        }
+
+        [Test]
+        public async Task RewritingTheStatusAMatchAlreadyHas_IsNotATransition()
+        {
+            await _db.ApplyMigrationsAsync();
+            var match = Guid.NewGuid();
+            await InsertMatchAsync(match, LobbyId, "active");
+
+            // The trigger fires on any UPDATE that assigns the column, including one that assigns the value
+            // already there. That is a rewrite, not a move, and it must not be refused.
+            Assert.DoesNotThrowAsync(() => SetStatusAsync(match, "active"));
+            Assert.That(await StatusAsync(match), Is.EqualTo("active"));
+        }
+
         // ---- the URL the deploy actually sets -------------------------------------
 
         [Test]
@@ -403,6 +475,18 @@ namespace HexWars.NetServer.Tests
                 ("setup", "Annihilation 9 7 0 5 3 1 1 1 3 0"), ("replay", startReplay),
                 ("engine", "hexwars-engine/1"), ("protocol", 2), ("build", "test-build"),
                 ("now", DateTimeOffset.UtcNow), ("completed", completedAt), ("winner", winnerSeat));
+
+        /// <summary>Moves a match to a status, optionally setting whatever else that status needs. The
+        /// status column is always assigned, so the transition trigger always fires.</summary>
+        Task SetStatusAsync(Guid matchId, string status, string? alsoSet = null) =>
+            ExecuteAsync(
+                "UPDATE matches SET status = @status"
+                + (alsoSet is null ? string.Empty : ", " + alsoSet)
+                + " WHERE match_id = @id",
+                ("status", status), ("id", matchId));
+
+        Task<string> StatusAsync(Guid matchId) =>
+            ScalarAsync<string>("SELECT status FROM matches WHERE match_id = @id", ("id", matchId));
 
         Task InsertPlayerAsync(Guid matchId, string steamId, int seat) =>
             ExecuteAsync(

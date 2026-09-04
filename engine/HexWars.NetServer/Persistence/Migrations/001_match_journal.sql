@@ -90,3 +90,35 @@ CREATE INDEX IF NOT EXISTS ix_join_credentials_match_player ON match_join_creden
 
 -- The expired-credential purge sweeps on expires_at alone.
 CREATE INDEX IF NOT EXISTS ix_join_credentials_expires ON match_join_credentials (expires_at);
+
+-- The lifecycle is a one-way street, and this is where that is actually enforced.
+--
+-- The store writes every transition as an UPDATE whose WHERE clause already names the status it is
+-- willing to move from, so through the store a bad edge is a no-op rather than an error. But the store
+-- is not the only thing that will ever touch this table: the retention sweeper, an operator at a psql
+-- prompt and every migration yet to be written all get the same connection. A completed match that can
+-- be nudged back to active is a finished game that starts accepting commands again, and a waiting match
+-- that jumps straight to completed is a result for a game nobody played. Those are not writes we want to
+-- be one careless UPDATE away from, so the edges live in the schema.
+CREATE OR REPLACE FUNCTION matches_enforce_status_transition() RETURNS trigger
+LANGUAGE plpgsql AS $matches_status$
+BEGIN
+  -- BEFORE UPDATE OF status fires whenever the column is assigned, even to the value it already holds;
+  -- rewriting a row without moving it is not a transition.
+  IF OLD.status = NEW.status THEN
+    RETURN NEW;
+  END IF;
+
+  IF (OLD.status = 'waiting' AND NEW.status IN ('active', 'expired', 'abandoned'))
+     OR (OLD.status = 'active' AND NEW.status IN ('completed', 'expired', 'abandoned')) THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'illegal match status transition % -> %', OLD.status, NEW.status;
+END;
+$matches_status$;
+
+DROP TRIGGER IF EXISTS matches_enforce_status_transition ON matches;
+CREATE TRIGGER matches_enforce_status_transition
+  BEFORE UPDATE OF status ON matches
+  FOR EACH ROW EXECUTE FUNCTION matches_enforce_status_transition();

@@ -689,6 +689,27 @@ namespace HexWars.NetServer.Tests
             await database.ApplyMigrationsAsync();
             return new PostgresMatchStore(database.DataSource, NullLogger<PostgresMatchStore>.Instance);
         }
+
+        [Test]
+        public async Task TryCompleteMatch_OnAnEdgeTheSchemaTriggerForbids_IsStillARefusalRatherThanAnError()
+        {
+            var match = await NewActiveMatchAsync();
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct),
+                Is.True);
+
+            // completed -> abandoned is an edge the transition trigger raises on. The store never offers it
+            // to the database, because its own WHERE clause already names the statuses it will move from, so
+            // the caller gets false rather than a PostgresException it has no way to act on.
+            Assert.That(await Store.TryCompleteMatchAsync(
+                match.MatchId, MatchStatus.Abandoned, null, Ended.AddMinutes(1), Ct), Is.False);
+            Assert.That(await Store.TryCompleteMatchAsync(
+                match.MatchId, MatchStatus.Expired, null, Ended.AddMinutes(1), Ct), Is.False);
+
+            PersistedMatch stored = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(stored.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(stored.WinnerSeat, Is.EqualTo(0));
+            Assert.That(stored.CompletedAt, Is.EqualTo(Ended), "a refused transition changes nothing at all");
+        }
     }
 
     /// <summary>The same contract against the test double the coordinator tests will use, plus the two
