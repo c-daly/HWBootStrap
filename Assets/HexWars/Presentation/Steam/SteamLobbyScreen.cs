@@ -128,7 +128,7 @@ namespace HexWars.Presentation
             if (_handedOff)
             {
                 // the broker outlives the UI, but only for as long as the connection it serves
-                if (_game == null || _game.GetComponent<SteamMatchConnection>() == null) Close();
+                if (_game == null || _game.GetComponent<SteamMatchConnection>() == null) ReleaseCoordinator();
                 return;
             }
 
@@ -163,8 +163,34 @@ namespace HexWars.Presentation
             var pending = _pendingRefresh;
             _pendingRefresh = null;
             if (pending != null) pending(null);   // never leave a reconnect waiting on a dead screen
-            if (_coordinator != null) { _coordinator.Dispose(); _coordinator = null; }
+            if (_coordinator != null)
+            {
+                // After a handoff the lobby still belongs to the running match, so only the Steam
+                // subscriptions go; ReleaseAfterMatch (or ReleaseCoordinator) frees the rest when the
+                // match itself ends. Any other teardown is the player leaving, so release everything.
+                if (_handedOff) _coordinator.Detach();
+                else _coordinator.Dispose();
+                _coordinator = null;
+            }
             if (_apiComponent != null) { Destroy(_apiComponent); _apiComponent = null; }
+        }
+
+        /// <summary>
+        /// Frees a coordinator that stayed alive as the credential broker. Called from the
+        /// return-to-title path, which is the last chance to leave the Steam lobby behind.
+        /// </summary>
+        internal static void ReleaseAfterMatch(GameBootstrap game)
+        {
+            if (game == null) return;
+            var screen = game.GetComponent<SteamLobbyScreen>();
+            if (screen != null) screen.ReleaseCoordinator();
+        }
+
+        void ReleaseCoordinator()
+        {
+            if (_coordinator != null) { _coordinator.Dispose(); _coordinator = null; }
+            _handedOff = false;
+            Close();
         }
 
         // ----- flow --------------------------------------------------------------------------------
@@ -177,7 +203,7 @@ namespace HexWars.Presentation
             {
                 // an unconfigured build must say so instead of failing at the first request
                 if (!settings.IsConfigured) { ShowNotConfigured(); return; }
-                _apiComponent = SteamMatchApiClient.Attach(gameObject, settings.BaseUrl);
+                _apiComponent = SteamMatchApiClient.Attach(gameObject, settings.BaseUrl, settings.ProtocolVersion);
                 api = _apiComponent;
             }
 
@@ -189,11 +215,9 @@ namespace HexWars.Presentation
                 ClientBuild = Application.version,
                 RollSeed = () => UnityEngine.Random.Range(SteamLobbyRules.MinSeed, SteamLobbyRules.MaxSeed + 1),
             };
+            // No clock priming: coordinator deadlines are relative and start running on the first
+            // LateUpdate Tick, so the game clock being long past zero here does not matter.
             _coordinator = new SteamLobbyCoordinator(steam, api, config, OnStatus, OnMatchReady);
-            // prime the clock before the first operation: search and allocation deadlines are set
-            // against the internal clock of the coordinator, which reads zero until the first Tick,
-            // and the game clock is long past zero by the time anyone reaches the title screen
-            _coordinator.Tick(Time.unscaledTimeAsDouble);
 
             switch (_entry)
             {
@@ -237,6 +261,9 @@ namespace HexWars.Presentation
             if (pending != null) { _pendingRefresh = null; pending(ticket); return; }
 
             _handedOff = true;
+            // The coordinator has done its job. Keep it for credential reissues, but take it off the
+            // Steam events: from here an accepted invite belongs to the title screen alone.
+            if (_coordinator != null) _coordinator.Detach();
             if (_canvasGo != null) _canvasGo.SetActive(false);
             _game.StartSteamMatch(ticket, RefreshCredential);
         }
@@ -280,7 +307,8 @@ namespace HexWars.Presentation
         void OnInvite()
         {
             if (_dead || _status == null || string.IsNullOrEmpty(_status.LobbyId)) return;
-            SteamRuntime.Client.OpenInviteOverlay(_status.LobbyId!);
+            var client = SteamRuntime.ClientIfCreated;
+            if (client != null) client.OpenInviteOverlay(_status.LobbyId!);
         }
 
         void OnRetry()

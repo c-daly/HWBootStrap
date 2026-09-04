@@ -22,6 +22,7 @@ namespace HexWars.Presentation
         static SteamRuntime? _instance;
         static ISteamLobbyClient? _client;
         static bool _clientOverridden;
+        static bool _quitting;
 
         /// <summary>The shared lobby client. Created on first use.</summary>
         public static ISteamLobbyClient Client
@@ -34,11 +35,19 @@ namespace HexWars.Presentation
         }
 
         /// <summary>
+        /// The shared lobby client if one exists, without creating it. Teardown paths use this: an
+        /// OnDestroy that runs during shutdown must not initialise Steam all over again just to
+        /// unsubscribe from an event.
+        /// </summary>
+        public static ISteamLobbyClient? ClientIfCreated { get { return _client; } }
+
+        /// <summary>
         /// Creates the lobby client, plus the per-frame pump object once the game is playing.
         /// Safe to call repeatedly.
         /// </summary>
         public static void EnsureCreated()
         {
+            if (_quitting) return;   // the process is going away; never re-initialise Steam into that
             if (_client == null)
             {
                 _client = new SteamLobbyClient(message => Debug.Log("[Steam] " + message));
@@ -62,6 +71,7 @@ namespace HexWars.Presentation
             if (!_clientOverridden && _client != null) _client.Dispose();
             _client = client;
             _clientOverridden = true;
+            _quitting = false;   // a previous play session quitting must not poison the next one
         }
 
         void Update()
@@ -71,6 +81,7 @@ namespace HexWars.Presentation
 
         void OnApplicationQuit()
         {
+            _quitting = true;
             ReleaseClient();
         }
 

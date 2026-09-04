@@ -1,7 +1,7 @@
 #nullable enable
 using System;
 using System.Collections;
-using System.Globalization;
+using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using NativeWebSocket;
@@ -10,23 +10,21 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// The protocol-v2 link to a durable Steam match. Same shape as <see cref="NetClient"/> (which still
-    /// owns the legacy v1 browser path, untouched): one event-driven attempt at a time, the attempt ends
-    /// on the socket OnClose event rather than on the Connect Task, and retries use capped exponential
-    /// backoff. Three things differ from v1.
+    /// The protocol-v2 link to a durable Steam match: the socket, and nothing else. Every decision
+    /// about what a frame means, when an attempt is over and how long to wait before the next one
+    /// lives in <see cref="SteamMatchSession"/>, which is plain C# and unit tested; this class opens
+    /// sockets, feeds the session, and carries out what it asks for.
     /// <para>
-    /// One: there is no room in the URL and no token in the query string. The socket opens on the URL the
-    /// match service handed out and the very first frame is <c>AUTH matchId credential</c>; the seat only
-    /// counts as live once SEAT comes back.
+    /// Three things differ from the legacy v1 <see cref="NetClient"/> path, which is untouched. One:
+    /// there is no room in the URL and no token in the query string, so the first frame is
+    /// <c>AUTH matchId credential</c> and the seat only counts once SEAT comes back. Two: a join
+    /// credential is single-use, so every retry asks the caller for a fresh one first. Three: the
+    /// server speaks PING and announces a planned restart with SERVER RESTART.
     /// </para>
     /// <para>
-    /// Two: a join credential is single-use and short-lived, so every RETRY asks the caller for a fresh
-    /// one first (the lobby coordinator reissues it through the match service). A caller that answers null
-    /// has given up, and the drop becomes an ordinary connection-lost.
-    /// </para>
-    /// <para>
-    /// Three: the server speaks PING (answered with PONG) and announces a planned restart with
-    /// SERVER RESTART. A restart close is always retryable, immediately, even before a game started.
+    /// The socket callbacks may arrive off the main thread, so they only set volatile flags and queue
+    /// raw frames. <see cref="Update"/> is the single place the session is driven and its outputs are
+    /// carried out, which keeps every Unity call on the main thread.
     /// </para>
     /// </summary>
     public sealed class SteamMatchConnection : MonoBehaviour
@@ -34,7 +32,8 @@ namespace HexWars.Presentation
         /// <summary>How long a credential refresh may take before the drop counts as unrecoverable.</summary>
         public const float RefreshTimeoutSeconds = 30f;
 
-        static readonly float[] BackoffSeconds = { 1f, 2f, 4f, 8f, 15f }; // caps at 15s, then repeats
+        readonly SteamMatchSession _session = new SteamMatchSession();
+        readonly Queue<string> _inbound = new Queue<string>();
 
         WebSocket? _ws;
         GameBootstrap? _game;
@@ -47,11 +46,12 @@ namespace HexWars.Presentation
         /// <summary>True only after the server accepted the credential and dealt a seat.</summary>
         public bool Connected { get; private set; }
 
-        bool _closing;
-        int _attempt;                  // 0 = first-ever attempt; >0 = a retry after a drop
+        bool _closing;                 // deliberate teardown (Cancel / Main menu), not an error
+        volatile bool _socketOpened;   // the socket opened; the session has not been told yet
         volatile bool _attemptClosed;  // this attempt is over (OnClose fired, or it never opened)
-        bool _authFailed;              // the credential was rejected: retrying cannot fix that
-        bool _expectRestart;           // SERVER RESTART arrived, so the close behind it is planned
+        bool _stopped;                 // the session will not try again
+        bool _retryRequested;
+        double _retryDelay;
         bool _refreshPending;
         int _refreshGeneration;
 
@@ -65,36 +65,36 @@ namespace HexWars.Presentation
             _game = game;
             _ticket = ticket;
             _refresh = refreshCredential;
+            _session.UseTicket(ticket);
             StartCoroutine(Lifecycle());
         }
 
+        /// <summary>
+        /// One attempt per pass. An attempt ends on the socket close event OR on the session handshake
+        /// deadline, which is what stops a socket that opens and then never answers AUTH from hanging
+        /// the game on "Connecting..." for good.
+        /// </summary>
         IEnumerator Lifecycle()
         {
             while (true)
             {
                 OpenOnce();
-                while (!_attemptClosed) yield return null;
+                while (!_attemptClosed && !_retryRequested && !_stopped && !_closing) yield return null;
                 if (_closing) yield break;
 
-                var game = _game;
-                if (game == null) yield break;
-                if (_authFailed) yield break;   // GameBootstrap.OnNetAuthFailed already took the player home
-
-                var plannedRestart = _expectRestart;
-                _expectRestart = false;
-
-                // A first drop with no game yet is the pre-start case: nothing to reconnect into, so it
-                // keeps the v1 toast-and-stop behaviour. A restart is always worth retrying.
-                if (_attempt == 0 && game.State == null && !plannedRestart)
+                // The deadline may already have ended this attempt; only a real close needs telling.
+                if (_attemptClosed && !_retryRequested && !_stopped)
                 {
-                    game.OnNetClosed();
-                    yield break;
+                    _session.Closed();
+                    ExecuteOutputs();
                 }
+                if (_closing || _stopped) yield break;
+                if (!_retryRequested) yield break;
 
-                game.OnNetReconnecting(_attempt);
-                var wait = plannedRestart ? 0f : BackoffSeconds[Mathf.Min(_attempt, BackoffSeconds.Length - 1)];
-                _attempt++;
-                if (wait > 0f) yield return new WaitForSeconds(wait);
+                _retryRequested = false;
+                var wait = _retryDelay;
+                CloseSocket();
+                if (wait > 0) yield return new WaitForSeconds((float)wait);
                 if (_closing) yield break;
 
                 if (BeginRefresh())
@@ -105,11 +105,11 @@ namespace HexWars.Presentation
                     if (_refreshPending)
                     {
                         _refreshPending = false;
-                        _ticket = null;   // no answer in time: treat it as a give-up
+                        _session.CredentialRefreshFailed();   // no answer in time is a give-up
                     }
+                    ExecuteOutputs();
                 }
-
-                if (_ticket == null) { game.OnNetClosed(); yield break; }
+                if (_closing || _stopped) yield break;
             }
         }
 
@@ -133,7 +133,7 @@ namespace HexWars.Presentation
             if (!started)
             {
                 _refreshPending = false;
-                _ticket = null;   // no reissue possible: give up rather than replay a dead credential
+                _session.CredentialRefreshFailed();   // never replay a credential that is already spent
             }
             return true;
         }
@@ -142,7 +142,8 @@ namespace HexWars.Presentation
         {
             if (generation != _refreshGeneration) return;   // a stale answer from an abandoned attempt
             _refreshPending = false;
-            _ticket = ticket;
+            if (ticket != null) _ticket = ticket;
+            _session.CredentialRefreshed(ticket);
         }
 
         /// <summary>One attempt, event-driven exactly as in <see cref="NetClient"/>: the Connect Task is
@@ -150,6 +151,8 @@ namespace HexWars.Presentation
         void OpenOnce()
         {
             _attemptClosed = false;
+            _socketOpened = false;
+            _session.Attempting();
 
             var ticket = _ticket;
             if (ticket == null || string.IsNullOrEmpty(ticket.WebsocketUrl))
@@ -171,8 +174,7 @@ namespace HexWars.Presentation
             _ws.OnOpen += () =>
             {
                 Debug.Log("[SteamNet] open");
-                var current = _ticket;
-                if (current != null) Send(SteamMatchProtocol.AuthFrame(current.MatchId, current.JoinCredential));
+                _socketOpened = true;   // Update sends AUTH, on the main thread
             };
             _ws.OnError += e => Debug.LogError("[SteamNet] error: " + e);
             _ws.OnClose += c =>
@@ -181,7 +183,11 @@ namespace HexWars.Presentation
                 Debug.Log("[SteamNet] closed: " + c);
                 _attemptClosed = true;
             };
-            _ws.OnMessage += OnMessage;
+            _ws.OnMessage += data =>
+            {
+                var raw = Encoding.UTF8.GetString(data);
+                lock (_inbound) _inbound.Enqueue(raw);
+            };
 
             try
             {
@@ -205,59 +211,95 @@ namespace HexWars.Presentation
             if (ws != null && ws.State == WebSocketState.Open) await ws.SendText(message);
         }
 
-        void OnMessage(byte[] data)
+        void Update()
+        {
+#if !UNITY_WEBGL || UNITY_EDITOR
+            _ws?.DispatchMessageQueue();
+#endif
+            if (_closing) return;
+
+            // a started game means a drop has something to reconnect into
+            if (_game != null && _game.State != null) _session.GameStarted = true;
+
+            if (_socketOpened) { _socketOpened = false; _session.Opened(); }
+
+            while (true)
+            {
+                string? frame = null;
+                lock (_inbound) { if (_inbound.Count > 0) frame = _inbound.Dequeue(); }
+                if (frame == null) break;
+                _session.Frame(frame);
+            }
+
+            _session.Tick(Time.unscaledTimeAsDouble);
+            ExecuteOutputs();
+        }
+
+        /// <summary>Carries out whatever the session asked for. Main thread only.</summary>
+        void ExecuteOutputs()
         {
             var game = _game;
-            if (game == null) return;
-
-            var raw = Encoding.UTF8.GetString(data);
-
-            string code;
-            if (SteamMatchProtocol.TryParseAuthFail(raw, out code))
+            foreach (var output in _session.Drain())
             {
-                _authFailed = true;
-                Connected = false;
-                Debug.LogWarning("[SteamNet] auth rejected: " + code);
-                game.OnNetAuthFailed(code);
-                return;
-            }
-
-            if (string.Equals(raw, SteamMatchProtocol.Ping, StringComparison.Ordinal))
-            {
-                Send(SteamMatchProtocol.Pong);
-                return;
-            }
-
-            if (string.Equals(raw, SteamMatchProtocol.ServerRestart, StringComparison.Ordinal))
-            {
-                _expectRestart = true;   // the close right behind this is planned, so retry at once
-                Debug.Log("[SteamNet] server restarting, will reconnect");
-                return;
-            }
-
-            var msg = NetProtocol.Parse(raw);
-            switch (msg.Type)
-            {
-                case "SEAT":
-                    if (msg.Payload == "FULL") { Seat = null; game.OnNetSeatFull(); }
-                    else
-                    {
-                        int seat;
-                        if (!int.TryParse(msg.Payload, NumberStyles.Integer, CultureInfo.InvariantCulture, out seat))
-                        {
-                            Debug.LogError("[SteamNet] unreadable seat: " + msg.Payload);
-                            break;
-                        }
-                        Seat = (PlayerId)seat;
+                switch (output.Kind)
+                {
+                    case SteamMatchSessionOutputKind.Send:
+                        Send(output.Text);
+                        break;
+                    case SteamMatchSessionOutputKind.CatalogRequested:
+                        Send(StartingCatalogMessage());
+                        break;
+                    case SteamMatchSessionOutputKind.Seat:
+                        Seat = (PlayerId)output.Seat;
                         Connected = true;
-                        if (_attempt > 0) { _attempt = 0; game.OnNetReconnected(); }
-                        game.OnNetSeat(Seat.Value);
-                    }
-                    break;
-                case "CATALOG?": Send(StartingCatalogMessage()); break;
-                case "START":  game.OnNetStart(msg.Payload); break;
-                case "APPLY":  game.OnNetApply(CommandWire.Read(msg.Payload)); break;
-                case "REJECT": game.OnNetReject(msg.Payload); break;
+                        if (game != null) game.OnNetSeat(Seat.Value);
+                        break;
+                    case SteamMatchSessionOutputKind.Reconnected:
+                        if (game != null) game.OnNetReconnected();
+                        break;
+                    case SteamMatchSessionOutputKind.SeatFull:
+                        Seat = null;
+                        Connected = false;
+                        _stopped = true;
+                        if (game != null) game.OnNetSeatFull();
+                        break;
+                    case SteamMatchSessionOutputKind.Start:
+                        if (game != null) game.OnNetStart(output.Text);
+                        break;
+                    case SteamMatchSessionOutputKind.Apply:
+                        if (game != null) game.OnNetApply(CommandWire.Read(output.Text));
+                        break;
+                    case SteamMatchSessionOutputKind.Reject:
+                        if (game != null) game.OnNetReject(output.Text);
+                        break;
+                    case SteamMatchSessionOutputKind.AuthFailed:
+                        Connected = false;
+                        _stopped = true;
+                        Debug.LogWarning("[SteamNet] auth rejected: " + output.Text);
+                        if (game != null) game.OnNetAuthFailed(output.Text);
+                        break;
+                    case SteamMatchSessionOutputKind.Reconnecting:
+                        Connected = false;
+                        if (game != null) game.OnNetReconnecting(output.Seat);
+                        break;
+                    case SteamMatchSessionOutputKind.Retry:
+                        _retryRequested = true;
+                        _retryDelay = output.DelaySeconds;
+                        break;
+                    case SteamMatchSessionOutputKind.Closed:
+                        Connected = false;
+                        _stopped = true;
+                        if (game != null) game.OnNetClosed();
+                        break;
+                    case SteamMatchSessionOutputKind.GiveUp:
+                        // No fresh credential: this connection can never come back, so it takes itself
+                        // down and the bootstrap puts the player back on the title.
+                        Connected = false;
+                        _stopped = true;
+                        if (game != null) game.OnSteamReconnectAbandoned();
+                        Destroy(this);
+                        return;
+                }
             }
         }
 
@@ -268,11 +310,13 @@ namespace HexWars.Presentation
             return NetProtocol.Catalog(BarracksWire.Write(catalog));
         }
 
-        void Update()
+        async void CloseSocket()
         {
-#if !UNITY_WEBGL || UNITY_EDITOR
-            _ws?.DispatchMessageQueue();
-#endif
+            var ws = _ws;
+            _ws = null;
+            if (ws == null) return;
+            try { await ws.Close(); }
+            catch (Exception e) { Debug.LogWarning("[SteamNet] close failed: " + e.Message); }
         }
 
         async void OnDestroy()

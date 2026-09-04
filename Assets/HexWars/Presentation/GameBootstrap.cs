@@ -98,16 +98,23 @@ namespace HexWars.Presentation
         void Start()
         {
             Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
+
+            bool isWebGl = false;
 #if UNITY_WEBGL && !UNITY_EDITOR
-            // Browser builds enter the title/lobby instead of auto-starting the legacy editor
-            // hotseat game. A title selection may later switch back to local play.
-            Networked = true;
+            isWebGl = true;
 #endif
-            if (Networked)
+            // Which front door this launch opens is a rule, not a scene checkbox: see StartupRoute.
+            // A Steam build reaches the title even though the checked-in scene has Networked off.
+            string room = RoomFromPageUrl();
+            var route = StartupRoute.Decide(isWebGl, SteamRuntime.IsSteamBuild, Networked, !string.IsNullOrEmpty(room));
+
+            if (route != StartupRoute.Route.LocalGame)
             {
+                Networked = true;
                 SetupEnvironment();          // light/skybox now; the board renders when the server deals the start state
-                string room = RoomFromPageUrl();
-                if (!string.IsNullOrEmpty(room)) StartNetGame(room, null); // opened via a shared ?room= link → join it
+                // the client and its per-frame pump must exist before the first lobby call
+                if (route == StartupRoute.Route.TitleWithSteam) SteamRuntime.EnsureCreated();
+                if (StartupRoute.AutoJoinsRoom(route, !string.IsNullOrEmpty(room))) StartNetGame(room, null); // opened via a shared ?room= link → join it
                 else { StartDemo(); gameObject.AddComponent<TitleScreen>(); } // front door: demo + title menu
                 return;
             }
@@ -406,6 +413,8 @@ namespace HexWars.Presentation
         {
             Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
+            // a lobby coordinator kept alive as the credential broker must not outlive the match
+            SteamLobbyScreen.ReleaseAfterMatch(this);
             if (_net != null) { Destroy(_net); _net = null; }
             if (_steamNet != null) { Destroy(_steamNet); _steamNet = null; }
             Seat = null;
@@ -504,10 +513,22 @@ namespace HexWars.Presentation
                 TitleScreen.Reopen(this);
         }
 
-        /// <summary>A started game's socket dropped and NetClient is retrying with backoff. Called once
-        /// per attempt (so a persistent status line can show progress); the Toast only fires transitioning
-        /// INTO reconnecting, not on every retry, matching spec §7 ("every attempt updates the status
-        /// line" — GameHud's banner text is that status line).</summary>
+        /// <summary>
+        /// A Steam match dropped and no fresh join credential could be had, so there is nothing left to
+        /// reconnect to. Without this the connection sat there "reconnecting" forever behind a board
+        /// the server had already stopped accepting commands for. Take the player home instead.
+        /// </summary>
+        internal void OnSteamReconnectAbandoned()
+        {
+            Debug.Log("[SteamNet] no fresh join credential; abandoning the match.");
+            Reconnecting = false;
+            Toast.Show("Could not rejoin the match — returning to the title.");
+            ReturnToMenu();   // releases the lobby coordinator, drops the socket, and reopens the title
+        }
+
+        /// <summary>A started game socket dropped and the connection is retrying with backoff. Called
+        /// once per attempt (so a persistent status line can show progress); the Toast only fires
+        /// transitioning INTO reconnecting, not on every retry.</summary>
         internal void OnNetReconnecting(int attempt)
         {
             if (!Reconnecting) Toast.Show("Connection lost — reconnecting…", new Color(0.42f, 0.34f, 0.12f, 0.94f));

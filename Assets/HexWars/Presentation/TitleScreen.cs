@@ -42,8 +42,12 @@ namespace HexWars.Presentation
                 // the client (and its per-frame pump) must exist before the first lobby call, and an
                 // invite accepted from the overlay has to find a listener while we are the front door
                 SteamRuntime.EnsureCreated();
-                SteamRuntime.Client.InviteAccepted += OnInviteAccepted;
-                _steamSubscribed = true;
+                var client = SteamRuntime.ClientIfCreated;
+                if (client != null)
+                {
+                    client.InviteAccepted += OnInviteAccepted;
+                    _steamSubscribed = true;
+                }
             }
             Build();
         }
@@ -100,12 +104,20 @@ namespace HexWars.Presentation
         {
             if (!_steamSubscribed) return;
             _steamSubscribed = false;
-            SteamRuntime.Client.InviteAccepted -= OnInviteAccepted;
+            // ClientIfCreated, not Client: during shutdown this must not build a new Steam client
+            var client = SteamRuntime.ClientIfCreated;
+            if (client != null) client.InviteAccepted -= OnInviteAccepted;
         }
 
+        /// <summary>
+        /// The one place an accepted invite opens a lobby. It is honoured only while the title is the
+        /// front door: with a real match on screen an invite must not tear it down.
+        /// </summary>
         void OnInviteAccepted(string lobbyId)
         {
             if (_dead || string.IsNullOrEmpty(lobbyId)) return;
+            if (_game == null) return;
+            if (_game.State != null && !_game.DemoMode) return;
             Hide();
             SteamLobbyScreen.OpenInvited(_game, lobbyId);
         }
