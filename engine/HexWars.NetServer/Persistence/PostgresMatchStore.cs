@@ -21,15 +21,10 @@ namespace HexWars.NetServer.Persistence
         /// error, it is the answer "someone else allocated this lobby first".</summary>
         public const string OpenLobbyIndex = "ux_matches_open_lobby";
 
-        /// <summary>How many inserts allocation will attempt when each one collides with a match that had
-        /// closed again by the time it was read back.
-        ///
-        /// Every retry means another client won the race and then closed its match, which is a legal thing
-        /// for a lobby to do repeatedly: three attempts is well inside the range a busy lobby reaches by
-        /// accident, and a caller that gets an exception there has been told its lobby is broken when it is
-        /// merely busy. Eight is far enough out that only a lobby churning faster than it can be read gets
-        /// there, and it is still a bound rather than a spin.</summary>
-        public const int CreateAttempts = 8;
+        /// <summary>How many consecutive collisions pass before allocation says so out loud. It is a
+        /// reporting interval, not a limit: the loop below has no limit, because any fixed one would throw
+        /// on the attempt after a lobby had already gone quiet.</summary>
+        public const int CollisionsPerWarning = 8;
 
         const string MatchColumns =
             "match_id, steam_lobby_id, status, setup_wire, start_replay, engine_version, protocol_version, "
@@ -69,8 +64,18 @@ namespace HexWars.NetServer.Persistence
             // answer is their match. But the match it collided with can reach a terminal status before we
             // read it back, and then there is no match to return and no reason not to allocate after all.
             // That is a legal sequence of events, not a failure, so it is retried rather than thrown.
-            for (int attempt = 1; attempt <= CreateAttempts; attempt++)
+            //
+            // There is no attempt limit, deliberately. Every iteration ends in one of two answers that are
+            // both correct - an insert that committed, or an open match that was really there - so a limit
+            // only ever adds a third answer that is wrong: it throws on the attempt after the lobby went
+            // quiet, when the very next insert would have succeeded. The token is what stops this loop,
+            // which puts the bound where it belongs, with the caller.
+            int collisions = 0;
+
+            while (true)
             {
+                ct.ThrowIfCancellationRequested();
+
                 await using NpgsqlTransaction transaction =
                     await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
@@ -99,26 +104,24 @@ namespace HexWars.NetServer.Persistence
                         return new CreateMatchResult(existing, false);
                     }
 
-                    logger.LogInformation(
-                        "Lobby allocation collided with a match that had closed by the time it was read back; "
-                        + "retrying (attempt {Attempt} of {Attempts}).", attempt, CreateAttempts);
+                    collisions++;
 
-                    if (OnCreateRetryForTests is not null && attempt < CreateAttempts)
-                        await OnCreateRetryForTests().ConfigureAwait(false);
+                    if (collisions % CollisionsPerWarning == 0)
+                        // Not a failure, but not normal either: a lobby being opened and closed faster than
+                        // it can be read is worth an operator seeing, and naming it is the only way to find
+                        // out which client is doing it.
+                        logger.LogWarning(
+                            "Steam lobby {SteamLobbyId} keeps colliding during match allocation: {Collisions} "
+                            + "inserts in a row have hit a match that closed again before it could be read "
+                            + "back. Still retrying.", request.SteamLobbyId, collisions);
+                    else
+                        logger.LogInformation(
+                            "Lobby allocation collided with a match that had closed by the time it was read "
+                            + "back; retrying (collision {Collisions}).", collisions);
+
+                    if (OnCreateRetryForTests is not null) await OnCreateRetryForTests().ConfigureAwait(false);
                 }
             }
-
-            // Eight collisions in a row, none of them with a match that was still open when we looked. That
-            // is not a race any longer, it is a lobby being opened and closed faster than it can be read, so
-            // it is worth an operator seeing rather than another quiet retry.
-            logger.LogWarning(
-                "Gave up allocating a match for Steam lobby {SteamLobbyId} after {Attempts} attempts; every "
-                + "insert collided with a match that had closed again before it could be read back.",
-                request.SteamLobbyId, CreateAttempts);
-
-            throw new InvalidOperationException(
-                "lobby allocation kept colliding: " + CreateAttempts + " inserts in a row each hit an open "
-                + "match for that Steam lobby that had closed again before it could be read back.");
         }
 
         static async Task<PersistedMatch> InsertMatchAsync(NpgsqlConnection connection,

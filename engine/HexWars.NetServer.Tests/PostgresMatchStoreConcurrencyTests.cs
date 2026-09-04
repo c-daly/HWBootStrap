@@ -1,5 +1,7 @@
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Tests.Fakes;
 using HexWars.NetServer.Tests.Fixtures;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NUnit.Framework;
@@ -189,35 +191,80 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task CreateMatch_GivesUpOnlyAfterEightAttempts_WhenTheLobbyNeverStopsChurning()
+        public async Task CreateMatch_KeepsRetryingUntilTheLobbyIsFree()
         {
+            var logs = new CapturingLoggerProvider();
+            using ILoggerFactory factory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+            var store = new PostgresMatchStore(_db.DataSource, factory.CreateLogger<PostgresMatchStore>());
+
             string lobby = NextLobbyId();
-            Guid open = (await _store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
+            Guid open = (await store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
 
             int conflicts = 0, retries = 0;
 
             // Close the match the insert collided with, so the re-read finds nothing...
-            _store.OnCreateConflictForTests = async () =>
+            store.OnCreateConflictForTests = async () =>
             {
                 conflicts++;
                 await ExpireAsync(open);
             };
 
-            // ...then open another one before the retry, so the next insert collides again. Forever.
-            _store.OnCreateRetryForTests = async () =>
+            // ...then open another one before the retry, so the next insert collides again. Twelve times,
+            // which is past any bound the old code had, and then the lobby is left alone. No number of
+            // collisions makes allocation give up: the thirteenth insert has a free lobby and must take it.
+            store.OnCreateRetryForTests = async () =>
             {
                 retries++;
-                open = await InsertWaitingMatchAsync(lobby);
+                if (retries <= 11) open = await InsertWaitingMatchAsync(lobby);
             };
 
-            Assert.ThrowsAsync<InvalidOperationException>(
-                () => _store.CreateMatchForLobbyAsync(Request(lobby), Ct));
+            CreateMatchResult allocated = await store.CreateMatchForLobbyAsync(Request(lobby), Ct);
 
-            Assert.That(conflicts, Is.EqualTo(PostgresMatchStore.CreateAttempts),
-                "every attempt must have been made before giving up");
-            Assert.That(conflicts, Is.EqualTo(8), "a lobby gets eight tries, not three");
-            Assert.That(retries, Is.EqualTo(7),
-                "the last collision gives up rather than retrying a ninth time");
+            Assert.That(conflicts, Is.EqualTo(12), "twelve collisions before the lobby was left alone");
+            Assert.That(allocated.Created, Is.True, "the lobby was free, so the insert must have taken it");
+            Assert.That(allocated.Match.Status, Is.EqualTo(MatchStatus.Waiting));
+
+            // Churn that deep is worth saying out loud, once every eight collisions rather than every one.
+            string[] churnWarnings = logs.Messages
+                .Where(m => m.Contains("keeps colliding during match allocation", StringComparison.Ordinal))
+                .ToArray();
+            Assert.That(churnWarnings, Has.Length.EqualTo(1),
+                "twelve collisions crosses the eight mark exactly once");
+            Assert.That(churnWarnings[0], Does.Contain(lobby),
+                "the warning has to name the lobby or nobody can find the client doing it");
+        }
+
+        [Test]
+        public async Task CreateMatch_StopsWhenCancelled_WhileTheLobbyChurns()
+        {
+            string lobby = NextLobbyId();
+            Guid open = (await _store.CreateMatchForLobbyAsync(Request(lobby), Ct)).Match.MatchId;
+
+            using var cancelling = new CancellationTokenSource();
+            int conflicts = 0;
+
+            // A lobby that never stops churning, so nothing inside the store can end this loop. The token
+            // is the only bound there is, and it has to be honoured or a caller that gave up is still
+            // holding a connection and spinning against the database.
+            _store.OnCreateConflictForTests = async () =>
+            {
+                conflicts++;
+                await ExpireAsync(open);
+            };
+            _store.OnCreateRetryForTests = async () =>
+            {
+                open = await InsertWaitingMatchAsync(lobby);
+                if (conflicts >= 5) await cancelling.CancelAsync();
+            };
+
+            CreateMatchRequest request = Request(lobby);
+
+            Assert.CatchAsync<OperationCanceledException>(
+                () => _store.CreateMatchForLobbyAsync(request, cancelling.Token));
+
+            Assert.That(conflicts, Is.EqualTo(5), "the token stopped it, and nothing else could have");
+            Assert.That(await SeatCountAsync(request.Players[0].SteamId), Is.EqualTo(0L),
+                "a cancelled allocation must not leave a match behind");
         }
 
         // ---- one connection is enough ------------------------------------------
@@ -302,6 +349,14 @@ namespace HexWars.NetServer.Tests
                 + "WHERE match_id = @matchId");
             command.Parameters.AddWithValue("matchId", matchId);
             await command.ExecuteNonQueryAsync();
+        }
+
+        async Task<long> SeatCountAsync(string steamId)
+        {
+            await using var command = _db.DataSource.CreateCommand(
+                "SELECT count(*) FROM match_players WHERE steam_id = @steamId");
+            command.Parameters.AddWithValue("steamId", steamId);
+            return (long)(await command.ExecuteScalarAsync())!;
         }
 
         async Task<Guid> InsertWaitingMatchAsync(string lobbyId)
