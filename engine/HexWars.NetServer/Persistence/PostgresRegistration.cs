@@ -35,6 +35,11 @@ namespace HexWars.NetServer.Persistence
 
             services.AddSingleton<MigrationRunner>();
             services.AddSingleton<IHostedService, MigrationHostedService>();
+
+            // Singleton because the store holds no per-request state and the connection pool it wraps is
+            // the thing that must be shared. Registered against the interface so a test can swap in the
+            // in-memory double without the rest of the server noticing.
+            services.AddSingleton<IMatchStore, PostgresMatchStore>();
             return services;
         }
     }
