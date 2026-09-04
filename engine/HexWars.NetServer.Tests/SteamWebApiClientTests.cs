@@ -58,6 +58,53 @@ namespace HexWars.NetServer.Tests
 
         const string LobbyEmpty = """{"response":{}}""";
 
+        // ---- fail-closed bodies (every one of these is a reviewer supplied input) -----
+
+        // result is not OK: the whole response is a rejection, whatever else it carries.
+        const string AuthResultFailed =
+            """{"response":{"params":{"result":"FAILED","steamid":"76561197960287930","ownersteamid":"bogus","vacbanned":"bogus"}}}""";
+
+        // The same body claiming success: now the unusable ownersteamid and the non-boolean ban flag are
+        // the whole story, and silently substituting steamid for the owner would hide a real problem.
+        const string AuthResultOkWithBogusFields =
+            """{"response":{"params":{"result":"OK","steamid":"76561197960287930","ownersteamid":"bogus","vacbanned":"bogus"}}}""";
+
+        const string AuthWithoutResult =
+            """{"response":{"params":{"steamid":"76561197960287930","vacbanned":false}}}""";
+
+        const string AuthWithStringVacBanned =
+            """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":"1","publisherbanned":false}}}""";
+
+        // An errorcode that is not a number: copying it into the detail would put a ticket in a log.
+        const string AuthErrorCodeCarryingATicket =
+            """{"response":{"error":{"errorcode":"ticket=deadbeef","errordesc":"Invalid ticket"}}}""";
+
+        const string OwnershipFailedWithNumericOwnsApp =
+            """{"appownership":{"result":"FAILED","ownsapp":2,"ownersteamid":"76561197960287931"}}""";
+
+        const string OwnershipOkWithNumericOwnsApp =
+            """{"appownership":{"result":"OK","ownsapp":2,"ownersteamid":"76561197960287930"}}""";
+
+        const string OwnershipOkWithStringOwnsApp =
+            """{"appownership":{"result":"OK","ownsapp":"true","ownersteamid":"76561197960287930"}}""";
+
+        const string OwnershipFailedResult =
+            """{"appownership":{"result":"FAILED","ownsapp":true,"ownersteamid":"76561197960287930"}}""";
+
+        const string OwnershipUnparseableOwner =
+            """{"appownership":{"result":"OK","ownsapp":true,"ownersteamid":"bogus"}}""";
+
+        // Family sharing: a different owner is legitimate, so it is allowed and merely noted.
+        const string OwnershipFamilyShared =
+            """{"appownership":{"result":"OK","ownsapp":true,"ownersteamid":"76561197985812219"}}""";
+
+        // A lobby id that is not the one we asked for: the answer is about some other lobby.
+        const string LobbyEchoesADifferentId =
+            """{"response":{"steamid_lobby":"109775241010407639","steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"}]}}""";
+
+        const string LobbyWithANonObjectMember =
+            """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"},{"steamid":"76561197985812219"},7]}}""";
+
         // ---- harness -------------------------------------------------------
 
         sealed class RecordingLogger<T> : ILogger<T>
@@ -151,6 +198,70 @@ namespace HexWars.NetServer.Tests
             Assert.That(ex.PlayerSafeMessage, Is.EqualTo("Steam sign-in could not be verified."));
             Assert.That(ex.Message, Does.StartWith("AuthenticationFailed: "));
             Assert.That(ex.Message, Does.Contain("101"));
+        }
+
+        [Test]
+        public void Auth_ErrorCodeThatIsNotANumber_IsNotCopiedIntoTheDetail()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthErrorCodeCarryingATicket);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.AuthenticationFailed));
+            Assert.That(ex.Detail, Does.Not.Contain("deadbeef"));
+            Assert.That(ex.ToString(), Does.Not.Contain("deadbeef"));
+            Assert.That(ex.Detail, Does.Contain("error object"));
+        }
+
+        [Test]
+        public void Auth_ResultNotOk_IsAuthenticationFailed()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthResultFailed);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.AuthenticationFailed));
+        }
+
+        [Test]
+        public void Auth_MissingResult_IsAuthenticationFailed()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthWithoutResult);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.AuthenticationFailed));
+        }
+
+        [Test]
+        public void Auth_OkResultWithAnUnusableOwnerSteamId_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthResultOkWithBogusFields);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            // Never silently replaced by steamid: a present-but-unreadable owner is a real problem.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void Auth_BanFlagThatIsNotABoolean_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthWithStringVacBanned);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
         }
 
         [TestCase("nothex!!", TestName = "Auth_NonHexTicket_NeverReachesTheNetwork")]
@@ -298,6 +409,73 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void Ownership_NumericOwnsAppWithAFailedResult_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipFailedWithNumericOwnsApp);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [TestCase(OwnershipOkWithNumericOwnsApp, TestName = "Ownership_NumericOwnsApp_IsMalformedResponse")]
+        [TestCase(OwnershipOkWithStringOwnsApp, TestName = "Ownership_StringOwnsApp_IsMalformedResponse")]
+        public void Ownership_OwnsAppThatIsNotABoolean_IsMalformedResponse(string body)
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, body);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void Ownership_FailedResult_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipFailedResult);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void Ownership_UnparseableOwnerSteamId_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipUnparseableOwner);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public async Task Ownership_FamilyShared_IsAllowedAndLoggedWithoutTheAccountIds()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipFamilyShared);
+
+            Assert.That(await h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None), Is.True);
+
+            var noted = h.Logger.Entries.Where(e => e.Level == LogLevel.Information).ToList();
+            Assert.That(noted.Any(e => e.Message.Contains("family", StringComparison.OrdinalIgnoreCase)), Is.True,
+                "a licence held by another account is worth a log line");
+            foreach (var entry in h.Logger.Entries)
+            {
+                Assert.That(entry.Message, Does.Not.Contain(OwnerId));
+                Assert.That(entry.Message, Does.Not.Contain(MemberId));
+            }
+        }
+
+        [Test]
         public void Ownership_NonSteamId_ThrowsWithoutAnyRequest()
         {
             using var h = new Harness();
@@ -410,7 +588,22 @@ namespace HexWars.NetServer.Tests
             Assert.That(snapshot.OwnerSteamId, Is.EqualTo(OwnerId));
             Assert.That(h.Handler.Requests, Has.Count.EqualTo(2));
             Assert.That(h.Delays, Has.Count.EqualTo(1));
-            Assert.That(h.Delays[0], Is.EqualTo(TimeSpan.FromSeconds(1)));
+            // Jittered like every other delay, so a fleet told to wait one second does not return as one wave.
+            Assert.That(h.Delays[0], Is.InRange(TimeSpan.FromMilliseconds(1000), TimeSpan.FromMilliseconds(1100)));
+        }
+
+        [Test]
+        public async Task Lobby_RetryAfterZero_StillWaitsTheFloor()
+        {
+            using var h = new Harness();
+            h.Handler
+                .RespondRetryAfter(FakeSteamHandler.LobbyPath, HttpStatusCode.TooManyRequests, 0)
+                .RespondJson(FakeSteamHandler.LobbyPath, LobbyValveShape);
+
+            await h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None);
+
+            // Retry-After: 0 must not turn the retry budget into a tight loop against a struggling Steam.
+            Assert.That(h.Delays[0], Is.InRange(TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(150)));
         }
 
         [Test]
@@ -425,7 +618,9 @@ namespace HexWars.NetServer.Tests
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.RateLimited));
             Assert.That(h.Handler.Requests, Has.Count.EqualTo(3));
             // Retry-After is capped so a hostile header cannot stall a request thread for 30 seconds.
-            Assert.That(h.Delays, Is.All.EqualTo(TimeSpan.FromSeconds(2)));
+            Assert.That(
+                h.Delays,
+                Is.All.InRange(TimeSpan.FromMilliseconds(2000), TimeSpan.FromMilliseconds(2100)));
         }
 
         [Test]
@@ -480,7 +675,83 @@ namespace HexWars.NetServer.Tests
             Assert.That(h.Handler.Requests, Is.Empty);
         }
 
+        [Test]
+        public void Lobby_EchoingADifferentLobbyId_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, LobbyEchoesADifferentId);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            // An answer about some other lobby is not an answer about this one.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void Lobby_MemberThatIsNotAnObject_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, LobbyWithANonObjectMember);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            // Skipping it would silently shrink the roster, which is how a third player disappears.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
         // ---- transport ------------------------------------------------------
+
+        [Test]
+        public void Redirect_IsRefusedWithoutFollowingIt()
+        {
+            using var h = new Harness();
+            h.Handler.Respond(
+                FakeSteamHandler.LobbyPath, HttpStatusCode.TemporaryRedirect, "{}",
+                r => r.Headers.Location = new Uri("https://elsewhere.invalid/steal?ticket=deadbeef"));
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.ServiceUnavailable));
+            Assert.That(h.Handler.Requests, Has.Count.EqualTo(1), "a redirect must not be followed or retried");
+            Assert.That(
+                h.Logger.Entries.Any(e => e.Level == LogLevel.Error && e.Message.Contains("redirect")),
+                Is.True, "an unexpected redirect from Steam is an operator-visible event");
+        }
+
+        [Test]
+        public void OversizedResponseBody_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, "{\"padding\":\"" + new string((char)120, 300 * 1024) + "\"}");
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [Test]
+        public void TransportException_LeaksNeitherKeyNorTicketAndCarriesNoInnerException()
+        {
+            using var h = new Harness();
+            h.Handler.Throw(
+                FakeSteamHandler.AuthPath,
+                () => new HttpRequestException(
+                    "GET https://host/auth?key=publisher-secret&ticket=deadbeef failed"));
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.ServiceUnavailable));
+            // ToString() renders the inner exception too, which is exactly how the raw URL escaped before.
+            Assert.That(ex.ToString(), Does.Not.Contain("publisher-secret"));
+            Assert.That(ex.ToString(), Does.Not.Contain("deadbeef"));
+            Assert.That(ex.InnerException, Is.Null);
+            Assert.That(ex.Detail, Does.Contain(nameof(HttpRequestException)));
+        }
 
         [Test]
         public void Timeout_MapsToServiceUnavailable()
@@ -541,8 +812,8 @@ namespace HexWars.NetServer.Tests
     {
         [TestCase("76561197960287930", ExpectedResult = "76561197960287930")]
         [TestCase("  76561197960287930  ", ExpectedResult = "76561197960287930")]
-        [TestCase("109775241010407638", ExpectedResult = "109775241010407638")]
         [TestCase("076561197960287930", ExpectedResult = "76561197960287930")]
+        [TestCase("76561197985812219", ExpectedResult = "76561197985812219")]
         public string TryNormalize_AcceptsSteamId64(string raw)
         {
             Assert.That(SteamId64.TryNormalize(raw, out var canonical), Is.True);
@@ -558,6 +829,12 @@ namespace HexWars.NetServer.Tests
         [TestCase("7656119796028 7930", TestName = "TryNormalize_RejectsInnerWhitespace")]
         [TestCase("-76561197960287930", TestName = "TryNormalize_RejectsNegative")]
         [TestCase("7.6561197960287930e16", TestName = "TryNormalize_RejectsScientificNotation")]
+        // A lobby/chat id: universe 1 but account type 8 and a flagged instance, so it is not an account.
+        [TestCase("109775241010407638", TestName = "TryNormalize_RejectsALobbyId")]
+        // All ones: universe 255, type 15, instance 0xFFFFF. Nothing about it is an individual account.
+        [TestCase("18446744073709551615", TestName = "TryNormalize_RejectsAnAllOnesId")]
+        // Universe 1, type 1, but instance 2 (console) rather than 1 (desktop).
+        [TestCase("76561202255233024", TestName = "TryNormalize_RejectsANonDesktopInstance")]
         public void TryNormalize_RejectsAnythingElse(string? raw)
         {
             Assert.That(SteamId64.TryNormalize(raw, out var canonical), Is.False);

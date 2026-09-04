@@ -62,6 +62,20 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public FakeSteamHandler RespondStatus(string path, HttpStatusCode status) => Respond(path, status, "{}");
 
+        /// <summary>Scripts a transport failure, so a test can prove what an exception message survives.</summary>
+        public FakeSteamHandler Throw(string path, Func<Exception> factory)
+        {
+            var key = Normalise(path);
+            if (!_scripted.TryGetValue(key, out var queue))
+            {
+                queue = new Queue<Func<HttpResponseMessage>>();
+                _scripted[key] = queue;
+            }
+
+            queue.Enqueue(() => throw factory());
+            return this;
+        }
+
         public FakeSteamHandler RespondRetryAfter(string path, HttpStatusCode status, int seconds) =>
             Respond(path, status, "{}", r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds)));
 

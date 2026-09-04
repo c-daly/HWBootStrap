@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using HexWars.NetServer.Configuration;
@@ -25,8 +26,15 @@ namespace HexWars.NetServer.Steam
 
         const int MaxRetries = 2;
         const int MaxTicketLength = 4096;
+
+        /// <summary>The ceiling on a response body. Steam answers are kilobytes; this is a wide margin.</summary>
+        internal const int MaxResponseBytes = 256 * 1024;
+
         static readonly TimeSpan BaseBackoff = TimeSpan.FromMilliseconds(200);
         static readonly TimeSpan MaxHonouredRetryAfter = TimeSpan.FromSeconds(2);
+
+        /// <summary>The shortest wait between attempts, so Retry-After: 0 cannot become a tight loop.</summary>
+        static readonly TimeSpan MinBackoff = TimeSpan.FromMilliseconds(50);
 
         static readonly Regex HexOnly = new(
             @"^[0-9A-Fa-f]+$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -78,12 +86,19 @@ namespace HexWars.NetServer.Steam
 
             if (TryGetObject(response, "error", out var error))
             {
-                var code = ReadScalar(error, "errorcode") ?? "unknown";
                 throw new SteamApiException(
-                    SteamFailure.AuthenticationFailed, "steam rejected the ticket (errorcode " + code + ")");
+                    SteamFailure.AuthenticationFailed, "steam rejected the ticket (" + DescribeErrorCode(error) + ")");
             }
 
             var parameters = RequireObject(response, "params");
+
+            // The verdict is the result field, not the presence of a steamid. Reading it the other way
+            // round is what lets a rejection that still echoes an account id pass as a sign-in.
+            if (!IsResultOk(parameters))
+            {
+                throw new SteamApiException(
+                    SteamFailure.AuthenticationFailed, "response.params.result was not OK");
+            }
 
             if (!TryReadSteamId(parameters, "steamid", out var steamId))
             {
@@ -91,11 +106,26 @@ namespace HexWars.NetServer.Steam
                     SteamFailure.MalformedResponse, "response.params.steamid was missing or not a SteamID64");
             }
 
-            // Without Family Sharing Valve omits ownersteamid; the player then owns the game themselves.
-            var owner = TryReadSteamId(parameters, "ownersteamid", out var ownerId) ? ownerId : steamId;
+            // Without Family Sharing Valve omits ownersteamid and the player owns the game themselves. A
+            // present one we cannot read is a different thing entirely, and quietly substituting steamid
+            // for it would run the ownership check against the wrong account.
+            var owner = steamId;
+            if (TryGetProperty(parameters, "ownersteamid", out _))
+            {
+                if (!TryReadSteamId(parameters, "ownersteamid", out var ownerId))
+                {
+                    throw new SteamApiException(
+                        SteamFailure.MalformedResponse, "response.params.ownersteamid was not a SteamID64");
+                }
+
+                owner = ownerId;
+            }
 
             return new SteamIdentity(
-                steamId, owner, ReadBool(parameters, "vacbanned"), ReadBool(parameters, "publisherbanned"));
+                steamId,
+                owner,
+                RequireBool(parameters, "response.params", "vacbanned"),
+                RequireBool(parameters, "response.params", "publisherbanned"));
         }
 
         public async Task<bool> CheckAppOwnershipAsync(string steamId, CancellationToken ct)
@@ -114,9 +144,38 @@ namespace HexWars.NetServer.Steam
             using var document = await SendAsync(uri, allowRetry: true, notFound: null, ct).ConfigureAwait(false);
 
             var ownership = RequireObject(document.RootElement, "appownership");
-            if (!TryReadBool(ownership, "ownsapp", out var ownsApp))
+
+            // result is optional here, but when Valve sends one it is the verdict on the whole answer:
+            // a FAILED body that still carries an ownsapp field is not a licence check we may act on.
+            if (TryGetProperty(ownership, "result", out _) && !IsResultOk(ownership))
             {
-                throw new SteamApiException(SteamFailure.MalformedResponse, "appownership.ownsapp was missing");
+                throw new SteamApiException(SteamFailure.MalformedResponse, "appownership.result was not OK");
+            }
+
+            // Strictly a JSON boolean: a 2, or the string "true", is not Valve answering this question.
+            if (!TryReadStrictBool(ownership, "ownsapp", out var ownsApp))
+            {
+                throw new SteamApiException(
+                    SteamFailure.MalformedResponse, "appownership.ownsapp was missing or not a boolean");
+            }
+
+            if (TryGetProperty(ownership, "ownersteamid", out _))
+            {
+                if (!TryReadSteamId(ownership, "ownersteamid", out var licenceOwner))
+                {
+                    throw new SteamApiException(
+                        SteamFailure.MalformedResponse, "appownership.ownersteamid was not a SteamID64");
+                }
+
+                if (!string.Equals(licenceOwner, canonical, StringComparison.Ordinal))
+                {
+                    // Family Sharing is legitimate and stays allowed, but it is worth a line. Both ids
+                    // are hashed so the log does not become a record of who lends games to whom.
+                    _logger.LogInformation(
+                        "App licence for {Player} is family shared from {Owner}",
+                        SteamLogRedaction.HashSteamId(canonical),
+                        SteamLogRedaction.HashSteamId(licenceOwner));
+                }
             }
 
             return ownsApp;
@@ -151,8 +210,20 @@ namespace HexWars.NetServer.Steam
                 throw new SteamApiException(SteamFailure.LobbyChanged, "lobby not found");
             }
 
-            // Valve does not echo steamid_lobby on this endpoint, so the requested id is the fallback.
-            var lobby = TryReadLobbyId(response, "steamid_lobby", out var echoed) ? echoed : canonicalLobby;
+            // Valve does not echo steamid_lobby on this endpoint, so the requested id is the answer. When
+            // a response does echo one it has to be the lobby we asked about: an answer describing some
+            // other lobby would seat that lobby roster into this match.
+            if (TryGetProperty(response, "steamid_lobby", out var echoedValue))
+            {
+                if (!TryNormaliseLobbyId(ScalarToString(echoedValue), out var echoed) ||
+                    !string.Equals(echoed, canonicalLobby, StringComparison.Ordinal))
+                {
+                    throw new SteamApiException(
+                        SteamFailure.MalformedResponse, "the response echoed a different lobby id");
+                }
+            }
+
+            var lobby = canonicalLobby;
 
             if (!TryReadSteamId(response, "steamid_owner", out var owner))
             {
@@ -165,9 +236,14 @@ namespace HexWars.NetServer.Steam
             {
                 foreach (var member in memberArray.EnumerateArray())
                 {
-                    if (member.ValueKind != JsonValueKind.Object) continue;
+                    // Dropping an unreadable member would silently shrink the roster, and a two-player
+                    // lobby that arrives looking like a one-player lobby is how a seat goes missing.
+                    if (member.ValueKind != JsonValueKind.Object)
+                    {
+                        throw new SteamApiException(
+                            SteamFailure.MalformedResponse, "a lobby member was not an object");
+                    }
 
-                    // Dropping an unreadable member would silently deny a player their seat, so fail closed.
                     if (!TryReadSteamId(member, "steamid", out var memberId))
                     {
                         throw new SteamApiException(
@@ -240,16 +316,30 @@ namespace HexWars.NetServer.Steam
                 HttpStatusCode status = 0;
                 var body = string.Empty;
                 Exception? transport = null;
+                SteamApiException? bodyFailure = null;
                 TimeSpan? retryAfter = null;
                 var started = _time.GetTimestamp();
 
                 try
                 {
                     using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-                    using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+                    // ResponseHeadersRead so the status is known before a single byte of body is buffered.
+                    using var response = await _http
+                        .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
+                        .ConfigureAwait(false);
                     status = response.StatusCode;
                     retryAfter = ReadRetryAfter(response);
-                    body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+
+                    // Only a body we are going to parse is worth reading. An error body is never used, so
+                    // a failing Steam cannot make this process buffer anything at all.
+                    if (IsSuccess(status))
+                    {
+                        body = await ReadBoundedBodyAsync(response, ct).ConfigureAwait(false);
+                    }
+                }
+                catch (SteamApiException ex)
+                {
+                    bodyFailure = ex;   // an oversized body: a verdict, not a transient blip
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -272,8 +362,23 @@ namespace HexWars.NetServer.Steam
                     transport is null ? ((int)status).ToString(CultureInfo.InvariantCulture) : "transport-failure",
                     (long)_time.GetElapsedTime(started).TotalMilliseconds);
 
+                if (bodyFailure is not null) throw bodyFailure;
+
                 if (transport is null)
                 {
+                    // Automatic redirects are off, so a 3xx here is Steam pointing our key and our ticket
+                    // at some other host. Following it by hand would resend both; retrying it would spend
+                    // the budget on a request that can never succeed.
+                    if (IsRedirect(status))
+                    {
+                        _logger.LogError(
+                            "unexpected redirect from Steam on {Path} with status {Status}",
+                            uri.AbsolutePath, (int)status);
+                        throw new SteamApiException(
+                            SteamFailure.ServiceUnavailable,
+                            "unexpected redirect from Steam (HTTP " + (int)status + ")");
+                    }
+
                     if (notFound.HasValue && status == HttpStatusCode.NotFound)
                     {
                         throw new SteamApiException(notFound.Value, "lobby not found");
@@ -290,7 +395,7 @@ namespace HexWars.NetServer.Steam
                             "steam rejected the publisher key (HTTP " + (int)status + ")");
                     }
 
-                    if ((int)status < 400)
+                    if (IsSuccess(status))
                     {
                         return ParseJson(body);
                     }
@@ -314,11 +419,14 @@ namespace HexWars.NetServer.Steam
         {
             if (transport is not null)
             {
-                // Transport messages quote the request they failed on, so they are redacted before use.
+                // Transport messages quote the request they failed on, so they are redacted before use,
+                // and the cause is NOT attached as an inner exception: ToString() would render the
+                // original message verbatim and undo the redaction. The type name is the part an
+                // operator actually needs, so that is what survives.
                 return new SteamApiException(
                     SteamFailure.ServiceUnavailable,
-                    "transport failure after " + attempts + " attempt(s): " + SteamLogRedaction.Redact(transport.Message),
-                    transport);
+                    "transport failure after " + attempts + " attempt(s): " + transport.GetType().Name
+                        + ": " + SteamLogRedaction.Redact(transport.Message));
             }
 
             var failure = status == HttpStatusCode.TooManyRequests
@@ -341,15 +449,54 @@ namespace HexWars.NetServer.Steam
         {
             if (retryAfter.HasValue)
             {
-                // Honour the server, but a hostile or careless Retry-After must not park a request thread.
+                // Honour the server, but a hostile or careless Retry-After must not park a request
+                // thread, and a Retry-After of zero must not turn the retry budget into a tight loop
+                // against a Steam that is already struggling. Jittered like the backoff path, so a fleet
+                // told to wait the same second does not come back as one wave.
                 var honoured = retryAfter.Value;
-                if (honoured < TimeSpan.Zero) honoured = TimeSpan.Zero;
-                return honoured > MaxHonouredRetryAfter ? MaxHonouredRetryAfter : honoured;
+                if (honoured > MaxHonouredRetryAfter) honoured = MaxHonouredRetryAfter;
+                if (honoured < MinBackoff) honoured = MinBackoff;
+                return honoured + Jitter();
             }
 
             var backoff = TimeSpan.FromMilliseconds(BaseBackoff.TotalMilliseconds * Math.Pow(2, attempt));
-            return backoff + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 101));
+            return backoff + Jitter();
         }
+
+        static TimeSpan Jitter() => TimeSpan.FromMilliseconds(Random.Shared.Next(0, 101));
+
+        static bool IsSuccess(HttpStatusCode status) => (int)status >= 200 && (int)status < 300;
+
+        static bool IsRedirect(HttpStatusCode status) => (int)status >= 300 && (int)status < 400;
+
+        /// <summary>
+        /// Reads a response body with a hard ceiling. A Steam answer is a few kilobytes; a multi-megabyte
+        /// one is a proxy error page or an attempt to make this process allocate, and in both cases the
+        /// right move is to stop reading rather than to buffer it all and then decide.
+        /// </summary>
+        static async Task<string> ReadBoundedBodyAsync(HttpResponseMessage response, CancellationToken ct)
+        {
+            var declared = response.Content.Headers.ContentLength;
+            if (declared.HasValue && declared.Value > MaxResponseBytes) throw OversizedBody();
+
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var buffered = new MemoryStream();
+            var chunk = new byte[8192];
+
+            while (true)
+            {
+                var read = await stream.ReadAsync(chunk.AsMemory(), ct).ConfigureAwait(false);
+                if (read == 0) break;
+                if (buffered.Length + read > MaxResponseBytes) throw OversizedBody();
+                buffered.Write(chunk, 0, read);
+            }
+
+            return Encoding.UTF8.GetString(buffered.GetBuffer(), 0, (int)buffered.Length);
+        }
+
+        static SteamApiException OversizedBody() => new(
+            SteamFailure.MalformedResponse,
+            "the response body exceeded " + MaxResponseBytes.ToString(CultureInfo.InvariantCulture) + " bytes");
 
         static JsonDocument ParseJson(string body)
         {
@@ -357,9 +504,10 @@ namespace HexWars.NetServer.Steam
             {
                 return JsonDocument.Parse(body);
             }
-            catch (JsonException ex)
+            catch (JsonException)
             {
-                throw new SteamApiException(SteamFailure.MalformedResponse, "the response body was not JSON", ex);
+                // The parser message quotes the body it choked on, so only the verdict is kept.
+                throw new SteamApiException(SteamFailure.MalformedResponse, "the response body was not JSON");
             }
         }
 
@@ -407,14 +555,12 @@ namespace HexWars.NetServer.Steam
                 && SteamId64.TryNormalize(ScalarToString(value), out canonical);
         }
 
-        static bool TryReadLobbyId(JsonElement parent, string name, out string canonical)
-        {
-            canonical = string.Empty;
-            return TryGetProperty(parent, name, out var value)
-                && TryNormaliseLobbyId(ScalarToString(value), out canonical);
-        }
-
-        static bool TryReadBool(JsonElement parent, string name, out bool result)
+        /// <summary>
+        /// A flag is a JSON boolean and nothing else. The lenient reading this replaces - 0/1, "true",
+        /// "1" - meant a field Valve never sends as a string could be forged into a false negative on a
+        /// ban check by anything that could shape the body, and a 2 read as true.
+        /// </summary>
+        static bool TryReadStrictBool(JsonElement parent, string name, out bool result)
         {
             result = false;
             if (!TryGetProperty(parent, name, out var value)) return false;
@@ -426,29 +572,49 @@ namespace HexWars.NetServer.Steam
                     return true;
                 case JsonValueKind.False:
                     return true;
-                case JsonValueKind.Number:
-                    result = value.TryGetInt64(out var number) && number != 0;
-                    return true;
-                case JsonValueKind.String:
-                    var text = value.GetString();
-                    if (text is null) return false;
-                    if (bool.TryParse(text, out var parsed))
-                    {
-                        result = parsed;
-                        return true;
-                    }
-                    if (long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var numeric))
-                    {
-                        result = numeric != 0;
-                        return true;
-                    }
-                    return false;
                 default:
                     return false;
             }
         }
 
-        static bool ReadBool(JsonElement parent, string name) => TryReadBool(parent, name, out var value) && value;
+        /// <summary>An absent flag is false; a present one that is not a boolean is a malformed response.</summary>
+        static bool RequireBool(JsonElement parent, string path, string name)
+        {
+            if (!TryGetProperty(parent, name, out _)) return false;
+            if (TryReadStrictBool(parent, name, out var value)) return value;
+
+            throw new SteamApiException(
+                SteamFailure.MalformedResponse, path + "." + name + " was not a boolean");
+        }
+
+        /// <summary>True only for a literal string result of OK. Valve spells success exactly one way.</summary>
+        static bool IsResultOk(JsonElement parent) =>
+            TryGetProperty(parent, "result", out var value)
+            && value.ValueKind == JsonValueKind.String
+            && string.Equals(value.GetString(), "OK", StringComparison.Ordinal);
+
+        /// <summary>
+        /// The one part of a Valve error object that may be copied into an operator detail: a number.
+        /// Anything else is echoed content, and echoed content is where a ticket ends up in a log.
+        /// </summary>
+        static string DescribeErrorCode(JsonElement error)
+        {
+            if (TryGetProperty(error, "errorcode", out var value))
+            {
+                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var numeric))
+                {
+                    return "errorcode " + numeric.ToString(CultureInfo.InvariantCulture);
+                }
+
+                if (value.ValueKind == JsonValueKind.String &&
+                    long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                {
+                    return "errorcode " + parsed.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+
+            return "error object";
+        }
 
         /// <summary>
         /// Steam expresses key/value bags three ways depending on the endpoint and the era of the docs:

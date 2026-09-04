@@ -16,10 +16,27 @@ namespace HexWars.NetServer.Steam
         /// <summary>Longest decimal representation of a ulong, used to reject overflow before parsing.</summary>
         const int MaxDigits = 20;
 
+        // A SteamID64 is four packed fields, and exactly one combination of the top three describes an
+        // ordinary player: universe 1 (public), account type 1 (individual), instance 1 (desktop).
+        // Everything else - a clan, a chat room, a lobby, a game server, another universe - is a
+        // well-formed 17-digit number that is not an account, and every one of them is above the
+        // individual base, so a magnitude check alone lets them all through.
+        const int UniverseShift = 56;
+        const ulong UniverseMask = 0xFFUL;
+        const int AccountTypeShift = 52;
+        const ulong AccountTypeMask = 0xFUL;
+        const int InstanceShift = 32;
+        const ulong InstanceMask = 0xFFFFFUL;
+
+        const ulong PublicUniverse = 1UL;
+        const ulong IndividualAccountType = 1UL;
+        const ulong DesktopInstance = 1UL;
+
         /// <summary>
-        /// True when <paramref name="raw"/> is a SteamID64 for an individual account. Surrounding
-        /// whitespace and leading zeros are tolerated; the canonical form has neither. A JSON number must
-        /// be converted to its string form by the caller before it gets here.
+        /// True when <paramref name="raw"/> is a SteamID64 for an individual account in the public
+        /// universe on the desktop instance. Surrounding whitespace and leading zeros are tolerated; the
+        /// canonical form has neither. A JSON number must be converted to its string form by the caller
+        /// before it gets here.
         /// </summary>
         public static bool TryNormalize(string? raw, out string canonical)
         {
@@ -36,6 +53,10 @@ namespace HexWars.NetServer.Steam
 
             if (!ulong.TryParse(trimmed, NumberStyles.None, CultureInfo.InvariantCulture, out var value)) return false;
             if (value < IndividualBase) return false;
+
+            if (((value >> UniverseShift) & UniverseMask) != PublicUniverse) return false;
+            if (((value >> AccountTypeShift) & AccountTypeMask) != IndividualAccountType) return false;
+            if (((value >> InstanceShift) & InstanceMask) != DesktopInstance) return false;
 
             canonical = value.ToString(CultureInfo.InvariantCulture);
             return true;
