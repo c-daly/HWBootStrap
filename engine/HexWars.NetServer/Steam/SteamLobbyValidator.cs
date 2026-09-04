@@ -12,8 +12,15 @@ namespace HexWars.NetServer.Steam
     /// request-supplied roster, no caller-supplied seat map and no caller-supplied setup parameter. The
     /// only inputs are the snapshot Valve returned and the options of this server, so a client cannot
     /// name its opponent, hand itself seat 0, or smuggle in a board it never advertised to the other
-    /// player. The requester id is the one thing the caller contributes, and it is only ever used to
-    /// answer whether that account is the lobby owner; it can never add anyone to the match.
+    /// player. The requester is the one thing the caller contributes, and it is only ever used to answer
+    /// whether that account is the lobby owner; it can never add anyone to the match.
+    ///
+    /// The requester arrives as a <see cref="SteamIdentity"/> rather than a string, and ONLY an identity
+    /// returned by <see cref="ISteamWebApiClient.AuthenticateUserTicketAsync"/> may be passed. That is the
+    /// whole provenance rule: a bare string cannot say whether Valve vouched for it, so accepting one
+    /// would let any caller that could reach this class claim to be any account in the lobby. Only
+    /// <see cref="SteamIdentity.SteamId"/> decides who plays - never OwnerSteamId, which under Family
+    /// Sharing belongs to whoever bought the licence rather than to whoever signed in.
     ///
     /// Every rejection is a <see cref="SteamApiException"/> whose Detail is a fixed operator-facing
     /// string. Details never carry Steam ids: these lines end up in logs, and a lobby id joined to two
@@ -26,7 +33,8 @@ namespace HexWars.NetServer.Steam
         /// deliberate: membership before ownership before version before shape, so someone who is not in
         /// the lobby learns nothing about its contents.
         /// </summary>
-        public VerifiedLobby ValidateForMatchCreation(SteamLobbySnapshot lobby, string requesterSteamId)
+        /// <param name="requester">An identity Valve returned. Only its SteamId is read.</param>
+        public VerifiedLobby ValidateForMatchCreation(SteamLobbySnapshot lobby, SteamIdentity requester)
         {
             var steamOptions = steam.Value;
             var hostingOptions = hosting.Value;
@@ -51,15 +59,16 @@ namespace HexWars.NetServer.Steam
                 memberData[id] = member.Data;
             }
 
-            // 2. The requester must be in the lobby before anything else about it is disclosed.
-            if (!SteamId64.TryNormalize(requesterSteamId, out var requester) ||
-                !members.Contains(requester, StringComparer.Ordinal))
+            // 2. The requester must be in the lobby before anything else about it is disclosed. It is
+            //    the authenticated SteamId that is looked up, never the licence owner.
+            if (!SteamId64.TryNormalize(requester.SteamId, out var requesterId) ||
+                !members.Contains(requesterId, StringComparer.Ordinal))
             {
                 throw Fail(SteamFailure.NotLobbyMember, "requester is not a lobby member");
             }
 
             // 3. Only the owner starts the match; the guest waits for hw_match to appear.
-            if (!string.Equals(requester, owner, StringComparison.Ordinal))
+            if (!string.Equals(requesterId, owner, StringComparison.Ordinal))
             {
                 throw Fail(SteamFailure.NotLobbyOwner, "requester is not the lobby owner");
             }
@@ -125,12 +134,20 @@ namespace HexWars.NetServer.Steam
                 throw Fail(SteamFailure.LobbyChanged, "setup missing");
             }
 
-            var requested = GameSetup.Parse(setupRaw);
-            var setup = requested.Sanitized();
+            // 10b. Strictly, not with GameSetup.Parse: the engine parser substitutes a default for every
+            //      field it cannot read, so an unreadable hw_setup would quietly become the default board
+            //      and start a match neither player agreed to.
+            if (!SteamLobbyRules.TryParseSetupStrict(setupRaw, out var setup))
+            {
+                throw Fail(SteamFailure.LobbyChanged, "setup malformed");
+            }
 
-            // 11. quick-v1 pins every field but the seed. The check runs on the parsed value rather than
-            //     the sanitized one, so the engine clamp cannot launder an out-of-range seed into a match
-            //     that our own client would never have offered.
+            // 11. quick-v1 pins every field but the seed. The check runs on the value exactly as written
+            //     rather than on the sanitized one, so the engine clamp cannot launder an out-of-range
+            //     seed into a match that our own client would never have offered. Re-parsing is safe
+            //     here and nowhere else: the strict parse above has already proved this string is the
+            //     eleven integers ToWire emits, so Parse can no longer invent anything.
+            var requested = GameSetup.Parse(setupRaw);
             if (string.Equals(ruleset, SteamLobbyRules.QuickRuleset, StringComparison.Ordinal) &&
                 !SteamLobbyRules.IsQuickMatchSetup(requested))
             {
@@ -162,9 +179,10 @@ namespace HexWars.NetServer.Steam
         /// Throws with <see cref="SteamFailure.NotLobbyMember"/> unless the account is currently in the
         /// lobby. Used on join, where ownership, readiness and setup were already settled by the owner.
         /// </summary>
-        public void EnsureMember(SteamLobbySnapshot lobby, string steamId)
+        /// <param name="identity">An identity Valve returned. Only its SteamId is read.</param>
+        public void EnsureMember(SteamLobbySnapshot lobby, SteamIdentity identity)
         {
-            if (!SteamId64.TryNormalize(steamId, out var canonical))
+            if (!SteamId64.TryNormalize(identity.SteamId, out var canonical))
             {
                 throw Fail(SteamFailure.NotLobbyMember, "requester is not a lobby member");
             }

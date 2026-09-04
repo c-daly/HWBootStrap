@@ -1,3 +1,4 @@
+using System.Globalization;
 using HexWars.Engine;
 
 namespace HexWars.NetServer.Steam
@@ -39,6 +40,52 @@ namespace HexWars.NetServer.Steam
         /// </summary>
         public static bool IsQuickMatchSetup(GameSetup setup) =>
             setup.Seed is >= MinSeed and <= MaxSeed && SetupEquals(setup, QuickMatchSetup(setup.Seed));
+
+        /// <summary>The exact number of fields GameSetup.ToWire writes.</summary>
+        const int SetupFieldCount = 11;
+
+        /// <summary>Index of the two enumerated fields, which have a range rather than a clamp.</summary>
+        const int ModeIndex = 0;
+        const int FogIndex = 10;
+
+        /// <summary>
+        /// Reads an hw_setup the way a lobby is allowed to write one: exactly the eleven fields ToWire
+        /// emits, every one an invariant integer, with the two enumerated fields inside their range. On
+        /// success <paramref name="setup"/> is already Sanitized and can go straight to GameFactory.
+        ///
+        /// This exists because GameSetup.Parse is deliberately lenient - it substitutes a default for
+        /// every field it cannot read, which is right for a local lobby form and wrong for a value that
+        /// arrived from the network. Parsing hw_setup directly would turn a garbage string into the
+        /// default board and start a match neither player agreed to play.
+        /// </summary>
+        public static bool TryParseSetupStrict(string? wire, out GameSetup setup)
+        {
+            setup = default;
+            if (string.IsNullOrEmpty(wire)) return false;
+
+            var tokens = wire.Split(SetupSeparator, StringSplitOptions.None);
+            if (tokens.Length != SetupFieldCount) return false;
+
+            for (var i = 0; i < tokens.Length; i++)
+            {
+                if (!int.TryParse(
+                        tokens[i], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var value))
+                {
+                    return false;
+                }
+
+                // Mode and fog are enumerations, not clamped numbers: the engine clamp would silently
+                // turn a mode of 2 into Territory, which is not the game the lobby advertised.
+                if ((i == ModeIndex || i == FogIndex) && value is not (0 or 1)) return false;
+            }
+
+            setup = GameSetup.Parse(wire).Sanitized();
+            return true;
+        }
+
+        /// <summary>The single space GameSetup.ToWire puts between fields. Never a run of spaces: two in
+        /// a row would produce an empty token, and an empty token is not an integer.</summary>
+        const string SetupSeparator = " ";
 
         /// <summary>True for the two ruleset names a lobby may advertise.</summary>
         public static bool IsKnownRuleset(string? ruleset) =>

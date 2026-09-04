@@ -127,6 +127,12 @@ namespace HexWars.NetServer.Tests
 
         static LobbyBuilder Lobby() => new();
 
+        /// <summary>
+        /// Stands in for an identity Valve returned. The validator only ever takes one of these, so a
+        /// test cannot accidentally assert on a code path that trusts a caller-supplied Steam id.
+        /// </summary>
+        static SteamIdentity Identity(string steamId) => new(steamId, steamId, false, false);
+
         static SteamLobbyValidator Validator(
             uint appId = AppId, int protocolVersion = ProtocolVersion, string[]? compatibleBuilds = null) =>
             new(
@@ -147,7 +153,7 @@ namespace HexWars.NetServer.Tests
             var subject = validator ?? Validator();
             var snapshot = lobby.Snapshot();
             var error = Assert.Throws<SteamApiException>(
-                () => subject.ValidateForMatchCreation(snapshot, requester))!;
+                () => subject.ValidateForMatchCreation(snapshot, Identity(requester)))!;
 
             Assert.That(error.Failure, Is.EqualTo(expected));
             Assert.That(error.Detail, Does.Contain(detail));
@@ -222,7 +228,7 @@ namespace HexWars.NetServer.Tests
             // hw_app is compared numerically after uint.TryParse, not as text, so a client that writes a
             // zero-padded App ID is still talking about the same application.
             var result = Validator().ValidateForMatchCreation(
-                Lobby().WithMeta(SteamLobbyKeys.App, "0480000").Snapshot(), OwnerId);
+                Lobby().WithMeta(SteamLobbyKeys.App, "0480000").Snapshot(), Identity(OwnerId));
 
             Assert.That(result.OwnerSteamId, Is.EqualTo(OwnerId));
         }
@@ -257,7 +263,7 @@ namespace HexWars.NetServer.Tests
             var validator = Validator(compatibleBuilds: Array.Empty<string>());
 
             var result = validator.ValidateForMatchCreation(
-                Lobby().WithMeta(SteamLobbyKeys.Build, "some-unreviewed-build").Snapshot(), OwnerId);
+                Lobby().WithMeta(SteamLobbyKeys.Build, "some-unreviewed-build").Snapshot(), Identity(OwnerId));
 
             Assert.That(result.ClientBuild, Is.EqualTo("some-unreviewed-build"));
         }
@@ -268,7 +274,7 @@ namespace HexWars.NetServer.Tests
             var validator = Validator(compatibleBuilds: Array.Empty<string>());
 
             var result = validator.ValidateForMatchCreation(
-                Lobby().WithMeta(SteamLobbyKeys.Build, null).Snapshot(), OwnerId);
+                Lobby().WithMeta(SteamLobbyKeys.Build, null).Snapshot(), Identity(OwnerId));
 
             Assert.That(result.ClientBuild, Is.Null);
         }
@@ -334,6 +340,56 @@ namespace HexWars.NetServer.Tests
                 Lobby().WithMeta(SteamLobbyKeys.Setup, value));
         }
 
+        // ---- rule 10b: the setup must be a setup -------------------------------
+
+        [TestCase("garbage", TestName = "MalformedSetup_Garbage")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3", TestName = "MalformedSetup_TenTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 0", TestName = "MalformedSetup_TwelveTokens")]
+        [TestCase("2 9 7 0 4242 3 1 1 1 3 0", TestName = "MalformedSetup_ModeOutOfRange")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 7", TestName = "MalformedSetup_FogOutOfRange")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 x", TestName = "MalformedSetup_NonNumericToken")]
+        [TestCase("Annihilation 9 7 0 4242 3 1 1 1 3 0", TestName = "MalformedSetup_ModeAsAName")]
+        [TestCase("0  9 7 0 4242 3 1 1 1 3 0", TestName = "MalformedSetup_DoubleSpace")]
+        public void MalformedSetup_IsLobbyChanged(string wire)
+        {
+            // Deliberately the custom ruleset: under quick-v1 the ruleset check would reject these
+            // anyway, and the point is that a custom lobby cannot turn nonsense into a default board.
+            AssertRejected(
+                SteamFailure.LobbyChanged, "setup malformed",
+                Lobby().WithMeta(SteamLobbyKeys.Ruleset, SteamLobbyRules.CustomRuleset)
+                       .WithMeta(SteamLobbyKeys.Setup, wire));
+        }
+
+        [Test]
+        public void TryParseSetupStrict_AcceptsAWireFormSetupAndReturnsItSanitized()
+        {
+            var huge = new GameSetup(GameMode.Territory, 500, 7, 0, 77, 3, 1, 1, 1, 3, true);
+
+            Assert.That(SteamLobbyRules.TryParseSetupStrict(huge.ToWire(), out var setup), Is.True);
+            Assert.That(setup.ToWire(), Is.EqualTo(huge.Sanitized().ToWire()));
+        }
+
+        [TestCase(null, TestName = "TryParseSetupStrict_RejectsNull")]
+        [TestCase("", TestName = "TryParseSetupStrict_RejectsEmpty")]
+        [TestCase("garbage", TestName = "TryParseSetupStrict_RejectsGarbage")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3", TestName = "TryParseSetupStrict_RejectsTenTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 0", TestName = "TryParseSetupStrict_RejectsTwelveTokens")]
+        [TestCase("2 9 7 0 4242 3 1 1 1 3 0", TestName = "TryParseSetupStrict_RejectsUnknownMode")]
+        [TestCase("-1 9 7 0 4242 3 1 1 1 3 0", TestName = "TryParseSetupStrict_RejectsNegativeMode")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 7", TestName = "TryParseSetupStrict_RejectsUnknownFog")]
+        public void TryParseSetupStrict_RejectsAnythingElse(string? wire)
+        {
+            Assert.That(SteamLobbyRules.TryParseSetupStrict(wire, out _), Is.False);
+        }
+
+        [Test]
+        public void WellFormedSetup_IsStillAccepted()
+        {
+            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), Identity(OwnerId));
+
+            Assert.That(result.Setup.ToWire(), Is.EqualTo(SteamLobbyRules.QuickMatchSetup(Seed).ToWire()));
+        }
+
         // ---- rule 11: quick-v1 setup equality ---------------------------------
 
         [Test]
@@ -376,7 +432,7 @@ namespace HexWars.NetServer.Tests
         {
             var result = Validator().ValidateForMatchCreation(
                 Lobby().WithMeta(SteamLobbyKeys.Setup, SteamLobbyRules.QuickMatchSetup(seed).ToWire()).Snapshot(),
-                OwnerId);
+                Identity(OwnerId));
 
             Assert.That(result.Setup.Seed, Is.EqualTo(seed));
         }
@@ -386,7 +442,7 @@ namespace HexWars.NetServer.Tests
         [Test]
         public void ValidQuickLobby_SeatsTheOwnerFirstAndReturnsTheQuickSetup()
         {
-            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), OwnerId);
+            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), Identity(OwnerId));
 
             Assert.That(result.LobbyId, Is.EqualTo(LobbyId));
             Assert.That(result.OwnerSteamId, Is.EqualTo(OwnerId));
@@ -404,7 +460,7 @@ namespace HexWars.NetServer.Tests
         public void OwnerListedSecond_StillTakesSeatZero()
         {
             var result = Validator().ValidateForMatchCreation(
-                Lobby().WithMembers(GuestId, OwnerId).Snapshot(), OwnerId);
+                Lobby().WithMembers(GuestId, OwnerId).Snapshot(), Identity(OwnerId));
 
             Assert.That(result.Players[0].SteamId, Is.EqualTo(OwnerId));
             Assert.That(result.Players[0].Seat, Is.EqualTo(0));
@@ -416,7 +472,7 @@ namespace HexWars.NetServer.Tests
         [TestCase("076561198000000001")]
         public void NonCanonicalRequesterId_StillMatchesTheOwner(string requester)
         {
-            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), requester);
+            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), Identity(requester));
 
             Assert.That(result.OwnerSteamId, Is.EqualTo(OwnerId));
             Assert.That(result.Players[0].SteamId, Is.EqualTo(OwnerId));
@@ -429,7 +485,7 @@ namespace HexWars.NetServer.Tests
                 Lobby().WithMembers(" 76561198000000001", "076561198000000002")
                        .WithOwner("76561198000000001 ")
                        .Snapshot(),
-                OwnerId);
+                Identity(OwnerId));
 
             Assert.That(result.OwnerSteamId, Is.EqualTo(OwnerId));
             Assert.That(result.Players[1].SteamId, Is.EqualTo(GuestId));
@@ -446,7 +502,7 @@ namespace HexWars.NetServer.Tests
                 Lobby().WithMeta(SteamLobbyKeys.Ruleset, SteamLobbyRules.CustomRuleset)
                        .WithMeta(SteamLobbyKeys.Setup, huge.ToWire())
                        .Snapshot(),
-                OwnerId);
+                Identity(OwnerId));
 
             Assert.That(result.Ruleset, Is.EqualTo(SteamLobbyRules.CustomRuleset));
             Assert.That(result.Setup.Width, Is.EqualTo(64));
@@ -462,7 +518,7 @@ namespace HexWars.NetServer.Tests
                 Lobby().WithMeta(SteamLobbyKeys.Ruleset, SteamLobbyRules.CustomRuleset)
                        .WithMeta(SteamLobbyKeys.Setup, custom.ToWire())
                        .Snapshot(),
-                OwnerId);
+                Identity(OwnerId));
 
             Assert.That(result.Setup.ToWire(), Is.EqualTo(custom.Sanitized().ToWire()));
         }
@@ -474,7 +530,7 @@ namespace HexWars.NetServer.Tests
         [TestCase("  76561198000000002 ")]
         public void EnsureMember_AcceptsAnAccountInTheLobby(string steamId)
         {
-            Assert.DoesNotThrow(() => Validator().EnsureMember(Lobby().Snapshot(), steamId));
+            Assert.DoesNotThrow(() => Validator().EnsureMember(Lobby().Snapshot(), Identity(steamId)));
         }
 
         [TestCase(StrangerId)]
@@ -485,11 +541,38 @@ namespace HexWars.NetServer.Tests
             var snapshot = Lobby().Snapshot();
 
             var error = Assert.Throws<SteamApiException>(
-                () => Validator().EnsureMember(snapshot, steamId))!;
+                () => Validator().EnsureMember(snapshot, Identity(steamId)))!;
 
             Assert.That(error.Failure, Is.EqualTo(SteamFailure.NotLobbyMember));
             Assert.That(error.PlayerSafeMessage, Is.EqualTo(SteamFailureMessages.NotLobbyMember));
             AssertNoSteamIds(error.Detail);
+        }
+
+        // ---- provenance of the requester ------------------------------------------
+
+        [Test]
+        public void FamilySharedIdentity_IsSeatedByThePlayerNotTheLicenceOwner()
+        {
+            // Under Family Sharing the licence belongs to another account entirely. The seat belongs to
+            // the account that signed in, so only SteamId may ever decide who plays.
+            var shared = new SteamIdentity(OwnerId, StrangerId, false, false);
+
+            var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), shared);
+
+            Assert.That(result.OwnerSteamId, Is.EqualTo(OwnerId));
+            Assert.That(result.Players[0].SteamId, Is.EqualTo(OwnerId));
+            Assert.That(result.Players.Select(p => p.SteamId), Does.Not.Contain(StrangerId));
+        }
+
+        [Test]
+        public void EnsureMember_ReadsTheIdentitySteamIdNotItsLicenceOwner()
+        {
+            var shared = new SteamIdentity(StrangerId, OwnerId, false, false);
+
+            var error = Assert.Throws<SteamApiException>(
+                () => Validator().EnsureMember(Lobby().Snapshot(), shared))!;
+
+            Assert.That(error.Failure, Is.EqualTo(SteamFailure.NotLobbyMember));
         }
 
         // ---- rules helper --------------------------------------------------------
