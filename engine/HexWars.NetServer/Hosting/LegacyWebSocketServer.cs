@@ -4,6 +4,8 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading.Channels;
 using HexWars.Engine;
+using HexWars.NetServer.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace HexWars.NetServer.Hosting
 {
@@ -27,7 +29,8 @@ namespace HexWars.NetServer.Hosting
         internal static async Task Handle(HttpContext ctx)
         {
             if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
-            if (!OriginAllowed(ctx)) { ctx.Response.StatusCode = 403; return; }
+            var hosting = ctx.RequestServices.GetRequiredService<IOptions<MatchHostingOptions>>().Value;
+            if (!OriginPolicy.IsAllowed(ctx, hosting.AllowedWebOrigins)) { ctx.Response.StatusCode = 403; return; }
             string room = NormalizeRoom(ctx.Request.Query["room"].ToString());
             bool isPrivate = ctx.Request.Query["private"].ToString() == "1";
             var setup = ParseSetup(ctx.Request.Query["setup"].ToString());
@@ -100,20 +103,6 @@ namespace HexWars.NetServer.Hosting
                 }
             } while (!res.EndOfMessage);
             return Encoding.UTF8.GetString(ms.ToArray());
-        }
-
-        /// <summary>When both an Origin header and a request Host are present, reject a mismatched
-        /// Origin before Accept (audit M13) — closes cross-site WebSocket hijacking of a logged-in
-        /// session. Absent/unparseable Origin (non-browser clients, the in-process selftest) is allowed
-        /// through unchanged, matching the spec's "when both present" scope.</summary>
-        static bool OriginAllowed(HttpContext ctx)
-        {
-            string origin = ctx.Request.Headers.Origin.ToString();
-            string host = ctx.Request.Host.Value;
-            if (string.IsNullOrEmpty(origin) || string.IsNullOrEmpty(host)) return true;
-            if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri)) return true;
-            string originAuthority = originUri.IsDefaultPort ? originUri.Host : $"{originUri.Host}:{originUri.Port}";
-            return string.Equals(originAuthority, host, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>Parse the host's lobby picks from the connect query (?setup=...); default if absent/bad.</summary>
