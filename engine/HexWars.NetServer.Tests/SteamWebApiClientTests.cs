@@ -656,10 +656,10 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.RateLimited));
             Assert.That(h.Handler.Requests, Has.Count.EqualTo(3));
-            // Retry-After is capped so a hostile header cannot stall a request thread for 30 seconds.
-            Assert.That(
-                h.Delays,
-                Is.All.InRange(TimeSpan.FromMilliseconds(2000), TimeSpan.FromMilliseconds(2100)));
+            // Retry-After is capped so a hostile header cannot stall a request thread for 30 seconds, and
+            // the cap is on the total wait: jitter added after it would put the ceiling back over budget.
+            Assert.That(h.Delays, Is.All.LessThanOrEqualTo(TimeSpan.FromMilliseconds(2000)));
+            Assert.That(h.Delays, Is.All.GreaterThanOrEqualTo(TimeSpan.FromMilliseconds(1900)));
         }
 
         [Test]
@@ -790,6 +790,36 @@ namespace HexWars.NetServer.Tests
             Assert.That(ex.ToString(), Does.Not.Contain("deadbeef"));
             Assert.That(ex.InnerException, Is.Null);
             Assert.That(ex.Detail, Does.Contain(nameof(HttpRequestException)));
+        }
+
+        [Test]
+        public void ResponseStreamFailure_MapsToServiceUnavailable()
+        {
+            using var h = new Harness();
+            h.Handler.RespondWithAFailingBody(FakeSteamHandler.AuthPath);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            // The headers said 200 and then the connection died, so the failure arrives out of the body
+            // read rather than the send. Unmapped it would leave a request handler facing a raw IOException.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.ServiceUnavailable));
+            Assert.That(ex.Detail, Does.Contain(nameof(IOException)));
+        }
+
+        [Test]
+        public async Task Lobby_ResponseStreamFailure_IsRetriedLikeAnyTransportFailure()
+        {
+            using var h = new Harness();
+            h.Handler
+                .RespondWithAFailingBody(FakeSteamHandler.LobbyPath)
+                .RespondJson(FakeSteamHandler.LobbyPath, LobbyValveShape);
+
+            var snapshot = await h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None);
+
+            Assert.That(snapshot.OwnerSteamId, Is.EqualTo(OwnerId));
+            Assert.That(h.Handler.Requests, Has.Count.EqualTo(2));
+            Assert.That(h.Delays, Has.Count.EqualTo(1));
         }
 
         [Test]

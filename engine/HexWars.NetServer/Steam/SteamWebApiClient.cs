@@ -355,6 +355,13 @@ namespace HexWars.NetServer.Steam
                 {
                     transport = ex;
                 }
+                catch (IOException ex)
+                {
+                    // The body read can fail long after the headers arrived, and .NET surfaces that as an
+                    // IOException (HttpIOException on a real connection) rather than an HttpRequestException.
+                    // Unmapped it would leave a request handler facing a raw transport exception.
+                    transport = ex;
+                }
 
                 // Never the full URL: the query string carries the publisher key and the auth ticket.
                 _logger.LogInformation(
@@ -456,9 +463,12 @@ namespace HexWars.NetServer.Steam
                 // against a Steam that is already struggling. Jittered like the backoff path, so a fleet
                 // told to wait the same second does not come back as one wave.
                 var honoured = retryAfter.Value;
-                if (honoured > MaxHonouredRetryAfter) honoured = MaxHonouredRetryAfter;
                 if (honoured < MinBackoff) honoured = MinBackoff;
-                return honoured + Jitter();
+
+                // The cap is on the total wait. Applied before the jitter it is not a cap at all: the
+                // thread still parks for the ceiling plus whatever the jitter adds on top.
+                var total = honoured + Jitter();
+                return total > MaxHonouredRetryAfter ? MaxHonouredRetryAfter : total;
             }
 
             var backoff = TimeSpan.FromMilliseconds(BaseBackoff.TotalMilliseconds * Math.Pow(2, attempt));

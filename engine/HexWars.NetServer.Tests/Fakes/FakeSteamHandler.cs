@@ -76,6 +76,89 @@ namespace HexWars.NetServer.Tests.Fakes
             return this;
         }
 
+        /// <summary>
+        /// Scripts a 200 whose body stream fails part way through. This is what a connection dropped
+        /// after the headers looks like to the client: an IOException out of the read, not out of the
+        /// send, so it never reaches the HttpRequestException catch.
+        /// </summary>
+        public FakeSteamHandler RespondWithAFailingBody(string path)
+        {
+            var key = Normalise(path);
+            if (!_scripted.TryGetValue(key, out var queue))
+            {
+                queue = new Queue<Func<HttpResponseMessage>>();
+                _scripted[key] = queue;
+            }
+
+            queue.Enqueue(() => new HttpResponseMessage(HttpStatusCode.OK) { Content = new FailingContent() });
+            return this;
+        }
+
+        sealed class FailingContent : HttpContent
+        {
+            protected override Task<Stream> CreateContentReadStreamAsync() =>
+                Task.FromResult<Stream>(new FailingStream());
+
+            protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+                throw new IOException("the response stream failed after the headers");
+
+            protected override bool TryComputeLength(out long length)
+            {
+                length = 0;
+                return false;
+            }
+        }
+
+        /// <summary>Hands back a plausible opening fragment and then fails, as a truncated body does.</summary>
+        sealed class FailingStream : Stream
+        {
+            static readonly byte[] Prefix = Encoding.UTF8.GetBytes("{\"response\":");
+
+            int _read;
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => _read;
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                if (_read >= Prefix.Length) throw new IOException("the response stream failed after the headers");
+
+                var take = Math.Min(count, Prefix.Length - _read);
+                Array.Copy(Prefix, _read, buffer, offset, take);
+                _read += take;
+                return take;
+            }
+
+            public override ValueTask<int> ReadAsync(
+                Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                if (_read >= Prefix.Length) throw new IOException("the response stream failed after the headers");
+
+                var take = Math.Min(buffer.Length, Prefix.Length - _read);
+                Prefix.AsMemory(_read, take).CopyTo(buffer);
+                _read += take;
+                return ValueTask.FromResult(take);
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+
         public FakeSteamHandler RespondRetryAfter(string path, HttpStatusCode status, int seconds) =>
             Respond(path, status, "{}", r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds)));
 
