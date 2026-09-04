@@ -1094,18 +1094,46 @@ namespace HexWars.NetServer.Tests
             Assert.That(SteamLogRedaction.Redact(string.Empty), Is.Empty);
         }
 
+        // The key is process wide, so a test that installs one must not leave it installed.
+        [TearDown]
+        public void RestoreARandomLogPseudonymKey() =>
+            SteamLogRedaction.ConfigureKey(Convert.FromHexString(Guid.NewGuid().ToString("N")));
+
         [Test]
-        public void HashSteamId_IsStableTwelveCharactersAndHidesTheId()
+        public void HashSteamId_IsAStableSixteenHexHandleThatHidesTheId()
         {
             const string steamId = "76561197960287930";
+            SteamLogRedaction.ConfigureKey(Convert.FromHexString(Guid.NewGuid().ToString("N")));
 
             var hashed = SteamLogRedaction.HashSteamId(steamId);
 
-            Assert.That(hashed, Has.Length.EqualTo(12));
+            // 64 bits of handle: short enough to read in a log line, wide enough that two accounts in one
+            // deployment do not collide and mislead an operator correlating them.
+            Assert.That(hashed, Has.Length.EqualTo(20));
             Assert.That(hashed, Does.StartWith("sid:"));
+            Assert.That(hashed.Substring(4), Does.Match("^[0-9a-f]{16}$"));
             Assert.That(hashed, Does.Not.Contain(steamId));
             Assert.That(SteamLogRedaction.HashSteamId(steamId), Is.EqualTo(hashed));
             Assert.That(SteamLogRedaction.HashSteamId("76561197960287931"), Is.Not.EqualTo(hashed));
+        }
+
+        [Test]
+        public void HashSteamId_IsKeyedSoALogReaderCannotPrecomputeTheNamespace()
+        {
+            const string steamId = "76561197960287930";
+
+            SteamLogRedaction.ConfigureKey(Convert.FromHexString("00112233445566778899aabbccddeeff"));
+            var underFirstKey = SteamLogRedaction.HashSteamId(steamId);
+            var repeated = SteamLogRedaction.HashSteamId(steamId);
+
+            SteamLogRedaction.ConfigureKey(Convert.FromHexString("ffeeddccbbaa99887766554433221100"));
+            var underSecondKey = SteamLogRedaction.HashSteamId(steamId);
+
+            // Same key, same handle: correlating one player across log lines still works.
+            Assert.That(repeated, Is.EqualTo(underFirstKey));
+            // Different key, different handle. Steam account ids are an enumerable namespace, so an
+            // unkeyed digest is a lookup table anyone holding the log can build offline.
+            Assert.That(underSecondKey, Is.Not.EqualTo(underFirstKey));
         }
 
         [Test]
