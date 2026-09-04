@@ -42,6 +42,10 @@
     <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchApiContracts.cs" Link="Presentation/Steam/SteamMatchApiContracts.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchApiContractsTests.cs" Link="Presentation/Steam/SteamMatchApiContractsTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchProtocolTests.cs" Link="Presentation/Steam/SteamMatchProtocolTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/StartupRoute.cs" Link="Presentation/Steam/StartupRoute.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/StartupRouteTests.cs" Link="Presentation/Steam/StartupRouteTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSession.cs" Link="Presentation/Steam/SteamMatchSession.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSessionTests.cs" Link="Presentation/Steam/SteamMatchSessionTests.cs" />
   </ItemGroup>
 
 </Project>
