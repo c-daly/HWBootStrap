@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace HexWars.NetServer.Persistence
 {
     /// <summary>
@@ -125,6 +127,15 @@ namespace HexWars.NetServer.Persistence
         /// <summary>SHA-256, so 32 bytes. The schema enforces the same length.</summary>
         public const int CredentialHashBytes = 32;
 
+        /// <summary>What both stores say when a command or a credential names somebody who holds no seat.
+        /// Postgres reaches it through a foreign key violation, the double by looking; the caller should not
+        /// be able to tell which store it is talking to.</summary>
+        public const string NoSeatMessage = "steam id holds no seat in this match";
+
+        /// <summary>The same expression as the CHECK on match_players.steam_id.</summary>
+        static readonly Regex SteamIdPattern =
+            new("^[0-9]{1,20}$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
         public static void ValidatePlayers(IReadOnlyList<(string SteamId, int Seat)> players)
         {
             ArgumentNullException.ThrowIfNull(players);
@@ -148,6 +159,29 @@ namespace HexWars.NetServer.Persistence
                 if (!steamIds.Add(steamId))
                     throw new ArgumentException("The same Steam id was given both seats.", nameof(players));
             }
+        }
+
+        /// <summary>
+        /// Every Steam id the store accepts, checked against the same pattern the schema does.
+        ///
+        /// It is deliberately the schema pattern rather than the 17 digits a real SteamID64 has: the column
+        /// is what actually refuses bad data, and a guard that were stricter than the column would make the
+        /// in-memory double reject rows Postgres would have taken.
+        /// </summary>
+        public static void ValidateSteamId(string? steamId, string parameterName)
+        {
+            if (steamId is null || !SteamIdPattern.IsMatch(steamId))
+                throw new ArgumentException(
+                    "A Steam id is 1 to 20 decimal digits and nothing else.", parameterName);
+        }
+
+        /// <summary>A winner is a seat or nobody. Anything else is a programming error, not a transition the
+        /// store could refuse politely: the schema has no column value for it.</summary>
+        public static void ValidateWinnerSeat(int? winnerSeat, string parameterName)
+        {
+            if (winnerSeat is not (null or 0 or 1))
+                throw new ArgumentException(
+                    "Seat " + winnerSeat + " is not a seat; only 0 and 1 exist.", parameterName);
         }
 
         public static void ValidateCredentialHash(byte[] credentialHash, string parameterName)

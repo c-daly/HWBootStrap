@@ -193,30 +193,52 @@ namespace HexWars.NetServer.Persistence
 
         public async Task SaveCatalogAsync(Guid matchId, string steamId, string catalogWire, CancellationToken ct)
         {
-            await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
-            await using var batch = new NpgsqlBatch(connection);
+            MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
 
-            // The EXISTS is the guard, not a read-then-write: a start that commits between the two would
-            // otherwise let a late catalogue frame edit a match that is already dealt.
-            var save = new NpgsqlBatchCommand(
+            await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using NpgsqlTransaction transaction =
+                await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+            // FOR UPDATE on the match row is what serialises this against TryStartMatchAsync, whose UPDATE
+            // wants the same lock. A save therefore either lands before the start and is picked up by the
+            // read that builds the start replay, or it arrives after it and does nothing at all. An EXISTS
+            // guard would not do: the start could commit between evaluating it and writing the row.
+            string? status = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
+            if (status is null || MatchStatusText.FromDb(status) != MatchStatus.Waiting)
+            {
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return;
+            }
+
+            int updated;
+            await using (var save = new NpgsqlCommand(
                 "UPDATE match_players SET catalog_wire = @catalogWire "
-                + "WHERE match_id = @matchId AND steam_id = @steamId "
-                + "AND EXISTS (SELECT 1 FROM matches WHERE match_id = @matchId AND status = @waiting)");
-            save.Parameters.AddWithValue("catalogWire", catalogWire);
-            save.Parameters.AddWithValue("matchId", matchId);
-            save.Parameters.AddWithValue("steamId", steamId);
-            save.Parameters.AddWithValue("waiting", MatchStatusText.Waiting);
-            batch.BatchCommands.Add(save);
+                + "WHERE match_id = @matchId AND steam_id = @steamId", connection, transaction))
+            {
+                save.Parameters.AddWithValue("catalogWire", catalogWire);
+                save.Parameters.AddWithValue("matchId", matchId);
+                save.Parameters.AddWithValue("steamId", steamId);
+                updated = await save.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            if (updated == 0)
+            {
+                // Nobody by that Steam id holds a seat here. Bumping last_activity_at anyway would let a
+                // stranger keep a dead lobby out of the reaper.
+                await transaction.RollbackAsync(ct).ConfigureAwait(false);
+                return;
+            }
 
             // No caller timestamp reaches this method, so the database clock decides. It only has to keep the
             // reaper away from a lobby whose players are still choosing.
-            var touch = new NpgsqlBatchCommand(
-                "UPDATE matches SET last_activity_at = now() WHERE match_id = @matchId AND status = @waiting");
-            touch.Parameters.AddWithValue("matchId", matchId);
-            touch.Parameters.AddWithValue("waiting", MatchStatusText.Waiting);
-            batch.BatchCommands.Add(touch);
+            await using (var touch = new NpgsqlCommand(
+                "UPDATE matches SET last_activity_at = now() WHERE match_id = @matchId", connection, transaction))
+            {
+                touch.Parameters.AddWithValue("matchId", matchId);
+                await touch.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
 
-            await batch.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
         }
 
         public async Task<bool> TryStartMatchAsync(Guid matchId, string startReplay, DateTimeOffset startedAt, CancellationToken ct)

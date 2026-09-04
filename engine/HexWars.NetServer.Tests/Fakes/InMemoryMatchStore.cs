@@ -145,12 +145,16 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task SaveCatalogAsync(Guid matchId, string steamId, string catalogWire, CancellationToken ct)
         {
+            ValidateSteamId(steamId, nameof(steamId));
+
             lock (_gate)
             {
                 BeginWrite();
 
                 if (_matches.TryGetValue(matchId, out MatchRow? row) && row.Status == MatchStatus.Waiting)
                 {
+                    // Nobody by that Steam id holds a seat: a full no-op, activity timestamp included, or a
+                    // stranger could keep a dead lobby away from the reaper.
                     PlayerRow? player = Player(matchId, steamId);
                     if (player is not null)
                     {
@@ -349,6 +353,12 @@ namespace HexWars.NetServer.Tests.Fakes
 
         static void ValidateCredentialHash(byte[] credentialHash, string parameterName) =>
             MatchStoreGuard.ValidateCredentialHash(credentialHash, parameterName);
+
+        static void ValidateSteamId(string? steamId, string parameterName) =>
+            MatchStoreGuard.ValidateSteamId(steamId, parameterName);
+
+        static void ValidateWinnerSeat(int? winnerSeat, string parameterName) =>
+            MatchStoreGuard.ValidateWinnerSeat(winnerSeat, parameterName);
 
         sealed class MatchRow
         {

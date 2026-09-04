@@ -93,6 +93,48 @@ namespace HexWars.NetServer.Tests
             Assert.That(await _store.LoadJournalAsync(Guid.NewGuid(), Ct), Is.Null);
         }
 
+        // ---- 2. catalogue saves are serialised with the start -------------------
+
+        [Test]
+        public async Task SaveCatalog_QueuesBehindTheMatchRowLock_AndNoOpsOnceTheStartCommits()
+        {
+            var match = await NewWaitingMatchAsync();
+            await _store.SaveCatalogAsync(match.MatchId, match.Seat0, "catalog-before-start", Ct);
+
+            await using NpgsqlConnection holder = await _db.DataSource.OpenConnectionAsync();
+            await using NpgsqlTransaction holding = await holder.BeginTransactionAsync();
+
+            await using (var takeLock = new NpgsqlCommand(
+                "SELECT status FROM matches WHERE match_id = @matchId FOR UPDATE", holder, holding))
+            {
+                takeLock.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await takeLock.ExecuteScalarAsync(), Is.EqualTo("waiting"));
+            }
+
+            await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
+            var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
+            Task save = other.SaveCatalogAsync(match.MatchId, match.Seat0, "catalog-after-start", Ct);
+
+            Task first = await Task.WhenAny(save, Task.Delay(BlockedFor));
+            Assert.That(first, Is.Not.SameAs(save),
+                "a catalogue save must take the match row lock, so it cannot run while a start holds it");
+
+            await using (var start = new NpgsqlCommand(
+                "UPDATE matches SET status = 'active', start_replay = 'START-REPLAY', "
+                + "started_at = now(), last_activity_at = now() WHERE match_id = @matchId", holder, holding))
+            {
+                start.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await start.ExecuteNonQueryAsync(), Is.EqualTo(1));
+            }
+
+            await holding.CommitAsync();
+            await save;
+
+            PersistedPlayer? player = await _store.GetPlayerAsync(match.MatchId, match.Seat0, Ct);
+            Assert.That(player!.CatalogWire, Is.EqualTo("catalog-before-start"),
+                "the save lost the race and must have done nothing at all");
+        }
+
         // ---- helpers ------------------------------------------------------------
 
         static string NextLobbyId() =>
