@@ -47,10 +47,16 @@ namespace HexWars.NetServer.Persistence
         {
             string raw = (databaseUrl ?? string.Empty).Trim();
             if (raw.Length == 0) throw new FormatException("The database URL is empty.");
-            if (raw.Contains("://", StringComparison.Ordinal)) return FromUri(raw);
+            // The SCHEME PREFIX selects the format, not the mere presence of a scheme separator: a key=value
+            // string may legitimately carry :// inside a value, such as a password or a search_path option.
+            if (IsPostgresUri(raw)) return FromUri(raw);
             if (raw.Contains("=", StringComparison.Ordinal)) return FromKeyValue(raw);
             throw new FormatException("The database URL is neither a postgres:// URL nor a key=value connection string.");
         }
+
+        static bool IsPostgresUri(string raw) =>
+            raw.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase)
+            || raw.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Npgsql is the parser. Its failure messages name the offending KEYWORD and never echo a
         /// value, so quoting one here cannot leak a password.</summary>

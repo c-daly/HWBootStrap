@@ -101,6 +101,50 @@ namespace HexWars.NetServer.Tests
                 Is.EqualTo("db:5432/x"));
         }
 
+        /// <summary>A password, or any other value, may legitimately contain a scheme separator. Picking
+        /// the URI parser because the string merely CONTAINS :// rejected a valid connection string.</summary>
+        const string SchemeLikePassword = "Host=db.internal;Database=hexwars;Password=\"p://q\"";
+
+        [Test]
+        public void KeyValueForm_WithASchemeLikeValue_IsNotReadAsAUri()
+        {
+            Assert.DoesNotThrow(() => DatabaseUrl.ToNpgsqlConnectionString(SchemeLikePassword));
+
+            Assert.That(DatabaseUrl.DescribeTarget(SchemeLikePassword), Is.EqualTo("db.internal:5432/hexwars"));
+        }
+
+        [Test]
+        public void KeyValueForm_WithASchemeLikeValue_ValidatesAndStaysOutOfTheReport()
+        {
+            var settings = TestConfig.ValidSteamSettings();
+            settings["DATABASE_URL"] = SchemeLikePassword;
+
+            var result = HexWarsConfiguration.Read(TestConfig.Config(settings), TestConfig.Env("Production"));
+
+            Assert.That(result.IsValid, Is.True, string.Join(" | ", result.Errors));
+            string json = EnvironmentReport.Describe(result.Steam, result.Match, TestConfig.Env("Production")).ToJson();
+            Assert.That(json, Does.Contain("db.internal:5432/hexwars"));
+            Assert.That(json, Does.Not.Contain("p://q"));
+        }
+
+        [Test]
+        public void KeyValueForm_WithASchemeInsideAnOptionsValue_IsAccepted()
+        {
+            const string raw = "Host=db;Database=x;Options=\"-c search_path=https://ignored\"";
+
+            Assert.DoesNotThrow(() => DatabaseUrl.ToNpgsqlConnectionString(raw));
+
+            Assert.That(DatabaseUrl.DescribeTarget(raw), Is.EqualTo("db:5432/x"));
+        }
+
+        [Test]
+        public void ANonPostgresScheme_IsStillRejected()
+        {
+            Assert.Throws<FormatException>(() => DatabaseUrl.ToNpgsqlConnectionString("mysql://u:p@h/db"));
+
+            Assert.That(DatabaseUrl.DescribeTarget("mysql://u:p@h/db"), Is.EqualTo("invalid"));
+        }
+
         [Test]
         public void DescribeTarget_NeverIncludesTheCredentials()
         {
