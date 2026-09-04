@@ -114,6 +114,16 @@ namespace HexWars.NetServer.Tests
         const string LobbyEchoesADifferentId =
             """{"response":{"steamid_lobby":"109775241010407639","steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"}]}}""";
 
+        // Two hw_ready entries for one member: last-write-wins would let a trailing "1" overwrite the
+        // "0" the player actually set, so which of the two the client happens to keep is not a decision
+        // that may be made by ordering.
+        const string LobbyWithADuplicateMemberKey =
+            """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930","member_metadata":[{"key_name":"hw_ready","key_value":"0"},{"key_name":"hw_ready","key_value":"1"}]}]}}""";
+
+        // The same, one level up: a second hw_setup would silently replace the match configuration.
+        const string LobbyWithADuplicateMetadataKey =
+            """{"response":{"steamid_owner":"76561197960287930","lobby_metadata":[{"key":"hw_setup","value":"Annihilation 9 7 0 1234 3 1 1 1 3 0"},{"key":"hw_setup","value":"Annihilation 3 3 0 1 1 1 1 1 1 0"}],"members":[{"steamid":"76561197960287930"}]}}""";
+
         const string LobbyWithANonObjectMember =
             """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"},{"steamid":"76561197985812219"},7]}}""";
 
@@ -738,6 +748,22 @@ namespace HexWars.NetServer.Tests
 
             // Skipping it would silently shrink the roster, which is how a third player disappears.
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+        }
+
+        [TestCase(LobbyWithADuplicateMemberKey, TestName = "Lobby_DuplicateMemberDataKey_IsMalformedResponse")]
+        [TestCase(LobbyWithADuplicateMetadataKey, TestName = "Lobby_DuplicateLobbyMetadataKey_IsMalformedResponse")]
+        public void Lobby_DuplicateMetadataKey_IsMalformedResponse(string body)
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, body);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            // Keeping one of the two on document order is a coin toss over the ready flag and the match
+            // setup string, so a repeated key is a body to reject rather than one to resolve.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+            Assert.That(ex.Detail, Does.Contain("duplicate metadata key"));
         }
 
         // ---- transport ------------------------------------------------------

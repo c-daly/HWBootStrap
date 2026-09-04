@@ -657,10 +657,22 @@ namespace HexWars.NetServer.Steam
         /// Steam expresses key/value bags three ways depending on the endpoint and the era of the docs:
         /// an array of key_name/key_value pairs (what ILobbyMatchmakingService documents), an array of
         /// key/value pairs, or a plain JSON object. All three land in the same dictionary.
+        ///
+        /// A key may appear only once across the whole bag. Letting a later entry win would make the
+        /// ready flag and the match setup string a matter of document order, which is a decision no
+        /// caller can audit and one anything that can shape the body could make for it.
         /// </summary>
         static IReadOnlyDictionary<string, string> ReadKeyValues(JsonElement parent, params string[] names)
         {
             var result = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            void Add(string key, string value)
+            {
+                if (result.TryAdd(key, value)) return;
+
+                // The key itself is Valve or player supplied text, so the detail names none of it.
+                throw new SteamApiException(SteamFailure.MalformedResponse, "duplicate metadata key");
+            }
 
             foreach (var name in names)
             {
@@ -671,7 +683,7 @@ namespace HexWars.NetServer.Steam
                     foreach (var property in value.EnumerateObject())
                     {
                         var scalar = ScalarToString(property.Value);
-                        if (scalar is not null) result[property.Name] = scalar;
+                        if (scalar is not null) Add(property.Name, scalar);
                     }
                 }
                 else if (value.ValueKind == JsonValueKind.Array)
@@ -683,7 +695,7 @@ namespace HexWars.NetServer.Steam
                         var key = ReadScalar(entry, "key_name") ?? ReadScalar(entry, "key") ?? ReadScalar(entry, "name");
                         var entryValue = ReadScalar(entry, "key_value") ?? ReadScalar(entry, "value");
 
-                        if (!string.IsNullOrEmpty(key) && entryValue is not null) result[key] = entryValue;
+                        if (!string.IsNullOrEmpty(key) && entryValue is not null) Add(key, entryValue);
                     }
                 }
             }
