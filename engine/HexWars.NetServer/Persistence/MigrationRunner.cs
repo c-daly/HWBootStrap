@@ -50,13 +50,30 @@ namespace HexWars.NetServer.Persistence
         public async Task<IReadOnlyList<string>> PendingAsync(CancellationToken ct)
         {
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
-            await ExecuteAsync(connection, CreateLedger, ct).ConfigureAwait(false);
 
-            HashSet<string> applied = await AppliedVersionsAsync(connection, ct).ConfigureAwait(false);
-            return EmbeddedMigrations()
-                .Select(migration => migration.Version)
-                .Where(version => !applied.Contains(version))
-                .ToArray();
+            // The same lock ApplyAsync takes, for the same reason. CREATE TABLE IF NOT EXISTS is not atomic
+            // against a racing session: two instances reaching a brand new database together collide in the
+            // system catalogue and one of them fails with a duplicate key rather than doing nothing. A
+            // readiness probe that waits a moment is better than one that reports a healthy database unready.
+            await ExecuteAsync(connection, "SELECT pg_advisory_lock(" + AdvisoryLockKey + ")", ct)
+                .ConfigureAwait(false);
+            try
+            {
+                await ExecuteAsync(connection, CreateLedger, ct).ConfigureAwait(false);
+
+                HashSet<string> applied = await AppliedVersionsAsync(connection, ct).ConfigureAwait(false);
+                return EmbeddedMigrations()
+                    .Select(migration => migration.Version)
+                    .Where(version => !applied.Contains(version))
+                    .ToArray();
+            }
+            finally
+            {
+                // Not the caller token, for the same reason ApplyAsync does not use it: a cancelled probe
+                // must still let its peers through.
+                await ExecuteAsync(connection, "SELECT pg_advisory_unlock(" + AdvisoryLockKey + ")",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
         }
 
         /// <summary>Brings the database up to date and returns what THIS call applied. A second caller, or a

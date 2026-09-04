@@ -100,6 +100,20 @@ DELETE FROM match_join_credentials WHERE expires_at < now() - interval '24 hours
 DELETE FROM matches WHERE status IN ('completed','expired','abandoned') AND completed_at < now() - interval '90 days';
 ```
 
+Each statement has an index behind it in `001_match_journal.sql`, so an hourly sweep over a large
+table is a range scan rather than four sequential scans:
+
+| Sweeper statement | Index |
+| --- | --- |
+| Expire stale waiting matches | `ix_matches_waiting_created` on `matches (created_at) WHERE status = 'waiting'` |
+| Abandon silent active matches | `ix_matches_status_activity` on `matches (status, last_activity_at)` |
+| Purge expired join credentials | `ix_join_credentials_expires` on `match_join_credentials (expires_at)` |
+| Purge matches past the 90-day window | `ix_matches_terminal_completed` on `matches (completed_at) WHERE status IN ('completed','expired','abandoned')` |
+
+The purge deletes only from `matches`. Players, commands and join credentials go with it: every one
+of those tables cascades from the match row, and commands and credentials additionally cascade from
+the seat they belong to.
+
 Two rules constrain the sweeper:
 
 - A sweep never touches an `active` match with activity in the last 7 days. A game in progress is

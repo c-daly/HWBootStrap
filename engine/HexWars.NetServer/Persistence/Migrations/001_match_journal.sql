@@ -42,6 +42,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_matches_open_lobby ON matches (steam_lobby_
 -- Drives the retention reaper and the open-match recovery scan.
 CREATE INDEX IF NOT EXISTS ix_matches_status_activity ON matches (status, last_activity_at);
 
+-- One index per statement the retention sweeper issues (docs/operations/match-data-retention.md), so an
+-- hourly sweep over a large table is a range scan rather than a sequential one.
+CREATE INDEX IF NOT EXISTS ix_matches_waiting_created ON matches (created_at)
+  WHERE status = 'waiting';
+CREATE INDEX IF NOT EXISTS ix_matches_terminal_completed ON matches (completed_at)
+  WHERE status IN ('completed','expired','abandoned');
+
 CREATE TABLE IF NOT EXISTS match_players (
   match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
   steam_id TEXT NOT NULL CHECK (steam_id ~ '^[0-9]{1,20}$'),

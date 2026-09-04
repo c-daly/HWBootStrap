@@ -79,6 +79,48 @@ namespace HexWars.NetServer.Tests
             Assert.That(await ScalarAsync<long>("SELECT count(*) FROM schema_migrations"), Is.EqualTo(1L));
         }
 
+        [Test]
+        public async Task ConcurrentPending_OnAFreshDatabase_AllSucceed()
+        {
+            // Four readiness probes hitting a brand new database at once. Without the advisory lock the
+            // racing CREATE TABLE IF NOT EXISTS statements collide in the system catalogue and one of them
+            // fails with a duplicate key rather than doing nothing.
+            var results = await Task.WhenAll(
+                Runner().PendingAsync(CancellationToken.None),
+                Runner().PendingAsync(CancellationToken.None),
+                Runner().PendingAsync(CancellationToken.None),
+                Runner().PendingAsync(CancellationToken.None));
+
+            foreach (var pending in results) Assert.That(pending, Is.EqualTo(new[] { OnlyMigration }));
+        }
+
+        [Test]
+        public async Task PendingAsync_QueuesBehindTheSameAdvisoryLockThatApplyTakes()
+        {
+            await using NpgsqlConnection holder = await _db.DataSource.OpenConnectionAsync();
+
+            Task<IReadOnlyList<string>> pending;
+            bool blocked;
+            try
+            {
+                await OnConnectionAsync(holder, "SELECT pg_advisory_lock(" + MigrationRunner.AdvisoryLockKey + ")");
+
+                pending = Runner().PendingAsync(CancellationToken.None);
+                Task first = await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(1)));
+                blocked = !ReferenceEquals(first, pending);
+            }
+            finally
+            {
+                // Released before any assertion runs: a lock left held by a failing test would hang every
+                // migration in the rest of the suite rather than failing this one test.
+                await OnConnectionAsync(holder, "SELECT pg_advisory_unlock_all()");
+            }
+
+            Assert.That(blocked, Is.True,
+                "reading the pending list must serialise on the same lock that applying does");
+            Assert.That(await pending, Is.EqualTo(new[] { OnlyMigration }));
+        }
+
         // ---- schema shape ------------------------------------------------------
 
         [Test]
@@ -103,10 +145,32 @@ namespace HexWars.NetServer.Tests
             Assert.That(await IndexDefinitionAsync("ix_join_credentials_match_player"), Is.Not.Null);
         }
 
+        [Test]
+        public async Task Migration_CreatesTheIndexesTheRetentionSweeperNeeds()
+        {
+            await _db.ApplyMigrationsAsync();
+
+            // One index per sweeper statement in docs/operations/match-data-retention.md, so an hourly sweep
+            // over a large table is three range scans rather than three sequential scans.
+            string? waiting = await IndexDefinitionAsync("ix_matches_waiting_created");
+            Assert.That(waiting, Is.Not.Null, "the waiting-match expiry sweep has no index");
+            Assert.That(waiting, Does.Contain("created_at"));
+            Assert.That(waiting, Does.Contain("waiting"));
+
+            string? terminal = await IndexDefinitionAsync("ix_matches_terminal_completed");
+            Assert.That(terminal, Is.Not.Null, "the 90 day purge has no index");
+            Assert.That(terminal, Does.Contain("completed_at"));
+            Assert.That(terminal, Does.Contain("completed"));
+
+            string? credentials = await IndexDefinitionAsync("ix_join_credentials_expires");
+            Assert.That(credentials, Is.Not.Null, "the expired credential purge has no index");
+            Assert.That(credentials, Does.Contain("expires_at"));
+        }
+
         // ---- constraints --------------------------------------------------------
 
         [Test]
-        public async Task OpenLobbyIndex_BlocksASecondWaitingMatch_AndFreesUpOnceTheFirstCompletes()
+        public async Task OpenLobbyIndex_BlocksASecondWaitingMatch_AndFreesUpOnceTheFirstIsTerminal()
         {
             await _db.ApplyMigrationsAsync();
             var first = Guid.NewGuid();
@@ -358,6 +422,12 @@ namespace HexWars.NetServer.Tests
                 + "VALUES (@hash, @id, @steam, @expires)",
                 ("hash", new byte[32]), ("id", matchId), ("steam", steamId),
                 ("expires", DateTimeOffset.UtcNow.AddMinutes(15)));
+
+        static async Task OnConnectionAsync(NpgsqlConnection connection, string sql)
+        {
+            await using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync();
+        }
 
         async Task ExecuteAsync(string sql, params (string Name, object? Value)[] parameters)
         {
