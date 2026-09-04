@@ -156,10 +156,27 @@ namespace HexWars.NetServer.Configuration
 
             // Uri.TryCreate treats a rooted Unix path as an absolute file:// URI, so it is the scheme check
             // that actually rejects a value like /matches.
-            if (publicBaseRaw is not null
-                && Uri.TryCreate(publicBaseRaw, UriKind.Absolute, out Uri? publicBase)
-                && (publicBase.Scheme == Uri.UriSchemeHttp || publicBase.Scheme == Uri.UriSchemeHttps))
-                match.PublicBaseUrl = publicBase;
+            // Credentials, a query string or a fragment on this value would be published: it is serialised
+            // into the environment report and logged once at startup. Refuse them rather than redact them.
+            string? publicBaseError = null;
+            if (publicBaseRaw is not null)
+            {
+                if (Uri.TryCreate(publicBaseRaw, UriKind.Absolute, out Uri? publicBase)
+                    && (publicBase.Scheme == Uri.UriSchemeHttp || publicBase.Scheme == Uri.UriSchemeHttps))
+                {
+                    if (publicBase.UserInfo.Length > 0
+                        || publicBase.Query.Length > 0
+                        || publicBase.Fragment.Length > 0)
+                        publicBaseError = MatchPublicBaseUrlKey
+                            + ": must not contain credentials, a query string, or a fragment";
+                    else
+                        match.PublicBaseUrl = publicBase;
+                }
+                else
+                {
+                    publicBaseError = MatchPublicBaseUrlKey + ": must be an absolute http or https URL";
+                }
+            }
 
             // The Steam stack needs real credentials; so does anything calling itself Production, even while
             // it still only serves the legacy WebGL lobby.
@@ -179,17 +196,17 @@ namespace HexWars.NetServer.Configuration
 
                 if (publicBaseRaw is null) errors.Add(MatchPublicBaseUrlKey + ": missing");
                 else if (IsPlaceholder(publicBaseRaw)) errors.Add(MatchPublicBaseUrlKey + ": placeholder value");
-                else if (match.PublicBaseUrl is null) errors.Add(MatchPublicBaseUrlKey + ": must be an absolute http or https URL");
+                else if (publicBaseError is not null) errors.Add(publicBaseError);
                 else if (env.IsProduction()
-                         && !string.Equals(match.PublicBaseUrl.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                         && !string.Equals(match.PublicBaseUrl!.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
                     errors.Add(MatchPublicBaseUrlKey + ": must use https in Production");
 
                 if (buildIdRaw is null) errors.Add(MatchBuildIdKey + ": missing");
                 else if (IsPlaceholder(buildIdRaw)) errors.Add(MatchBuildIdKey + ": placeholder value");
             }
-            else if (publicBaseRaw is not null && match.PublicBaseUrl is null)
+            else if (publicBaseError is not null)
             {
-                errors.Add(MatchPublicBaseUrlKey + ": must be an absolute http or https URL");
+                errors.Add(publicBaseError);
             }
 
             return new ConfigurationResult(steam, match, errors);
