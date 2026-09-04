@@ -111,8 +111,14 @@ table is a range scan rather than four sequential scans:
 | Purge matches past the 90-day window | `ix_matches_terminal_completed` on `matches (completed_at) WHERE status IN ('completed','expired','abandoned')` |
 
 The purge deletes only from `matches`. Players, commands and join credentials go with it: every one
-of those tables cascades from the match row, and commands and credentials additionally cascade from
-the seat they belong to.
+of those tables cascades from the match row.
+
+Deleting a seat is a different thing, and the schema treats it differently. `match_join_credentials`
+cascades from the seat, so removing a player takes their join tokens with them. `match_commands`
+does **not**: its foreign key to the seat is `ON DELETE RESTRICT`, so deleting a player who issued
+any command is refused with SQLSTATE `23503`. A journal with a hole in it replays into a different
+game than the one that was played, so commands are removed only when the whole match is, never by
+reaching for one seat. An operator who needs a player's rows gone deletes the match.
 
 Two rules constrain the sweeper:
 
