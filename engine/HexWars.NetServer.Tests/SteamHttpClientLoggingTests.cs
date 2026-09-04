@@ -27,7 +27,17 @@ namespace HexWars.NetServer.Tests
         const string AuthOk =
             """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":false,"publisherbanned":false}}}""";
 
-        static WebApplicationFactory<Program> Host(FakeSteamHandler handler, CapturingLoggerProvider captured) =>
+        /// <summary>
+        /// A second named client, to prove the log filter is scoped to the Steam one. Named so that it
+        /// starts with the Steam client name: the filter category is a prefix match, so a name the Steam
+        /// one is a prefix of is exactly the client a filter without a terminating dot would silence.
+        /// </summary>
+        const string ProbeClientName = SteamWebApiRegistration.HttpClientName + "Metrics";
+
+        static WebApplicationFactory<Program> Host(
+            FakeSteamHandler handler,
+            CapturingLoggerProvider captured,
+            Action<IServiceCollection>? extraServices = null) =>
             new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             {
                 builder.UseEnvironment("Development");
@@ -60,6 +70,8 @@ namespace HexWars.NetServer.Tests
                         SteamWebApiRegistration.HttpClientName,
                         options => options.HttpMessageHandlerBuilderActions.Add(
                             handlerBuilder => handlerBuilder.PrimaryHandler = handler));
+
+                    extraServices?.Invoke(services);
                 });
             });
 
@@ -119,6 +131,43 @@ namespace HexWars.NetServer.Tests
             }
 
             await Task.CompletedTask;
+        }
+
+        [Test]
+        public async Task FrameworkRequestLogging_IsSuppressedForTheSteamClientOnly()
+        {
+            var steamHandler = new FakeSteamHandler();
+            steamHandler.RespondJson(FakeSteamHandler.AuthPath, AuthOk);
+
+            var probeHandler = new FakeSteamHandler();
+            probeHandler.RespondJson("/probe/", "{}");
+
+            var captured = new CapturingLoggerProvider();
+
+            using var factory = Host(steamHandler, captured, services =>
+                services.AddHttpClient(ProbeClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => probeHandler));
+
+            var steam = factory.Services.GetRequiredService<ISteamWebApiClient>();
+            await steam.AuthenticateUserTicketAsync(Ticket, CancellationToken.None);
+
+            var probe = factory.Services.GetRequiredService<IHttpClientFactory>().CreateClient(ProbeClientName);
+            using var response = await probe.GetAsync("https://probe.invalid/probe/");
+
+            const string FrameworkCategory = "System.Net.Http.HttpClient.";
+
+            // Only Steam puts secrets in a request URI. Another client losing its request diagnostics is a
+            // silent hole in whatever that client is later used for.
+            Assert.That(
+                captured.Messages.Any(m => m.StartsWith(FrameworkCategory + ProbeClientName, StringComparison.Ordinal)),
+                Is.True,
+                "a client that is not the Steam one must keep its framework request logs");
+
+            Assert.That(
+                captured.Messages.Any(m => m.StartsWith(
+                    FrameworkCategory + SteamWebApiRegistration.HttpClientName + ".", StringComparison.Ordinal)),
+                Is.False,
+                "the Steam request URI carries the publisher key and the auth ticket");
         }
 
         [Test]

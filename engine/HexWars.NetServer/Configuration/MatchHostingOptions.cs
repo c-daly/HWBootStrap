@@ -33,5 +33,15 @@ namespace HexWars.NetServer.Configuration
         public string[] BlockedSteamIds { get; set; } = Array.Empty<string>();
 
         public string? MetricsToken { get; set; }
+
+        /// <summary>The shortest key worth having behind a log pseudonym.</summary>
+        public const int MinLogPseudonymKeyLength = 16;
+
+        /// <summary>
+        /// Secret behind the Steam-id pseudonyms in logs. A secret: it is what stops a log reader
+        /// precomputing the handles for an enumerable id namespace. Null means a random per-process key,
+        /// so handles correlate within one process lifetime and never across a restart or an instance.
+        /// </summary>
+        public string? LogPseudonymKey { get; set; }
     }
 }
