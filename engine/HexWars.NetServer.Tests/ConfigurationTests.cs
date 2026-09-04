@@ -336,6 +336,38 @@ namespace HexWars.NetServer.Tests
             Assert.That(DatabaseUrl.ToNpgsqlConnectionString(kv), Is.EqualTo(kv));
         }
 
+        [Test]
+        public void DatabaseUrl_KeyValueFormAcceptsBothHostAndDatabaseAliases()
+        {
+            Assert.That(DatabaseUrl.ToNpgsqlConnectionString("Host=db;Database=x"), Is.EqualTo("Host=db;Database=x"));
+            Assert.That(DatabaseUrl.ToNpgsqlConnectionString("  Server=db;DB=x;Username=u;Password=p  "),
+                Is.EqualTo("Server=db;DB=x;Username=u;Password=p"));
+        }
+
+        [TestCase("foo=bar")]
+        [TestCase("Host=db")]
+        [TestCase("Database=x")]
+        [TestCase("Host=;Database=x")]
+        [TestCase("Host=db;Database=")]
+        [TestCase("Host=db;Database=x;bogus")]
+        public void DatabaseUrl_KeyValueFormWithoutAHostAndDatabaseThrows(string raw)
+        {
+            Assert.Throws<FormatException>(() => DatabaseUrl.ToNpgsqlConnectionString(raw));
+        }
+
+        [Test]
+        public void MalformedKeyValueDatabaseUrl_IsRejectedByConfigurationValidation()
+        {
+            var settings = ValidSteamSettings();
+            settings["DATABASE_URL"] = "foo=bar";
+
+            var result = Read(settings);
+
+            Assert.That(result.IsValid, Is.False);
+            Assert.That(result.Errors,
+                Is.EqualTo(new[] { "DATABASE_URL: not a valid PostgreSQL URL or connection string" }));
+        }
+
         [TestCase("")]
         [TestCase("   ")]
         [TestCase("not-a-connection-string")]
@@ -365,10 +397,22 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void DescribeTarget_ReadsTheHostAndDatabaseAliasesAndDefaultsThePort()
+        {
+            string aliases = DatabaseUrl.DescribeTarget("Server=db;DB=x;Username=u;Password=p");
+
+            Assert.That(aliases, Is.EqualTo("db:5432/x"));
+            Assert.That(aliases, Does.Not.Contain("Password"));
+            Assert.That(DatabaseUrl.DescribeTarget("Host=db;Port=6543;Database=x"), Is.EqualTo("db:6543/x"));
+        }
+
+        [Test]
         public void DescribeTarget_ReportsNoneAndInvalidWithoutThrowing()
         {
             Assert.That(DatabaseUrl.DescribeTarget(""), Is.EqualTo("none"));
             Assert.That(DatabaseUrl.DescribeTarget("garbage"), Is.EqualTo("invalid"));
+            Assert.That(DatabaseUrl.DescribeTarget("foo=bar"), Is.EqualTo("invalid"));
+            Assert.That(DatabaseUrl.DescribeTarget("Host=db;Database=x;bogus"), Is.EqualTo("invalid"));
         }
 
         // ---- environment report ---------------------------------------------
@@ -400,8 +444,17 @@ namespace HexWars.NetServer.Tests
             Assert.That(root.GetProperty("publicBaseUrl").GetString(),
                 Does.StartWith("https://match.hexwars.invalid"));
 
-            string hash = root.GetProperty("engineAssemblyHash").GetString()!;
-            Assert.That(hash == "unavailable" || hash.Length == 16, Is.True, hash);
+            Assert.That(root.GetProperty("engineAssemblyHash").GetString(),
+                Does.Match("^sha256:[0-9a-f]{64}$"));
+        }
+
+        [Test]
+        public void EnvironmentReport_EngineAssemblyHash_IsTheFullSha256Digest()
+        {
+            var result = Read(ValidSteamSettings());
+            var report = EnvironmentReport.Describe(result.Steam, result.Match, Env());
+
+            Assert.That(report.EngineAssemblyHash, Does.Match("^sha256:[0-9a-f]{64}$"));
         }
 
         [Test]
