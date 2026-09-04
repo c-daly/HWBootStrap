@@ -59,6 +59,11 @@ namespace HexWars.Presentation
         public bool Networked = false;
 
         NetClient _net;
+
+        /// <summary>The protocol-v2 link to a Steam-hosted match. Null for every legacy v1 room, which
+        /// keeps using <see cref="_net"/> exactly as before.</summary>
+        SteamMatchConnection _steamNet;
+
         /// <summary>The seat the server assigned this browser (null until seated, or if the room was full).</summary>
         public PlayerId? Seat { get; private set; }
 
@@ -171,6 +176,13 @@ namespace HexWars.Presentation
         {
             if (Networked)
             {
+                if (_steamNet != null)
+                {
+                    if (State == null) return false;
+                    if (Seat.HasValue && cmd.Issuer != Seat.Value) return false;
+                    _steamNet.Send(NetProtocol.Cmd(cmd));
+                    return true;   // the match service validates and echoes APPLY (or REJECT)
+                }
                 if (_net == null || State == null) return false;
                 if (Seat.HasValue && cmd.Issuer != Seat.Value) return false; // only act as your own seat, on your turn
                 _net.Send(NetProtocol.Cmd(cmd));
@@ -233,15 +245,40 @@ namespace HexWars.Presentation
             StateChanged?.Invoke();
             Networked = true;
             if (_net != null) { Destroy(_net); _net = null; }
+            if (_steamNet != null) { Destroy(_steamNet); _steamNet = null; }
             _net = gameObject.AddComponent<NetClient>();
             _net.Connect(this, room, setupWire, isPrivate);
         }
+
+#nullable enable
+        /// <summary>Start an online match that Steam allocated through the match service (protocol v2).
+        /// Same prologue as <see cref="StartNetGame"/>: the demo ends, local state is cleared, and the
+        /// authoritative state arrives later on START. <paramref name="refreshCredential"/> is how the
+        /// connection asks the lobby coordinator to reissue a join credential before a retry: it starts a
+        /// reissue and answers with a fresh ticket, or with null to give up.</summary>
+        public void StartSteamMatch(SteamMatchTicket ticket, System.Func<System.Action<SteamMatchTicket?>, bool> refreshCredential)
+        {
+            EndDemo();
+            TipsService.NewGame();
+            LastLocalSetup = null; // a Steam match is not a vs-AI game, same reasoning as NewGame()
+            // the demo state must not linger: the panels dismiss once a real game exists, and the
+            // authoritative state arrives later via START
+            State = null;
+            StateChanged?.Invoke();
+            Networked = true;
+            if (_net != null) { Destroy(_net); _net = null; }
+            if (_steamNet != null) { Destroy(_steamNet); _steamNet = null; }
+            _steamNet = gameObject.AddComponent<SteamMatchConnection>();
+            _steamNet.Connect(this, ticket, refreshCredential);
+        }
+#nullable restore
 
         /// <summary>Host changed their mind while waiting: drop the socket and seat. State stays as it
         /// was (null before START), so the title/demo behind the form is untouched.</summary>
         public void CancelHosting()
         {
             if (_net != null) { Destroy(_net); _net = null; }
+            if (_steamNet != null) { Destroy(_steamNet); _steamNet = null; }
             Seat = null;
             Reconnecting = false;
         }
@@ -370,6 +407,7 @@ namespace HexWars.Presentation
             Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
             if (_net != null) { Destroy(_net); _net = null; }
+            if (_steamNet != null) { Destroy(_steamNet); _steamNet = null; }
             Seat = null;
             Reconnecting = false;
             var ai = GetComponent<AiOpponent>();
@@ -438,6 +476,17 @@ namespace HexWars.Presentation
                 TitleScreen.Reopen(this);
         }
 
+        /// <summary>The match service rejected this join credential (invalid, expired, or the service
+        /// could not check it). Retrying the same credential can never succeed, so the connection stops
+        /// and the player goes back to the title, where a fresh Steam sign-in can start a new match.</summary>
+        internal void OnNetAuthFailed(string code)
+        {
+            Debug.Log("[SteamNet] match sign-in refused: " + code);
+            Toast.Show("Steam sign-in for this match failed — return to the title and try again.");
+            CancelHosting();
+            TitleScreen.Reopen(this);
+        }
+
         /// <summary>The socket died before a match began (server down / network drop while hosting or
         /// joining). Mid-game drops are the reconnect follow-up (audit U2) — pre-game, a toast plus the
         /// waiting screen's Cancel is normally the whole story. But a shared <c>?room=</c> link auto-joins
@@ -448,7 +497,7 @@ namespace HexWars.Presentation
         /// own self-heal restores the demo + music.</summary>
         internal void OnNetClosed()
         {
-            if (Networked && State == null && _net != null)
+            if (Networked && State == null && (_net != null || _steamNet != null))
                 Toast.Show("Connection lost — check the link and try again.");
             GetComponent<SetupForm>()?.OnConnectionLost();
             if (GetComponent<SetupForm>() == null && GetComponent<GameBrowser>() == null && GetComponent<TitleScreen>() == null)
@@ -555,6 +604,7 @@ namespace HexWars.Presentation
             "CatalogV1Required"     => "Waiting for both players' barracks. Refresh if this message persists.",
             "CatalogClosed"         => "This match has already started with its saved barracks.",
             "GameAlreadyOver"       => "The game is over.",
+            "TemporaryFailure"      => "Server busy — try that again.",   // protocol v2: the move was legal, the save was not
             _                        => "That move isn't allowed right now.",
         };
 
