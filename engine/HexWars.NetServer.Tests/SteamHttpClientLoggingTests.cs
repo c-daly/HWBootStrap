@@ -1,5 +1,6 @@
 using System.Net.Http;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
 using Microsoft.AspNetCore.Hosting;
@@ -48,6 +49,11 @@ namespace HexWars.NetServer.Tests
 
                 builder.ConfigureServices(services =>
                 {
+                    // The DATABASE_URL above names a host that does not resolve; these tests are about the
+                    // Steam client's logging, not storage, so drop the startup migration that would
+                    // (correctly) refuse to boot. PostgresStartupTests covers that behaviour.
+                    services.Remove(services.Single(d => d.ImplementationType == typeof(MigrationHostedService)));
+
                     // Replaces the primary handler the registration configured, leaving the rest of the
                     // factory pipeline - including its loggers - exactly as the server built it.
                     services.Configure<HttpClientFactoryOptions>(
