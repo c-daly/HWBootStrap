@@ -793,6 +793,25 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void TransportException_DetailIsTheTypeNameNotTheMessage()
+        {
+            using var h = new Harness();
+            // The ticket appears in prose rather than as a query parameter, so redaction cannot see it.
+            // A redaction pass only catches the shapes it knows; the message itself must not be copied.
+            h.Handler.Throw(
+                FakeSteamHandler.AuthPath,
+                () => new HttpRequestException("authentication for " + Ticket + " failed"));
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.ServiceUnavailable));
+            Assert.That(ex.Detail, Does.Not.Contain(Ticket));
+            Assert.That(ex.ToString(), Does.Not.Contain(Ticket));
+            Assert.That(ex.Detail, Does.Contain(nameof(HttpRequestException)));
+        }
+
+        [Test]
         public void ResponseStreamFailure_MapsToServiceUnavailable()
         {
             using var h = new Harness();

@@ -428,14 +428,14 @@ namespace HexWars.NetServer.Steam
         {
             if (transport is not null)
             {
-                // Transport messages quote the request they failed on, so they are redacted before use,
-                // and the cause is NOT attached as an inner exception: ToString() would render the
-                // original message verbatim and undo the redaction. The type name is the part an
-                // operator actually needs, so that is what survives.
+                // A transport message is free-form text written by whatever failed, and it has been near
+                // a URL carrying the publisher key and the auth ticket. Redaction only catches the shapes
+                // it knows - a secret named in prose walks straight through it - so none of the message
+                // is copied. What survives is the type name and the structured fields .NET exposes, and
+                // the cause is not attached either, because ToString() would render its message verbatim.
                 return new SteamApiException(
                     SteamFailure.ServiceUnavailable,
-                    "transport failure after " + attempts + " attempt(s): " + transport.GetType().Name
-                        + ": " + SteamLogRedaction.Redact(transport.Message));
+                    "transport failure after " + attempts + " attempt(s): " + DescribeTransport(transport));
             }
 
             var failure = status == HttpStatusCode.TooManyRequests
@@ -443,6 +443,29 @@ namespace HexWars.NetServer.Steam
                 : SteamFailure.ServiceUnavailable;
 
             return new SteamApiException(failure, "HTTP " + (int)status + " after " + attempts + " attempt(s)");
+        }
+
+        /// <summary>
+        /// Everything an operator can act on that is not free-form text: the exception type, and for an
+        /// HttpRequestException the two fields .NET fills in itself - an enum and a status code, neither
+        /// of which can carry a secret.
+        /// </summary>
+        static string DescribeTransport(Exception transport)
+        {
+            var described = transport.GetType().Name;
+
+            if (transport is HttpRequestException http)
+            {
+                described += " (" + http.HttpRequestError;
+                if (http.StatusCode.HasValue)
+                {
+                    described += ", HTTP " + ((int)http.StatusCode.Value).ToString(CultureInfo.InvariantCulture);
+                }
+
+                described += ")";
+            }
+
+            return described;
         }
 
         TimeSpan? ReadRetryAfter(HttpResponseMessage response)
