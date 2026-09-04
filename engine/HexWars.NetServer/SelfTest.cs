@@ -2,6 +2,7 @@ using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using HexWars.Engine;
+using HexWars.NetServer.Hosting;
 
 namespace HexWars.NetServer
 {
@@ -21,7 +22,7 @@ namespace HexWars.NetServer
             builder.Logging.ClearProviders();
             var app = builder.Build();
             app.UseWebSockets();
-            app.Map("/ws", Program.Handle);
+            app.Map("/ws", LegacyWebSocketServer.Handle);
             await app.StartAsync();
 
             try
@@ -31,7 +32,7 @@ namespace HexWars.NetServer
                 string catalogRequestA = await Recv(a);     // CATALOG? while the room is waiting
                 await Send(a, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
 
-                var lobby1 = Program.OpenGamesSnapshot();      // host waiting -> the room is browsable
+                var lobby1 = LegacyWebSocketServer.OpenGamesSnapshot();      // host waiting -> the room is browsable
                 bool lobbyListsWaitingRoom = lobby1.Count == 1 && lobby1[0].Code == "TEST";
 
                 using var b = await Connect();
@@ -41,7 +42,7 @@ namespace HexWars.NetServer
                 string startA = await Recv(a);              // START ... (dealt to both once full)
                 string startB = await Recv(b);
 
-                var lobby2 = Program.OpenGamesSnapshot();      // both seated -> started -> unlisted
+                var lobby2 = LegacyWebSocketServer.OpenGamesSnapshot();      // both seated -> started -> unlisted
                 bool lobbyEmptiesOnStart = lobby2.Count == 0;
 
                 await Send(a, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
