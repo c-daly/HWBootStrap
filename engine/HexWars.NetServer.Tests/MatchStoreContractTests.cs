@@ -523,11 +523,51 @@ namespace HexWars.NetServer.Tests
         }
     }
 
-    /// <summary>The same contract against the test double the coordinator tests will use.</summary>
+    /// <summary>The same contract against the test double the coordinator tests will use, plus the two
+    /// hooks that only the double has. Those are worth their own tests because a coordinator test that
+    /// arms a write failure and gets no failure would pass while proving nothing.</summary>
     [TestFixture]
     public sealed class InMemoryMatchStoreTests : MatchStoreContractTests
     {
-        protected override Task<IMatchStore> CreateStoreAsync() =>
-            Task.FromResult<IMatchStore>(new InMemoryMatchStore());
+        InMemoryMatchStore _fake = null!;
+
+        protected override Task<IMatchStore> CreateStoreAsync()
+        {
+            _fake = new InMemoryMatchStore();
+            return Task.FromResult<IMatchStore>(_fake);
+        }
+
+        [Test]
+        public async Task InjectedWriteFailure_FailsTheNextWriteAndThenClearsItself()
+        {
+            var match = await NewWaitingMatchAsync();
+            var boom = new InvalidOperationException("the database went away");
+            _fake.InjectedWriteFailure = boom;
+
+            var thrown = Assert.ThrowsAsync<InvalidOperationException>(
+                () => _fake.TryStartMatchAsync(match.MatchId, "START-REPLAY", Started, Ct));
+
+            Assert.That(thrown, Is.SameAs(boom));
+            Assert.That(_fake.InjectedWriteFailure, Is.Null, "one injected failure means exactly one");
+            Assert.That((await _fake.GetMatchAsync(match.MatchId, Ct))!.Status,
+                Is.EqualTo(MatchStatus.Waiting), "a failed write must not have written");
+            Assert.That(await _fake.TryStartMatchAsync(match.MatchId, "START-REPLAY", Started, Ct), Is.True);
+        }
+
+        [Test]
+        public async Task WriteCount_CountsWritesButNotReadsOrHeartbeats()
+        {
+            var match = await NewWaitingMatchAsync();
+            Assert.That(_fake.WriteCount, Is.EqualTo(1));
+
+            await _fake.GetMatchAsync(match.MatchId, Ct);
+            await _fake.TouchAsync(match.MatchId, match.Seat0, Move1, Ct);
+            Assert.That(_fake.WriteCount, Is.EqualTo(1),
+                "reads and liveness heartbeats are not the writes a coordinator test counts");
+
+            await _fake.TryStartMatchAsync(match.MatchId, "START-REPLAY", Started, Ct);
+            await _fake.AppendCommandAsync(match.MatchId, 1, "E 0", match.Seat0, Move2, Ct);
+            Assert.That(_fake.WriteCount, Is.EqualTo(3));
+        }
     }
 }
