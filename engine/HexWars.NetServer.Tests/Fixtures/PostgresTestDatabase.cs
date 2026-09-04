@@ -23,6 +23,11 @@ namespace HexWars.NetServer.Tests.Fixtures
         public const string OverrideEnvironmentVariable = "HEXWARS_TEST_DATABASE_URL";
         public const string ContainerImage = "postgres:16-alpine";
 
+        /// <summary>The database inside the throwaway container. Named so it satisfies
+        /// <see cref="DisposableDatabaseGuard"/> like any other target: the container path is not an
+        /// exception to the rule, it just happens to pass it.</summary>
+        public const string ContainerDatabase = "hexwars_test";
+
         static readonly SemaphoreSlim Gate = new(1, 1);
         static PostgresTestDatabase? _instance;
 
@@ -64,16 +69,36 @@ namespace HexWars.NetServer.Tests.Fixtures
             }
         }
 
+        /// <summary>The check <see cref="CreateAsync"/> makes before it will hand out a supplied database,
+        /// and the connection string it hands out once the database passes. Separated from CreateAsync so
+        /// it can be tested without setting a process-wide environment variable or touching a database.
+        /// </summary>
+        internal static string RequireDisposable(string databaseUrl, Func<string, string?> env)
+        {
+            if (!DisposableDatabaseGuard.IsDisposable(databaseUrl, env, out string reason))
+                throw new InvalidOperationException(
+                    "Refusing to run the persistence tests against the database in "
+                    + OverrideEnvironmentVariable + ": " + reason);
+
+            return DbUrl.ToNpgsqlConnectionString(databaseUrl);
+        }
+
         static async Task<PostgresTestDatabase> CreateAsync()
         {
             string? supplied = Environment.GetEnvironmentVariable(OverrideEnvironmentVariable);
             if (!string.IsNullOrWhiteSpace(supplied))
             {
-                string connectionString = DbUrl.ToNpgsqlConnectionString(supplied!);
+                // Before anything opens a connection, because the first thing every fixture does with the
+                // result is drop its public schema, and there is no undo for that.
+                string connectionString =
+                    RequireDisposable(supplied!, Environment.GetEnvironmentVariable);
                 return new PostgresTestDatabase(null, ComposeUrl(connectionString), connectionString);
             }
 
-            var container = new PostgreSqlBuilder().WithImage(ContainerImage).Build();
+            var container = new PostgreSqlBuilder()
+                .WithImage(ContainerImage)
+                .WithDatabase(ContainerDatabase)
+                .Build();
             try
             {
                 await container.StartAsync().ConfigureAwait(false);
@@ -88,6 +113,15 @@ namespace HexWars.NetServer.Tests.Fixtures
             }
 
             string fromContainer = container.GetConnectionString();
+
+            // The same rule, applied to the database this fixture created itself. It should be impossible
+            // to fail, which is exactly why it is worth asserting: if the container ever comes back on a
+            // different database, that is a fixture bug and not a licence to drop a schema.
+            if (!DisposableDatabaseGuard.IsDisposable(fromContainer, Environment.GetEnvironmentVariable, out string why))
+                throw new InvalidOperationException(
+                    "The throwaway Postgres this fixture started is not itself disposable, which is a bug "
+                    + "in the fixture rather than in your environment: " + why);
+
             return new PostgresTestDatabase(container, ComposeUrl(fromContainer), fromContainer);
         }
 
