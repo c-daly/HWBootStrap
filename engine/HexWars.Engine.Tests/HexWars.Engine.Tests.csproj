@@ -28,6 +28,10 @@
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementHighlightClassifierTests.cs" Link="Presentation/MovementHighlightClassifierTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementTooltipFormatterTests.cs" Link="Presentation/MovementTooltipFormatterTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementPresentationRouteTests.cs" Link="Presentation/MovementPresentationRouteTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbySnapshot.cs" Link="Presentation/Steam/SteamLobbySnapshot.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamLobbyClient.cs" Link="Presentation/Steam/ISteamLobbyClient.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamLobbyClient.cs" Link="Presentation/Steam/FakeSteamLobbyClient.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/FakeSteamLobbyClientTests.cs" Link="Presentation/Steam/FakeSteamLobbyClientTests.cs" />
   </ItemGroup>
 
 </Project>
