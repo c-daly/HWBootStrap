@@ -150,8 +150,7 @@ namespace HexWars.NetServer.Persistence
 
             foreach ((string steamId, int seat) in players)
             {
-                if (string.IsNullOrWhiteSpace(steamId))
-                    throw new ArgumentException("A player was given with no Steam id.", nameof(players));
+                ValidateSteamId(steamId, nameof(players));
                 if (seat is not (0 or 1))
                     throw new ArgumentException("Seat " + seat + " is not a seat; only 0 and 1 exist.", nameof(players));
                 if (!seats.Add(seat))

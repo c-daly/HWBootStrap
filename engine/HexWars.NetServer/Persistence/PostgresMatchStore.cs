@@ -322,6 +322,8 @@ namespace HexWars.NetServer.Persistence
 
         public async Task TouchAsync(Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct)
         {
+            if (steamId is not null) MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
+
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using var batch = new NpgsqlBatch(connection);
 
@@ -468,17 +470,45 @@ namespace HexWars.NetServer.Persistence
         public async Task StoreJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt, CancellationToken ct)
         {
             MatchStoreGuard.ValidateCredentialHash(credentialHash, nameof(credentialHash));
+            MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
 
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(
-                "INSERT INTO match_join_credentials (credential_hash, match_id, steam_id, expires_at, revoked_at) "
-                + "VALUES (@credentialHash, @matchId, @steamId, @expiresAt, NULL)", connection);
-            command.Parameters.AddWithValue("credentialHash", credentialHash);
-            command.Parameters.AddWithValue("matchId", matchId);
-            command.Parameters.AddWithValue("steamId", steamId);
-            command.Parameters.Add(Timestamp("expiresAt", expiresAt));
 
-            await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            int inserted;
+            try
+            {
+                // DO NOTHING rather than a bare insert: the credential service retries after a dropped
+                // connection, and a retry that lost its answer must not turn a stored credential into an
+                // error the caller reports as a failed issue.
+                await using var command = new NpgsqlCommand(
+                    "INSERT INTO match_join_credentials (credential_hash, match_id, steam_id, expires_at, revoked_at) "
+                    + "VALUES (@credentialHash, @matchId, @steamId, @expiresAt, NULL) "
+                    + "ON CONFLICT (credential_hash) DO NOTHING", connection);
+                command.Parameters.AddWithValue("credentialHash", credentialHash);
+                command.Parameters.AddWithValue("matchId", matchId);
+                command.Parameters.AddWithValue("steamId", steamId);
+                command.Parameters.Add(Timestamp("expiresAt", expiresAt));
+
+                inserted = await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.ForeignKeyViolation)
+            {
+                throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId), ex);
+            }
+
+            if (inserted == 1) return;
+
+            JoinCredentialRecord? stored =
+                await FindJoinCredentialAsync(credentialHash, ct).ConfigureAwait(false);
+
+            if (stored is not null
+                && stored.MatchId == matchId
+                && string.Equals(stored.SteamId, steamId, StringComparison.Ordinal))
+                return;
+
+            // Two different seats cannot share one credential: whoever presented it would be authenticated
+            // as the wrong player. In practice this means a 32 byte random collision or a caller bug.
+            throw new InvalidOperationException("credential hash already bound to another seat");
         }
 
         public async Task<JoinCredentialRecord?> FindJoinCredentialAsync(byte[] credentialHash, CancellationToken ct)
@@ -504,6 +534,8 @@ namespace HexWars.NetServer.Persistence
 
         public async Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)
         {
+            MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
+
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using var command = new NpgsqlCommand(
                 "UPDATE match_join_credentials SET revoked_at = @revokedAt "

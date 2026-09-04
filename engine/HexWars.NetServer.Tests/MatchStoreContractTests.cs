@@ -507,6 +507,174 @@ namespace HexWars.NetServer.Tests
                 tooShort, match.MatchId, match.Seat0, Created.AddMinutes(15), Ct));
             Assert.ThrowsAsync<ArgumentException>(() => Store.FindJoinCredentialAsync(tooShort, Ct));
         }
+
+        [Test]
+        public async Task StoreJoinCredential_WithTheSameHashAndSeatTwice_IsIdempotent()
+        {
+            var match = await NewWaitingMatchAsync();
+            byte[] hash = Hash(40);
+
+            await Store.StoreJoinCredentialAsync(hash, match.MatchId, match.Seat0, Created.AddMinutes(15), Ct);
+            Assert.DoesNotThrowAsync(() => Store.StoreJoinCredentialAsync(
+                hash, match.MatchId, match.Seat0, Created.AddMinutes(45), Ct));
+
+            JoinCredentialRecord? stored = await Store.FindJoinCredentialAsync(hash, Ct);
+            Assert.That(stored, Is.Not.Null);
+            Assert.That(stored!.SteamId, Is.EqualTo(match.Seat0));
+            Assert.That(stored.ExpiresAt, Is.EqualTo(Created.AddMinutes(15)),
+                "a retried insert must leave the stored row alone rather than extending it");
+        }
+
+        [Test]
+        public async Task StoreJoinCredential_WithAHashAlreadyBoundToAnotherSeat_IsRefused()
+        {
+            var match = await NewWaitingMatchAsync();
+            var elsewhere = await NewWaitingMatchAsync();
+            byte[] hash = Hash(50);
+
+            await Store.StoreJoinCredentialAsync(hash, match.MatchId, match.Seat0, Created.AddMinutes(15), Ct);
+
+            Assert.ThrowsAsync<InvalidOperationException>(() => Store.StoreJoinCredentialAsync(
+                hash, match.MatchId, match.Seat1, Created.AddMinutes(15), Ct));
+            Assert.ThrowsAsync<InvalidOperationException>(() => Store.StoreJoinCredentialAsync(
+                hash, elsewhere.MatchId, elsewhere.Seat0, Created.AddMinutes(15), Ct));
+
+            JoinCredentialRecord? stored = await Store.FindJoinCredentialAsync(hash, Ct);
+            Assert.That(stored!.MatchId, Is.EqualTo(match.MatchId));
+            Assert.That(stored.SteamId, Is.EqualTo(match.Seat0));
+        }
+
+        // ---- seats own commands and credentials ------------------------------
+
+        [Test]
+        public async Task StoreJoinCredential_ForASteamIdWithNoSeatInThatMatch_IsRejected()
+        {
+            var match = await NewWaitingMatchAsync();
+            string stranger = NextSteamId();
+
+            Assert.ThrowsAsync<ArgumentException>(() => Store.StoreJoinCredentialAsync(
+                Hash(60), match.MatchId, stranger, Created.AddMinutes(15), Ct));
+
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(60), Ct), Is.Null);
+        }
+
+        [Test]
+        public async Task AppendCommand_FromASteamIdWithNoSeatInThatMatch_IsRejected()
+        {
+            var match = await NewActiveMatchAsync();
+            string stranger = NextSteamId();
+
+            Assert.ThrowsAsync<ArgumentException>(() => Store.AppendCommandAsync(
+                match.MatchId, 1, "E 0", stranger, Move1, Ct));
+
+            MatchJournal? journal = await Store.LoadJournalAsync(match.MatchId, Ct);
+            Assert.That(journal!.Commands, Is.Empty, "a refused command must leave no trace in the journal");
+        }
+
+        [Test]
+        public async Task AppendCommand_FromASteamIdWithNoSeat_IsRejectedEvenAtAStaleSequence()
+        {
+            var match = await NewActiveMatchAsync();
+            string stranger = NextSteamId();
+
+            // The seat is checked before the sequence is. A stranger must not be answered with an ordering
+            // result it could resync from and retry.
+            Assert.ThrowsAsync<ArgumentException>(() => Store.AppendCommandAsync(
+                match.MatchId, 7, "E 0", stranger, Move1, Ct));
+        }
+
+        [Test]
+        public async Task StoreJoinCredential_WithAClashingHash_IsRefusedBeforeTheSeatIsChecked()
+        {
+            var match = await NewWaitingMatchAsync();
+            byte[] hash = Hash(80);
+            await Store.StoreJoinCredentialAsync(hash, match.MatchId, match.Seat0, Created.AddMinutes(15), Ct);
+
+            // A hash that is already taken is a collision whoever presents it: the insert writes nothing, so
+            // no seat is ever looked at, and both stores must say the same thing.
+            Assert.ThrowsAsync<InvalidOperationException>(() => Store.StoreJoinCredentialAsync(
+                hash, match.MatchId, NextSteamId(), Created.AddMinutes(15), Ct));
+        }
+
+        // ---- argument checks both stores apply --------------------------------
+
+        [TestCase("")]
+        [TestCase("   ")]
+        [TestCase("abc")]
+        [TestCase("7656119000000000a")]
+        [TestCase("765611900000000001234")]
+        public async Task ASteamIdThatIsNotOneToTwentyDigits_IsRejectedWhereverOneIsTaken(string steamId)
+        {
+            var match = await NewActiveMatchAsync();
+
+            Assert.ThrowsAsync<ArgumentException>(() => Store.CreateMatchForLobbyAsync(
+                Request(NextLobbyId(), steamId, NextSteamId()), Ct));
+            Assert.ThrowsAsync<ArgumentException>(() => Store.SaveCatalogAsync(
+                match.MatchId, steamId, "catalog", Ct));
+            Assert.ThrowsAsync<ArgumentException>(() => Store.AppendCommandAsync(
+                match.MatchId, 1, "E 0", steamId, Move1, Ct));
+            Assert.ThrowsAsync<ArgumentException>(() => Store.TouchAsync(match.MatchId, steamId, Move1, Ct));
+            Assert.ThrowsAsync<ArgumentException>(() => Store.StoreJoinCredentialAsync(
+                Hash(70), match.MatchId, steamId, Created.AddMinutes(15), Ct));
+            Assert.ThrowsAsync<ArgumentException>(() => Store.RevokeJoinCredentialsAsync(
+                match.MatchId, steamId, Move1, Ct));
+        }
+
+        [Test]
+        public async Task SaveCatalog_ForSomeoneWhoHoldsNoSeat_ChangesNothingAtAll()
+        {
+            var match = await NewWaitingMatchAsync();
+            PersistedMatch before = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+
+            await Store.SaveCatalogAsync(match.MatchId, NextSteamId(), "catalog-for-nobody", Ct);
+
+            PersistedMatch after = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(after.LastActivityAt, Is.EqualTo(before.LastActivityAt),
+                "a stranger must not be able to keep a dead lobby alive");
+            Assert.That((await Store.GetPlayersAsync(match.MatchId, Ct)).Select(p => p.CatalogWire),
+                Is.All.Null);
+        }
+
+        [Test]
+        public async Task CompleteMatch_WithAWinnerButANonCompletedTerminal_IsRefused()
+        {
+            var match = await NewActiveMatchAsync();
+
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Abandoned, 0, Ended, Ct),
+                Is.False);
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Expired, 1, Ended, Ct),
+                Is.False);
+
+            PersistedMatch stored = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(stored.Status, Is.EqualTo(MatchStatus.Active), "a refused transition changes nothing");
+            Assert.That(stored.WinnerSeat, Is.Null);
+        }
+
+        [Test]
+        public async Task CompleteMatch_WithNoWinner_IsADraw()
+        {
+            var match = await NewActiveMatchAsync();
+
+            Assert.That(await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, null, Ended, Ct),
+                Is.True);
+
+            PersistedMatch stored = (await Store.GetMatchAsync(match.MatchId, Ct))!;
+            Assert.That(stored.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(stored.WinnerSeat, Is.Null);
+            Assert.That(stored.CompletedAt, Is.EqualTo(Ended));
+        }
+
+        [TestCase(2)]
+        [TestCase(-1)]
+        public async Task CompleteMatch_WithAWinnerSeatThatDoesNotExist_IsRejected(int winnerSeat)
+        {
+            var match = await NewActiveMatchAsync();
+
+            Assert.ThrowsAsync<ArgumentException>(() => Store.TryCompleteMatchAsync(
+                match.MatchId, MatchStatus.Completed, winnerSeat, Ended, Ct));
+
+            Assert.That((await Store.GetMatchAsync(match.MatchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+        }
     }
 
     /// <summary>The contract against the real database. Every test starts from a freshly migrated schema so

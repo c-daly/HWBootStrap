@@ -219,6 +219,8 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task TouchAsync(Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct)
         {
+            if (steamId is not null) ValidateSteamId(steamId, nameof(steamId));
+
             lock (_gate)
             {
                 if (_matches.TryGetValue(matchId, out MatchRow? row)) row.LastActivityAt = Stored(seenAt);
@@ -237,6 +239,8 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence, string commandWire, string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
         {
+            ValidateSteamId(issuerSteamId, nameof(issuerSteamId));
+
             lock (_gate)
             {
                 BeginWrite();
@@ -274,20 +278,30 @@ namespace HexWars.NetServer.Tests.Fakes
         public Task StoreJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt, CancellationToken ct)
         {
             ValidateCredentialHash(credentialHash, nameof(credentialHash));
+            ValidateSteamId(steamId, nameof(steamId));
 
             lock (_gate)
             {
                 BeginWrite();
 
-                if (!_matches.ContainsKey(matchId))
-                    throw new InvalidOperationException(
-                        "No match has that id, so a credential cannot be bound to it. Postgres refuses the "
-                        + "same insert with a foreign key violation.");
+                // ON CONFLICT (credential_hash) DO NOTHING, then read back what is stored: the same seat
+                // means an earlier attempt committed after all, so the retry is a success and the stored row
+                // keeps the expiry it was issued with. This comes first because a skipped insert checks no
+                // foreign key either.
+                CredentialRow? clash = Credential(credentialHash);
+                if (clash is not null)
+                {
+                    if (clash.MatchId == matchId
+                        && string.Equals(clash.SteamId, steamId, StringComparison.Ordinal))
+                        return Task.CompletedTask;
 
-                if (Credential(credentialHash) is not null)
-                    throw new InvalidOperationException(
-                        "A credential with that hash is already stored; Postgres refuses it as a primary key "
-                        + "violation.");
+                    throw new InvalidOperationException("credential hash already bound to another seat");
+                }
+
+                // The composite foreign key: a credential belongs to a seat, so an unknown match and an
+                // unknown player are the same refusal.
+                if (Player(matchId, steamId) is null)
+                    throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
 
                 _credentials.Add(new CredentialRow
                 {
@@ -313,6 +327,8 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)
         {
+            ValidateSteamId(steamId, nameof(steamId));
+
             lock (_gate)
             {
                 BeginWrite();
