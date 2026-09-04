@@ -70,17 +70,35 @@ namespace HexWars.NetServer.Tests.Fixtures
         }
 
         /// <summary>The check <see cref="CreateAsync"/> makes before it will hand out a supplied database,
-        /// and the connection string it hands out once the database passes. Separated from CreateAsync so
-        /// it can be tested without setting a process-wide environment variable or touching a database.
-        /// </summary>
-        internal static string RequireDisposable(string databaseUrl, Func<string, string?> env)
+        /// and both forms of the target once it passes. Separated from CreateAsync so it can be tested
+        /// without setting a process-wide environment variable or touching a database.</summary>
+        internal static (string ConnectionString, string DatabaseUrl) RequireDisposable(
+            string databaseUrl, Func<string, string?> env)
         {
+            // The guard resolves the value through Npgsql before judging it, so the database it rules on
+            // is the one a connection would actually open rather than the text somebody typed.
             if (!DisposableDatabaseGuard.IsDisposable(databaseUrl, env, out string reason))
                 throw new InvalidOperationException(
                     "Refusing to run the persistence tests against the database in "
                     + OverrideEnvironmentVariable + ": " + reason);
 
-            return DbUrl.ToNpgsqlConnectionString(databaseUrl);
+            string connectionString = DbUrl.ToNpgsqlConnectionString(databaseUrl);
+            string url = ComposeUrl(connectionString);
+
+            // This fixture hands out both forms, and host tests feed the URL one straight into
+            // DATABASE_URL. So it is not enough for the check to have approved a database: the URL has to
+            // read back as that same database, or the thing that was approved and the thing that gets
+            // migrated are two different databases and the check was of the wrong one.
+            string? approved = DisposableDatabaseGuard.DatabaseName(connectionString);
+            string? handedOut = DisposableDatabaseGuard.DatabaseName(url);
+
+            if (!string.Equals(approved, handedOut, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "Refusing to run the persistence tests: the database that was checked (\"" + approved
+                    + "\") is not the one the URL form of the same target reads back as (\"" + handedOut
+                    + "\"), so the check and the migration would be about different databases.");
+
+            return (connectionString, url);
         }
 
         static async Task<PostgresTestDatabase> CreateAsync()
@@ -90,9 +108,9 @@ namespace HexWars.NetServer.Tests.Fixtures
             {
                 // Before anything opens a connection, because the first thing every fixture does with the
                 // result is drop its public schema, and there is no undo for that.
-                string connectionString =
+                (string connectionString, string url) =
                     RequireDisposable(supplied!, Environment.GetEnvironmentVariable);
-                return new PostgresTestDatabase(null, ComposeUrl(connectionString), connectionString);
+                return new PostgresTestDatabase(null, url, connectionString);
             }
 
             var container = new PostgreSqlBuilder()
@@ -125,12 +143,18 @@ namespace HexWars.NetServer.Tests.Fixtures
             return new PostgresTestDatabase(container, ComposeUrl(fromContainer), fromContainer);
         }
 
-        /// <summary>Npgsql key=value back to the postgres:// URL a hosting platform would hand us.</summary>
+        /// <summary>Npgsql key=value back to the postgres:// URL a hosting platform would hand us.
+        ///
+        /// The database goes through EscapeDataString like the credentials do. A Postgres identifier may
+        /// contain any character at all, and one carrying a URL delimiter dropped in raw silently renames
+        /// the target: "prod?test" becomes the path "prod" with a query string after it, which is a
+        /// different and probably real database.</summary>
         static string ComposeUrl(string connectionString)
         {
             var parts = new NpgsqlConnectionStringBuilder(connectionString);
             string host = string.IsNullOrEmpty(parts.Host) ? "localhost" : parts.Host!;
-            string database = string.IsNullOrEmpty(parts.Database) ? "postgres" : parts.Database!;
+            string database =
+                Uri.EscapeDataString(string.IsNullOrEmpty(parts.Database) ? "postgres" : parts.Database!);
             string user = Uri.EscapeDataString(parts.Username ?? string.Empty);
             string password = Uri.EscapeDataString(parts.Password ?? string.Empty);
             string port = parts.Port.ToString(CultureInfo.InvariantCulture);

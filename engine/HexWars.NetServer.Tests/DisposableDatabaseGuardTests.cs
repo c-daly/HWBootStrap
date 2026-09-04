@@ -28,7 +28,7 @@ namespace HexWars.NetServer.Tests
 
         static string KeyValue(string database) =>
             "Host=db.example.com;Port=5432;Username=" + Username + ";Password=" + Password
-            + ";Database=" + database;
+            + ";Database=\"" + database + "\"";
 
         [TestCase("hexwars_test")]
         [TestCase("test")]
@@ -120,13 +120,36 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public void TheFixture_AcceptsATestDatabaseAndHandsBackItsConnectionString()
+        public void TheFixture_AcceptsATestDatabaseAndHandsBackBothFormsOfIt()
         {
-            string connectionString =
+            (string connectionString, string url) =
                 PostgresTestDatabase.RequireDisposable(Url("hexwars_test"), NoEnvironment);
 
-            Assert.That(connectionString, Does.Contain("hexwars_test"));
             Assert.That(DisposableDatabaseGuard.DatabaseName(connectionString), Is.EqualTo("hexwars_test"));
+            Assert.That(DisposableDatabaseGuard.DatabaseName(url), Is.EqualTo("hexwars_test"));
+        }
+
+        [TestCase("prod?test")]
+        [TestCase("test/prod")]
+        [TestCase("test#prod")]
+        [TestCase("test prod")]
+        public void ADatabaseNameCarryingAUrlDelimiter_IsCheckedAndHandedOutAsTheSameDatabase(string database)
+        {
+            // The fixture hands out a URL as well as a connection string, and host tests feed that URL
+            // into DATABASE_URL. A name like "prod?test" satisfies the name rule, but dropped into a URL
+            // unescaped the question mark starts a query string and the URL reads back as "prod": the
+            // database that was approved and the database that would have been migrated are not the same
+            // one, and the second is somebody's production data.
+            string target = KeyValue(database);
+            Assert.That(DisposableDatabaseGuard.DatabaseName(target), Is.EqualTo(database),
+                "the check has to be about the database Npgsql resolves, not the raw text");
+
+            (string connectionString, string url) =
+                PostgresTestDatabase.RequireDisposable(target, NoEnvironment);
+
+            Assert.That(DisposableDatabaseGuard.DatabaseName(connectionString), Is.EqualTo(database));
+            Assert.That(DisposableDatabaseGuard.DatabaseName(url), Is.EqualTo(database),
+                "the URL form has to name the database that was approved and no other");
         }
     }
 }
