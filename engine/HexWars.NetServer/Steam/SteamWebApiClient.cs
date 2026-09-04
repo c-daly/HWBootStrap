@@ -548,14 +548,64 @@ namespace HexWars.NetServer.Steam
 
         static JsonDocument ParseJson(string body)
         {
+            JsonDocument document;
             try
             {
-                return JsonDocument.Parse(body);
+                document = JsonDocument.Parse(body);
             }
             catch (JsonException)
             {
                 // The parser message quotes the body it choked on, so only the verdict is kept.
                 throw new SteamApiException(SteamFailure.MalformedResponse, "the response body was not JSON");
+            }
+
+            try
+            {
+                RequireNoDuplicateProperties(document.RootElement);
+            }
+            catch
+            {
+                document.Dispose();   // the caller never receives it, so it never reaches a using
+                throw;
+            }
+
+            return document;
+        }
+
+        /// <summary>
+        /// System.Text.Json keeps the LAST of a repeated property, and every read in this class goes
+        /// through TryGetProperty, so a repeat anywhere in the body silently decides which value is read:
+        /// the ban flag, the ownership verdict, the key_name of one metadata entry. Fixing that one field
+        /// at a time only moves the trick a level down, so the whole tree is walked once, before any field
+        /// is read at all. Recursion depth is bounded by the 64 level limit the parser already enforces.
+        /// </summary>
+        static void RequireNoDuplicateProperties(JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var property in element.EnumerateObject())
+                    {
+                        // The name is sender supplied text, so the detail does not repeat it back.
+                        if (!seen.Add(property.Name))
+                        {
+                            throw new SteamApiException(
+                                SteamFailure.MalformedResponse, "duplicate json property");
+                        }
+
+                        RequireNoDuplicateProperties(property.Value);
+                    }
+
+                    break;
+
+                case JsonValueKind.Array:
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        RequireNoDuplicateProperties(item);
+                    }
+
+                    break;
             }
         }
 
@@ -670,22 +720,19 @@ namespace HexWars.NetServer.Steam
             new(SteamFailure.MalformedResponse, "duplicate metadata key");
 
         /// <summary>
-        /// System.Text.Json keeps the LAST of a repeated property and TryGetProperty never reports the
-        /// collision, so a second member_metadata silently wins over the first and the bag we read is not
-        /// the bag that was sent. Counting the properties by hand is the only way to see it. Both
-        /// spellings of one bag arriving together is the same trick wearing two names, so it goes too.
+        /// One bag, one spelling. A repeated property name is already gone by the time anything is read,
+        /// so what is left is the two-alias case: member_metadata and member_data arriving together are
+        /// two bags claiming to be the same one, and which of them wins would be settled by the order
+        /// this client happens to check the names in.
         /// </summary>
-        static void RequireNoRepeatedContainer(JsonElement parent, string[] names)
+        static void RequireOneContainer(JsonElement parent, string[] names)
         {
             if (parent.ValueKind != JsonValueKind.Object) return;
 
-            var seen = new HashSet<string>(StringComparer.Ordinal);
             var containers = 0;
-
-            foreach (var property in parent.EnumerateObject())
+            foreach (var name in names)
             {
-                if (!seen.Add(property.Name)) throw DuplicateMetadataKey();
-                if (Array.IndexOf(names, property.Name) >= 0) containers++;
+                if (TryGetProperty(parent, name, out _)) containers++;
             }
 
             if (containers > 1) throw DuplicateMetadataKey();
@@ -702,7 +749,7 @@ namespace HexWars.NetServer.Steam
         /// </summary>
         static IReadOnlyDictionary<string, string> ReadKeyValues(JsonElement parent, params string[] names)
         {
-            RequireNoRepeatedContainer(parent, names);
+            RequireOneContainer(parent, names);
 
             var result = new Dictionary<string, string>(StringComparer.Ordinal);
 

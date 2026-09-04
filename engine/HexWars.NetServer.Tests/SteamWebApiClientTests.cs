@@ -139,6 +139,19 @@ namespace HexWars.NetServer.Tests
         const string LobbyWithBothLobbyAliases =
             """{"response":{"steamid_owner":"76561197960287930","lobby_metadata":{"hw_setup":"a"},"lobby_data":{"hw_setup":"b"},"members":[{"steamid":"76561197960287930"}]}}""";
 
+        // Reviewer input: the repeat is on a property of one metadata entry, below anything a container
+        // level check can see, and key_name reads as the second one.
+        const string LobbyWithARepeatedKeyNameInsideAnEntry =
+            """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930","member_metadata":[{"key_name":"ignored","key_name":"hw_ready","key_value":"1"}]}]}}""";
+
+        // The same class two endpoints away: the second vacbanned is the one TryGetProperty returns, so
+        // a banned account reads as clean.
+        const string AuthWithARepeatedPropertyInsideParams =
+            """{"response":{"params":{"result":"OK","steamid":"76561197960287930","vacbanned":true,"vacbanned":false,"publisherbanned":false}}}""";
+
+        const string OwnershipWithARepeatedProperty =
+            """{"appownership":{"result":"OK","ownsapp":false,"ownsapp":true}}""";
+
         const string LobbyWithANonObjectMember =
             """{"response":{"steamid_owner":"76561197960287930","members":[{"steamid":"76561197960287930"},{"steamid":"76561197985812219"},7]}}""";
 
@@ -803,11 +816,9 @@ namespace HexWars.NetServer.Tests
             Assert.That(ex.Detail, Does.Contain("duplicate metadata key"));
         }
 
-        [TestCase(LobbyWithADuplicateMemberContainer, TestName = "Lobby_RepeatedMemberMetadataProperty_IsMalformedResponse")]
-        [TestCase(LobbyWithADuplicateLobbyContainer, TestName = "Lobby_RepeatedLobbyMetadataProperty_IsMalformedResponse")]
         [TestCase(LobbyWithBothMemberAliases, TestName = "Lobby_BothMemberDataAliases_IsMalformedResponse")]
         [TestCase(LobbyWithBothLobbyAliases, TestName = "Lobby_BothLobbyDataAliases_IsMalformedResponse")]
-        public void Lobby_DuplicateMetadataContainer_IsMalformedResponse(string body)
+        public void Lobby_BothSpellingsOfOneMetadataBag_IsMalformedResponse(string body)
         {
             using var h = new Harness();
             h.Handler.RespondJson(FakeSteamHandler.LobbyPath, body);
@@ -815,10 +826,54 @@ namespace HexWars.NetServer.Tests
             var ex = Assert.ThrowsAsync<SteamApiException>(
                 () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
 
-            // Reading the bag through TryGetProperty hands back whichever copy came last, so the ready
-            // flag and the match setup become a matter of which one the sender put second.
+            // Two bags claiming to be the same one: which wins would be decided by the order this client
+            // happens to check the aliases in, not by anything the sender is entitled to decide.
             Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
             Assert.That(ex.Detail, Is.EqualTo("duplicate metadata key"));
+        }
+
+        [TestCase(LobbyWithADuplicateMemberContainer, TestName = "Lobby_RepeatedMemberMetadataProperty_IsMalformedResponse")]
+        [TestCase(LobbyWithADuplicateLobbyContainer, TestName = "Lobby_RepeatedLobbyMetadataProperty_IsMalformedResponse")]
+        [TestCase(LobbyWithARepeatedKeyNameInsideAnEntry, TestName = "Lobby_RepeatedKeyNameInsideAMetadataEntry_IsMalformedResponse")]
+        public void Lobby_RepeatedJsonProperty_IsMalformedResponse(string body)
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.LobbyPath, body);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.GetLobbyDataAsync(LobbyId, CancellationToken.None));
+
+            // Every read here goes through TryGetProperty, which hands back whichever copy came last, so
+            // a repeat anywhere in the tree quietly decides the value rather than the sender declaring it.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+            Assert.That(ex.Detail, Is.EqualTo("duplicate json property"));
+        }
+
+        [Test]
+        public void Auth_RepeatedPropertyInsideParams_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.AuthPath, AuthWithARepeatedPropertyInsideParams);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.AuthenticateUserTicketAsync(Ticket, CancellationToken.None));
+
+            // The second vacbanned is the one that would be read, which turns a banned account clean.
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+            Assert.That(ex.Detail, Is.EqualTo("duplicate json property"));
+        }
+
+        [Test]
+        public void Ownership_RepeatedPropertyInsideAppOwnership_IsMalformedResponse()
+        {
+            using var h = new Harness();
+            h.Handler.RespondJson(FakeSteamHandler.OwnershipPath, OwnershipWithARepeatedProperty);
+
+            var ex = Assert.ThrowsAsync<SteamApiException>(
+                () => h.Client.CheckAppOwnershipAsync(OwnerId, CancellationToken.None));
+
+            Assert.That(ex!.Failure, Is.EqualTo(SteamFailure.MalformedResponse));
+            Assert.That(ex.Detail, Is.EqualTo("duplicate json property"));
         }
 
         // ---- transport ------------------------------------------------------
