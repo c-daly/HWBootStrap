@@ -483,6 +483,82 @@ def test_client_fails_closed_on_malformed_or_eof_handshake(tmp_path: Path, reply
     assert len(str(raised.value).split("GymServer stderr tail: ")[-1]) <= 8192
 
 
+def _delayed_duel_reset_server(tmp_path: Path, delay_seconds: float) -> list[str]:
+    script = tmp_path / "delayed_duel_reset.py"
+    script.write_text(
+        """import json
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from test_tactical_v3_schema import minimal_view_payload
+
+request = json.loads(sys.stdin.readline())
+if request["cmd"] != "duel_spaces":
+    raise RuntimeError(request["cmd"])
+spaces = json.loads(
+    (Path(sys.argv[1]) / "fixtures" / "tactical_v3" /
+     "seed-41-duel-spaces.json").read_text(encoding="utf-8")
+)
+print(json.dumps(spaces), flush=True)
+request = json.loads(sys.stdin.readline())
+if request["cmd"] != "duel_reset":
+    raise RuntimeError(request["cmd"])
+time.sleep(float(sys.argv[3]))
+print(json.dumps(minimal_view_payload()), flush=True)
+""",
+        encoding="utf-8",
+    )
+    return [
+        sys.executable,
+        str(script),
+        str(Path(__file__).parent),
+        str(Path(__file__).resolve().parents[1]),
+        str(delay_seconds),
+    ]
+
+
+def test_client_accepts_delayed_duel_reset_within_watchdog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_client as module
+
+    client = module.TacticalV3GymClient(
+        _delayed_duel_reset_server(tmp_path, 0.1), environment_kind="duel",
+    )
+    monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 2.0)
+    with client:
+        view = client.duel_reset(
+            41, "external", "passive", 0, "standard-3v3", 0,
+        )
+    assert view.decision.decision_id == 7
+
+
+def test_hanging_duel_reset_names_command_closes_and_reaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_client as module
+
+    client = module.TacticalV3GymClient(
+        _delayed_duel_reset_server(tmp_path, 30), environment_kind="duel",
+    )
+    process = client.proc
+    monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"GymServer duel_reset reply timed out after 0\.05 seconds",
+    ):
+        client.duel_reset(
+            41, "external", "passive", 0, "standard-3v3", 0,
+        )
+
+    assert client._closed
+    assert process.poll() is not None
+
+
 def test_client_timeout_is_bounded_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import ml_lab.tactical_v3_client as module
     monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 0.05)
