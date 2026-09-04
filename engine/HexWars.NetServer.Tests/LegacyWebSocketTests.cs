@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text;
+using HexWars.Engine;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -34,10 +35,19 @@ namespace HexWars.NetServer.Tests
 
         static async Task<string> ReceiveAsync(WebSocket socket)
         {
-            var buffer = new byte[16384];
-            var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-            return Encoding.UTF8.GetString(buffer, 0, result.Count);
+            var buffer = new byte[65536];
+            using var message = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                message.Write(buffer, 0, result.Count);
+            } while (!result.EndOfMessage);
+            return Encoding.UTF8.GetString(message.ToArray());
         }
+
+        static Task SendAsync(WebSocket socket, string text) => socket.SendAsync(
+            Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, CancellationToken.None);
 
         [Test]
         public async Task SameHostOrigin_IsSeated()
@@ -76,6 +86,31 @@ namespace HexWars.NetServer.Tests
             var ex = Assert.CatchAsync(async () => await ConnectAsync(factory, "ORIGINDENY", "https://evil.invalid"));
 
             Assert.That(ex!.Message, Does.Contain("403"));
+        }
+
+        /// <summary>The hub end to end through the real host: two sockets are seated, both hand in a
+        /// barracks catalog, and the server deals the same START replay to both.</summary>
+        [Test]
+        public async Task TwoClientsInOneRoom_AreSeatedAndDealtTheSameStart()
+        {
+            string catalog = NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates));
+            using var factory = Factory();
+
+            using var host = await ConnectAsync(factory, "PLAYTHROUGH", origin: null);
+            Assert.That(await ReceiveAsync(host), Is.EqualTo(NetProtocol.Seat(PlayerId.Player0)));
+            Assert.That(await ReceiveAsync(host), Is.EqualTo(NetProtocol.CatalogRequest));
+            await SendAsync(host, catalog);
+
+            using var guest = await ConnectAsync(factory, "PLAYTHROUGH", origin: null);
+            Assert.That(await ReceiveAsync(guest), Is.EqualTo(NetProtocol.Seat(PlayerId.Player1)));
+            Assert.That(await ReceiveAsync(guest), Is.EqualTo(NetProtocol.CatalogRequest));
+            await SendAsync(guest, catalog);
+
+            string hostStart = await ReceiveAsync(host);
+            string guestStart = await ReceiveAsync(guest);
+
+            Assert.That(hostStart, Does.StartWith("START "));
+            Assert.That(guestStart, Is.EqualTo(hostStart));
         }
 
         [Test]
