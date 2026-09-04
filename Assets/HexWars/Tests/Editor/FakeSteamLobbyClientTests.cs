@@ -179,6 +179,51 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void RequestAuthTicket_IgnoresAResponseForAnAbandonedHandle()
+        {
+            using var client = NewClient();
+            client.AutoDeliverAuthTickets = false;
+            string? first = "not-set";
+            string? second = "not-set";
+
+            client.RequestAuthTicket(t => first = t);
+            var stale = client.AuthTicketHandles[0];
+            client.RequestAuthTicket(t => second = t);
+            var current = client.AuthTicketHandles[1];
+
+            Assert.That(client.CancelAuthTicketCalls, Is.EqualTo(1), "a new request releases the old handle");
+            Assert.That(client.CurrentAuthTicketHandle, Is.EqualTo(current));
+
+            client.DeliverAuthTicketResponse(stale, "STALE");
+
+            Assert.That(client.StaleAuthTicketResponses, Is.EqualTo(1));
+            Assert.That(first, Is.EqualTo("not-set"));
+            Assert.That(second, Is.EqualTo("not-set"));
+
+            client.DeliverAuthTicketResponse(current, "FRESH");
+
+            Assert.That(second, Is.EqualTo("FRESH"));
+        }
+
+        [Test]
+        public void SetLobbyData_CanBeScriptedToFail()
+        {
+            using var client = NewClient();
+            string? lobbyId = null;
+            client.CreateLobby(SteamLobbyVisibility.Public, 2, id => lobbyId = id);
+            client.PumpAll();
+
+            client.FailNextSetLobbyData = true;
+            Assert.That(client.SetLobbyData(lobbyId!, "hw_app", "480"), Is.False);
+            Assert.That(client.SetLobbyData(lobbyId!, "hw_app", "480"), Is.True, "the toggle is one shot");
+
+            client.FailSetLobbyDataForKey = "hw_match";
+            Assert.That(client.SetLobbyData(lobbyId!, "hw_match", "m-1"), Is.False);
+            Assert.That(client.SetLobbyData(lobbyId!, "hw_match", "m-1"), Is.False, "that key stays refused");
+            Assert.That(client.SetLobbyData(lobbyId!, "hw_name", "Local"), Is.True);
+        }
+
+        [Test]
         public void RequestAuthTicket_WhenScriptedNull_DeliversNull()
         {
             using var client = NewClient();

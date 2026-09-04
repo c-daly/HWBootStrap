@@ -1,5 +1,5 @@
 #nullable enable
-// Duplicated from Assets/HexWars/Tests/Editor/Fakes/ — the EditMode and PlayMode suites are separate
+// Duplicated from Assets/HexWars/Tests/Editor/Fakes/ - the EditMode and PlayMode suites are separate
 // assemblies and neither may reference the other, so the fakes exist once per suite. Keep the two
 // copies in step: the EditMode copy is the one linked into engine/HexWars.Engine.Tests.
 using System;
@@ -37,6 +37,10 @@ namespace HexWars.Presentation.PlayModeTests
         ulong _nextLobbyId = 109775240000000001UL;
         bool _disposed;
 
+        uint _nextAuthTicketHandle = 1;
+        uint _currentAuthTicketHandle;
+        Action<string?>? _authTicketCallback;
+
         public bool IsAvailable { get; set; } = true;
         public string LocalSteamId { get; set; } = "76561197960287930";
         public string LocalDisplayName { get; set; } = "LocalPlayer";
@@ -49,6 +53,24 @@ namespace HexWars.Presentation.PlayModeTests
 
         /// <summary>Ticket handed to the next RequestAuthTicket caller. Null scripts a failure.</summary>
         public string? NextTicket { get; set; } = "0A1B2C3D";
+
+        /// <summary>
+        /// When false, a test delivers ticket responses itself through
+        /// <see cref="DeliverAuthTicketResponse"/>, which is how a stale one is staged.
+        /// </summary>
+        public bool AutoDeliverAuthTickets { get; set; } = true;
+
+        /// <summary>Every handle RequestAuthTicket issued, in order.</summary>
+        public List<uint> AuthTicketHandles { get; } = new List<uint>();
+
+        /// <summary>Responses dropped because their handle was no longer the current one.</summary>
+        public int StaleAuthTicketResponses { get; private set; }
+
+        /// <summary>The next write of this key fails, whatever it is. Cleared once it has fired.</summary>
+        public bool FailNextSetLobbyData { get; set; }
+
+        /// <summary>Every write of this key fails. Null means no key is refused.</summary>
+        public string? FailSetLobbyDataForKey { get; set; }
 
         /// <summary>Lobbies RequestLobbyList searches, and that JoinLobby can materialise.</summary>
         public List<SteamLobbySearchResult> AvailableLobbies { get; } = new List<SteamLobbySearchResult>();
@@ -165,6 +187,9 @@ namespace HexWars.Presentation.PlayModeTests
         public bool SetLobbyData(string lobbyId, string key, string value)
         {
             SetLobbyDataCalls++;
+            if (FailNextSetLobbyData) { FailNextSetLobbyData = false; return false; }
+            if (FailSetLobbyDataForKey != null
+                && string.Equals(key, FailSetLobbyDataForKey, StringComparison.Ordinal)) return false;
             if (!IsAvailable || _disposed) return false;
             if (string.IsNullOrEmpty(lobbyId) || !_lobbies.TryGetValue(lobbyId, out var lobby)) return false;
             if (!string.Equals(lobby.OwnerSteamId, LocalSteamId, StringComparison.Ordinal)) return false;
@@ -211,6 +236,8 @@ namespace HexWars.Presentation.PlayModeTests
             LastInviteOverlayLobbyId = lobbyId;
         }
 
+        public uint CurrentAuthTicketHandle { get { return _currentAuthTicketHandle; } }
+
         public void RequestAuthTicket(Action<string?> onDone)
         {
             RequestAuthTicketCalls++;
@@ -220,13 +247,37 @@ namespace HexWars.Presentation.PlayModeTests
                 return;
             }
 
+            // A second request cancels the first handle, exactly as the live client does, so only one
+            // ticket is ever outstanding.
+            if (_currentAuthTicketHandle != 0) CancelAuthTicket();
+
+            var handle = _nextAuthTicketHandle++;
+            _currentAuthTicketHandle = handle;
+            _authTicketCallback = onDone;
+            AuthTicketHandles.Add(handle);
+
             var ticket = NextTicket;
-            Enqueue(() => onDone(ticket));
+            if (AutoDeliverAuthTickets) Enqueue(() => DeliverAuthTicketResponse(handle, ticket));
+        }
+
+        /// <summary>
+        /// Steam answering for one handle. A response for anything but the current handle is dropped,
+        /// which is the whole point of correlating them: a late answer to an abandoned request must
+        /// never be handed to a caller that has moved on.
+        /// </summary>
+        public void DeliverAuthTicketResponse(uint handle, string? ticket)
+        {
+            if (handle != _currentAuthTicketHandle) { StaleAuthTicketResponses++; return; }
+            var done = _authTicketCallback;
+            _authTicketCallback = null;
+            if (done != null) done(ticket);
         }
 
         public void CancelAuthTicket()
         {
             CancelAuthTicketCalls++;
+            _currentAuthTicketHandle = 0;
+            _authTicketCallback = null;
         }
 
         /// <summary>Releases at most one queued callback, mirroring a single frame of SteamAPI.RunCallbacks.</summary>
@@ -241,6 +292,8 @@ namespace HexWars.Presentation.PlayModeTests
         {
             DisposeCalls++;
             _disposed = true;
+            _currentAuthTicketHandle = 0;
+            _authTicketCallback = null;
             _pending.Clear();
             LobbyDataChanged = null;
             MemberJoined = null;

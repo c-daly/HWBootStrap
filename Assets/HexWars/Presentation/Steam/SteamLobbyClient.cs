@@ -242,25 +242,31 @@ namespace HexWars.Presentation
             catch (Exception ex) { _log("SteamFriends.ActivateGameOverlayInviteDialog failed: " + ex.Message); }
         }
 
+        public uint CurrentAuthTicketHandle { get { return _authTicket.m_HAuthTicket; } }
+
         public void RequestAuthTicket(Action<string?> onDone)
         {
             if (!IsAvailable) { Defer(() => onDone(null)); return; }
+
+            // Only one ticket may be outstanding: the previous handle is released first, so a ticket
+            // this client will never read cannot linger on the account.
+            CancelAuthTicket();
             try
             {
-                _onAuthTicket = onDone;
                 var handle = SteamUser.GetAuthTicketForWebApi(WebApiIdentity);
                 if (handle == HAuthTicket.Invalid)
                 {
-                    _onAuthTicket = null;
                     _log("SteamUser.GetAuthTicketForWebApi returned an invalid handle.");
                     Defer(() => onDone(null));
                     return;
                 }
                 _authTicket = handle;
+                _onAuthTicket = onDone;
             }
             catch (Exception ex)
             {
                 _log("SteamUser.GetAuthTicketForWebApi failed: " + ex.Message);
+                _authTicket = HAuthTicket.Invalid;
                 _onAuthTicket = null;
                 Defer(() => onDone(null));
             }
@@ -268,6 +274,7 @@ namespace HexWars.Presentation
 
         public void CancelAuthTicket()
         {
+            _onAuthTicket = null;
             if (!_initialised || _authTicket == HAuthTicket.Invalid) return;
             try { SteamUser.CancelAuthTicket(_authTicket); }
             catch (Exception ex) { _log("SteamUser.CancelAuthTicket failed: " + ex.Message); }
@@ -437,7 +444,14 @@ namespace HexWars.Presentation
 
         void OnWebApiTicket(GetTicketForWebApiResponse_t callback)
         {
-            _authTicket = callback.m_hAuthTicket;
+            // Steam delivers one of these per issued handle. Anything but the handle this client is
+            // waiting on belongs to a request that was cancelled or superseded, and must be dropped
+            // instead of being handed to whoever asked most recently.
+            if (callback.m_hAuthTicket != _authTicket)
+            {
+                _log("Ignoring an auth ticket response for a handle we are no longer waiting on.");
+                return;
+            }
 
             var done = _onAuthTicket;
             _onAuthTicket = null;
@@ -563,6 +577,7 @@ namespace HexWars.Presentation
         public void OpenInviteOverlay(string lobbyId) { }
         public void RequestAuthTicket(Action<string?> onDone) { Defer(() => onDone(null)); }
         public void CancelAuthTicket() { }
+        public uint CurrentAuthTicketHandle { get { return 0u; } }
 
 #pragma warning disable 0067 // the stub never raises these; the interface still has to expose them
         public event Action<string>? LobbyDataChanged;

@@ -63,8 +63,17 @@ namespace HexWars.Presentation
         /// </summary>
         void RequestAuthTicket(Action<string?> onDone);
 
-        /// <summary>Cancels the outstanding auth ticket, if any.</summary>
+        /// <summary>
+        /// Cancels the outstanding auth ticket, if any, and drops its pending callback. A Web API
+        /// ticket is good for one exchange, so the caller cancels it as soon as that exchange ends.
+        /// </summary>
         void CancelAuthTicket();
+
+        /// <summary>
+        /// Handle of the auth ticket this client is currently waiting on, or 0 when there is none.
+        /// Responses carrying any other handle belong to an abandoned request and are dropped.
+        /// </summary>
+        uint CurrentAuthTicketHandle { get; }
 
         /// <summary>Lobby metadata (or a member data entry) changed. The argument is the lobby id.</summary>
         event Action<string> LobbyDataChanged;
