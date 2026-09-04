@@ -1,5 +1,6 @@
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Options;
 
@@ -14,7 +15,18 @@ namespace HexWars.NetServer.Hosting
     {
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
+            // Belt and braces with RemoveAllLoggers() on the Steam client: these categories log the full
+            // request URI at Information, and for Steam that URI is the publisher key and the auth
+            // ticket. Nothing this server needs from them is worth that risk on any deployment.
+            builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.None);
+
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+            // Registered unconditionally: the typed client resolves its options lazily, so a
+            // Legacy-only deployment with no Steam credentials is unaffected by it being here.
+            builder.Services.AddSteamWebApi();
+            // Stateless and options-driven: one instance serves every request, and resolving it here
+            // rather than constructing it in an endpoint keeps the lobby rules out of the HTTP layer.
+            builder.Services.AddSingleton<SteamLobbyValidator>();
             return builder;
         }
 
