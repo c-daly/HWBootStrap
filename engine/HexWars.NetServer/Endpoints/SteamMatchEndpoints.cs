@@ -95,17 +95,38 @@ namespace HexWars.NetServer.Endpoints
             string caller = CallerKey(http);
             if (throttle.IsThrottled(caller)) return ApiErrors.RateLimitedResult();
 
-            // Before the Steam round trips and before the write, for the same reason the throttle is: a
-            // caller that has already filled its share of the database costs this server nothing to refuse.
-            // This is a bound on durable state, not on request rate - the limiter above owns that - so it
-            // counts the matches a caller actually got rather than the calls it made.
-            if (!quota.HasHeadroom(caller))
+            // Taken under the quota lock before anything is awaited, and taken as a SEAT rather than as an
+            // answer to a question. Asking whether there is room and spending it later is check-then-act:
+            // the room is granted in between, so a dozen concurrent creations from one address all read the
+            // same low number and all proceed. It is also before the Steam round trips and before the write,
+            // for the same reason the throttle is: a caller that has filled its share of the database costs
+            // this server nothing to refuse.
+            string bucket = OpenMatchQuota.BucketFor(http.Connection.RemoteIpAddress);
+            bool reserved = quota.TryReserve(bucket, out QuotaLease lease);
+
+            // The one request still worth serving over the cap is a retry for a lobby that ALREADY has a
+            // match, because that request writes nothing - it hands the caller back the match they were
+            // already given. Refusing it would lock a player out of the game they just started because their
+            // first response was lost. It costs one indexed read, and only for a caller already over the cap.
+            if (!reserved)
             {
-                logger.LogWarning(
-                    "Refused a match creation: this address already allocated {Cap} matches this window",
-                    options.MaxOpenMatchesPerIp);
-                return ApiErrors.RateLimitedResult();
+                PersistedMatch? alreadyAllocated = await store
+                    .FindOpenMatchForLobbyAsync(request.SteamLobbyId!, ct).ConfigureAwait(false);
+
+                if (alreadyAllocated is null)
+                {
+                    lease.Release();
+                    logger.LogWarning(
+                        "Refused a match creation: this address already allocated {Cap} matches this window",
+                        options.MaxOpenMatchesPerIp);
+                    return ApiErrors.RateLimitedResult();
+                }
             }
+
+            // Nothing has been written yet, so a lease that never gets past here is handed straight back.
+            // The one moment that is neither is the create call itself: an exception from it may or may not
+            // have left a row, and the two mistakes are not equal, so an ambiguous commit is charged.
+            CreationOutcome outcome = CreationOutcome.NothingWritten;
 
             // Every line the rest of this call writes carries the lobby, including the ones written from the
             // catch blocks, which is where an operator actually goes looking.
@@ -142,6 +163,7 @@ namespace HexWars.NetServer.Endpoints
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.SettingsChangedMessage);
                 }
 
+                outcome = CreationOutcome.Ambiguous;
                 CreateMatchResult result = await store.CreateMatchForLobbyAsync(
                     new CreateMatchRequest(
                         verified.LobbyId,
@@ -156,7 +178,7 @@ namespace HexWars.NetServer.Endpoints
                 // Charged only for a match this call actually allocated. A create that found the lobby
                 // already had one wrote nothing, and the other seat asking for their credential is the normal
                 // way that happens - billing them for it would lock a pair out of their own rematches.
-                if (result.Created) quota.RecordCreation(caller);
+                outcome = result.Created ? CreationOutcome.Created : CreationOutcome.NothingWritten;
 
                 string requesterId = Canonical(identity.SteamId);
                 int? seat = SeatOf(verified.Players, requesterId);
@@ -243,8 +265,8 @@ namespace HexWars.NetServer.Endpoints
                 // service. It is a refusal, not a fault: answering 500 would tell a caller the server
                 // broke when what actually happened is that their request could not be honoured.
                 logger.LogWarning(
-                    invalid, "Refused a match creation for lobby {LobbyId}: {Reason}",
-                    request.SteamLobbyId, invalid.Message);
+                    "Refused a match creation for lobby {LobbyId}: {Reason}",
+                    request.SteamLobbyId, SteamLogRedaction.Redact(invalid.Message));
                 return ApiErrors.InvalidRequestResult();
             }
             catch (OperationCanceledException)
@@ -253,12 +275,33 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
-                // Storage is the only thing left that can throw here. The ticket is deliberately not in
-                // scope of this line: an exception message may be echoed into a log sink verbatim.
+                // The exception is described rather than handed to the logger. Anything that reaches
+                // here failed while holding something: a transport error quotes the URL it could not reach,
+                // which for the Steam client is the publisher key and the ticket, and a connection failure
+                // quotes DATABASE_URL. Describe keeps the stack trace and takes the values out.
                 logger.LogError(
-                    storage, "Match creation failed for lobby {LobbyId}", request.SteamLobbyId);
+                    "Match creation failed for lobby {LobbyId}: {Failure}",
+                    request.SteamLobbyId, SteamLogRedaction.Describe(storage));
                 return ApiErrors.UnavailableResult();
             }
+            finally
+            {
+                // The single place the seat is settled, whichever of the dozen exits this handler took.
+                // Everything before the create call wrote nothing, so the seat goes straight back; the call
+                // itself may have left a row it could not tell us about, and that one is charged.
+                if (outcome == CreationOutcome.NothingWritten) lease.Release();
+                else lease.Commit();
+            }
+        }
+
+        /// <summary>What the create call managed to do, which is what decides whether the caller is charged
+        /// for it. <see cref="Ambiguous"/> is the window inside the store call: a row may exist and this
+        /// process cannot say, so it is treated as one.</summary>
+        enum CreationOutcome
+        {
+            NothingWritten,
+            Ambiguous,
+            Created,
         }
 
         static async Task<IResult> JoinAsync(
@@ -393,7 +436,8 @@ namespace HexWars.NetServer.Endpoints
             catch (ArgumentException invalid)
             {
                 logger.LogWarning(
-                    invalid, "Refused a join at match {MatchId}: {Reason}", Short(matchId), invalid.Message);
+                    "Refused a join at match {MatchId}: {Reason}",
+                    Short(matchId), SteamLogRedaction.Redact(invalid.Message));
                 return ApiErrors.InvalidRequestResult();
             }
             catch (OperationCanceledException)
@@ -402,7 +446,9 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
-                logger.LogError(storage, "Join failed for match {MatchId}", Short(matchId));
+                logger.LogError(
+                    "Join failed for match {MatchId}: {Failure}",
+                    Short(matchId), SteamLogRedaction.Describe(storage));
                 return ApiErrors.UnavailableResult();
             }
         }
