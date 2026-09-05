@@ -727,7 +727,7 @@ namespace HexWars.NetServer.Tests
                 Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct) =>
                 throw new NotSupportedException();
 
-            public Task<bool> ReplaceJoinCredentialAsync(
+            public Task<CredentialReplacement> ReplaceJoinCredentialAsync(
                 byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt,
                 DateTimeOffset now, CancellationToken ct, TimeSpan? allowTerminalWithin = null) =>
                 throw new NotSupportedException();

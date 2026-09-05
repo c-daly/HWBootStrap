@@ -678,12 +678,12 @@ namespace HexWars.NetServer.Tests
             var match = await NewWaitingMatchAsync();
 
             Assert.That(
-                await Store.ReplaceJoinCredentialAsync(
-                    Hash(60), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct),
+                (await Store.ReplaceJoinCredentialAsync(
+                    Hash(60), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct)).Replaced,
                 Is.True);
             Assert.That(
-                await Store.ReplaceJoinCredentialAsync(
-                    Hash(70), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct),
+                (await Store.ReplaceJoinCredentialAsync(
+                    Hash(70), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct)).Replaced,
                 Is.True);
 
             JoinCredentialRecord? replaced = await Store.FindJoinCredentialAsync(Hash(60), Ct);
@@ -719,10 +719,10 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
 
-            bool replaced = await Store.ReplaceJoinCredentialAsync(
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
                 Hash(64), match.MatchId, match.Seat0, Ended.AddMinutes(15), Ended, Ct);
 
-            Assert.That(replaced, Is.False);
+            Assert.That(replacement.Replaced, Is.False);
             Assert.That(await Store.FindJoinCredentialAsync(Hash(64), Ct), Is.Null,
                 "a refused replace must not store the credential it refused to issue");
             Assert.That((await Store.FindJoinCredentialAsync(Hash(63), Ct))!.RevokedAt, Is.Null,
@@ -739,11 +739,11 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
 
-            bool replaced = await Store.ReplaceJoinCredentialAsync(
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
                 Hash(67), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(3), Ct,
                 allowTerminalWithin: TimeSpan.FromMinutes(10));
 
-            Assert.That(replaced, Is.True);
+            Assert.That(replacement.Replaced, Is.True);
             Assert.That(await Store.FindJoinCredentialAsync(Hash(67), Ct), Is.Not.Null);
         }
 
@@ -754,11 +754,11 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
 
-            bool replaced = await Store.ReplaceJoinCredentialAsync(
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
                 Hash(68), match.MatchId, match.Seat0, Ended.AddMinutes(30), Ended.AddMinutes(20), Ct,
                 allowTerminalWithin: TimeSpan.FromMinutes(10));
 
-            Assert.That(replaced, Is.False);
+            Assert.That(replacement.Replaced, Is.False);
             Assert.That(await Store.FindJoinCredentialAsync(Hash(68), Ct), Is.Null);
         }
 
@@ -770,11 +770,11 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Expired, null, Ended, Ct), Is.True);
 
-            bool replaced = await Store.ReplaceJoinCredentialAsync(
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
                 Hash(69), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(1), Ct,
                 allowTerminalWithin: TimeSpan.FromMinutes(10));
 
-            Assert.That(replaced, Is.False);
+            Assert.That(replacement.Replaced, Is.False);
         }
 
         [Test]

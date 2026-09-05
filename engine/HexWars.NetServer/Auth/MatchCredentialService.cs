@@ -43,27 +43,20 @@ namespace HexWars.NetServer.Auth
             DateTimeOffset expiresAt = now.AddSeconds(options.Value.JoinTokenTtlSeconds);
             TimeSpan window = TerminalWindow;
 
-            // A credential into a finished match is capped at what is left of the reconnect window. It is
-            // issued to let a seat learn how the game ended and for nothing else, so outliving the window
-            // it was granted under would leave a working key to a match nobody can play.
-            PersistedMatch? ending = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
-            if (ending is not null
-                && ending.Status is not (MatchStatus.Waiting or MatchStatus.Active)
-                && ending.CompletedAt is DateTimeOffset finishedAt)
-            {
-                DateTimeOffset closes = finishedAt + window;
-                if (closes < expiresAt) expiresAt = closes;
-            }
-
             // One store call, not two. Revoking and storing separately leaves a window where a concurrent
             // reconnect ends with two live credentials for one seat, and a failure between the two destroys
             // the only credential the player had. The store does both inside a single transaction that also
             // refuses a match which finished while the request was in flight.
-            bool replaced = await store
+            // The full TTL is what is ASKED for. What is stored is what the store decides under the match
+            // row lock: a match that finishes between this call being made and that lock being taken caps
+            // the credential at what is left of the reconnect window, and only the transaction can know
+            // that. Reading the status here first and capping from it would be a decision made on a value
+            // that was already able to change.
+            CredentialReplacement replacement = await store
                 .ReplaceJoinCredentialAsync(hash, matchId, steamId, expiresAt, now, ct, window)
                 .ConfigureAwait(false);
 
-            if (!replaced)
+            if (!replacement.Replaced)
             {
                 logger.LogInformation(
                     "Refused a join credential for {Player} in match {Match}: the match is no longer open",
@@ -71,12 +64,14 @@ namespace HexWars.NetServer.Auth
                 throw new InvalidOperationException(MatchNotOpenMessage);
             }
 
+            DateTimeOffset stored = replacement.EffectiveExpiresAt ?? expiresAt;
+
             // The credential itself never appears in a log line, at any level. Only the fact of it does.
             logger.LogInformation(
                 "Issued a join credential for {Player} in match {Match}, valid until {ExpiresAt:o}",
-                SteamLogRedaction.HashSteamId(steamId), Short(matchId), expiresAt);
+                SteamLogRedaction.HashSteamId(steamId), Short(matchId), stored);
 
-            return new IssuedCredential(CredentialEncoding.ToBase64Url(raw), expiresAt);
+            return new IssuedCredential(CredentialEncoding.ToBase64Url(raw), stored);
         }
 
         public async Task<CredentialValidation?> ValidateAsync(Guid matchId, string credential, CancellationToken ct)
@@ -150,17 +145,30 @@ namespace HexWars.NetServer.Auth
                 matchId, issued.SteamId, seat.Seat, issued.CredentialHash, issued.ExpiresAt);
         }
 
-        public async Task<bool> IsStillValidAsync(byte[] credentialHash, Guid matchId, DateTimeOffset now)
+        public async Task<bool> IsStillValidAsync(
+            byte[] credentialHash, Guid matchId, DateTimeOffset now, CancellationToken ct)
         {
             ArgumentNullException.ThrowIfNull(credentialHash);
 
-            JoinCredentialRecord? issued = await store
-                .FindJoinCredentialAsync(credentialHash, CancellationToken.None).ConfigureAwait(false);
+            JoinCredentialRecord? issued =
+                await store.FindJoinCredentialAsync(credentialHash, ct).ConfigureAwait(false);
 
             if (issued is null || issued.MatchId != matchId) return false;
             if (issued.RevokedAt is not null) return false;
+            if (issued.ExpiresAt <= now) return false;
 
-            return issued.ExpiresAt > now;
+            // And the window, independently of the credential. A credential stored before the match ended
+            // carries an expiry that knows nothing about the ending, so a socket holding one would outlive
+            // the window by however much of its TTL was left.
+            PersistedMatch? match = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
+            if (match is null) return false;
+            if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
+
+            TimeSpan window = TerminalWindow;
+
+            return window > TimeSpan.Zero
+                && match.CompletedAt is DateTimeOffset finishedAt
+                && now - finishedAt <= window;
         }
 
         /// <summary>How long after a match ends its seats can still get back in. Zero closes the window.</summary>

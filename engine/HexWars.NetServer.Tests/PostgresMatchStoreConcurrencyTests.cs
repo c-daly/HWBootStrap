@@ -536,6 +536,35 @@ namespace HexWars.NetServer.Tests
             NullLogger<MatchCredentialService>.Instance);
 
         [Test]
+        public async Task AMatchThatFinishesBeforeTheLock_CapsTheCredentialAtTheWindow()
+        {
+            // The caller decides on a full TTL, and the match ends before this transaction can take the
+            // match row lock. Only the value computed under that lock knows the match is over, so only it
+            // can be capped - a caller that read the status first read it before it changed.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+
+            _store.BeforeLockForTests = async () =>
+            {
+                _store.BeforeLockForTests = null;
+                Assert.That(
+                    await _store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct),
+                    Is.True);
+            };
+
+            CredentialReplacement replacement = await _store.ReplaceJoinCredentialAsync(
+                Hash(80), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.True);
+            Assert.That(replacement.EffectiveExpiresAt, Is.EqualTo(Move1 + window),
+                "the returned expiry is the one the row was locked against");
+
+            JoinCredentialRecord stored = (await _store.FindJoinCredentialAsync(Hash(80), Ct))!;
+            Assert.That(stored.ExpiresAt, Is.EqualTo(Move1 + window),
+                "and it is what was actually written, not merely what was reported");
+        }
+
+        [Test]
         public async Task AnIssueForAMatchThatHasFinished_IsRefusedAndWritesNothing()
         {
             var match = await NewActiveMatchAsync();

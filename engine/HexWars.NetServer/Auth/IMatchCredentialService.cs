@@ -62,6 +62,7 @@ namespace HexWars.NetServer.Auth
         /// Takes the hash rather than the credential: nothing on this server keeps the credential, and
         /// nothing should need it to ask this.
         /// </summary>
-        Task<bool> IsStillValidAsync(byte[] credentialHash, Guid matchId, DateTimeOffset now);
+        Task<bool> IsStillValidAsync(
+            byte[] credentialHash, Guid matchId, DateTimeOffset now, CancellationToken ct);
     }
 }

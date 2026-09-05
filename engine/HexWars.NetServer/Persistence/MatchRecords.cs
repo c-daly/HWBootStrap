@@ -83,6 +83,16 @@ namespace HexWars.NetServer.Persistence
     public sealed record JoinCredentialRecord(byte[] CredentialHash, Guid MatchId, string SteamId, DateTimeOffset ExpiresAt, DateTimeOffset? RevokedAt);
 
     /// <summary>
+    /// What a credential replacement did, and when the credential it stored actually ends.
+    ///
+    /// The expiry is an answer rather than an argument because the transaction is the only place that
+    /// knows the whole truth. A caller asking for a full-TTL credential a moment before the match ends is
+    /// not wrong to ask; it simply cannot know, and a credential that outlived the reconnect window would
+    /// be a working key to a match nobody can play.
+    /// </summary>
+    public sealed record CredentialReplacement(bool Replaced, DateTimeOffset? EffectiveExpiresAt);
+
+    /// <summary>
     /// The single place that knows how <see cref="MatchStatus"/> is spelled in the database. The schema has a
     /// CHECK constraint on the same five words, so a mismatch here is a startup-time failure rather than a
     /// silently wrong row.

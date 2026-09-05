@@ -306,6 +306,30 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ALiveCredentialStopsBeingValidWhenTheTerminalWindowCloses()
+        {
+            // The expiry stored on a credential issued while the match was still being played knows
+            // nothing about the ending that came later, so a socket holding one would outlive the window
+            // by whatever was left of its TTL. The re-check has to judge the match as well as the token.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+            Assert.That(CredentialEncoding.TryFromBase64Url(issued.Credential, out byte[] raw), Is.True);
+            byte[] hash = SHA256.HashData(raw);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            Assert.That(
+                await _service.IsStillValidAsync(hash, _matchId, Origin.AddMinutes(5), Ct), Is.True);
+
+            DateTimeOffset past = Origin.AddSeconds(
+                MatchHostingOptions.DefaultTerminalReconnectSeconds + 60);
+
+            Assert.That(past, Is.LessThan(issued.ExpiresAt),
+                "the credential itself is still unexpired, so the refusal can only be about the window");
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, past, Ct), Is.False);
+        }
+
+        [Test]
         public async Task ACredentialValidatesIntoAnAbandonedMatchThatHadStarted()
         {
             // A game the reaper abandoned underneath its players ended just as definitely as one somebody

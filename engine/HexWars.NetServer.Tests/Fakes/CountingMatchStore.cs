@@ -149,8 +149,8 @@ namespace HexWars.NetServer.Tests.Fakes
             return inner.RevokeJoinCredentialsAsync(matchId, steamId, revokedAt, ct);
         }
 
-        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+        public Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
+            string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
             TimeSpan? allowTerminalWithin = null)
         {
             Writes++;

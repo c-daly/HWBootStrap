@@ -327,8 +327,8 @@ namespace HexWars.NetServer.Tests.Fakes
             }
         }
 
-        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+        public Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
+            string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
             TimeSpan? allowTerminalWithin = null)
         {
             ValidateCredentialHash(credentialHash, nameof(credentialHash));
@@ -346,8 +346,19 @@ namespace HexWars.NetServer.Tests.Fakes
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
 
                 MatchRow row = _matches[matchId];
-                if (!row.IsOpen && !ReachableAfterTheEnd(row, now, allowTerminalWithin))
-                    return Task.FromResult(false);
+                DateTimeOffset effectiveExpiresAt = expiresAt;
+
+                if (!row.IsOpen)
+                {
+                    if (!ReachableAfterTheEnd(row, now, allowTerminalWithin))
+                        return Task.FromResult(new CredentialReplacement(false, null));
+
+                    // Capped under the same lock Postgres caps it under: a caller that decided on a full
+                    // TTL before the match finished cannot have known, and only the value computed here is
+                    // certain to be inside the window.
+                    DateTimeOffset closes = row.CompletedAt!.Value + allowTerminalWithin!.Value;
+                    if (closes < effectiveExpiresAt) effectiveExpiresAt = closes;
+                }
 
                 CredentialRow? clash = Credential(credentialHash);
                 if (clash is not null)
@@ -364,10 +375,10 @@ namespace HexWars.NetServer.Tests.Fakes
                     Hash = (byte[])credentialHash.Clone(),
                     MatchId = matchId,
                     SteamId = steamId,
-                    ExpiresAt = Stored(expiresAt),
+                    ExpiresAt = Stored(effectiveExpiresAt),
                 });
 
-                return Task.FromResult(true);
+                return Task.FromResult(new CredentialReplacement(true, Stored(effectiveExpiresAt)));
             }
         }
 

@@ -134,8 +134,12 @@ namespace HexWars.NetServer.Persistence
         /// <param name="allowTerminalWithin">When set, a match in a terminal status that has a start replay
         /// and finished within this window is still issued a credential. It is how a seat that missed the
         /// final APPLY gets back in to learn how the game ended; null means open matches only.</param>
-        Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+        /// <returns>Whether the credential was stored, and the expiry it was actually stored with. The
+        /// caller does not decide the second: a match can finish between the moment a caller reads its
+        /// status and the moment this takes the row lock, and only the value computed under that lock can
+        /// be capped at the window the match is now inside.</returns>
+        Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
+            string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
             TimeSpan? allowTerminalWithin = null);
     }
 }
