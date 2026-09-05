@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
+using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Persistence;
@@ -51,9 +52,9 @@ namespace HexWars.NetServer.Tests
 
         // ---- fixture ---------------------------------------------------------
 
-        void Start(Action<SteamServerFactory>? configure = null)
+        void Start(Action<SteamServerFactory>? configure = null, string environment = "Development")
         {
-            _fixture = new SteamServerFactory();
+            _fixture = new SteamServerFactory { Environment = environment };
             _fixture.Settings["MATCH_HEARTBEAT_SECONDS"] = "1";
             _fixture.Settings["MATCH_STALE_CONNECTION_SECONDS"] = "3";
             _fixture.Settings["MATCH_AUTH_TIMEOUT_SECONDS"] = "1";
@@ -420,7 +421,8 @@ namespace HexWars.NetServer.Tests
             // from this side. The queue must fill and then refuse, and the refusal must close the socket:
             // dropping frames silently would leave the client replaying a game with a hole in it.
             var wedged = new WedgedWebSocket();
-            var connection = new V2Connection("wedged", wedged, "203.0.113.9", 16, DateTimeOffset.UtcNow);
+            var connection = new V2Connection(
+                "wedged", wedged, "203.0.113.9", 16, 1024 * 1024, DateTimeOffset.UtcNow);
 
             int accepted = 0;
             for (int frame = 0; frame < 500; frame++)
@@ -439,6 +441,202 @@ namespace HexWars.NetServer.Tests
                 "there is no close handshake to be had with a peer that is not reading");
 
             wedged.Release();
+        }
+
+        [Test]
+        public async Task TheOutboundQueueAlsoRefusesOnBytes()
+        {
+            // A frame count is not a memory bound on its own. This queue is nowhere near its 4096-frame
+            // limit and is already holding more than the byte cap allows, which is exactly the shape of a
+            // match whose START carries a long journal to a client that has stopped reading.
+            var wedged = new WedgedWebSocket();
+            var connection = new V2Connection(
+                "fat", wedged, "203.0.113.9", 4096, 64 * 1024, DateTimeOffset.UtcNow);
+
+            string big = new('x', 16 * 1024);
+
+            var accepted = 0;
+            for (var frame = 0; frame < 64; frame++)
+            {
+                if (!connection.TryEnqueue(big)) break;
+                accepted++;
+            }
+
+            Assert.That(accepted, Is.InRange(3, 5),
+                "a 64 KB cap, plus at most the frame the writer had already taken");
+            Assert.That(connection.MaxQueueBytes, Is.LessThanOrEqualTo(64 * 1024));
+            Assert.That(connection.IsClosed, Is.True, "a full queue is a decision, not a pause");
+
+            await connection.Closed;
+            wedged.Release();
+        }
+
+        [Test]
+        public async Task ASocketThatWillNotFinishTheCloseHandshake_IsAbortedRatherThanHeldForever()
+        {
+            // CloseOutputAsync completes and the peer never answers. The receive loop that owns the
+            // registry entry is parked inside ReceiveAsync, so without the abort this socket, its task and
+            // its registry entry live as long as the process does.
+            var silent = new SilentPeerWebSocket();
+            var connection = new V2Connection(
+                "silent", silent, "203.0.113.9", 16, 1024 * 1024, DateTimeOffset.UtcNow);
+
+            DateTimeOffset asked = DateTimeOffset.UtcNow;
+            await connection.CloseAsync(1001, "stale");
+
+            Assert.That(silent.AbortCount, Is.GreaterThan(0));
+            Assert.That(DateTimeOffset.UtcNow - asked, Is.LessThan(TimeSpan.FromSeconds(8)),
+                "the wait is bounded, or an unresponsive peer holds the close instead of the socket");
+        }
+
+        [Test]
+        public async Task ASocketWhoseReceiveLoopHasEnded_IsClosedWithoutWaitingForIt()
+        {
+            var silent = new SilentPeerWebSocket();
+            var connection = new V2Connection(
+                "tidy", silent, "203.0.113.9", 16, 1024 * 1024, DateTimeOffset.UtcNow);
+
+            DateTimeOffset asked = DateTimeOffset.UtcNow;
+            await connection.CloseFromReceiveLoopAsync(1000, "bye");
+
+            Assert.That(silent.AbortCount, Is.EqualTo(0), "nothing to abort: the loop had already stopped");
+            Assert.That(DateTimeOffset.UtcNow - asked,
+                Is.LessThan(V2Connection.ReceiveLoopExitWindow),
+                "a tidy close must not pay the unresponsive-peer window");
+        }
+
+        // ---- transport and address limits ------------------------------------
+
+        [Test]
+        public async Task InProduction_APlaintextSocketIsRefusedBeforeTheUpgrade()
+        {
+            Start(environment: "Production");
+            await SeedAWaitingMatch();
+
+            Exception? refused = null;
+            try
+            {
+                using WebSocket socket = await ConnectAsync();
+            }
+            catch (Exception failure)
+            {
+                refused = failure;
+            }
+
+            Assert.That(refused, Is.Not.Null,
+                "the next frame on this socket would be a bearer credential");
+            Assert.That(refused!.Message, Does.Contain("400"));
+        }
+
+        [Test]
+        public async Task InProduction_AForwardedHttpsSocketFromATrustedProxyIsAccepted()
+        {
+            Start(
+                fixture =>
+                {
+                    fixture.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+                    fixture.Settings["MATCH_TRUST_ALL_PROXIES"] = "true";
+                    fixture.RemoteIpAddress = IPAddress.Parse("203.0.113.4");
+                },
+                environment: "Production");
+
+            await SeedAWaitingMatch();
+
+            WebSocketClient client = _host.Server.CreateWebSocketClient();
+            client.ConfigureRequest = request => request.Headers["X-Forwarded-Proto"] = "https";
+
+            using WebSocket socket = await client.ConnectAsync(
+                new Uri("ws://localhost" + SteamMatchEndpoints.WebSocketPath), CancellationToken.None);
+
+            await SendAsync(socket, Auth(_credential0));
+            Assert.That((await ReceiveAsync(socket)).Text, Is.EqualTo("SEAT 0"));
+        }
+
+        [Test]
+        public async Task OneAddressCannotHoldMoreSocketsThanTheCap()
+        {
+            Start(fixture =>
+            {
+                fixture.Settings["MATCH_MAX_SOCKETS_PER_IP"] = "2";
+                fixture.Settings["MATCH_AUTH_TIMEOUT_SECONDS"] = "30";
+                fixture.RemoteIpAddress = IPAddress.Parse("203.0.113.5");
+            });
+
+            await SeedAWaitingMatch();
+
+            using WebSocket first = await ConnectAsync();
+            using WebSocket second = await ConnectAsync();
+
+            Exception? refused = null;
+            try
+            {
+                using WebSocket third = await ConnectAsync();
+            }
+            catch (Exception failure)
+            {
+                refused = failure;
+            }
+
+            Assert.That(refused, Is.Not.Null, "the cap has to be applied while refusing is still free");
+            Assert.That(refused!.Message, Does.Contain("429"));
+            Assert.That(first.State, Is.EqualTo(WebSocketState.Open),
+                "the sockets already accepted are not disturbed by the refusal");
+        }
+
+        [Test]
+        public async Task AnAddressThatKeepsFailingAuth_IsRefusedWithoutAskingTheStore()
+        {
+            Start(fixture =>
+            {
+                fixture.Settings["MATCH_MAX_SOCKETS_PER_IP"] = "64";
+                fixture.RemoteIpAddress = IPAddress.Parse("203.0.113.6");
+            });
+
+            await SeedAWaitingMatch();
+
+            string wrong = "AUTH " + _matchId + " " + new string('a', 43);
+
+            for (var attempt = 0; attempt < AuthFailureThrottle.MaxFailures; attempt++)
+            {
+                using WebSocket socket = await ConnectAsync();
+                await SendAsync(socket, wrong);
+
+                Assert.That((await ReceiveAsync(socket)).Text, Is.EqualTo("AUTH FAIL invalid"));
+                Assert.That((await ReceiveAsync(socket)).CloseStatus,
+                    Is.EqualTo(WebSocketCloseStatus.PolicyViolation));
+            }
+
+            _fixture.Counting.ResetCounts();
+
+            using WebSocket refused = await ConnectAsync();
+            await SendAsync(refused, wrong);
+
+            Assert.That((await ReceiveAsync(refused)).Text, Is.EqualTo("AUTH FAIL invalid"));
+            Assert.That((await ReceiveAsync(refused)).CloseStatus,
+                Is.EqualTo(WebSocketCloseStatus.PolicyViolation));
+            Assert.That(_fixture.Counting.Calls, Is.EqualTo(0),
+                "a caller that has spent its failures costs this server no database at all");
+        }
+
+        [Test]
+        public async Task ASecondSocketForOneSeat_ClosesTheFirstAndPlaysOn()
+        {
+            Start();
+            await SeedAWaitingMatch();
+
+            using WebSocket first = await SeatAsync(_credential0, 0);
+            using WebSocket second = await ConnectAsync();
+            await SendAsync(second, Auth(_credential0));
+
+            Assert.That((await ReceiveAsync(second)).Text, Is.EqualTo("SEAT 0"));
+            Assert.That((await ReceiveAsync(second)).Text, Is.EqualTo(NetProtocol.CatalogRequest));
+
+            Received ended = await ReceiveAsync(first);
+            Assert.That(ended.CloseStatus, Is.EqualTo(WebSocketCloseStatus.NormalClosure),
+                "one credential is one live socket, and the older one is the one that goes");
+
+            using WebSocket other = await SeatAsync(_credential1, 1);
+            await StartTheMatch(second, other);
         }
 
         async Task StartTheMatch(WebSocket zero, WebSocket one)
@@ -489,6 +687,45 @@ namespace HexWars.NetServer.Tests
                 bool endOfMessage,
                 CancellationToken cancellationToken) =>
                 _wedge.WaitAsync(cancellationToken);
+        }
+
+        /// <summary>A socket that accepts sends and whose receive never completes: the shape of a client
+        /// that has gone away without ever answering a close handshake.</summary>
+        sealed class SilentPeerWebSocket : WebSocket
+        {
+            int _aborts;
+
+            public int AbortCount => Volatile.Read(ref _aborts);
+
+            public override WebSocketCloseStatus? CloseStatus => null;
+            public override string? CloseStatusDescription => null;
+            public override WebSocketState State => WebSocketState.Open;
+            public override string? SubProtocol => null;
+
+            public override void Abort() => Interlocked.Increment(ref _aborts);
+
+            public override Task CloseAsync(
+                WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+                Task.CompletedTask;
+
+            public override Task CloseOutputAsync(
+                WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) =>
+                Task.CompletedTask;
+
+            public override void Dispose()
+            {
+            }
+
+            public override Task<WebSocketReceiveResult> ReceiveAsync(
+                ArraySegment<byte> buffer, CancellationToken cancellationToken) =>
+                new TaskCompletionSource<WebSocketReceiveResult>().Task;
+
+            public override Task SendAsync(
+                ArraySegment<byte> buffer,
+                WebSocketMessageType messageType,
+                bool endOfMessage,
+                CancellationToken cancellationToken) =>
+                Task.CompletedTask;
         }
     }
 }

@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using HexWars.Engine;
+using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Runtime;
@@ -34,6 +35,23 @@ namespace HexWars.NetServer.Hosting
         internal const int CloseStale = 1001;
         internal const int ClosePolicy = 1008;
         internal const int CloseTooBig = 1009;
+
+        /// <summary>Handshakes this process will validate at once, across every socket.</summary>
+        internal const int MaxConcurrentValidations = 64;
+
+        /// <summary>How long an AUTH frame waits for a validation slot before it is told unavailable.</summary>
+        internal static readonly TimeSpan ValidationQueueWindow = TimeSpan.FromSeconds(2);
+
+        /// <summary>
+        /// The validation slots, shared by every v2 socket on this host.
+        ///
+        /// An AUTH frame is at least one database round trip made on behalf of somebody who has proved
+        /// nothing, and a socket is cheap to open. Without a ceiling a burst of handshakes points the whole
+        /// connection pool at the credential table and starves the matches already being played, which is a
+        /// far worse outcome than telling a few newcomers to try again in a moment.
+        /// </summary>
+        static readonly SemaphoreSlim ValidationSlots =
+            new(MaxConcurrentValidations, MaxConcurrentValidations);
 
         const string LoggerCategory = "HexWars.NetServer.Hosting.ProtocolV2WebSocketServer";
 
@@ -76,17 +94,44 @@ namespace HexWars.NetServer.Hosting
             var registry = context.RequestServices.GetRequiredService<V2ConnectionRegistry>();
             var coordinator = context.RequestServices.GetRequiredService<DurableMatchCoordinator>();
             var time = context.RequestServices.GetRequiredService<TimeProvider>();
+            var environment = context.RequestServices.GetRequiredService<IWebHostEnvironment>();
             ILogger logger = context.RequestServices
                 .GetRequiredService<ILoggerFactory>()
                 .CreateLogger(LoggerCategory);
+
+            // Before the upgrade, because the very next frame on this socket is a bearer credential. In
+            // production TLS is terminated at the platform proxy and the scheme is forwarded, so a request
+            // that still says http after the forwarded-headers middleware has run either arrived over
+            // plaintext or came round the side of that proxy. Neither is a socket to accept a credential on.
+            if (environment.IsProduction() && !context.Request.IsHttps)
+            {
+                logger.LogWarning("Refused a plaintext v2 socket: this host only accepts https in production");
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            string remoteIp =
+                context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller;
+
+            // Also before the upgrade. An accepted socket costs a receive buffer, a writer task and a
+            // registry entry before it has proved anything, so the ceiling has to be applied while refusing
+            // is still free.
+            if (registry.CountForIp(remoteIp) >= options.MaxSocketsPerIp)
+            {
+                logger.LogWarning(
+                    "Refused a v2 socket: this address already holds {Cap} of them", options.MaxSocketsPerIp);
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                return;
+            }
 
             WebSocket socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
 
             var connection = new V2Connection(
                 Guid.NewGuid().ToString("N"),
                 socket,
-                context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller,
+                remoteIp,
                 options.OutboundQueueCapacity,
+                options.OutboundQueueBytes,
                 time.GetUtcNow());
 
             // Registered before the handshake, because the coordinator answers AUTH by sending SEAT through
@@ -103,6 +148,11 @@ namespace HexWars.NetServer.Hosting
             }
             finally
             {
+                // Said first, and said however this socket ended. It is what lets a close decided
+                // elsewhere - the heartbeat, an eviction - stop waiting for a receive loop that has already
+                // stopped, and it always runs, so the registry entry always goes.
+                connection.ReceiveLoopEnded();
+
                 await coordinator.DisconnectAsync(connection.Id).ConfigureAwait(false);
                 registry.Remove(connection.Id);
                 await connection.CloseAsync(CloseNormal, "bye").ConfigureAwait(false);
@@ -119,6 +169,7 @@ namespace HexWars.NetServer.Hosting
             ILogger logger)
         {
             CancellationToken aborted = context.RequestAborted;
+            var throttle = context.RequestServices.GetRequiredService<AuthFailureThrottle>();
 
             using var deadline = new CancellationTokenSource(
                 TimeSpan.FromSeconds(options.AuthFrameTimeoutSeconds), time);
@@ -129,7 +180,8 @@ namespace HexWars.NetServer.Hosting
 
             if (first.Kind == FrameKind.TooBig)
             {
-                await connection.CloseAsync(CloseTooBig, "message too large").ConfigureAwait(false);
+                await connection.CloseFromReceiveLoopAsync(CloseTooBig, "message too large")
+                    .ConfigureAwait(false);
                 return false;
             }
 
@@ -140,7 +192,8 @@ namespace HexWars.NetServer.Hosting
                 if (deadline.IsCancellationRequested && !aborted.IsCancellationRequested)
                 {
                     logger.LogDebug("Closed a v2 socket that never sent AUTH");
-                    await connection.CloseAsync(ClosePolicy, "auth timeout").ConfigureAwait(false);
+                    await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth timeout")
+                        .ConfigureAwait(false);
                 }
 
                 return false;
@@ -154,6 +207,7 @@ namespace HexWars.NetServer.Hosting
                 // otherwise have it written to the log by the code that refused it.
                 logger.LogDebug(
                     "A v2 socket opened with {Type} rather than AUTH", Truncate(opening.Type, LoggedMatchIdLength));
+                throttle.RecordFailure(connection.RemoteIp);
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
                 return false;
             }
@@ -162,7 +216,38 @@ namespace HexWars.NetServer.Hosting
             if (tokens.Length != 2)
             {
                 logger.LogDebug("A v2 socket sent an AUTH frame that is not a match id and a credential");
+                throttle.RecordFailure(connection.RemoteIp);
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                return false;
+            }
+
+            // Before the credential service, which is a database round trip made for a caller who has
+            // proved nothing. Guessing 256 bits is not the threat; a client wedged in a retry loop on a
+            // credential that will never work is, and every attempt costs this server a query.
+            if (throttle.IsThrottled(connection.RemoteIp))
+            {
+                logger.LogWarning("Refused an AUTH frame from a caller that has spent its failures");
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                return false;
+            }
+
+            bool admitted;
+            try
+            {
+                admitted = await ValidationSlots
+                    .WaitAsync(ValidationQueueWindow, aborted).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            if (!admitted)
+            {
+                logger.LogWarning(
+                    "Refused an AUTH frame: {Slots} handshakes are already being validated",
+                    MaxConcurrentValidations);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
                 return false;
             }
 
@@ -180,16 +265,28 @@ namespace HexWars.NetServer.Hosting
             catch (Exception failure)
             {
                 // The coordinator turns the failures it expects into a fail code of its own, so anything
-                // that reaches here is a bug. The player still gets an answer they can retry on.
+                // that reaches here is a bug. The player still gets an answer they can retry on, and it is
+                // not counted against them: this one is ours.
                 logger.LogError(failure, "A v2 handshake failed unexpectedly");
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
                 return false;
             }
+            finally
+            {
+                ValidationSlots.Release();
+            }
 
             if (!outcome.Ok)
             {
-                await RefuseAsync(connection, outcome.FailCode ?? DurableMatchCoordinator.AuthFailInvalid)
-                    .ConfigureAwait(false);
+                string code = outcome.FailCode ?? DurableMatchCoordinator.AuthFailInvalid;
+
+                // Only a refusal counts. Unavailable means this host could not answer, and counting it
+                // would lock the players of a match out during exactly the outage they are retrying
+                // through.
+                if (string.Equals(code, DurableMatchCoordinator.AuthFailInvalid, StringComparison.Ordinal))
+                    throttle.RecordFailure(connection.RemoteIp);
+
+                await RefuseAsync(connection, code).ConfigureAwait(false);
                 return false;
             }
 
@@ -220,7 +317,8 @@ namespace HexWars.NetServer.Hosting
 
                 if (frame.Kind == FrameKind.TooBig)
                 {
-                    await connection.CloseAsync(CloseTooBig, "message too large").ConfigureAwait(false);
+                    await connection.CloseFromReceiveLoopAsync(CloseTooBig, "message too large")
+                        .ConfigureAwait(false);
                     return;
                 }
 
@@ -249,7 +347,7 @@ namespace HexWars.NetServer.Hosting
         static async Task RefuseAsync(V2Connection connection, string failCode)
         {
             connection.TryEnqueue(AuthFailPrefix + failCode);
-            await connection.CloseAsync(ClosePolicy, "auth failed").ConfigureAwait(false);
+            await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth failed").ConfigureAwait(false);
         }
 
         /// <summary>One whole message, or why there is not one. The size cap is enforced as the message

@@ -32,11 +32,27 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         internal static readonly TimeSpan CloseDrainWindow = TimeSpan.FromSeconds(2);
 
+        /// <summary>
+        /// How long a close waits for the receive loop to notice it before the socket is aborted.
+        ///
+        /// CloseOutputAsync only says this end is done; the loop on the other side of this object is still
+        /// parked inside ReceiveAsync waiting for a close frame the peer may never send. A client that has
+        /// gone away without a handshake would otherwise hold that task, its buffer and its registry entry
+        /// for as long as the process lives, and the heartbeat would go on finding it every tick.
+        /// </summary>
+        internal static readonly TimeSpan ReceiveLoopExitWindow = TimeSpan.FromSeconds(2);
+
         readonly Channel<string> _outbound;
         readonly Task _writer;
         readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        readonly TaskCompletionSource _receiveLoopEnded =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        readonly int _outboundQueueBytes;
 
         long _lastInboundTicks;
+        long _queueBytes;
+        long _maxQueueBytes;
         int _queueDepth;
         int _maxQueueDepth;
         int _closing;
@@ -48,11 +64,13 @@ namespace HexWars.NetServer.Hosting
         volatile bool _authenticated;
 
         public V2Connection(
-            string id, WebSocket webSocket, string remoteIp, int outboundQueueCapacity, DateTimeOffset now)
+            string id, WebSocket webSocket, string remoteIp, int outboundQueueCapacity,
+            int outboundQueueBytes, DateTimeOffset now)
         {
             Id = id;
             WebSocket = webSocket;
             RemoteIp = remoteIp;
+            _outboundQueueBytes = outboundQueueBytes;
             _lastInboundTicks = now.UtcTicks;
             _outbound = Channel.CreateBounded<string>(new BoundedChannelOptions(outboundQueueCapacity)
             {
@@ -110,6 +128,12 @@ namespace HexWars.NetServer.Hosting
         /// <summary>The deepest this connection's queue has ever been. Metrics only.</summary>
         public int MaxQueueDepth => Volatile.Read(ref _maxQueueDepth);
 
+        /// <summary>Bytes queued and not yet written, counted as UTF-8.</summary>
+        public long QueueBytes => Interlocked.Read(ref _queueBytes);
+
+        /// <summary>The most bytes this connection has ever had waiting. Metrics only.</summary>
+        public long MaxQueueBytes => Interlocked.Read(ref _maxQueueBytes);
+
         /// <summary>
         /// Queues one frame. Synchronous and non-blocking by contract: the coordinator calls this while
         /// holding the per-match gate, so anything that waited here would stall the other seat.
@@ -122,14 +146,44 @@ namespace HexWars.NetServer.Hosting
         {
             if (IsClosed) return false;
 
-            if (!_outbound.Writer.TryWrite(message))
+            // Bytes as well as frames. A frame count is not a memory bound on its own: a START carrying a
+            // long journal is orders of magnitude bigger than an APPLY, so a queue well inside its frame
+            // limit can still be holding megabytes - once per socket, for every socket on the host.
+            int size = Encoding.UTF8.GetByteCount(message);
+            long queued = Interlocked.Add(ref _queueBytes, size);
+
+            if (queued > _outboundQueueBytes || !_outbound.Writer.TryWrite(message))
             {
+                Interlocked.Add(ref _queueBytes, -size);
                 _ = CloseAsync(SlowClientCloseStatus, SlowClientReason);
                 return false;
             }
 
+            RecordBytes(queued);
             RecordDepth(Interlocked.Increment(ref _queueDepth));
             return true;
+        }
+
+        /// <summary>
+        /// Says the receive loop for this socket has stopped.
+        ///
+        /// Called by the handler that owns the loop, so a close does not have to wait out its whole window
+        /// and abort a socket that had already unwound tidily.
+        /// </summary>
+        public void ReceiveLoopEnded() => _receiveLoopEnded.TrySetResult();
+
+        /// <summary>
+        /// Closes from inside the socket task, which is by definition no longer receiving.
+        ///
+        /// The distinction matters. A close asked for by the heartbeat, the sink or the coordinator has to
+        /// wait for the receive loop and then abort it, because the loop is parked on a peer that may never
+        /// answer. A close the loop itself decided on has nothing to wait for, and waiting would add the
+        /// whole window to every refused handshake.
+        /// </summary>
+        public Task CloseFromReceiveLoopAsync(int status, string reason)
+        {
+            ReceiveLoopEnded();
+            return CloseAsync(status, reason);
         }
 
         /// <summary>
@@ -168,6 +222,18 @@ namespace HexWars.NetServer.Hosting
                         .CloseOutputAsync((WebSocketCloseStatus)status, reason, CancellationToken.None)
                         .ConfigureAwait(false);
                 }
+
+                // CloseOutputAsync only says this end is done. The receive loop is still parked inside
+                // ReceiveAsync waiting for a close frame that a client which has gone away will never send,
+                // and it is the exit of that loop which removes this connection from the registry. Waiting
+                // for it and then aborting is what turns a peer that will not answer into a socket that is
+                // gone rather than one this host keeps finding on every heartbeat.
+                using var unwound = new CancellationTokenSource();
+                Task exit = Task.Delay(ReceiveLoopExitWindow, unwound.Token);
+                Task observed = await Task.WhenAny(_receiveLoopEnded.Task, exit).ConfigureAwait(false);
+                unwound.Cancel();
+
+                if (!ReferenceEquals(observed, _receiveLoopEnded.Task)) WebSocket.Abort();
             }
             catch
             {
@@ -188,6 +254,7 @@ namespace HexWars.NetServer.Hosting
                 await foreach (string message in _outbound.Reader.ReadAllAsync().ConfigureAwait(false))
                 {
                     Interlocked.Decrement(ref _queueDepth);
+                    Interlocked.Add(ref _queueBytes, -Encoding.UTF8.GetByteCount(message));
 
                     try
                     {
@@ -208,6 +275,17 @@ namespace HexWars.NetServer.Hosting
             }
             catch
             {
+            }
+        }
+
+        void RecordBytes(long queued)
+        {
+            long seen = Interlocked.Read(ref _maxQueueBytes);
+            while (queued > seen)
+            {
+                long prior = Interlocked.CompareExchange(ref _maxQueueBytes, queued, seen);
+                if (prior == seen) return;
+                seen = prior;
             }
         }
 
