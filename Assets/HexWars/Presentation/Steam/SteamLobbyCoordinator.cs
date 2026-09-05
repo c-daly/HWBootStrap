@@ -500,18 +500,37 @@ namespace HexWars.Presentation
         {
             if (!IsCurrent(generation))
             {
-                // Cancelled or timed out while Steam was still joining: the join still succeeded, so
-                // this client is sitting in a lobby nobody is watching. Leave it.
+                // Cancelled or timed out while Steam was still joining. A failure is simply gone.
                 if (!ok || string.IsNullOrEmpty(lobbyId)) return;
 
-                // Unless the retry landed on the SAME lobby. Steam answers call results in whatever
-                // order they complete, so the abandoned join can succeed after the one that replaced
-                // it. Leaving then ejects the player from the lobby this coordinator believes it
-                // holds, and readiness and metadata never move again. One membership, one leave.
+                // Already held under the current generation: one membership, one leave.
                 if (string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal)) return;
-                if (string.Equals(lobbyId, _joiningLobbyId, StringComparison.Ordinal)) return;
 
+                // The current generation is entering this very lobby and Steam has just confirmed the
+                // membership, so this IS the join being waited on: adopt it. Steam answers call
+                // results in whatever order they complete, and merely ignoring this one left the
+                // confirmed membership belonging to nobody - if the replacement then timed out or
+                // failed, the lobby stayed occupied with nothing left to release it.
+                if (string.IsNullOrEmpty(_lobbyId)
+                    && string.Equals(lobbyId, _joiningLobbyId, StringComparison.Ordinal))
+                {
+                    AcceptJoinedLobby(lobbyId);
+                    return;
+                }
+
+                // Any other lobby really is one nobody is watching.
                 _steam.LeaveLobby(lobbyId);
+                return;
+            }
+
+            // The answer to a join whose lobby a late success already adopted. A success adds
+            // nothing, and a failure must not tear down the membership that adoption confirmed.
+            if (!string.IsNullOrEmpty(_lobbyId)
+                && string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal))
+            {
+                ClearDeadline();
+                _joinInFlight = false;
+                _joiningLobbyId = null;
                 return;
             }
 
@@ -525,6 +544,20 @@ namespace HexWars.Presentation
                 else FailWith(SteamLobbyPhase.BackendUnavailable, null);
                 return;
             }
+
+            AcceptJoinedLobby(lobbyId);
+        }
+
+        /// <summary>
+        /// This client is confirmed in <paramref name="lobbyId"/>: make it the session lobby, or leave
+        /// it when it turns out to be unreadable or incompatible. The one place a confirmed membership
+        /// becomes a held lobby, so a late success and the join it replaced cannot diverge.
+        /// </summary>
+        void AcceptJoinedLobby(string lobbyId)
+        {
+            ClearDeadline();
+            _joinInFlight = false;
+            _joiningLobbyId = null;
 
             var snapshot = _steam.GetLobby(lobbyId);
             if (snapshot == null)

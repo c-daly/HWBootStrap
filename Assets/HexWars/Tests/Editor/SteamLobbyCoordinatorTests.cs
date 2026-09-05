@@ -1077,11 +1077,75 @@ namespace HexWars.Presentation.Tests
             Assert.That(_sut.Status.Phase, Is.EqualTo(held));
         }
 
+        [Test]
+        public void ALateJoinSuccessForTheLobbyBeingEntered_IsAdoptedAsTheCurrentJoin()
+        {
+            var lobbyId = AdoptALateJoinSuccess(false);
+
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId),
+                "a confirmed membership must have an owner, or the lobby is occupied for ever");
+            Assert.That(_sut.Status.Phase, Is.AnyOf(SteamLobbyPhase.WaitingForPlayer,
+                                                    SteamLobbyPhase.WaitingForReady));
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero);
+
+            // The replacement join is answered as far as this coordinator is concerned, so nothing
+            // times out on top of the lobby it now holds.
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds * 4);
+
+            Assert.That(_sut.Status.Phase, Is.Not.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId));
+        }
+
+        [Test]
+        public void AReplacementJoinFailingAfterAdoption_StillKeepsTheLobby()
+        {
+            var lobbyId = AdoptALateJoinSuccess(true);
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId));
+            var held = _sut.Status.Phase;
+
+            _steam.Pump();   // the replacement join reports its own failure
+
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId),
+                "the adopted membership must not be torn down by the answer it replaced");
+            Assert.That(_sut.Status.Phase, Is.EqualTo(held));
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero);
+            Assert.That(_steam.CreateLobbyCalls, Is.Zero,
+                "hosting on top of the lobby already held would strand it");
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()
         {
             _steam.PumpAll();
+        }
+
+        /// <summary>
+        /// A join times out, the retry finds the same lobby, and only then does the abandoned join
+        /// report success. <paramref name="replacementFails"/> scripts the retry own join to fail.
+        /// </summary>
+        string AdoptALateJoinSuccess(bool replacementFails)
+        {
+            const string lobbyId = "109775240000000841";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+
+            _sut.QuickMatch();
+            _steam.Pump();                     // the search answers and the first join goes out
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(1));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+
+            _sut.Retry();
+            _steam.FailNextJoinLobby = replacementFails;
+            _steam.PumpAt(1);                  // the retry search answers ahead of the abandoned join
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(2));
+            Assert.That(_sut.Status.LobbyId, Is.Null, "nothing is held while both joins are in flight");
+
+            _steam.Pump();                     // the abandoned join now reports success
+            return lobbyId;
         }
 
         List<SteamLobbyPhase> Phases()
