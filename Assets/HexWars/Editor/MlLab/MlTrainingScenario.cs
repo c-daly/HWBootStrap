@@ -409,9 +409,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int MaxControllableUnits { get; set; }
         public string PlacementPolicy { get; set; }
         public MlTrainingTacticalV3Capacity Capacity { get; set; }
+        public MlTrainingTacticalV3Objective Objective { get; set; }
         public List<MlTrainingUnitTemplate> Templates { get; set; }
         public List<MlTrainingTacticalV2StartProfile> StartProfiles { get; set; }
         public List<MlTrainingTacticalV2StartWeight> StartDistribution { get; set; }
+    }
+
+    public sealed class MlTrainingTacticalV3Objective
+    {
+        public string Kind { get; set; }
+        public string TargetPolicy { get; set; }
+        public int Radius { get; set; }
     }
 
     public sealed class MlTrainingTacticalV3Capacity
@@ -603,8 +611,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
                     MlSymmetricTacticalV2ScenarioWire.FromScenario(scenario), true);
             }
             if (scenario.Environment == MlEnvironmentContract.TacticalV3)
+            {
+                if (scenario.TacticalV3.Objective == null)
+                    return JsonUtility.ToJson(
+                        MlLegacyTacticalV3ScenarioWire.FromScenario(scenario), true);
                 return JsonUtility.ToJson(
                     MlTacticalV3ScenarioWire.FromScenario(scenario), true);
+            }
             return JsonUtility.ToJson(MlTacticalScenarioWire.FromScenario(scenario), true);
         }
 
@@ -762,6 +775,10 @@ namespace HexWars.Presentation.EditorTools.MlLab
             "max_cells", "max_units", "max_templates", "max_capability_definitions",
             "max_capability_allocations", "max_rules", "max_memory_records",
             "max_relations", "max_candidates",
+        };
+        static readonly string[] TacticalV3ObjectiveKeys =
+        {
+            "kind", "target_policy", "radius",
         };
         static readonly string[] StartProfileKeys =
         {
@@ -1075,7 +1092,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
         static void ValidateTacticalV3(JsonNode node, string path)
         {
             Dictionary<string, JsonNode> value = RequireObject(node, path);
-            ExactKeys(value, TacticalV3Keys, path);
+            bool hasObjective = value.ContainsKey("objective");
+            ExactKeys(
+                value,
+                hasObjective
+                    ? TacticalV3Keys.Concat(new[] { "objective" }).ToArray()
+                    : TacticalV3Keys,
+                path);
             RequireInteger(value["starting_unit_count"], path + ".starting_unit_count");
             RequireInteger(value["max_controllable_units"], path + ".max_controllable_units");
             RequireNonEmptyString(value["placement_policy"], path + ".placement_policy");
@@ -1085,6 +1108,17 @@ namespace HexWars.Presentation.EditorTools.MlLab
             ExactKeys(capacity, TacticalV3CapacityKeys, path + ".capacity");
             foreach (string key in TacticalV3CapacityKeys)
                 RequireInteger(capacity[key], path + ".capacity." + key);
+
+            if (hasObjective)
+            {
+                Dictionary<string, JsonNode> objective = RequireObject(
+                    value["objective"], path + ".objective");
+                ExactKeys(objective, TacticalV3ObjectiveKeys, path + ".objective");
+                RequireNonEmptyString(objective["kind"], path + ".objective.kind");
+                RequireNonEmptyString(
+                    objective["target_policy"], path + ".objective.target_policy");
+                RequireInteger(objective["radius"], path + ".objective.radius");
+            }
 
             List<JsonNode> templates = RequireArray(value["templates"], path + ".templates");
             for (int i = 0; i < templates.Count; i++)
@@ -1662,6 +1696,34 @@ namespace HexWars.Presentation.EditorTools.MlLab
     }
 
     [Serializable]
+    sealed class MlLegacyTacticalV3ScenarioWire
+    {
+        public int schema_version;
+        public string id;
+        public string name;
+        public string environment;
+        public MlTrainingBoardWire board;
+        public MlTrainingRulesWire rules;
+        public MlTrainingEpisodeWire episode;
+        public MlTacticalV3RewardWire reward;
+        public MlLegacyTrainingTacticalV3Wire tactical_v3;
+
+        public static MlLegacyTacticalV3ScenarioWire FromScenario(
+            MlTrainingScenario scenario) => new MlLegacyTacticalV3ScenarioWire
+        {
+            schema_version = scenario.SchemaVersion,
+            id = scenario.Id,
+            name = scenario.Name,
+            environment = MlEnvironmentContracts.CliValue(scenario.Environment),
+            board = MlTrainingBoardWire.FromModel(scenario.Board),
+            rules = MlTrainingRulesWire.FromModel(scenario.Rules),
+            episode = MlTrainingEpisodeWire.FromModel(scenario.Episode),
+            reward = MlTacticalV3RewardWire.FromModel(scenario.TacticalV3Reward),
+            tactical_v3 = MlLegacyTrainingTacticalV3Wire.FromModel(scenario.TacticalV3),
+        };
+    }
+
+    [Serializable]
     sealed class MlSymmetricTacticalV2ScenarioWire
     {
         public int schema_version;
@@ -2005,6 +2067,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int max_controllable_units;
         public string placement_policy;
         public MlTrainingTacticalV3CapacityWire capacity;
+        public MlTrainingTacticalV3ObjectiveWire objective;
         public MlTrainingUnitTemplateWire[] templates;
         public MlTrainingTacticalV2StartProfileWire[] start_profiles;
         public MlTrainingTacticalV2StartWeightWire[] start_distribution;
@@ -2015,6 +2078,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             MaxControllableUnits = max_controllable_units,
             PlacementPolicy = placement_policy,
             Capacity = capacity?.ToModel(),
+            Objective = objective?.ToModelOrNull(),
             Templates = (templates ?? Array.Empty<MlTrainingUnitTemplateWire>())
                 .Select(item => item.ToModel()).ToList(),
             StartProfiles = (start_profiles ??
@@ -2032,6 +2096,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 max_controllable_units = model.MaxControllableUnits,
                 placement_policy = model.PlacementPolicy,
                 capacity = MlTrainingTacticalV3CapacityWire.FromModel(model.Capacity),
+                objective = MlTrainingTacticalV3ObjectiveWire.FromModel(model.Objective),
                 templates = model.Templates.Select(
                     MlTrainingUnitTemplateWire.FromModel).ToArray(),
                 start_profiles = model.StartProfiles.Select(
@@ -2039,6 +2104,68 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 start_distribution = model.StartDistribution.Select(
                     MlTrainingTacticalV2StartWeightWire.FromModel).ToArray(),
             };
+    }
+
+    [Serializable]
+    sealed class MlLegacyTrainingTacticalV3Wire
+    {
+        public int starting_unit_count;
+        public int max_controllable_units;
+        public string placement_policy;
+        public MlTrainingTacticalV3CapacityWire capacity;
+        public MlTrainingUnitTemplateWire[] templates;
+        public MlTrainingTacticalV2StartProfileWire[] start_profiles;
+        public MlTrainingTacticalV2StartWeightWire[] start_distribution;
+
+        public static MlLegacyTrainingTacticalV3Wire FromModel(
+            MlTrainingTacticalV3 model) => new MlLegacyTrainingTacticalV3Wire
+            {
+                starting_unit_count = model.StartingUnitCount,
+                max_controllable_units = model.MaxControllableUnits,
+                placement_policy = model.PlacementPolicy,
+                capacity = MlTrainingTacticalV3CapacityWire.FromModel(model.Capacity),
+                templates = model.Templates.Select(
+                    MlTrainingUnitTemplateWire.FromModel).ToArray(),
+                start_profiles = model.StartProfiles.Select(
+                    MlTrainingTacticalV2StartProfileWire.FromModel).ToArray(),
+                start_distribution = model.StartDistribution.Select(
+                    MlTrainingTacticalV2StartWeightWire.FromModel).ToArray(),
+            };
+    }
+
+    [Serializable]
+    sealed class MlTrainingTacticalV3ObjectiveWire
+    {
+        public string kind;
+        public string target_policy;
+        public int radius;
+
+        public MlTrainingTacticalV3Objective ToModelOrNull()
+        {
+            // Unity 6's JsonUtility materializes a default nested object even when an
+            // optional object member is absent. Strict JSON validation has already
+            // established that a present objective has all three non-empty fields,
+            // so the all-default wire unambiguously represents legacy annihilation.
+            if (string.IsNullOrEmpty(kind) && string.IsNullOrEmpty(target_policy) &&
+                radius == 0)
+                return null;
+            return new MlTrainingTacticalV3Objective
+            {
+                Kind = kind,
+                TargetPolicy = target_policy,
+                Radius = radius,
+            };
+        }
+
+        public static MlTrainingTacticalV3ObjectiveWire FromModel(
+            MlTrainingTacticalV3Objective model) => model == null
+                ? null
+                : new MlTrainingTacticalV3ObjectiveWire
+                {
+                    kind = model.Kind,
+                    target_policy = model.TargetPolicy,
+                    radius = model.Radius,
+                };
     }
 
     [Serializable]
