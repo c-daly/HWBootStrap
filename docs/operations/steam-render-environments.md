@@ -71,6 +71,10 @@ names, bound by the server configuration layer.
 | `MATCH_JOIN_TOKEN_TTL_SECONDS` | int | `900` | no | no | Lifetime of an issued join credential. Valid range 60..86400. |
 | `MATCH_BUILD_ID` | string | none | yes | no | Identifies the running build. On Render, set it from `RENDER_GIT_COMMIT`. |
 | `MATCH_PROTOCOL_VERSION` | int | `2` | no | no | Wire protocol version advertised to clients and stored on each match. |
+| `MATCH_HEARTBEAT_SECONDS` | int | `20` | no | no | How often `/ws/v2` sends `PING` on every authenticated socket. Valid range 1..300. It is the only traffic on an idle match, so it is also the only thing keeping an intermediary from dropping a socket both ends still believe in. |
+| `MATCH_STALE_CONNECTION_SECONDS` | int | `60` | no | no | Silence after which an authenticated `/ws/v2` socket is closed with 1001. Valid range 2..900, and it must be greater than `MATCH_HEARTBEAT_SECONDS`: a window no longer than the ping cadence judges silence over an interval the client was never given a chance to answer in. Startup fails if it is not. |
+| `MATCH_OUTBOUND_QUEUE_CAPACITY` | int | `256` | no | no | Frames one `/ws/v2` connection may have waiting before it is closed with 1008 `slow client`. Valid range 16..4096. The bound is what stops a client that has stopped reading from being paid for by every other match on the host; see `docs/operations/protocol-v2.md` §5. |
+| `MATCH_AUTH_TIMEOUT_SECONDS` | int | `10` | no | no | How long a freshly accepted `/ws/v2` socket has to send its `AUTH` frame before it is closed with 1008. Valid range 1..120. |
 | `ALLOWED_WEB_ORIGINS` | comma list | empty | no | no | Browser origins permitted on the legacy WebGL routes. |
 | `LOBBY_PROVIDER` | comma list of `Legacy`, `Steam` | `Legacy` | no | no | Which lobby surfaces are mapped. `Legacy` maps `/games` and `/ws`; `Steam` maps `/api/v1/steam/*` and `/ws/v2`. |
 | `MATCH_COMPATIBLE_CLIENT_BUILDS` | comma list | empty | no | no | Accepted client build strings. Empty means any client build is accepted; the protocol version must still match. |
