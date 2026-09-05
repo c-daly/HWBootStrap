@@ -75,13 +75,23 @@ namespace HexWars.NetServer.Hosting
                 builder.Services.AddSingleton<ILiveMatchLoader>(
                     provider => provider.GetRequiredService<MatchRecoveryService>());
 
-                // A placeholder until the websocket route brings a real one. TryAdd so the route can
-                // register its own sink ahead of this call and keep it.
-                builder.Services.TryAddSingleton<IConnectionSink, NullConnectionSink>();
+                // The live v2 sockets, and the sink the coordinator broadcasts through: the same object
+                // under both names. The coordinator only wants somewhere to put a frame addressed to a
+                // connection id; the socket route and the heartbeat want the connections themselves. Two
+                // registrations would be two dictionaries that have to agree, and the moment they did not,
+                // a frame would be queued for a socket that had already gone.
+                builder.Services.TryAddSingleton<V2ConnectionRegistry>();
+                builder.Services.TryAddSingleton<IConnectionSink>(
+                    provider => provider.GetRequiredService<V2ConnectionRegistry>());
 
                 // One coordinator for the process. It holds every match this host is playing, so a
                 // per-request instance would hold none of them.
                 builder.Services.AddSingleton<DurableMatchCoordinator>();
+
+                // Registered next to the coordinator it sweeps, and after it, because it resolves it. It
+                // is the only thing that touches an idle socket at all, so it is also the only thing that
+                // notices a client which went away without saying so.
+                builder.Services.AddHostedService<ConnectionHeartbeatService>();
             }
 
             // Both registered unconditionally, and AFTER the Postgres branch on purpose.
@@ -260,10 +270,10 @@ namespace HexWars.NetServer.Hosting
             {
                 app.MapSteamMatchEndpoints();
 
-                // The create and join responses point every client at this route, so something has to
-                // answer it in the shape those clients parse. Replaced by the real v2 handler when the
-                // durable-gameplay work lands.
-                app.MapProtocolV2Placeholder();
+                // The route every create and join response points a client at. Mapped here rather than
+                // beside the HTTP endpoints because it is not one: it upgrades, and what happens after the
+                // upgrade is the whole durable runtime.
+                app.Map(SteamMatchEndpoints.WebSocketPath, ProtocolV2WebSocketServer.Handle);
             }
 
             return app;

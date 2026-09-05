@@ -1069,20 +1069,6 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task TheAdvertisedWebsocketRouteAnswersInTheFixedErrorShape()
-        {
-            // Every create and join response points a client here. Until protocol v2 ships, following that
-            // URL has to produce something the client can parse and act on rather than a 404 page.
-            using var factory = new SteamServerFactory();
-            using HttpClient client = factory.CreateClient();
-
-            HttpResponseMessage response = await client.GetAsync(SteamMatchEndpoints.WebSocketPath);
-
-            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
-            Assert.That(await ErrorCode(response), Is.EqualTo("service_unavailable"));
-        }
-
-        [Test]
         public async Task WithoutTheSteamProviderTheWebsocketRouteIsNotMappedEither()
         {
             using var factory = new SteamServerFactory();

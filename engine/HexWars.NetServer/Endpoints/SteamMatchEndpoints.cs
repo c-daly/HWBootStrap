@@ -56,22 +56,6 @@ namespace HexWars.NetServer.Endpoints
             return app;
         }
 
-        /// <summary>
-        /// Answers the websocket route these endpoints advertise, until the durable-gameplay work replaces
-        /// this with the real handler.
-        ///
-        /// A placeholder rather than nothing, because the create and join responses hand every client a
-        /// URL pointing here: leaving it unmapped means a client that does exactly what it was told gets a
-        /// 404 and an HTML error body, which is neither a shape it can parse nor a state it can act on.
-        /// The 503 it gets instead is the same refusal it would see during an outage, and its reconnect
-        /// backoff already knows what to do with that.
-        /// </summary>
-        public static IEndpointRouteBuilder MapProtocolV2Placeholder(this IEndpointRouteBuilder app)
-        {
-            app.Map(WebSocketPath, () => ApiErrors.UnavailableResult());
-            return app;
-        }
-
         static async Task<IResult> CreateAsync(
             HttpContext http,
             ISteamWebApiClient steam,

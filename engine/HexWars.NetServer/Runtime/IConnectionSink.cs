@@ -11,7 +11,7 @@ namespace HexWars.NetServer.Runtime
     ///
     /// Both methods are deliberately synchronous and must not block. They are called while the per-match gate
     /// is held, so an implementation that waited on a network write would stall every other player in that
-    /// match; the real one hands the frame to an unbounded outbound channel and returns.
+    /// match; the real one hands the frame to a bounded per-connection channel and returns.
     /// </summary>
     public interface IConnectionSink
     {
@@ -20,22 +20,5 @@ namespace HexWars.NetServer.Runtime
 
         /// <summary>Asks for a connection to be closed with a WebSocket close status and reason.</summary>
         void Close(string connectionId, int closeStatus, string reason);
-    }
-
-    /// <summary>
-    /// The sink a host has before the websocket route is wired up: it drops everything.
-    ///
-    /// It exists so the container can be built and validated by a deployment that never opens a v2 socket,
-    /// rather than making the coordinator hold a nullable sink and check it on every send.
-    /// </summary>
-    internal sealed class NullConnectionSink : IConnectionSink
-    {
-        public void Send(string connectionId, string message)
-        {
-        }
-
-        public void Close(string connectionId, int closeStatus, string reason)
-        {
-        }
     }
 }
