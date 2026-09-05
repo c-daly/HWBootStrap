@@ -98,6 +98,49 @@ namespace HexWars.NetServer.Tests
             Assert.That(result.Match.ProtocolVersion, Is.EqualTo(ProtocolContract.Version));
         }
 
+        [TestCase("8", 8)]
+        [TestCase("256", 256)]
+        [TestCase("4096", 4096)]
+        public void ARecheckBudgetInsideItsRange_IsAccepted(string configured, int expected)
+        {
+            Dictionary<string, string?> values = ValidSteamSettings();
+            values["MATCH_MAX_RECHECKS_PER_CADENCE"] = configured;
+
+            var result = Read(values);
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.MaxRechecksPerCadence, Is.EqualTo(expected));
+        }
+
+        [TestCase("7")]
+        [TestCase("4097")]
+        [TestCase("0")]
+        [TestCase("lots")]
+        public void ARecheckBudgetOutsideItsRange_FailsStartup(string configured)
+        {
+            // The budget has to be large enough that the socket count fits inside one recheck interval,
+            // and small enough that a host which has just come up does not try to check everything at
+            // once. Neither end is a preference, so neither end is silently clamped.
+            Dictionary<string, string?> values = ValidSteamSettings();
+            values["MATCH_MAX_RECHECKS_PER_CADENCE"] = configured;
+
+            var result = Read(values);
+
+            Assert.That(result.IsValid, Is.False);
+            Assert.That(Joined(result), Does.Contain("MATCH_MAX_RECHECKS_PER_CADENCE"));
+        }
+
+        [Test]
+        public void TheRecheckBudget_DefaultsToTwoHundredAndFiftySix()
+        {
+            var result = Read(ValidSteamSettings());
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.MaxRechecksPerCadence, Is.EqualTo(256));
+            Assert.That(result.Match.MaxRechecksPerCadence,
+                Is.EqualTo(MatchHostingOptions.DefaultMaxRechecksPerCadence));
+        }
+
         [Test]
         public void TheNewSocketLimits_HaveDefaultsAndAreBounded()
         {

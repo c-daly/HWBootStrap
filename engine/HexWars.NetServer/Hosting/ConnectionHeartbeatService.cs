@@ -43,15 +43,30 @@ namespace HexWars.NetServer.Hosting
         /// <summary>How long one re-check is given before it is abandoned until the next cadence.</summary>
         internal static readonly TimeSpan RecheckTimeout = TimeSpan.FromSeconds(5);
 
+        /// <summary>How often a cadence that could not start is allowed to say so.</summary>
+        static readonly TimeSpan OverrunLogInterval = TimeSpan.FromMinutes(1);
+
         long _candidates;
+        long _scanned;
         long _cadences;
+
+        Task? _inflight;
+        CancellationTokenSource? _inflightCancellation;
+        DateTimeOffset _lastOverrunLog = DateTimeOffset.MinValue;
 
         /// <summary>Connections that have been offered to the batch selection. A socket that is not due is
         /// never counted, so this is what proves the selection walks the due ones and not the host.</summary>
         internal long RecheckCandidatesConsidered => Interlocked.Read(ref _candidates);
 
+        /// <summary>Every connection the selection has looked at, due or not.</summary>
+        internal long RecheckConnectionsScanned => Interlocked.Read(ref _scanned);
+
         /// <summary>Re-check passes that have found something to do.</summary>
         internal long RecheckCadences => Interlocked.Read(ref _cadences);
+
+        /// <summary>Re-check passes running right now: one, or none. Never two.</summary>
+        internal int RecheckBatchesInFlight =>
+            Volatile.Read(ref _inflight) is { IsCompleted: false } ? 1 : 0;
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -127,83 +142,107 @@ namespace HexWars.NetServer.Hosting
         /// <summary>
         /// Starts a pass over the sockets whose credentials are due to be asked about again.
         ///
-        /// Detached, and it drains. The previous shape took a slot per socket and stopped at the first
-        /// refusal, so exactly eight genuinely asynchronous checks ran per heartbeat however many were due
-        /// and however quickly they finished - a slot freed a millisecond later sat idle until the next
-        /// tick. With a hundred live sockets the hundredth was re-checked minutes after it was promised,
-        /// which makes the documented interval a fiction rather than a cadence.
-        ///
-        /// Eight workers pull from the batch until it is empty or the next heartbeat is due. Whatever is
-        /// left keeps its old check time, so it is at the front of the queue next cadence.
+        /// One pass at a time, ever. The pass is detached so it cannot delay a ping, and a detached thing
+        /// started once per tick is a leak waiting for a check that ignores its cancellation: the token
+        /// only ASKS, so passes would pile up eight workers at a time and never come down. A tick that
+        /// finds the previous pass still running cancels it and stands down instead.
         /// </summary>
         void StartDueRechecks(DateTimeOffset now, TimeSpan recheck, TimeSpan cadence, CancellationToken stopping)
         {
+            if (_inflight is { IsCompleted: false })
+            {
+                _inflightCancellation?.Cancel();
+                NoteOverrun(now);
+                return;
+            }
+
+            _inflightCancellation?.Dispose();
+            _inflightCancellation = null;
+            Volatile.Write(ref _inflight, null);
+
             V2Connection[] batch = SelectOldestDue(now, recheck, options.Value.MaxRechecksPerCadence);
             if (batch.Length == 0) return;
 
             Interlocked.Increment(ref _cadences);
-            _ = DrainAsync(batch, now, cadence, stopping);
+
+            var cancellation = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            cancellation.CancelAfter(cadence);
+            _inflightCancellation = cancellation;
+            Volatile.Write(ref _inflight, DrainAsync(batch, now, cancellation.Token));
+        }
+
+        /// <summary>Says a pass overran, at most once a minute. A host that is behind is behind on every
+        /// tick, and a line per tick would bury the fact rather than report it.</summary>
+        void NoteOverrun(DateTimeOffset now)
+        {
+            if (now - _lastOverrunLog < OverrunLogInterval) return;
+
+            _lastOverrunLog = now;
+            logger.LogWarning(
+                "A credential re-check pass was still running when the next was due; it has been cancelled "
+                + "and this tick starts none. Sockets keep their place in the queue.");
         }
 
         /// <summary>
-        /// The oldest-checked due sockets, up to <paramref name="budget"/>, without sorting the rest.
+        /// The oldest-checked due sockets, up to <paramref name="budget"/>, in oldest-first order.
         ///
-        /// Oldest first is what makes it fair: a socket that did not fit in one cadence keeps the oldest
-        /// check time on the host and goes to the front of the next one. Sorting every due connection to
-        /// learn that is work proportional to the whole host, repeated every heartbeat, to choose a few
-        /// hundred - so the candidates are walked once against a buffer of the best so far instead.
+        /// Oldest FIRST and not merely the oldest SET. The batch is handed to a worker pool that takes
+        /// items in order, so a batch in registry order starts whichever sockets happen to sit near the
+        /// front of the dictionary - and when checks take longer than a cadence, those same few are all
+        /// that ever start while an hour-old socket behind them is cancelled every time.
+        ///
+        /// A bounded heap rather than a sort: the host may have thousands of due sockets and this runs on
+        /// the heartbeat loop. The heap keeps the newest of the chosen at its top, so the common case for
+        /// a candidate is one comparison against it.
         /// </summary>
         V2Connection[] SelectOldestDue(DateTimeOffset now, TimeSpan recheck, int budget)
         {
-            var chosen = new List<V2Connection>(Math.Min(budget, 64));
-            var newest = -1;
+            // Inverted, so the heap surfaces the NEWEST of the chosen - which is the one to evict.
+            var chosen = new PriorityQueue<V2Connection, DateTimeOffset>(
+                Comparer<DateTimeOffset>.Create((left, right) => right.CompareTo(left)));
 
             foreach (V2Connection connection in registry.Snapshot())
             {
+                Interlocked.Increment(ref _scanned);
+
                 if (!connection.IsAuthenticated || connection.IsClosed) continue;
                 if (!IsRecheckDue(connection, now, recheck)) continue;
 
                 Interlocked.Increment(ref _candidates);
 
+                DateTimeOffset checkedAt = connection.LastCredentialCheck;
+
                 if (chosen.Count < budget)
                 {
-                    chosen.Add(connection);
-                    if (newest < 0
-                        || connection.LastCredentialCheck > chosen[newest].LastCredentialCheck)
-                        newest = chosen.Count - 1;
-
+                    chosen.Enqueue(connection, checkedAt);
                     continue;
                 }
 
-                // The common case once the buffer is full: one comparison against the newest thing in it.
-                if (connection.LastCredentialCheck >= chosen[newest].LastCredentialCheck) continue;
-
-                chosen[newest] = connection;
-                newest = 0;
-                for (var i = 1; i < chosen.Count; i++)
-                    if (chosen[i].LastCredentialCheck > chosen[newest].LastCredentialCheck) newest = i;
+                if (checkedAt < chosen.Peek().LastCredentialCheck)
+                    chosen.EnqueueDequeue(connection, checkedAt);
             }
 
-            return chosen.ToArray();
+            // Dequeue hands back newest first, so it is filled from the end: batch[0] is the oldest thing
+            // on the host, and the pool starts there.
+            var batch = new V2Connection[chosen.Count];
+            for (int i = batch.Length - 1; i >= 0; i--) batch[i] = chosen.Dequeue();
+
+            return batch;
         }
 
         /// <summary>
         /// Runs one batch of re-checks, eight at a time, until it is done or the cadence runs out.
         ///
-        /// The deadline is the next heartbeat: a pass that is still going when the following one is due has
-        /// fallen behind, and carrying on would stack passes on top of each other. What it did not reach is
-        /// simply not stamped, so the next pass starts with exactly those sockets.
+        /// The deadline is the next heartbeat: a pass still going when the following one is due has fallen
+        /// behind, and carrying on would stack passes on top of each other. What it did not reach is simply
+        /// not stamped, so the next pass starts with exactly those sockets.
         /// </summary>
-        async Task DrainAsync(
-            V2Connection[] batch, DateTimeOffset now, TimeSpan cadence, CancellationToken stopping)
+        async Task DrainAsync(V2Connection[] batch, DateTimeOffset now, CancellationToken deadline)
         {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-            deadline.CancelAfter(cadence);
-
             var pool = new ParallelOptions
             {
                 MaxDegreeOfParallelism = MaxConcurrentRechecks,
-                CancellationToken = deadline.Token,
+                CancellationToken = deadline,
             };
 
             try
@@ -218,9 +257,8 @@ namespace HexWars.NetServer.Hosting
             }
             catch (OperationCanceledException)
             {
-                if (!stopping.IsCancellationRequested)
-                    logger.LogWarning(
-                        "A credential re-check pass ran out of cadence with work left; it resumes next tick");
+                // Expected on a busy host and on shutdown. The pass that could not finish leaves the rest
+                // of its batch unstamped, which is what puts them first next time.
             }
             catch (Exception failure)
             {
@@ -236,18 +274,24 @@ namespace HexWars.NetServer.Hosting
         /// is not evidence against the player, and closing every live socket over a database having a bad
         /// minute would be a self-inflicted outage.
         /// </summary>
-        async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
+        async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken batch)
         {
             try
             {
                 if (connection.CredentialHash is not byte[] hash) return;
                 if (connection.MatchId is not Guid matchId) return;
 
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(batch);
                 deadline.CancelAfter(RecheckTimeout);
 
+                // The token is passed AND the await is bounded. A store client that ignores cancellation
+                // would otherwise hold this worker for as long as it liked, and the deadline would be a
+                // request rather than a deadline. WaitAsync abandons it instead: the worker moves on, and
+                // the orphaned call is bounded by eight per pass and one pass at a time.
                 bool valid = await credentials
-                    .IsStillValidAsync(hash, matchId, now, deadline.Token).ConfigureAwait(false);
+                    .IsStillValidAsync(hash, matchId, now, deadline.Token)
+                    .WaitAsync(deadline.Token)
+                    .ConfigureAwait(false);
 
                 if (valid) return;
 
@@ -256,7 +300,7 @@ namespace HexWars.NetServer.Hosting
             }
             catch (OperationCanceledException)
             {
-                if (!stopping.IsCancellationRequested)
+                if (!batch.IsCancellationRequested)
                     logger.LogWarning(
                         "A credential re-check did not answer inside {Seconds}s; leaving the socket open",
                         (int)RecheckTimeout.TotalSeconds);

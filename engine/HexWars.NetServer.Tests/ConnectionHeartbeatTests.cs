@@ -5,6 +5,7 @@ using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NUnit.Framework;
@@ -31,6 +32,8 @@ namespace HexWars.NetServer.Tests
         V2ConnectionRegistry _registry = null!;
         BlockingCredentialService _credentials = null!;
         ConnectionHeartbeatService _heartbeat = null!;
+        CapturingLoggerProvider _logs = null!;
+        ILoggerFactory _loggers = null!;
         readonly List<V2Connection> _connections = new();
 
         [TearDown]
@@ -46,6 +49,7 @@ namespace HexWars.NetServer.Tests
 
             await Task.WhenAll(_connections.Select(c => c.CloseAsync(1000, "bye")));
             _connections.Clear();
+            _loggers?.Dispose();
         }
 
         void Start(
@@ -62,6 +66,9 @@ namespace HexWars.NetServer.Tests
                 MaxRechecksPerCadence = budget,
                 MaxSocketsPerIp = 8192,
             });
+
+            _logs = new CapturingLoggerProvider();
+            _loggers = LoggerFactory.Create(builder => builder.AddProvider(_logs));
 
             _registry = new V2ConnectionRegistry(options, NullLogger<V2ConnectionRegistry>.Instance);
             _credentials = new BlockingCredentialService(checkTakes);
@@ -82,13 +89,13 @@ namespace HexWars.NetServer.Tests
                 _credentials,
                 options,
                 TimeProvider.System,
-                NullLogger<ConnectionHeartbeatService>.Instance);
+                _loggers.CreateLogger<ConnectionHeartbeatService>());
         }
 
         /// <summary>One authenticated socket over a peer that accepts everything and says nothing.</summary>
         RecordingWebSocket Seat(int index) => Seat(index, due: true);
 
-        RecordingWebSocket Seat(int index, bool due)
+        RecordingWebSocket Seat(int index, bool due, DateTimeOffset? lastCheck = null)
         {
             var peer = new RecordingWebSocket();
             var connection = new V2Connection(
@@ -99,9 +106,9 @@ namespace HexWars.NetServer.Tests
                 CredentialExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
 
                 // Long ago, so the socket is due for a re-check on the very first tick.
-                LastCredentialCheck = due
+                LastCredentialCheck = lastCheck ?? (due
                     ? DateTimeOffset.UtcNow.AddHours(-1)
-                    : DateTimeOffset.UtcNow.AddHours(1),
+                    : DateTimeOffset.UtcNow.AddHours(1)),
             };
 
             connection.CredentialHash[0] = (byte)index;
@@ -242,6 +249,83 @@ namespace HexWars.NetServer.Tests
                     "a socket that was checked is stamped, and one that was skipped is not");
         }
 
+        [Test]
+        public async Task UnderSustainedOverload_ChecksStartStrictlyOldestFirst()
+        {
+            // The oldest SET is not the same as oldest FIRST. Handing the pool a batch in registry order
+            // starts whichever sockets happen to sit near the front of the dictionary, and when a check
+            // outlasts a cadence those same few are all that ever start - an hour-old socket behind them is
+            // cancelled every time and never asked about at all.
+            //
+            // Seat i is stamped one second newer than seat i-1, so the age order is exactly the index
+            // order and any gap in the started set is a socket that was skipped over an older one.
+            DateTimeOffset oldest = DateTimeOffset.UtcNow.AddHours(-2);
+
+            Start(recheckSeconds: 300, heartbeatSeconds: 1, budget: 256,
+                checkTakes: TimeSpan.FromSeconds(3));
+
+            for (var i = 0; i < 100; i++) Seat(i, due: true, lastCheck: oldest.AddSeconds(i));
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _heartbeat.RecheckCadences >= 3, TimeSpan.FromSeconds(20));
+            await _heartbeat.StopAsync(CancellationToken.None);
+
+            IReadOnlySet<byte> started = _credentials.Seen;
+
+            Assert.That(started, Is.Not.Empty);
+            Assert.That(started.Count, Is.LessThan(100), "the checks outlast a cadence, so not all of them");
+            Assert.That(started, Is.EquivalentTo(Enumerable.Range(0, started.Count).Select(i => (byte)i)),
+                "the started sockets are the N oldest, with no younger one jumping the queue");
+        }
+
+        [Test]
+        public async Task AStoreThatIgnoresCancellation_NeverLetsPassesPileUp()
+        {
+            // A cancellation token asks; it does not compel. A pass started once per tick against a client
+            // that ignores the token would grow by eight workers a tick and never come down, so a tick that
+            // finds the previous pass still running cancels it and starts none of its own.
+            Start(recheckSeconds: 300, heartbeatSeconds: 1, budget: 256);
+            _credentials.IgnoresCancellation = true;
+
+            RecordingWebSocket peer = Seat(0);
+            for (var i = 1; i < 40; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+
+            var highest = 0;
+            for (var sample = 0; sample < 60; sample++)
+            {
+                highest = Math.Max(highest, _heartbeat.RecheckBatchesInFlight);
+                await Task.Delay(100);
+            }
+
+            Assert.That(highest, Is.LessThanOrEqualTo(1), "one pass at a time, however badly it is going");
+            Assert.That(peer.Sent.Count(m => m == "PING"), Is.GreaterThanOrEqualTo(3),
+                "and the pings that keep every match alive still go out every tick");
+        }
+
+        [Test]
+        public async Task AStoreThatThrows_LeavesTheSocketsOpenAndTheHeartbeatRunning()
+        {
+            // A database having a bad minute is not evidence against any player. Closing live sockets over
+            // it would turn an outage in one dependency into an outage in the game.
+            Start(recheckSeconds: 1, heartbeatSeconds: 1);
+            _credentials.Throws = true;
+
+            RecordingWebSocket peer = Seat(0);
+            for (var i = 1; i < 5; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _credentials.Started >= 10, TimeSpan.FromSeconds(20));
+
+            Assert.That(_connections.Any(c => c.IsClosed), Is.False, "no socket is closed over a failed query");
+            Assert.That(peer.Sent.Count(m => m == "PING"), Is.GreaterThanOrEqualTo(2),
+                "and the heartbeat keeps going rather than dying on the first exception");
+            Assert.That(
+                _logs.Messages.Count(m => m.Contains("could not be re-checked", StringComparison.Ordinal)),
+                Is.GreaterThanOrEqualTo(1), "each failure is reported once");
+        }
+
         static async Task WaitUntil(Func<bool> condition, TimeSpan within)
         {
             DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(within);
@@ -255,6 +339,13 @@ namespace HexWars.NetServer.Tests
         /// <summary>A credential service that answers instantly except for the seats a test wedges.</summary>
         sealed class BlockingCredentialService(TimeSpan? takes = null) : IMatchCredentialService
         {
+            /// <summary>Answers with a task that never completes and pays no attention to the token: a
+            /// store client that treats cancellation as a suggestion.</summary>
+            public bool IgnoresCancellation { get; set; }
+
+            /// <summary>Fails every call, the way a database that is down does.</summary>
+            public bool Throws { get; set; }
+
             readonly HashSet<byte> _blocked = new();
             readonly SemaphoreSlim _release = new(0);
             int _started;
@@ -289,6 +380,18 @@ namespace HexWars.NetServer.Tests
                 Interlocked.Increment(ref _started);
                 RecordPeak(Interlocked.Increment(ref _inFlight));
                 lock (_seen) _seen.Add(credentialHash[0]);
+
+                if (Throws)
+                {
+                    Interlocked.Decrement(ref _inFlight);
+                    throw new InvalidOperationException("the database is not answering");
+                }
+
+                if (IgnoresCancellation)
+                {
+                    // No token, on purpose. What is being tested is the caller giving up on it.
+                    await new TaskCompletionSource().Task.ConfigureAwait(false);
+                }
 
                 bool blocked;
                 lock (_blocked) blocked = _blocked.Contains(credentialHash[0]);
