@@ -7,6 +7,7 @@ using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
 using HexWars.NetServer.Tests.Fixtures;
 using Microsoft.AspNetCore.Hosting;
@@ -289,6 +290,62 @@ namespace HexWars.NetServer.Tests
             }
 
             Assert.That((await answer).CloseStatus, Is.EqualTo(WebSocketCloseStatus.MessageTooBig));
+        }
+
+        // ---- frames this protocol has no reading for --------------------------
+
+        [Test]
+        public async Task ABinaryFrameThatSpellsAValidAuth_AuthenticatesNothing()
+        {
+            // The bytes are a perfectly good AUTH frame. They arrive as binary, so they are not decoded and
+            // not dispatched: a protocol that reads every non-close frame as text will happily seat a
+            // client that never spoke it.
+            Start();
+            await SeedAWaitingMatch();
+
+            using WebSocket binary = await ConnectAsync();
+            await binary.SendAsync(
+                Encoding.UTF8.GetBytes(Auth(_credential0)),
+                WebSocketMessageType.Binary, true, CancellationToken.None);
+
+            Assert.That(await ExpectCloseAsync(binary, FrameWait),
+                Is.EqualTo(WebSocketCloseStatus.InvalidMessageType));
+
+            var registry = _host.Services.GetRequiredService<V2ConnectionRegistry>();
+            Assert.That(registry.Snapshot().Any(c => c.IsAuthenticated), Is.False,
+                "nothing was seated by it");
+
+            // And the credential it carried is untouched: a text AUTH on a fresh socket still works.
+            using WebSocket text = await ConnectAsync();
+            await SendAsync(text, Auth(_credential0));
+            Assert.That((await ReceiveAsync(text)).Text, Is.EqualTo("SEAT 0"));
+        }
+
+        [Test]
+        public async Task ABinaryCommandFromASeatedSocket_IsRefusedAndNeverJournalled()
+        {
+            Start();
+            await SeedAWaitingMatch();
+
+            using WebSocket zero = await SeatAsync(_credential0, 0);
+            using WebSocket one = await SeatAsync(_credential1, 1);
+            await StartTheMatch(zero, one);
+
+            var coordinator = _host.Services.GetRequiredService<DurableMatchCoordinator>();
+            Assert.That(coordinator.TryGetLiveMatch(_matchId, out LiveMatch? live), Is.True);
+            int before = live!.LastSequence;
+
+            await zero.SendAsync(
+                Encoding.UTF8.GetBytes(NetProtocol.Cmd(new EndTurn(PlayerId.Player0))),
+                WebSocketMessageType.Binary, true, CancellationToken.None);
+
+            Assert.That(await ExpectCloseAsync(zero, FrameWait),
+                Is.EqualTo(WebSocketCloseStatus.InvalidMessageType));
+
+            Assert.That(live.LastSequence, Is.EqualTo(before), "the command never reached the journal");
+
+            MatchJournal journal = (await _fixture.Store.LoadJournalAsync(_matchId, CancellationToken.None))!;
+            Assert.That(journal.Commands, Is.Empty);
         }
 
         // ---- liveness --------------------------------------------------------

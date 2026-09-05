@@ -31,10 +31,15 @@ namespace HexWars.NetServer.Hosting
         internal const string PongMessage = "PONG";
         internal const string AuthFailPrefix = "AUTH FAIL ";
 
+        internal const string TextFramesOnly = "text frames only";
+
         internal const int CloseNormal = 1000;
         internal const int CloseStale = 1001;
         internal const int ClosePolicy = 1008;
         internal const int CloseTooBig = 1009;
+
+        /// <summary>The close a socket gets for sending data this protocol has no reading for.</summary>
+        internal const int CloseUnsupportedData = 1003;
 
         /// <summary>Handshakes this process will validate at once, across every socket.</summary>
         internal const int MaxConcurrentValidations = 64;
@@ -67,6 +72,10 @@ namespace HexWars.NetServer.Hosting
             Text,
             Closed,
             TooBig,
+
+            /// <summary>A binary frame. Every message in this protocol is UTF-8 text, so bytes arriving as
+            /// binary are not a message that failed to parse - they are a client speaking something else.</summary>
+            Unsupported,
         }
 
         readonly record struct Frame(FrameKind Kind, string Text);
@@ -193,6 +202,16 @@ namespace HexWars.NetServer.Hosting
             if (first.Kind == FrameKind.TooBig)
             {
                 await connection.CloseFromReceiveLoopAsync(CloseTooBig, "message too large")
+                    .ConfigureAwait(false);
+                return false;
+            }
+
+            if (first.Kind == FrameKind.Unsupported)
+            {
+                // Closed without a word. The bytes are not dispatched and not decoded, so a binary frame
+                // that happens to spell a valid AUTH authenticates nothing.
+                logger.LogDebug("Closed a v2 socket that opened with a binary frame");
+                await connection.CloseFromReceiveLoopAsync(CloseUnsupportedData, TextFramesOnly)
                     .ConfigureAwait(false);
                 return false;
             }
@@ -343,6 +362,14 @@ namespace HexWars.NetServer.Hosting
                     return;
                 }
 
+                if (frame.Kind == FrameKind.Unsupported)
+                {
+                    logger.LogDebug("Closed a seated v2 socket that sent a binary frame");
+                    await connection.CloseFromReceiveLoopAsync(CloseUnsupportedData, TextFramesOnly)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
                 if (frame.Kind == FrameKind.Closed) return;
 
                 // Any inbound frame is liveness, PONG included and PONG especially: the heartbeat asks
@@ -399,6 +426,12 @@ namespace HexWars.NetServer.Hosting
 
                 if (result.MessageType == WebSocketMessageType.Close)
                     return new Frame(FrameKind.Closed, string.Empty);
+
+                // On every fragment, not only the first. A message can change type part-way through only
+                // because a client is doing something wrong, and reading the rest of it to find out what
+                // would mean decoding bytes this protocol has no meaning for - as text, at that.
+                if (result.MessageType == WebSocketMessageType.Binary)
+                    return new Frame(FrameKind.Unsupported, string.Empty);
 
                 message.Write(buffer, 0, result.Count);
                 if (message.Length > MaxIncomingBytes) return new Frame(FrameKind.TooBig, string.Empty);
