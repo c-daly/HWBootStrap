@@ -57,6 +57,12 @@ namespace HexWars.NetServer.Persistence
         /// so a test can put a new open match in the way.</summary>
         internal Func<Task>? OnCreateRetryForTests { get; set; }
 
+        /// <summary>Test hook: runs inside the credential replacement, after the old credentials are
+        /// revoked and before the new one is inserted. Throwing from it is the only way to reach the
+        /// window that made the two-call version dangerous - the one where a player has lost the
+        /// credential they held and not yet been given its replacement.</summary>
+        internal Func<Task>? AfterRevokeForTests { get; set; }
+
         // ---- allocation ------------------------------------------------------
 
         public async Task<CreateMatchResult> CreateMatchForLobbyAsync(CreateMatchRequest request, CancellationToken ct)
@@ -629,6 +635,8 @@ namespace HexWars.NetServer.Persistence
                 revoke.Parameters.AddWithValue("steamId", steamId);
                 await revoke.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
+
+            if (AfterRevokeForTests is not null) await AfterRevokeForTests().ConfigureAwait(false);
 
             try
             {

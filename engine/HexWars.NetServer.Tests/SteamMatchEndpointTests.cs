@@ -1094,6 +1094,57 @@ namespace HexWars.NetServer.Tests
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
         }
 
+        // ---- the database being gone ---------------------------------------------------------------
+
+        [Test]
+        public async Task WithTheDatabaseUnreachable_CreateIsAServiceOutageAndSaysNothingElse()
+        {
+            using var factory = new SteamServerFactory { UseUnreachableDatabase = true };
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(factory.Steam.LobbyCalls, Is.EqualTo(1),
+                "the request has to have reached storage, or this asserts nothing about a database outage");
+            AssertLeaksNothing(await Body(response));
+        }
+
+        [Test]
+        public async Task WithTheDatabaseUnreachable_JoinIsAServiceOutageAndSaysNothingElse()
+        {
+            using var factory = new SteamServerFactory { UseUnreachableDatabase = true };
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Join(client, Guid.NewGuid(), FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(factory.Steam.AuthenticateCalls, Is.EqualTo(1),
+                "an unknown match is answered 404 once storage answers, so this 503 came from storage");
+            AssertLeaksNothing(await Body(response));
+        }
+
+        /// <summary>The whole error body, checked for the things an exception would have put in it. An
+        /// Npgsql failure names the host, the port and the driver, and a player is neither able to act on
+        /// any of that nor entitled to know it.</summary>
+        static void AssertLeaksNothing(JsonElement body)
+        {
+            Assert.That(body.GetProperty("error").GetString(), Is.EqualTo("service_unavailable"));
+            Assert.That(
+                body.GetProperty("message").GetString(),
+                Is.EqualTo(SteamFailureMessages.ServiceUnavailable));
+            Assert.That(
+                body.EnumerateObject().Select(property => property.Name).ToArray(),
+                Is.EquivalentTo(new[] { "error", "message" }),
+                "nothing beyond the two fields the contract promises");
+
+            string text = body.GetRawText();
+            foreach (string leak in new[] { "Npgsql", "127.0.0.1", "Exception", "   at ", "Password" })
+            {
+                Assert.That(text, Does.Not.Contain(leak).IgnoreCase, "the response carried " + leak);
+            }
+        }
+
         // ---- the real database -------------------------------------------------------------------
 
         [Test]

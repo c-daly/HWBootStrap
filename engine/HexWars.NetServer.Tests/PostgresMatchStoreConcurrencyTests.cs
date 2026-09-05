@@ -452,6 +452,56 @@ namespace HexWars.NetServer.Tests
                 "which still stops working, because the match it names is over");
         }
 
+        [Test]
+        public async Task TwoIssuesForOneSeatSubmittedTogether_LeaveExactlyOneUsableCredential()
+        {
+            // No held lock and no hook: two services on two pools, submitted together and left to
+            // interleave however the database schedules them. It cannot prove the mechanism the way the
+            // blocked test above does, but it is the shape the deployment actually produces - one player
+            // reconnecting through two instances at the same moment - and the outcome must hold whatever
+            // order they land in.
+            var match = await NewWaitingMatchAsync();
+
+            await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
+            var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
+
+            MatchCredentialService first = NewCredentialService(_store);
+            MatchCredentialService second = NewCredentialService(other);
+
+            IssuedCredential[] issued = await Task.WhenAll(
+                first.IssueAsync(match.MatchId, match.Seat0, Ct),
+                second.IssueAsync(match.MatchId, match.Seat0, Ct));
+
+            CredentialValidation?[] validations = await Task.WhenAll(
+                first.ValidateAsync(match.MatchId, issued[0].Credential, Ct),
+                first.ValidateAsync(match.MatchId, issued[1].Credential, Ct));
+
+            Assert.That(validations.Count(validation => validation is not null), Is.EqualTo(1),
+                "one seat may have one usable credential, whichever of the two issues committed last");
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task AFailureAfterTheRevoke_RollsBackAndLeavesTheOldCredentialUsable()
+        {
+            // The window that made the two-call version dangerous: the old credential is already revoked
+            // and the new one has not landed. One transaction means the player keeps what they had rather
+            // than being left holding nothing.
+            var match = await NewWaitingMatchAsync();
+            MatchCredentialService service = NewCredentialService(_store);
+            IssuedCredential held = await service.IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            _store.AfterRevokeForTests = () => throw new TimeoutException("the connection went away");
+
+            Assert.ThrowsAsync<TimeoutException>(() => service.IssueAsync(match.MatchId, match.Seat0, Ct));
+
+            _store.AfterRevokeForTests = null;
+
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1));
+            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Not.Null,
+                "a failed reissue must not cost the player the credential they were already holding");
+        }
+
         MatchCredentialService NewCredentialService(IMatchStore store) => new(
             store,
             Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace HexWars.NetServer.Tests.Fixtures
 {
@@ -166,6 +167,16 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// <summary>When set, the host keeps the real PostgresMatchStore and talks to <see cref=\"Database\"/>.</summary>
         public bool UsePostgres { get; private set; }
 
+        /// <summary>
+        /// When set, the host gets a real PostgresMatchStore pointed at a port nothing is listening on.
+        ///
+        /// The in-memory store can be made to throw, but only exceptions a test chose. This produces the
+        /// real ones - the Npgsql failures an outage actually raises - which is the only way to show an
+        /// endpoint turns them into the fixed error body rather than leaking a connection string or a
+        /// stack trace into the response.
+        /// </summary>
+        public bool UseUnreachableDatabase { get; init; }
+
         /// <summary>The database behind a <see cref="PostgresAsync"/> factory, for asserting on rows.</summary>
         public PostgresTestDatabase? Database { get; private set; }
 
@@ -208,7 +219,17 @@ namespace HexWars.NetServer.Tests.Fixtures
                     services.FirstOrDefault(d => d.ImplementationType == typeof(MigrationHostedService));
                 if (migration is not null) services.Remove(migration);
 
-                if (!UsePostgres)
+                if (UseUnreachableDatabase)
+                {
+                    // A short connect timeout so a refused connection is an immediate failure rather than
+                    // a test that spends its life waiting for one.
+                    services.RemoveAll<IMatchStore>();
+                    services.AddSingleton<IMatchStore>(provider => new PostgresMatchStore(
+                        NpgsqlDataSource.Create(
+                            "Host=127.0.0.1;Port=1;Username=u;Password=p;Database=fake;Timeout=1"),
+                        provider.GetRequiredService<ILogger<PostgresMatchStore>>()));
+                }
+                else if (!UsePostgres)
                 {
                     services.RemoveAll<IMatchStore>();
                     services.AddSingleton<IMatchStore>(Counting);
