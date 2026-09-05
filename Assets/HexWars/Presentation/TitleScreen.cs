@@ -117,7 +117,15 @@ namespace HexWars.Presentation
         {
             if (_dead || string.IsNullOrEmpty(lobbyId)) return;
             if (_game == null) return;
-            if (_game.State != null && !_game.DemoMode) return;
+
+            // The state check alone is not the whole gate. Before START a match socket is up with no
+            // state behind it, and a lobby screen can be mid-flow with no state either; honouring the
+            // invite in either case tears down live work and orphans the coordinator that holds the
+            // Steam lobby and the auth ticket.
+            if (!SteamInviteGate.CanAccept(_game.State != null, _game.DemoMode,
+                                           _game.GetComponent<SteamMatchConnection>() != null,
+                                           _game.GetComponent<SteamLobbyScreen>() != null)) return;
+
             Hide();
             SteamLobbyScreen.OpenInvited(_game, lobbyId);
         }

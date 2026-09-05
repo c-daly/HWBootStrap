@@ -508,6 +508,10 @@ namespace HexWars.Presentation
         {
             if (Networked && State == null && (_net != null || _steamNet != null))
                 Toast.Show("Connection lost — check the link and try again.");
+            // The socket died before START, so the coordinator kept alive as the credential broker has
+            // nothing left to serve: release it here, or its Steam lobby and auth ticket outlive the
+            // attempt (ReturnToMenu, which normally does this, is not on this path).
+            SteamLobbyScreen.ReleaseAfterMatch(this);
             GetComponent<SetupForm>()?.OnConnectionLost();
             if (GetComponent<SetupForm>() == null && GetComponent<GameBrowser>() == null && GetComponent<TitleScreen>() == null)
                 TitleScreen.Reopen(this);

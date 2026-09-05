@@ -165,10 +165,12 @@ namespace HexWars.Presentation
             if (pending != null) pending(null);   // never leave a reconnect waiting on a dead screen
             if (_coordinator != null)
             {
-                // After a handoff the lobby still belongs to the running match, so only the Steam
-                // subscriptions go; ReleaseAfterMatch (or ReleaseCoordinator) frees the rest when the
-                // match itself ends. Any other teardown is the player leaving, so release everything.
-                if (_handedOff) _coordinator.Detach();
+                // A handoff only earns the lobby a stay of execution once a match actually started:
+                // then the lobby belongs to the running match and only the Steam subscriptions go,
+                // with ReleaseAfterMatch freeing the rest when the match ends. A handoff whose socket
+                // died before START has nothing left to serve, and detaching there left an empty Steam
+                // lobby and a live auth ticket behind with no owner to release them.
+                if (_handedOff && _game != null && _game.State != null) _coordinator.Detach();
                 else _coordinator.Dispose();
                 _coordinator = null;
             }

@@ -46,6 +46,8 @@
     <Compile Include="../../Assets/HexWars/Tests/Editor/StartupRouteTests.cs" Link="Presentation/Steam/StartupRouteTests.cs" />
     <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSession.cs" Link="Presentation/Steam/SteamMatchSession.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSessionTests.cs" Link="Presentation/Steam/SteamMatchSessionTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamInviteGate.cs" Link="Presentation/Steam/SteamInviteGate.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamInviteGateTests.cs" Link="Presentation/Steam/SteamInviteGateTests.cs" />
   </ItemGroup>
 
 </Project>
