@@ -44,10 +44,30 @@ git ls-remote https://github.com/rlabrecque/Steamworks.NET.git refs/tags/<tag>^{
 The `^{}` suffix dereferences an annotated tag to the commit it wraps; without it you get the tag
 object, which Unity will not resolve. Record the new tag-to-SHA pair in the table above.
 
+### Owner gate: regenerating `Packages/packages-lock.json`
+
 Unity also writes `Packages/packages-lock.json`, which records the resolved revision for every git
-dependency. That file can only be produced by the editor, so it is not part of this change: the next
-person to open the project in Unity will see the lock file update, and that update should be
-committed.
+dependency. Only the editor can produce that file, so it is **not** part of this change and the lock
+file in the repository still names the previous revision. Until the step below is done, a clean
+checkout resolves the package from `manifest.json` rather than from the lock, which is the one thing
+the pin exists to prevent.
+
+This is an owner gate: the change is not finished until someone with the editor does it.
+
+1. Open the project once in **Unity 6000.5** (the version in `ProjectSettings/ProjectVersion.txt`).
+2. Let the Package Manager finish resolving. It rewrites `Packages/packages-lock.json` in place, and
+   the `com.rlabrecque.steamworks.net` entry should then carry the same commit SHA as `manifest.json`
+   (`c21a8f0e31c56ae8707130967faf491f7dd7c0d8`).
+3. Verify the two agree, then commit the lock file on its own:
+
+```
+git diff --stat Packages/packages-lock.json
+git add Packages/packages-lock.json
+git commit -m "build(unity): refresh packages-lock for the pinned Steamworks.NET revision"
+```
+
+If the lock file does not change, the editor did not re-resolve: delete the
+`com.rlabrecque.steamworks.net` entry from `packages-lock.json`, reopen the project, and repeat.
 
 ## `steam_appid.txt` for editor runs
 
