@@ -114,7 +114,7 @@ namespace HexWars.NetServer.Auth
             // revokes it when the match ends. Without this the websocket handshake would happily seat a
             // player into a finished match and then have to discover the problem afterwards.
             PersistedMatch? match = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
-            if (match is null || match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
+            if (match is null || !StillReachable(match))
             {
                 logger.LogDebug(
                     "Join credential for {Player} in match {Match} refused: the match is no longer open",
@@ -133,6 +133,31 @@ namespace HexWars.NetServer.Auth
             }
 
             return new CredentialValidation(matchId, issued.SteamId, seat.Seat);
+        }
+
+        /// <summary>
+        /// Whether a socket may still be opened into this match.
+        ///
+        /// Waiting and active are the game itself. A completed match stays reachable for
+        /// MATCH_TERMINAL_RECONNECT_SECONDS afterwards, because the final APPLY is the frame most likely to
+        /// be lost - it is broadcast at the instant the match becomes terminal - and a player whose socket
+        /// dropped a moment earlier has no other way to learn how the game they were playing ended. The
+        /// window is short and it does not extend the credential: an expired or revoked one is still
+        /// refused above, and no new credential can be issued into a finished match at all.
+        ///
+        /// Expired and abandoned are never reachable. There is no ending to deal for either, and both are
+        /// statuses the server chose rather than the players.
+        /// </summary>
+        bool StillReachable(PersistedMatch match)
+        {
+            if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
+            if (match.Status != MatchStatus.Completed) return false;
+            if (match.CompletedAt is not DateTimeOffset completedAt) return false;
+
+            int seconds = options.Value.TerminalReconnectSeconds;
+            if (seconds <= 0) return false;
+
+            return time.GetUtcNow() - completedAt <= TimeSpan.FromSeconds(seconds);
         }
 
         /// <summary>Match ids reach logs as their first eight hex characters: enough to follow one match

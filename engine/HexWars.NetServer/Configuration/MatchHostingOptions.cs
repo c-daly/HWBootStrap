@@ -7,7 +7,19 @@ namespace HexWars.NetServer.Configuration
         public const int DefaultJoinTokenTtlSeconds = 900;
         public const int MinJoinTokenTtlSeconds = 60;
         public const int MaxJoinTokenTtlSeconds = 86400;
-        public const int DefaultProtocolVersion = 2;
+        public const int DefaultProtocolVersion = ProtocolContract.Version;
+
+        public const int DefaultTerminalReconnectSeconds = 600;
+        public const int MinTerminalReconnectSeconds = 0;
+        public const int MaxTerminalReconnectSeconds = 86400;
+
+        public const int DefaultMaxSocketsPerIp = 8;
+        public const int MinMaxSocketsPerIp = 1;
+        public const int MaxMaxSocketsPerIp = 256;
+
+        public const int DefaultOutboundQueueBytes = 4 * 1024 * 1024;
+        public const int MinOutboundQueueBytes = 64 * 1024;
+        public const int MaxOutboundQueueBytes = 64 * 1024 * 1024;
 
         public const int DefaultHeartbeatIntervalSeconds = 20;
         public const int MinHeartbeatIntervalSeconds = 1;
@@ -109,5 +121,34 @@ namespace HexWars.NetServer.Configuration
         /// <summary>How long a freshly accepted socket has to send its AUTH frame. An unauthenticated
         /// socket costs a connection slot and holds no seat, so this is deliberately short.</summary>
         public int AuthFrameTimeoutSeconds { get; set; } = DefaultAuthFrameTimeoutSeconds;
+
+        /// <summary>
+        /// How long after a match finishes a player may still reconnect to it and be dealt the final state.
+        ///
+        /// The last APPLY of a game is the one most likely to be lost: it is broadcast at the instant the
+        /// match becomes terminal, and a client whose socket dropped a moment earlier has no way to learn
+        /// how the game it was playing ended. Without a window it is told its credential is invalid, which
+        /// is true and useless. Zero closes the window entirely.
+        /// </summary>
+        public int TerminalReconnectSeconds { get; set; } = DefaultTerminalReconnectSeconds;
+
+        /// <summary>
+        /// Sockets one address may hold on /ws/v2 at once, counted before the upgrade is accepted.
+        ///
+        /// A match needs two, and a household behind one NAT might plausibly want a handful. The cap is not
+        /// about them: an unauthenticated socket costs a connection slot, a receive buffer and a writer task
+        /// before it has proved anything, and without a per-address ceiling one client can open as many as
+        /// the process has memory for.
+        /// </summary>
+        public int MaxSocketsPerIp { get; set; } = DefaultMaxSocketsPerIp;
+
+        /// <summary>
+        /// Bytes one connection may have queued to go out before it is closed as a slow client.
+        ///
+        /// The frame count is not a memory bound on its own. A START carrying a long journal is orders of
+        /// magnitude bigger than an APPLY, so a queue that is well inside its frame limit can still be
+        /// holding megabytes, and the number of those queues is the number of sockets on the host.
+        /// </summary>
+        public int OutboundQueueBytes { get; set; } = DefaultOutboundQueueBytes;
     }
 }

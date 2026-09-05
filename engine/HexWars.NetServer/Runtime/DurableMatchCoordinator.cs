@@ -60,11 +60,32 @@ namespace HexWars.NetServer.Runtime
         /// <summary>A barracks arrived after the start state was dealt, which is baked into it.</summary>
         public const string RejectCatalogClosed = "REJECT CatalogClosed";
 
-        /// <summary>A command arrived for a match that is not being played: still waiting, or finished.</summary>
+        /// <summary>A command arrived for a match that has not started yet. Temporary by nature: the same
+        /// command will be accepted once both barracks are in.</summary>
         public const string RejectCatalogV1Required = "REJECT CatalogV1Required";
 
         /// <summary>The durable write did not happen. The client may send the same command again.</summary>
         public const string RejectTemporaryFailure = "REJECT TemporaryFailure";
+
+        /// <summary>
+        /// A command arrived for a match the journal calls finished.
+        ///
+        /// Kept apart from CatalogV1Required because the two invite opposite behaviour. A match that has
+        /// not started yet will accept this command once it does; a match that has ended never will, and a
+        /// client that cannot tell them apart retries a move into a game that is over.
+        /// </summary>
+        public const string RejectMatchEnded = "REJECT MatchEnded";
+
+        /// <summary>The close a socket gets when the match under it has ended in a status this host cannot
+        /// go on serving. 1000 rather than an error code: nothing went wrong, the game is simply over.</summary>
+        public const int MatchEndedCloseStatus = 1000;
+
+        public const string MatchEndedCloseReason = "match ended";
+
+        /// <summary>The close the older socket of a seat gets when that seat authenticates again.</summary>
+        public const int SupersededCloseStatus = 1000;
+
+        public const string SupersededCloseReason = "superseded";
 
         /// <summary>The credential, the match id or the match itself will not do. Deliberately one code for
         /// all of them: the caller is unauthenticated, so a finer answer would only help a guesser.</summary>
@@ -95,6 +116,19 @@ namespace HexWars.NetServer.Runtime
 
         /// <summary>Whether the handshake worked, the seat it seated, and - when it did not - why not.</summary>
         public sealed record AuthOutcome(bool Ok, int Seat, string? FailCode);
+
+        /// <summary>What recording the end of a game concluded. <c>Advance</c> false means the caller must
+        /// change nothing: the issuer has already been told why.</summary>
+        readonly record struct CompletionOutcome(bool Advance, MatchStatus Status);
+
+        /// <summary>
+        /// Runs between finding a cached match and taking its gate. Null in production.
+        ///
+        /// A seam for the one race that cannot be provoked from outside: the sweeper releasing a projection
+        /// a handshake is already committed to. Without a hook a test would have to win a scheduling race
+        /// to observe it, which is the same as not testing it.
+        /// </summary>
+        internal Func<Guid, Task>? BeforeGateForTest { get; set; }
 
         // ---- diagnostics -----------------------------------------------------
 
@@ -173,7 +207,7 @@ namespace HexWars.NetServer.Runtime
             LiveMatch match;
             try
             {
-                match = await GetOrLoadAsync(matchId, ct).ConfigureAwait(false);
+                match = await EnterAsync(matchId, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -197,13 +231,18 @@ namespace HexWars.NetServer.Runtime
                 return Failed(AuthFailUnavailable);
             }
 
-            await match.Gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
                 if (match.Stale && !await TryReloadAsync(match, ct).ConfigureAwait(false))
                     return Failed(AuthFailUnavailable);
 
-                if (match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
+                // Before anything is served. A process killed between the append of a winning command and
+                // the row that records the win leaves a game the engine calls over and the database calls
+                // active; the next player through the door finishes closing it, rather than being dealt a
+                // match that can never end.
+                await HealCompletionAsync(match, ct).ConfigureAwait(false);
+
+                if (!CanSeat(match))
                 {
                     logger.LogDebug("Turned a player away: this match is {Status}", match.Status);
                     return Failed(AuthFailInvalid);
@@ -211,6 +250,12 @@ namespace HexWars.NetServer.Runtime
 
                 int seat = validation.Seat;
                 DateTimeOffset now = time.GetUtcNow();
+
+                // One live socket per seat. A second AUTH on the same seat is far more often a reconnect
+                // whose predecessor has not been noticed yet than it is two clients - and when it is two,
+                // one credential fanning out into an unbounded number of sockets is the shape of an abuse
+                // rather than of a game.
+                SupersedeSeat(match, connectionId, validation.SteamId);
 
                 match.Connections[connectionId] = validation.SteamId;
                 match.LastConnectionAt = now;
@@ -235,8 +280,22 @@ namespace HexWars.NetServer.Runtime
 
                 if (match.Status == MatchStatus.Waiting)
                 {
-                    if (!match.Catalogs.ContainsKey(seat))
+                    // Both barracks already durable and no start state: this host, or the one before it,
+                    // died between the second SaveCatalog and the TryStart. Nothing else will ever start
+                    // this match - the catalogues have been sent and no client sends one twice - so the
+                    // handshake finishes what the catalog frame began.
+                    if (match.Catalogs.TryGetValue(0, out IReadOnlyList<UnitTemplate>? seat0Barracks)
+                        && match.Catalogs.TryGetValue(1, out IReadOnlyList<UnitTemplate>? seat1Barracks))
+                    {
+                        logger.LogInformation(
+                            "Both barracks were already stored and the match never started; resuming it");
+                        await StartTheMatchAsync(match, connectionId, seat0Barracks, seat1Barracks, ct)
+                            .ConfigureAwait(false);
+                    }
+                    else if (!match.Catalogs.ContainsKey(seat))
+                    {
                         sink.Send(connectionId, NetProtocol.CatalogRequest);
+                    }
                 }
                 else
                 {
@@ -260,7 +319,7 @@ namespace HexWars.NetServer.Runtime
         public async Task ReceiveAsync(string connectionId, string raw, CancellationToken ct)
         {
             if (!_connections.TryGetValue(connectionId, out Guid matchId)
-                || !TryGetLiveMatch(matchId, out LiveMatch? cached))
+                || !TryGetLiveMatch(matchId, out _))
             {
                 sink.Send(connectionId, RejectNoSeat);
                 return;
@@ -272,10 +331,24 @@ namespace HexWars.NetServer.Runtime
             // unknown type would make adding one to the client a breaking change.
             if (message.Type is not (CatalogMessage or CommandMessage)) return;
 
-            LiveMatch match = cached!;
             using IDisposable? scope = MatchScope(matchId);
 
-            await match.Gate.WaitAsync(ct).ConfigureAwait(false);
+            LiveMatch match;
+            try
+            {
+                match = await EnterAsync(matchId, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                logger.LogWarning(failure, "A frame arrived for a match that could not be loaded");
+                sink.Send(connectionId, RejectTemporaryFailure);
+                return;
+            }
+
             try
             {
                 if (match.Stale && !await TryReloadAsync(match, ct).ConfigureAwait(false))
@@ -283,6 +356,11 @@ namespace HexWars.NetServer.Runtime
                     sink.Send(connectionId, RejectTemporaryFailure);
                     return;
                 }
+
+                // The same self-healing pass the handshake runs. A completion that threw left this match
+                // finished in the engine and active in the database; the next frame either way is the one
+                // that closes it.
+                await HealCompletionAsync(match, ct).ConfigureAwait(false);
 
                 if (!match.Connections.TryGetValue(connectionId, out string? steamId)
                     || !match.Seats.TryGetValue(steamId, out int seat))
@@ -414,7 +492,7 @@ namespace HexWars.NetServer.Runtime
         {
             if (match.Status != MatchStatus.Active)
             {
-                sink.Send(connectionId, RejectCatalogV1Required);
+                sink.Send(connectionId, RejectForStatus(match.Status));
                 return;
             }
 
@@ -442,13 +520,15 @@ namespace HexWars.NetServer.Runtime
             }
 
             DateTimeOffset now = time.GetUtcNow();
+            string wire = CommandWire.Write(command);
+            int sequence = match.LastSequence + 1;
 
             // The durable step, before anything in memory moves and before anybody is told.
             AppendResult append;
             try
             {
                 append = await store.AppendCommandAsync(
-                    match.MatchId, match.LastSequence + 1, CommandWire.Write(command), steamId, now, ct)
+                    match.MatchId, sequence, wire, steamId, now, ct)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -457,11 +537,25 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "The command from {Player} could not be journalled",
+                // An exception is not a refusal. A statement that timed out, or a connection that dropped
+                // after the server had already committed, leaves this process unable to tell a command that
+                // landed from one that did not - and TemporaryFailure invites the client to send it again,
+                // which is how one move becomes two. The journal is the only thing that knows, so it is
+                // asked rather than guessed at.
+                logger.LogWarning(failure, "The command from {Player} may not have been journalled",
                     SteamLogRedaction.HashSteamId(steamId));
-                match.Stale = true;
-                sink.Send(connectionId, RejectTemporaryFailure);
-                return;
+
+                if (!await AlreadyJournalledAsync(match, sequence, wire, steamId, ct).ConfigureAwait(false))
+                {
+                    match.Stale = true;
+                    sink.Send(connectionId, RejectTemporaryFailure);
+                    return;
+                }
+
+                logger.LogInformation(
+                    "The append that failed had committed after all; sequence {Sequence} counts as applied",
+                    sequence);
+                append = new AppendResult(AppendStatus.Appended, sequence);
             }
 
             switch (append.Status)
@@ -485,51 +579,65 @@ namespace HexWars.NetServer.Runtime
                     logger.LogInformation("A command arrived for a match the journal no longer calls active");
                     match.Stale = true;
                     await TryReloadAsync(match, ct).ConfigureAwait(false);
-                    sink.Send(connectionId, RejectCatalogV1Required);
+                    sink.Send(connectionId, RejectForStatus(match.Status));
                     return;
             }
 
-            if (applied.NewState.IsGameOver
-                && !await CompleteTheMatchAsync(match, connectionId, applied.NewState, now, ct)
-                    .ConfigureAwait(false))
-                return;
+            MatchStatus terminalStatus = MatchStatus.Completed;
+            bool endTheSockets = false;
+
+            if (applied.NewState.IsGameOver)
+            {
+                CompletionOutcome outcome = await CompleteTheMatchAsync(
+                        match, connectionId, sequence, wire, steamId, applied.NewState, now, ct)
+                    .ConfigureAwait(false);
+
+                if (!outcome.Advance) return;
+
+                terminalStatus = outcome.Status;
+
+                // Completed is the game ending. Anything else terminal means somebody took this match away
+                // underneath a live game - the reaper, or an operator - and the sockets have to be told.
+                endTheSockets = outcome.Status != MatchStatus.Completed;
+            }
 
             match.State = applied.NewState;
             match.Log.Add(command);
-            match.LastSequence++;
-            if (applied.NewState.IsGameOver) match.Status = MatchStatus.Completed;
+            match.LastSequence = sequence;
+            if (applied.NewState.IsGameOver) match.Status = terminalStatus;
 
             string broadcast = NetProtocol.Apply(command);
             foreach (string connection in match.Connections.Keys) sink.Send(connection, broadcast);
+
+            // After the APPLY, never before it. The command is durable, so both seats are entitled to see
+            // it; what they are not entitled to is a socket into a match that no longer exists.
+            if (endTheSockets) CloseEveryConnection(match, MatchEndedCloseStatus, MatchEndedCloseReason);
         }
 
         /// <summary>
         /// Records the end of the game, before the winning command is broadcast.
         ///
-        /// Returns false when it could not be recorded, and the caller then advances nothing: the command is
-        /// already durable, so the same frame sent again finds it AlreadyApplied and tries the completion
-        /// once more. Advancing here and failing to record it would leave a finished game the database still
-        /// calls active, which the reaper would eventually mark abandoned.
+        /// Three answers, and the difference between them is the whole point. Recorded: advance and
+        /// broadcast. Refused (the row was already terminal): the append that preceded this may still have
+        /// landed, so the journal is asked, and a durable command is broadcast whatever the row now says
+        /// while one that never landed is not. Threw: advance nothing - the command is already durable, so
+        /// the same frame sent again finds it AlreadyApplied and tries the completion once more, and if
+        /// nobody sends anything again the next handshake heals it. Advancing on a completion that failed
+        /// would leave a finished game the database still calls active, which the reaper would eventually
+        /// mark abandoned.
         /// </summary>
-        async Task<bool> CompleteTheMatchAsync(LiveMatch match, string connectionId, GameState final,
-            DateTimeOffset now, CancellationToken ct)
+        async Task<CompletionOutcome> CompleteTheMatchAsync(LiveMatch match, string connectionId,
+            int sequence, string wire, string issuerSteamId, GameState final, DateTimeOffset now,
+            CancellationToken ct)
         {
             int? winnerSeat = final.Winner is PlayerId winner ? (int)winner : null;
 
+            bool completed;
             try
             {
-                bool completed = await store
+                completed = await store
                     .TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, winnerSeat, now, ct)
                     .ConfigureAwait(false);
-
-                if (!completed)
-                    logger.LogWarning(
-                        "The winning command is journalled but the match was already in a terminal status");
-                else
-                    logger.LogInformation("Match finished, winner {WinnerSeat}",
-                        winnerSeat is null ? "draw" : winnerSeat.ToString());
-
-                return true;
             }
             catch (OperationCanceledException)
             {
@@ -541,6 +649,135 @@ namespace HexWars.NetServer.Runtime
                     "The winning command is journalled but the match could not be closed");
                 match.Stale = true;
                 sink.Send(connectionId, RejectTemporaryFailure);
+                return new CompletionOutcome(false, match.Status);
+            }
+
+            if (completed)
+            {
+                logger.LogInformation("Match finished, winner {WinnerSeat}",
+                    winnerSeat is null ? "draw" : winnerSeat.ToString());
+                return new CompletionOutcome(true, MatchStatus.Completed);
+            }
+
+            logger.LogWarning(
+                "The winning command is journalled but the match was already in a terminal status");
+
+            if (!await AlreadyJournalledAsync(match, sequence, wire, issuerSteamId, ct).ConfigureAwait(false))
+            {
+                match.Stale = true;
+                sink.Send(connectionId, RejectTemporaryFailure);
+                return new CompletionOutcome(false, match.Status);
+            }
+
+            PersistedMatch? row;
+            try
+            {
+                row = await store.GetMatchAsync(match.MatchId, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                // The command is durable and the clients are owed it. What the row says can wait for the
+                // rebuild the stale flag forces.
+                logger.LogWarning(failure, "The status of a finished match could not be re-read");
+                match.Stale = true;
+                return new CompletionOutcome(true, MatchStatus.Completed);
+            }
+
+            // Read rather than assumed: a match that ends at the same moment the reaper abandons it is
+            // abandoned, and the sockets watching it have to be told that rather than told they won.
+            return new CompletionOutcome(true, row?.Status ?? MatchStatus.Completed);
+        }
+
+        /// <summary>
+        /// Finishes a completion that was started and never landed.
+        ///
+        /// A process killed between the append of a winning command and the row that records the win leaves
+        /// a game the engine calls over and the database calls active. Nothing in the journal is wrong -
+        /// replaying it produces exactly this position - so this is not a repair: it is the same completion,
+        /// attempted again by whoever arrives next. It is safe to run on every load because
+        /// TryCompleteMatchAsync is idempotent, and it runs before anything is served so a reconnecting
+        /// player is dealt a match whose status matches the position in front of them.
+        /// </summary>
+        async Task HealCompletionAsync(LiveMatch match, CancellationToken ct)
+        {
+            if (match.Status != MatchStatus.Active) return;
+            if (match.State is null || !match.State.IsGameOver) return;
+
+            int? winnerSeat = match.State.Winner is PlayerId winner ? (int)winner : null;
+
+            try
+            {
+                if (await store
+                        .TryCompleteMatchAsync(
+                            match.MatchId, MatchStatus.Completed, winnerSeat, time.GetUtcNow(), ct)
+                        .ConfigureAwait(false))
+                {
+                    match.Status = MatchStatus.Completed;
+                    logger.LogInformation(
+                        "Closed a finished match the journal still called active, winner {WinnerSeat}",
+                        winnerSeat is null ? "draw" : winnerSeat.ToString());
+                    return;
+                }
+
+                // False means somebody moved the row first, and what they moved it to decides what this
+                // host serves. It is read rather than assumed.
+                PersistedMatch? row = await store.GetMatchAsync(match.MatchId, ct).ConfigureAwait(false);
+                if (row is not null) match.Status = row.Status;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                // Left stale on purpose: the next operation on this match rebuilds it and tries again,
+                // which is the entire self-healing loop.
+                logger.LogError(failure, "A finished match could not be closed; it will be tried again");
+                match.Stale = true;
+            }
+        }
+
+        /// <summary>
+        /// Whether the command this process just tried to append is in the journal after all.
+        ///
+        /// Matched on all three of sequence, wire and issuer. Sequence alone would accept a different
+        /// command that happens to sit at the same number, which is the one case where answering yes turns
+        /// a failed write into a lie both clients then act on.
+        /// </summary>
+        async Task<bool> AlreadyJournalledAsync(
+            LiveMatch match, int sequence, string wire, string issuerSteamId, CancellationToken ct)
+        {
+            try
+            {
+                MatchJournal? reloaded =
+                    await store.LoadJournalAsync(match.MatchId, ct).ConfigureAwait(false);
+
+                if (reloaded is null) return false;
+
+                foreach (PersistedCommand stored in reloaded.Commands)
+                {
+                    if (stored.Sequence != sequence) continue;
+
+                    return string.Equals(stored.CommandWire, wire, StringComparison.Ordinal)
+                        && string.Equals(stored.IssuerSteamId, issuerSteamId, StringComparison.Ordinal);
+                }
+
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                // The store is not answering at all, so there is nothing to be confident about. The safe
+                // guess is the one that ends in a retry: an identical retry is recognised by the store as
+                // AlreadyApplied, while a broadcast of a command that never landed is not recoverable.
+                logger.LogWarning(failure, "The journal could not be re-read after an ambiguous append");
                 return false;
             }
         }
@@ -663,13 +900,7 @@ namespace HexWars.NetServer.Runtime
                 await match.Gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
-                    foreach (string connection in match.Connections.Keys)
-                    {
-                        _connections.TryRemove(connection, out _);
-                        sink.Close(connection, closeStatus, reason);
-                    }
-
-                    match.Connections.Clear();
+                    CloseEveryConnection(match, closeStatus, reason);
                 }
                 finally
                 {
@@ -686,12 +917,59 @@ namespace HexWars.NetServer.Runtime
             foreach (string connection in match.Connections.Keys) sink.Send(connection, message);
         }
 
+        /// <summary>Closes every socket watching one match and forgets them. The caller holds the gate.</summary>
+        void CloseEveryConnection(LiveMatch match, int closeStatus, string reason)
+        {
+            foreach (string connection in match.Connections.Keys)
+            {
+                _connections.TryRemove(connection, out _);
+                sink.Close(connection, closeStatus, reason);
+            }
+
+            match.Connections.Clear();
+        }
+
+        /// <summary>Closes any socket this seat already holds, so one credential is one live connection.
+        /// The caller holds the gate.</summary>
+        void SupersedeSeat(LiveMatch match, string connectionId, string steamId)
+        {
+            foreach (KeyValuePair<string, string> seated in match.Connections)
+            {
+                if (string.Equals(seated.Key, connectionId, StringComparison.Ordinal)) continue;
+                if (!string.Equals(seated.Value, steamId, StringComparison.Ordinal)) continue;
+
+                match.Connections.TryRemove(seated.Key, out _);
+                _connections.TryRemove(seated.Key, out _);
+                sink.Close(seated.Key, SupersededCloseStatus, SupersededCloseReason);
+
+                logger.LogInformation("Closed the earlier socket of a seat that authenticated again");
+            }
+        }
+
+        /// <summary>
+        /// Whether a seat may be taken in this match right now.
+        ///
+        /// Waiting and active are the game. A completed match is served too, for as long as the credential
+        /// service is still willing to validate into it: the final APPLY is the frame most likely to be
+        /// lost, and a player whose socket dropped a moment before it has no other way to learn how the
+        /// game they were playing ended. Expired and abandoned are not served - there is no ending to deal.
+        /// </summary>
+        static bool CanSeat(LiveMatch match) =>
+            match.Status is MatchStatus.Waiting or MatchStatus.Active
+            || (match.Status == MatchStatus.Completed && match.Start is not null);
+
+        /// <summary>What a command arriving at a match that is not being played is told. A match that has
+        /// not started will take this command once it does; a terminal one never will, and a client that
+        /// cannot tell those apart retries a move into a game that is over.</summary>
+        static string RejectForStatus(MatchStatus status) =>
+            status == MatchStatus.Waiting ? RejectCatalogV1Required : RejectMatchEnded;
+
         async Task<LiveMatch> GetOrLoadAsync(Guid matchId, CancellationToken ct)
         {
             // The load runs without the caller cancellation token on purpose: the projection is shared, so
             // one client giving up must not cancel the load every other client is waiting on.
             Lazy<Task<LiveMatch>> entry = _matches.GetOrAdd(matchId,
-                id => new Lazy<Task<LiveMatch>>(() => loader.LoadAsync(id, CancellationToken.None)));
+                id => new Lazy<Task<LiveMatch>>(() => LoadAndStampAsync(id)));
 
             try
             {
@@ -705,6 +983,45 @@ namespace HexWars.NetServer.Runtime
                     _matches.TryRemove(new KeyValuePair<Guid, Lazy<Task<LiveMatch>>>(matchId, entry));
 
                 throw;
+            }
+        }
+
+        /// <summary>Loads a projection and stamps it as freshly arrived. Without the stamp a match that has
+        /// been loaded and not yet connected to looks, to the sweeper, like one nobody has watched since the
+        /// epoch - and it can be released between the load and the handshake that asked for it.</summary>
+        async Task<LiveMatch> LoadAndStampAsync(Guid matchId)
+        {
+            LiveMatch match =
+                await loader.LoadAsync(matchId, CancellationToken.None).ConfigureAwait(false);
+
+            match.LastConnectionAt = time.GetUtcNow();
+            return match;
+        }
+
+        /// <summary>
+        /// Takes the gate of the match this process is holding, reloading when the sweeper released it
+        /// while this caller was waiting. The returned projection is the cached one and its gate is held.
+        ///
+        /// The cache and the gate are two facts that can disagree. The sweeper takes a gate, drops the
+        /// match from memory and releases; a caller that was already waiting on that gate then owns a
+        /// projection nobody else can find, and a player seated into it holds a seat in a game this process
+        /// no longer believes it is hosting. Re-checking after the wait costs a dictionary lookup.
+        /// </summary>
+        async Task<LiveMatch> EnterAsync(Guid matchId, CancellationToken ct)
+        {
+            while (true)
+            {
+                LiveMatch match = await GetOrLoadAsync(matchId, ct).ConfigureAwait(false);
+
+                if (BeforeGateForTest is not null)
+                    await BeforeGateForTest(matchId).ConfigureAwait(false);
+
+                await match.Gate.WaitAsync(ct).ConfigureAwait(false);
+
+                if (TryGetLiveMatch(matchId, out LiveMatch? cached) && ReferenceEquals(cached, match))
+                    return match;
+
+                match.Gate.Release();
             }
         }
 

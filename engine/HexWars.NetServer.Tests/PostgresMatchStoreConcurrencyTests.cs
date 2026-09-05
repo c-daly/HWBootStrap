@@ -448,8 +448,24 @@ namespace HexWars.NetServer.Tests
             Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
             Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1),
                 "a refused issue must leave the credential the player already held exactly as it was");
-            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Null,
-                "which still stops working, because the match it names is over");
+            // The ending does not revoke it. A seat that missed the final APPLY still needs a way to learn
+            // how the game finished, so the credential opens the match for the terminal reconnect window
+            // and for nothing beyond it.
+            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Not.Null,
+                "inside the terminal window a finished match is still reachable");
+
+            MatchCredentialService windowClosed = new(
+                _store,
+                Options.Create(new MatchHostingOptions
+                {
+                    JoinTokenTtlSeconds = 900,
+                    TerminalReconnectSeconds = 0,
+                }),
+                new FakeTimeProvider(Created),
+                NullLogger<MatchCredentialService>.Instance);
+
+            Assert.That(await windowClosed.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Null,
+                "and with the window closed it stops working the moment the match is over");
         }
 
         [Test]

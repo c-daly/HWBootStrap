@@ -32,6 +32,13 @@ namespace HexWars.NetServer.Tests
         static CancellationToken Ct => CancellationToken.None;
 
         InMemoryMatchStore _store = null!;
+
+        /// <summary>The store the coordinator actually resolves, wrapping <see cref="_store"/>. Every fault
+        /// below is armed on it, and every arrangement a test makes behind the coordinator back is written
+        /// straight to the inner store so the fault seams do not see it.</summary>
+        FaultInjectingMatchStore _faults = null!;
+
+        MatchHostingOptions _options = null!;
         FakeTimeProvider _clock = null!;
         RecordingConnectionSink _sink = null!;
         MatchCredentialService _credentials = null!;
@@ -44,11 +51,13 @@ namespace HexWars.NetServer.Tests
         public async Task SeedAWaitingMatchWithACredentialForEachSeat()
         {
             _store = new InMemoryMatchStore();
+            _faults = new FaultInjectingMatchStore(_store);
+            _options = new MatchHostingOptions();
             _clock = new FakeTimeProvider(Begin);
             _sink = new RecordingConnectionSink();
             _credentials = new MatchCredentialService(
-                _store,
-                Options.Create(new MatchHostingOptions()),
+                _faults,
+                Options.Create(_options),
                 _clock,
                 NullLogger<MatchCredentialService>.Instance);
 
@@ -60,15 +69,19 @@ namespace HexWars.NetServer.Tests
             _credential0 = (await _credentials.IssueAsync(_matchId, Seat0Steam, Ct)).Credential;
             _credential1 = (await _credentials.IssueAsync(_matchId, Seat1Steam, Ct)).Credential;
 
-            _coordinator = new DurableMatchCoordinator(
-                _store,
-                _credentials,
-                new JournalLiveMatchLoader(_store),
-                _sink,
-                Options.Create(new MatchHostingOptions()),
-                _clock,
-                NullLogger<DurableMatchCoordinator>.Instance);
+            _coordinator = NewCoordinator();
         }
+
+        /// <summary>A coordinator over the same store with no projections of its own: what a restart looks
+        /// like from the database, which is the only place a restart is visible.</summary>
+        DurableMatchCoordinator NewCoordinator() => new(
+            _faults,
+            _credentials,
+            new JournalLiveMatchLoader(_faults),
+            _sink,
+            Options.Create(_options),
+            _clock,
+            NullLogger<DurableMatchCoordinator>.Instance);
 
         // ---- helpers ---------------------------------------------------------
 
@@ -414,7 +427,8 @@ namespace HexWars.NetServer.Tests
 
             _sink.Clear();
             await Cmd("c0", new EndTurn(PlayerId.Player0));
-            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { "REJECT CatalogV1Required" }));
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { DurableMatchCoordinator.RejectMatchEnded }),
+                "a finished match is a different refusal from one that has not started: this one is final");
         }
 
         // ---- concurrency and staleness ---------------------------------------
@@ -556,6 +570,338 @@ namespace HexWars.NetServer.Tests
             await _coordinator.SweepAsync(_clock.GetUtcNow());
 
             Assert.That(_coordinator.LiveMatchCount, Is.EqualTo(1));
+        }
+
+        // ---- the end of a game that did not finish closing --------------------
+
+        /// <summary>Plays the scripted game to one command short of the end and hands back what is left.</summary>
+        async Task<(MatchRecord Played, GameState Start)> PlayToTheBrinkAsync()
+        {
+            await StartTheMatch();
+
+            GameState start = await DealtStartState();
+            MatchRecord played = Match.Record(start, new GreedyAgent(11), new GreedyAgent(29), maxCommands: 4000);
+            Assert.That(played.Result.Final.IsGameOver, Is.True,
+                "the offline driver never reached a terminal state, so this test proves nothing");
+
+            for (var i = 0; i < played.Commands.Count - 1; i++) await Cmd(played.Commands[i]);
+
+            return (played, start);
+        }
+
+        [Test]
+        public async Task AKillBetweenTheWinningAppendAndTheCompletion_IsHealedByTheNextHandshake()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+
+            // The winning command commits and the row that records the win never lands. That is exactly the
+            // state a process killed in the gap leaves behind: a game the engine calls over and the database
+            // calls active.
+            _faults.FailNextCompletion(new InvalidOperationException("the database went away"));
+            _sink.Clear();
+            await Cmd(played.Commands[^1]);
+
+            Assert.That(_sink.MessagesFor("c0"), Does.Contain(DurableMatchCoordinator.RejectTemporaryFailure)
+                .Or.EqualTo(new[] { DurableMatchCoordinator.RejectTemporaryFailure }));
+            Assert.That(_sink.Sent.Any(s => s.Message.StartsWith("APPLY ", StringComparison.Ordinal)), Is.False,
+                "a command whose completion failed must not be broadcast");
+
+            PersistedMatch stranded = (await _store.GetMatchAsync(_matchId, Ct))!;
+            Assert.That(stranded.Status, Is.EqualTo(MatchStatus.Active), "this is the state being healed");
+
+            MatchJournal journal = (await _store.LoadJournalAsync(_matchId, Ct))!;
+            Assert.That(journal.Commands, Has.Count.EqualTo(played.Commands.Count),
+                "the winning command is durable; only the completion is missing");
+
+            // A restart: a coordinator with no projections, over nothing but the rows above.
+            DurableMatchCoordinator restarted = NewCoordinator();
+            _sink.Clear();
+
+            DurableMatchCoordinator.AuthOutcome back =
+                await restarted.AuthenticateAsync("c2", _matchId.ToString(), _credential0, Ct);
+
+            Assert.That(back.Ok, Is.True, back.FailCode);
+
+            PersistedMatch healed = (await _store.GetMatchAsync(_matchId, Ct))!;
+            Assert.That(healed.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(healed.WinnerSeat,
+                Is.EqualTo(played.Result.Final.Winner is PlayerId w ? (int)w : null));
+
+            Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
+            {
+                "SEAT 0",
+                NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
+            }), "the reconnecting seat is fast-forwarded to the position the game ended in");
+        }
+
+        [Test]
+        public async Task ACompletionThatThrew_IsRetriedByTheNextHandshakeOnTheSameHost()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            _faults.FailNextCompletion(new InvalidOperationException("the database went away"));
+            await Cmd(played.Commands[^1]);
+
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+
+            // No restart at all. The same host, the same projection, the next thing anybody does with it.
+            await Auth("c2", _credential1);
+
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(Live().Status, Is.EqualTo(MatchStatus.Completed));
+        }
+
+        [Test]
+        public async Task AMatchAbandonedInTheCompletionWindow_StillGetsItsApplyAndThenLosesItsSockets()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            // Somebody else ends this match between the append of the winning command and the completion of
+            // it - the reaper, or an operator. TryCompleteMatchAsync then answers false, which is NOT a
+            // success: the command is durable and owed to both seats, but the match they are watching is
+            // gone.
+            var abandonedOnce = false;
+            _faults.BeforeCompletion = async () =>
+            {
+                if (abandonedOnce) return;
+                abandonedOnce = true;
+                await _store.TryCompleteMatchAsync(
+                    _matchId, MatchStatus.Abandoned, null, _clock.GetUtcNow(), Ct);
+            };
+
+            _sink.Clear();
+            await Cmd(played.Commands[^1]);
+
+            string expected = NetProtocol.Apply(played.Commands[^1]);
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { expected }));
+            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { expected }),
+                "a durable command reaches both seats whatever the row now says");
+
+            PersistedMatch row = (await _store.GetMatchAsync(_matchId, Ct))!;
+            Assert.That(row.Status, Is.EqualTo(MatchStatus.Abandoned), "the row was not overwritten");
+            Assert.That(row.WinnerSeat, Is.Null);
+
+            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EquivalentTo(new[] { "c0", "c1" }));
+            Assert.That(_sink.Closed.Select(c => c.CloseStatus),
+                Is.All.EqualTo(DurableMatchCoordinator.MatchEndedCloseStatus));
+            Assert.That(_sink.Closed.Select(c => c.Reason),
+                Is.All.EqualTo(DurableMatchCoordinator.MatchEndedCloseReason));
+            Assert.That(_coordinator.ConnectionsOf(_matchId), Is.Empty);
+        }
+
+        // ---- the terminal reconnect window ------------------------------------
+
+        /// <summary>Plays the scripted game to its end, completion and all.</summary>
+        async Task<(MatchRecord Played, GameState Start)> PlayToTheEndAsync()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+            await Cmd(played.Commands[^1]);
+
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed));
+            return (played, start);
+        }
+
+        [Test]
+        public async Task ASeatThatMissedTheFinalApply_ReconnectsInsideTheWindowAndIsDealtTheEnding()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheEndAsync();
+
+            _clock.Advance(TimeSpan.FromSeconds(30));
+            _sink.Clear();
+
+            DurableMatchCoordinator.AuthOutcome back = await Auth("c2", _credential1);
+
+            Assert.That(back.Ok, Is.True, back.FailCode);
+            Assert.That(back.Seat, Is.EqualTo(1));
+            Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
+            {
+                "SEAT 1",
+                NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
+            }));
+
+            _sink.Clear();
+            await Cmd("c2", new EndTurn(PlayerId.Player1));
+            Assert.That(_sink.MessagesFor("c2"),
+                Is.EqualTo(new[] { DurableMatchCoordinator.RejectMatchEnded }),
+                "the window is for learning how it ended, not for playing on");
+        }
+
+        [Test]
+        public async Task AfterTheTerminalWindowHasPassed_TheSameCredentialIsRefused()
+        {
+            await PlayToTheEndAsync();
+
+            // Past the reconnect window and still inside the credential TTL, so the refusal can only be
+            // about the window.
+            _clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds + 60));
+            Assert.That(_clock.GetUtcNow() - Begin,
+                Is.LessThan(TimeSpan.FromSeconds(MatchHostingOptions.DefaultJoinTokenTtlSeconds)));
+
+            DurableMatchCoordinator.AuthOutcome refused = await Auth("c3", _credential1);
+
+            Assert.That(refused.Ok, Is.False);
+            Assert.That(refused.FailCode, Is.EqualTo(DurableMatchCoordinator.AuthFailInvalid));
+        }
+
+        [Test]
+        public async Task WithTheWindowClosed_AFinishedMatchIsRefusedImmediately()
+        {
+            _options.TerminalReconnectSeconds = 0;
+            await PlayToTheEndAsync();
+
+            DurableMatchCoordinator.AuthOutcome refused = await Auth("c3", _credential1);
+
+            Assert.That(refused.Ok, Is.False);
+            Assert.That(refused.FailCode, Is.EqualTo(DurableMatchCoordinator.AuthFailInvalid));
+        }
+
+        // ---- a start that was interrupted -------------------------------------
+
+        [Test]
+        public async Task BothCatalogsStoredAndNoStart_IsResumedByTheNextHandshake()
+        {
+            // The gap between the second SaveCatalog and the TryStart. Nothing else will ever start this
+            // match: both clients have sent their barracks and no client sends one twice.
+            string wire = BarracksWire.Write(BarracksCatalog.DefaultTemplates);
+            await _store.SaveCatalogAsync(_matchId, Seat0Steam, wire, Ct);
+            await _store.SaveCatalogAsync(_matchId, Seat1Steam, wire, Ct);
+
+            DurableMatchCoordinator.AuthOutcome seated = await Auth("c0", _credential0);
+
+            Assert.That(seated.Ok, Is.True, seated.FailCode);
+
+            PersistedMatch row = (await _store.GetMatchAsync(_matchId, Ct))!;
+            Assert.That(row.Status, Is.EqualTo(MatchStatus.Active), "the handshake finished the start");
+            Assert.That(row.StartReplay, Is.Not.Null);
+
+            Assert.That(_sink.MessagesFor("c0"),
+                Is.EqualTo(new[] { "SEAT 0", NetProtocol.Start(row.StartReplay!) }),
+                "and never CATALOG?, which this seat has already answered");
+        }
+
+        [Test]
+        public async Task BothCatalogsStoredAndSomebodyElseStartedFirst_DealsTheirStartState()
+        {
+            string wire = BarracksWire.Write(BarracksCatalog.DefaultTemplates);
+            await _store.SaveCatalogAsync(_matchId, Seat0Steam, wire, Ct);
+            await _store.SaveCatalogAsync(_matchId, Seat1Steam, wire, Ct);
+
+            // A start state that is not the one this host would build, so dealing the wrong one is visible.
+            GameState theirs = GameFactory.Build(
+                GameSetup.Parse((await _store.GetMatchAsync(_matchId, Ct))!.SetupWire),
+                BarracksCatalog.DefaultTemplates,
+                BarracksCatalog.DefaultTemplates);
+            string theirReplay = ReplayFile.Write(theirs, Array.Empty<Command>());
+            Assert.That(await _store.TryStartMatchAsync(_matchId, theirReplay, Begin, Ct), Is.True);
+
+            await Auth("c0", _credential0);
+
+            Assert.That(_sink.MessagesFor("c0"),
+                Is.EqualTo(new[] { "SEAT 0", NetProtocol.Start(theirReplay) }),
+                "the start state on the row is the game the clients are in");
+        }
+
+        // ---- an append that may or may not have landed ------------------------
+
+        [Test]
+        public async Task AnAppendThatCommittedAndThenThrew_IsAppliedOnceAndJournalledOnce()
+        {
+            await StartTheMatch();
+            _sink.Clear();
+
+            var opening = new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0));
+            _faults.ThrowAfterNextAppend(new InvalidOperationException("the connection was reset"));
+
+            await Cmd("c0", opening);
+
+            string expected = NetProtocol.Apply(opening);
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { expected }),
+                "the row is there, so the issuer is told once and not asked to retry");
+            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { expected }));
+
+            MatchJournal journal = (await _store.LoadJournalAsync(_matchId, Ct))!;
+            Assert.That(journal.Commands, Has.Count.EqualTo(1));
+            Assert.That(journal.Commands[0].Sequence, Is.EqualTo(1));
+            Assert.That(Live().LastSequence, Is.EqualTo(1));
+
+            // And a client that retried anyway is evaluated normally rather than waved through.
+            _sink.Clear();
+            await Cmd("c0", opening);
+
+            Assert.That(_sink.MessagesFor("c0").Single(), Does.StartWith("REJECT "));
+            Assert.That((await _store.LoadJournalAsync(_matchId, Ct))!.Commands, Has.Count.EqualTo(1));
+        }
+
+        [Test]
+        public async Task AnAppendThatNeverLanded_IsStillATemporaryFailure()
+        {
+            await StartTheMatch();
+            _sink.Clear();
+
+            _faults.FailNextAppend(new InvalidOperationException("the database went away"));
+            await Cmd("c0", new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
+
+            Assert.That(_sink.MessagesFor("c0"),
+                Is.EqualTo(new[] { DurableMatchCoordinator.RejectTemporaryFailure }));
+            Assert.That((await _store.LoadJournalAsync(_matchId, Ct))!.Commands, Is.Empty);
+        }
+
+        // ---- eviction against the handshake -----------------------------------
+
+        [Test]
+        public async Task ASweepBetweenTheLoadAndTheGate_DoesNotStrandTheSeat()
+        {
+            var swept = 0;
+            _coordinator.BeforeGateForTest = async _ =>
+            {
+                if (swept++ > 0) return;
+
+                // The projection is loaded, nobody is connected to it yet, and the sweeper decides it is
+                // idle. Without the re-check after the gate this handshake would seat a player into a
+                // projection no later frame can find.
+                _clock.Advance(DurableMatchCoordinator.IdleEvictionWindow + TimeSpan.FromMinutes(1));
+                await _coordinator.SweepAsync(_clock.GetUtcNow());
+            };
+
+            DurableMatchCoordinator.AuthOutcome seated = await Auth("c0", _credential0);
+
+            Assert.That(seated.Ok, Is.True, seated.FailCode);
+            Assert.That(swept, Is.GreaterThan(1), "the sweep has to have happened for this to prove anything");
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { "SEAT 0", NetProtocol.CatalogRequest }));
+
+            _coordinator.BeforeGateForTest = null;
+            _sink.Clear();
+
+            await _coordinator.ReceiveAsync(
+                "c0", NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)), Ct);
+
+            Assert.That(_sink.MessagesFor("c0"), Is.Empty, "the first frame after the race is accepted");
+            Assert.That((await _store.GetPlayerAsync(_matchId, Seat0Steam, Ct))!.CatalogWire, Is.Not.Null);
+        }
+
+        // ---- one live socket per seat -----------------------------------------
+
+        [Test]
+        public async Task ASecondSocketForOneSeat_SupersedesTheFirst()
+        {
+            await SeatBothPlayers();
+            _sink.Clear();
+
+            DurableMatchCoordinator.AuthOutcome again = await Auth("c0-again", _credential0);
+
+            Assert.That(again.Ok, Is.True);
+            Assert.That(_sink.Closed, Is.EqualTo(new[]
+            {
+                ("c0", DurableMatchCoordinator.SupersededCloseStatus,
+                    DurableMatchCoordinator.SupersededCloseReason),
+            }));
+            Assert.That(_coordinator.ConnectionsOf(_matchId), Is.EquivalentTo(new[] { "c1", "c0-again" }));
+
+            _sink.Clear();
+            await Cmd("c0", new EndTurn(PlayerId.Player0));
+            Assert.That(_sink.MessagesFor("c0"),
+                Is.EqualTo(new[] { DurableMatchCoordinator.RejectNoSeat }));
         }
     }
 }

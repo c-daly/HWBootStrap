@@ -18,6 +18,8 @@ namespace HexWars.NetServer.Tests.Fakes
     public sealed class FaultInjectingMatchStore(IMatchStore inner) : IMatchStore
     {
         Exception? _nextAppendFailure;
+        Exception? _afterNextAppendFailure;
+        Exception? _nextCompletionFailure;
 
         /// <summary>How many appends actually reached the inner store.</summary>
         public int AppendsForwarded { get; private set; }
@@ -25,11 +27,32 @@ namespace HexWars.NetServer.Tests.Fakes
         /// <summary>How many appends were refused by the injected fault.</summary>
         public int AppendsFailed { get; private set; }
 
+        /// <summary>How many completions actually reached the inner store.</summary>
+        public int CompletionsForwarded { get; private set; }
+
+        /// <summary>Runs just before a completion is forwarded. The seam a test needs to end a match from
+        /// somewhere else in the window the coordinator is trying to complete it in.</summary>
+        public Func<Task>? BeforeCompletion { get; set; }
+
         /// <summary>Arms the next AppendCommandAsync to throw, once. Null disarms it.</summary>
         public void FailNextAppend(Exception? failure) => _nextAppendFailure = failure;
 
-        public Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence, string commandWire,
-            string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
+        /// <summary>
+        /// Arms the next AppendCommandAsync to commit and THEN throw, once.
+        ///
+        /// This is the ambiguous commit, and it is a different fault from FailNextAppend in the only way
+        /// that matters: the row is there. A statement that timed out on the way back, or a connection lost
+        /// after the server committed, both reach the caller as an exception over a journal that has
+        /// already moved. Answering it with TemporaryFailure invites the client to send the command again,
+        /// which is how one move becomes two.
+        /// </summary>
+        public void ThrowAfterNextAppend(Exception? failure) => _afterNextAppendFailure = failure;
+
+        /// <summary>Arms the next TryCompleteMatchAsync to throw, once. Null disarms it.</summary>
+        public void FailNextCompletion(Exception? failure) => _nextCompletionFailure = failure;
+
+        public async Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence,
+            string commandWire, string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
         {
             Exception? failure = _nextAppendFailure;
             if (failure is not null)
@@ -39,12 +62,20 @@ namespace HexWars.NetServer.Tests.Fakes
 
                 // Thrown rather than returned: an outage is not one of the outcomes AppendResult can carry,
                 // and turning it into one here would test a code path production never takes.
-                return Task.FromException<AppendResult>(failure);
+                throw failure;
             }
 
             AppendsForwarded++;
-            return inner.AppendCommandAsync(
-                matchId, expectedSequence, commandWire, issuerSteamId, acceptedAt, ct);
+            AppendResult result = await inner
+                .AppendCommandAsync(matchId, expectedSequence, commandWire, issuerSteamId, acceptedAt, ct)
+                .ConfigureAwait(false);
+
+            Exception? afterwards = _afterNextAppendFailure;
+            if (afterwards is null) return result;
+
+            _afterNextAppendFailure = null;
+            AppendsFailed++;
+            throw afterwards;
         }
 
         // ---- everything else is a plain forward -------------------------------
@@ -74,9 +105,23 @@ namespace HexWars.NetServer.Tests.Fakes
         public Task<MatchJournal?> LoadJournalAsync(Guid matchId, CancellationToken ct) =>
             inner.LoadJournalAsync(matchId, ct);
 
-        public Task<bool> TryCompleteMatchAsync(Guid matchId, MatchStatus terminal, int? winnerSeat,
-            DateTimeOffset completedAt, CancellationToken ct) =>
-            inner.TryCompleteMatchAsync(matchId, terminal, winnerSeat, completedAt, ct);
+        public async Task<bool> TryCompleteMatchAsync(Guid matchId, MatchStatus terminal, int? winnerSeat,
+            DateTimeOffset completedAt, CancellationToken ct)
+        {
+            Exception? failure = _nextCompletionFailure;
+            if (failure is not null)
+            {
+                _nextCompletionFailure = null;
+                throw failure;
+            }
+
+            if (BeforeCompletion is not null) await BeforeCompletion().ConfigureAwait(false);
+
+            CompletionsForwarded++;
+            return await inner
+                .TryCompleteMatchAsync(matchId, terminal, winnerSeat, completedAt, ct)
+                .ConfigureAwait(false);
+        }
 
         public Task TouchAsync(Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct) =>
             inner.TouchAsync(matchId, steamId, seenAt, ct);

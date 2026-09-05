@@ -565,6 +565,93 @@ namespace HexWars.NetServer.Tests
             }
         }
 
+        /// <summary>
+        /// Both barracks durable and the start never written: a restart finishes it rather than leaving the
+        /// match waiting for a catalog neither client will ever send again.
+        /// </summary>
+        [Test]
+        public async Task BothCatalogsStoredAndNoStart_IsResumedAfterTheRestart()
+        {
+            PostgresTestDatabase database = await PostgresTestDatabase.GetAsync();
+            Guid matchId;
+
+            await using (SteamServerFactory a = await HostAsync(reset: true))
+            {
+                DurableFlowClient zero =
+                    await DurableFlowClient.CreateAsync(a, LobbyId, FakeSteamWebApiClient.OwnerTicket);
+                DurableFlowClient one =
+                    await DurableFlowClient.JoinAsync(a, zero.MatchId, FakeSteamWebApiClient.GuestTicket);
+
+                await using (zero)
+                await using (one)
+                {
+                    matchId = zero.MatchId;
+
+                    await zero.ConnectAsync();
+                    await zero.ExpectAsync(NetProtocol.CatalogRequest);
+                    await zero.SendCatalogAsync();
+                    await WaitForStoredCatalogAsync(database, matchId, 0);
+
+                    // The second barracks is made durable behind the coordinator, which is precisely the
+                    // window a kill lands in: the row is written and the start that would have followed it
+                    // never runs. Sending it through the socket would start the match, which is the state
+                    // this test exists to avoid arriving at.
+                    await StoreCatalogDirectlyAsync(database, matchId, seat: 1);
+                }
+            }
+
+            Assert.That(await StatusOfAsync(database, matchId), Is.EqualTo("waiting"));
+
+            await using SteamServerFactory b = await HostAsync(reset: false);
+
+            RecoveryReport report = RecoveryOf(b);
+            Assert.That(report.Verified, Is.EqualTo(1));
+            Assert.That(report.Failed, Is.Empty);
+
+            (DurableFlowClient zeroB, DurableFlowClient oneB) = await RejoinAsync(b, matchId);
+            await using (zeroB)
+            await using (oneB)
+            {
+                await zeroB.ConnectAsync();
+
+                // START, and never CATALOG?: this seat has already answered that question, and nothing
+                // else was ever going to start this match.
+                await zeroB.ExpectAsync("START ");
+                Assert.That(zeroB.Log, Is.Empty);
+                Assert.That(zeroB.StateText, Is.EqualTo(DirectReplayText(0)));
+
+                await oneB.ConnectAsync();
+                await oneB.ExpectAsync("START ");
+                Assert.That(oneB.ReplayText, Is.EqualTo(zeroB.ReplayText),
+                    "both seats are dealt the one start state the row now holds");
+            }
+
+            Assert.That(await StatusOfAsync(database, matchId), Is.EqualTo("active"));
+        }
+
+        /// <summary>Writes a barracks straight into the row, without the coordinator seeing it.</summary>
+        static async Task StoreCatalogDirectlyAsync(
+            PostgresTestDatabase database, Guid matchId, int seat)
+        {
+            await using NpgsqlCommand stored = database.DataSource.CreateCommand(
+                "UPDATE match_players SET catalog_wire = @wire WHERE match_id = @match AND seat = @seat");
+            stored.Parameters.AddWithValue("wire", BarracksWire.Write(Barracks));
+            stored.Parameters.AddWithValue("match", matchId);
+            stored.Parameters.AddWithValue("seat", seat);
+
+            Assert.That(await stored.ExecuteNonQueryAsync(), Is.EqualTo(1));
+        }
+
+        /// <summary>The stored status of one match, as the text the column actually holds.</summary>
+        static async Task<string> StatusOfAsync(PostgresTestDatabase database, Guid matchId)
+        {
+            await using NpgsqlCommand status = database.DataSource.CreateCommand(
+                "SELECT status FROM matches WHERE match_id = @match");
+            status.Parameters.AddWithValue("match", matchId);
+
+            return (string)(await status.ExecuteScalarAsync())!;
+        }
+
         /// <summary>Waits until a barracks is durable, so a test can drop the host knowing the write landed
         /// rather than hoping it did.</summary>
         static async Task WaitForStoredCatalogAsync(PostgresTestDatabase database, Guid matchId, int seat)

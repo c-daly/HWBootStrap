@@ -237,16 +237,50 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task ACredentialStopsValidatingWhenItsMatchEnds()
+        public async Task ACredentialKeepsValidatingBrieflyAfterTheMatchEnds()
         {
+            // The last APPLY of a game is the frame most likely to be lost: it goes out at the instant the
+            // match becomes terminal. A player whose socket dropped a moment earlier has no other way to
+            // learn how the game they were playing ended, so the credential still opens the match for a
+            // short while afterwards.
             IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
-            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
 
             await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
             await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
 
+            _clock.Advance(TimeSpan.FromSeconds(30));
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ACredentialStopsValidatingOnceTheTerminalWindowHasPassed()
+        {
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            // Past the window and still inside the credential TTL, so the refusal is about the match and
+            // not about the credential.
+            _clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds + 60));
+
             Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null,
-                "a credential outlives the game it was issued for, so a handshake must not seat a finished match");
+                "the window is for learning how the game ended, and it closes");
+        }
+
+        [Test]
+        public async Task ACredentialNeverValidatesIntoAnAbandonedMatch()
+        {
+            // Abandoned and expired are statuses the server chose rather than the players. There is no
+            // ending to deal, so there is nothing the window would be for.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Abandoned, null, Origin, Ct);
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null);
         }
 
         [TestCaseSource(nameof(CredentialsThatCannotBeCredentials))]
