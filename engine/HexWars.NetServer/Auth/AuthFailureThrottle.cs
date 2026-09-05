@@ -64,10 +64,13 @@ namespace HexWars.NetServer.Auth
         {
             DateTimeOffset now = time.GetUtcNow();
 
-            // Before the insert, so the ceiling is a ceiling rather than a high-water mark.
-            Maintain(now, admittingNewCaller: !_counters.ContainsKey(key));
-
-            Counter counter = _counters.GetOrAdd(key, _ => new Counter { StartedAt = now });
+            // A caller already tracked cannot grow the map, so it never has to wait on the gate. Only an
+            // admission does, because checking for room and then inserting are two steps: without holding
+            // the gate across both, two threads that each find room at the ceiling minus one will each
+            // insert, and the ceiling becomes a number the map passes rather than one it respects.
+            Counter counter = _counters.TryGetValue(key, out Counter? tracked)
+                ? Maintained(now, tracked)
+                : Admit(key, now);
 
             lock (counter)
             {
@@ -113,40 +116,68 @@ namespace HexWars.NetServer.Auth
         /// Opportunistic rather than on a timer: a background timer would keep this object alive and have
         /// to be disposed, and the only call that grows the map is the one that can also shrink it.
         /// </summary>
-        void Maintain(DateTimeOffset now, bool admittingNewCaller)
+        /// <summary>
+        /// Admits a caller the map has not seen, making room first if there is none. The gate spans the
+        /// check and the insert together, which is the whole point: they are the two halves of one
+        /// decision, and a ceiling enforced across a gap is not a ceiling.
+        /// </summary>
+        Counter Admit(string key, DateTimeOffset now)
         {
+            lock (_maintenanceGate)
+            {
+                // Another thread may have admitted this same caller while this one waited, in which case
+                // the map did not grow and there is nothing to make room for.
+                if (_counters.TryGetValue(key, out Counter? admitted)) return admitted;
+
+                MaintainLocked(now, admittingNewCaller: true);
+
+                var counter = new Counter { StartedAt = now };
+                _counters[key] = counter;
+                return counter;
+            }
+        }
+
+        /// <summary>Runs the periodic sweep if it is due, then hands back the caller unchanged. A caller
+        /// already in the map cannot grow it, so this never needs to make room.</summary>
+        Counter Maintained(DateTimeOffset now, Counter counter)
+        {
+            if (_swept && now - _lastSweep < SweepInterval) return counter;
+
+            lock (_maintenanceGate)
+            {
+                MaintainLocked(now, admittingNewCaller: false);
+            }
+
+            return counter;
+        }
+
+        void MaintainLocked(DateTimeOffset now, bool admittingNewCaller)
+        {
+            // Re-checked under the gate: several threads can arrive together, and the sweep only needs to
+            // happen once for all of them.
             bool full = admittingNewCaller && _counters.Count >= MaxTrackedCallers;
             bool due = !_swept || now - _lastSweep >= SweepInterval;
             if (!full && !due) return;
 
-            lock (_maintenanceGate)
+            if (!_swept)
             {
-                // Re-checked under the lock: several threads can arrive here together, and the sweep only
-                // needs to happen once for all of them.
-                full = admittingNewCaller && _counters.Count >= MaxTrackedCallers;
-                due = !_swept || now - _lastSweep >= SweepInterval;
-                if (!full && !due) return;
-
-                if (!_swept)
-                {
-                    // The first call establishes when the clock started rather than sweeping an empty map.
-                    _lastSweep = now;
-                    _swept = true;
-                    if (!full) return;
-                }
-
-                if (due)
-                {
-                    _lastSweep = now;
-                    SweepCount++;
-                }
-
-                DropElapsed(now);
-
-                if (!admittingNewCaller || _counters.Count < MaxTrackedCallers) return;
-
-                EvictOldest();
+                // The first call establishes when the clock started rather than sweeping an empty map.
+                _lastSweep = now;
+                _swept = true;
+                if (!full) return;
             }
+
+            if (due)
+            {
+                _lastSweep = now;
+                SweepCount++;
+            }
+
+            DropElapsed(now);
+
+            if (!admittingNewCaller || _counters.Count < MaxTrackedCallers) return;
+
+            EvictOldest();
         }
 
         void DropElapsed(DateTimeOffset now)

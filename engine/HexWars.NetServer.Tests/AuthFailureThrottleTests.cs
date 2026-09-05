@@ -94,6 +94,25 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void TheCeilingHoldsWhenCallersArriveAtOnce()
+        {
+            // Checking the ceiling and then inserting are two steps, so a single-threaded test can only
+            // ever show the map is small on average. Filling it to just under the ceiling and then letting
+            // many threads admit fresh callers together is what turns "evict then add" into a claim about
+            // the ceiling rather than about the scheduler.
+            var throttle = new AuthFailureThrottle(new FakeTimeProvider(Start));
+
+            for (int caller = 0; caller < AuthFailureThrottle.MaxTrackedCallers - 100; caller++)
+            {
+                throttle.RecordFailure("seed-" + caller);
+            }
+
+            Parallel.For(0, 2_000, caller => throttle.RecordFailure("racing-" + caller));
+
+            Assert.That(throttle.TrackedCallers, Is.LessThanOrEqualTo(AuthFailureThrottle.MaxTrackedCallers));
+        }
+
+        [Test]
         public void TheSweepIsTimeGatedRatherThanRunningOnEveryFailure()
         {
             var clock = new FakeTimeProvider(Start);
