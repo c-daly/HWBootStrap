@@ -198,19 +198,46 @@ shows a different game.
 
 The check to run before trusting a restore, and the honest way to rehearse an engine bump.
 
-1. Restore the backup into the **staging** database, never production.
-2. Point `HEXWARS_TEST_DATABASE_URL` at that copy and run:
+**Never point `selftest-durable` at real data.** It proves a match can survive a restart by BUILDING one,
+and it drops the public schema of its target before it starts. It refuses any database whose name is not
+marked disposable for exactly that reason, and making a name disposable to get past the refusal would
+destroy the journals the restore exists to preserve.
+
+Use `verify-journals` instead. It reads, and only reads: the connection asks Postgres for read-only
+sessions, so a write anywhere below it is refused by the server rather than trusted not to happen. It runs
+no migrations. It replays every journal through the same verifier the running host applies at startup, so a
+pass here means what a healthy `recovery` check means.
+
+1. Restore the backup into a database of its own, never over production.
+2. Point the verb at it and run it from the deployed image:
 
    ```
-   dotnet run --project engine/HexWars.NetServer -- selftest-durable
+   HEXWARS_VERIFY_DATABASE_URL=postgres://user:pass@host:5432/restored dotnet HexWars.NetServer.dll verify-journals
    ```
 
-   It exits 3 rather than touch a database whose name is not marked disposable, which is the guard that
-   keeps this command away from production.
+   Add `--open-only` to check just the matches still being played. From a checkout the same verb is
+   `dotnet run --project engine/HexWars.NetServer -- verify-journals`.
 
-3. A pass prints `SELFTEST-DURABLE PASS`. Exit 3 means it refused to run and proved nothing.
-4. Deploy the staging service against the copy and read `GET /health/ready`. The `recovery` check answers
-   the question a restore is really asking: can every open match in that data actually be hosted.
+3. Read the output. One line per match, then a summary:
+
+   ```
+   4b1e0f42-... active 37 OK
+   9c02a118-... active 12 CorruptCommand the command at sequence 5 does not parse
+   VERIFY-JOURNALS FAIL 1/2
+   ```
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| 0 | `VERIFY-JOURNALS PASS n/n`, every journal replays | Trust the restore |
+| 1 | `VERIFY-JOURNALS FAIL k/n`, k journals will not | Abandon those matches with procedure A after the restore |
+| 2 | It could not look: no address, no connection, or a schema behind this build | Fix that first; nothing was verified |
+
+Exit 2 on a schema mismatch is deliberate. A journal read against a schema this build does not recognise
+would report failures that are about the schema, and an operator acting on them would go looking at
+matches that are perfectly intact.
+
+4. Optionally, deploy a staging service against the copy and read `GET /health/ready`. The `recovery` check
+   answers the same question through the host that would serve it.
 
 ## 9. Related documents
 

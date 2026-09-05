@@ -126,9 +126,17 @@ A deploy during a busy period interrupts every live game for a few seconds. Pref
 3. If a new migration really is incompatible with the previous app version, **roll forward** - ship a fix on
    top rather than undoing the schema. The additive-only rule exists so this case does not arise, and a
    migration that breaks it should not have merged.
-4. After a rollback, check readiness. A `schema` check that is Healthy with the database ahead of the build
-   is the expected outcome for an additive migration. A `schema` check reporting pending migrations means
-   the rollback went to a build older than the schema, and rolling forward is then the only safe move.
+4. After a rollback, check readiness, and read the `schema` check the right way round. It compares the
+   migrations THIS BUILD carries against the ledger in the database and reports the ones the ledger does
+   not have. So `pending` always means the database is BEHIND the build - which is not the rollback case
+   and is normally impossible, because the startup migration applies them before the host serves anything.
+   Seeing it after a rollback means the deploy you rolled back to could not migrate; fix that, do not roll
+   further back.
+5. A build that is older than the schema is the expected rollback outcome, and it reports **Healthy**. The
+   ledger holds migration ids this build has never heard of, and the runner ignores them: it only ever asks
+   what of its own is missing, never what else is there. That is what additive-only buys - the older build
+   simply does not use the newer column or table. If you want to confirm it, the extra ids are visible in
+   `SELECT version FROM schema_migrations`.
 
 ## 6. Scaling
 

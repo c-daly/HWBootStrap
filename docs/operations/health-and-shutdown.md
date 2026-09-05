@@ -179,6 +179,21 @@ and how the database is behaving. It is mapped on every deployment, whatever `LO
 Counters are totals since the process started, not rates. A match host restarts often enough that a rate
 computed inside it would be computed over the wrong window; subtract two readings instead.
 
+## 5. Verifying journals without touching them
+
+`dotnet HexWars.NetServer.dll verify-journals` answers, read-only, the question readiness answers about the
+database this host is attached to: can this build replay the matches in there. It runs no migrations and
+asks Postgres for read-only sessions, so a write anywhere below it is refused by the server rather than
+trusted not to happen, and it replays through the same verifier the startup recovery pass uses.
+
+It reads `HEXWARS_VERIFY_DATABASE_URL`, falling back to `DATABASE_URL`. `--open-only` restricts it to
+matches still being played. It prints one line per match and a summary; exit 0 all replay, 1 some do not,
+2 it could not look. The procedure that uses it is
+[Procedure G of the match recovery runbook](match-recovery-runbook.md).
+
+It is the only tool that may be pointed at real data. `selftest-durable` builds a match to prove one
+survives a restart, and drops the schema of its target to do it.
+
 ## 5. Related documents
 
 - [Steam / Render environment authority](steam-render-environments.md) - every variable named above.
