@@ -185,11 +185,18 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// has to prove the rows the endpoints claim to write are actually there; every other test uses
         /// the in-memory store, which has the same semantics and does not need Docker.
         /// </summary>
-        public static async Task<SteamServerFactory> PostgresAsync()
+        /// <param name="reset">False to attach to the database exactly as it stands. A restart test builds a
+        /// SECOND host over what the first one wrote, and dropping the schema between the two halves would
+        /// turn the recovery assertion into a test that an empty database holds no matches.</param>
+        public static async Task<SteamServerFactory> PostgresAsync(bool reset = true)
         {
             PostgresTestDatabase database = await PostgresTestDatabase.GetAsync();
-            await database.ResetAsync();
-            await database.ApplyMigrationsAsync();
+
+            if (reset)
+            {
+                await database.ResetAsync();
+                await database.ApplyMigrationsAsync();
+            }
 
             var factory = new SteamServerFactory { UsePostgres = true, Database = database };
             factory.Settings["DATABASE_URL"] = database.DatabaseUrl;
