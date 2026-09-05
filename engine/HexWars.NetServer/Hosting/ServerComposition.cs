@@ -221,6 +221,11 @@ namespace HexWars.NetServer.Hosting
             if (match.LobbyProvider.HasFlag(LobbyProviders.Steam))
             {
                 app.MapSteamMatchEndpoints();
+
+                // The create and join responses point every client at this route, so something has to
+                // answer it in the shape those clients parse. Replaced by the real v2 handler when the
+                // durable-gameplay work lands.
+                app.MapProtocolV2Placeholder();
             }
 
             return app;
