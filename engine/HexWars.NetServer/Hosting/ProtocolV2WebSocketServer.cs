@@ -327,7 +327,8 @@ namespace HexWars.NetServer.Hosting
                 logger.LogWarning(
                     "Refused an AUTH frame: {Slots} handshakes are already being validated",
                     MaxConcurrentValidations);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable,
+                    metrics, MatchMetrics.AuthStage.Capacity).ConfigureAwait(false);
                 return false;
             }
 
@@ -348,12 +349,26 @@ namespace HexWars.NetServer.Hosting
                 // that reaches here is a bug. The player still gets an answer they can retry on, and it is
                 // not counted against them: this one is ours.
                 logger.LogError(failure, "A v2 handshake failed unexpectedly");
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable,
+                    metrics, MatchMetrics.AuthStage.Internal).ConfigureAwait(false);
                 return false;
             }
             finally
             {
                 ValidationSlots.Release();
+            }
+
+            // Refused because this host is leaving, not because anything about the caller was wrong. It
+            // gets the same 1012 every seated socket is about to get, so the client reconnects to whatever
+            // replaces this process instead of treating it as a credential it should stop using.
+            if (!outcome.Ok && outcome.ShuttingDown)
+            {
+                logger.LogDebug("Closed a v2 handshake that finished after this host began shutting down");
+                await connection.CloseFromReceiveLoopAsync(
+                        GracefulShutdownService.RestartCloseStatus,
+                        GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
+                return false;
             }
 
             if (!outcome.Ok)

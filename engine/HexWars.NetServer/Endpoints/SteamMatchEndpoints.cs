@@ -132,6 +132,7 @@ namespace HexWars.NetServer.Endpoints
 
                 if (!RequestedSetupStillMatches(request.RequestedSetup, verified.Setup))
                 {
+                    metrics.SteamFailure(LobbyChangedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.SettingsChangedMessage);
                 }
@@ -166,6 +167,7 @@ namespace HexWars.NetServer.Endpoints
                     if (!RosterMatches(existing, verified.Players) ||
                         !string.Equals(result.Match.SetupWire, verified.Setup.ToWire(), StringComparison.Ordinal))
                     {
+                        metrics.SteamFailure(LobbyChangedFailure);
                         logger.LogInformation(
                             "Refused an existing match {MatchId} for lobby {LobbyId}: the lobby no longer matches it",
                             Short(result.Match.MatchId), verified.LobbyId);
@@ -570,6 +572,11 @@ namespace HexWars.NetServer.Endpoints
         /// <summary>The two refusals this server decides rather than Valve, named so they read alongside
         /// the SteamFailure values in the same counter.</summary>
         const string OwnershipFailure = "OwnershipMissing";
+
+        /// <summary>The lobby moved on between the client reading it and this server validating it. Not a
+        /// refusal Valve issued, but the same thing to an operator: a player who could not get in because
+        /// of what the lobby said.</summary>
+        const string LobbyChangedFailure = "lobby_changed";
         const string BlockedFailure = "Blocked";
 
         /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical

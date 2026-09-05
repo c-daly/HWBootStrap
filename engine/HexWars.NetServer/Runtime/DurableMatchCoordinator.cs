@@ -168,7 +168,8 @@ namespace HexWars.NetServer.Runtime
             int Seat,
             string? FailCode,
             byte[]? CredentialHash = null,
-            DateTimeOffset? CredentialExpiresAt = null);
+            DateTimeOffset? CredentialExpiresAt = null,
+            bool ShuttingDown = false);
 
         /// <summary>What recording the end of a game concluded. <c>Advance</c> false means the caller must
         /// change nothing: the issuer has already been told why.</summary>
@@ -355,6 +356,22 @@ namespace HexWars.NetServer.Runtime
                 // validated one tick inside the window was still being dealt when the touch above took
                 // longer than that tick. Nothing is superseded, registered or sent until this passes.
                 DateTimeOffset now = time.GetUtcNow();
+
+                // Read here, under the gate, and not only at the socket edge. A handshake that passed the
+                // registry admission check is still in flight through a credential lookup, a journal load
+                // and a liveness write, and any of those can outlive the moment this host was told to
+                // stop. Seating it now would register a connection the drain snapshot has already been
+                // taken without, supersede a socket that was about to get a proper 1012, or deal a START
+                // for a match this process will not be hosting a second from now.
+                //
+                // Not counted as an auth failure: nothing about this caller was wrong. It is reported as
+                // the shutdown it is, and the socket layer closes it with 1012 rather than 1008.
+                if (Stopping)
+                {
+                    logger.LogDebug(
+                        "Turned a handshake away: this host began shutting down while it was in flight");
+                    return new AuthOutcome(false, -1, AuthFailUnavailable, ShuttingDown: true);
+                }
 
                 if (!WithinTerminalWindow(match, now))
                 {
@@ -826,6 +843,7 @@ namespace HexWars.NetServer.Runtime
                     // would invite exactly the duplicate the append-first order exists to prevent. It is
                     // disconnected instead, and its reconnect is dealt the terminal state through the
                     // window.
+                    metrics.DbFailure(MatchMetrics.DbOp.Complete);
                     logger.LogError(again,
                         "The winning command is journalled and the match could not be closed at all");
                     match.Stale = true;
@@ -987,6 +1005,7 @@ namespace HexWars.NetServer.Runtime
                     // Not rethrown, cancellation included. The caller marks the projection stale and sends
                     // the sockets away to resync, which is a better answer than an exception unwinding
                     // through a gate holder that has already decided nothing may be broadcast.
+                    metrics.DbFailure(MatchMetrics.DbOp.Complete);
                     logger.LogError(again, "A finished match could not be closed");
                     return false;
                 }
