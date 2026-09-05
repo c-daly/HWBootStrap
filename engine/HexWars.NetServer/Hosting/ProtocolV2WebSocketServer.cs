@@ -4,6 +4,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Runtime;
 using Microsoft.Extensions.Options;
 
@@ -164,6 +165,13 @@ namespace HexWars.NetServer.Hosting
                 if (!await AuthenticateAsync(context, connection, coordinator, options, time, logger)
                         .ConfigureAwait(false))
                     return;
+
+                // Only after the handshake, because only then is there a match to name. Every line the pump
+                // writes for the rest of this socket carries it, which is what makes a log searchable by game
+                // rather than by guesswork about which frame belonged to whom.
+                using IDisposable? scope = connection.MatchId is Guid seated
+                    ? LogScopes.MatchScope(logger, seated)
+                    : null;
 
                 await PumpAsync(context, connection, coordinator, time, logger).ConfigureAwait(false);
             }

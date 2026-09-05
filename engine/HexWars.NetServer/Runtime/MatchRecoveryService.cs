@@ -1,5 +1,6 @@
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using Microsoft.Extensions.Options;
 
@@ -76,6 +77,10 @@ namespace HexWars.NetServer.Runtime
 
             foreach (Guid matchId in open)
             {
+                // One scope per match, so the refusal below and everything HealAsync writes underneath it
+                // carry the id an operator would go looking for.
+                using IDisposable? scope = LogScopes.MatchScope(logger, matchId);
+
                 try
                 {
                     LiveMatch live = await LoadAsync(matchId, ct).ConfigureAwait(false);
@@ -280,6 +285,6 @@ namespace HexWars.NetServer.Runtime
 
         /// <summary>Match ids reach logs as their first eight hex characters, the same shortening the
         /// coordinator and the credential service use, so one match can be followed across all three.</summary>
-        static string Short(Guid matchId) => matchId.ToString("N")[..8];
+        static string Short(Guid matchId) => LogScopes.ShortMatchId(matchId);
     }
 }

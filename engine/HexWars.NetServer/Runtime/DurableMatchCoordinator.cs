@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using Microsoft.Extensions.Options;
@@ -1304,13 +1305,12 @@ namespace HexWars.NetServer.Runtime
                     yield return entry.Value.Value.Result;
         }
 
-        IDisposable? MatchScope(Guid matchId) =>
-            logger.BeginScope(new Dictionary<string, object> { ["MatchId"] = Short(matchId) });
+        IDisposable? MatchScope(Guid matchId) => LogScopes.MatchScope(logger, matchId);
 
         static AuthOutcome Failed(string code) => new(false, -1, code);
 
         /// <summary>Match ids reach logs as their first eight hex characters, the same shortening the
         /// credential service uses, so one match can be followed across both.</summary>
-        static string Short(Guid matchId) => matchId.ToString("N")[..8];
+        static string Short(Guid matchId) => LogScopes.ShortMatchId(matchId);
     }
 }
