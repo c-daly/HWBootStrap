@@ -164,11 +164,16 @@ namespace HexWars.NetServer.Auth
             if (match is null) return false;
             if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
 
+            // The same rule the handshake applies: the window belongs to a match that STARTED. One that
+            // expired or was abandoned while still waiting for barracks has no game in it, so a socket
+            // holding a credential for it is holding nothing and goes on the next re-check.
+            if (match.StartReplay is null) return false;
+
             TimeSpan window = TerminalWindow;
 
             return window > TimeSpan.Zero
                 && match.CompletedAt is DateTimeOffset finishedAt
-                && now - finishedAt <= window;
+                && now < finishedAt + window;
         }
 
         /// <summary>How long after a match ends its seats can still get back in. Zero closes the window.</summary>
@@ -204,7 +209,7 @@ namespace HexWars.NetServer.Auth
             TimeSpan window = TerminalWindow;
             if (window <= TimeSpan.Zero) return false;
 
-            return time.GetUtcNow() - completedAt <= window;
+            return time.GetUtcNow() < completedAt + window;
         }
 
         /// <summary>Match ids reach logs as their first eight hex characters: enough to follow one match

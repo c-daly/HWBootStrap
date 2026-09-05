@@ -536,6 +536,37 @@ namespace HexWars.NetServer.Tests
             NullLogger<MatchCredentialService>.Instance);
 
         [Test]
+        public async Task AWindowThatClosesWhileTheCallerQueuesForTheLock_IsRefused()
+        {
+            // The caller decided its request was inside the window and then waited for this lock. Judging
+            // it against the instant the caller was reasoning about would hand out a credential for a
+            // window that had already closed, so the clock is read while the row is held.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+
+            var clock = new FakeTimeProvider(Move1);
+            var store = new PostgresMatchStore(
+                _db.DataSource, NullLogger<PostgresMatchStore>.Instance, clock);
+
+            Assert.That(
+                await store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct),
+                Is.True);
+
+            store.BeforeLockForTests = () =>
+            {
+                store.BeforeLockForTests = null;
+                clock.Advance(window + TimeSpan.FromMinutes(1));
+                return Task.CompletedTask;
+            };
+
+            CredentialReplacement replacement = await store.ReplaceJoinCredentialAsync(
+                Hash(81), match.MatchId, match.Seat0, Move1.AddMinutes(5), Move1, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.False);
+            Assert.That(await store.FindJoinCredentialAsync(Hash(81), Ct), Is.Null);
+        }
+
+        [Test]
         public async Task AMatchThatFinishesBeforeTheLock_CapsTheCredentialAtTheWindow()
         {
             // The caller decides on a full TTL, and the match ends before this transaction can take the

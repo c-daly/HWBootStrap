@@ -415,7 +415,10 @@ namespace HexWars.NetServer.Endpoints
             if (match.CompletedAt is not DateTimeOffset finishedAt) return false;
             if (options.TerminalReconnectSeconds <= 0) return false;
 
-            return now - finishedAt <= TimeSpan.FromSeconds(options.TerminalReconnectSeconds);
+            // Strict, and matched by both stores: at exactly the closing instant there is no window left.
+            // This answer is only ever a fast refusal, though - the store re-reads the clock under the row
+            // lock, and its answer is the one that decides whether a credential exists.
+            return now < finishedAt + TimeSpan.FromSeconds(options.TerminalReconnectSeconds);
         }
 
         /// <summary>

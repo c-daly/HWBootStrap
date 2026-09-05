@@ -21,7 +21,10 @@ namespace HexWars.NetServer.Persistence
     /// older timestamp last, and a match dragged far enough into the past gets abandoned while it is still
     /// being played.
     /// </summary>
-    public sealed class PostgresMatchStore(NpgsqlDataSource dataSource, ILogger<PostgresMatchStore> logger) : IMatchStore
+    public sealed class PostgresMatchStore(
+        NpgsqlDataSource dataSource,
+        ILogger<PostgresMatchStore> logger,
+        TimeProvider? time = null) : IMatchStore
     {
         /// <summary>The partial unique index from 001_match_journal. A unique violation naming it is not an
         /// error, it is the answer "someone else allocated this lobby first".</summary>
@@ -61,6 +64,15 @@ namespace HexWars.NetServer.Persistence
         /// revoked and before the new one is inserted. Throwing from it is the only way to reach the
         /// window that made the two-call version dangerous - the one where a player has lost the
         /// credential they held and not yet been given its replacement.</summary>
+        /// <summary>
+        /// The clock a transaction judges a match by, read while it holds the row.
+        ///
+        /// Optional only for the doubles this project builds by hand; the host always supplies one. A
+        /// caller decides what to ask for and then queues for a lock, so the instant it was reasoning
+        /// about is already history by the time the row is held.
+        /// </summary>
+        DateTimeOffset AtLock(DateTimeOffset callerNow) => time?.GetUtcNow() ?? callerNow;
+
         internal Func<Task>? AfterRevokeForTests { get; set; }
 
         /// <summary>Runs before the credential transaction takes the match row lock. The seam a test needs
@@ -640,18 +652,26 @@ namespace HexWars.NetServer.Persistence
                 // worth opening. The exception is the reconnect window, where a seat that missed the final
                 // APPLY has to be able to get back in and be shown how the match ended - and only if the
                 // match actually started, because one that expired while waiting has no game to show.
+                //
+                // Judged against the clock read HERE. The caller decided what to ask for before it queued
+                // for this lock, and the window it was reasoning about may have closed while it waited.
+                // The boundary is strict: at exactly the closing instant there is no window left to give.
+                DateTimeOffset atLock = AtLock(now);
+
                 if (allowTerminalWithin is not TimeSpan allowed
                     || allowed <= TimeSpan.Zero
                     || !locked.HasStartReplay
                     || locked.CompletedAt is not DateTimeOffset finishedAt
-                    || now - finishedAt > allowed)
+                    || atLock >= finishedAt + allowed)
                     return new CredentialReplacement(false, null);
 
-                // Capped HERE and not by the caller. A caller reads the status, decides on a full TTL and
-                // then waits for this lock; the match can finish inside that gap, and the only value that
-                // cannot be stale is the one computed while the row is held.
+                // Capped HERE and not by the caller, for the same reason.
                 DateTimeOffset closes = finishedAt + allowed;
                 if (closes < effectiveExpiresAt) effectiveExpiresAt = closes;
+
+                // A credential that is already dead is not a credential: it would be stored, handed back,
+                // and refused by the very next thing that looked at it.
+                if (effectiveExpiresAt <= atLock) return new CredentialReplacement(false, null);
             }
 
             await using (var revoke = new NpgsqlCommand(

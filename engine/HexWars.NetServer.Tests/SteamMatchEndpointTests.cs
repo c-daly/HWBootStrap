@@ -622,6 +622,25 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task JoiningExactlyAtTheWindowBoundaryIsAConflict()
+        {
+            // The boundary is the closing instant, not the last usable one. A credential minted here would
+            // be born dead - refused by the very next thing that looked at it.
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await FinishedMatchAsync(factory, client);
+
+            factory.Clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds));
+
+            HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
+            Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        [Test]
         public async Task JoiningAMatchThatEndedWithoutEverStartingIsAConflict()
         {
             // No start replay means no game was dealt, so there is no ending for a returning seat to be

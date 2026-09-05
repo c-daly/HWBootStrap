@@ -748,6 +748,25 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReplaceJoinCredential_ExactlyAtTheWindowBoundary_IsRefused()
+        {
+            // At the closing instant there is no window left to give. A credential minted here would be
+            // born dead: stored, handed back, and refused by the very next thing that looked at it.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
+                Hash(71), match.MatchId, match.Seat0, Ended.AddMinutes(30), Ended + window, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.False);
+            Assert.That(replacement.EffectiveExpiresAt, Is.Null);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(71), Ct), Is.Null,
+                "a refused replace stores nothing");
+        }
+
+        [Test]
         public async Task ReplaceJoinCredential_OnAMatchThatEndedBeforeTheWindow_IsStillRefused()
         {
             var match = await NewActiveMatchAsync();

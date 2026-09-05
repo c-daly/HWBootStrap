@@ -14,8 +14,13 @@ namespace HexWars.NetServer.Tests.Fakes
     /// microsecond, because timestamptz cannot hold a .NET tick; and the recorded rows are copied on the way
     /// in and out, so a caller mutating an array it passed in cannot reach into stored state.
     /// </summary>
-    public sealed class InMemoryMatchStore : IMatchStore
+    public sealed class InMemoryMatchStore(TimeProvider? time = null) : IMatchStore
     {
+        /// <summary>The clock a write judges a match by, read as the lock is taken - the same rule the
+        /// Postgres store follows. Without one, the instant the caller passed is used, which keeps every
+        /// test that does not care about the window behaving exactly as it did.</summary>
+        DateTimeOffset AtLock(DateTimeOffset callerNow) => time?.GetUtcNow() ?? callerNow;
+
         const long TicksPerMicrosecond = 10;
 
         readonly object _gate = new();
@@ -350,7 +355,9 @@ namespace HexWars.NetServer.Tests.Fakes
 
                 if (!row.IsOpen)
                 {
-                    if (!ReachableAfterTheEnd(row, now, allowTerminalWithin))
+                    DateTimeOffset atLock = AtLock(now);
+
+                    if (!ReachableAfterTheEnd(row, atLock, allowTerminalWithin))
                         return Task.FromResult(new CredentialReplacement(false, null));
 
                     // Capped under the same lock Postgres caps it under: a caller that decided on a full
@@ -358,6 +365,9 @@ namespace HexWars.NetServer.Tests.Fakes
                     // certain to be inside the window.
                     DateTimeOffset closes = row.CompletedAt!.Value + allowTerminalWithin!.Value;
                     if (closes < effectiveExpiresAt) effectiveExpiresAt = closes;
+
+                    if (effectiveExpiresAt <= atLock)
+                        return Task.FromResult(new CredentialReplacement(false, null));
                 }
 
                 CredentialRow? clash = Credential(credentialHash);
@@ -394,7 +404,8 @@ namespace HexWars.NetServer.Tests.Fakes
             if (row.StartReplay is null) return false;
             if (row.CompletedAt is not DateTimeOffset completedAt) return false;
 
-            return now - completedAt <= allowed;
+            // Strict: at exactly the closing instant there is no window left to give.
+            return now < completedAt + allowed;
         }
 
         public Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)

@@ -343,6 +343,24 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ALiveCredentialIsInvalidTheMomentAMatchThatNeverStartedExpires()
+        {
+            // The window belongs to a match that was PLAYED. One that expired while still waiting for
+            // barracks has no game in it, so there is nothing for a socket to come back and be shown - and
+            // a socket still holding a credential for it is holding nothing.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+            Assert.That(CredentialEncoding.TryFromBase64Url(issued.Credential, out byte[] raw), Is.True);
+            byte[] hash = SHA256.HashData(raw);
+
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, Origin, Ct), Is.True);
+
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
+
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, Origin, Ct), Is.False,
+                "immediately, not after the reconnect window it was never entitled to");
+        }
+
+        [Test]
         public async Task ACredentialNeverValidatesIntoAMatchThatEndedWithoutStarting()
         {
             // No start replay means no game was ever dealt, so there is no ending to show anybody and the
