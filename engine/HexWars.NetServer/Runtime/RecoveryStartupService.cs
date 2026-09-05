@@ -27,6 +27,7 @@ namespace HexWars.NetServer.Runtime
             {
                 state.RecordReport(new RecoveryReport(
                     0,
+                    0,
                     Array.Empty<(Guid MatchId, MatchRecoveryFailure Failure, string Detail)>(),
                     DateTimeOffset.UtcNow));
                 return;

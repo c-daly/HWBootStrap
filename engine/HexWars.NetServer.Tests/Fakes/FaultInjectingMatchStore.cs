@@ -20,6 +20,9 @@ namespace HexWars.NetServer.Tests.Fakes
         Exception? _nextAppendFailure;
         Exception? _afterNextAppendFailure;
         Exception? _nextCompletionFailure;
+        Exception? _everyCompletionFailure;
+        Exception? _nextJournalReadFailure;
+        Exception? _nextGetMatchFailure;
 
         /// <summary>How many appends actually reached the inner store.</summary>
         public int AppendsForwarded { get; private set; }
@@ -50,6 +53,17 @@ namespace HexWars.NetServer.Tests.Fakes
 
         /// <summary>Arms the next TryCompleteMatchAsync to throw, once. Null disarms it.</summary>
         public void FailNextCompletion(Exception? failure) => _nextCompletionFailure = failure;
+
+        /// <summary>Fails EVERY TryCompleteMatchAsync until disarmed with null: a database this host cannot
+        /// finish a game against, rather than one bad moment it can retry through.</summary>
+        public void FailEveryCompletion(Exception? failure) => _everyCompletionFailure = failure;
+
+        /// <summary>Arms the next LoadJournalAsync to throw, once. What makes an ambiguous commit
+        /// unverifiable rather than merely uncertain.</summary>
+        public void FailNextJournalRead(Exception? failure) => _nextJournalReadFailure = failure;
+
+        /// <summary>Arms the next GetMatchAsync to throw, once.</summary>
+        public void FailNextGetMatch(Exception? failure) => _nextGetMatchFailure = failure;
 
         public async Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence,
             string commandWire, string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
@@ -83,8 +97,14 @@ namespace HexWars.NetServer.Tests.Fakes
         public Task<CreateMatchResult> CreateMatchForLobbyAsync(CreateMatchRequest request, CancellationToken ct) =>
             inner.CreateMatchForLobbyAsync(request, ct);
 
-        public Task<PersistedMatch?> GetMatchAsync(Guid matchId, CancellationToken ct) =>
-            inner.GetMatchAsync(matchId, ct);
+        public Task<PersistedMatch?> GetMatchAsync(Guid matchId, CancellationToken ct)
+        {
+            Exception? failure = _nextGetMatchFailure;
+            if (failure is null) return inner.GetMatchAsync(matchId, ct);
+
+            _nextGetMatchFailure = null;
+            return Task.FromException<PersistedMatch?>(failure);
+        }
 
         public Task<PersistedMatch?> FindOpenMatchForLobbyAsync(string steamLobbyId, CancellationToken ct) =>
             inner.FindOpenMatchForLobbyAsync(steamLobbyId, ct);
@@ -102,12 +122,20 @@ namespace HexWars.NetServer.Tests.Fakes
             Guid matchId, string startReplay, DateTimeOffset startedAt, CancellationToken ct) =>
             inner.TryStartMatchAsync(matchId, startReplay, startedAt, ct);
 
-        public Task<MatchJournal?> LoadJournalAsync(Guid matchId, CancellationToken ct) =>
-            inner.LoadJournalAsync(matchId, ct);
+        public Task<MatchJournal?> LoadJournalAsync(Guid matchId, CancellationToken ct)
+        {
+            Exception? failure = _nextJournalReadFailure;
+            if (failure is null) return inner.LoadJournalAsync(matchId, ct);
+
+            _nextJournalReadFailure = null;
+            return Task.FromException<MatchJournal?>(failure);
+        }
 
         public async Task<bool> TryCompleteMatchAsync(Guid matchId, MatchStatus terminal, int? winnerSeat,
             DateTimeOffset completedAt, CancellationToken ct)
         {
+            if (_everyCompletionFailure is not null) throw _everyCompletionFailure;
+
             Exception? failure = _nextCompletionFailure;
             if (failure is not null)
             {
@@ -141,7 +169,9 @@ namespace HexWars.NetServer.Tests.Fakes
             inner.RevokeJoinCredentialsAsync(matchId, steamId, revokedAt, ct);
 
         public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct) =>
-            inner.ReplaceJoinCredentialAsync(credentialHash, matchId, steamId, expiresAt, now, ct);
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null) =>
+            inner.ReplaceJoinCredentialAsync(
+                credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
     }
 }

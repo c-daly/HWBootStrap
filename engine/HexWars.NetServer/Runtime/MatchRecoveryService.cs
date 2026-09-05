@@ -7,11 +7,15 @@ namespace HexWars.NetServer.Runtime
 {
     /// <summary>What one startup verification pass found.</summary>
     /// <param name="Verified">Open matches this build can replay and would host.</param>
+    /// <param name="Healed">Matches the pass found finished in the engine and unfinished in the store, and
+    /// closed. Reported separately from Verified because it is a write: an operator seeing a non-zero count
+    /// is being told this host repaired something, which is worth knowing even though nothing went wrong.</param>
     /// <param name="Failed">The ones it would refuse, with the reason each needs.</param>
     /// <param name="CompletedAt">When the pass finished. Readiness reports it so an operator can tell a
     /// pass that ran from one that never got the chance.</param>
     public sealed record RecoveryReport(
         int Verified,
+        int Healed,
         IReadOnlyList<(Guid MatchId, MatchRecoveryFailure Failure, string Detail)> Failed,
         DateTimeOffset CompletedAt);
 
@@ -31,6 +35,7 @@ namespace HexWars.NetServer.Runtime
     public sealed class MatchRecoveryService(
         IMatchStore store,
         IOptions<MatchHostingOptions> options,
+        TimeProvider time,
         ILogger<MatchRecoveryService> logger) : ILiveMatchLoader
     {
         /// <summary>
@@ -67,13 +72,16 @@ namespace HexWars.NetServer.Runtime
 
             var failed = new List<(Guid MatchId, MatchRecoveryFailure Failure, string Detail)>();
             int verified = 0;
+            int healed = 0;
 
             foreach (Guid matchId in open)
             {
                 try
                 {
-                    await LoadAsync(matchId, ct).ConfigureAwait(false);
+                    LiveMatch live = await LoadAsync(matchId, ct).ConfigureAwait(false);
                     verified++;
+
+                    if (await HealAsync(live, ct).ConfigureAwait(false)) healed++;
                 }
                 catch (MatchRecoveryException refusal)
                 {
@@ -85,10 +93,55 @@ namespace HexWars.NetServer.Runtime
             }
 
             logger.LogInformation(
-                "Startup recovery verified {Verified} open match(es) and refused {Refused}",
-                verified, failed.Count);
+                "Startup recovery verified {Verified} open match(es), healed {Healed} and refused {Refused}",
+                verified, healed, failed.Count);
 
-            return new RecoveryReport(verified, failed, DateTimeOffset.UtcNow);
+            return new RecoveryReport(verified, healed, failed, time.GetUtcNow());
+        }
+
+        /// <summary>
+        /// Closes a match the journal says is still being played and the engine says is over.
+        ///
+        /// It is the same repair the coordinator performs on the next handshake, done at startup instead so
+        /// it does not wait for one. Nothing guarantees a player ever comes back to a finished game, and a
+        /// match left active is one the retention reaper will eventually mark abandoned - turning a game
+        /// somebody won into a game the record says nobody finished.
+        ///
+        /// A failure here is deliberately not fatal and not collected as a refusal: the journal is intact,
+        /// the match is hostable, and the next handshake tries the same write again.
+        /// </summary>
+        async Task<bool> HealAsync(LiveMatch live, CancellationToken ct)
+        {
+            if (live.Status != MatchStatus.Active) return false;
+            if (live.State is null || !live.State.IsGameOver) return false;
+
+            int? winnerSeat = live.State.Winner is PlayerId winner ? (int)winner : null;
+
+            try
+            {
+                bool closed = await store
+                    .TryCompleteMatchAsync(
+                        live.MatchId, MatchStatus.Completed, winnerSeat, time.GetUtcNow(), ct)
+                    .ConfigureAwait(false);
+
+                if (!closed) return false;
+
+                logger.LogWarning(
+                    "Match {MatchId} was finished in the journal and open in the store; closed it at startup",
+                    Short(live.MatchId));
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                logger.LogError(failure,
+                    "Match {MatchId} is finished and could not be closed at startup", Short(live.MatchId));
+                return false;
+            }
         }
 
         /// <summary>

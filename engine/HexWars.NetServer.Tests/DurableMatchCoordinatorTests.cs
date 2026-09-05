@@ -594,17 +594,24 @@ namespace HexWars.NetServer.Tests
         {
             (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
 
-            // The winning command commits and the row that records the win never lands. That is exactly the
-            // state a process killed in the gap leaves behind: a game the engine calls over and the database
-            // calls active.
-            _faults.FailNextCompletion(new InvalidOperationException("the database went away"));
+            // The winning command commits and no attempt to record the win lands. That is exactly the state
+            // a process killed in the gap leaves behind: a game the engine calls over and the database calls
+            // active. Every attempt fails, because one that failed once is retried immediately.
+            _faults.FailEveryCompletion(new InvalidOperationException("the database went away"));
             _sink.Clear();
             await Cmd(played.Commands[^1]);
 
-            Assert.That(_sink.MessagesFor("c0"), Does.Contain(DurableMatchCoordinator.RejectTemporaryFailure)
-                .Or.EqualTo(new[] { DurableMatchCoordinator.RejectTemporaryFailure }));
             Assert.That(_sink.Sent.Any(s => s.Message.StartsWith("APPLY ", StringComparison.Ordinal)), Is.False,
                 "a command whose completion failed must not be broadcast");
+            Assert.That(_sink.Sent.Any(s => s.Message == DurableMatchCoordinator.RejectTemporaryFailure),
+                Is.False, "the command is durable, so the issuer must never be invited to send it again");
+            Assert.That(_sink.Closed, Is.EqualTo(new[]
+            {
+                ("c0", DurableMatchCoordinator.ResyncCloseStatus,
+                    DurableMatchCoordinator.ResyncCloseReason),
+            }), "the issuer is disconnected instead, and learns the ending on its reconnect");
+
+            _faults.FailEveryCompletion(null);
 
             PersistedMatch stranded = (await _store.GetMatchAsync(_matchId, Ct))!;
             Assert.That(stranded.Status, Is.EqualTo(MatchStatus.Active), "this is the state being healed");
@@ -637,18 +644,47 @@ namespace HexWars.NetServer.Tests
         [Test]
         public async Task ACompletionThatThrew_IsRetriedByTheNextHandshakeOnTheSameHost()
         {
-            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
 
-            _faults.FailNextCompletion(new InvalidOperationException("the database went away"));
+            _faults.FailEveryCompletion(new InvalidOperationException("the database went away"));
             await Cmd(played.Commands[^1]);
 
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+
+            _faults.FailEveryCompletion(null);
+            _sink.Clear();
 
             // No restart at all. The same host, the same projection, the next thing anybody does with it.
             await Auth("c2", _credential1);
 
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed));
             Assert.That(Live().Status, Is.EqualTo(MatchStatus.Completed));
+
+            // Both seats that were watching are dealt the terminal state. Neither of them ever saw the
+            // APPLY that ended the game, so healing the row without telling them would leave two clients
+            // sitting in a position that no longer exists.
+            string terminal = NetProtocol.Start(ReplayFile.Write(start, played.Commands));
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { terminal }));
+            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { terminal }));
+        }
+
+        [Test]
+        public async Task ACompletionThatFailedOnce_IsRetriedImmediatelyAndTheGameEndsNormally()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            // One failure is a connection that has just been replaced, not a database that is gone. The
+            // completion is one idempotent UPDATE, so the immediate retry is the cheapest correct answer
+            // and the players never learn anything happened.
+            _faults.FailNextCompletion(new InvalidOperationException("the connection was reset"));
+            _sink.Clear();
+            await Cmd(played.Commands[^1]);
+
+            string expected = NetProtocol.Apply(played.Commands[^1]);
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { expected }));
+            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { expected }));
+            Assert.That(_sink.Closed, Is.Empty);
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed));
         }
 
         [Test]
@@ -902,6 +938,124 @@ namespace HexWars.NetServer.Tests
             await Cmd("c0", new EndTurn(PlayerId.Player0));
             Assert.That(_sink.MessagesFor("c0"),
                 Is.EqualTo(new[] { DurableMatchCoordinator.RejectNoSeat }));
+        }
+
+        // ---- an ambiguous commit nobody can settle ----------------------------
+
+        [Test]
+        public async Task AnAmbiguousAppendThatCannotBeVerified_ClosesTheIssuerRatherThanInvitingARetry()
+        {
+            await StartTheMatch();
+            _sink.Clear();
+
+            // The row lands and the answer never comes back, and then the journal will not answer either.
+            // TemporaryFailure would be a claim that the write did not happen, which is exactly what could
+            // not be established - and an obedient client would send the command again.
+            var opening = new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0));
+            _faults.ThrowAfterNextAppend(new InvalidOperationException("the connection was reset"));
+            _faults.FailNextJournalRead(new InvalidOperationException("the database is not answering"));
+
+            await Cmd("c0", opening);
+
+            Assert.That(_sink.Sent.Any(s => s.Message == DurableMatchCoordinator.RejectTemporaryFailure),
+                Is.False, "never an invitation to resend a command that may already be durable");
+            Assert.That(_sink.Closed, Is.EqualTo(new[]
+            {
+                ("c0", DurableMatchCoordinator.ResyncCloseStatus,
+                    DurableMatchCoordinator.ResyncCloseReason),
+            }));
+
+            MatchJournal journal = (await _store.LoadJournalAsync(_matchId, Ct))!;
+            Assert.That(journal.Commands, Has.Count.EqualTo(1), "the write had in fact landed");
+
+            // And the reconnect settles it: START carries the command the client could not be told about.
+            _sink.Clear();
+            await Auth("c0-again", _credential0);
+
+            Assert.That(_sink.MessagesFor("c0-again").Last(), Does.StartWith("START "));
+            Assert.That(_sink.MessagesFor("c0-again").Last(),
+                Does.Contain(CommandWire.Write(opening)));
+        }
+
+        [Test]
+        public async Task AnAppendCancelledMidWriteThatCannotBeVerified_AlsoClosesTheIssuer()
+        {
+            await StartTheMatch();
+            _sink.Clear();
+
+            // A cancellation is not a refusal either: the write may have committed before the token was
+            // observed, and there is no way to find out when the journal will not answer.
+            _faults.FailNextAppend(new OperationCanceledException("the write was cancelled"));
+            _faults.FailNextJournalRead(new InvalidOperationException("the database is not answering"));
+
+            await Cmd("c0", new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
+
+            Assert.That(_sink.Sent.Any(s => s.Message == DurableMatchCoordinator.RejectTemporaryFailure),
+                Is.False);
+            Assert.That(_sink.Closed.Select(c => c.CloseStatus),
+                Is.EqualTo(new[] { DurableMatchCoordinator.ResyncCloseStatus }));
+        }
+
+        [Test]
+        public async Task AStatusThatCannotBeReReadAfterARefusedCompletion_IsNotTreatedAsCompleted()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            // Somebody else ends the match, so TryComplete answers false - and then the row cannot be read
+            // to find out what they ended it as. Unknown is not Completed: advancing to it would be
+            // inventing an ending, and broadcasting under it would hand the clients a result that may not
+            // be the recorded one.
+            var abandonedOnce = false;
+            _faults.BeforeCompletion = async () =>
+            {
+                if (abandonedOnce) return;
+                abandonedOnce = true;
+                await _store.TryCompleteMatchAsync(
+                    _matchId, MatchStatus.Abandoned, null, _clock.GetUtcNow(), Ct);
+            };
+
+            _faults.FailNextGetMatch(new InvalidOperationException("the database is not answering"));
+            _sink.Clear();
+
+            await Cmd(played.Commands[^1]);
+
+            Assert.That(_sink.Sent.Any(s => s.Message.StartsWith("APPLY ", StringComparison.Ordinal)),
+                Is.False, "nothing is broadcast under a status this host could not read");
+            Assert.That(Live().Status, Is.Not.EqualTo(MatchStatus.Completed));
+            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EquivalentTo(new[] { "c0", "c1" }));
+            Assert.That(_sink.Closed.Select(c => c.CloseStatus),
+                Is.All.EqualTo(DurableMatchCoordinator.ResyncCloseStatus));
+        }
+
+        // ---- the window covers however a started match ended -------------------
+
+        [Test]
+        public async Task AMatchTheReaperAbandonedAfterItWasOver_StillDealsItsEndingInsideTheWindow()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+
+            _faults.FailEveryCompletion(new InvalidOperationException("the database went away"));
+            await Cmd(played.Commands[^1]);
+            _faults.FailEveryCompletion(null);
+
+            // The reaper gets to the row first and calls it abandoned. The game is still over, the journal
+            // still says how, and the seats still deserve to be shown it.
+            Assert.That(
+                await _store.TryCompleteMatchAsync(
+                    _matchId, MatchStatus.Abandoned, null, _clock.GetUtcNow(), Ct),
+                Is.True);
+
+            _clock.Advance(TimeSpan.FromSeconds(30));
+            _sink.Clear();
+
+            DurableMatchCoordinator.AuthOutcome back = await Auth("c2", _credential1);
+
+            Assert.That(back.Ok, Is.True, back.FailCode);
+            Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
+            {
+                "SEAT 1",
+                NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
+            }));
         }
     }
 }

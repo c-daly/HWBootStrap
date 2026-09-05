@@ -39,15 +39,18 @@ namespace HexWars.NetServer.Tests
         static CancellationToken Ct => CancellationToken.None;
 
         JournalStore _store = null!;
+        FakeTimeProvider _clock = null!;
         MatchRecoveryService _recovery = null!;
 
         [SetUp]
         public void AServiceOverAJournalWeControlByHand()
         {
             _store = new JournalStore();
+            _clock = new FakeTimeProvider(Begin);
             _recovery = new MatchRecoveryService(
                 _store,
                 Options.Create(new MatchHostingOptions()),
+                _clock,
                 NullLogger<MatchRecoveryService>.Instance);
         }
 
@@ -184,6 +187,87 @@ namespace HexWars.NetServer.Tests
             Assert.That(Refusal().Failure, Is.EqualTo(MatchRecoveryFailure.SequenceGap));
         }
 
+        // ---- the startup pass finishes what a kill interrupted -----------------
+
+        [Test]
+        public async Task AnActiveMatchThatIsAlreadyOver_IsClosedByTheStartupPass()
+        {
+            // A process killed between the append of a winning command and the row that records the win
+            // leaves this exact state. Waiting for a handshake to repair it is not good enough: nothing
+            // guarantees a player ever comes back to a finished game, and a match left active is one the
+            // retention reaper eventually marks abandoned - turning a game somebody won into a game the
+            // record says nobody finished.
+            var store = new InMemoryMatchStore();
+            (Guid matchId, MatchRecord played) = await SeedAFinishedButOpenMatchAsync(store);
+
+            RecoveryReport report = await NewRecovery(store).VerifyOpenMatchesAsync(Ct);
+
+            Assert.That(report.Verified, Is.EqualTo(1));
+            Assert.That(report.Healed, Is.EqualTo(1));
+            Assert.That(report.Failed, Is.Empty);
+
+            PersistedMatch row = (await store.GetMatchAsync(matchId, Ct))!;
+            Assert.That(row.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(row.WinnerSeat,
+                Is.EqualTo(played.Result.Final.Winner is PlayerId w ? (int)w : null));
+        }
+
+        [Test]
+        public async Task AnActiveMatchStillBeingPlayed_IsVerifiedAndLeftAlone()
+        {
+            var store = new InMemoryMatchStore();
+            (Guid matchId, MatchRecord played) = await SeedAFinishedButOpenMatchAsync(store, dropLast: true);
+            Assert.That(played.Commands, Is.Not.Empty);
+
+            RecoveryReport report = await NewRecovery(store).VerifyOpenMatchesAsync(Ct);
+
+            Assert.That(report.Verified, Is.EqualTo(1));
+            Assert.That(report.Healed, Is.Zero, "healing is a write, and an unfinished game needs none");
+            Assert.That((await store.GetMatchAsync(matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+        }
+
+        MatchRecoveryService NewRecovery(IMatchStore store) => new(
+            store,
+            Options.Create(new MatchHostingOptions()),
+            _clock,
+            NullLogger<MatchRecoveryService>.Instance);
+
+        /// <summary>An active match whose journal replays to a finished game, written through the store the
+        /// same way the coordinator writes one.</summary>
+        static async Task<(Guid MatchId, MatchRecord Played)> SeedAFinishedButOpenMatchAsync(
+            InMemoryMatchStore store, bool dropLast = false)
+        {
+            CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, ProtocolContract.Version,
+                "test-build", new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+
+            Guid matchId = created.Match.MatchId;
+            GameState start = FreshStart();
+
+            Assert.That(
+                await store.TryStartMatchAsync(
+                    matchId, ReplayFile.Write(start, Array.Empty<Command>()), Begin, Ct),
+                Is.True);
+
+            MatchRecord played =
+                Match.Record(start, new GreedyAgent(11), new GreedyAgent(29), maxCommands: 4000);
+            Assert.That(played.Result.Final.IsGameOver, Is.True,
+                "the offline driver never reached a terminal state, so this test proves nothing");
+
+            int count = dropLast ? played.Commands.Count - 1 : played.Commands.Count;
+            for (var i = 0; i < count; i++)
+            {
+                Command command = played.Commands[i];
+                AppendResult appended = await store.AppendCommandAsync(
+                    matchId, i + 1, CommandWire.Write(command),
+                    command.Issuer == PlayerId.Player0 ? Seat0Steam : Seat1Steam, Begin, Ct);
+
+                Assert.That(appended.Status, Is.EqualTo(AppendStatus.Appended));
+            }
+
+            return (matchId, played);
+        }
+
         // ---- the refusals, one per way a record can be unplayable ------------
 
         [Test]
@@ -242,7 +326,7 @@ namespace HexWars.NetServer.Tests
         {
             var wrong = new MatchHostingOptions { ProtocolVersion = 3 };
             _recovery = new MatchRecoveryService(
-                _store, Options.Create(wrong), NullLogger<MatchRecoveryService>.Instance);
+                _store, Options.Create(wrong), _clock, NullLogger<MatchRecoveryService>.Instance);
 
             Seed(Active(FreshStartReplay()));
 
@@ -528,6 +612,7 @@ namespace HexWars.NetServer.Tests
                 var loader = new CountingLoader(new MatchRecoveryService(
                     journals,
                     Options.Create(new MatchHostingOptions()),
+                    new FakeTimeProvider(Begin),
                     NullLogger<MatchRecoveryService>.Instance));
 
                 return new Fixture
@@ -644,7 +729,7 @@ namespace HexWars.NetServer.Tests
 
             public Task<bool> ReplaceJoinCredentialAsync(
                 byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt,
-                DateTimeOffset now, CancellationToken ct) =>
+                DateTimeOffset now, CancellationToken ct, TimeSpan? allowTerminalWithin = null) =>
                 throw new NotSupportedException();
         }
     }
