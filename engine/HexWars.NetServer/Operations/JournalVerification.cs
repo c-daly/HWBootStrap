@@ -187,27 +187,30 @@ namespace HexWars.NetServer.Operations
         internal static async Task<IReadOnlyList<string>> PendingMigrationsAsync(
             NpgsqlDataSource source, CancellationToken ct)
         {
-            await using NpgsqlConnection connection = await source.OpenConnectionAsync(ct).ConfigureAwait(false);
+            bool ledger = await ReadOnlyQueryAsync(
+                source,
+                "SELECT to_regclass('public.schema_migrations') IS NOT NULL",
+                async (command, token) =>
+                    await command.ExecuteScalarAsync(token).ConfigureAwait(false) is true,
+                ct).ConfigureAwait(false);
 
-            var applied = new HashSet<string>(StringComparer.Ordinal);
+            // No ledger at all is not an empty ledger: it is a database that has never been migrated, and
+            // every migration this build carries is missing from it.
+            if (!ledger) return MigrationRunner.EmbeddedMigrations().Select(m => m.Version).ToArray();
 
-            await using (NpgsqlCommand exists = connection.CreateCommand())
-            {
-                exists.CommandText = "SELECT to_regclass('public.schema_migrations') IS NOT NULL";
-                object? answer = await exists.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            HashSet<string> applied = await ReadOnlyQueryAsync(
+                source,
+                "SELECT version FROM schema_migrations",
+                async (command, token) =>
+                {
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+                    await using NpgsqlDataReader rows =
+                        await command.ExecuteReaderAsync(token).ConfigureAwait(false);
 
-                // No ledger at all is not an empty ledger: it is a database that has never been migrated,
-                // and every migration this build carries is missing from it.
-                if (answer is not true)
-                    return MigrationRunner.EmbeddedMigrations().Select(m => m.Version).ToArray();
-            }
-
-            await using (NpgsqlCommand read = connection.CreateCommand())
-            {
-                read.CommandText = "SELECT version FROM schema_migrations";
-                await using NpgsqlDataReader rows = await read.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                while (await rows.ReadAsync(ct).ConfigureAwait(false)) applied.Add(rows.GetString(0));
-            }
+                    while (await rows.ReadAsync(token).ConfigureAwait(false)) seen.Add(rows.GetString(0));
+                    return seen;
+                },
+                ct).ConfigureAwait(false);
 
             // Only what is missing. A version in the ledger this build has never heard of means the
             // database is AHEAD, which is a rollback and is fine: the older build simply does not use it.
@@ -217,22 +220,62 @@ namespace HexWars.NetServer.Operations
                 .ToArray();
         }
 
-        static async Task<IReadOnlyList<(Guid MatchId, string Status)>> ListAsync(
-            NpgsqlDataSource source, bool openOnly, CancellationToken ct)
+        static Task<IReadOnlyList<(Guid MatchId, string Status)>> ListAsync(
+            NpgsqlDataSource source, bool openOnly, CancellationToken ct) =>
+            ReadOnlyQueryAsync(
+                source,
+                openOnly
+                    ? "SELECT match_id, status FROM matches WHERE status IN ('waiting','active') ORDER BY created_at"
+                    : "SELECT match_id, status FROM matches ORDER BY created_at",
+                async (command, token) =>
+                {
+                    var matches = new List<(Guid, string)>();
+                    await using NpgsqlDataReader rows =
+                        await command.ExecuteReaderAsync(token).ConfigureAwait(false);
+
+                    while (await rows.ReadAsync(token).ConfigureAwait(false))
+                        matches.Add((rows.GetGuid(0), rows.GetString(1)));
+
+                    return (IReadOnlyList<(Guid, string)>)matches;
+                },
+                ct);
+
+        /// <summary>
+        /// The only place this verb runs SQL of its own, and the only reason its promise is worth
+        /// anything.
+        ///
+        /// The session default the connection asks for is a DEFAULT: one SET turns it off, and the next
+        /// statement can write. An explicit READ ONLY transaction cannot be turned off from inside itself,
+        /// so every statement that runs in here is refused a write by the server no matter what ran
+        /// before it. The transaction is rolled back rather than committed, because there is by
+        /// construction nothing to commit.
+        /// </summary>
+        internal static async Task<T> ReadOnlyQueryAsync<T>(
+            NpgsqlDataSource source,
+            string sql,
+            Func<NpgsqlCommand, CancellationToken, Task<T>> read,
+            CancellationToken ct)
         {
-            await using NpgsqlConnection connection = await source.OpenConnectionAsync(ct).ConfigureAwait(false);
-            await using NpgsqlCommand read = connection.CreateCommand();
+            await using NpgsqlConnection connection =
+                await source.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using NpgsqlTransaction transaction =
+                await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-            read.CommandText = openOnly
-                ? "SELECT match_id, status FROM matches WHERE status IN ('waiting','active') ORDER BY created_at"
-                : "SELECT match_id, status FROM matches ORDER BY created_at";
+            await using (NpgsqlCommand mark = connection.CreateCommand())
+            {
+                mark.Transaction = transaction;
+                mark.CommandText = "SET TRANSACTION READ ONLY";
+                await mark.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
 
-            var matches = new List<(Guid, string)>();
-            await using NpgsqlDataReader rows = await read.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            while (await rows.ReadAsync(ct).ConfigureAwait(false))
-                matches.Add((rows.GetGuid(0), rows.GetString(1)));
+            await using NpgsqlCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sql;
 
-            return matches;
+            T answer = await read(command, ct).ConfigureAwait(false);
+
+            await transaction.RollbackAsync(ct).ConfigureAwait(false);
+            return answer;
         }
     }
 }
