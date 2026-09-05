@@ -42,9 +42,17 @@ namespace HexWars.Presentation
         /// <summary>How long the previous attempt gets to finish closing before the next one opens.</summary>
         public const float AttemptCloseTimeoutSeconds = 2f;
 
+        /// <summary>
+        /// Replaces the socket for a test. PlayMode cannot open a real websocket, so the smoke test
+        /// installs a driver it can drive frame by frame and walks a real AUTH, SEAT and START through
+        /// this component. Null (the default) uses NativeWebSocket.
+        /// </summary>
+        internal static Func<ISteamSocketDriver>? DriverFactoryForTests;
+
         readonly SteamMatchSession _session = new SteamMatchSession();
 
-        NativeWebSocketDriver? _driver;
+        ISteamSocketDriver? _driver;
+        NativeWebSocketDriver? _nativeDriver;   // the same object as _driver when the socket is real
         SteamMatchSocketPump? _pump;
         GameBootstrap? _game;
         SteamMatchTicket? _ticket;
@@ -74,7 +82,18 @@ namespace HexWars.Presentation
             _ticket = ticket;
             _refresh = refreshCredential;
             _session.UseTicket(ticket);
-            _driver = new NativeWebSocketDriver(message => Debug.LogWarning("[SteamNet] " + message));
+
+            var factory = DriverFactoryForTests;
+            if (factory == null)
+            {
+                _nativeDriver = new NativeWebSocketDriver(message => Debug.LogWarning("[SteamNet] " + message));
+                _driver = _nativeDriver;
+            }
+            else
+            {
+                _driver = factory();
+            }
+
             _pump = new SteamMatchSocketPump(_session, _driver, message => Debug.LogError("[SteamNet] " + message));
             StartCoroutine(Lifecycle());
         }
@@ -209,8 +228,8 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            var driver = _driver;
-            if (driver != null) driver.DispatchMessages();
+            var native = _nativeDriver;
+            if (native != null) native.DispatchMessages();
             if (_closing) return;
 
             // a started game means a drop has something to reconnect into
@@ -326,9 +345,15 @@ namespace HexWars.Presentation
             _pump = null;
             if (pump != null) pump.Dispose();
 
+            var native = _nativeDriver;
             var driver = _driver;
+            _nativeDriver = null;
             _driver = null;
-            if (driver != null) driver.CloseAll();
+
+            if (native != null) { native.CloseAll(); return; }
+            if (driver == null) return;
+            try { driver.CloseAsync(_session.CurrentAttempt); }
+            catch (Exception e) { Debug.LogWarning("[SteamNet] close failed: " + e.Message); }
         }
 
         /// <summary>Log-safe form of the socket URL. The credential is never in a URL, and this keeps it
