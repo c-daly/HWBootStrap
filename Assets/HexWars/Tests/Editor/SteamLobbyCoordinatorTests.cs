@@ -1021,6 +1021,30 @@ namespace HexWars.Presentation.Tests
                 "the abandoned exchange must not keep its Web API ticket");
         }
 
+        [Test]
+        public void AJoinThatNeverAnswers_TimesOutIntoBackendUnavailable()
+        {
+            const string lobbyId = "109775240000000821";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+
+            _sut.QuickMatch();
+            _steam.Pump();   // the search answers, a join goes out, and Steam never answers it
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(1));
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Searching));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_sut.Status.CanRetry, Is.True);
+            Assert.That(_steam.CreateLobbyCalls, Is.Zero,
+                "hosting on top of a join that may still land would strand a lobby");
+
+            Pump();   // the late success belongs to an abandoned attempt
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1));
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()

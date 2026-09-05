@@ -104,6 +104,7 @@ namespace HexWars.Presentation
 
         string? _joinRequestedMatchId;
         bool _allocationStarted;
+        bool _joinInFlight;
 
         SteamLobbyStatus _status;
 
@@ -318,6 +319,13 @@ namespace HexWars.Presentation
             {
                 ClearDeadline();
                 _generation++;
+                if (_joinInFlight)
+                {
+                    _joinInFlight = false;
+                    SetPhase(SteamLobbyPhase.BackendUnavailable);
+                    Publish();
+                    return;
+                }
                 if (_operation == Operation.QuickMatch)
                 {
                     CreateLobbyForCurrentOperation();
@@ -399,9 +407,13 @@ namespace HexWars.Presentation
                 return;
             }
 
-            // The search is over the moment a join goes out. Leaving the deadline armed lets it fire
-            // between the join and its answer, which hosts a second lobby while the first one lands.
-            ClearDeadline();
+            // The search is over the moment a join goes out, but the join needs a deadline of its own:
+            // Steam can accept it and never answer, and the search deadline used to be cleared here,
+            // which left the player on "Searching..." with nothing to end it. The join deadline is the
+            // allocation one and it reports a backend outage, so it can never host a second lobby on
+            // top of the one this client may still be entering.
+            _joinInFlight = true;
+            SetDeadline(_config.AllocationTimeoutSeconds);
             _steam.JoinLobby(chosen, ok => OnLobbyJoined(generation, chosen, ok));
         }
 
@@ -490,6 +502,7 @@ namespace HexWars.Presentation
             }
 
             ClearDeadline();
+            _joinInFlight = false;
             if (!ok)
             {
                 // A Quick Match race (somebody else took the slot) simply becomes hosting.
@@ -908,6 +921,7 @@ namespace HexWars.Presentation
             _opponentName = null;
             _allocationStarted = false;
             _joinRequestedMatchId = null;
+            _joinInFlight = false;
             ClearPendingMatchKey();
             ClearDeadline();
         }
