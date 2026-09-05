@@ -106,12 +106,17 @@ namespace HexWars.NetServer.Endpoints
 
                 if (IsRefusedAccount(options, identity, logger, "a match creation"))
                 {
+                    metrics.SteamFailure(BlockedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
                 }
 
                 if (!await steam.CheckAppOwnershipAsync(identity.SteamId, ct).ConfigureAwait(false))
                 {
+                    // A refusal Valve answered with rather than threw. It belongs with the other Steam
+                    // failures for the same reason the thrown ones do: an operator watching that counter
+                    // is watching whether Steam is letting players in, and a no is a no either way.
+                    metrics.SteamFailure(OwnershipFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden,
                         ApiErrors.OwnershipMissing,
@@ -244,6 +249,7 @@ namespace HexWars.NetServer.Endpoints
             {
                 // Storage is the only thing left that can throw here. The ticket is deliberately not in
                 // scope of this line: an exception message may be echoed into a log sink verbatim.
+                metrics.DbFailure(MatchMetrics.DbOp.Create);
                 logger.LogError(
                     storage, "Match creation failed for lobby {LobbyId}", request.SteamLobbyId);
                 return ApiErrors.UnavailableResult();
@@ -299,6 +305,7 @@ namespace HexWars.NetServer.Endpoints
 
                 if (IsRefusedAccount(options, identity, logger, "a join"))
                 {
+                    metrics.SteamFailure(BlockedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
                 }
@@ -395,6 +402,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
+                metrics.DbFailure(MatchMetrics.DbOp.Join);
                 logger.LogError(storage, "Join failed for match {MatchId}", Short(matchId));
                 return ApiErrors.UnavailableResult();
             }
@@ -554,8 +562,15 @@ namespace HexWars.NetServer.Endpoints
         static void RecordSteamRefusal(MatchMetrics metrics, SteamApiException failure)
         {
             metrics.SteamFailure(failure.Failure.ToString());
-            if (failure.Failure == SteamFailure.AuthenticationFailed) metrics.AuthFailure();
+
+            if (failure.Failure == SteamFailure.AuthenticationFailed)
+                metrics.AuthFailure(MatchMetrics.AuthStage.Ticket);
         }
+
+        /// <summary>The two refusals this server decides rather than Valve, named so they read alongside
+        /// the SteamFailure values in the same counter.</summary>
+        const string OwnershipFailure = "OwnershipMissing";
+        const string BlockedFailure = "Blocked";
 
         /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
         /// form still matches the account it was meant to name.</summary>

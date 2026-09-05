@@ -15,10 +15,14 @@ namespace HexWars.NetServer.Operations
         long CommandsCommitted,
         long CommandsRejected,
         IReadOnlyDictionary<string, long> RejectionsByReason,
+        long CatalogRejected,
+        IReadOnlyDictionary<string, long> CatalogRejectionsByReason,
         long DatabaseFailures,
+        IReadOnlyDictionary<string, long> DatabaseFailuresByOp,
         long SteamFailures,
         IReadOnlyDictionary<string, long> SteamFailuresByKind,
         long AuthFailures,
+        IReadOnlyDictionary<string, long> AuthFailuresByStage,
         long Reconnects,
         long RecoveryFailures,
         int LiveMatches,
@@ -51,6 +55,7 @@ namespace HexWars.NetServer.Operations
         public const string MatchesCreatedName = "hexwars.matches.created";
         public const string CommandsCommittedName = "hexwars.commands.committed";
         public const string CommandsRejectedName = "hexwars.commands.rejected";
+        public const string CatalogRejectedName = "hexwars.catalog.rejected";
         public const string DatabaseFailuresName = "hexwars.db.failures";
         public const string SteamFailuresName = "hexwars.steam.failures";
         public const string AuthFailuresName = "hexwars.auth.failures";
@@ -70,6 +75,43 @@ namespace HexWars.NetServer.Operations
         /// <summary>Which Steam refusal it was.</summary>
         public const string FailureTag = "failure";
 
+        /// <summary>Which store call failed. See DbOp for the set.</summary>
+        public const string OpTag = "op";
+
+        /// <summary>How far a handshake got before it was refused. See AuthStage for the set.</summary>
+        public const string StageTag = "stage";
+
+        /// <summary>
+        /// The store calls a failure can be attributed to.
+        ///
+        /// Named rather than free text, because the whole value of the tag is that two operators reading
+        /// the same counter a month apart are reading the same thing.
+        /// </summary>
+        public static class DbOp
+        {
+            public const string Append = "append";
+            public const string Catalog = "catalog";
+            public const string Start = "start";
+            public const string Complete = "complete";
+            public const string Status = "status";
+            public const string Reload = "reload";
+            public const string Journal = "journal";
+            public const string Touch = "touch";
+            public const string Load = "load";
+            public const string Create = "create";
+            public const string Join = "join";
+        }
+
+        /// <summary>How far a refused handshake got. A frame refusal never cost a database read; a
+        /// credential refusal did, and the two want different responses when either one spikes.</summary>
+        public static class AuthStage
+        {
+            public const string Frame = "frame";
+            public const string Credential = "credential";
+            public const string Timeout = "timeout";
+            public const string Ticket = "ticket";
+        }
+
         readonly Meter _meter = new(MeterName);
         readonly MeterListener _listener = new();
 
@@ -82,6 +124,7 @@ namespace HexWars.NetServer.Operations
         readonly Counter<long> _matchesCreated;
         readonly Counter<long> _commandsCommitted;
         readonly Counter<long> _commandsRejected;
+        readonly Counter<long> _catalogRejected;
         readonly Counter<long> _databaseFailures;
         readonly Counter<long> _steamFailures;
         readonly Counter<long> _authFailures;
@@ -95,6 +138,7 @@ namespace HexWars.NetServer.Operations
             _matchesCreated = _meter.CreateCounter<long>(MatchesCreatedName);
             _commandsCommitted = _meter.CreateCounter<long>(CommandsCommittedName);
             _commandsRejected = _meter.CreateCounter<long>(CommandsRejectedName);
+            _catalogRejected = _meter.CreateCounter<long>(CatalogRejectedName);
             _databaseFailures = _meter.CreateCounter<long>(DatabaseFailuresName);
             _steamFailures = _meter.CreateCounter<long>(SteamFailuresName);
             _authFailures = _meter.CreateCounter<long>(AuthFailuresName);
@@ -140,15 +184,31 @@ namespace HexWars.NetServer.Operations
 
         public void CommandCommitted() => _commandsCommitted.Add(1);
 
+        /// <summary>A CMD frame that was not applied. Only a CMD: a catalog refused is a different event
+        /// with a different response, and counting the two together makes both unreadable.</summary>
         public void CommandRejected(string reason) =>
             _commandsRejected.Add(1, new KeyValuePair<string, object?>(ReasonTag, reason));
 
-        public void DatabaseFailure() => _databaseFailures.Add(1);
+        /// <summary>A CATALOG frame refused, or a start that could not be recorded.</summary>
+        public void CatalogRejected(string reason) =>
+            _catalogRejected.Add(1, new KeyValuePair<string, object?>(ReasonTag, reason));
+
+        /// <summary>
+        /// A store call that failed, named by the call.
+        ///
+        /// Every catch around the store goes through here. An untagged total would say the database is
+        /// unhappy and nothing else; the tag is what separates a wedged append from a journal read that
+        /// times out, which are the same number and different incidents.
+        /// </summary>
+        public void DbFailure(string op) =>
+            _databaseFailures.Add(1, new KeyValuePair<string, object?>(OpTag, op));
 
         public void SteamFailure(string failure) =>
             _steamFailures.Add(1, new KeyValuePair<string, object?>(FailureTag, failure));
 
-        public void AuthFailure() => _authFailures.Add(1);
+        /// <summary>A handshake that got no seat, tagged with how far it got. See AuthStage.</summary>
+        public void AuthFailure(string stage) =>
+            _authFailures.Add(1, new KeyValuePair<string, object?>(StageTag, stage));
 
         /// <summary>A seat that had a socket recently taking one again.</summary>
         public void Reconnect() => _reconnects.Add(1);
@@ -180,10 +240,14 @@ namespace HexWars.NetServer.Operations
                 Count(CommandsCommittedName),
                 Count(CommandsRejectedName),
                 Tagged(CommandsRejectedName),
+                Count(CatalogRejectedName),
+                Tagged(CatalogRejectedName),
                 Count(DatabaseFailuresName),
+                Tagged(DatabaseFailuresName),
                 Count(SteamFailuresName),
                 Tagged(SteamFailuresName),
                 Count(AuthFailuresName),
+                Tagged(AuthFailuresName),
                 Count(ReconnectsName),
                 Count(RecoveryFailuresName),
                 Gauge(LiveMatchesName),
@@ -225,7 +289,8 @@ namespace HexWars.NetServer.Operations
             string? tagged = null;
             foreach (KeyValuePair<string, object?> tag in tags)
             {
-                if (tag.Key == ReasonTag || tag.Key == FailureTag) tagged = tag.Value?.ToString();
+                if (tag.Key is ReasonTag or FailureTag or OpTag or StageTag)
+                    tagged = tag.Value?.ToString();
             }
 
             if (tagged is null) return;

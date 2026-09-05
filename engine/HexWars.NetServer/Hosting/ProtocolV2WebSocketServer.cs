@@ -158,7 +158,21 @@ namespace HexWars.NetServer.Hosting
             // Registered before the handshake, because the coordinator answers AUTH by sending SEAT through
             // the sink: a connection the sink cannot find would authenticate into silence. Add takes over
             // the reservation above; Remove is what hands it back.
-            registry.Add(connection);
+            //
+            // It refuses once this host is going away. The readiness check higher up is a moment, not a
+            // barrier: a request that passed it is still mid-upgrade when shutdown takes its snapshot of
+            // what to close, and a socket added after that snapshot is one nobody ever closes. Refused
+            // here it gets the same 1012 every other socket gets, which is the answer that tells a client
+            // to come back rather than that something broke.
+            if (!registry.Add(connection))
+            {
+                logger.LogDebug("Refused a v2 socket that arrived as this host was going away");
+                registry.Release(remoteIp);
+                await connection
+                    .CloseAsync(GracefulShutdownService.RestartCloseStatus, GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
+                return;
+            }
 
             try
             {
@@ -192,6 +206,8 @@ namespace HexWars.NetServer.Hosting
         {
             CancellationToken aborted = context.RequestAborted;
             var throttle = context.RequestServices.GetRequiredService<AuthFailureThrottle>();
+            var metrics = context.RequestServices.GetRequiredService<MatchMetrics>();
+            var registry = context.RequestServices.GetRequiredService<V2ConnectionRegistry>();
 
             using var deadline = new CancellationTokenSource(
                 TimeSpan.FromSeconds(options.AuthFrameTimeoutSeconds), time);
@@ -202,6 +218,7 @@ namespace HexWars.NetServer.Hosting
 
             if (first.Kind == FrameKind.TooBig)
             {
+                metrics.AuthFailure(MatchMetrics.AuthStage.Frame);
                 await connection.CloseFromReceiveLoopAsync(CloseTooBig, "message too large")
                     .ConfigureAwait(false);
                 return false;
@@ -213,6 +230,7 @@ namespace HexWars.NetServer.Hosting
                 // whole point of the deadline; a client that hung up on its own needs nothing said to it.
                 if (deadline.IsCancellationRequested && !aborted.IsCancellationRequested)
                 {
+                    metrics.AuthFailure(MatchMetrics.AuthStage.Timeout);
                     logger.LogDebug("Closed a v2 socket that never sent AUTH");
                     await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth timeout")
                         .ConfigureAwait(false);
@@ -232,7 +250,8 @@ namespace HexWars.NetServer.Hosting
                 logger.LogDebug(
                     "A v2 socket opened with something other than AUTH, {Bytes} bytes", first.Text.Length);
                 throttle.RecordFailure(connection.RemoteIp);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
                 return false;
             }
 
@@ -241,7 +260,23 @@ namespace HexWars.NetServer.Hosting
             {
                 logger.LogDebug("A v2 socket sent an AUTH frame that is not a match id and a credential");
                 throttle.RecordFailure(connection.RemoteIp);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
+                return false;
+            }
+
+            // This host began going away while the socket was still proving who it is. It gets the same
+            // 1012 every seated socket gets rather than a seat in a match this process will not be hosting
+            // a moment from now, and no credential is looked up on its behalf. Checked here rather than at
+            // the upgrade because the whole point is the window in between: the frame this socket is being
+            // judged on arrived after the upgrade was accepted.
+            if (registry.Stopping)
+            {
+                logger.LogDebug("Refused a v2 handshake that landed as this host was going away");
+                await connection.CloseFromReceiveLoopAsync(
+                        GracefulShutdownService.RestartCloseStatus,
+                        GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
                 return false;
             }
 
@@ -251,7 +286,8 @@ namespace HexWars.NetServer.Hosting
             if (throttle.IsThrottled(connection.RemoteIp))
             {
                 logger.LogWarning("Refused an AUTH frame from a caller that has spent its failures");
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
                 return false;
             }
 
@@ -379,8 +415,18 @@ namespace HexWars.NetServer.Hosting
 
         /// <summary>Names the refusal, then closes. The frame goes out first because the close drains the
         /// outbound queue: a client told only by a close status cannot tell invalid from unavailable.</summary>
-        static async Task RefuseAsync(V2Connection connection, string failCode)
+        /// <summary>
+        /// Refuses a handshake and records how far it got.
+        ///
+        /// The stage is the whole value of the counter. A rise in frame refusals is a client sending
+        /// rubbish and costs this server nothing; a rise in credential refusals is a database read per
+        /// attempt. They are the same number and they want different responses.
+        /// </summary>
+        static async Task RefuseAsync(
+            V2Connection connection, string failCode, MatchMetrics? metrics = null, string? stage = null)
         {
+            if (metrics is not null && stage is not null) metrics.AuthFailure(stage);
+
             connection.TryEnqueue(AuthFailPrefix + failCode);
             await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth failed").ConfigureAwait(false);
         }
