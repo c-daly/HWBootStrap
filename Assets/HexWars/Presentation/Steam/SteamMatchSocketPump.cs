@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace HexWars.Presentation
 {
@@ -26,6 +27,7 @@ namespace HexWars.Presentation
             Message,
             Closed,
             Error,
+            Violation,
         }
 
         readonly struct SocketEvent
@@ -42,6 +44,20 @@ namespace HexWars.Presentation
             public readonly string Text;
         }
 
+        /// <summary>
+        /// How many driver events may wait for the next Pump. A v2 match is a handful of frames a
+        /// second; a peer that queues hundreds is either broken or hostile, and an unbounded queue
+        /// lets it grow the heap until the process dies.
+        /// </summary>
+        public const int MaxQueuedEvents = 256;
+
+        /// <summary>How many events one Pump replays. The rest wait for the next frame, so a burst
+        /// costs a few frames of latency instead of a stalled main thread.</summary>
+        public const int MaxEventsPerPump = 64;
+
+        /// <summary>The largest single frame the protocol allows. START is the biggest real one.</summary>
+        public const int MaxFrameBytes = 256 * 1024;
+
         readonly SteamMatchSession _session;
         readonly ISteamSocketDriver _driver;
         readonly Action<string>? _log;
@@ -49,6 +65,7 @@ namespace HexWars.Presentation
         readonly object _gate = new object();
 
         bool _disposed;
+        bool _violated;
 
         /// <param name="log">Where socket errors go. Null discards them.</param>
         public SteamMatchSocketPump(SteamMatchSession session, ISteamSocketDriver driver, Action<string>? log = null)
@@ -72,10 +89,13 @@ namespace HexWars.Presentation
             get { lock (_gate) { return _queue.Count; } }
         }
 
-        /// <summary>Replays every queued driver event into the session, oldest first.</summary>
+        /// <summary>
+        /// Replays queued driver events into the session, oldest first, at most
+        /// <see cref="MaxEventsPerPump"/> of them. Whatever is left waits for the next call.
+        /// </summary>
         public void Pump()
         {
-            while (true)
+            for (var replayed = 0; replayed < MaxEventsPerPump; replayed++)
             {
                 SocketEvent next;
                 lock (_gate)
@@ -97,6 +117,10 @@ namespace HexWars.Presentation
                         break;
                     case EventKind.Error:
                         if (_log != null) _log(next.Text);
+                        break;
+                    case EventKind.Violation:
+                        if (_log != null) _log(next.Text);
+                        _session.ProtocolViolation(next.AttemptId);
                         break;
                 }
             }
@@ -123,7 +147,15 @@ namespace HexWars.Presentation
 
         void OnMessage(int attemptId, string text)
         {
-            Enqueue(new SocketEvent(EventKind.Message, attemptId, text ?? string.Empty));
+            var frame = text ?? string.Empty;
+            if (Encoding.UTF8.GetByteCount(frame) > MaxFrameBytes)
+            {
+                // No v2 frame is anywhere near this large. Reading it would mean letting the peer
+                // choose how much memory to spend, so the attempt ends instead.
+                Violation(attemptId, "a frame larger than " + MaxFrameBytes + " bytes");
+                return;
+            }
+            Enqueue(new SocketEvent(EventKind.Message, attemptId, frame));
         }
 
         void OnClosed(int attemptId, string reason)
@@ -141,9 +173,33 @@ namespace HexWars.Presentation
         {
             lock (_gate)
             {
-                if (_disposed) return;
+                if (_disposed || _violated) return;
+                if (_queue.Count >= MaxQueuedEvents)
+                {
+                    RaiseViolation(socketEvent.AttemptId,
+                        "more than " + MaxQueuedEvents + " frames queued for one attempt");
+                    return;
+                }
                 _queue.Enqueue(socketEvent);
             }
+        }
+
+        void Violation(int attemptId, string reason)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _violated) return;
+                RaiseViolation(attemptId, reason);
+            }
+        }
+
+        /// <summary>Drops everything queued and leaves one violation behind. Call under the lock.</summary>
+        void RaiseViolation(int attemptId, string reason)
+        {
+            _violated = true;
+            _queue.Clear();
+            _queue.Enqueue(new SocketEvent(EventKind.Violation, attemptId,
+                "attempt " + attemptId + ": protocol violation, " + reason));
         }
     }
 }

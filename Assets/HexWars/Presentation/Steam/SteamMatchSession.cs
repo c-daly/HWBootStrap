@@ -342,6 +342,19 @@ namespace HexWars.Presentation
             Emit(SteamMatchSessionOutputKind.GiveUp);
         }
 
+        /// <summary>
+        /// The transport itself found something the protocol does not allow: a flood of frames, or a
+        /// single frame far larger than any v2 message. The session cannot see either - it is handed
+        /// one decoded frame at a time - so the pump reports it here, and it ends the attempt exactly
+        /// as a malformed frame does.
+        /// </summary>
+        public void ProtocolViolation(int attemptId)
+        {
+            if (!IsCurrentAttempt(attemptId)) return;
+            if (State == SteamMatchSessionState.Closed) return;
+            RaiseProtocolViolation();
+        }
+
         /// <summary>Takes every queued output, leaving the queue empty.</summary>
         public IReadOnlyList<SteamMatchSessionOutput> Drain()
         {
@@ -380,7 +393,7 @@ namespace HexWars.Presentation
             if (!string.Equals(payload, "0", StringComparison.Ordinal)
                 && !string.Equals(payload, "1", StringComparison.Ordinal))
             {
-                ProtocolViolation();
+                RaiseProtocolViolation();
                 return;
             }
 
@@ -423,7 +436,7 @@ namespace HexWars.Presentation
         }
 
         /// <summary>The far end broke the protocol: end the attempt and never try it again.</summary>
-        void ProtocolViolation()
+        void RaiseProtocolViolation()
         {
             _protocolViolated = true;
             State = SteamMatchSessionState.Closed;

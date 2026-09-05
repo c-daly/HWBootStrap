@@ -146,6 +146,61 @@ namespace HexWars.Presentation.Tests
             Assert.That(closing.IsCompleted, Is.True);
         }
 
+        [Test]
+        public void AFloodOfFrames_IsAProtocolViolationAndTheQueueIsDropped()
+        {
+            var a = OpenAttempt();
+            _driver.RaiseOpened(a);
+            PumpAndExecute();
+
+            // An unbounded queue lets the peer choose how much memory this process spends.
+            for (var i = 0; i < 300; i++) _driver.RaiseMessage(a, SteamMatchProtocol.Ping);
+
+            Assert.That(_pump.QueuedEvents, Is.EqualTo(1),
+                "everything queued is dropped, leaving only the violation");
+
+            var outputs = PumpAndExecute();
+            Assert.That(Kinds(outputs), Is.EqualTo(new[]
+            {
+                SteamMatchSessionOutputKind.ProtocolViolation, SteamMatchSessionOutputKind.GiveUp,
+            }));
+            Assert.That(_session.State, Is.EqualTo(SteamMatchSessionState.Closed));
+        }
+
+        [Test]
+        public void OnePumpReplaysAtMostItsCap_AndTheRestWaitForTheNextFrame()
+        {
+            var a = OpenAttempt();
+            for (var i = 0; i < 100; i++) _driver.RaiseMessage(a, SteamMatchProtocol.Ping);
+            Assert.That(_pump.QueuedEvents, Is.EqualTo(100));
+
+            _pump.Pump();
+            Assert.That(_pump.QueuedEvents,
+                Is.EqualTo(100 - SteamMatchSocketPump.MaxEventsPerPump),
+                "a burst costs a few frames of latency, not a stalled main thread");
+
+            _pump.Pump();
+            Assert.That(_pump.QueuedEvents, Is.Zero);
+        }
+
+        [Test]
+        public void AFrameLargerThanTheCap_IsAProtocolViolation()
+        {
+            var a = OpenAttempt();
+            _driver.RaiseOpened(a);
+            PumpAndExecute();
+
+            _driver.RaiseMessage(a, new string('x', SteamMatchSocketPump.MaxFrameBytes + 1));
+
+            var outputs = PumpAndExecute();
+            Assert.That(Kinds(outputs), Is.EqualTo(new[]
+            {
+                SteamMatchSessionOutputKind.ProtocolViolation, SteamMatchSessionOutputKind.GiveUp,
+            }));
+            Assert.That(_log, Has.Count.EqualTo(1));
+            Assert.That(_log[0], Does.Contain("protocol violation"));
+        }
+
         // ----- helpers ------------------------------------------------------------------------
 
         static SteamMatchTicket Ticket(string credential)
