@@ -1,6 +1,7 @@
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -64,6 +65,69 @@ namespace HexWars.NetServer.Tests.Fixtures
 
         public SteamServerFactory() => Counting = new CountingMatchStore(Store);
 
+        long _requestBodyBytesRead;
+
+        /// <summary>
+        /// Bytes pulled off request bodies since this host started. It is the only way to tell a body that
+        /// was refused for being too large from one that was read in full and then measured, which is the
+        /// difference between a bound and a comment claiming there is one.
+        /// </summary>
+        public long RequestBodyBytesRead => Interlocked.Read(ref _requestBodyBytesRead);
+
+        /// <summary>Wraps every request body in a counting stream, ahead of the whole application
+        /// pipeline.</summary>
+        sealed class CountingBodyStartupFilter(SteamServerFactory owner) : IStartupFilter
+        {
+            public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+            {
+                app.Use(async (context, following) =>
+                {
+                    context.Request.Body = new CountingStream(context.Request.Body, owner);
+                    await following();
+                });
+
+                next(app);
+            };
+        }
+
+        /// <summary>A read-through stream that counts. Only the read paths are overridden: nothing writes
+        /// to a request body, and a write path nobody exercises could only ever be wrong.</summary>
+        sealed class CountingStream(Stream inner, SteamServerFactory owner) : Stream
+        {
+            public override bool CanRead => inner.CanRead;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => inner.Length;
+
+            public override long Position
+            {
+                get => inner.Position;
+                set => throw new NotSupportedException();
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) =>
+                Count(inner.Read(buffer, offset, count));
+
+            public override async ValueTask<int> ReadAsync(
+                Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+                Count(await inner.ReadAsync(buffer, cancellationToken));
+
+            public override async Task<int> ReadAsync(
+                byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+                Count(await inner.ReadAsync(buffer.AsMemory(offset, count), cancellationToken));
+
+            int Count(int read)
+            {
+                if (read > 0) Interlocked.Add(ref owner._requestBodyBytesRead, read);
+                return read;
+            }
+
+            public override void Flush() => inner.Flush();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+
         /// <summary>The scripted Steam API. Configure its tables before the first request.</summary>
         public FakeSteamWebApiClient Steam { get; } = FakeSteamWebApiClient.Ready();
 
@@ -121,6 +185,8 @@ namespace HexWars.NetServer.Tests.Fixtures
 
                 services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(Clock);
+
+                services.AddSingleton<IStartupFilter>(new CountingBodyStartupFilter(this));
             });
         }
     }

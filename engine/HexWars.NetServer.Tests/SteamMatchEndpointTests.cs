@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -350,6 +351,133 @@ namespace HexWars.NetServer.Tests
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
             Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
             Assert.That(factory.Steam.AuthenticateCalls, Is.Zero);
+        }
+
+        [Test]
+        public async Task ABodyThatIsNotJson_IsRefusedInTheFixedErrorShape()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            using var content = new StringContent("steamLobbyId=1", Encoding.UTF8, "text/plain");
+            HttpResponseMessage response = await client.PostAsync(CreateRoute, content);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest),
+                "the framework answers an unsupported content type with 415 and its own body shape");
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+            Assert.That(factory.Steam.AuthenticateCalls, Is.Zero);
+        }
+
+        [Test]
+        public async Task ABodyThatIsBrokenJson_IsRefusedInTheFixedErrorShape()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            using var content = new StringContent("{\"ticket\":", Encoding.UTF8, "application/json");
+            HttpResponseMessage response = await client.PostAsync(CreateRoute, content);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+        }
+
+        [Test]
+        public async Task AnEmptyBody_IsRefusedInTheFixedErrorShape()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            using var content = new StringContent(string.Empty, Encoding.UTF8, "application/json");
+            HttpResponseMessage response = await client.PostAsync(CreateRoute, content);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+        }
+
+        /// <summary>An otherwise valid request with a large unknown member. Unknown members are ignored by
+        /// the serializer, which is exactly how a caller would smuggle work in: size is then the only
+        /// reason left to refuse it.</summary>
+        static string OversizedCreateBody() => JsonSerializer.Serialize(new
+        {
+            steamLobbyId = FakeSteamWebApiClient.LobbyId,
+            ticket = FakeSteamWebApiClient.OwnerTicket,
+            padding = new string((char)120, 20 * 1024),
+        });
+
+        [Test]
+        public async Task AnOversizedBodyThatDeclaresItsLength_IsRefusedWithoutBeingReadAtAll()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            using var content = new StringContent(OversizedCreateBody(), Encoding.UTF8, "application/json");
+            HttpResponseMessage response = await client.PostAsync(CreateRoute, content);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+            Assert.That(factory.RequestBodyBytesRead, Is.Zero,
+                "a Content-Length past the cap is refused before a byte is pulled off the socket");
+        }
+
+        [Test]
+        public async Task AnOversizedBodyThatHidesItsLength_IsRefusedOnceTheCapIsReached()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            // Chunked, so Content-Length says nothing and the cap has to be enforced by the read itself.
+            // This is the case the header check cannot cover, and the one an abusive client would use.
+            byte[] body = Encoding.UTF8.GetBytes(OversizedCreateBody());
+            using var request = new HttpRequestMessage(HttpMethod.Post, CreateRoute)
+            {
+                Content = new StreamContent(new UndeclaredLengthStream(body)),
+            };
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            request.Headers.TransferEncodingChunked = true;
+
+            HttpResponseMessage response = await client.SendAsync(request);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+            Assert.That(factory.RequestBodyBytesRead, Is.GreaterThan(0),
+                "this body really did have to be read, or the bound below asserts nothing");
+            Assert.That(factory.RequestBodyBytesRead, Is.LessThanOrEqualTo(JsonBody.DefaultMaxBytes + 1),
+                "and the read must stop one byte past the cap rather than draining the whole body");
+        }
+
+        /// <summary>A stream that will not say how long it is, so HttpClient sends it chunked.</summary>
+        sealed class UndeclaredLengthStream(byte[] content) : Stream
+        {
+            int _position;
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                int available = Math.Min(count, content.Length - _position);
+                if (available <= 0) return 0;
+
+                Array.Copy(content, _position, buffer, offset, available);
+                _position += available;
+                return available;
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
 
         [Test]

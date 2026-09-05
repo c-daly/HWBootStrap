@@ -57,7 +57,6 @@ namespace HexWars.NetServer.Endpoints
         }
 
         static async Task<IResult> CreateAsync(
-            CreateSteamMatchRequest? request,
             HttpContext http,
             ISteamWebApiClient steam,
             SteamLobbyValidator validator,
@@ -71,6 +70,9 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            CreateSteamMatchRequest? request =
+                await JsonBody.ReadAsync<CreateSteamMatchRequest>(http.Request, ct: ct).ConfigureAwait(false);
 
             if (request is null ||
                 !IsWellFormedLobbyId(request.SteamLobbyId) ||
@@ -230,7 +232,6 @@ namespace HexWars.NetServer.Endpoints
 
         static async Task<IResult> JoinAsync(
             Guid matchId,
-            JoinSteamMatchRequest? request,
             HttpContext http,
             ISteamWebApiClient steam,
             IMatchStore store,
@@ -242,6 +243,9 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            JoinSteamMatchRequest? request =
+                await JsonBody.ReadAsync<JoinSteamMatchRequest>(http.Request, ct: ct).ConfigureAwait(false);
 
             if (request is null || !IsWellFormedTicket(request.Ticket))
             {
