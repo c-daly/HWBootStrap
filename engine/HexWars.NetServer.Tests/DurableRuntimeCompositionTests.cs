@@ -25,7 +25,8 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(first, Is.SameAs(second), "a per-request coordinator would hold no match at all");
             Assert.That(factory.Services.GetRequiredService<ILiveMatchLoader>(),
-                Is.TypeOf<JournalLiveMatchLoader>());
+                Is.SameAs(factory.Services.GetRequiredService<MatchRecoveryService>()),
+                "the startup pass and the handshake must judge a match by the same rules");
             Assert.That(factory.Services.GetRequiredService<IConnectionSink>(), Is.Not.Null);
         }
     }
