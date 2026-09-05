@@ -479,8 +479,8 @@ namespace HexWars.NetServer.Tests
                 Array.Empty<PersistedCommand>());
 
             var state = new RecoveryState();
-            var startup = new RecoveryStartupService(
-                state, _recovery, NullLogger<RecoveryStartupService>.Instance);
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
 
             await startup.StartAsync(Ct);
 
@@ -490,29 +490,112 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task TheStartupService_RecordsAStoreFailureAndStillCompletes()
+        public async Task TheStartupService_RecordsAStoreFailureWithoutClaimingItFinished()
         {
             // A database that is down at boot must not crash-loop the process: readiness reports it, so the
             // platform restart policy stops being the thing that decides whether this host ever comes back.
+            // And an attempt that failed is not a verdict - the host still does not know what it is hosting.
             _store.Failure = new InvalidOperationException("the database is not there");
 
             var state = new RecoveryState();
-            var startup = new RecoveryStartupService(
-                state, _recovery, NullLogger<RecoveryStartupService>.Instance);
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
 
             await startup.StartAsync(Ct);
 
-            Assert.That(state.Completed, Is.True);
+            Assert.That(state.Completed, Is.False);
             Assert.That(state.Report, Is.Null);
             Assert.That(state.Error, Is.InstanceOf<InvalidOperationException>());
+
+            await startup.StopAsync(Ct);
+        }
+
+        [Test]
+        public async Task TheStartupService_KeepsTryingUntilTheDatabaseComesBack()
+        {
+            // The pass used to run once. A host that booted during a thirty second outage stayed unready
+            // until somebody deployed or killed it, which turned an outage in one dependency into an
+            // outage that needed a person.
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var state = new RecoveryState();
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
+
+            await startup.StartAsync(Ct);
+            Assert.That(state.Completed, Is.False, "the first attempt failed");
+
+            Exception first = state.Error!;
+            _store.Failure = new InvalidOperationException("still not there");
+
+            // The retry loop is on the thread pool, so the clock must not be wound past a wait that has
+            // not been scheduled yet - the timer would be created after the jump and never come due.
+            await WaitUntil(() => _clock.ScheduledTimers > 0);
+            _clock.Advance(TimeSpan.FromSeconds(30));
+            await WaitUntil(() => !ReferenceEquals(state.Error, first));
+
+            Assert.That(state.Completed, Is.False, "the second attempt failed too");
+            Assert.That(state.Error!.Message, Is.EqualTo("still not there"),
+                "and the latest reason is the one an operator sees");
+
+            // The database comes back, and the next attempt in the backoff finds it.
+            _store.Failure = null;
+            Seed(new MatchJournal(
+                Row(MatchId, MatchStatus.Waiting, null),
+                new[] { Player(MatchId, 0), Player(MatchId, 1) },
+                Array.Empty<PersistedCommand>()));
+
+            await WaitUntil(() => _clock.ScheduledTimers > 0);
+            _clock.Advance(TimeSpan.FromSeconds(60));
+            await WaitUntil(() => state.Completed);
+
+            Assert.That(state.Completed, Is.True);
+            Assert.That(state.Error, Is.Null, "a success clears the failure it was retrying through");
+            Assert.That(state.Report!.Verified, Is.EqualTo(1));
+
+            await startup.StopAsync(Ct);
+        }
+
+        [Test]
+        public async Task TheStartupService_StopsCleanlyWhileStillFailing()
+        {
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var state = new RecoveryState();
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
+
+            await startup.StartAsync(Ct);
+
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                await WaitUntil(() => _clock.ScheduledTimers > 0);
+                _clock.Advance(TimeSpan.FromSeconds(120));
+                await Task.Delay(20);
+            }
+
+            Assert.That(state.Completed, Is.False, "a host that never reached the database never claims to");
+            Assert.That(state.Error, Is.Not.Null);
+
+            await startup.StopAsync(Ct).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        /// <summary>Gives a retry that has just been woken by the clock a moment to land.</summary>
+        static async Task WaitUntil(Func<bool> condition)
+        {
+            for (var attempt = 0; attempt < 200; attempt++)
+            {
+                if (condition()) return;
+                await Task.Delay(25);
+            }
         }
 
         [Test]
         public async Task TheStartupService_CompletesImmediatelyWhenThereIsNoDatabaseAtAll()
         {
             var state = new RecoveryState();
-            var startup = new RecoveryStartupService(
-                state, null, NullLogger<RecoveryStartupService>.Instance);
+            using var startup = new RecoveryStartupService(
+                state, null, _clock, NullLogger<RecoveryStartupService>.Instance);
 
             await startup.StartAsync(Ct);
 

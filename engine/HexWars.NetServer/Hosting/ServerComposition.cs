@@ -108,6 +108,7 @@ namespace HexWars.NetServer.Hosting
             builder.Services.AddSingleton<IHostedService>(provider => new RecoveryStartupService(
                 provider.GetRequiredService<RecoveryState>(),
                 provider.GetService<MatchRecoveryService>(),
+                provider.GetRequiredService<TimeProvider>(),
                 provider.GetRequiredService<ILogger<RecoveryStartupService>>()));
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
