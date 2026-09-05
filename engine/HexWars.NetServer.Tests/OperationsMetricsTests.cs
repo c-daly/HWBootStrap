@@ -302,10 +302,16 @@ namespace HexWars.NetServer.Tests
 
             SteamServerFactory factory = Host();
             factory.Logging = logging;
-            factory.Clock.VirtualTimers = true;
 
             using HttpClient client = factory.CreateClient();
             Assert.That(logging.Any("Metrics {"), Is.False, "nothing has been logged before a period passed");
+
+            // The clock only fires what is already armed, so winding it forward before the log service has
+            // scheduled its first tick would move it past nothing at all.
+            for (var round = 0; round < 200 && factory.Clock.ScheduledTimers == 0; round++)
+                await Task.Delay(25);
+
+            Assert.That(factory.Clock.ScheduledTimers, Is.GreaterThan(0), "the period was never armed");
 
             for (var round = 0; round < 100 && !logging.Any("Metrics {"); round++)
             {

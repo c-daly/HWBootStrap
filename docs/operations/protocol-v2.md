@@ -126,6 +126,7 @@ it took, and the first eight characters of the match id.
 | 1000 | Normal closure | The socket ended normally, from either side. Also `superseded` (this seat authenticated on a newer socket) and `match ended` (the match reached a terminal status underneath a live game). |
 | 1001 | Endpoint unavailable | Stale: nothing inbound for `MATCH_STALE_CONNECTION_SECONDS`. |
 | 1008 | Policy violation | The handshake failed, the auth deadline passed, or the client is not reading (see §5). |
+| 1003 | Unsupported data | A binary frame arrived. Every message in this protocol is UTF-8 text; the frame is neither decoded nor dispatched, so a binary frame that spells a valid `AUTH` authenticates nothing. |
 | 1009 | Message too big | An inbound frame exceeded 64 KB. |
 | 1011 | Internal error | `resync required`: the server cannot say whether it recorded your last command, or cannot read the status of a match it was finishing. Reconnect and take `START`; **do not resend anything**. |
 | 1012 | Service restart | Graceful shutdown, after `SERVER RESTART`. |

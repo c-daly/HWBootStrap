@@ -50,6 +50,14 @@ namespace HexWars.NetServer.Runtime
             }
         }
 
+        /// <summary>
+        /// Records an attempt that could not run, leaving the pass unfinished.
+        ///
+        /// <see cref="Completed"/> stays false because a failure that will be retried is not a verdict: the
+        /// host does not yet know what it is hosting, and saying it had finished would let readiness report
+        /// an answer nobody has reached. <see cref="Error"/> carries the most recent reason so an operator
+        /// can see what it is still failing on.
+        /// </summary>
         public void RecordFailure(Exception error)
         {
             ArgumentNullException.ThrowIfNull(error);
@@ -58,7 +66,7 @@ namespace HexWars.NetServer.Runtime
             {
                 _report = null;
                 _error = error;
-                _completed = true;
+                _completed = false;
             }
         }
     }

@@ -1,46 +1,25 @@
 namespace HexWars.NetServer.Tests.Fakes
 {
     /// <summary>
-    /// A clock a test moves by hand.
+    /// A clock a test moves by hand, including the timers scheduled against it.
     ///
-    /// Expiry is the only interesting thing about a join credential that takes time to happen, and a test
-    /// that waited for it would either be slow or would have to shrink the TTL until the assertion stopped
-    /// being about the production value. Injecting the clock instead lets the same test use a realistic TTL
-    /// and still land exactly on the boundary, where the interesting bug lives.
+    /// Expiry and backoff are the two interesting things about this server that take time to happen, and a
+    /// test that waited for either would be slow or would have to shrink the production value until the
+    /// assertion stopped being about it. Injecting the clock lets the same test use the real interval and
+    /// still land exactly on the boundary, where the interesting bug lives.
     ///
-    /// Timers are OPT IN, through <see cref="VirtualTimers"/>. Most of this suite schedules nothing and
-    /// wants the real ones - the heartbeat is genuinely about elapsed seconds, and silently virtualising
-    /// its ticks would stop those tests testing anything. A test that has to drive a backoff, where the
-    /// production delays are minutes, turns them on and winds the clock instead of waiting.
+    /// Timers are driven rather than left to the base implementation, which would quietly use the system
+    /// clock: a retry loop waiting thirty seconds on <see cref="TimeProvider"/> would then take thirty real
+    /// seconds however far a test wound this clock forward. <see cref="Advance"/> fires everything that
+    /// falls due on the way, in order, moving the clock to each due time as it goes - so a callback that
+    /// reads the clock sees the moment it was scheduled for and not the end of the jump.
     /// </summary>
     public sealed class FakeTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {
         readonly object _gate = new();
-        readonly List<VirtualTimer> _timers = new();
+        readonly List<FakeTimer> _timers = new();
 
         DateTimeOffset _utcNow = utcNow;
-        long _timersCreated;
-
-        /// <summary>How many timers this clock has handed out, ever. A test that has to know a backoff is
-        /// waiting before it winds the clock on watches this rather than racing the loop that schedules
-        /// it.</summary>
-        public long TimersCreated
-        {
-            get { lock (_gate) return _timersCreated; }
-        }
-
-        /// <summary>Timers that exist and have not been disposed.</summary>
-        public int PendingTimers
-        {
-            get { lock (_gate) return _timers.Count; }
-        }
-
-        /// <summary>
-        /// When set, CreateTimer hands out timers this clock owns and Advance fires the ones that came due.
-        /// Off by default, which leaves the base implementation and its real timers. Set it before the host
-        /// that will schedule anything starts.
-        /// </summary>
-        public bool VirtualTimers { get; set; }
 
         public override DateTimeOffset GetUtcNow()
         {
@@ -49,82 +28,101 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public void Advance(TimeSpan delta) => SetUtcNow(GetUtcNow().Add(delta));
 
+        /// <summary>
+        /// Timers armed and waiting on this clock.
+        ///
+        /// A test that winds the clock forward before the code under test has scheduled its wait has
+        /// simply moved the clock past nothing: the timer is created afterwards, due relative to the new
+        /// now, and never fires. Waiting for this to rise first is how a test says it is ready to jump.
+        /// </summary>
+        public int ScheduledTimers
+        {
+            get { lock (_gate) return _timers.Count(timer => timer.DueAt is not null); }
+        }
+
         public void SetUtcNow(DateTimeOffset value)
         {
-            List<VirtualTimer> due;
-
-            lock (_gate)
+            // One timer at a time, oldest due first, with the clock set to its due moment before it runs.
+            // Firing them all at the end of the jump would let a callback that schedules another timer
+            // schedule it in the past.
+            while (true)
             {
-                _utcNow = value;
-                if (!VirtualTimers) return;
+                FakeTimer? next;
 
-                due = new List<VirtualTimer>();
-                foreach (VirtualTimer timer in _timers)
+                lock (_gate)
                 {
-                    if (timer.TakeIfDue(value)) due.Add(timer);
-                }
-            }
+                    next = null;
 
-            // Outside the lock, and off this thread: a callback may create or dispose a timer, and a
-            // PeriodicTimer continuation resumed inline would put whatever awaits it onto the thread that
-            // is driving the test.
-            foreach (VirtualTimer timer in due) timer.Fire();
+                    foreach (FakeTimer timer in _timers)
+                    {
+                        if (timer.DueAt is not DateTimeOffset due || due > value) continue;
+                        if (next is null || due < next.DueAt) next = timer;
+                    }
+
+                    if (next is null)
+                    {
+                        if (value > _utcNow) _utcNow = value;
+                        return;
+                    }
+
+                    _utcNow = next.DueAt!.Value;
+                    next.Rearm(_utcNow);
+                }
+
+                // Outside the lock: a callback is free to read this clock, or schedule against it.
+                next.Fire();
+            }
         }
 
         public override ITimer CreateTimer(
             TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
-            if (!VirtualTimers) return base.CreateTimer(callback, state, dueTime, period);
+            ArgumentNullException.ThrowIfNull(callback);
 
-            var timer = new VirtualTimer(this, callback, state);
+            var timer = new FakeTimer(this, callback, state);
 
-            lock (_gate)
-            {
-                _timers.Add(timer);
-                _timersCreated++;
-            }
+            lock (_gate) _timers.Add(timer);
 
             timer.Change(dueTime, period);
             return timer;
         }
 
-        void Forget(VirtualTimer timer)
+        void Forget(FakeTimer timer)
         {
             lock (_gate) _timers.Remove(timer);
         }
 
-        /// <summary>A timer that only ever fires because a test said the clock had moved.</summary>
-        sealed class VirtualTimer(FakeTimeProvider owner, TimerCallback callback, object? state) : ITimer
+        sealed class FakeTimer(FakeTimeProvider clock, TimerCallback callback, object? state) : ITimer
         {
-            DateTimeOffset? _due;
             TimeSpan _period = Timeout.InfiniteTimeSpan;
+
+            /// <summary>When this timer next fires, or null when it is not armed.</summary>
+            public DateTimeOffset? DueAt { get; private set; }
 
             public bool Change(TimeSpan dueTime, TimeSpan period)
             {
-                lock (owner._gate)
+                lock (clock._gate)
                 {
                     _period = period;
-                    _due = dueTime == Timeout.InfiniteTimeSpan ? null : owner._utcNow.Add(dueTime);
+                    DueAt = dueTime == Timeout.InfiniteTimeSpan ? null : clock._utcNow + dueTime;
                 }
 
                 return true;
             }
 
-            /// <summary>Called with the clock lock held. True when this timer now owes a callback.</summary>
-            internal bool TakeIfDue(DateTimeOffset now)
-            {
-                if (_due is null || _due > now) return false;
-
-                _due = _period == Timeout.InfiniteTimeSpan || _period <= TimeSpan.Zero
+            /// <summary>Called under the clock lock, as the timer is about to fire.</summary>
+            public void Rearm(DateTimeOffset now) =>
+                DueAt = _period == Timeout.InfiniteTimeSpan || _period <= TimeSpan.Zero
                     ? null
-                    : now.Add(_period);
+                    : now + _period;
 
-                return true;
+            public void Fire() => callback(state);
+
+            public void Dispose()
+            {
+                lock (clock._gate) DueAt = null;
+                clock.Forget(this);
             }
-
-            internal void Fire() => ThreadPool.UnsafeQueueUserWorkItem(_ => callback(state), null);
-
-            public void Dispose() => owner.Forget(this);
 
             public ValueTask DisposeAsync()
             {

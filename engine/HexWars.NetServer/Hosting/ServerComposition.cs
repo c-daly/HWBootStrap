@@ -151,6 +151,7 @@ namespace HexWars.NetServer.Hosting
             builder.Services.AddSingleton<IHostedService>(provider => new RecoveryStartupService(
                 provider.GetRequiredService<RecoveryState>(),
                 provider.GetService<MatchRecoveryService>(),
+                provider.GetRequiredService<TimeProvider>(),
                 provider.GetRequiredService<ILogger<RecoveryStartupService>>()));
 
             // Resolved optionally for the same reason: a legacy deployment has neither a coordinator nor a
