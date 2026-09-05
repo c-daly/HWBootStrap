@@ -27,17 +27,22 @@ namespace HexWars.Presentation
         bool _ownsSteamApi;
         bool _disposed;
 
-        CallResult<LobbyCreated_t>? _lobbyCreatedResult;
-        CallResult<LobbyMatchList_t>? _lobbyMatchListResult;
-        CallResult<LobbyEnter_t>? _lobbyEnterResult;
+        // One registry per call type, keyed by the Steam call handle. A CallResult can only track a
+        // single call at a time, so the old one-field-per-type arrangement silently dropped the first
+        // request whenever a second went out before it answered: the player cancels a join and starts
+        // another, and the first lobby is entered with nobody left holding a reference to leave it.
+        readonly Dictionary<SteamAPICall_t, CallResult<LobbyCreated_t>> _createCalls =
+            new Dictionary<SteamAPICall_t, CallResult<LobbyCreated_t>>();
+        readonly Dictionary<SteamAPICall_t, CallResult<LobbyMatchList_t>> _listCalls =
+            new Dictionary<SteamAPICall_t, CallResult<LobbyMatchList_t>>();
+        readonly Dictionary<SteamAPICall_t, CallResult<LobbyEnter_t>> _enterCalls =
+            new Dictionary<SteamAPICall_t, CallResult<LobbyEnter_t>>();
+
         Callback<LobbyDataUpdate_t>? _lobbyDataUpdate;
         Callback<LobbyChatUpdate_t>? _lobbyChatUpdate;
         Callback<GameLobbyJoinRequested_t>? _gameLobbyJoinRequested;
         Callback<GetTicketForWebApiResponse_t>? _webApiTicketResponse;
 
-        Action<string?>? _onLobbyCreated;
-        Action<IReadOnlyList<SteamLobbySearchResult>>? _onLobbyList;
-        Action<bool>? _onLobbyJoined;
         Action<string?>? _onAuthTicket;
         HAuthTicket _authTicket = HAuthTicket.Invalid;
 
@@ -120,14 +125,12 @@ namespace HexWars.Presentation
             if (!IsAvailable) { Defer(() => onDone(null)); return; }
             try
             {
-                _onLobbyCreated = onDone;
                 var call = SteamMatchmaking.CreateLobby(ToLobbyType(visibility), Math.Max(1, maxMembers));
-                _lobbyCreatedResult!.Set(call);
+                Register(_createCalls, call, (result, ioFailure) => OnLobbyCreated(result, ioFailure, onDone));
             }
             catch (Exception ex)
             {
                 _log("SteamMatchmaking.CreateLobby failed: " + ex.Message);
-                _onLobbyCreated = null;
                 Defer(() => onDone(null));
             }
         }
@@ -145,14 +148,12 @@ namespace HexWars.Presentation
                     }
                 }
                 SteamMatchmaking.AddRequestLobbyListResultCountFilter(MaxSearchResults);
-                _onLobbyList = onDone;
                 var call = SteamMatchmaking.RequestLobbyList();
-                _lobbyMatchListResult!.Set(call);
+                Register(_listCalls, call, (result, ioFailure) => OnLobbyMatchList(result, ioFailure, onDone));
             }
             catch (Exception ex)
             {
                 _log("SteamMatchmaking.RequestLobbyList failed: " + ex.Message);
-                _onLobbyList = null;
                 Defer(() => onDone(Array.Empty<SteamLobbySearchResult>()));
             }
         }
@@ -162,14 +163,12 @@ namespace HexWars.Presentation
             if (!IsAvailable || !TryParseLobby(lobbyId, out var lobby)) { Defer(() => onDone(false)); return; }
             try
             {
-                _onLobbyJoined = onDone;
                 var call = SteamMatchmaking.JoinLobby(lobby);
-                _lobbyEnterResult!.Set(call);
+                Register(_enterCalls, call, (result, ioFailure) => OnLobbyEnter(result, ioFailure, onDone));
             }
             catch (Exception ex)
             {
                 _log("SteamMatchmaking.JoinLobby failed: " + ex.Message);
-                _onLobbyJoined = null;
                 Defer(() => onDone(false));
             }
         }
@@ -307,18 +306,15 @@ namespace HexWars.Presentation
 
             CancelAuthTicket();
 
-            Dispose(ref _lobbyCreatedResult);
-            Dispose(ref _lobbyMatchListResult);
-            Dispose(ref _lobbyEnterResult);
+            DisposeAll(_createCalls);
+            DisposeAll(_listCalls);
+            DisposeAll(_enterCalls);
             Dispose(ref _lobbyDataUpdate);
             Dispose(ref _lobbyChatUpdate);
             Dispose(ref _gameLobbyJoinRequested);
             Dispose(ref _webApiTicketResponse);
 
             _deferred.Clear();
-            _onLobbyCreated = null;
-            _onLobbyList = null;
-            _onLobbyJoined = null;
             _onAuthTicket = null;
 
             LobbyDataChanged = null;
@@ -339,21 +335,14 @@ namespace HexWars.Presentation
 
         void RegisterCallbacks()
         {
-            _lobbyCreatedResult = CallResult<LobbyCreated_t>.Create(OnLobbyCreated);
-            _lobbyMatchListResult = CallResult<LobbyMatchList_t>.Create(OnLobbyMatchList);
-            _lobbyEnterResult = CallResult<LobbyEnter_t>.Create(OnLobbyEnter);
             _lobbyDataUpdate = Callback<LobbyDataUpdate_t>.Create(OnLobbyDataUpdate);
             _lobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
             _gameLobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(OnGameLobbyJoinRequested);
             _webApiTicketResponse = Callback<GetTicketForWebApiResponse_t>.Create(OnWebApiTicket);
         }
 
-        void OnLobbyCreated(LobbyCreated_t callback, bool ioFailure)
+        void OnLobbyCreated(LobbyCreated_t callback, bool ioFailure, Action<string?> done)
         {
-            var done = _onLobbyCreated;
-            _onLobbyCreated = null;
-            if (done == null) return;
-
             if (ioFailure || callback.m_eResult != EResult.k_EResultOK)
             {
                 _log("CreateLobby failed (ioFailure=" + ioFailure + ", result=" + callback.m_eResult + ").");
@@ -363,12 +352,9 @@ namespace HexWars.Presentation
             done(callback.m_ulSteamIDLobby.ToString(CultureInfo.InvariantCulture));
         }
 
-        void OnLobbyMatchList(LobbyMatchList_t callback, bool ioFailure)
+        void OnLobbyMatchList(LobbyMatchList_t callback, bool ioFailure,
+                              Action<IReadOnlyList<SteamLobbySearchResult>> done)
         {
-            var done = _onLobbyList;
-            _onLobbyList = null;
-            if (done == null) return;
-
             if (ioFailure)
             {
                 _log("RequestLobbyList failed with an IO failure.");
@@ -396,12 +382,8 @@ namespace HexWars.Presentation
             done(results);
         }
 
-        void OnLobbyEnter(LobbyEnter_t callback, bool ioFailure)
+        void OnLobbyEnter(LobbyEnter_t callback, bool ioFailure, Action<bool> done)
         {
-            var done = _onLobbyJoined;
-            _onLobbyJoined = null;
-            if (done == null) return;
-
             var entered = !ioFailure
                 && callback.m_EChatRoomEnterResponse == (uint)EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess;
             if (!entered)
@@ -474,11 +456,35 @@ namespace HexWars.Presentation
             _deferred.Enqueue(action);
         }
 
-        static void Dispose<T>(ref CallResult<T>? result)
+        /// <summary>
+        /// Tracks one outstanding Steam call. Each call gets its OWN CallResult, kept alive by the
+        /// registry until its result arrives, so a second request never unregisters the first: both
+        /// answer, in the order Steam delivers them.
+        /// </summary>
+        void Register<T>(Dictionary<SteamAPICall_t, CallResult<T>> registry, SteamAPICall_t call,
+                         Action<T, bool> handler)
         {
-            if (result == null) return;
-            result.Dispose();
-            result = null;
+            var result = CallResult<T>.Create();
+            registry[call] = result;
+            result.Set(call, (payload, ioFailure) =>
+            {
+                // The CallResult is retired on the next Pump rather than from inside its own dispatch,
+                // and it stays in the registry until then so Dispose still reaches it either way.
+                Defer(() =>
+                {
+                    CallResult<T>? tracked;
+                    if (!registry.TryGetValue(call, out tracked) || !ReferenceEquals(tracked, result)) return;
+                    registry.Remove(call);
+                    result.Dispose();
+                });
+                handler(payload, ioFailure);
+            });
+        }
+
+        static void DisposeAll<T>(Dictionary<SteamAPICall_t, CallResult<T>> registry)
+        {
+            foreach (var pending in registry.Values) pending.Dispose();
+            registry.Clear();
         }
 
         static void Dispose<T>(ref Callback<T>? callback)

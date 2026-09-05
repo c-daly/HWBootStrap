@@ -310,6 +310,32 @@ namespace HexWars.Presentation.Tests
             return lobbyId!;
         }
 
+        [Test]
+        public void TwoJoinsInFlightAtOnce_BothAnswer_InOrder()
+        {
+            // A second JoinLobby must not unregister the first. The real client kept one CallResult per
+            // call type, so the first join was silently dropped and its lobby was entered with nobody
+            // left to leave it; the fake has to be able to show that, or the coordinator cannot be
+            // tested against it.
+            using var client = NewClient();
+            const string firstId = "109775240000000901";
+            const string secondId = "109775240000000902";
+            var meta = new Dictionary<string, string>();
+            client.AvailableLobbies.Add(new SteamLobbySearchResult(firstId, meta, 1));
+            client.AvailableLobbies.Add(new SteamLobbySearchResult(secondId, meta, 1));
+
+            var answers = new List<string>();
+            client.JoinLobby(firstId, ok => answers.Add("first:" + ok));
+            client.JoinLobby(secondId, ok => answers.Add("second:" + ok));
+
+            Assert.That(answers, Is.Empty);
+            Assert.That(client.JoinLobbyCalls, Is.EqualTo(2));
+
+            client.PumpAll();
+
+            Assert.That(answers, Is.EqualTo(new[] { "first:True", "second:True" }));
+        }
+
         static List<string> MemberIds(SteamLobbySnapshot snapshot)
         {
             var ids = new List<string>();
