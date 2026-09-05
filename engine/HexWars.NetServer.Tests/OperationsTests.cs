@@ -321,6 +321,64 @@ namespace HexWars.NetServer.Tests
                 "an operator cannot act on a count; the description names the match");
         }
 
+        [Test]
+        public async Task Ready_GoesFromUnreadyToReadyWhenTheRecoveryPassFinallyRuns()
+        {
+            SteamServerFactory fixture = Track(await SteamServerFactory.PostgresAsync());
+
+            var attempts = 0;
+            WebApplicationFactory<Program> host = Track(fixture.WithWebHostBuilder(
+                builder => builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IMatchStore>();
+                    services.AddSingleton<IMatchStore>(provider => new CountingMatchStore(
+                        new PostgresMatchStore(
+                            provider.GetRequiredService<NpgsqlDataSource>(),
+                            provider.GetRequiredService<ILogger<PostgresMatchStore>>()))
+                    {
+                        BeforeListOpenMatches = () => ++attempts <= 2
+                            ? throw new InvalidOperationException("the database is not there")
+                            : Task.CompletedTask,
+                    });
+                })));
+
+            using HttpClient client = host.CreateClient();
+
+            // The pass that ran during startup failed, so this host is holding traffic back rather than
+            // serving matches it has not checked.
+            Assert.That((await ReadyAsync(client)).Code, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            Assert.That(attempts, Is.EqualTo(1));
+
+            await AdvanceUntilAsync(fixture, TimeSpan.FromSeconds(30), () => attempts >= 2);
+            Assert.That((await ReadyAsync(client)).Code, Is.EqualTo(HttpStatusCode.ServiceUnavailable),
+                "the second attempt failed too, so nothing has been verified yet");
+
+            await AdvanceUntilAsync(fixture, TimeSpan.FromSeconds(60), () => attempts >= 3);
+
+            for (var round = 0; round < 200; round++)
+            {
+                if ((await ReadyAsync(client)).Code == HttpStatusCode.OK) break;
+                await Task.Delay(25);
+            }
+
+            Assert.That((await ReadyAsync(client)).Code, Is.EqualTo(HttpStatusCode.OK),
+                "a host that recovered on its own starts serving without a restart");
+            Assert.That(attempts, Is.EqualTo(3), "two refusals and then the pass that worked");
+        }
+
+        /// <summary>Winds the clock on once the backoff is actually armed. Advancing before the retry has
+        /// scheduled its wait moves the clock past nothing at all.</summary>
+        static async Task AdvanceUntilAsync(SteamServerFactory fixture, TimeSpan wait, Func<bool> until)
+        {
+            for (var round = 0; round < 200 && !until(); round++)
+            {
+                if (fixture.Clock.ScheduledTimers > 0) fixture.Clock.Advance(wait);
+                await Task.Delay(25);
+            }
+
+            Assert.That(until(), Is.True, "the retry never came round");
+        }
+
         // ---- going away -------------------------------------------------------
 
         [Test]

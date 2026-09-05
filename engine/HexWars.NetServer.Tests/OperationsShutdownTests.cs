@@ -253,5 +253,139 @@ namespace HexWars.NetServer.Tests
                 Assert.That(coordinator.ConnectionCount, Is.Zero, "it was never seated");
             }
         }
+
+        [Test]
+        public async Task Shutdown_RefusesAHandshakeThatFinishesAfterQuiescence()
+        {
+            SteamServerFactory fixture = Fixture();
+            var faults = new FaultInjectingMatchStore(fixture.Store);
+
+            WebApplicationFactory<Program> host = Track(fixture.WithWebHostBuilder(
+                builder => builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IMatchStore>();
+                    services.AddSingleton<IMatchStore>(faults);
+                })));
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(host);
+            await using (zero)
+            await using (one)
+            {
+                var coordinator = host.Services.GetRequiredService<DurableMatchCoordinator>();
+                var registry = host.Services.GetRequiredService<V2ConnectionRegistry>();
+                int seated = coordinator.ConnectionsOf(zero.MatchId).Count;
+
+                // The liveness stamp is the last database call a handshake makes, so pausing it holds a
+                // socket exactly where this test needs it: past every admission check, under the match
+                // gate, with the seat not yet taken.
+                var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                faults.BeforeTouch = async () =>
+                {
+                    reached.TrySetResult();
+                    await release.Task.ConfigureAwait(false);
+                };
+
+                DurableFlowClient late = await DurableFlowClient.JoinAsync(
+                    host, zero.MatchId, FakeSteamWebApiClient.OwnerTicket);
+
+                await using (late)
+                {
+                    await late.OpenAsync();
+                    await late.SendAuthAsync();
+                    await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+                    coordinator.BeginShutdown();
+                    registry.BeginShutdown();
+                    release.TrySetResult();
+
+                    Assert.That((int)(await late.ExpectCloseAsync())!,
+                        Is.EqualTo(GracefulShutdownService.RestartCloseStatus),
+                        "a handshake that finished after quiescence is told to come back, not that it failed");
+
+                    Assert.That(coordinator.ConnectionsOf(zero.MatchId).Count, Is.EqualTo(seated),
+                        "nothing was registered after the snapshot could have been taken");
+
+                    // Registering would have superseded the earlier socket of this seat with a 1000, and a
+                    // waiting match would have been dealt a START. Neither seat heard anything.
+                    await zero.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+                    await one.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+
+                    late.Drop();
+                }
+
+                faults.BeforeTouch = null;
+            }
+        }
+
+        [Test]
+        public async Task Shutdown_SaysGoodbyeOnceHoweverManyTimesTheHostAsks()
+        {
+            var logging = new CapturingLoggerProvider();
+            SteamServerFactory fixture = Fixture();
+            fixture.Logging = logging;
+
+            using HttpClient warm = fixture.CreateClient();
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(fixture);
+            await using (zero)
+            await using (one)
+            {
+                var host = fixture.Services.GetRequiredService<IHost>();
+
+                await host.StopAsync(CancellationToken.None).WaitAsync(Deadline);
+                await host.StopAsync(CancellationToken.None).WaitAsync(Deadline);
+
+                foreach (DurableFlowClient seat in new[] { zero, one })
+                {
+                    Assert.That(await seat.ExpectAsync(GracefulShutdownService.RestartNotice),
+                        Is.EqualTo(GracefulShutdownService.RestartNotice));
+                    Assert.That((int)(await seat.ExpectCloseAsync())!,
+                        Is.EqualTo(GracefulShutdownService.RestartCloseStatus),
+                        "a second pass would have sent a second notice before this close");
+                }
+
+                Assert.That(
+                    logging.Messages.Count(m => m.Contains("socket(s) closed")), Is.EqualTo(1),
+                    "one goodbye and one summary, however many times the host is stopped");
+
+                zero.Drop();
+                one.Drop();
+            }
+        }
+
+        [Test]
+        public async Task Shutdown_AbortsAPeerThatReadsTheCloseAndNeverAnswers()
+        {
+            SteamServerFactory fixture = Fixture();
+            using HttpClient warm = fixture.CreateClient();
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(fixture);
+            await using (zero)
+            await using (one)
+            {
+                var clock = Stopwatch.StartNew();
+                await fixture.Services.GetRequiredService<IHost>().StopAsync(CancellationToken.None)
+                    .WaitAsync(Deadline);
+                clock.Stop();
+
+                // Neither client ever answers the close frame: it reads the close and stops there, exactly
+                // like a peer that is still connected and has nothing more to say. The server has to abort
+                // rather than wait for an answer, or shutdown never ends.
+                foreach (DurableFlowClient seat in new[] { zero, one })
+                {
+                    Assert.That(await seat.ExpectAsync(GracefulShutdownService.RestartNotice),
+                        Is.EqualTo(GracefulShutdownService.RestartNotice));
+                    Assert.That((int)(await seat.ExpectCloseAsync())!,
+                        Is.EqualTo(GracefulShutdownService.RestartCloseStatus));
+                }
+
+                Assert.That(clock.Elapsed, Is.LessThan(Deadline),
+                    "a peer with nothing to say must not be waited on past the budget");
+
+                zero.Drop();
+                one.Drop();
+            }
+        }
     }
 }

@@ -46,6 +46,33 @@ namespace HexWars.NetServer.Tests
         // ---- apply / pending --------------------------------------------------
 
         [Test]
+        public async Task AVersionThisBuildHasNeverHeardOf_IsIgnoredRatherThanUndone()
+        {
+            // A rollback leaves the database AHEAD: the ledger holds migrations only the newer build
+            // carries. The runner asks what of its OWN is missing and never what else is there, which is
+            // what lets an older binary serve a schema a newer one applied. If this ever became a
+            // symmetric comparison, a rollback would report a database that is perfectly fine as one that
+            // needs attention, and the runbook diagnosis built on it would send an operator the wrong way.
+            await Runner().ApplyAsync(CancellationToken.None);
+
+            await using (NpgsqlConnection connection =
+                await _db.DataSource.OpenConnectionAsync(CancellationToken.None))
+            await using (NpgsqlCommand ahead = connection.CreateCommand())
+            {
+                ahead.CommandText =
+                    "INSERT INTO schema_migrations (version) VALUES ('002_from_a_newer_build')";
+                await ahead.ExecuteNonQueryAsync(CancellationToken.None);
+            }
+
+            Assert.That(await Runner().PendingAsync(CancellationToken.None), Is.Empty,
+                "pending means this build is missing something, never that the database has extra");
+
+            Assert.That(await Runner().ApplyAsync(CancellationToken.None), Is.Empty,
+                "and nothing is applied or undone because of it");
+        }
+
+
+        [Test]
         public async Task PendingAsync_OnAnEmptyDatabase_ListsTheMigrationAndCreatesTheLedger()
         {
             var pending = await Runner().PendingAsync(CancellationToken.None);
