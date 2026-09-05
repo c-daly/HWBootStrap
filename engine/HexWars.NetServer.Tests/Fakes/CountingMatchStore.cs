@@ -124,10 +124,17 @@ namespace HexWars.NetServer.Tests.Fakes
             return inner.TouchAsync(matchId, steamId, seenAt, ct);
         }
 
-        public Task<IReadOnlyList<Guid>> ListOpenMatchIdsAsync(CancellationToken ct)
+        /// <summary>Runs before every open-match listing, and is the only seam in this fixture that can
+        /// reach the startup recovery pass. A store that will not answer is the case readiness has to
+        /// survive, and nothing else here can produce one.</summary>
+        public Func<Task>? BeforeListOpenMatches { get; set; }
+
+        public async Task<IReadOnlyList<Guid>> ListOpenMatchIdsAsync(CancellationToken ct)
         {
             Reads++;
-            return inner.ListOpenMatchIdsAsync(ct);
+            if (BeforeListOpenMatches is not null) await BeforeListOpenMatches().ConfigureAwait(false);
+
+            return await inner.ListOpenMatchIdsAsync(ct).ConfigureAwait(false);
         }
 
         public Task StoreJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
