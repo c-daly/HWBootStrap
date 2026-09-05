@@ -836,7 +836,9 @@ namespace HexWars.NetServer.Tests
             using var factory = new WebApplicationFactory<Program>();
             using var client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             var games = await client.GetAsync("/games");
             Assert.That(games.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -867,7 +869,9 @@ namespace HexWars.NetServer.Tests
             });
             using var client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             var games = await client.GetAsync("/games");
             Assert.That(games.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));

@@ -1,6 +1,7 @@
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
@@ -51,6 +52,7 @@ namespace HexWars.NetServer.Tests
                 _store,
                 Options.Create(new MatchHostingOptions()),
                 _clock,
+                new MatchMetrics(),
                 NullLogger<MatchRecoveryService>.Instance);
         }
 
@@ -230,6 +232,7 @@ namespace HexWars.NetServer.Tests
             store,
             Options.Create(new MatchHostingOptions()),
             _clock,
+            new MatchMetrics(),
             NullLogger<MatchRecoveryService>.Instance);
 
         /// <summary>An active match whose journal replays to a finished game, written through the store the
@@ -326,7 +329,8 @@ namespace HexWars.NetServer.Tests
         {
             var wrong = new MatchHostingOptions { ProtocolVersion = 3 };
             _recovery = new MatchRecoveryService(
-                _store, Options.Create(wrong), _clock, NullLogger<MatchRecoveryService>.Instance);
+                _store, Options.Create(wrong), _clock, new MatchMetrics(),
+                NullLogger<MatchRecoveryService>.Instance);
 
             Seed(Active(FreshStartReplay()));
 
@@ -613,6 +617,7 @@ namespace HexWars.NetServer.Tests
                     journals,
                     Options.Create(new MatchHostingOptions()),
                     new FakeTimeProvider(Begin),
+                    new MatchMetrics(),
                     NullLogger<MatchRecoveryService>.Instance));
 
                 return new Fixture
@@ -629,6 +634,7 @@ namespace HexWars.NetServer.Tests
                         sink,
                         Options.Create(new MatchHostingOptions()),
                         clock,
+                        new MatchMetrics(),
                         NullLogger<DurableMatchCoordinator>.Instance),
                 };
             }

@@ -973,7 +973,9 @@ namespace HexWars.NetServer.Tests
             factory.Logging = captured;
             using HttpClient client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             Assert.That(captured.Any("MATCH_TRUSTED_PROXY_CIDRS"), Is.True,
                 "an empty trust list means any peer can name the client, which an operator has to be told");

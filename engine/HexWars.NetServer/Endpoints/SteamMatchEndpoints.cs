@@ -3,6 +3,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using Microsoft.Extensions.Options;
@@ -63,6 +64,8 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            ServiceReadiness readiness,
+            MatchMetrics metrics,
             TimeProvider time,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
@@ -71,6 +74,11 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            // Before the body, and before anything that costs a round trip: a host on its way out
+            // must not take a seat in a match it will not be here to host, and refusing early is what
+            // makes a rolling deploy cost a player one retry rather than one game.
+            if (readiness.ShuttingDown) return ApiErrors.UnavailableResult();
 
             if (IsRefusedTransport(http, environment))
             {
@@ -133,6 +141,10 @@ namespace HexWars.NetServer.Endpoints
                         verified.Players,
                         time.GetUtcNow()),
                     ct).ConfigureAwait(false);
+
+                // The row, not the response. A creation refused below this line still left a match in the
+                // database, and a counter that missed it would understate what this host has allocated.
+                if (result.Created) metrics.MatchCreated();
 
                 string requesterId = Canonical(identity.SteamId);
                 int? seat = SeatOf(verified.Players, requesterId);
@@ -199,6 +211,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (SteamApiException failure)
             {
+                RecordSteamRefusal(metrics, failure);
                 logger.LogInformation(
                     "Steam refused a match creation for lobby {LobbyId}: {Failure} ({Detail})",
                     request.SteamLobbyId, failure.Failure, failure.Detail);
@@ -244,6 +257,8 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            ServiceReadiness readiness,
+            MatchMetrics metrics,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
             TimeProvider time,
@@ -252,6 +267,11 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            // Before the body, and before anything that costs a round trip: a host on its way out
+            // must not take a seat in a match it will not be here to host, and refusing early is what
+            // makes a rolling deploy cost a player one retry rather than one game.
+            if (readiness.ShuttingDown) return ApiErrors.UnavailableResult();
 
             if (IsRefusedTransport(http, environment))
             {
@@ -347,6 +367,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (SteamApiException failure)
             {
+                RecordSteamRefusal(metrics, failure);
                 logger.LogInformation(
                     "Steam refused a join at match {MatchId}: {Failure} ({Detail})",
                     Short(matchId), failure.Failure, failure.Detail);
@@ -521,6 +542,20 @@ namespace HexWars.NetServer.Endpoints
         /// </summary>
         static bool IsRefusedTransport(HttpContext http, IHostEnvironment environment) =>
             environment.IsProduction() && !http.Request.IsHttps;
+
+        /// <summary>
+        /// Records what Valve refused, once, for both handlers.
+        ///
+        /// An authentication refusal is counted twice on purpose. It belongs with the other Steam failures
+        /// because that is where an operator looks when Steam is having a bad day, and on its own because a
+        /// rise in rejected tickets with everything else steady is somebody trying credentials rather than
+        /// a platform outage, and the two want different responses.
+        /// </summary>
+        static void RecordSteamRefusal(MatchMetrics metrics, SteamApiException failure)
+        {
+            metrics.SteamFailure(failure.Failure.ToString());
+            if (failure.Failure == SteamFailure.AuthenticationFailed) metrics.AuthFailure();
+        }
 
         /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
         /// form still matches the account it was meant to name.</summary>

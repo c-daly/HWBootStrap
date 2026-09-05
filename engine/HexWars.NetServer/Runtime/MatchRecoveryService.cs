@@ -1,5 +1,6 @@
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using Microsoft.Extensions.Options;
 
@@ -36,6 +37,7 @@ namespace HexWars.NetServer.Runtime
         IMatchStore store,
         IOptions<MatchHostingOptions> options,
         TimeProvider time,
+        MatchMetrics metrics,
         ILogger<MatchRecoveryService> logger) : ILiveMatchLoader
     {
         /// <summary>
@@ -91,6 +93,10 @@ namespace HexWars.NetServer.Runtime
                         Short(matchId), refusal.Failure, refusal.Detail);
                 }
             }
+
+            // Counted here rather than where the report is read, so a pass that nobody consults is still
+            // on the record. A refused match is the one finding in this whole class that needs a human.
+            metrics.RecoveryFailure(failed.Count);
 
             logger.LogInformation(
                 "Startup recovery verified {Verified} open match(es), healed {Healed} and refused {Refused}",

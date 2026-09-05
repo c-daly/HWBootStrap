@@ -41,7 +41,9 @@ namespace HexWars.NetServer.Tests
             });
             using var client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             string all = string.Join("\n", capture.Messages);
             Assert.That(capture.Any("Environment report"), Is.True,

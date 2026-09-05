@@ -6,14 +6,18 @@ using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Endpoints;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Steam;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
+using Npgsql;
 
 namespace HexWars.NetServer.Hosting
 {
@@ -50,9 +54,29 @@ namespace HexWars.NetServer.Hosting
             // an expiry. TryAdd rather than Add: a host that has already supplied its own keeps it.
             builder.Services.TryAddSingleton(TimeProvider.System);
 
+            // Whether this host will serve traffic at all, and whether anything may say it is not. Both
+            // registered before everything else because every branch below reads one of them.
+            builder.Services.TryAddSingleton<ServiceReadiness>();
+
+            // Unconditional, and safe on a host with no durable runtime: the gauges read through delegates
+            // that stay unwired there, so a legacy deployment publishes zeroes rather than failing to start.
+            builder.Services.TryAddSingleton<MatchMetrics>();
+            builder.Services.AddHostedService<MetricsLogService>();
+
+            // Longer than the drain plus the goodbye, and shorter than the platform patience that follows.
+            // A host killed halfway through saying goodbye leaves sockets that saw an error rather than a
+            // restart, which is a player being shown a failure that did not happen.
+            builder.Services.Configure<HostOptions>(
+                host => host.ShutdownTimeout = GracefulShutdownService.ShutdownTimeout);
+
+            IHealthChecksBuilder health = builder.Services.AddHealthChecks();
+            string[] ready = { HealthEndpoints.ReadyTag };
+
             // Read straight from configuration rather than the bound options: this runs before validation,
             // and a legacy deployment with no DATABASE_URL must not pull Npgsql into the container at all.
-            if (!string.IsNullOrWhiteSpace(builder.Configuration["DATABASE_URL"]))
+            bool hasDatabase = !string.IsNullOrWhiteSpace(builder.Configuration["DATABASE_URL"]);
+
+            if (hasDatabase)
             {
                 builder.Services.AddHexWarsPostgres();
 
@@ -92,7 +116,26 @@ namespace HexWars.NetServer.Hosting
                 // is the only thing that touches an idle socket at all, so it is also the only thing that
                 // notices a client which went away without saying so.
                 builder.Services.AddHostedService<ConnectionHeartbeatService>();
+
+                // Two questions, not one. A database that answers is not a database carrying the schema
+                // this build writes against, and a host that took traffic on the second would accept
+                // players into matches it cannot journal.
+                //
+                // The data source arrives as a delegate rather than as itself: readiness is asked again on
+                // every probe because the answer changes while the process runs, and a check holding one
+                // pool could not be pointed at a database that has gone away.
+                builder.Services.AddSingleton(
+                    provider => new DatabaseHealthCheck(provider.GetRequiredService<NpgsqlDataSource>));
+
+                health.AddCheck<DatabaseHealthCheck>(HealthEndpoints.DatabaseCheck, tags: ready);
+                health.AddCheck<SchemaHealthCheck>(HealthEndpoints.SchemaCheck, tags: ready);
             }
+
+            // Both unconditional. Recovery has to be able to say something on every deployment - a pass
+            // that never ran is a different answer from nothing to check - and a host being told to stop is
+            // the one reason to hold traffic back that has nothing to do with a database.
+            health.AddCheck<RecoveryHealthCheck>(HealthEndpoints.RecoveryCheck, tags: ready);
+            health.AddCheck<ShutdownHealthCheck>(HealthEndpoints.ShutdownCheck, tags: ready);
 
             // Both registered unconditionally, and AFTER the Postgres branch on purpose.
             //
@@ -109,6 +152,16 @@ namespace HexWars.NetServer.Hosting
                 provider.GetRequiredService<RecoveryState>(),
                 provider.GetService<MatchRecoveryService>(),
                 provider.GetRequiredService<ILogger<RecoveryStartupService>>()));
+
+            // Resolved optionally for the same reason: a legacy deployment has neither a coordinator nor a
+            // socket registry, and there it flips readiness and stops, which is all there is to do.
+            builder.Services.AddSingleton<IHostedService>(provider => new GracefulShutdownService(
+                provider.GetRequiredService<ServiceReadiness>(),
+                provider.GetRequiredService<IHostApplicationLifetime>(),
+                provider.GetService<DurableMatchCoordinator>(),
+                provider.GetService<V2ConnectionRegistry>(),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<GracefulShutdownService>>()));
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
             // Legacy-only deployment with no Steam credentials is unaffected by it being here.
@@ -237,7 +290,50 @@ namespace HexWars.NetServer.Hosting
             // above: a rate limit on the WebGL bundle would throttle a page load, not an abuser.
             app.UseRateLimiter();
 
-            app.MapGet("/healthz", () => "ok");
+            // The operations surface, mapped for every deployment. A probe that only worked under one
+            // lobby provider would be a probe that reports a healthy legacy host as a missing route.
+            var metrics = app.Services.GetRequiredService<MatchMetrics>();
+
+            // Wired here rather than injected, because the meter is registered before the runtime it reads
+            // and a constructor dependency between the two would be a cycle. A host with neither leaves the
+            // delegates unset and the gauges answer zero.
+            if (app.Services.GetService<DurableMatchCoordinator>() is DurableMatchCoordinator coordinator)
+                metrics.LiveMatches = () => coordinator.LiveMatchCount;
+
+            if (app.Services.GetService<V2ConnectionRegistry>() is V2ConnectionRegistry sockets)
+            {
+                metrics.OpenSockets = () => sockets.Count;
+                metrics.MaxOutboundQueueDepth = () => sockets.MaxQueueDepth;
+            }
+
+            // 200 for as long as the process runs, whatever state it is in. A host whose database is down
+            // is alive and must say so: answering anything else here gets it restarted, and the restart
+            // comes up against the same database.
+            object alive = new { status = "live", buildId = match.BuildId };
+            app.MapGet(HealthEndpoints.LiveRoute, () => Results.Json(alive));
+            app.MapGet(HealthEndpoints.LegacyLiveRoute, () => Results.Json(alive));
+
+            app.MapHealthChecks(HealthEndpoints.ReadyRoute, new HealthCheckOptions
+            {
+                Predicate = check => check.Tags.Contains(HealthEndpoints.ReadyTag),
+                ResponseWriter = HealthEndpoints.WriteAsync,
+            });
+
+            // 404 until a token is configured, because a deployment that never turned this on has no such
+            // route; 401 after, because the numbers name matches and say how many people are playing.
+            app.MapGet(HealthEndpoints.MetricsRoute, (HttpContext http) =>
+            {
+                string? token = match.MetricsToken;
+                if (string.IsNullOrEmpty(token)) return Results.NotFound();
+
+                if (!HealthEndpoints.TokenMatches(
+                        token, http.Request.Headers[HealthEndpoints.MetricsTokenHeader]))
+                {
+                    return Results.StatusCode(StatusCodes.Status401Unauthorized);
+                }
+
+                return Results.Json(metrics.Snapshot());
+            });
 
             if (match.LobbyProvider.HasFlag(LobbyProviders.Legacy))
             {

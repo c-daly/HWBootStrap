@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Hosting;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
@@ -83,6 +84,7 @@ namespace HexWars.NetServer.Tests
                 _registry,
                 options,
                 TimeProvider.System,
+                new MatchMetrics(),
                 NullLogger<DurableMatchCoordinator>.Instance);
 
             _heartbeat = new ConnectionHeartbeatService(

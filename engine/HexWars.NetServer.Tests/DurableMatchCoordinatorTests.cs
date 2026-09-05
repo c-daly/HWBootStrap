@@ -1,6 +1,7 @@
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
@@ -81,6 +82,7 @@ namespace HexWars.NetServer.Tests
             _sink,
             Options.Create(_options),
             _clock,
+            new MatchMetrics(),
             NullLogger<DurableMatchCoordinator>.Instance);
 
         // ---- helpers ---------------------------------------------------------

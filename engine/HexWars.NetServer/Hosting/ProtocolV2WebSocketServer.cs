@@ -4,6 +4,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Runtime;
 using Microsoft.Extensions.Options;
 
@@ -77,6 +78,15 @@ namespace HexWars.NetServer.Hosting
             if (!context.WebSockets.IsWebSocketRequest)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            // Before the origin check and long before the upgrade: a host that has been told to stop has
+            // nothing to offer a new socket, and a client turned away now reconnects to whatever replaces
+            // this process rather than being closed a second after it authenticated.
+            if (context.RequestServices.GetRequiredService<ServiceReadiness>().ShuttingDown)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 return;
             }
 
