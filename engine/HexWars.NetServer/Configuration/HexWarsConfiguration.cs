@@ -51,6 +51,10 @@ namespace HexWars.NetServer.Configuration
         public const string MatchBlockedSteamIdsKey = "MATCH_BLOCKED_STEAM_IDS";
         public const string MatchMetricsTokenKey = "MATCH_METRICS_TOKEN";
         public const string MatchLogPseudonymKeyKey = "MATCH_LOG_PSEUDONYM_KEY";
+        public const string MatchHeartbeatSecondsKey = "MATCH_HEARTBEAT_SECONDS";
+        public const string MatchStaleConnectionSecondsKey = "MATCH_STALE_CONNECTION_SECONDS";
+        public const string MatchOutboundQueueCapacityKey = "MATCH_OUTBOUND_QUEUE_CAPACITY";
+        public const string MatchAuthTimeoutSecondsKey = "MATCH_AUTH_TIMEOUT_SECONDS";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -148,6 +152,37 @@ namespace HexWars.NetServer.Configuration
                         + MatchHostingOptions.MinJoinTokenTtlSeconds + " and "
                         + MatchHostingOptions.MaxJoinTokenTtlSeconds);
             }
+
+            match.HeartbeatIntervalSeconds = BoundedInt(
+                config, MatchHeartbeatSecondsKey,
+                MatchHostingOptions.MinHeartbeatIntervalSeconds,
+                MatchHostingOptions.MaxHeartbeatIntervalSeconds,
+                MatchHostingOptions.DefaultHeartbeatIntervalSeconds, errors);
+
+            match.StaleConnectionSeconds = BoundedInt(
+                config, MatchStaleConnectionSecondsKey,
+                MatchHostingOptions.MinStaleConnectionSeconds,
+                MatchHostingOptions.MaxStaleConnectionSeconds,
+                MatchHostingOptions.DefaultStaleConnectionSeconds, errors);
+
+            match.OutboundQueueCapacity = BoundedInt(
+                config, MatchOutboundQueueCapacityKey,
+                MatchHostingOptions.MinOutboundQueueCapacity,
+                MatchHostingOptions.MaxOutboundQueueCapacity,
+                MatchHostingOptions.DefaultOutboundQueueCapacity, errors);
+
+            match.AuthFrameTimeoutSeconds = BoundedInt(
+                config, MatchAuthTimeoutSecondsKey,
+                MatchHostingOptions.MinAuthFrameTimeoutSeconds,
+                MatchHostingOptions.MaxAuthFrameTimeoutSeconds,
+                MatchHostingOptions.DefaultAuthFrameTimeoutSeconds, errors);
+
+            // Checked as a pair rather than as two ranges, because either value alone can be perfectly
+            // reasonable and the combination still closes healthy sockets: a window that is not longer than
+            // the ping cadence judges silence over an interval the client was never given a chance to
+            // answer in, and the symptom is players being disconnected mid-game for no visible reason.
+            if (match.StaleConnectionSeconds <= match.HeartbeatIntervalSeconds)
+                errors.Add(MatchStaleConnectionSecondsKey + ": must be greater than " + MatchHeartbeatSecondsKey);
 
             string? trustRaw = Value(config, MatchTrustForwardedHeadersKey);
             if (trustRaw is not null)
@@ -294,6 +329,23 @@ namespace HexWars.NetServer.Configuration
 
         static string[] ReadList(IConfiguration config, string key) => SplitList(Value(config, key) ?? string.Empty);
 
+        /// <summary>An optional integer key with a floor and a ceiling. An absent key keeps the default; a
+        /// value that is not an integer and one that is out of range are the same mistake to an operator,
+        /// so they get the same message naming the range rather than a parser's vocabulary.</summary>
+        static int BoundedInt(
+            IConfiguration config, string key, int min, int max, int fallback, List<string> errors)
+        {
+            string? raw = Value(config, key);
+            if (raw is null) return fallback;
+
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+                && parsed >= min && parsed <= max)
+                return parsed;
+
+            errors.Add(key + ": must be an integer between " + min + " and " + max);
+            return fallback;
+        }
+
         static string[] SplitList(string raw) => raw
             .Split(",", StringSplitOptions.RemoveEmptyEntries)
             .Select(part => part.Trim())
@@ -324,6 +376,10 @@ namespace HexWars.NetServer.Configuration
             target.BlockedSteamIds = source.BlockedSteamIds;
             target.MetricsToken = source.MetricsToken;
             target.LogPseudonymKey = source.LogPseudonymKey;
+            target.HeartbeatIntervalSeconds = source.HeartbeatIntervalSeconds;
+            target.StaleConnectionSeconds = source.StaleConnectionSeconds;
+            target.OutboundQueueCapacity = source.OutboundQueueCapacity;
+            target.AuthFrameTimeoutSeconds = source.AuthFrameTimeoutSeconds;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

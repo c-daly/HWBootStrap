@@ -243,6 +243,99 @@ namespace HexWars.NetServer.Tests
             Assert.That(result.Match.JoinTokenTtlSeconds, Is.EqualTo(120));
         }
 
+        // ---- socket timing and back pressure ---------------------------------
+
+        [Test]
+        public void SocketTimingDefaults_AreThePublishedOnes()
+        {
+            var result = Read(new Dictionary<string, string?>());
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.HeartbeatIntervalSeconds, Is.EqualTo(20));
+            Assert.That(result.Match.StaleConnectionSeconds, Is.EqualTo(60));
+            Assert.That(result.Match.OutboundQueueCapacity, Is.EqualTo(256));
+            Assert.That(result.Match.AuthFrameTimeoutSeconds, Is.EqualTo(10));
+        }
+
+        [TestCase("0")]
+        [TestCase("301")]
+        [TestCase("not-a-number")]
+        public void HeartbeatInterval_OutsideTheAllowedRange_IsAValidationError(string raw)
+        {
+            var result = Read(new Dictionary<string, string?> { ["MATCH_HEARTBEAT_SECONDS"] = raw });
+
+            Assert.That(result.Errors,
+                Is.EqualTo(new[] { "MATCH_HEARTBEAT_SECONDS: must be an integer between 1 and 300" }));
+        }
+
+        [TestCase("1")]
+        [TestCase("901")]
+        [TestCase("whenever")]
+        public void StaleWindow_OutsideTheAllowedRange_IsAValidationError(string raw)
+        {
+            var result = Read(new Dictionary<string, string?> { ["MATCH_STALE_CONNECTION_SECONDS"] = raw });
+
+            Assert.That(result.Errors,
+                Is.EqualTo(new[] { "MATCH_STALE_CONNECTION_SECONDS: must be an integer between 2 and 900" }));
+        }
+
+        [Test]
+        public void StaleWindow_NotAboveTheHeartbeat_IsRefusedByName()
+        {
+            // A window no longer than the ping cadence closes healthy sockets: the server would be judging
+            // silence over an interval it never gave the client a chance to answer in.
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_HEARTBEAT_SECONDS"] = "30",
+                ["MATCH_STALE_CONNECTION_SECONDS"] = "30",
+            });
+
+            Assert.That(result.Errors, Is.EqualTo(new[]
+            {
+                "MATCH_STALE_CONNECTION_SECONDS: must be greater than MATCH_HEARTBEAT_SECONDS",
+            }));
+        }
+
+        [Test]
+        public void SocketTiming_InRange_IsAccepted()
+        {
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_HEARTBEAT_SECONDS"] = "5",
+                ["MATCH_STALE_CONNECTION_SECONDS"] = "12",
+                ["MATCH_OUTBOUND_QUEUE_CAPACITY"] = "64",
+                ["MATCH_AUTH_TIMEOUT_SECONDS"] = "3",
+            });
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.HeartbeatIntervalSeconds, Is.EqualTo(5));
+            Assert.That(result.Match.StaleConnectionSeconds, Is.EqualTo(12));
+            Assert.That(result.Match.OutboundQueueCapacity, Is.EqualTo(64));
+            Assert.That(result.Match.AuthFrameTimeoutSeconds, Is.EqualTo(3));
+        }
+
+        [TestCase("15")]
+        [TestCase("4097")]
+        [TestCase("lots")]
+        public void OutboundQueueCapacity_OutsideTheAllowedRange_IsAValidationError(string raw)
+        {
+            var result = Read(new Dictionary<string, string?> { ["MATCH_OUTBOUND_QUEUE_CAPACITY"] = raw });
+
+            Assert.That(result.Errors,
+                Is.EqualTo(new[] { "MATCH_OUTBOUND_QUEUE_CAPACITY: must be an integer between 16 and 4096" }));
+        }
+
+        [TestCase("0")]
+        [TestCase("121")]
+        [TestCase("soon")]
+        public void AuthFrameTimeout_OutsideTheAllowedRange_IsAValidationError(string raw)
+        {
+            var result = Read(new Dictionary<string, string?> { ["MATCH_AUTH_TIMEOUT_SECONDS"] = raw });
+
+            Assert.That(result.Errors,
+                Is.EqualTo(new[] { "MATCH_AUTH_TIMEOUT_SECONDS: must be an integer between 1 and 120" }));
+        }
+
         [TestCase("true", true)]
         [TestCase("TRUE", true)]
         [TestCase("1", true)]

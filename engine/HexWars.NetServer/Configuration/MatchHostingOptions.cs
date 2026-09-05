@@ -9,6 +9,22 @@ namespace HexWars.NetServer.Configuration
         public const int MaxJoinTokenTtlSeconds = 86400;
         public const int DefaultProtocolVersion = 2;
 
+        public const int DefaultHeartbeatIntervalSeconds = 20;
+        public const int MinHeartbeatIntervalSeconds = 1;
+        public const int MaxHeartbeatIntervalSeconds = 300;
+
+        public const int DefaultStaleConnectionSeconds = 60;
+        public const int MinStaleConnectionSeconds = 2;
+        public const int MaxStaleConnectionSeconds = 900;
+
+        public const int DefaultOutboundQueueCapacity = 256;
+        public const int MinOutboundQueueCapacity = 16;
+        public const int MaxOutboundQueueCapacity = 4096;
+
+        public const int DefaultAuthFrameTimeoutSeconds = 10;
+        public const int MinAuthFrameTimeoutSeconds = 1;
+        public const int MaxAuthFrameTimeoutSeconds = 120;
+
         /// <summary>A postgres:// URI or an Npgsql key=value string. A secret (it carries a password).</summary>
         public string DatabaseUrl { get; set; } = string.Empty;
 
@@ -62,5 +78,36 @@ namespace HexWars.NetServer.Configuration
         /// so handles correlate within one process lifetime and never across a restart or an instance.
         /// </summary>
         public string? LogPseudonymKey { get; set; }
+
+        /// <summary>
+        /// How often the v2 host sends PING on every authenticated socket.
+        ///
+        /// It is the only traffic on an idle match, so it is also the only thing that keeps an intermediary
+        /// from quietly dropping a socket both ends still believe in, and the only thing that tells this
+        /// process a client has gone away without closing.
+        /// </summary>
+        public int HeartbeatIntervalSeconds { get; set; } = DefaultHeartbeatIntervalSeconds;
+
+        /// <summary>
+        /// How long a socket may go without a single inbound frame before it is closed as stale.
+        ///
+        /// Must be longer than <see cref="HeartbeatIntervalSeconds"/>, and by enough to survive one lost
+        /// ping: a window equal to the cadence would judge silence over an interval the client was never
+        /// given a chance to answer in.
+        /// </summary>
+        public int StaleConnectionSeconds { get; set; } = DefaultStaleConnectionSeconds;
+
+        /// <summary>
+        /// Frames one connection may have waiting to go out before the server gives up on it.
+        ///
+        /// The queue is bounded because the alternative is not "no limit" but "the limit is this process's
+        /// memory": a client that stops reading while its match keeps playing would otherwise be paid for
+        /// by every other match on the host.
+        /// </summary>
+        public int OutboundQueueCapacity { get; set; } = DefaultOutboundQueueCapacity;
+
+        /// <summary>How long a freshly accepted socket has to send its AUTH frame. An unauthenticated
+        /// socket costs a connection slot and holds no seat, so this is deliberately short.</summary>
+        public int AuthFrameTimeoutSeconds { get; set; } = DefaultAuthFrameTimeoutSeconds;
     }
 }
