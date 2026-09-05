@@ -532,6 +532,43 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task Touch_WithTheLatestTimestampWrittenInAnotherZone_ComesBackAsUtc()
+        {
+            var match = await NewWaitingMatchAsync();
+
+            // The same instant as the maximum, written down five hours behind. Postgres returns every
+            // timestamptz in UTC whatever went in, so a store that hands the caller's own offset back is
+            // describing something the database does not do, and a test that compared offsets would pass
+            // against that store and fail against the real one.
+            var maximumElsewhere = new DateTimeOffset(
+                DateTime.MaxValue.Ticks - TimeSpan.FromHours(5).Ticks, TimeSpan.FromHours(-5));
+
+            await Store.TouchAsync(match.MatchId, match.Seat0, maximumElsewhere, Ct);
+
+            DateTimeOffset activity = (await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt;
+            Assert.That(activity.Offset, Is.EqualTo(TimeSpan.Zero), "a stored timestamp is always UTC");
+            Assert.That(activity, Is.EqualTo(DateTimeOffset.MaxValue));
+
+            DateTimeOffset seen = (await Store.GetPlayerAsync(match.MatchId, match.Seat0, Ct))!.LastSeenAt!.Value;
+            Assert.That(seen.Offset, Is.EqualTo(TimeSpan.Zero));
+            Assert.That(seen, Is.EqualTo(DateTimeOffset.MaxValue));
+        }
+
+        [Test]
+        public async Task Touch_WithAnOrdinaryTimestampInAnotherZone_ComesBackAsTheSameInstantInUtc()
+        {
+            var match = await NewWaitingMatchAsync();
+            var elsewhere = new DateTimeOffset(2026, 9, 4, 14, 30, 0, TimeSpan.FromHours(2));
+
+            await Store.TouchAsync(match.MatchId, match.Seat0, elsewhere, Ct);
+
+            DateTimeOffset activity = (await Store.GetMatchAsync(match.MatchId, Ct))!.LastActivityAt;
+            Assert.That(activity.Offset, Is.EqualTo(TimeSpan.Zero));
+            Assert.That(activity.UtcDateTime, Is.EqualTo(elsewhere.UtcDateTime),
+                "the same moment, said in the one way the database says it");
+        }
+
+        [Test]
         public async Task SaveCatalog_DoesNotLowerActivityThatIsAlreadyAhead()
         {
             var match = await NewWaitingMatchAsync();
