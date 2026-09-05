@@ -1,3 +1,5 @@
+using HexWars.NetServer.Persistence;
+
 namespace HexWars.NetServer.Configuration
 {
     /// <summary>Everything the match host needs that is not a Steam credential. Bound from the flat
@@ -40,6 +42,30 @@ namespace HexWars.NetServer.Configuration
         public const int DefaultOutboundQueueCapacity = 256;
         public const int MinOutboundQueueCapacity = 16;
         public const int MaxOutboundQueueCapacity = 4096;
+
+        public const int DefaultMaxOpenMatchesPerIp = 3;
+        public const int MinMaxOpenMatchesPerIp = 1;
+        public const int MaxMaxOpenMatchesPerIp = 1000;
+
+        public const int DefaultRetentionSweepMinutes = 60;
+        public const int MinRetentionSweepMinutes = 1;
+        public const int MaxRetentionSweepMinutes = 1440;
+
+        public const int DefaultRetentionWaitingMinutes = 30;
+        public const int MinRetentionWaitingMinutes = 1;
+        public const int MaxRetentionWaitingMinutes = 10080;
+
+        public const int DefaultRetentionActiveIdleDays = 7;
+        public const int MinRetentionActiveIdleDays = 1;
+        public const int MaxRetentionActiveIdleDays = 365;
+
+        public const int DefaultRetentionTerminalDays = 90;
+        public const int MinRetentionTerminalDays = 1;
+        public const int MaxRetentionTerminalDays = 3650;
+
+        public const int DefaultRetentionCredentialHours = 24;
+        public const int MinRetentionCredentialHours = 1;
+        public const int MaxRetentionCredentialHours = 8760;
 
         public const int DefaultAuthFrameTimeoutSeconds = 10;
         public const int MinAuthFrameTimeoutSeconds = 1;
@@ -185,5 +211,44 @@ namespace HexWars.NetServer.Configuration
         /// has pings to send.
         /// </remarks>
         public int MaxRechecksPerCadence { get; set; } = DefaultMaxRechecksPerCadence;
+
+        /// <summary>
+        /// Matches one address may successfully allocate inside <see cref="OpenMatchWindow"/>.
+        ///
+        /// The per-minute rate limiter bounds how OFTEN a caller may ask; this bounds how much durable state
+        /// one caller may leave behind. A match row is cheap to create and lives for the whole retention
+        /// window, so a caller staying politely inside the request budget can still fill the database. Three
+        /// is a household playing together with room to retry, and not a script.
+        /// </summary>
+        public int MaxOpenMatchesPerIp { get; set; } = DefaultMaxOpenMatchesPerIp;
+
+        /// <summary>The window <see cref="MaxOpenMatchesPerIp"/> is counted over. In memory only, and lost on
+        /// restart by design: no IP address is ever written to the database.</summary>
+        public static readonly TimeSpan OpenMatchWindow = TimeSpan.FromMinutes(10);
+
+        /// <summary>How often the retention sweeper runs. It is a sweep over four indexed ranges, so the
+        /// cadence is about how promptly data ages out rather than about load.</summary>
+        public int RetentionSweepMinutes { get; set; } = DefaultRetentionSweepMinutes;
+
+        /// <summary>Age at which a match that never started is expired.</summary>
+        public int RetentionWaitingMinutes { get; set; } = DefaultRetentionWaitingMinutes;
+
+        /// <summary>Silence after which a started match is abandoned. A game in progress is never disturbed
+        /// by retention, however long it has been running, as long as players keep playing it.</summary>
+        public int RetentionActiveIdleDays { get; set; } = DefaultRetentionActiveIdleDays;
+
+        /// <summary>How long a finished match and its journal are kept before they are hard-deleted.</summary>
+        public int RetentionTerminalDays { get; set; } = DefaultRetentionTerminalDays;
+
+        /// <summary>How long an expired join credential row is kept before it is deleted.</summary>
+        public int RetentionCredentialHours { get; set; } = DefaultRetentionCredentialHours;
+
+        /// <summary>The four ages as the store wants them. Assembled here so the sweeper, the tests and the
+        /// operator documentation cannot drift apart on the arithmetic.</summary>
+        public RetentionPolicy RetentionPolicy => new(
+            TimeSpan.FromMinutes(RetentionWaitingMinutes),
+            TimeSpan.FromDays(RetentionActiveIdleDays),
+            TimeSpan.FromDays(RetentionTerminalDays),
+            TimeSpan.FromHours(RetentionCredentialHours));
     }
 }

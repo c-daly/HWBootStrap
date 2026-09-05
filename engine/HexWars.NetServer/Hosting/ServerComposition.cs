@@ -9,6 +9,8 @@ using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Steam;
+using HexWars.NetServer.Operations;
+using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.StaticFiles;
@@ -33,6 +35,13 @@ namespace HexWars.NetServer.Hosting
         /// <summary>Join attempts one address may make per window.</summary>
         public const int JoinPermitsPerWindow = 20;
 
+        /// <summary>
+        /// The one CORS policy this server has: the browser origins allowed to read the public, unauthenticated
+        /// routes. Named so an endpoint opts in by name - the readiness endpoints that arrive with the health
+        /// work take the same policy, and nothing else ever should.
+        /// </summary>
+        public const string WebGlCorsPolicy = "webgl";
+
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
             // Belt and braces with RemoveAllLoggers() on the Steam client: these categories log the full
@@ -45,6 +54,28 @@ namespace HexWars.NetServer.Hosting
                 "System.Net.Http.HttpClient." + SteamWebApiRegistration.HttpClientName + ".", LogLevel.None);
 
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+
+            // Every ceiling on the work an unauthenticated caller can make this process do, set on the
+            // server itself so it applies before any middleware or endpoint is reached. Harmless on a host
+            // that is not Kestrel: the options object is simply never consulted.
+            builder.WebHost.ConfigureKestrel(RequestLimits.Configure);
+
+            // Named rather than default, and applied per endpoint rather than globally. The Steam API and
+            // both websocket routes must emit no CORS headers at all: a credential-bearing endpoint that
+            // told a browser which origins may call it would be advertising a cross-site target, and the
+            // clients that use those routes are native and never send a preflight. GET only, because
+            // everything the WebGL client reads cross-origin is a read.
+            builder.Services.AddCors();
+            builder.Services.AddOptions<CorsOptions>().Configure<IOptions<MatchHostingOptions>>(
+                (cors, hosting) => cors.AddPolicy(
+                    WebGlCorsPolicy,
+                    policy => policy.WithOrigins(hosting.Value.AllowedWebOrigins).WithMethods("GET")));
+
+            // Both process-wide by necessity: a per-request block list would re-parse the configuration on
+            // every call, and a per-request quota would count to one and never refuse.
+            builder.Services.AddSingleton<PlayerBlockList>();
+            builder.Services.AddSingleton<OpenMatchQuota>();
+
 
             // One clock for everything that needs one, so a test can wind it forward instead of waiting for
             // an expiry. TryAdd rather than Add: a host that has already supplied its own keeps it.
@@ -92,6 +123,14 @@ namespace HexWars.NetServer.Hosting
                 // is the only thing that touches an idle socket at all, so it is also the only thing that
                 // notices a client which went away without saying so.
                 builder.Services.AddHostedService<ConnectionHeartbeatService>();
+
+                // Registered next to the store it sweeps and the coordinator it evicts through: it cannot be
+                // built without either, and a deployment with no database has nothing to retain. Under both
+                // names so a test can drive one sweep rather than wait an hour for the cadence.
+                builder.Services.AddSingleton<MatchRetentionService>();
+                builder.Services.AddSingleton<IHostedService>(
+                    provider => provider.GetRequiredService<MatchRetentionService>());
+
             }
 
             // Both registered unconditionally, and AFTER the Postgres branch on purpose.
@@ -224,6 +263,14 @@ namespace HexWars.NetServer.Hosting
                 app.UseForwardedHeaders(forwarded);
             }
 
+            // Before anything reads a body, and before the static-file handler: a body over the cap is
+            // refused from its declared length, so the bytes are never pulled off the wire at all.
+            app.UseHexWarsRequestLimits();
+
+            // Endpoint-aware: this emits nothing at all unless the endpoint the request matched asked
+            // for a named policy. Routing has already run by here, which is what lets it see that.
+            app.UseCors();
+
             app.UseWebSockets();
             app.UseDefaultFiles();   // serve the WebGL client (index.html) from wwwroot/ when a deploy copies it in
             // Unity WebGL ships .unityweb/.data/.wasm; without these mappings Kestrel 404s them.
@@ -238,11 +285,13 @@ namespace HexWars.NetServer.Hosting
             // above: a rate limit on the WebGL bundle would throttle a page load, not an abuser.
             app.UseRateLimiter();
 
-            app.MapGet("/healthz", () => "ok");
+            app.MapGet("/healthz", () => "ok").RequireCors(WebGlCorsPolicy);
 
             if (match.LobbyProvider.HasFlag(LobbyProviders.Legacy))
             {
-                // The lobby browser: open public games as JSON. Same origin as the WebGL client, no CORS.
+                // The lobby browser: open public games as JSON. Read-only and public, so it carries the
+                // one CORS policy this server has - a WebGL client served from an allow-listed origin can read
+                // it, and nobody else gets a header saying they may.
                 app.MapGet("/games", () =>
                 {
                     IReadOnlyList<OpenGame> open = LegacyWebSocketServer.OpenGamesSnapshot();
@@ -260,7 +309,7 @@ namespace HexWars.NetServer.Hosting
                             ageSeconds = g.AgeSeconds,
                         }).ToArray(),
                     });
-                });
+                }).RequireCors(WebGlCorsPolicy);
                 app.Map("/ws", LegacyWebSocketServer.Handle);
             }
 

@@ -4,6 +4,7 @@ using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Steam;
 using Microsoft.Extensions.Options;
 
@@ -63,6 +64,8 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            PlayerBlockList blockList,
+            OpenMatchQuota quota,
             TimeProvider time,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
@@ -92,11 +95,27 @@ namespace HexWars.NetServer.Endpoints
             string caller = CallerKey(http);
             if (throttle.IsThrottled(caller)) return ApiErrors.RateLimitedResult();
 
+            // Before the Steam round trips and before the write, for the same reason the throttle is: a
+            // caller that has already filled its share of the database costs this server nothing to refuse.
+            // This is a bound on durable state, not on request rate - the limiter above owns that - so it
+            // counts the matches a caller actually got rather than the calls it made.
+            if (!quota.HasHeadroom(caller))
+            {
+                logger.LogWarning(
+                    "Refused a match creation: this address already allocated {Cap} matches this window",
+                    options.MaxOpenMatchesPerIp);
+                return ApiErrors.RateLimitedResult();
+            }
+
+            // Every line the rest of this call writes carries the lobby, including the ones written from the
+            // catch blocks, which is where an operator actually goes looking.
+            using IDisposable? lobbyScope = LogScopes.LobbyScope(logger, request.SteamLobbyId);
+
             try
             {
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
-                if (IsRefusedAccount(options, identity, logger, "a match creation"))
+                if (IsRefusedAccount(blockList, identity, logger, "a match creation"))
                 {
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
@@ -133,6 +152,11 @@ namespace HexWars.NetServer.Endpoints
                         verified.Players,
                         time.GetUtcNow()),
                     ct).ConfigureAwait(false);
+
+                // Charged only for a match this call actually allocated. A create that found the lobby
+                // already had one wrote nothing, and the other seat asking for their credential is the normal
+                // way that happens - billing them for it would lock a pair out of their own rematches.
+                if (result.Created) quota.RecordCreation(caller);
 
                 string requesterId = Canonical(identity.SteamId);
                 int? seat = SeatOf(verified.Players, requesterId);
@@ -244,6 +268,7 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            PlayerBlockList blockList,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
             TimeProvider time,
@@ -252,6 +277,9 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            // The match is known from the route, so every line this call writes can carry it.
+            using IDisposable? matchScope = LogScopes.MatchScope(logger, matchId);
 
             if (IsRefusedTransport(http, environment))
             {
@@ -277,7 +305,7 @@ namespace HexWars.NetServer.Endpoints
 
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
-                if (IsRefusedAccount(options, identity, logger, "a join"))
+                if (IsRefusedAccount(blockList, identity, logger, "a join"))
                 {
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
@@ -483,7 +511,7 @@ namespace HexWars.NetServer.Endpoints
         /// title. It is logged, because an operator investigating a report will want to know.
         /// </summary>
         static bool IsRefusedAccount(
-            MatchHostingOptions options, SteamIdentity identity, ILogger logger, string what)
+            PlayerBlockList blockList, SteamIdentity identity, ILogger logger, string what)
         {
             string handle = SteamLogRedaction.HashSteamId(identity.SteamId);
 
@@ -493,7 +521,7 @@ namespace HexWars.NetServer.Endpoints
                 return true;
             }
 
-            if (IsBlocked(options, identity.SteamId))
+            if (blockList.IsBlocked(identity.SteamId))
             {
                 logger.LogWarning("Refused {What} from blocked account {Sid}", what, handle);
                 return true;
@@ -521,21 +549,6 @@ namespace HexWars.NetServer.Endpoints
         /// </summary>
         static bool IsRefusedTransport(HttpContext http, IHostEnvironment environment) =>
             environment.IsProduction() && !http.Request.IsHttps;
-
-        /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
-        /// form still matches the account it was meant to name.</summary>
-        internal static bool IsBlocked(MatchHostingOptions options, string steamId)
-        {
-            if (options.BlockedSteamIds.Length == 0) return false;
-
-            string canonical = Canonical(steamId);
-            foreach (string blocked in options.BlockedSteamIds)
-            {
-                if (string.Equals(Canonical(blocked), canonical, StringComparison.Ordinal)) return true;
-            }
-
-            return false;
-        }
 
         static string Canonical(string steamId) =>
             SteamId64.TryNormalize(steamId, out string canonical) ? canonical : steamId.Trim();
