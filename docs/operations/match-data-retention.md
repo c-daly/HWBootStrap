@@ -92,7 +92,11 @@ The rules above are enforced by the hosted service
 [`MatchRetentionService`](../../engine/HexWars.NetServer/Operations/MatchRetentionService.cs), which is
 registered only when `DATABASE_URL` is set. It runs every `MATCH_RETENTION_SWEEP_MINUTES` (60 by
 default) and calls `IMatchStore.ApplyRetentionAsync`, which issues exactly these statements inside one
-transaction, with the four ages as parameters rather than the literals written here:
+transaction. The four ages are parameters; the STATUSES are SQL literals exactly as written here, and
+deliberately so - three of these statements are served by partial indexes over those same words, and a
+partial index is only usable where the planner can prove the query implies its predicate. A parameter
+manages that on a custom plan and stops managing it on a generic one, so parameterising a status would
+leave the sweep correct and turn it into a sequential scan of every match ever played.
 
 ```sql
 UPDATE matches SET status='expired', completed_at=now(), last_activity_at=now()
@@ -130,7 +134,11 @@ Two rules constrain the sweeper:
   it.
 - A sweep logs counts only. Row counts per statement, never match ids, Steam ids, command wires, or
   credential material.
-- Abandoning a match closes whatever sockets it still has, with websocket close code **1001**. The
+- Abandoning a match closes whatever sockets it still has, with websocket close code **1001**, and that
+  closing is bounded rather than best-effort. A match whose gate is held by a commit in flight is left
+  exactly as it was and named for the next sweep; an eviction that throws or stalls is logged and stepped
+  over. Neither can stop the sweeper, because the rows are already correct and the sockets are what is
+  left. The
   statement returns the ids it changed and the sweeper passes them to the match coordinator; that
   list is the only identifier a sweep ever carries, and it goes to the coordinator rather than to a
   log. The four ages are set by `MATCH_RETENTION_WAITING_MINUTES`, `MATCH_RETENTION_ACTIVE_IDLE_DAYS`,
