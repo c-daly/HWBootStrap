@@ -50,7 +50,7 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Library_ContainsTacticalV3StandardAndFullRosterTemplates()
+        public void Library_ContainsTacticalV3StandardFullRosterAndCloseStaticTemplates()
         {
             var library = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath);
             MlTrainingScenario[] actual = library
@@ -72,16 +72,27 @@ namespace HexWars.Presentation.Tests
             {
                 "tactical-v3-standard",
                 "tactical-v3-full-roster",
+                "tactical-v3-close-static-v1",
             }));
             Assert.That(actual.Select(item => item.Name), Is.EqualTo(new[]
             {
                 "Standard",
                 "Full Roster",
+                "Close Static 1v1",
             }));
             Assert.That(actual[0].TacticalV3.Templates, Has.Count.EqualTo(3));
             Assert.That(actual[0].TacticalV3.Templates.Select(item => item.Id),
                 Is.EqualTo(new[] { "custom-a", "custom-b", "custom-c" }));
             Assert.That(actual[1].TacticalV3.Templates, Has.Count.EqualTo(5));
+            Assert.That(actual[2].Board.Width, Is.EqualTo(4));
+            Assert.That(actual[2].Board.Height, Is.EqualTo(4));
+            Assert.That(actual[2].Rules.RoundCap, Is.EqualTo(8));
+            Assert.That(actual[2].Episode.MaxSteps, Is.EqualTo(64));
+            Assert.That(actual[2].TacticalV3.Templates.Select(item => item.Id),
+                Is.EqualTo(new[] { "closer-v1" }));
+            Assert.That(actual[2].TacticalV3.StartDistribution.Single(
+                item => item.BasisPoints != 0).ProfileId,
+                Is.EqualTo("conversion-1v1-near"));
             Assert.That(actual[0].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
             Assert.That(actual[1].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
             Assert.That(standardPreflight.ContractHash, Is.EqualTo(

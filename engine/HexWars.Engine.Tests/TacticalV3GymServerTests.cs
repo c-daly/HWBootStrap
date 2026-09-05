@@ -23,6 +23,9 @@ namespace HexWars.Engine.Tests
         private static string MismatchedScenario => RepositoryPath(
             "python", "config", "annihilation-imitation-v1.json");
 
+        private static string TrainingGameTemplates => RepositoryPath(
+            "python", "config", "training-game-templates.json");
+
         public enum WrongReferenceFamily
         {
             UnitCell,
@@ -505,6 +508,71 @@ namespace HexWars.Engine.Tests
             }));
 
             AssertViewIdentities(next);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Process_CloseStaticTemplateIs4x4OneVsOneAndPassiveOnlyEndsTurn(bool duel)
+        {
+            string scenario = WriteTemplateScenario("tactical-v3-close-static-v1");
+            try
+            {
+                using var server = duel
+                    ? TacticalV3ServerProcess.Start(scenario)
+                    : TacticalV3ServerProcess.StartWithOpponent(scenario, "passive");
+                JsonElement spaces = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = duel ? "duel_spaces" : "spaces",
+                }));
+                JsonElement board = spaces.GetProperty("match").GetProperty("board");
+                JsonElement reset = duel
+                    ? server.Request(JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_reset", seed = 41,
+                        p0 = "external", p1 = "passive", learner = 0,
+                        start_profile = "conversion-1v1-near", reference_seat = 0,
+                    }))
+                    : server.Request("{\"cmd\":\"reset\",\"seed\":41}");
+                JsonElement units = reset.GetProperty("observation").GetProperty("units");
+                HexCoord selfCell = UnitCell(reset, "self");
+                HexCoord opponentCell = UnitCell(reset, "opponent");
+                int initialRound = RuleValue(reset, "round");
+                JsonElement endTurn = reset.GetProperty("candidates").EnumerateArray()
+                    .Single(candidate =>
+                        candidate.GetProperty("kind").GetString() == "end_turn");
+
+                JsonElement next = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = duel ? "duel_step" : "step",
+                    decision_id = reset.GetProperty("decision_id").GetInt64(),
+                    candidate_id = endTurn.GetProperty("candidate_id").GetInt32(),
+                }));
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(board.GetProperty("width").GetInt32(), Is.EqualTo(4));
+                    Assert.That(board.GetProperty("height").GetInt32(), Is.EqualTo(4));
+                    Assert.That(reset.GetProperty("observation").GetProperty("cells")
+                        .GetArrayLength(), Is.EqualTo(16));
+                    Assert.That(reset.GetProperty("start_profile").GetString(),
+                        Is.EqualTo("conversion-1v1-near"));
+                    Assert.That(units.EnumerateArray().Count(unit =>
+                        unit.GetProperty("owner").GetString() == "self"), Is.EqualTo(1));
+                    Assert.That(units.EnumerateArray().Count(unit =>
+                        unit.GetProperty("owner").GetString() == "opponent"), Is.EqualTo(1));
+                    Assert.That(HexCoord.Distance(selfCell, opponentCell), Is.InRange(2, 3));
+                    Assert.That(next.GetProperty("seat").GetInt32(), Is.EqualTo(0));
+                    Assert.That(RuleValue(next, "round"), Is.EqualTo(initialRound + 1));
+                    Assert.That(next.GetProperty("decision_id").GetInt64(),
+                        Is.EqualTo(reset.GetProperty("decision_id").GetInt64() + 2));
+                    Assert.That(next.GetProperty("observation").GetProperty("units").GetRawText(),
+                        Is.EqualTo(units.GetRawText()));
+                });
+            }
+            finally
+            {
+                if (File.Exists(scenario)) File.Delete(scenario);
+            }
         }
 
         [Test]
@@ -1376,6 +1444,35 @@ namespace HexWars.Engine.Tests
                 Assert.That(candidate.GetProperty("decision_id").GetInt64(), Is.EqualTo(decisionId));
                 Assert.That(candidate.GetProperty("candidate_id").TryGetInt32(out _), Is.True);
             }
+        }
+
+        private static int RuleValue(JsonElement view, string kind) =>
+            view.GetProperty("observation").GetProperty("rules").EnumerateArray()
+                .Single(rule => rule.GetProperty("kind").GetString() == kind)
+                .GetProperty("int_value").GetInt32();
+
+        private static HexCoord UnitCell(JsonElement view, string owner)
+        {
+            JsonElement observation = view.GetProperty("observation");
+            JsonElement unit = observation.GetProperty("units").EnumerateArray()
+                .Single(item => item.GetProperty("owner").GetString() == owner);
+            int row = unit.GetProperty("cell").GetProperty("row").GetInt32();
+            JsonElement cell = observation.GetProperty("cells")[row];
+            return new HexCoord(
+                cell.GetProperty("q").GetInt32(), cell.GetProperty("r").GetInt32());
+        }
+
+        private static string WriteTemplateScenario(string templateId)
+        {
+            using JsonDocument library = JsonDocument.Parse(
+                File.ReadAllText(TrainingGameTemplates));
+            JsonElement template = library.RootElement.GetProperty("templates")
+                .EnumerateArray().Single(item =>
+                    item.GetProperty("id").GetString() == templateId);
+            string path = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                templateId + "-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(path, template.GetRawText(), new UTF8Encoding(false));
+            return path;
         }
 
         private static void AssertAuthoritativeGameStatesEqual(
@@ -2361,6 +2458,13 @@ namespace HexWars.Engine.Tests
                 new TacticalV3ServerProcess(null,
                     "--environment", MlContract.TacticalV3Version,
                     "--scenario-file", scenario);
+
+            public static TacticalV3ServerProcess StartWithOpponent(
+                string scenario, string opponent) =>
+                new TacticalV3ServerProcess(null,
+                    "--environment", MlContract.TacticalV3Version,
+                    "--scenario-file", scenario,
+                    "--opponent", opponent);
 
             public static TacticalV3ServerProcess StartInWorkingDirectory(
                 string scenario, string workingDirectory) =>

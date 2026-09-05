@@ -24,7 +24,7 @@ from .tactical_v3_schema import (
 
 _STDERR_TAIL_LIMIT = 8192
 _REAP_TIMEOUT_SECONDS = 2
-_REPLY_TIMEOUT_SECONDS = 5
+_REPLY_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,7 +477,12 @@ class TacticalV3GymClient:
         try:
             line = self._stdout_lines.get(timeout=_REPLY_TIMEOUT_SECONDS)
         except queue.Empty:
-            self._raise_after_protocol_error(RuntimeError("GymServer reply timed out"))
+            command = request.get("cmd")
+            command_name = command if type(command) is str and command else "<unknown>"
+            self._raise_after_protocol_error(RuntimeError(
+                f"GymServer {command_name} reply timed out after "
+                f"{_REPLY_TIMEOUT_SECONDS:g} seconds"
+            ))
         if not line:
             self._raise_after_protocol_error(RuntimeError("GymServer closed unexpectedly"))
         if not line.strip():

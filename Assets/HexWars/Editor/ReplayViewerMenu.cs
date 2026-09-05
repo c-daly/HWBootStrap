@@ -165,13 +165,58 @@ namespace HexWars.Presentation.EditorTools
             }
         }
 
-        public static string BuildLiveTrainingSpec(string runDirectory) =>
-            new ModelSeatConfiguration
+        public static string BuildLiveTrainingSpec(string runDirectory)
+        {
+            string selected = MlArenaLaunchPlan.ResolveModelRunSelection(runDirectory);
+            return new ModelSeatConfiguration
             {
                 Kind = ModelControllerKind.LiveRun,
-                Path = runDirectory,
-                InferenceMode = ModelInferenceMode.Stochastic,
+                Path = selected,
+                // SB3 supports stochastic prediction. Structured tactical-v3
+                // inference is currently greedy-only, so advertise the behavior
+                // the policy server actually performs instead of silently lying.
+                InferenceMode = UsesStructuredInference(selected)
+                    ? ModelInferenceMode.Deterministic
+                    : ModelInferenceMode.Stochastic,
             }.BuildSpec();
+        }
+
+        static bool UsesStructuredInference(string runDirectory)
+        {
+            try
+            {
+                string json = System.IO.File.ReadAllText(
+                    System.IO.Path.Combine(runDirectory, "run.json"));
+                LiveTrainingManifest manifest =
+                    JsonUtility.FromJson<LiveTrainingManifest>(json);
+                string algorithm = manifest?.config?.algorithm;
+                return string.Equals(
+                           algorithm, "structured_imitation",
+                           StringComparison.Ordinal) ||
+                       string.Equals(
+                           algorithm, "structured_policy_gradient",
+                           StringComparison.Ordinal);
+            }
+            catch (Exception error) when (
+                error is ArgumentException ||
+                error is System.IO.IOException ||
+                error is NotSupportedException ||
+                error is System.Security.SecurityException ||
+                error is UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        [Serializable] sealed class LiveTrainingManifest
+        {
+            public LiveTrainingConfig config;
+        }
+
+        [Serializable] sealed class LiveTrainingConfig
+        {
+            public string algorithm;
+        }
 
         static string PyDir() =>
             System.IO.Path.Combine(System.IO.Directory.GetParent(Application.dataPath).FullName, "python");

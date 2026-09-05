@@ -9,7 +9,22 @@ using UnityEngine;
 namespace HexWars.Presentation.EditorTools.MlLab
 {
     public enum MlAlgorithm { MaskablePpo, MaskedDqn }
-    public enum MlOpponentKind { Greedy, Random, FixedRun, LiveRun }
+    // Zero is the pre-existing tactical-v3 behavior. Keep the explicit values so
+    // serialized ML Lab windows continue to select DAgger after this field is added.
+    public enum MlTacticalV3TrainingMode
+    {
+        DaggerContinuation = 0,
+        OutcomeCandidate = 1,
+    }
+    // Explicit values preserve serialized ML Lab selections across enum growth.
+    public enum MlOpponentKind
+    {
+        Greedy = 0,
+        Random = 1,
+        FixedRun = 2,
+        LiveRun = 3,
+        Passive = 4,
+    }
     public enum MlLearnerSeat { Alternating, Seat0, Seat1 }
 
     public static class MlLabPaths
@@ -85,6 +100,8 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public int Workers = 1;
         public string Device = "auto";
         public MlLearnerSeat LearnerSeat = MlLearnerSeat.Alternating;
+        public MlTacticalV3TrainingMode TacticalV3TrainingMode =
+            MlTacticalV3TrainingMode.DaggerContinuation;
         public MlOpponentKind OpponentKind = MlOpponentKind.Greedy;
         public string OpponentPath = string.Empty;
         public string ResumeSource = string.Empty;
@@ -108,44 +125,53 @@ namespace HexWars.Presentation.EditorTools.MlLab
             IReadOnlyList<MlTrackerConfig> trackers)
         {
             var errors = new List<string>();
-            bool structuredContinuation =
-                Environment == MlEnvironmentContract.TacticalV3;
+            bool tacticalV3 = Environment == MlEnvironmentContract.TacticalV3;
+            bool outcomeCandidate = tacticalV3 &&
+                TacticalV3TrainingMode ==
+                    MlTacticalV3TrainingMode.OutcomeCandidate;
             if (!IsValidRunName(RunName))
                 errors.Add("Run name must use 1-64 letters, numbers, dots, underscores, or dashes.");
-            if (structuredContinuation && TotalTimesteps < 2)
+            if (tacticalV3 && TotalTimesteps < 2)
                 errors.Add(
-                    "DAgger train label target must be at least two.");
-            else if (!structuredContinuation && TotalTimesteps <= 0)
+                    outcomeCandidate
+                        ? "Outcome learner decision target must be at least two."
+                        : "DAgger train label target must be at least two.");
+            else if (!tacticalV3 && TotalTimesteps <= 0)
                 errors.Add("Timesteps must be greater than zero.");
-            if (!structuredContinuation && CheckpointInterval <= 0)
+            if (!tacticalV3 && CheckpointInterval <= 0)
                 errors.Add("Checkpoint interval must be greater than zero.");
-            if (!structuredContinuation && Workers <= 0)
+            if (!tacticalV3 && Workers <= 0)
                 errors.Add("Workers must be at least one.");
-            if (structuredContinuation && (Seed < 0 || Seed > 20000))
+            if (tacticalV3 && (Seed < 0 || Seed > 20000))
                 errors.Add(
                     "Tactical-v3 seed must be from 0 through 20000.");
             if (string.IsNullOrWhiteSpace(Device)) errors.Add("Device is required.");
             if ((OpponentKind == MlOpponentKind.FixedRun || OpponentKind == MlOpponentKind.LiveRun) &&
                 string.IsNullOrWhiteSpace(OpponentPath))
                 errors.Add("Opponent path is required for a model or live run.");
-            if (structuredContinuation && string.IsNullOrWhiteSpace(ResumeSource))
+            if (tacticalV3 && !outcomeCandidate &&
+                string.IsNullOrWhiteSpace(ResumeSource))
                 errors.Add(
                     "A source model is required to initialize a tactical-v3 continuation.");
-            if (!structuredContinuation &&
+            if ((!tacticalV3 || outcomeCandidate) &&
                 !string.IsNullOrEmpty(ResumeSource) &&
                 string.IsNullOrWhiteSpace(ResumeSource))
-                errors.Add("Resume source cannot be blank.");
+                errors.Add(outcomeCandidate
+                    ? "Initial model cannot be blank."
+                    : "Resume source cannot be blank.");
             foreach (var tracker in
                      trackers ?? Array.Empty<MlTrackerConfig>())
             {
                 if (tracker != null && string.Equals(tracker.Kind, "custom", StringComparison.OrdinalIgnoreCase) &&
                     string.IsNullOrWhiteSpace(tracker.Settings))
                     errors.Add("Custom tracker requires a module:function adapter.");
-                if (structuredContinuation && tracker != null &&
+                if (tacticalV3 && tracker != null &&
                     !string.Equals(tracker.Kind, "local", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(tracker.Kind, "tensorboard", StringComparison.OrdinalIgnoreCase))
                     errors.Add(
-                        "Tactical-v3 continuation currently supports local and TensorBoard trackers only.");
+                        outcomeCandidate
+                            ? "Tactical-v3 outcome training currently supports local and TensorBoard trackers only."
+                            : "Tactical-v3 continuation currently supports local and TensorBoard trackers only.");
             }
             return errors;
         }
@@ -196,9 +222,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public string BuildStructuredTrainArguments(string scenarioPath)
         {
-            if (Environment != MlEnvironmentContract.TacticalV3)
+            if (Environment != MlEnvironmentContract.TacticalV3 ||
+                TacticalV3TrainingMode !=
+                    MlTacticalV3TrainingMode.DaggerContinuation)
                 throw new InvalidOperationException(
-                    "Structured training is only available for tactical-v3.");
+                    "Structured DAgger training is only available for tactical-v3 continuations.");
             if (string.IsNullOrWhiteSpace(ResumeSource))
                 throw new InvalidOperationException(
                     "A source model is required to initialize a tactical-v3 continuation.");
@@ -221,6 +249,41 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "--device", Q(Device),
                 "--learner-seat", SeatValue(LearnerSeat),
             };
+            AppendTrackerArguments(args);
+            args.Add("--no-console-output");
+            args.Add("--json");
+            return string.Join(" ", args);
+        }
+
+        public string BuildOutcomeTrainArguments(string scenarioPath)
+        {
+            if (Environment != MlEnvironmentContract.TacticalV3 ||
+                TacticalV3TrainingMode !=
+                    MlTacticalV3TrainingMode.OutcomeCandidate)
+                throw new InvalidOperationException(
+                    "Outcome training is only available for tactical-v3 outcome candidates.");
+            if (string.IsNullOrWhiteSpace(scenarioPath))
+                throw new ArgumentException(
+                    "Resolved scenario path is required.", nameof(scenarioPath));
+
+            var args = new List<string>
+            {
+                "train-outcome",
+                "--run", Q(RunName),
+                "--scenario-file", QAlways(scenarioPath),
+                "--opponent", Q(OpponentValue()),
+                "--timesteps", TotalTimesteps.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--seed", Seed.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--device", Q(Device),
+                "--learner-seat", SeatValue(LearnerSeat),
+            };
+            if (!string.IsNullOrWhiteSpace(ResumeSource))
+            {
+                args.Add("--source-run");
+                args.Add(Q(ResumeSource));
+            }
             AppendTrackerArguments(args);
             args.Add("--no-console-output");
             args.Add("--json");
@@ -258,9 +321,11 @@ namespace HexWars.Presentation.EditorTools.MlLab
 
         public string BuildStructuredPreflightArguments(string scenarioPath)
         {
-            if (Environment != MlEnvironmentContract.TacticalV3)
+            if (Environment != MlEnvironmentContract.TacticalV3 ||
+                TacticalV3TrainingMode !=
+                    MlTacticalV3TrainingMode.DaggerContinuation)
                 throw new InvalidOperationException(
-                    "Structured preflight is only available for tactical-v3.");
+                    "Structured DAgger preflight is only available for tactical-v3 continuations.");
             if (string.IsNullOrWhiteSpace(ResumeSource))
                 throw new InvalidOperationException(
                     "A source model is required to initialize a tactical-v3 continuation.");
@@ -279,6 +344,36 @@ namespace HexWars.Presentation.EditorTools.MlLab
                 "--device", Q(Device),
                 "--json",
             });
+        }
+
+        public string BuildOutcomePreflightArguments(string scenarioPath)
+        {
+            if (Environment != MlEnvironmentContract.TacticalV3 ||
+                TacticalV3TrainingMode !=
+                    MlTacticalV3TrainingMode.OutcomeCandidate)
+                throw new InvalidOperationException(
+                    "Outcome preflight is only available for tactical-v3 outcome candidates.");
+            if (string.IsNullOrWhiteSpace(scenarioPath))
+                throw new ArgumentException(
+                    "Resolved scenario path is required.", nameof(scenarioPath));
+
+            var args = new List<string>
+            {
+                "preflight-outcome",
+                "--scenario-file", QAlways(scenarioPath),
+                "--opponent", Q(OpponentValue()),
+                "--seed", Seed.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture),
+                "--device", Q(Device),
+                "--learner-seat", SeatValue(LearnerSeat),
+            };
+            if (!string.IsNullOrWhiteSpace(ResumeSource))
+            {
+                args.Add("--source-run");
+                args.Add(Q(ResumeSource));
+            }
+            args.Add("--json");
+            return string.Join(" ", args);
         }
 
         public string BuildResumeArguments()
@@ -315,6 +410,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             switch (OpponentKind)
             {
                 case MlOpponentKind.Random: return "random";
+                case MlOpponentKind.Passive: return "passive";
                 case MlOpponentKind.FixedRun: return "run:" + OpponentPath;
                 case MlOpponentKind.LiveRun:
                     return new ModelSeatConfiguration

@@ -41,6 +41,14 @@ def test_startup_error_path_is_limited_to_safe_training_run_names(
     ) == tmp_path / "retry-1" / "train-err.log"
 
     assert hexwars_ml._startup_error_path(
+        [
+            "train-outcome",
+            "--run", "close-candidate",
+            "--runs-root", str(tmp_path),
+        ]
+    ) == tmp_path / "close-candidate" / "train-err.log"
+
+    assert hexwars_ml._startup_error_path(
         ["evaluate", "--run", "evaluation", "--runs-root", str(tmp_path)]
     ) is None
     assert hexwars_ml._startup_error_path(
@@ -147,6 +155,147 @@ def test_retry_entrypoint_keeps_normal_sibling_startup_logging(
     )
     assert "ML Lab startup began with pid " in contents
     assert "ML Lab startup exited with code 0" in contents
+
+
+@pytest.mark.parametrize(
+    "protected_kind",
+    (
+        "initialization",
+        "fixed_opponent",
+        "live_opponent",
+        "direct_opponent",
+        "file_opponent",
+    ),
+)
+def test_outcome_entrypoint_does_not_open_a_log_inside_model_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    source = runs / "protected"
+    source.mkdir(parents=True)
+    log = source / "train-err.log"
+    log.write_text("source diagnostics\n", encoding="utf-8")
+    (source / "run.json").write_text("{}\n", encoding="utf-8")
+    spec_file = tmp_path / "opponent.json"
+    spec_file.write_text(
+        json.dumps({"kind": "run", "path": str(source), "mode": "fixed"}),
+        encoding="utf-8",
+    )
+    opponent_values = {
+        "fixed_opponent": f"run:{source}",
+        "live_opponent": json.dumps({
+            "kind": "run", "path": str(source), "mode": "live",
+        }),
+        "direct_opponent": str(source),
+        "file_opponent": f"@{spec_file}",
+    }
+    source_arguments = ["--source-run", str(source)] if (
+        protected_kind == "initialization"
+    ) else ["--opponent", opponent_values[protected_kind]]
+    argv = [
+        "train-outcome",
+        "--run", source.name,
+        "--runs-root", str(runs),
+        *source_arguments,
+        "--json",
+    ]
+    received = []
+
+    def fake_main(actual_argv: list[str]) -> int:
+        received.append(actual_argv)
+        return 1
+
+    monkeypatch.setattr(cli_module, "main", fake_main)
+
+    assert hexwars_ml._startup_error_path(argv) is None
+    assert hexwars_ml.run(argv) == 1
+    assert received == [argv]
+    assert log.read_text(encoding="utf-8") == "source diagnostics\n"
+
+
+def test_outcome_entrypoint_keeps_normal_sibling_startup_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = tmp_path / "runs"
+    source = runs / "source"
+    source.mkdir(parents=True)
+    source_log = source / "train-err.log"
+    source_log.write_text("source diagnostics\n", encoding="utf-8")
+    argv = [
+        "train-outcome",
+        "--run", "candidate",
+        "--source-run", str(source),
+        "--runs-root", str(runs),
+    ]
+    monkeypatch.setattr(cli_module, "main", lambda _argv: 0)
+
+    destination_log = runs / "candidate" / "train-err.log"
+    assert hexwars_ml._startup_error_path(argv) == destination_log
+    assert hexwars_ml.run(argv) == 0
+    assert source_log.read_text(encoding="utf-8") == "source diagnostics\n"
+    contents = destination_log.read_text(encoding="utf-8")
+    assert "ML Lab startup began with pid " in contents
+    assert "ML Lab startup exited with code 0" in contents
+
+
+def test_outcome_entrypoint_keeps_scripted_name_precedence_over_run_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named_like_script = tmp_path / "random"
+    named_like_script.mkdir()
+    (named_like_script / "run.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    runs = named_like_script / "runs"
+    argv = [
+        "train-outcome",
+        "--run", "candidate",
+        "--opponent", "random",
+        "--runs-root", str(runs),
+    ]
+    monkeypatch.setattr(cli_module, "main", lambda _argv: 0)
+
+    destination_log = runs / "candidate" / "train-err.log"
+    assert hexwars_ml._startup_error_path(argv) == destination_log
+    assert hexwars_ml.run(argv) == 0
+    contents = destination_log.read_text(encoding="utf-8")
+    assert "ML Lab startup began with pid " in contents
+    assert "ML Lab startup exited with code 0" in contents
+
+
+def test_outcome_entrypoint_does_not_log_inside_empty_source_run_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.chdir(source)
+    argv = [
+        "train-outcome",
+        "--run", "child",
+        "--source-run=",
+        "--runs-root", ".",
+    ]
+    received = []
+
+    def fake_main(actual_argv: list[str]) -> int:
+        received.append(actual_argv)
+        return 1
+
+    monkeypatch.setattr(cli_module, "main", fake_main)
+
+    assert hexwars_ml._startup_error_path(argv) is None
+    assert hexwars_ml.run(argv) == 1
+    assert received == [argv]
+    assert not (source / "child").exists()
+
+
+@pytest.mark.parametrize("value", ("run:", "ppo:", "dqn:"))
+def test_outcome_entrypoint_ignores_empty_controller_source_paths(value: str) -> None:
+    assert hexwars_ml._controller_source_path(value) is None
 
 
 def test_training_argparse_failure_is_retained_in_run_stderr_log(

@@ -224,6 +224,7 @@ def test_builtin_library_has_expected_ordered_templates() -> None:
         "adaptive-large-battle",
         "tactical-v3-standard",
         "tactical-v3-full-roster",
+        "tactical-v3-close-static-v1",
     ]
 
 
@@ -257,6 +258,7 @@ def test_builtin_library_presets_have_exact_horizons_and_geometry() -> None:
         ("adaptive-large-battle", 24, 16, 4, 150, 1800),
         ("tactical-v3-standard", 13, 9, 3, 100, 808),
         ("tactical-v3-full-roster", 13, 9, 3, 100, 808),
+        ("tactical-v3-close-static-v1", 4, 4, 1, 8, 64),
     ]
 
 
@@ -356,6 +358,85 @@ def test_tactical_v3_default_and_full_roster_templates_resolve_strictly() -> Non
         standard.document["tactical_v3"]["capacity"]
         == full_roster.document["tactical_v3"]["capacity"]
     )
+
+
+def test_tactical_v3_close_static_template_resolves_as_exact_minigame() -> None:
+    scenario = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=None,
+        template_id="tactical-v3-close-static-v1",
+    )
+    standard = resolve_scenario(
+        environment="tactical-v3", scenario_file=None, template_id=None
+    )
+
+    assert scenario.template_id == "tactical-v3-close-static-v1"
+    assert scenario.name == "Close Static 1v1"
+    assert dict(scenario.document["board"]) == {
+        "width": 4,
+        "height": 4,
+        "max_elevation": 1,
+        "zone_depth": 1,
+        "flat_chance": 1.0,
+        "plains_weight": 1,
+        "forest_weight": 0,
+        "rough_weight": 0,
+        "water_weight": 0,
+    }
+    assert dict(scenario.document["rules"]) == {
+        "actions_per_turn": 0,
+        "round_cap": 8,
+        "starting_points": 0,
+        "fog_of_war": False,
+        "biomes_enabled": False,
+        "bounty_rate": 0.5,
+        "deploy_cost_multiplier": 1.0,
+        "generator_cost": 2,
+        "generator_output": 1,
+        "generator_health": 3,
+    }
+    assert dict(scenario.document["episode"]) == {"max_steps": 64}
+    assert dict(scenario.document["reward"]) == {
+        "terminal_win": 1.0,
+        "terminal_non_win": -1.0,
+        "material_adjustment_bound": 0.2,
+        "time_pressure_bound": 0.05,
+        "points_weight": 0.5,
+    }
+
+    tactical_v3 = scenario.document["tactical_v3"]
+    assert tactical_v3["starting_unit_count"] == 3
+    assert tactical_v3["max_controllable_units"] == 3
+    assert tactical_v3["placement_policy"] == "profiled-seeded-v1"
+    assert tactical_v3["capacity"] == standard.document["tactical_v3"]["capacity"]
+    assert [
+        (row["profile_id"], row["basis_points"])
+        for row in tactical_v3["start_distribution"]
+        if row["basis_points"]
+    ] == [("conversion-1v1-near", 10_000)]
+    assert [template["id"] for template in tactical_v3["templates"]] == [
+        "closer-v1"
+    ]
+    assert tactical_v3["templates"][0]["name"] == "Closer"
+    assert dict(tactical_v3["templates"][0]["stats"]) == {
+        "health": 3,
+        "damage": 3,
+        "defense": 0,
+        "movement": 1,
+        "vertical_movement": 0,
+        "range": 1,
+        "range_arc": 1,
+        "vision": 4,
+        "vision_arc": 1,
+    }
+
+
+def test_tactical_v3_close_static_horizon_is_the_shortest_schema_valid_budget() -> None:
+    document = tactical_v3_document("tactical-v3-close-static-v1")
+    document["episode"]["max_steps"] -= 1
+
+    with pytest.raises(ValueError, match=r"minimum required is 64"):
+        validate_scenario_document(document)
 
 
 def test_tactical_v3_accepts_unity_float32_stage_one_reward_values() -> None:
