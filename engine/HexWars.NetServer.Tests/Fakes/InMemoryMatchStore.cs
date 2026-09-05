@@ -160,7 +160,7 @@ namespace HexWars.NetServer.Tests.Fakes
                     {
                         player.CatalogWire = catalogWire;
                         // Mirrors the now() the SQL uses: no caller timestamp reaches this method.
-                        row.LastActivityAt = Stored(DateTimeOffset.UtcNow);
+                        row.LastActivityAt = Later(row.LastActivityAt, Stored(DateTimeOffset.UtcNow));
                     }
                 }
 
@@ -180,7 +180,7 @@ namespace HexWars.NetServer.Tests.Fakes
                 row.Status = MatchStatus.Active;
                 row.StartReplay = startReplay;
                 row.StartedAt = Stored(startedAt);
-                row.LastActivityAt = Stored(startedAt);
+                row.LastActivityAt = Later(row.LastActivityAt, Stored(startedAt));
                 return Task.FromResult(true);
             }
         }
@@ -212,7 +212,7 @@ namespace HexWars.NetServer.Tests.Fakes
                 row.Status = terminal;
                 row.WinnerSeat = winnerSeat;
                 row.CompletedAt = Stored(completedAt);
-                row.LastActivityAt = Stored(completedAt);
+                row.LastActivityAt = Later(row.LastActivityAt, Stored(completedAt));
                 return Task.FromResult(true);
             }
         }
@@ -223,12 +223,14 @@ namespace HexWars.NetServer.Tests.Fakes
 
             lock (_gate)
             {
-                if (_matches.TryGetValue(matchId, out MatchRow? row)) row.LastActivityAt = Stored(seenAt);
+                if (_matches.TryGetValue(matchId, out MatchRow? row))
+                    row.LastActivityAt = Later(row.LastActivityAt, Stored(seenAt));
 
                 if (steamId is not null)
                 {
                     PlayerRow? player = Player(matchId, steamId);
-                    if (player is not null) player.LastSeenAt = Stored(seenAt);
+                    if (player is not null)
+                        player.LastSeenAt = Later(player.LastSeenAt ?? Stored(seenAt), Stored(seenAt));
                 }
 
                 return Task.CompletedTask;
@@ -259,7 +261,7 @@ namespace HexWars.NetServer.Tests.Fakes
                 {
                     row.Commands.Add(new PersistedCommand(
                         matchId, expectedSequence, commandWire, Stored(acceptedAt), issuerSteamId));
-                    row.LastActivityAt = Stored(acceptedAt);
+                    row.LastActivityAt = Later(row.LastActivityAt, Stored(acceptedAt));
                     return Task.FromResult(new AppendResult(AppendStatus.Appended, expectedSequence));
                 }
 
@@ -366,12 +368,32 @@ namespace HexWars.NetServer.Tests.Fakes
         CredentialRow? Credential(byte[] hash) =>
             _credentials.FirstOrDefault(c => c.Hash.SequenceEqual(hash));
 
-        /// <summary>What Postgres would have stored: an instant, truncated to the microsecond timestamptz
-        /// holds. Without this the double compares equal where the database would not.</summary>
+        /// <summary>The GREATEST the SQL uses. Activity only ever moves forward: writes to one match race
+        /// each other and get retried, so a call that lands late carrying an older timestamp must not drag
+        /// a live match back into the reaper's window.</summary>
+        static DateTimeOffset Later(DateTimeOffset current, DateTimeOffset candidate) =>
+            candidate > current ? candidate : current;
+
+        /// <summary>What Postgres would have stored: a UTC instant, truncated to the microsecond a
+        /// timestamptz holds. Without this the double compares equal where the database would not.
+        ///
+        /// UTC first, before anything else looks at the value. Two DateTimeOffsets are equal when they
+        /// name the same moment, whatever zone each was written in, so a comparison that passes and then
+        /// returns what the caller handed over keeps their offset: the double would answer +05:00 where
+        /// the database always answers +00:00, and a test about offsets would pass here and fail there.
+        ///
+        /// The two extremes are then instants no longer and are not rounded. Npgsql maps them onto the
+        /// timestamptz infinities and reads them back as exactly these values, so truncating MaxValue down
+        /// to the microsecond would have the double return a timestamp the database never could.</summary>
         static DateTimeOffset Stored(DateTimeOffset value)
         {
-            DateTime utc = value.UtcDateTime;
-            return new DateTimeOffset(utc.AddTicks(-(utc.Ticks % TicksPerMicrosecond)), TimeSpan.Zero);
+            DateTimeOffset utc = value.ToUniversalTime();
+
+            if (utc == DateTimeOffset.MaxValue || utc == DateTimeOffset.MinValue) return utc;
+
+            DateTime instant = utc.UtcDateTime;
+            return new DateTimeOffset(
+                instant.AddTicks(-(instant.Ticks % TicksPerMicrosecond)), TimeSpan.Zero);
         }
 
         /// <summary>The argument checks the real store applies, called through the shared guard rather
