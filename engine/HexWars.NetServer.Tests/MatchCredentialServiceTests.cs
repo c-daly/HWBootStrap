@@ -327,6 +327,15 @@ namespace HexWars.NetServer.Tests
             Assert.That(past, Is.LessThan(issued.ExpiresAt),
                 "the credential itself is still unexpired, so the refusal can only be about the window");
             Assert.That(await _service.IsStillValidAsync(hash, _matchId, past, Ct), Is.False);
+
+            // And the boundary itself is the closing instant, not the last usable one - the same strict
+            // test the handshake and both stores apply.
+            DateTimeOffset boundary =
+                Origin.AddSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+
+            Assert.That(
+                await _service.IsStillValidAsync(hash, _matchId, boundary.AddTicks(-1), Ct), Is.True);
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, boundary, Ct), Is.False);
         }
 
         [Test]

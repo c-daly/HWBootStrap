@@ -48,18 +48,23 @@ namespace HexWars.NetServer.Tests
             _connections.Clear();
         }
 
-        void Start(int recheckSeconds, int heartbeatSeconds = 1)
+        void Start(
+            int recheckSeconds,
+            int heartbeatSeconds = 1,
+            int budget = MatchHostingOptions.DefaultMaxRechecksPerCadence,
+            TimeSpan? checkTakes = null)
         {
             var options = Options.Create(new MatchHostingOptions
             {
                 HeartbeatIntervalSeconds = heartbeatSeconds,
                 StaleConnectionSeconds = 300,
                 CredentialRecheckSeconds = recheckSeconds,
-                MaxSocketsPerIp = 256,
+                MaxRechecksPerCadence = budget,
+                MaxSocketsPerIp = 8192,
             });
 
             _registry = new V2ConnectionRegistry(options, NullLogger<V2ConnectionRegistry>.Instance);
-            _credentials = new BlockingCredentialService();
+            _credentials = new BlockingCredentialService(checkTakes);
 
             var store = new InMemoryMatchStore();
             var coordinator = new DurableMatchCoordinator(
@@ -81,7 +86,9 @@ namespace HexWars.NetServer.Tests
         }
 
         /// <summary>One authenticated socket over a peer that accepts everything and says nothing.</summary>
-        RecordingWebSocket Seat(int index)
+        RecordingWebSocket Seat(int index) => Seat(index, due: true);
+
+        RecordingWebSocket Seat(int index, bool due)
         {
             var peer = new RecordingWebSocket();
             var connection = new V2Connection(
@@ -91,8 +98,10 @@ namespace HexWars.NetServer.Tests
                 CredentialHash = new byte[32],
                 CredentialExpiresAt = DateTimeOffset.UtcNow.AddHours(1),
 
-                // Long ago, so every socket is due for a re-check on the very first tick.
-                LastCredentialCheck = DateTimeOffset.UtcNow.AddHours(-1),
+                // Long ago, so the socket is due for a re-check on the very first tick.
+                LastCredentialCheck = due
+                    ? DateTimeOffset.UtcNow.AddHours(-1)
+                    : DateTimeOffset.UtcNow.AddHours(1),
             };
 
             connection.CredentialHash[0] = (byte)index;
@@ -149,49 +158,87 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task AHostWhereEverySocketIsDueAtOnce_StartsOnlyOneCadenceWorthOfChecks()
+        public async Task AHundredDueSockets_AreAllCheckedInsideOneCadence()
         {
-            // A host that has just come up finds every socket due on its first tick. Building a task per
-            // socket - each with its own linked token source and timer - is thousands of allocations
-            // before a single query has run, on a tick that has a ping to send. The cap is on the work
-            // created, not only on how much of it may run at once.
-            Start(recheckSeconds: 1, heartbeatSeconds: 2);
+            // The regression this file exists for. Taking a slot per socket and stopping at the first
+            // refusal meant exactly eight genuinely asynchronous checks ran per heartbeat, however many
+            // were due: a slot freed a millisecond later sat idle until the next tick, and the hundredth
+            // socket was re-checked minutes after the interval promised it would be.
+            //
+            // A hundred quarter-second checks over eight workers is about three seconds of work, which
+            // fits inside one five-second cadence and takes thirteen cadences without a pool that refills.
+            Start(recheckSeconds: 1, heartbeatSeconds: 5, checkTakes: TimeSpan.FromMilliseconds(200));
 
-            for (var i = 0; i < 2000; i++) Seat(i);
+            for (var i = 0; i < 100; i++) Seat(i);
 
             await _heartbeat.StartAsync(CancellationToken.None);
-            await WaitUntil(() => _credentials.Started > 0, TimeSpan.FromSeconds(15));
+            await WaitUntil(() => _credentials.Completed >= 100, TimeSpan.FromSeconds(20));
 
-            // Read between ticks: the next one is a whole interval away.
-            Assert.That(_credentials.Started,
-                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxRechecksPerCadence),
-                "one cadence must not try to re-check two thousand sockets");
+            Assert.That(_credentials.Completed, Is.EqualTo(100));
+            Assert.That(_heartbeat.RecheckCadences, Is.EqualTo(1),
+                "one pass, not thirteen: the workers keep pulling until the batch is drained");
             Assert.That(_credentials.InFlightPeak,
-                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxConcurrentRechecks));
+                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxConcurrentRechecks),
+                "and draining is still not the same as flooding the store");
         }
 
         [Test]
-        public async Task SocketsThatMissedASlot_AreTheOnesCheckedNext()
+        public async Task OneWedgedCheckInABatch_DoesNotStopTheOtherNinetyNine()
         {
-            // Fairness is the whole reason the queue is ordered by last check. A socket that did not get a
-            // slot is deliberately not stamped, so it keeps the oldest check time on the host and goes to
-            // the front - without that a busy host would re-check the same lucky sockets forever and never
-            // notice a revoked credential on any of the others.
-            const int seats = ConnectionHeartbeatService.MaxRechecksPerCadence + 8;
+            Start(recheckSeconds: 1, heartbeatSeconds: 5, checkTakes: TimeSpan.FromMilliseconds(200));
 
-            Start(recheckSeconds: 1);
+            for (var i = 0; i < 100; i++) Seat(i);
+            _credentials.BlockFor(7);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _credentials.Completed >= 99, TimeSpan.FromSeconds(20));
+
+            Assert.That(_credentials.Completed, Is.GreaterThanOrEqualTo(99),
+                "one query that never returns holds one worker, not the batch");
+        }
+
+        [Test]
+        public async Task SelectingTheBatch_LooksAtTheDueSocketsAndNotTheHost()
+        {
+            // Sorting every connection on the host to choose a few hundred is work proportional to the
+            // whole host, repeated every heartbeat. The selection walks the DUE ones once instead, so a
+            // host with five thousand quiet sockets pays for the forty that are asking to be checked.
+            Start(recheckSeconds: 1, heartbeatSeconds: 5, budget: 32);
+
+            for (var i = 0; i < 40; i++) Seat(i, due: true);
+            for (var i = 0; i < 5000; i++) Seat(200 + i, due: false);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _heartbeat.RecheckCadences >= 1, TimeSpan.FromSeconds(20));
+            await WaitUntil(() => _credentials.Started >= 32, TimeSpan.FromSeconds(20));
+
+            Assert.That(_heartbeat.RecheckCandidatesConsidered, Is.EqualTo(40),
+                "only the due sockets are offered to the batch");
+            Assert.That(_credentials.Started, Is.EqualTo(32), "and the batch is one budget deep");
+        }
+
+        [Test]
+        public async Task SocketsThatDidNotFitInACadence_AreTheOnesCheckedNext()
+        {
+            // Fairness is the whole reason the queue is ordered by last check. A socket the pass never
+            // reached is deliberately not stamped, so it keeps the oldest check time on the host and goes
+            // to the front - without that a busy host would re-check the same lucky sockets forever and
+            // never notice a revoked credential on any of the others.
+            const int budget = 32;
+            const int seats = budget + 8;
+
+            Start(recheckSeconds: 1, budget: budget);
             for (var i = 0; i < seats; i++) Seat(i);
 
             await _heartbeat.StartAsync(CancellationToken.None);
-
             await WaitUntil(() => _credentials.Seen.Count >= seats, TimeSpan.FromSeconds(20));
 
             Assert.That(_credentials.Seen, Has.Count.EqualTo(seats),
-                "every socket is reached within a few cadences, not merely the first "
-                + ConnectionHeartbeatService.MaxRechecksPerCadence.ToString());
+                "every socket is reached within a few cadences, not merely the first budget of them");
 
             foreach (V2Connection connection in _connections)
-                Assert.That(connection.LastCredentialCheck, Is.GreaterThan(DateTimeOffset.UtcNow.AddMinutes(-30)),
+                Assert.That(connection.LastCredentialCheck,
+                    Is.GreaterThan(DateTimeOffset.UtcNow.AddMinutes(-30)),
                     "a socket that was checked is stamped, and one that was skipped is not");
         }
 
@@ -206,7 +253,7 @@ namespace HexWars.NetServer.Tests
         }
 
         /// <summary>A credential service that answers instantly except for the seats a test wedges.</summary>
-        sealed class BlockingCredentialService : IMatchCredentialService
+        sealed class BlockingCredentialService(TimeSpan? takes = null) : IMatchCredentialService
         {
             readonly HashSet<byte> _blocked = new();
             readonly SemaphoreSlim _release = new(0);
@@ -249,6 +296,11 @@ namespace HexWars.NetServer.Tests
                 try
                 {
                     if (blocked) await _release.WaitAsync(ct).ConfigureAwait(false);
+
+                    // Genuinely asynchronous when a test asks for it. A check that completes synchronously
+                    // hides the scheduling bug this file exists to catch: the slot is free again before the
+                    // caller has looked at it, so a scheduler that never refills still looks busy.
+                    else if (takes is TimeSpan delay) await Task.Delay(delay, ct).ConfigureAwait(false);
 
                     Interlocked.Increment(ref _completed);
                     return true;

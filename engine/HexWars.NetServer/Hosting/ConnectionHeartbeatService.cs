@@ -40,20 +40,18 @@ namespace HexWars.NetServer.Hosting
         /// <summary>Credential re-checks in flight at once, across every socket on this host.</summary>
         internal const int MaxConcurrentRechecks = 8;
 
-        /// <summary>
-        /// Re-checks this loop will even consider starting in one pass.
-        ///
-        /// A cap on the work, not only on the concurrency. A host that has just come up finds every socket
-        /// due at once, and building a task per socket - each with its own linked token source and timer -
-        /// is thousands of allocations before a single query has run, on a tick that has a ping to send.
-        /// Four times the concurrency is enough to keep the slots busy and nothing like enough to notice.
-        /// </summary>
-        internal const int MaxRechecksPerCadence = MaxConcurrentRechecks * 4;
-
         /// <summary>How long one re-check is given before it is abandoned until the next cadence.</summary>
         internal static readonly TimeSpan RecheckTimeout = TimeSpan.FromSeconds(5);
 
-        readonly SemaphoreSlim _recheckSlots = new(MaxConcurrentRechecks, MaxConcurrentRechecks);
+        long _candidates;
+        long _cadences;
+
+        /// <summary>Connections that have been offered to the batch selection. A socket that is not due is
+        /// never counted, so this is what proves the selection walks the due ones and not the host.</summary>
+        internal long RecheckCandidatesConsidered => Interlocked.Read(ref _candidates);
+
+        /// <summary>Re-check passes that have found something to do.</summary>
+        internal long RecheckCadences => Interlocked.Read(ref _cadences);
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -103,7 +101,7 @@ namespace HexWars.NetServer.Hosting
                     // and doing one inline would put every socket on this host behind the slowest of them:
                     // one match querying a wedged connection would hold up the ping that keeps every other
                     // match alive.
-                    StartDueRechecks(now, recheck, stoppingToken);
+                    StartDueRechecks(now, recheck, interval, stoppingToken);
 
                     await coordinator.SweepAsync(now).ConfigureAwait(false);
                 }
@@ -127,43 +125,116 @@ namespace HexWars.NetServer.Hosting
             && now - connection.LastCredentialCheck >= recheck;
 
         /// <summary>
-        /// Starts as many due re-checks as there are free slots, oldest first.
+        /// Starts a pass over the sockets whose credentials are due to be asked about again.
         ///
-        /// Oldest first is what makes it fair. A socket that did not get a slot is not stamped, so it keeps
-        /// the oldest check time on the host and is at the front of the queue next cadence - without that,
-        /// a busy host could starve the same sockets forever while re-checking the same lucky ones.
+        /// Detached, and it drains. The previous shape took a slot per socket and stopped at the first
+        /// refusal, so exactly eight genuinely asynchronous checks ran per heartbeat however many were due
+        /// and however quickly they finished - a slot freed a millisecond later sat idle until the next
+        /// tick. With a hundred live sockets the hundredth was re-checked minutes after it was promised,
+        /// which makes the documented interval a fiction rather than a cadence.
         ///
-        /// The slot is taken BEFORE any work is created. Creating a task that will immediately queue for a
-        /// slot is the amplification this cap exists to prevent: the work would be allocated whether or not
-        /// there was anywhere to run it.
+        /// Eight workers pull from the batch until it is empty or the next heartbeat is due. Whatever is
+        /// left keeps its old check time, so it is at the front of the queue next cadence.
         /// </summary>
-        void StartDueRechecks(DateTimeOffset now, TimeSpan recheck, CancellationToken stopping)
+        void StartDueRechecks(DateTimeOffset now, TimeSpan recheck, TimeSpan cadence, CancellationToken stopping)
         {
-            List<V2Connection> due = registry.Snapshot()
-                .Where(c => c.IsAuthenticated && !c.IsClosed && IsRecheckDue(c, now, recheck))
-                .OrderBy(c => c.LastCredentialCheck)
-                .Take(MaxRechecksPerCadence)
-                .ToList();
+            V2Connection[] batch = SelectOldestDue(now, recheck, options.Value.MaxRechecksPerCadence);
+            if (batch.Length == 0) return;
 
-            foreach (V2Connection connection in due)
+            Interlocked.Increment(ref _cadences);
+            _ = DrainAsync(batch, now, cadence, stopping);
+        }
+
+        /// <summary>
+        /// The oldest-checked due sockets, up to <paramref name="budget"/>, without sorting the rest.
+        ///
+        /// Oldest first is what makes it fair: a socket that did not fit in one cadence keeps the oldest
+        /// check time on the host and goes to the front of the next one. Sorting every due connection to
+        /// learn that is work proportional to the whole host, repeated every heartbeat, to choose a few
+        /// hundred - so the candidates are walked once against a buffer of the best so far instead.
+        /// </summary>
+        V2Connection[] SelectOldestDue(DateTimeOffset now, TimeSpan recheck, int budget)
+        {
+            var chosen = new List<V2Connection>(Math.Min(budget, 64));
+            var newest = -1;
+
+            foreach (V2Connection connection in registry.Snapshot())
             {
-                if (!_recheckSlots.Wait(0)) break;
+                if (!connection.IsAuthenticated || connection.IsClosed) continue;
+                if (!IsRecheckDue(connection, now, recheck)) continue;
 
-                // Stamped only now, when the check is certain to run. A socket that was skipped keeps its
-                // place at the front of the queue.
-                connection.LastCredentialCheck = now;
-                _ = RecheckAsync(connection, now, stopping);
+                Interlocked.Increment(ref _candidates);
+
+                if (chosen.Count < budget)
+                {
+                    chosen.Add(connection);
+                    if (newest < 0
+                        || connection.LastCredentialCheck > chosen[newest].LastCredentialCheck)
+                        newest = chosen.Count - 1;
+
+                    continue;
+                }
+
+                // The common case once the buffer is full: one comparison against the newest thing in it.
+                if (connection.LastCredentialCheck >= chosen[newest].LastCredentialCheck) continue;
+
+                chosen[newest] = connection;
+                newest = 0;
+                for (var i = 1; i < chosen.Count; i++)
+                    if (chosen[i].LastCredentialCheck > chosen[newest].LastCredentialCheck) newest = i;
+            }
+
+            return chosen.ToArray();
+        }
+
+        /// <summary>
+        /// Runs one batch of re-checks, eight at a time, until it is done or the cadence runs out.
+        ///
+        /// The deadline is the next heartbeat: a pass that is still going when the following one is due has
+        /// fallen behind, and carrying on would stack passes on top of each other. What it did not reach is
+        /// simply not stamped, so the next pass starts with exactly those sockets.
+        /// </summary>
+        async Task DrainAsync(
+            V2Connection[] batch, DateTimeOffset now, TimeSpan cadence, CancellationToken stopping)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            deadline.CancelAfter(cadence);
+
+            var pool = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = MaxConcurrentRechecks,
+                CancellationToken = deadline.Token,
+            };
+
+            try
+            {
+                await Parallel.ForEachAsync(batch, pool, async (connection, ct) =>
+                {
+                    // Stamped as the check starts, not when the batch was chosen: a socket the deadline
+                    // never reached keeps its place at the front of the queue.
+                    connection.LastCredentialCheck = now;
+                    await RecheckAsync(connection, now, ct).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!stopping.IsCancellationRequested)
+                    logger.LogWarning(
+                        "A credential re-check pass ran out of cadence with work left; it resumes next tick");
+            }
+            catch (Exception failure)
+            {
+                logger.LogWarning(failure, "A credential re-check pass stopped early");
             }
         }
 
         /// <summary>
         /// Asks the store whether a live socket still has a credential, and closes it when it does not.
         ///
-        /// Bounded and deadlined on purpose. Revocation is a question only the store can answer, so it
-        /// costs a round trip per socket, and a host with a thousand of them must not turn one heartbeat
-        /// into a thousand simultaneous queries. Anything that does not answer inside the deadline leaves
-        /// the socket exactly as it was: an unanswered question is not evidence against the player, and
-        /// closing every live socket over a database having a bad minute would be a self-inflicted outage.
+        /// Deadlined on purpose; the concurrency is bounded by the pool that calls this. Anything that
+        /// does not answer inside the deadline leaves the socket exactly as it was: an unanswered question
+        /// is not evidence against the player, and closing every live socket over a database having a bad
+        /// minute would be a self-inflicted outage.
         /// </summary>
         async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
         {
@@ -193,10 +264,6 @@ namespace HexWars.NetServer.Hosting
             catch (Exception failure)
             {
                 logger.LogWarning(failure, "A live credential could not be re-checked");
-            }
-            finally
-            {
-                _recheckSlots.Release();
             }
         }
     }

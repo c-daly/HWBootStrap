@@ -17,6 +17,10 @@ namespace HexWars.NetServer.Configuration
         public const int MinMaxSocketsPerIp = 1;
         public const int MaxMaxSocketsPerIp = 256;
 
+        public const int DefaultMaxRechecksPerCadence = 256;
+        public const int MinMaxRechecksPerCadence = 8;
+        public const int MaxMaxRechecksPerCadence = 4096;
+
         public const int DefaultCredentialRecheckSeconds = 60;
         public const int MinCredentialRecheckSeconds = 5;
         public const int MaxCredentialRecheckSeconds = 3600;
@@ -163,5 +167,18 @@ namespace HexWars.NetServer.Configuration
         /// and is not any more, and nothing else on this host would ever notice.
         /// </summary>
         public int CredentialRecheckSeconds { get; set; } = DefaultCredentialRecheckSeconds;
+
+        /// <summary>
+        /// Sockets one heartbeat will re-check the credential of.
+        /// </summary>
+        /// <remarks>
+        /// It has to be large enough that the whole socket budget fits inside one recheck interval, or the
+        /// documented cadence is a fiction: with a cap of 32 and 100 live sockets the last of them is asked
+        /// about minutes late. Eight concurrent checks over a 20 second heartbeat drain 256 sub-second
+        /// queries comfortably, so that is the default. It is still a cap rather than no cap, because a
+        /// host that has just come up finds every socket due at once and the tick that discovers that also
+        /// has pings to send.
+        /// </remarks>
+        public int MaxRechecksPerCadence { get; set; } = DefaultMaxRechecksPerCadence;
     }
 }
