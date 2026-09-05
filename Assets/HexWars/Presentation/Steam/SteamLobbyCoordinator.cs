@@ -105,6 +105,7 @@ namespace HexWars.Presentation
         string? _joinRequestedMatchId;
         bool _allocationStarted;
         bool _joinInFlight;
+        string? _joiningLobbyId;
 
         SteamLobbyStatus _status;
 
@@ -192,6 +193,8 @@ namespace HexWars.Presentation
             var generation = _generation;
             SetPhase(SteamLobbyPhase.Searching);
             SetDeadline(_config.SearchTimeoutSeconds);
+            _joinInFlight = true;
+            _joiningLobbyId = lobbyId;
             Publish();
             _steam.JoinLobby(lobbyId, ok => OnLobbyJoined(generation, lobbyId, ok));
         }
@@ -322,6 +325,7 @@ namespace HexWars.Presentation
                 if (_joinInFlight)
                 {
                     _joinInFlight = false;
+                    _joiningLobbyId = null;
                     SetPhase(SteamLobbyPhase.BackendUnavailable);
                     Publish();
                     return;
@@ -413,6 +417,7 @@ namespace HexWars.Presentation
             // allocation one and it reports a backend outage, so it can never host a second lobby on
             // top of the one this client may still be entering.
             _joinInFlight = true;
+            _joiningLobbyId = chosen;
             SetDeadline(_config.AllocationTimeoutSeconds);
             _steam.JoinLobby(chosen, ok => OnLobbyJoined(generation, chosen, ok));
         }
@@ -497,12 +502,22 @@ namespace HexWars.Presentation
             {
                 // Cancelled or timed out while Steam was still joining: the join still succeeded, so
                 // this client is sitting in a lobby nobody is watching. Leave it.
-                if (ok && !string.IsNullOrEmpty(lobbyId)) _steam.LeaveLobby(lobbyId);
+                if (!ok || string.IsNullOrEmpty(lobbyId)) return;
+
+                // Unless the retry landed on the SAME lobby. Steam answers call results in whatever
+                // order they complete, so the abandoned join can succeed after the one that replaced
+                // it. Leaving then ejects the player from the lobby this coordinator believes it
+                // holds, and readiness and metadata never move again. One membership, one leave.
+                if (string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal)) return;
+                if (string.Equals(lobbyId, _joiningLobbyId, StringComparison.Ordinal)) return;
+
+                _steam.LeaveLobby(lobbyId);
                 return;
             }
 
             ClearDeadline();
             _joinInFlight = false;
+            _joiningLobbyId = null;
             if (!ok)
             {
                 // A Quick Match race (somebody else took the slot) simply becomes hosting.
@@ -922,6 +937,7 @@ namespace HexWars.Presentation
             _allocationStarted = false;
             _joinRequestedMatchId = null;
             _joinInFlight = false;
+            _joiningLobbyId = null;
             ClearPendingMatchKey();
             ClearDeadline();
         }

@@ -322,6 +322,29 @@ namespace HexWars.Presentation.Tests
         // ----- test driver -------------------------------------------------------------------
 
         /// <summary>Drains the queue. Bounded so a callback that enqueues more work cannot hang a test.</summary>
+        /// <summary>
+        /// Releases one queued callback out of turn. Steam answers call results in whatever order
+        /// they complete, so a request issued later can land before an earlier one that is still
+        /// outstanding; FIFO delivery alone cannot stage that.
+        /// </summary>
+        public void PumpAt(int index)
+        {
+            PumpCalls++;
+            if (index < 0 || index >= _pending.Count) return;
+
+            var kept = new List<Action>(_pending.Count);
+            Action? chosen = null;
+            var i = 0;
+            foreach (var pending in _pending)
+            {
+                if (i == index) chosen = pending; else kept.Add(pending);
+                i++;
+            }
+            _pending.Clear();
+            foreach (var keep in kept) _pending.Enqueue(keep);
+            if (chosen != null) chosen();
+        }
+
         public void PumpAll()
         {
             for (var i = 0; i < 1024 && _pending.Count > 0; i++) Pump();

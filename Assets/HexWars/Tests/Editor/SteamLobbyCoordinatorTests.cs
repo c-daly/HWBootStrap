@@ -1045,6 +1045,38 @@ namespace HexWars.Presentation.Tests
             Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1));
         }
 
+        [Test]
+        public void ALateJoinSuccessForTheLobbyTheRetryAlreadyHolds_IsNotLeft()
+        {
+            const string lobbyId = "109775240000000831";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+
+            _sut.QuickMatch();
+            _steam.Pump();                    // the search answers and a join goes out
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(1));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+
+            _sut.Retry();                     // the retry searches again and finds the same lobby
+            _steam.PumpAt(1);                 // its search answers ahead of the abandoned join
+            _steam.PumpAt(1);                 // and so does its own join
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(2));
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId));
+            var held = _sut.Status.Phase;
+
+            Assert.That(_steam.PendingCallbackCount, Is.EqualTo(1),
+                "the abandoned join is the one callback still outstanding");
+
+            _steam.Pump();                    // only now does the abandoned join report success
+
+            Assert.That(_steam.LeaveLobbyCalls, Is.Zero,
+                "leaving would eject the player from the lobby the coordinator believes it holds");
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId));
+            Assert.That(_sut.Status.Phase, Is.EqualTo(held));
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()
