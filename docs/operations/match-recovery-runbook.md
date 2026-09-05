@@ -203,10 +203,27 @@ and it drops the public schema of its target before it starts. It refuses any da
 marked disposable for exactly that reason, and making a name disposable to get past the refusal would
 destroy the journals the restore exists to preserve.
 
-Use `verify-journals` instead. It reads, and only reads: the connection asks Postgres for read-only
-sessions, so a write anywhere below it is refused by the server rather than trusted not to happen. It runs
-no migrations. It replays every journal through the same verifier the running host applies at startup, so a
-pass here means what a healthy `recovery` check means.
+Use `verify-journals` instead. It runs no migrations, and every statement it issues of its own runs inside
+an explicit `READ ONLY` transaction, which cannot be turned off from inside itself. It replays every journal
+through the same verifier the running host applies at startup, so a pass here means what a healthy
+`recovery` check means.
+
+**What that does and does not promise.** It protects against this verb writing by accident: no migration, no
+repair, no statement of its own that could ever be a write. It is not a sandbox. Anything else holding the
+same credentials can still write, and the connection-level default it also sets is only a default - one
+`SET` turns that off. When you need the guarantee rather than the discipline, connect as a role that cannot
+write:
+
+```sql
+-- OWNER-INPUT: create once per database an operator will verify.
+CREATE ROLE hexwars_readonly LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE <database> TO hexwars_readonly;
+GRANT USAGE ON SCHEMA public TO hexwars_readonly;
+GRANT SELECT ON matches, match_players, match_commands, match_join_credentials TO hexwars_readonly;
+GRANT SELECT ON schema_migrations TO hexwars_readonly;
+```
+
+Point `HEXWARS_VERIFY_DATABASE_URL` at that role and the promise stops depending on this code at all.
 
 1. Restore the backup into a database of its own, never over production.
 2. Point the verb at it and run it from the deployed image:

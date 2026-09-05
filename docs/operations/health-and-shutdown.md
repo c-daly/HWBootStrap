@@ -140,6 +140,11 @@ other ways.
 | `hexwars.auth.failures` | counter | `stage` | Handshakes that got no seat: `frame` (never reached a credential), `credential` (a lookup that said no), `timeout` (never sent AUTH), `ticket` (Valve refused the ticket at the HTTP endpoint), `capacity` (this host was already validating as many as it will), `internal` (a failure this server did not anticipate: ours, not the caller) |
 | `hexwars.reconnects` | counter | | Seats that took a socket having held one in the last 10 minutes |
 | `hexwars.recovery.failures` | counter | | Matches the startup recovery pass refused |
+| `hexwars.matches.live` | gauge | | Matches held in memory |
+| `hexwars.sockets.open` | gauge | | Live v2 sockets |
+| `hexwars.outbound.queue.max` | gauge | | Deepest any outbound queue has been |
+| `hexwars.command.commit.ms` | histogram | | Duration of the durable append |
+| `hexwars.command.broadcast.ms` | histogram | | Accepted to the last seat having the frame queued |
 
 The tags are the point of three of these. An untagged database counter says the database is unhappy and
 nothing an operator can act on: a wedged append and a journal read that timed out are the same number and
@@ -152,11 +157,7 @@ during an ordinary reconnect as a startup problem, and would count it twice.
 
 A handshake refused while this host is shutting down is deliberately counted nowhere. Nothing about the
 caller was wrong; it is a shutdown, and the shutdown summary already says so.
-| `hexwars.matches.live` | gauge | | Matches held in memory |
-| `hexwars.sockets.open` | gauge | | Live v2 sockets |
-| `hexwars.outbound.queue.max` | gauge | | Deepest any outbound queue has been |
-| `hexwars.command.commit.ms` | histogram | | Duration of the durable append |
-| `hexwars.command.broadcast.ms` | histogram | | Accepted to the last seat having the frame queued |
+
 
 ### The log line
 
@@ -188,10 +189,15 @@ computed inside it would be computed over the wrong window; subtract two reading
 
 ## 5. Verifying journals without touching them
 
-`dotnet HexWars.NetServer.dll verify-journals` answers, read-only, the question readiness answers about the
-database this host is attached to: can this build replay the matches in there. It runs no migrations and
-asks Postgres for read-only sessions, so a write anywhere below it is refused by the server rather than
-trusted not to happen, and it replays through the same verifier the startup recovery pass uses.
+`dotnet HexWars.NetServer.dll verify-journals` answers the question readiness answers about the database
+this host is attached to: can this build replay the matches in there. It runs no migrations, every
+statement it issues of its own runs inside an explicit `READ ONLY` transaction, and it replays through the
+same verifier the startup recovery pass uses.
+
+That protects against the verb writing by accident. It is not a sandbox: the connection default it also
+sets is only a default, and anything else holding the same credentials can still write. For a guarantee
+rather than a discipline, run it as a read-only role - see
+[Procedure G](match-recovery-runbook.md).
 
 It reads `HEXWARS_VERIFY_DATABASE_URL`, falling back to `DATABASE_URL`. `--open-only` restricts it to
 matches still being played. It prints one line per match and a summary; exit 0 all replay, 1 some do not,
