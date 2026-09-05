@@ -13,10 +13,10 @@ namespace HexWars.NetServer.Operations
     /// one for the right database. The two copies are kept identical on purpose, and each is tested where
     /// it lives.
     ///
-    /// A database qualifies one of two ways. Either its name says what it is - anything containing "test"
-    /// - or somebody named it explicitly in the confirmation variable. The confirmation is by name rather
-    /// than a bare yes: a stale yes left in a shell would authorise the next database that came along,
-    /// while a stale name only ever authorises the same one.
+    /// A database qualifies one of two ways. Either its name says what it is - the word "test" standing on
+    /// its own - or somebody named it explicitly in the confirmation variable. The confirmation is by name
+    /// rather than a bare yes: a stale yes left in a shell would authorise the next database that came
+    /// along, while a stale name only ever authorises the same one.
     ///
     /// Pure and static, with the environment as a parameter, so the rule can be exercised without a
     /// database and without mutating the environment of the process asking.
@@ -27,8 +27,31 @@ namespace HexWars.NetServer.Operations
         /// test database.</summary>
         public const string ConfirmationEnvironmentVariable = "HEXWARS_TEST_DATABASE_DISPOSABLE";
 
-        /// <summary>What a database name has to contain to authorise itself.</summary>
+        /// <summary>The word a database name has to be built from to authorise itself.</summary>
         public const string TestNameMarker = "test";
+
+        /// <summary>
+        /// True when the name says, as a word rather than as a substring, that this is a test database.
+        ///
+        /// A substring search is not this rule and never was. "contest", "latest" and "protest_db" all
+        /// contain the letters, and none of them is a database anybody meant to hand to something that
+        /// drops schemas. The word has to stand on its own: the whole name, or delimited by an underscore
+        /// or a hyphen at whichever end it appears.
+        /// </summary>
+        public static bool NamesATestDatabase(string? database)
+        {
+            if (string.IsNullOrEmpty(database)) return false;
+
+            const StringComparison anyCase = StringComparison.OrdinalIgnoreCase;
+
+            return database.Equals(TestNameMarker, anyCase)
+                || database.StartsWith(TestNameMarker + "_", anyCase)
+                || database.StartsWith(TestNameMarker + "-", anyCase)
+                || database.EndsWith("_" + TestNameMarker, anyCase)
+                || database.EndsWith("-" + TestNameMarker, anyCase)
+                || database.Contains("_" + TestNameMarker + "_", anyCase)
+                || database.Contains("-" + TestNameMarker + "-", anyCase);
+        }
 
         /// <summary>True when this target may be dropped and recreated. <paramref name="reason"/> always
         /// explains the answer and never contains a username or a password, because it is written to a
@@ -47,7 +70,7 @@ namespace HexWars.NetServer.Operations
                 return false;
             }
 
-            if (database.Contains(TestNameMarker, StringComparison.OrdinalIgnoreCase))
+            if (NamesATestDatabase(database))
             {
                 reason = "database \"" + database + "\" is named as a test database.";
                 return true;
@@ -62,7 +85,8 @@ namespace HexWars.NetServer.Operations
 
             reason = "database \"" + database + "\" is not marked disposable. This self-test DROPs and "
                 + "recreates the public schema of whatever it is given, so it will only do that to a "
-                + "database whose name contains \"" + TestNameMarker + "\", or to one named explicitly in "
+                + "database called \"" + TestNameMarker + "\", or whose name carries \"" + TestNameMarker
+                + "\" as a word delimited by _ or - , or to one named explicitly in "
                 + ConfirmationEnvironmentVariable + "=" + database + ".";
             return false;
         }

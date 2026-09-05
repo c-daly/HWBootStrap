@@ -11,8 +11,8 @@ namespace HexWars.NetServer.Tests.Fixtures
     /// comment is not a check: a pasted URL for the wrong database reads exactly like one for the right
     /// database, and by the time anyone notices the difference the schema is gone.
     ///
-    /// A database qualifies one of two ways. Either its name says what it is - anything containing
-    /// "test" - or somebody named it explicitly in the confirmation variable. The confirmation is by
+    /// A database qualifies one of two ways. Either its name says what it is - the word "test" standing
+    /// on its own - or somebody named it explicitly in the confirmation variable. The confirmation is by
     /// name rather than a bare "yes" on purpose: a stale "yes" left in a shell would happily authorise
     /// the next database that came along, while a stale name only ever authorises the same one.
     ///
@@ -25,8 +25,31 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// a test database.</summary>
         public const string ConfirmationEnvironmentVariable = "HEXWARS_TEST_DATABASE_DISPOSABLE";
 
-        /// <summary>What a database name has to contain to authorise itself.</summary>
+        /// <summary>The word a database name has to be built from to authorise itself.</summary>
         public const string TestNameMarker = "test";
+
+        /// <summary>
+        /// True when the name says, as a word rather than as a substring, that this is a test database.
+        ///
+        /// A substring search is not this rule and never was. "contest", "latest" and "protest_db" all
+        /// contain the letters, and none of them is a database anybody meant to hand to something that
+        /// drops schemas. The word has to stand on its own: the whole name, or delimited by an underscore
+        /// or a hyphen at whichever end it appears.
+        /// </summary>
+        public static bool NamesATestDatabase(string? database)
+        {
+            if (string.IsNullOrEmpty(database)) return false;
+
+            const StringComparison anyCase = StringComparison.OrdinalIgnoreCase;
+
+            return database.Equals(TestNameMarker, anyCase)
+                || database.StartsWith(TestNameMarker + "_", anyCase)
+                || database.StartsWith(TestNameMarker + "-", anyCase)
+                || database.EndsWith("_" + TestNameMarker, anyCase)
+                || database.EndsWith("-" + TestNameMarker, anyCase)
+                || database.Contains("_" + TestNameMarker + "_", anyCase)
+                || database.Contains("-" + TestNameMarker + "-", anyCase);
+        }
 
         /// <summary>True when this target may be dropped and recreated. <paramref name="reason"/> always
         /// explains the answer and never contains a username or a password, because it is written to a
@@ -45,7 +68,7 @@ namespace HexWars.NetServer.Tests.Fixtures
                 return false;
             }
 
-            if (database.Contains(TestNameMarker, StringComparison.OrdinalIgnoreCase))
+            if (NamesATestDatabase(database))
             {
                 reason = "database \"" + database + "\" is named as a test database.";
                 return true;
@@ -60,7 +83,8 @@ namespace HexWars.NetServer.Tests.Fixtures
 
             reason = "database \"" + database + "\" is not marked disposable. This test run DROPs and "
                 + "recreates the public schema of whatever it is given, so it will only do that to a "
-                + "database whose name contains \"" + TestNameMarker + "\", or to one named explicitly in "
+                + "database called \"" + TestNameMarker + "\", or whose name carries \"" + TestNameMarker
+                + "\" as a word delimited by _ or - , or to one named explicitly in "
                 + ConfirmationEnvironmentVariable + "=" + database + ".";
             return false;
         }
