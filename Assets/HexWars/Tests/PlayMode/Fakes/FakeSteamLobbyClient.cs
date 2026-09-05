@@ -69,6 +69,15 @@ namespace HexWars.Presentation.PlayModeTests
         /// <summary>The next write of this key fails, whatever it is. Cleared once it has fired.</summary>
         public bool FailNextSetLobbyData { get; set; }
 
+        /// <summary>
+        /// The next CreateLobby fails outright, the way a call Steam could not even issue does:
+        /// the caller is answered with a failure on the next Pump. Cleared once it has fired.
+        /// </summary>
+        public bool FailNextCreateLobby { get; set; }
+
+        /// <summary>The same for JoinLobby. Cleared once it has fired.</summary>
+        public bool FailNextJoinLobby { get; set; }
+
         /// <summary>Every write of this key fails. Null means no key is refused.</summary>
         public string? FailSetLobbyDataForKey { get; set; }
 
@@ -117,6 +126,12 @@ namespace HexWars.Presentation.PlayModeTests
             CreateLobbyCalls++;
             LastCreateVisibility = visibility;
             LastCreateMaxMembers = maxMembers;
+            if (FailNextCreateLobby)
+            {
+                FailNextCreateLobby = false;
+                Enqueue(() => onDone(null));
+                return;
+            }
             if (!IsAvailable || _disposed)
             {
                 Enqueue(() => onDone(null));
@@ -156,6 +171,12 @@ namespace HexWars.Presentation.PlayModeTests
         public void JoinLobby(string lobbyId, Action<bool> onDone)
         {
             JoinLobbyCalls++;
+            if (FailNextJoinLobby)
+            {
+                FailNextJoinLobby = false;
+                Enqueue(() => onDone(false));
+                return;
+            }
             var lobby = string.IsNullOrEmpty(lobbyId) ? null : Resolve(lobbyId);
             if (!IsAvailable || _disposed || lobby == null)
             {

@@ -126,7 +126,8 @@ namespace HexWars.Presentation
             try
             {
                 var call = SteamMatchmaking.CreateLobby(ToLobbyType(visibility), Math.Max(1, maxMembers));
-                Register(_createCalls, call, (result, ioFailure) => OnLobbyCreated(result, ioFailure, onDone));
+                Register(_createCalls, call, (result, ioFailure) => OnLobbyCreated(result, ioFailure, onDone),
+                         () => onDone(null));
             }
             catch (Exception ex)
             {
@@ -149,7 +150,8 @@ namespace HexWars.Presentation
                 }
                 SteamMatchmaking.AddRequestLobbyListResultCountFilter(MaxSearchResults);
                 var call = SteamMatchmaking.RequestLobbyList();
-                Register(_listCalls, call, (result, ioFailure) => OnLobbyMatchList(result, ioFailure, onDone));
+                Register(_listCalls, call, (result, ioFailure) => OnLobbyMatchList(result, ioFailure, onDone),
+                         () => onDone(Array.Empty<SteamLobbySearchResult>()));
             }
             catch (Exception ex)
             {
@@ -164,7 +166,8 @@ namespace HexWars.Presentation
             try
             {
                 var call = SteamMatchmaking.JoinLobby(lobby);
-                Register(_enterCalls, call, (result, ioFailure) => OnLobbyEnter(result, ioFailure, onDone));
+                Register(_enterCalls, call, (result, ioFailure) => OnLobbyEnter(result, ioFailure, onDone),
+                         () => onDone(false));
             }
             catch (Exception ex)
             {
@@ -462,8 +465,18 @@ namespace HexWars.Presentation
         /// answer, in the order Steam delivers them.
         /// </summary>
         void Register<T>(Dictionary<SteamAPICall_t, CallResult<T>> registry, SteamAPICall_t call,
-                         Action<T, bool> handler)
+                         Action<T, bool> handler, Action onInvalid)
         {
+            if (call == SteamAPICall_t.Invalid)
+            {
+                // Steam refused to issue the call. A CallResult registered for handle 0 waits for a
+                // result that can never arrive, and the next invalid call overwrites that entry
+                // without disposing it, so the caller is answered with a failure instead.
+                _log("A Steam call could not be issued; answering the caller with a failure.");
+                Defer(onInvalid);
+                return;
+            }
+
             var result = CallResult<T>.Create();
             registry[call] = result;
             result.Set(call, (payload, ioFailure) =>

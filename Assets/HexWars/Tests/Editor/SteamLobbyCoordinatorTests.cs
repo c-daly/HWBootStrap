@@ -954,6 +954,55 @@ namespace HexWars.Presentation.Tests
             Assert.That(_steam.GetLobby(lobbyId)!.Metadata.ContainsKey(SteamLobbyKeys.Match), Is.False);
         }
 
+        // ----- Steam calls that were never issued ----------------------------------------------
+
+        [Test]
+        public void ACreateLobbyThatFailsOutright_ReportsBackendUnavailableAndOffersRetry()
+        {
+            _steam.FailNextCreateLobby = true;
+
+            _sut.HostGame(GameSetup.Default, SteamLobbyVisibility.Public);
+            Pump();
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_sut.Status.CanRetry, Is.True);
+            Assert.That(_sut.Status.LobbyId, Is.Null);
+        }
+
+        [Test]
+        public void AJoinLobbyThatFailsOutright_ReportsBackendUnavailableAndOffersRetry()
+        {
+            const string lobbyId = "109775240000000811";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+            _steam.FailNextJoinLobby = true;
+
+            _sut.JoinInvited(lobbyId);
+            Pump();
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_sut.Status.CanRetry, Is.True);
+        }
+
+        [Test]
+        public void ACreateLobbyThatNeverAnswers_TimesOutIntoBackendUnavailable()
+        {
+            _sut.HostGame(GameSetup.Default, SteamLobbyVisibility.Public);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.CreatingLobby));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds - 0.1);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.CreatingLobby));
+
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_sut.Status.CanRetry, Is.True);
+
+            Pump();   // the late create must not resurrect the abandoned attempt
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1), "the lobby Steam did create is not stranded");
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()

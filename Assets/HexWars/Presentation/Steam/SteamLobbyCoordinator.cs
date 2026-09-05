@@ -334,6 +334,15 @@ namespace HexWars.Presentation
                 return;
             }
 
+            if (_phase == SteamLobbyPhase.CreatingLobby)
+            {
+                ClearDeadline();
+                _generation++;
+                SetPhase(SteamLobbyPhase.BackendUnavailable);
+                Publish();
+                return;
+            }
+
             if (IsMatchServicePhase(_phase))
             {
                 ClearDeadline();
@@ -422,6 +431,9 @@ namespace HexWars.Presentation
 
             var generation = _generation;
             SetPhase(SteamLobbyPhase.CreatingLobby);
+            // Steam can accept a create and never answer it. Without a deadline the player sat on
+            // "Creating lobby..." for ever, with no Retry offered and nothing to time it out.
+            SetDeadline(_config.AllocationTimeoutSeconds);
             Publish();
             _steam.CreateLobby(visibility, 2, lobbyId => OnLobbyCreated(generation, lobbyId));
         }
@@ -435,10 +447,12 @@ namespace HexWars.Presentation
                 return;
             }
 
+            ClearDeadline();
             if (string.IsNullOrEmpty(lobbyId))
             {
-                SetPhase(SteamLobbyPhase.Failed);
-                Publish();
+                // Steam could not create it, or could not even issue the call. Either way it is the
+                // backend that failed and trying again is worth offering.
+                FailWith(SteamLobbyPhase.BackendUnavailable, null);
                 return;
             }
 
@@ -484,7 +498,7 @@ namespace HexWars.Presentation
             {
                 // A Quick Match race (somebody else took the slot) simply becomes hosting.
                 if (_operation == Operation.QuickMatch) CreateLobbyForCurrentOperation();
-                else FailWith(SteamLobbyPhase.Failed, null);
+                else FailWith(SteamLobbyPhase.BackendUnavailable, null);
                 return;
             }
 
