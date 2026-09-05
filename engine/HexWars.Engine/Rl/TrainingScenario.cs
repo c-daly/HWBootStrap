@@ -276,7 +276,13 @@ namespace HexWars.Engine.Rl
             var runtimeReward = new TacticalV3RewardConfig(
                 reward.TerminalWin, reward.TerminalNonWin, reward.MaterialAdjustmentBound,
                 reward.TimePressureBound, reward.PointsWeight);
-            return new TacticalV3Config(match, capacity, runtimeReward);
+            TacticalV3ObjectiveConfig? objective = source.Objective == null
+                ? null
+                : new TacticalV3ObjectiveConfig(
+                    source.Objective.Kind,
+                    source.Objective.TargetPolicy,
+                    source.Objective.Radius);
+            return new TacticalV3Config(match, capacity, runtimeReward, objective);
         }
 
         private TacticalV2Config BuildTacticalMatch(
@@ -436,6 +442,22 @@ namespace HexWars.Engine.Rl
             {
                 errors.Add(
                     "tactical-v3 symmetric-random-v1 must not declare start profiles or a start distribution");
+            }
+
+            TrainingTacticalV3ObjectiveConfig? objective = tacticalV3.Objective;
+            if (objective != null)
+            {
+                if (objective.Kind != TacticalV3ObjectiveConfig.ReachCellKind)
+                    errors.Add("tactical-v3 objective kind must be 'reach_cell'");
+                if (objective.TargetPolicy !=
+                    TacticalV3ObjectiveConfig.SeededFarthestReachableUnoccupiedPolicy)
+                {
+                    errors.Add(
+                        "tactical-v3 reach-cell target policy must be '" +
+                        TacticalV3ObjectiveConfig.SeededFarthestReachableUnoccupiedPolicy + "'");
+                }
+                if (objective.Radius != 0)
+                    errors.Add("tactical-v3 reach-cell radius must be 0");
             }
 
             TrainingTacticalV3CapacityConfig? capacity = tacticalV3.Capacity;
@@ -794,6 +816,16 @@ namespace HexWars.Engine.Rl
         public string PlacementPolicy = "symmetric-random-v1";
         public List<TrainingUnitTemplateConfig> Templates = new List<TrainingUnitTemplateConfig>();
         public TrainingTacticalV3CapacityConfig Capacity = new TrainingTacticalV3CapacityConfig();
+        public TrainingTacticalV3ObjectiveConfig? Objective;
+    }
+
+    [Serializable]
+    public sealed class TrainingTacticalV3ObjectiveConfig
+    {
+        public string Kind = TacticalV3ObjectiveConfig.ReachCellKind;
+        public string TargetPolicy =
+            TacticalV3ObjectiveConfig.SeededFarthestReachableUnoccupiedPolicy;
+        public int Radius;
     }
 
     [Serializable]

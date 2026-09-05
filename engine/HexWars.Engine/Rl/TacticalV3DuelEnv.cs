@@ -11,7 +11,7 @@ namespace HexWars.Engine.Rl
         private readonly ILegalCandidateSource _candidates;
         private readonly ISeatObservationSource _observations;
         private readonly IActionResolver _resolver;
-        private readonly IRewardContract _reward;
+        private readonly TacticalV3Reward _reward;
         private readonly List<DuelTransition> _transitions = new List<DuelTransition>();
         private readonly Dictionary<string, int> _daggerOccurrences =
             new Dictionary<string, int>(StringComparer.Ordinal);
@@ -27,6 +27,8 @@ namespace HexWars.Engine.Rl
         private PlayerId _learnerSeat;
         private string _startProfileId = "standard-3v3";
         private PlayerId _referenceSeat;
+        private HexCoord? _objectiveTarget;
+        private bool _objectiveReached;
         private bool _hasReset;
 
         public TacticalV3DuelEnv(TacticalV3Config config)
@@ -34,7 +36,13 @@ namespace HexWars.Engine.Rl
             _config = SnapshotConfig(config ?? throw new ArgumentNullException(nameof(config)));
             _layout = new TacticalV2Layout(_config.Match);
             _observations = new TacticalV3SeatObservationSource(_config);
-            _candidates = new TacticalV3LegalCandidateSource(_observations, _config.Capacity);
+            _candidates = _config.Objective == null
+                ? new TacticalV3LegalCandidateSource(_observations, _config.Capacity)
+                : new TacticalV3LegalCandidateSource(
+                    _observations,
+                    _config.Capacity,
+                    (state, seat) => _objectiveTarget,
+                    IsReachCellCompletion);
             _resolver = new TacticalV3ActionResolver();
             _reward = new TacticalV3Reward(_config.Reward);
         }
@@ -57,7 +65,7 @@ namespace HexWars.Engine.Rl
         {
             TacticalV2Start start = _layout.NewGame(seed);
             return ResetFromStart(
-                start, controller0, controller1, learnerSeat, referenceSeat: learnerSeat);
+                start, seed, controller0, controller1, learnerSeat, referenceSeat: learnerSeat);
         }
 
         internal TacticalV3View ResetSelectedProfile(
@@ -102,7 +110,7 @@ namespace HexWars.Engine.Rl
 
             TacticalV2Start start = _layout.NewGame(seed, profile, referenceSeat);
             return ResetFromStart(
-                start, controller0, controller1, learnerSeat, referenceSeat);
+                start, seed, controller0, controller1, learnerSeat, referenceSeat);
         }
 
         public TacticalV3View Step(long decisionId, int candidateId)
@@ -136,6 +144,9 @@ namespace HexWars.Engine.Rl
                 throw new InvalidOperationException(
                     "teacher selection requires the active tactical-v3 seat to be external");
 
+            if (_config.Objective != null)
+                return SelectReachCellTeacherCandidate(teacher);
+
             Command command = teacher.Decide(State);
             int candidateId = _frame.RequireUniqueCandidateId(command);
             return new TacticalV3TeacherSelection(
@@ -163,6 +174,56 @@ namespace HexWars.Engine.Rl
             int candidateId = _frame.RequireUniqueCandidateId(command);
             return new TacticalV3TeacherSelection(
                 _frame.DecisionId, candidateId, 0, 0, 0, "greedy-one-ply-v1");
+        }
+
+        private TacticalV3TeacherSelection SelectReachCellTeacherCandidate(
+            BoundedSearchAgent teacher)
+        {
+            HexCoord target = _objectiveTarget ?? throw new InvalidOperationException(
+                "reach-cell target is not initialized");
+            TacticalV3Candidate? selected = null;
+            int selectedDistance = int.MaxValue;
+
+            for (int index = 0; index < _frame.Candidates.Count; index++)
+            {
+                TacticalV3Candidate candidate = _frame.Candidates[index];
+                if (candidate.Kind != TacticalV3CandidateKind.Move) continue;
+                if (!(_frame.CommandAt(index) is MoveUnit move))
+                    throw new InvalidOperationException(
+                        "reach-cell move candidate does not map to a move command");
+
+                Unit mover = RequireLivingUnit(
+                    _state.Player(_state.ActivePlayer), move.UnitId);
+                IReadOnlyDictionary<HexCoord, int> distances =
+                    ReachableDistances(_state, mover, move.Dest);
+                int distance = distances.TryGetValue(target, out int reachableDistance)
+                    ? reachableDistance
+                    : int.MaxValue;
+                if (selected == null || distance < selectedDistance ||
+                    (distance == selectedDistance &&
+                     candidate.CandidateId < selected.CandidateId))
+                {
+                    selected = candidate;
+                    selectedDistance = distance;
+                }
+            }
+
+            if (selected == null)
+            {
+                selected = _frame.Candidates
+                    .Where(candidate => candidate.Kind == TacticalV3CandidateKind.EndTurn)
+                    .OrderBy(candidate => candidate.CandidateId)
+                    .FirstOrDefault() ?? throw new InvalidOperationException(
+                        "reach-cell decision has neither a move nor an end-turn candidate");
+            }
+
+            return new TacticalV3TeacherSelection(
+                _frame.DecisionId,
+                selected.CandidateId,
+                0,
+                teacher.ExpansionBudget,
+                0,
+                TacticalV3ObjectiveConfig.ReachCellTeacherHeuristicIdentity);
         }
 
         public TacticalV3SelectiveDaggerInspection InspectSelectiveDagger(
@@ -238,6 +299,7 @@ namespace HexWars.Engine.Rl
 
         private TacticalV3View ResetFromStart(
             TacticalV2Start start,
+            int seed,
             IAgent? controller0,
             IAgent? controller1,
             PlayerId learnerSeat,
@@ -253,6 +315,10 @@ namespace HexWars.Engine.Rl
             _learnerSeat = learnerSeat;
             _startProfileId = start.ProfileId;
             _referenceSeat = referenceSeat;
+            _objectiveReached = false;
+            _objectiveTarget = _config.Objective == null
+                ? (HexCoord?)null
+                : SelectReachCellTarget(_state, learnerSeat, seed);
             _transitions.Clear();
             _drainedTransitionCount = 0;
             _daggerOccurrences.Clear();
@@ -277,6 +343,8 @@ namespace HexWars.Engine.Rl
 
             _state = result.NewState;
             _transitions.Add(new DuelTransition(before, command, _state));
+            if (IsReachCellCompletion(_state, command.Issuer, command))
+                _objectiveReached = true;
             return true;
         }
 
@@ -321,6 +389,26 @@ namespace HexWars.Engine.Rl
 
         private TacticalV3View MakeView()
         {
+            if (_config.Objective != null)
+            {
+                bool reachTerminated = _objectiveReached || _state.IsGameOver;
+                bool reachTruncated = !reachTerminated &&
+                    _transitions.Count >= _config.Match.MaxSteps;
+                PlayerId? episodeWinner = _objectiveReached
+                    ? _learnerSeat
+                    : (PlayerId?)null;
+                return new TacticalV3View(
+                    _frame,
+                    _reward.Evaluate(
+                        _state, reachTerminated, reachTruncated, episodeWinner),
+                    _frame.Seat,
+                    episodeWinner.HasValue ? (int)episodeWinner.Value : -1,
+                    reachTerminated,
+                    reachTruncated,
+                    _startProfileId,
+                    _referenceSeat);
+            }
+
             bool terminated = _state.IsGameOver;
             bool truncated = !terminated && _transitions.Count >= _config.Match.MaxSteps;
             int winner = terminated && _state.Winner.HasValue
@@ -335,6 +423,130 @@ namespace HexWars.Engine.Rl
                 truncated,
                 _startProfileId,
                 _referenceSeat);
+        }
+
+        private HexCoord SelectReachCellTarget(
+            GameState state, PlayerId learnerSeat, int seed)
+        {
+            var occupied = new HashSet<HexCoord>(
+                state.Players
+                    .SelectMany(player => player.UnitsOnBoard)
+                    .Where(unit => unit.IsAlive)
+                    .Select(unit => unit.Cell));
+            var nearestLearnerDistance = new Dictionary<HexCoord, int>();
+            foreach (Unit unit in state.Player(learnerSeat).UnitsOnBoard
+                .Where(unit => unit.IsAlive)
+                .OrderBy(unit => unit.Id))
+            {
+                foreach (KeyValuePair<HexCoord, int> item in
+                    ReachableDistances(state, unit, unit.Cell))
+                {
+                    if (item.Value == 0 || occupied.Contains(item.Key)) continue;
+                    if (!nearestLearnerDistance.TryGetValue(item.Key, out int known) ||
+                        item.Value < known)
+                    {
+                        nearestLearnerDistance[item.Key] = item.Value;
+                    }
+                }
+            }
+
+            if (nearestLearnerDistance.Count == 0)
+                throw new InvalidOperationException(
+                    "reach-cell target policy found no reachable unoccupied cell");
+
+            int farthestDistance = nearestLearnerDistance.Values.Max();
+            HexCoord[] farthest = nearestLearnerDistance
+                .Where(item => item.Value == farthestDistance)
+                .Select(item => new
+                {
+                    Physical = item.Key,
+                    Relative = learnerSeat == PlayerId.Player0
+                        ? item.Key
+                        : _layout.MirrorCell(item.Key),
+                })
+                .OrderBy(item => item.Relative.Q)
+                .ThenBy(item => item.Relative.R)
+                .Select(item => item.Physical)
+                .ToArray();
+            uint choice = MixReachSeed(unchecked((uint)seed) ^ 0x52454143u);
+            return farthest[(int)(choice % (uint)farthest.Length)];
+        }
+
+        private static IReadOnlyDictionary<HexCoord, int> ReachableDistances(
+            GameState state, Unit mover, HexCoord start)
+        {
+            var blocked = new HashSet<HexCoord>();
+            foreach (PlayerState player in state.Players)
+                foreach (Unit unit in player.UnitsOnBoard)
+                    if (unit.IsAlive && unit.Id != mover.Id) blocked.Add(unit.Cell);
+
+            var distances = new Dictionary<HexCoord, int> { [start] = 0 };
+            if (mover.Stats.Movement <= 0) return distances;
+
+            var queue = new Queue<HexCoord>();
+            queue.Enqueue(start);
+            while (queue.Count > 0)
+            {
+                HexCoord current = queue.Dequeue();
+                int currentElevation = state.Board.TileAt(current).Elevation;
+                foreach (HexCoord next in current.Neighbors()
+                    .OrderBy(cell => cell.Q)
+                    .ThenBy(cell => cell.R))
+                {
+                    if (distances.ContainsKey(next) || blocked.Contains(next) ||
+                        !state.Board.Contains(next))
+                    {
+                        continue;
+                    }
+
+                    Tile tile = state.Board.TileAt(next);
+                    TerrainDef terrain = state.Config.Terrain(tile.Terrain);
+                    int climb = Math.Max(0, tile.Elevation - currentElevation);
+                    if (!terrain.Passable || terrain.MoveCost > mover.Stats.Movement ||
+                        climb > mover.Stats.VerticalMovement)
+                    {
+                        continue;
+                    }
+
+                    distances[next] = distances[current] + 1;
+                    queue.Enqueue(next);
+                }
+            }
+            return distances;
+        }
+
+        private bool IsReachCellCompletion(
+            GameState after, PlayerId seat, Command command)
+        {
+            if (_config.Objective == null || !_objectiveTarget.HasValue ||
+                seat != _learnerSeat || !(command is MoveUnit move))
+            {
+                return false;
+            }
+
+            foreach (Unit unit in after.Player(_learnerSeat).UnitsOnBoard)
+            {
+                if (unit.Id == move.UnitId && unit.IsAlive)
+                    return HexCoord.Distance(unit.Cell, _objectiveTarget.Value) <=
+                        _config.Objective.Radius;
+            }
+            return false;
+        }
+
+        private static Unit RequireLivingUnit(PlayerState player, int unitId)
+        {
+            foreach (Unit unit in player.UnitsOnBoard)
+                if (unit.Id == unitId && unit.IsAlive) return unit;
+            throw new InvalidOperationException(
+                "reach-cell move referenced a missing living unit");
+        }
+
+        private static uint MixReachSeed(uint value)
+        {
+            value += 0x9E3779B9u;
+            value = (value ^ (value >> 16)) * 0x85EBCA6Bu;
+            value = (value ^ (value >> 13)) * 0xC2B2AE35u;
+            return value ^ (value >> 16);
         }
 
         private static TacticalV3Config SnapshotConfig(TacticalV3Config source)
@@ -357,7 +569,8 @@ namespace HexWars.Engine.Rl
                 StartProfiles = Array.AsReadOnly(match.StartProfiles.ToArray()),
                 StartDistribution = match.StartDistribution,
             };
-            return new TacticalV3Config(matchSnapshot, source.Capacity, source.Reward);
+            return new TacticalV3Config(
+                matchSnapshot, source.Capacity, source.Reward, source.Objective);
         }
 
         private static GameConfig SnapshotGameConfig(GameConfig source)
@@ -450,6 +663,7 @@ namespace HexWars.Engine.Rl
 
         private bool IsFinished =>
             _state.IsGameOver ||
+            _objectiveReached ||
             _transitions.Count >= _config.Match.MaxSteps;
 
         private void RequireReset()

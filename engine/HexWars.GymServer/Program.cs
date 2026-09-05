@@ -287,15 +287,19 @@ string RequireTacticalV3Command(JsonElement element)
             $"tactical-v3 {command} has unknown or missing fields");
     if (command == "duel_oracle_step" || command == "duel_oracle_query")
     {
-        if (element.GetProperty("search_depth").GetInt32() != 4)
+        bool reachCell = tacticalV3Config!.Objective != null;
+        int requiredDepth = reachCell ? 0 : 4;
+        if (element.GetProperty("search_depth").GetInt32() != requiredDepth)
             throw new InvalidDataException(
-                $"tactical-v3 {command} search_depth must be 4");
+                $"tactical-v3 {command} search_depth must be {requiredDepth}");
         int expansionBudget = element.GetProperty("expansion_budget").GetInt32();
         if (expansionBudget != 512 && expansionBudget != 2048)
             throw new InvalidDataException(
                 $"tactical-v3 {command} expansion_budget must be 512 or 2048");
-        if (element.GetProperty("heuristic_identity").GetString() !=
-            BoundedSearchAgent.HeuristicIdentity)
+        string requiredHeuristic = reachCell
+            ? TacticalV3ObjectiveConfig.ReachCellTeacherHeuristicIdentity
+            : BoundedSearchAgent.HeuristicIdentity;
+        if (element.GetProperty("heuristic_identity").GetString() != requiredHeuristic)
             throw new InvalidDataException(
                 $"tactical-v3 {command} heuristic_identity is unsupported");
     }
