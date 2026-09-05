@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -32,6 +33,49 @@ def _transfer_identity():
         contract_hash="f" * 64,
         match=MappingProxyType(match),
     )
+
+
+def _reach_identity():
+    identity = _identity()
+    match = dict(identity.match)
+    match["objective"] = MappingProxyType({
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    })
+    return replace(
+        identity,
+        scenario_id="reach-cell-curriculum-v1",
+        contract_hash="e" * 64,
+        match=MappingProxyType(match),
+    )
+
+
+def test_reach_curriculum_teacher_contract_has_no_fake_search_expansions() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    identity = _reach_identity()
+    assert module._teacher_evidence_contract(identity, 2048) == (
+        "reach-cell-shortest-path-v1",
+        0,
+        2048,
+        "reach-cell-shortest-path-v1",
+    )
+    decision = _view(7).decision
+    valid = TeacherSelection(
+        7, decision.candidates[0].candidate_id,
+        0, 2048, 0, "reach-cell-shortest-path-v1",
+    )
+    module._validate_selection(
+        valid, decision, 2048, identity=identity,
+    )
+    with pytest.raises(ValueError, match="teacher metadata drifted"):
+        module._validate_selection(
+            replace(valid, actual_expansions=1),
+            decision,
+            2048,
+            identity=identity,
+        )
 
 
 def _view(decision_id: int, *, seat: int = 0, profile: str = "standard-3v3",
@@ -75,6 +119,37 @@ def _view_with_two_candidates(
         second["candidate_id"] = 1
         payload["candidates"].append(second)
     return parse_view(payload, _identity())
+
+
+def _reach_view_with_two_candidates(
+    decision_id: int,
+    *,
+    profile: str = "conversion-1v1-near",
+    terminal: bool = False,
+):
+    payload = minimal_view_payload()
+    payload["decision_id"] = decision_id
+    payload["start_profile"] = profile
+    payload["candidates"][0]["decision_id"] = decision_id
+    if terminal:
+        payload["candidates"] = []
+        payload["terminated"] = True
+        payload["winner"] = 0
+        payload["reward"]["finalized"] = True
+    else:
+        target_cell = copy.deepcopy(payload["observation"]["cells"][0])
+        target_cell["q"] = 1
+        payload["observation"]["cells"].append(target_cell)
+        payload["candidates"][0]["target"] = {"table": "cells", "row": 1}
+        completing = copy.deepcopy(payload["candidates"][0])
+        completing["candidate_id"] = 1
+        completing["cell"] = {"table": "cells", "row": 1}
+        completing["projection"]["destination_cell"] = {
+            "table": "cells", "row": 1,
+        }
+        completing["projection"]["is_terminal"] = True
+        payload["candidates"].append(completing)
+    return parse_view(payload, _reach_identity())
 
 
 class _FakeClient:
@@ -195,6 +270,59 @@ class _SelectiveDaggerClient(_DaggerClient):
             ("c" if self._index == 0 else "d") * 64,
             1, -0.25 if self._index == 0 else 0.25,
             3 if self._index == 0 else 1,
+            2,
+        )
+
+
+class _ReachDaggerClient(_DaggerClient):
+    def __init__(self) -> None:
+        self._identity = _reach_identity()
+        self._views = (
+            _reach_view_with_two_candidates(7),
+            _reach_view_with_two_candidates(8),
+            _reach_view_with_two_candidates(9, terminal=True),
+        )
+        self._index = 0
+        self.events = []
+        self.oracle_budgets = []
+
+    def duel_oracle_query(
+        self,
+        decision_id,
+        *,
+        search_depth,
+        expansion_budget,
+        heuristic_identity,
+    ):
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        assert search_depth == 0
+        assert heuristic_identity == "reach-cell-shortest-path-v1"
+        self.events.append(("query", decision_id, 1))
+        self.oracle_budgets.append(expansion_budget)
+        return TeacherSelection(
+            decision_id,
+            1,
+            0,
+            expansion_budget,
+            0,
+            heuristic_identity,
+        )
+
+    def duel_dagger_inspect(self, decision_id, learner_candidate_id):
+        from ml_lab.tactical_v3_client import SelectiveDaggerInspection
+
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        self.events.append(("inspect", decision_id, learner_candidate_id))
+        return SelectiveDaggerInspection(
+            decision_id,
+            learner_candidate_id,
+            (),
+            ("8" if self._index == 0 else "9") * 64,
+            1,
+            0.0,
+            1,
             2,
         )
 
@@ -502,7 +630,7 @@ def test_selective_collection_stops_only_after_complete_pair_at_fixed_target(
         )
         return module.PilotDaggerEpisode(
             _identity(), (None,) * labels_per_game, summary,
-            "a" * 64, "b" * 64, 3, 0.125,
+            "a" * 64, "b" * 64, 3, 0.125, _identity(),
         )
 
     result = module.collect_selective_dagger_partition(
@@ -524,6 +652,7 @@ def test_selective_collection_fails_when_frozen_ceiling_cannot_reach_target() ->
         summary = module.PilotDaggerGameSummary(item, -1, False, True, 0, 0, 0, 0)
         return module.PilotDaggerEpisode(
             _identity(), (), summary, "a" * 64, "b" * 64, 3, 0.125,
+            _identity(),
         )
 
     with pytest.raises(RuntimeError, match="20,000.*2,000"):
@@ -640,11 +769,16 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
         json.loads(line)
         for line in (output / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["kind"] == "tactical-v3-dagger-episode"
     assert manifest["records"]["count"] == 2
     assert manifest["summary"]["disagreements"] == 1
-    assert manifest["actor"] == {
+    assert parse_spaces(manifest["actor"]["semantic_identity"]) == _identity()
+    assert {
+        key: value
+        for key, value in manifest["actor"].items()
+        if key != "semantic_identity"
+    } == {
         "algorithm": "structured_imitation",
         "best_epoch": 3,
         "best_validation_policy_nll": 0.125,
@@ -661,6 +795,76 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     assert rows[0]["teacher_candidate_id"] == 1
     assert rows[0]["disagreement"] is True
     assert rows[0]["teacher_intervened"] is False
+
+
+def test_reach_curriculum_labels_every_visited_state_and_roundtrips(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    actor_identity = _identity()
+    identity = _reach_identity()
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-near", 65_100_000, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=actor_identity,
+            model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _ReachDaggerClient()
+
+    episode = module.collect_dagger_game(
+        client,
+        actor,
+        item,
+        opponent="passive",
+        allow_compatible_identity_transfer=True,
+    )
+
+    assert client.events[1:] == [
+        ("inspect", 7, 0), ("query", 7, 1), ("step", 7, 0),
+        ("inspect", 8, 0), ("query", 8, 1), ("step", 8, 0),
+    ]
+    assert len(episode.records) == 2
+    assert episode.actor_identity == actor_identity
+    assert all(
+        record.eligibility_reasons == ("curriculum_reach_cell",)
+        for record in episode.records
+    )
+    assert all(
+        record.example.teacher.identity == "reach-cell-shortest-path-v1"
+        and record.example.teacher.search_depth == 0
+        and record.example.teacher.expansion_budget == 512
+        and record.example.teacher.actual_expansions == 0
+        and record.example.teacher.heuristic_identity
+        == "reach-cell-shortest-path-v1"
+        for record in episode.records
+    )
+
+    output = module.write_dagger_episode(tmp_path / "reach-episode", episode)
+    manifest = json.loads((output / "episode.json").read_text(encoding="utf-8"))
+    assert manifest["teacher"] == {
+        "identity": "reach-cell-shortest-path-v1",
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }
+    assert parse_spaces(
+        manifest["actor"]["semantic_identity"]
+    ) == actor_identity
+    assert module.load_dagger_episode(
+        output,
+        identity,
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+        expected_actor_identity=actor_identity,
+    ) == episode
 
 
 def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
@@ -692,6 +896,100 @@ def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
     records.write_bytes(records.read_bytes() + b" ")
     with pytest.raises(ValueError, match="records|canonical|hash"):
         load(output, _identity(), oracle_expansion_budget=2048)
+
+
+def test_dagger_episode_schema1_reopens_with_unknown_actor_and_cannot_attest_transfer(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 65_000_002, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(_DaggerClient(), actor, item)
+    output = module.write_dagger_episode(tmp_path / "legacy-episode", episode)
+    manifest_path = output / "episode.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    del manifest["actor"]["semantic_identity"]
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    reopened = module.load_dagger_episode(
+        output,
+        _identity(),
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+    )
+
+    assert reopened == replace(episode, actor_identity=None)
+    with pytest.raises(ValueError, match="cannot authenticate actor semantic identity"):
+        module.load_dagger_episode(
+            output,
+            _identity(),
+            oracle_expansion_budget=512,
+            expected_schedule=item,
+            expected_actor_identity=_transfer_identity(),
+        )
+
+
+def test_dagger_episode_schema2_authenticates_actor_compatibility_and_exact_source(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    actor_identity = _identity()
+    target_identity = _reach_identity()
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-near", 65_100_001, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=actor_identity, model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(
+        _ReachDaggerClient(), actor, item, opponent="passive",
+        allow_compatible_identity_transfer=True,
+    )
+    output = module.write_dagger_episode(tmp_path / "transferred", episode)
+
+    with pytest.raises(ValueError, match="does not match the expected actor"):
+        module.load_dagger_episode(
+            output,
+            target_identity,
+            oracle_expansion_budget=512,
+            expected_actor_identity=_transfer_identity(),
+        )
+
+    manifest_path = output / "episode.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["actor"]["semantic_identity"]["environment_kind"] = "tactical"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(ValueError, match="requires duel policy identities"):
+        module.load_dagger_episode(
+            output,
+            target_identity,
+            oracle_expansion_budget=512,
+        )
 
 
 def test_dagger_episode_reader_preserves_continuation_medium_profile(
@@ -957,6 +1255,7 @@ def test_dagger_compatible_transfer_is_explicit_and_model_facing_only() -> None:
     )
 
     assert episode.identity == target_identity
+    assert episode.actor_identity == source_identity
     assert episode.actor_model_state_sha256 == "a" * 64
 
 

@@ -31,6 +31,7 @@ from ml_lab.tactical_v3_objectives import (
     ObjectiveConfig,
     structured_imitation_loss,
 )
+from ml_lab.tactical_v3_schema import TacticalV3SemanticIdentity
 
 
 def _canonical_device(value: object) -> str:
@@ -148,6 +149,7 @@ def train_offline(
     objective_config: ObjectiveConfig,
     trainer_config: TrainerConfig,
     *,
+    identity: TacticalV3SemanticIdentity | None = None,
     epoch_callback: Callable[[EpochMetrics], None] | None = None,
     step_callback: Callable[[StepMetrics], None] | None = None,
     deadline_monotonic: float | None = None,
@@ -163,6 +165,7 @@ def train_offline(
         model_config,
         objective_config,
         trainer_config,
+        identity=identity,
         epoch_callback=epoch_callback,
         step_callback=step_callback,
         deadline_monotonic=deadline_monotonic,
@@ -240,6 +243,7 @@ def _batch_to_device(batch: RaggedBatch, device: torch.device) -> RaggedBatch:
         horizon_target_mask=move(batch.horizon_target_mask),
         remaining_turns=move(batch.remaining_turns),
         remaining_turns_mask=move(batch.remaining_turns_mask),
+        objective_kind=batch.objective_kind,
     )
 
 
@@ -274,8 +278,13 @@ def _validation_batch_losses(
     return structured_imitation_loss(output, batch, objective_config)
 
 
-def _collate_training_batch(examples: tuple, horizons: tuple) -> RaggedBatch:
-    return collate_examples(examples, horizons)
+def _collate_training_batch(
+    examples: tuple,
+    horizons: tuple,
+    *,
+    identity: TacticalV3SemanticIdentity | None = None,
+) -> RaggedBatch:
+    return collate_examples(examples, horizons, identity=identity)
 
 
 def _evaluate_validation(
@@ -287,6 +296,7 @@ def _evaluate_validation(
     device: torch.device,
     *,
     epoch: int,
+    identity: TacticalV3SemanticIdentity | None = None,
     step_callback: Callable[[StepMetrics], None] | None = None,
     global_step_start: int = 0,
     deadline_monotonic: float | None = None,
@@ -299,7 +309,12 @@ def _evaluate_validation(
             _check_training_deadline(deadline_monotonic)
             rows = examples[start:start + batch_size]
             batch = _batch_to_device(
-                collate_examples(rows, model_config.horizon_turns), device
+                collate_examples(
+                    rows,
+                    model_config.horizon_turns,
+                    identity=identity,
+                ),
+                device,
             )
             context = f"epoch={epoch} validation_batch={batch_index}"
             _validate_batch_contract(batch, device, context)
@@ -699,6 +714,7 @@ def _train_offline_impl(
     objective_config: ObjectiveConfig,
     trainer_config: TrainerConfig,
     *,
+    identity: TacticalV3SemanticIdentity | None,
     epoch_callback: Callable[[EpochMetrics], None] | None,
     step_callback: Callable[[StepMetrics], None] | None,
     deadline_monotonic: float | None,
@@ -869,9 +885,14 @@ def _train_offline_impl(
             ):
                 micro_rows = rows[start:start + execution_batch_size]
                 micro_context = f"{context} micro_batch={micro_index}"
+                collate_arguments = {}
+                if identity is not None:
+                    collate_arguments["identity"] = identity
                 batch = _batch_to_device(
                     _collate_training_batch(
-                        micro_rows, model_config.horizon_turns,
+                        micro_rows,
+                        model_config.horizon_turns,
+                        **collate_arguments,
                     ),
                     device,
                 )
@@ -942,6 +963,8 @@ def _train_offline_impl(
             )
         if deadline_monotonic is not None:
             validation_arguments["deadline_monotonic"] = deadline_monotonic
+        if identity is not None:
+            validation_arguments["identity"] = identity
         validation_metrics, candidate_nll = _evaluate_validation(
             model,
             validation_rows,

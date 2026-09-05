@@ -306,12 +306,20 @@ def _string(value: object, field: str) -> str:
     return value
 
 
-def _fixture_logits_and_actions(model: TacticalV3Policy, examples: tuple[StructuredExample, ...]) -> tuple[tuple[tuple[float, ...], ...], tuple[CandidateIdentity, ...]]:
+def _fixture_logits_and_actions(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+    identity: TacticalV3SemanticIdentity,
+) -> tuple[tuple[tuple[float, ...], ...], tuple[CandidateIdentity, ...]]:
     if not examples:
         raise ValueError("inference fixture must contain examples")
     model.eval()
     with torch.no_grad():
-        batch = collate_examples(examples, model.config.horizon_turns)
+        batch = collate_examples(
+            examples,
+            model.config.horizon_turns,
+            identity=identity,
+        )
         output = model(batch)
     logits: list[tuple[float, ...]] = []
     actions: list[CandidateIdentity] = []
@@ -328,8 +336,12 @@ def _fixture_logits_and_actions(model: TacticalV3Policy, examples: tuple[Structu
     return tuple(logits), tuple(actions)
 
 
-def _fixture_wire(model: TacticalV3Policy, examples: tuple[StructuredExample, ...]) -> dict[str, object]:
-    logits, actions = _fixture_logits_and_actions(model, examples)
+def _fixture_wire(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+    identity: TacticalV3SemanticIdentity,
+) -> dict[str, object]:
+    logits, actions = _fixture_logits_and_actions(model, examples, identity)
     return {
         "examples": [_example_wire(example) for example in examples],
         "valid_candidate_logits": [list(row) for row in logits],
@@ -465,7 +477,11 @@ def save_structured_checkpoint(path: Path, model: TacticalV3Policy, metadata: St
         "format_version": _FORMAT_VERSION,
         "metadata": _metadata_wire(metadata),
         "state_dict": state,
-        "inference_fixture": _fixture_wire(cpu_model, tuple(fixture_examples)),
+        "inference_fixture": _fixture_wire(
+            cpu_model,
+            tuple(fixture_examples),
+            metadata.identity,
+        ),
     }
     return _write_checkpoint(Path(path), payload)
 
@@ -499,7 +515,11 @@ def load_structured_checkpoint(path: Path, expected_encoding_hash: str, expected
     model.load_state_dict(state, strict=True)
     model.eval()
     fixture = _fixture_from_wire(raw["inference_fixture"], metadata.identity)
-    actual_logits, actual_actions = _fixture_logits_and_actions(model, fixture.examples)
+    actual_logits, actual_actions = _fixture_logits_and_actions(
+        model,
+        fixture.examples,
+        metadata.identity,
+    )
     if actual_logits != fixture.valid_candidate_logits or actual_actions != fixture.selected_identities:
         raise ValueError("checkpoint inference fixture does not replay exactly")
     return LoadedStructuredPolicy(model, metadata, fixture)

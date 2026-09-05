@@ -148,7 +148,11 @@ def select_candidate(
         raise ValueError("controller must be StructuredController")
     if type(view) is not TacticalV3View:
         raise ValueError("view must be TacticalV3View")
-    batch = collate_decisions((view.decision,), controller.policy.config.horizon_turns)
+    batch = collate_decisions(
+        (view.decision,),
+        controller.policy.config.horizon_turns,
+        identity=controller.identity,
+    )
     with torch.inference_mode():
         selected, = controller.policy.select(batch)
     return selected

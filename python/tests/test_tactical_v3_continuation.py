@@ -34,7 +34,7 @@ from ml_lab.tactical_v3_continuation import (
     run_structured_continuation,
 )
 from ml_lab.scenarios import resolve_scenario
-from ml_lab.tactical_v3_schema import parse_spaces
+from ml_lab.tactical_v3_schema import canonical_sha256, parse_spaces
 from ml_lab.tactical_v3_pilot import PilotDaggerEpisode, PilotDaggerGameSummary
 
 
@@ -214,6 +214,113 @@ def test_target_scenario_is_cross_checked_against_gymserver_identity() -> None:
             identity,
             distribution,
         )
+
+
+def test_reach_objective_is_cross_checked_and_persisted_as_teacher_contract(
+    tmp_path: Path,
+) -> None:
+    from ml_lab.tactical_v3_pilot import _pilot_configs
+
+    objective = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    resolved = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=SCENARIO,
+        template_id=None,
+    )
+    document = json.loads(resolved.canonical_json)
+    document["id"] = "tactical-v3-reach-cell-v1"
+    document["tactical_v3"]["objective"] = objective
+    scenario_file = tmp_path / "reach.json"
+    scenario_file.write_text(json.dumps(document), encoding="utf-8")
+    resolved = resolve_scenario(
+        environment="tactical-v3",
+        scenario_file=scenario_file,
+        template_id=None,
+    )
+    identity = parse_spaces(
+        json.loads(DUEL_SPACES.read_text(encoding="utf-8"))
+    )
+    match = dict(identity.match)
+    match["objective"] = MappingProxyType(objective)
+    contract_hash = canonical_sha256({
+        "encoding_hash": identity.encoding_hash,
+        "environment_kind": identity.environment_kind,
+        "match": match,
+        "schema_version": 1,
+        "version": identity.contract_version,
+    })
+    reach_identity = replace(
+        identity,
+        scenario_id="tactical-v3-reach-cell-v1",
+        contract_hash=contract_hash,
+        match=MappingProxyType(match),
+    )
+    distribution = _start_distribution(resolved.document)
+
+    _validate_target_scenario_identity(
+        resolved,
+        reach_identity,
+        distribution,
+    )
+    wrong_match = dict(reach_identity.match)
+    wrong_match.pop("objective")
+    wrong_identity = replace(
+        reach_identity,
+        match=MappingProxyType(wrong_match),
+        contract_hash=canonical_sha256({
+            "encoding_hash": reach_identity.encoding_hash,
+            "environment_kind": reach_identity.environment_kind,
+            "match": wrong_match,
+            "schema_version": 1,
+            "version": reach_identity.contract_version,
+        }),
+    )
+    with pytest.raises(ValueError, match="objective does not match GymServer"):
+        _validate_target_scenario_identity(resolved, wrong_identity, distribution)
+
+    source_dir = tmp_path / "source-model"
+    source_dir.mkdir()
+    model_config, _, _ = _pilot_configs(227, "cpu")
+    source = SimpleNamespace(
+        model=SimpleNamespace(config=model_config),
+        metadata=SimpleNamespace(
+            identity=identity,
+            model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            best_epoch=3,
+            best_validation_policy_nll=1.25,
+        ),
+    )
+    config = _config(
+        source_dir,
+        scenario_file=scenario_file,
+        device="cpu",
+        opponent="passive",
+    )
+    manifest_path, _ = _write_collection_manifest(
+        tmp_path,
+        config,
+        reach_identity,
+        source,
+        _resolve_opponent("passive"),
+        [],
+        [],
+        b"",
+        b"",
+        distribution,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["oracle"] == {
+        "identity": "reach-cell-shortest-path-v1",
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }
 
 
 def test_collection_assigns_a_weighted_start_to_the_complete_reciprocal_pair(
@@ -632,6 +739,7 @@ def _reusable_collection_fixture(
                 source.metadata.corpus_sha256,
                 source.metadata.best_epoch,
                 source.metadata.best_validation_policy_nll,
+                source.metadata.identity,
             )
             partition_evidence.append({
                 "index": index,
@@ -660,11 +768,12 @@ def _reusable_collection_fixture(
         start_distribution,
     )
     monkeypatch.setattr(module, "validate_structured_run", lambda path: source)
-    monkeypatch.setattr(
-        module,
-        "load_dagger_episode",
-        lambda path, identity, **kwargs: episodes[Path(path)],
-    )
+    def load_episode(path, target_identity, **kwargs):
+        assert target_identity == identity
+        assert kwargs["expected_actor_identity"] == source.metadata.identity
+        return episodes[Path(path)]
+
+    monkeypatch.setattr(module, "load_dagger_episode", load_episode)
     return module, runs, run_dir, source, episodes
 
 

@@ -55,6 +55,7 @@ from .tactical_v3_pilot import (
     _canonical_bytes,
     _is_reparse,
     _pilot_configs,
+    _teacher_evidence_contract,
     _train_pilot_dataset,
     _validate_compatible_transfer_identity,
     collect_dagger_game,
@@ -312,6 +313,22 @@ def _validate_target_scenario_identity(
         raise ValueError(
             "selected tactical-v3 scenario capacity does not match GymServer"
         )
+    requested_objective = tactical_v3.get("objective")
+    actual_objective = match.get("objective")
+    if requested_objective is None:
+        if actual_objective is not None:
+            raise ValueError(
+                "legacy tactical-v3 scenario unexpectedly declares an objective "
+                "in the GymServer identity"
+            )
+    elif (
+        not isinstance(requested_objective, Mapping)
+        or not isinstance(actual_objective, Mapping)
+        or dict(actual_objective) != dict(requested_objective)
+    ):
+        raise ValueError(
+            "selected tactical-v3 scenario objective does not match GymServer"
+        )
 
     expected_profiles = tuple(sorted(
         (
@@ -502,6 +519,9 @@ class _LiveTelemetry:
             "collection/reason_favorable": reasons["favorable"],
             "collection/reason_cycle_warning": reasons["cycle_warning"],
             "collection/reason_wasted_end_turn": reasons["wasted_end_turn"],
+            "collection/reason_curriculum_reach_cell": reasons[
+                "curriculum_reach_cell"
+            ],
         }
         for seat in (0, 1):
             seat_games = max(sum(seat_outcomes[seat].values()), 1)
@@ -902,12 +922,21 @@ def _inspect_reusable_collection(
         }),
         "structured retry oracle",
     )
-    if (
-        oracle["identity"] != "bounded-search-v1"
-        or oracle["search_depth"] != 4
-        or oracle["expansion_budget"] not in {512, 2048}
-        or oracle["heuristic_identity"] != "material-plus-pursuit-v1"
-    ):
+    raw_oracle_budget = oracle["expansion_budget"]
+    if type(raw_oracle_budget) is not int or raw_oracle_budget not in {512, 2048}:
+        raise ValueError("structured retry oracle contract changed")
+    (
+        expected_teacher_identity,
+        expected_teacher_depth,
+        expected_teacher_budget,
+        expected_teacher_heuristic,
+    ) = _teacher_evidence_contract(identity, raw_oracle_budget)
+    if oracle != {
+        "identity": expected_teacher_identity,
+        "search_depth": expected_teacher_depth,
+        "expansion_budget": expected_teacher_budget,
+        "heuristic_identity": expected_teacher_heuristic,
+    }:
         raise ValueError("structured retry oracle contract changed")
 
     schedule = _exact_mapping(
@@ -996,7 +1025,7 @@ def _inspect_reusable_collection(
         device=recorded_device,
         learner_seat=learner_seat,
         trackers=tuple(dict(item) for item in trackers_raw),
-        oracle_expansion_budget=oracle["expansion_budget"],
+        oracle_expansion_budget=raw_oracle_budget,
     )
     config.validate()
     model_config, _, _ = _pilot_configs(config.seed, config.device)
@@ -1589,11 +1618,13 @@ def _load_reusable_partition(
             header.identity,
             oracle_expansion_budget=header.config.oracle_expansion_budget,
             expected_schedule=schedule,
+            expected_actor_identity=source.identity,
         )
         if (
             len(episode.records) != labels
             or episode.summary.winner != winner
             or episode.summary.disagreements != disagreements
+            or episode.actor_identity != source.identity
             or episode.actor_model_state_sha256 != source.model_state_sha256
             or episode.actor_corpus_sha256 != source.corpus_sha256
             or episode.actor_best_epoch != source.best_epoch
@@ -1695,6 +1726,9 @@ def _write_collection_manifest(
     validation_records: bytes,
     start_distribution: tuple[tuple[str, int], ...],
 ) -> tuple[Path, str]:
+    teacher_identity, teacher_depth, teacher_budget, teacher_heuristic = (
+        _teacher_evidence_contract(identity, config.oracle_expansion_budget)
+    )
     value = {
         "schema_version": 1,
         "kind": "tactical-v3-ml-lab-dagger-continuation-collection",
@@ -1703,10 +1737,10 @@ def _write_collection_manifest(
         "source": _source_policy_provenance(config, source),
         "opponent": dict(opponent.metadata),
         "oracle": {
-            "identity": "bounded-search-v1",
-            "search_depth": 4,
-            "expansion_budget": config.oracle_expansion_budget,
-            "heuristic_identity": "material-plus-pursuit-v1",
+            "identity": teacher_identity,
+            "search_depth": teacher_depth,
+            "expansion_budget": teacher_budget,
+            "heuristic_identity": teacher_heuristic,
         },
         "schedule": {
             "seed": config.seed,
