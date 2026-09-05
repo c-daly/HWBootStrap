@@ -1039,7 +1039,9 @@ def collect_dagger_game(
         if view.seat != item.learner_seat:
             if structured_opponent is None:
                 raise ValueError("scripted opponent exposed an external decision")
-            opponent_selection = select_candidate(structured_opponent, view)
+            opponent_selection = select_candidate(
+                structured_opponent, view, target_identity=identity,
+            )
             view = client.duel_step(CandidateSelection(
                 opponent_selection.decision_id,
                 opponent_selection.candidate_id,

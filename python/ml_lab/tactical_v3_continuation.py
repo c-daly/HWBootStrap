@@ -1618,13 +1618,19 @@ def _load_reusable_partition(
             header.identity,
             oracle_expansion_budget=header.config.oracle_expansion_budget,
             expected_schedule=schedule,
-            expected_actor_identity=source.identity,
         )
+        # The enclosing collection has already authenticated the full source
+        # identity and these exact episode/record bytes. Schema 1 episodes did
+        # not repeat that identity; retain their readability without inventing
+        # standalone provenance. Schema 2 must also match its embedded identity.
         if (
             len(episode.records) != labels
             or episode.summary.winner != winner
             or episode.summary.disagreements != disagreements
-            or episode.actor_identity != source.identity
+            or (
+                episode.actor_identity is not None
+                and episode.actor_identity != source.identity
+            )
             or episode.actor_model_state_sha256 != source.model_state_sha256
             or episode.actor_corpus_sha256 != source.corpus_sha256
             or episode.actor_best_epoch != source.best_epoch

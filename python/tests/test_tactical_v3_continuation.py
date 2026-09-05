@@ -770,7 +770,6 @@ def _reusable_collection_fixture(
     monkeypatch.setattr(module, "validate_structured_run", lambda path: source)
     def load_episode(path, target_identity, **kwargs):
         assert target_identity == identity
-        assert kwargs["expected_actor_identity"] == source.metadata.identity
         return episodes[Path(path)]
 
     monkeypatch.setattr(module, "load_dagger_episode", load_episode)
@@ -805,6 +804,33 @@ def test_structured_retry_authenticates_and_reuses_collection_in_new_sibling(
     )
     assert manifest["timesteps"] == 4
     assert manifest["episodes"] == 4
+
+
+def test_structured_retry_accepts_legacy_episode_via_verified_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, runs, old_run, _, episodes = _reusable_collection_fixture(tmp_path, monkeypatch)
+    for path, episode in tuple(episodes.items()):
+        episodes[path] = replace(episode, actor_identity=None)
+    header = _inspect_reusable_collection(old_run, "legacy-retry", runs)
+    reusable = _load_reusable_collection(header)
+    assert len(reusable.train) == len(reusable.validation) == 2
+    assert all(episode.actor_identity is None for episode in reusable.train)
+
+
+def test_structured_retry_rejects_wrong_embedded_actor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, runs, old_run, _, episodes = _reusable_collection_fixture(tmp_path, monkeypatch)
+    path = next(iter(episodes))
+    episode = episodes[path]
+    episodes[path] = replace(
+        episode,
+        actor_identity=replace(episode.actor_identity, contract_hash="f" * 64),
+    )
+    header = _inspect_reusable_collection(old_run, "wrong-actor-retry", runs)
+    with pytest.raises(ValueError, match="provenance changed"):
+        _load_reusable_collection(header)
 
 
 def test_structured_retry_rejects_tampered_episode_before_creating_sibling(

@@ -1818,8 +1818,9 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
         train, validation, model_config, objective_config, trainer_config,
         *, epoch_callback, step_callback, deadline_monotonic,
         initial_state_dict, training_batch_provider, checkpoint_callback,
-        resume_state,
+        resume_state, identity,
     ):
+        assert identity == collection.identity
         assert initial_state_dict is None
         assert training_batch_provider is None
         assert resume_state is None
@@ -2186,6 +2187,7 @@ def test_pilot_honors_deferred_stop_during_restored_metrics(
 
 class _EvaluationClient:
     def __init__(self) -> None:
+        self.identity = _identity()
         self.resets = []
         self.steps = []
         self.status_calls = 0
@@ -2579,10 +2581,11 @@ def test_run_pilot_diagnostics_reuses_frozen_evidence_and_writes_game_rows(
     breakdown = {"standard-3v3": {"all": {"examples": 2}, "seats": {}}}
     monkeypatch.setattr(module, "TacticalV3GymClient", Client)
     monkeypatch.setattr(module, "load_structured_checkpoint", fake_load)
-    monkeypatch.setattr(
-        module, "validation_metric_breakdown",
-        lambda model, examples: breakdown,
-    )
+    def fake_breakdown(model, examples, *, identity):
+        assert identity == collection.identity
+        return breakdown
+
+    monkeypatch.setattr(module, "validation_metric_breakdown", fake_breakdown)
     controllers = []
 
     def fake_evaluate(client, actual_loaded, controller, schedule):
