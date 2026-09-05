@@ -28,9 +28,26 @@ namespace HexWars.NetServer.Operations
 
         public const string RestartCloseReason = "service restart";
 
-        /// <summary>How long in-flight commits are given to finish. Comfortably inside the host shutdown
-        /// timeout, so the drain finishing late still leaves room to say goodbye.</summary>
+        /// <summary>How long in-flight commits are given to finish, at most.</summary>
         public static readonly TimeSpan DrainWindow = TimeSpan.FromSeconds(10);
+
+        /// <summary>How long the notice and the closes together are given, at most.</summary>
+        public static readonly TimeSpan NotifyWindow = TimeSpan.FromSeconds(5);
+
+        /// <summary>
+        /// The whole budget, drain and goodbye together.
+        ///
+        /// Five seconds inside the host timeout on purpose. Every step below is bounded against what is
+        /// left of THIS, not against its own window, because the failure that matters is the one where a
+        /// step overruns: a shutdown killed partway through sends 1012 to nobody, and every client it was
+        /// serving sees a torn connection instead of an instruction to come back.
+        /// </summary>
+        public static readonly TimeSpan ShutdownBudget = TimeSpan.FromSeconds(20);
+
+        /// <summary>What the closes get when the budget is already spent. The closes are attempted
+        /// whatever happened before them, and V2Connection bounds each one at three seconds and then
+        /// aborts, so the worst case stays inside the host timeout.</summary>
+        public static readonly TimeSpan CloseFloor = TimeSpan.FromSeconds(3);
 
         /// <summary>What the host waits for before it stops waiting. Long enough for the drain, the notice
         /// and every close handshake; short enough that a platform that kills at 30 seconds does not.</summary>
@@ -45,7 +62,8 @@ namespace HexWars.NetServer.Operations
         readonly object _gate = new();
 
         CancellationTokenRegistration _stopping;
-        Task? _running;
+        int _quiesced;
+        int _saidGoodbye;
 
         public GracefulShutdownService(
             ServiceReadiness readiness,
@@ -65,85 +83,145 @@ namespace HexWars.NetServer.Operations
 
         public Task StartAsync(CancellationToken cancellationToken)
         {
-            // ApplicationStopping, not StopAsync: it fires before any hosted service is stopped and before
-            // the server stops accepting, which is the only moment where readiness can go false while the
-            // sockets are all still there to be told.
-            _stopping = _lifetime.ApplicationStopping.Register(() => Begin());
+            // ApplicationStopping fires before any hosted service is stopped and before the server stops
+            // accepting, which is the only moment where readiness can go false and admission can close
+            // while every socket is still here to be told. It does nothing that waits: a token callback
+            // runs on the thread that stopped the host, and awaiting there would hold up the stop itself.
+            _stopping = _lifetime.ApplicationStopping.Register(Quiesce);
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// Everything that has to happen at the instant of stopping, and nothing that waits.
+        ///
+        /// Order matters and is the whole point: readiness first so the platform stops routing here, then
+        /// the coordinator so no further command is committed, then the registry so no further socket is
+        /// admitted. All three are set before StopAsync takes its snapshot, so nothing can be added to the
+        /// set of things that need closing after that set is read.
+        /// </summary>
+        void Quiesce()
+        {
+            if (Interlocked.Exchange(ref _quiesced, 1) != 0) return;
+
+            _readiness.BeginShutdown();
+            _coordinator?.BeginShutdown();
+            _registry?.BeginShutdown();
+
+            _logger.LogInformation("Shutdown: readiness false");
+        }
+
+        /// <summary>
+        /// The goodbye, inside one budget the host token can cut short.
+        ///
+        /// Run here rather than from the ApplicationStopping callback because this is the only place with
+        /// a cancellation token the host actually enforces. The callback cannot be awaited by anything, so
+        /// work started there runs unobserved and unbounded, which is how a wedged store used to carry
+        /// shutdown past the platform kill deadline.
+        /// </summary>
         public async Task StopAsync(CancellationToken cancellationToken)
         {
             _stopping.Dispose();
 
-            // Begin rather than a read of the field: a host stopped some way that did not raise
-            // ApplicationStopping still owes its players a goodbye.
-            await Begin().ConfigureAwait(false);
-        }
+            // A host stopped some way that did not raise ApplicationStopping still owes its players this.
+            Quiesce();
 
-        public void Dispose() => _stopping.Dispose();
-
-        /// <summary>Starts the sequence, once, and hands back the same task to everyone who asks.</summary>
-        Task Begin()
-        {
-            lock (_gate) return _running ??= RunAsync();
-        }
-
-        async Task RunAsync()
-        {
-            // Everything up to the first await runs on the caller thread, which is what makes a readiness
-            // probe issued straight after StopApplication see the answer this method decided.
-            _readiness.BeginShutdown();
-            _logger.LogInformation("Shutdown: readiness false");
+            // Once, however many times the host asks. A second pass would spend the budget again and send
+            // a second SERVER RESTART to clients that are already closing, and the interesting case - a
+            // host disposed after it was stopped - takes this path twice by construction.
+            if (Interlocked.Exchange(ref _saidGoodbye, 1) != 0) return;
 
             long started = _time.GetTimestamp();
             int matches = _coordinator?.LiveMatchCount ?? 0;
+            var skipped = 0;
 
             if (_coordinator is not null)
             {
-                try
-                {
-                    await _coordinator.DrainAsync(DrainWindow).ConfigureAwait(false);
-                }
-                catch (Exception failure)
-                {
-                    _logger.LogWarning(failure, "Shutdown: the in-flight commits did not drain cleanly");
-                }
+                DurableMatchCoordinator.DrainSummary drain = default;
 
-                try
-                {
-                    await _coordinator.BroadcastAllAsync(RestartNotice).ConfigureAwait(false);
-                }
-                catch (Exception failure)
-                {
-                    _logger.LogWarning(failure, "Shutdown: the restart notice could not be broadcast");
-                }
+                await StepAsync(
+                    Remaining(started, DrainWindow),
+                    async () => drain = await _coordinator.DrainAsync(Remaining(started, DrainWindow))
+                        .ConfigureAwait(false),
+                    "draining in-flight commits",
+                    cancellationToken).ConfigureAwait(false);
+
+                skipped = drain.Skipped;
+
+                await StepAsync(
+                    Remaining(started, NotifyWindow),
+                    () => _coordinator.BroadcastAllAsync(RestartNotice),
+                    "broadcasting the restart notice",
+                    cancellationToken).ConfigureAwait(false);
             }
 
             var closed = 0;
 
             if (_registry is not null)
             {
-                // Every socket at once. Each close waits on a peer that may never answer, and doing them in
-                // turn would spend that window per connection instead of once.
+                // Attempted whatever happened above, and given a floor of its own. A drain that overran is
+                // a reason to hurry, not a reason to leave every client reading a torn socket.
                 IReadOnlyCollection<V2Connection> open = _registry.Snapshot();
                 closed = open.Count;
 
-                try
-                {
-                    await Task.WhenAll(open.Select(
-                        connection => connection.CloseAsync(RestartCloseStatus, RestartCloseReason)))
-                        .ConfigureAwait(false);
-                }
-                catch (Exception failure)
-                {
-                    _logger.LogWarning(failure, "Shutdown: not every socket closed politely");
-                }
+                TimeSpan left = Remaining(started, ShutdownBudget);
+                if (left < CloseFloor) left = CloseFloor;
+
+                await StepAsync(
+                    left,
+                    () => Task.WhenAll(open.Select(
+                        connection => connection.CloseAsync(RestartCloseStatus, RestartCloseReason))),
+                    "closing the sockets",
+                    CancellationToken.None).ConfigureAwait(false);
             }
 
             _logger.LogInformation(
-                "Shutdown: {Matches} live match(es), {Sockets} socket(s) closed, took {Elapsed}",
-                matches, closed, _time.GetElapsedTime(started));
+                "Shutdown: {Matches} live match(es), {Sockets} socket(s) closed, {Skipped} not drained, "
+                + "took {DrainMs} ms",
+                matches, closed, skipped, (long)_time.GetElapsedTime(started).TotalMilliseconds);
+        }
+
+        public void Dispose() => _stopping.Dispose();
+
+        /// <summary>What is left of the budget, never more than this step is allowed and never below
+        /// zero.</summary>
+        TimeSpan Remaining(long started, TimeSpan cap)
+        {
+            TimeSpan left = ShutdownBudget - _time.GetElapsedTime(started);
+            if (left < TimeSpan.Zero) left = TimeSpan.Zero;
+
+            return left < cap ? left : cap;
+        }
+
+        /// <summary>
+        /// One step, bounded. A step that overruns is logged and abandoned; the next one still runs.
+        ///
+        /// Abandoned rather than cancelled: WaitAsync stops waiting, it does not stop the work, and there
+        /// is nothing useful to do about a store call that will never return. The process is about to end.
+        /// </summary>
+        async Task StepAsync(TimeSpan limit, Func<Task> step, string what, CancellationToken cancellation)
+        {
+            if (limit <= TimeSpan.Zero)
+            {
+                _logger.LogWarning("Shutdown: no budget left for {Step}", what);
+                return;
+            }
+
+            try
+            {
+                await step().WaitAsync(limit, cancellation).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogWarning("Shutdown: {Step} did not finish within {Limit}", what, limit);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Shutdown: {Step} was cut short by the host deadline", what);
+            }
+            catch (Exception failure)
+            {
+                _logger.LogWarning(failure, "Shutdown: {Step} failed", what);
+            }
         }
     }
 }
