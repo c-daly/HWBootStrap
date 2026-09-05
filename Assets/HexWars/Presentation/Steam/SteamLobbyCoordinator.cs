@@ -215,6 +215,11 @@ namespace HexWars.Presentation
         {
             if (!EnsureSteam()) return;
 
+            // A retry starts a fresh exchange, so whatever ticket the abandoned one still holds goes
+            // now. Cancelling when none is held costs nothing; leaving one live costs a ticket slot
+            // on the account for its whole lifetime.
+            ReleaseTicket();
+
             if (!string.IsNullOrEmpty(_lobbyId) && IsRetryableInLobby(_phase))
             {
                 _generation++;
@@ -258,7 +263,7 @@ namespace HexWars.Presentation
 
             _generation++;
             _api.Cancel();
-            _steam.CancelAuthTicket();
+            ReleaseTicket();
             if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
 
             ClearSession();
@@ -325,6 +330,7 @@ namespace HexWars.Presentation
                 _allocationStarted = false;
                 _joinRequestedMatchId = null;
                 _api.Cancel();
+                ReleaseTicket();
                 SetPhase(SteamLobbyPhase.BackendUnavailable);
                 Publish();
             }
@@ -341,7 +347,7 @@ namespace HexWars.Presentation
             _disposed = true;
             _generation++;
             _api.Cancel();
-            _steam.CancelAuthTicket();
+            ReleaseTicket();
             if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
             ClearSession();
             Detach();
@@ -533,6 +539,7 @@ namespace HexWars.Presentation
             if (IsMatchServicePhase(_phase))
             {
                 _api.Cancel();
+                ReleaseTicket();
                 _generation++;
             }
 
@@ -630,6 +637,7 @@ namespace HexWars.Presentation
             {
                 _allocationStarted = false;
                 ClearDeadline();
+                ReleaseTicket();
                 FailWith(SteamLobbyPhase.Failed, null);
                 return;
             }
@@ -645,7 +653,7 @@ namespace HexWars.Presentation
             if (!IsCurrent(generation)) return;
 
             ClearDeadline();
-            _steam.CancelAuthTicket();   // one ticket per exchange: it is spent now, whatever happened
+            ReleaseTicket();   // one ticket per exchange: it is spent now, whatever happened
             if (result != null && result.Ok)
             {
                 if (!string.IsNullOrEmpty(_lobbyId) && !string.IsNullOrEmpty(result.MatchId)
@@ -685,6 +693,8 @@ namespace HexWars.Presentation
             ClearPendingMatchKey();
             _generation++;
             _api.Cancel();
+            // The ticket is already gone: this branch is only reachable through OnCreateMatchDone,
+            // which releases it the moment the exchange completes, write outcome or not.
             if (!string.IsNullOrEmpty(_lobbyId)) _steam.LeaveLobby(_lobbyId!);
             ClearSession();
             // The allocated match is left for the server retention sweep to reclaim.
@@ -723,6 +733,7 @@ namespace HexWars.Presentation
             {
                 _joinRequestedMatchId = null;
                 ClearDeadline();
+                ReleaseTicket();
                 FailWith(SteamLobbyPhase.Failed, null);
                 return;
             }
@@ -738,6 +749,7 @@ namespace HexWars.Presentation
             if (string.IsNullOrEmpty(ticket))
             {
                 ClearDeadline();
+                ReleaseTicket();
                 FailWith(SteamLobbyPhase.Failed, null);
                 return;
             }
@@ -752,7 +764,7 @@ namespace HexWars.Presentation
             if (!IsCurrent(generation)) return;
 
             ClearDeadline();
-            _steam.CancelAuthTicket();   // one ticket per exchange: it is spent now, whatever happened
+            ReleaseTicket();   // one ticket per exchange: it is spent now, whatever happened
             if (result != null && result.Ok)
             {
                 CompleteMatch(result);
@@ -816,6 +828,21 @@ namespace HexWars.Presentation
         }
 
         // ----- state plumbing ------------------------------------------------------------------
+
+        /// <summary>
+        /// Releases the Steam Web API auth ticket this exchange holds.
+        /// <para>
+        /// One ticket belongs to one exchange, and every path that abandons an exchange comes through
+        /// here: a timeout, an opponent walking out mid-allocation, a ticket that never arrived, an
+        /// API error, a retry, a hw_match write that could not be published. A ticket that is not
+        /// cancelled stays live on the account for its full lifetime, and the paths that skipped it
+        /// were exactly the paths nobody exercises by hand.
+        /// </para>
+        /// </summary>
+        void ReleaseTicket()
+        {
+            _steam.CancelAuthTicket();
+        }
 
         bool EnsureSteam()
         {

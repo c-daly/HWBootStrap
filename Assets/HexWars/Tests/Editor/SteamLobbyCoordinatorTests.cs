@@ -824,6 +824,102 @@ namespace HexWars.Presentation.Tests
             Assert.That(_steam.JoinLobbyCalls, Is.Zero);
         }
 
+        // ----- auth ticket release ---------------------------------------------------------------
+
+        [Test]
+        public void AnAllocationTimeout_ReleasesTheAuthTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _steam.AutoDeliverAuthTickets = false;       // Steam never answers the ticket request
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.RequestingTicket));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1),
+                "an abandoned exchange must not leave a Web API ticket live on the account");
+        }
+
+        [Test]
+        public void AnOpponentLeavingDuringTheTicketRequest_ReleasesTheAuthTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _steam.AutoDeliverAuthTickets = false;
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.RequestingTicket));
+
+            _steam.RemoveRemoteMember(lobbyId, RemoteId);
+            Pump();
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.WaitingForPlayer));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void ATicketSteamRefusedToIssue_StillReleasesTheAuthTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _steam.NextTicket = null;
+
+            ReadyUpBothPlayers(lobbyId);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Failed));
+            Assert.That(_api.Calls, Is.Empty);
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1),
+                "a handle can be live even when no ticket body came back");
+        }
+
+        [Test]
+        public void AMatchServiceFailure_ReleasesTheAuthTicketExactlyOnce()
+        {
+            AllocateWith(SteamMatchApiResult.Failure(500, "InternalError", "Something went wrong."));
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Failed));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void AnAbandonedMatchKeyWrite_ReleasesTheAuthTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _api.CreateResults.Enqueue(SteamMatchApiResult.Success("match-1", Wss, "cred-1", 0));
+            _steam.FailSetLobbyDataForKey = SteamLobbyKeys.Match;   // hw_match can never be published
+
+            ReadyUpBothPlayers(lobbyId);
+            _sut.Tick(Clock);
+            _sut.Tick(Clock);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.Failed));
+            Assert.That(_tickets, Is.Empty, "the owner must not walk into a match the guest cannot see");
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1),
+                "the exchange released its ticket when it completed, and abandoning the write adds none");
+        }
+
+        // ----- overlapping Steam call results --------------------------------------------------
+
+        [Test]
+        public void AJoinStillInFlightWhenTheNextOneStarts_LeavesTheAbandonedLobby()
+        {
+            const string first = "109775240000000801";
+            const string second = "109775240000000802";
+            _steam.AvailableLobbies.Add(OpenLobby(first));
+            _steam.AvailableLobbies.Add(OpenLobby(second));
+
+            _sut.JoinInvited(first);      // join A is in flight
+            _sut.Cancel();
+            _sut.JoinInvited(second);     // join B starts before A answered
+
+            Pump();
+
+            Assert.That(_steam.JoinLobbyCalls, Is.EqualTo(2),
+                "the second join must not replace the first registration");
+            Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1),
+                "the late success of the abandoned join must not strand its lobby");
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(second), "the live join still completes");
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()
