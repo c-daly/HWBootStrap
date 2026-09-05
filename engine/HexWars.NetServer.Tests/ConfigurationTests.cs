@@ -265,6 +265,32 @@ namespace HexWars.NetServer.Tests
                 Is.EqualTo(new[] { "MATCH_TRUST_FORWARDED_HEADERS: must be true, false, 1 or 0" }));
         }
 
+        [TestCase("10.4.0.0/16")]
+        [TestCase("203.0.113.9")]
+        [TestCase("2001:db8::/32")]
+        [TestCase("10.4.0.0/16, 203.0.113.9")]
+        public void TrustedProxyCidrs_AcceptAddressesAndRanges(string raw)
+        {
+            var result = Read(new Dictionary<string, string?> { ["MATCH_TRUSTED_PROXY_CIDRS"] = raw });
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.TrustedProxyCidrs, Is.Not.Empty);
+        }
+
+        [TestCase("10.4.0.0/33")]
+        [TestCase("10.4.0.0/oops")]
+        [TestCase("not-an-address")]
+        [TestCase("10.4.0.0/16, nonsense")]
+        public void TrustedProxyCidrs_RejectAnythingElse(string raw)
+        {
+            // Named rather than skipped: a typo here trusts nobody, which turns every forwarded address
+            // into the proxy address and rate-limits the whole deployment as a single caller.
+            var result = Read(new Dictionary<string, string?> { ["MATCH_TRUSTED_PROXY_CIDRS"] = raw });
+
+            Assert.That(result.Errors, Does.Contain(
+                "MATCH_TRUSTED_PROXY_CIDRS: each entry must be an IP address or a CIDR range"));
+        }
+
         [Test]
         public void CommaLists_AreTrimmedAndEmptyEntriesDropped()
         {

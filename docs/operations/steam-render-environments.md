@@ -74,12 +74,30 @@ names, bound by the server configuration layer.
 | `ALLOWED_WEB_ORIGINS` | comma list | empty | no | no | Browser origins permitted on the legacy WebGL routes. |
 | `LOBBY_PROVIDER` | comma list of `Legacy`, `Steam` | `Legacy` | no | no | Which lobby surfaces are mapped. `Legacy` maps `/games` and `/ws`; `Steam` maps `/api/v1/steam/*` and `/ws/v2`. |
 | `MATCH_COMPATIBLE_CLIENT_BUILDS` | comma list | empty | no | no | Accepted client build strings. Empty means any client build is accepted; the protocol version must still match. |
-| `MATCH_TRUST_FORWARDED_HEADERS` | bool | `false` | no | no | Honour forwarded-for headers. Set it `true` on Render so rate limiting sees the real client IP rather than the proxy. |
+| `MATCH_TRUST_FORWARDED_HEADERS` | bool | `false` | no | no | Honour forwarded-for headers. Set it `true` on Render so rate limiting sees the real client IP rather than the proxy. Read the note below before setting it. |
+| `MATCH_TRUSTED_PROXY_CIDRS` | comma list of IP addresses or CIDR ranges | empty | no | no | Whose forwarded-for header this server believes. Only consulted when `MATCH_TRUST_FORWARDED_HEADERS` is `true`. Each entry must be an IPv4 or IPv6 address, optionally with a prefix length; an entry that does not parse fails startup. |
 | `MATCH_BLOCKED_STEAM_IDS` | comma list of SteamID64 | empty | no | no | Accounts refused at match create and join. |
 | `MATCH_METRICS_TOKEN` | string | unset | no | **YES** | When set, `GET /api/v1/metrics` requires the header `X-Metrics-Token` carrying this value. |
 | `MATCH_LOG_PSEUDONYM_KEY` | string, at least 16 characters | unset | no | **YES** | Key behind the `sid:` pseudonyms that stand in for Steam account ids in logs. Steam ids are an enumerable namespace, so the handle is an HMAC rather than a plain digest and the key is what stops a log reader precomputing it. Unset means a random key is generated per process, so handles correlate only within one process lifetime and never across a restart or between instances. Production should set it from the Render secret store so handles stay comparable across restarts and across instances. |
 | `DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE` | bool | `false` in the image | yes, in the container | no | Disables the .NET configuration file watcher. Required in the immutable container; see the lineage section. |
 | `PORT` | int | injected by Render | n/a on Render | no | The port the web service must listen on. Render injects it; do not hard-code it. |
+
+### Trusting forwarded headers
+
+The rate limiter and the auth-failure throttle both partition on the client address. With
+`MATCH_TRUST_FORWARDED_HEADERS` off, that address is the peer this process sees, which behind a proxy
+is the proxy: one abusive client then spends the budget for everyone behind it. With it on, the server
+reads the last `X-Forwarded-For` entry instead, and a caller who can reach this process directly can
+pick their own partition by writing that header, which makes both limits decorative.
+
+`MATCH_TRUSTED_PROXY_CIDRS` closes that gap: the header is believed only when the peer is one of the
+listed addresses or ranges. Set it whenever the proxy addresses are known.
+
+Render does not publish the addresses of its proxy fleet, so on Render the list stays empty. That
+configuration means **every peer is trusted to name the client**, and it is safe only because nothing
+can reach the service except through the platform proxy. The server logs a Warning at startup saying
+so. If the service is ever given a second way in - a direct port, a private network peer, a sidecar -
+either populate this list or turn `MATCH_TRUST_FORWARDED_HEADERS` back off.
 
 ### Placeholder values are rejected
 

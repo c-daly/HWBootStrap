@@ -844,6 +844,74 @@ namespace HexWars.NetServer.Tests
             Assert.That(await ErrorCode(renamed), Is.EqualTo("rate_limited"));
         }
 
+        [Test]
+        public async Task AForwardedAddressFromAnUntrustedPeer_IsIgnored()
+        {
+            using var factory = new SteamServerFactory();
+            factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Settings["MATCH_TRUSTED_PROXY_CIDRS"] = "10.4.0.0/16";
+            factory.RemoteIpAddress = IPAddress.Parse("203.0.113.99");
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(
+                await CreateFrom(client, FakeSteamWebApiClient.OwnerTicket, "198.51.100.1"));
+
+            for (int attempt = 1; attempt <= AuthFailureThrottle.MaxFailures; attempt++)
+            {
+                await JoinFrom(client, matchId, UnknownTicket, "198.51.100.1");
+            }
+
+            // A different forwarded address, from the same untrusted peer. Because the header is not
+            // believed, both requests partition on the peer, so this one is already spent.
+            HttpResponseMessage renamed = await JoinFrom(client, matchId, UnknownTicket, "198.51.100.2");
+
+            Assert.That(renamed.StatusCode, Is.EqualTo(HttpStatusCode.TooManyRequests));
+            Assert.That(await ErrorCode(renamed), Is.EqualTo("rate_limited"));
+        }
+
+        [Test]
+        public async Task TrustingForwardedHeadersWithNoTrustedProxies_SaysSoAtStartup()
+        {
+            var captured = new CapturingLoggerProvider();
+            using var factory = new SteamServerFactory();
+            factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Logging = captured;
+            using HttpClient client = factory.CreateClient();
+
+            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+
+            Assert.That(captured.Any("MATCH_TRUSTED_PROXY_CIDRS"), Is.True,
+                "an empty trust list means any peer can name the client, which an operator has to be told");
+        }
+
+        [Test]
+        public async Task AForwardedAddressFromATrustedProxy_IsHonoured()
+        {
+            using var factory = new SteamServerFactory();
+            factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Settings["MATCH_TRUSTED_PROXY_CIDRS"] = "10.4.0.0/16";
+            factory.RemoteIpAddress = IPAddress.Parse("10.4.7.9");
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(
+                await CreateFrom(client, FakeSteamWebApiClient.OwnerTicket, "198.51.100.1"));
+
+            for (int attempt = 1; attempt <= AuthFailureThrottle.MaxFailures; attempt++)
+            {
+                await JoinFrom(client, matchId, UnknownTicket, "198.51.100.1");
+            }
+
+            HttpResponseMessage sameClient = await JoinFrom(client, matchId, UnknownTicket, "198.51.100.1");
+            HttpResponseMessage otherClient = await JoinFrom(client, matchId, UnknownTicket, "198.51.100.2");
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(sameClient.StatusCode, Is.EqualTo(HttpStatusCode.TooManyRequests));
+                Assert.That(otherClient.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized),
+                    "behind a trusted proxy the header names the client, so one abuser is not everyone");
+            });
+        }
+
         // ---- provenance and provider gating ------------------------------------------------------
 
         [Test]

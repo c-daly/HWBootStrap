@@ -78,6 +78,54 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void TheMapNeverGrowsPastItsCeiling()
+        {
+            // Twice the ceiling of distinct callers, which is what a client walking an IPv6 /64 looks
+            // like. Without a bound this is an allocation anyone can make this process perform.
+            var throttle = new AuthFailureThrottle(new FakeTimeProvider(Start));
+
+            for (int caller = 0; caller < 2 * AuthFailureThrottle.MaxTrackedCallers; caller++)
+            {
+                throttle.RecordFailure("10.0." + (caller / 256) + "." + (caller % 256) + ":" + caller);
+                Assert.That(throttle.TrackedCallers, Is.LessThanOrEqualTo(AuthFailureThrottle.MaxTrackedCallers));
+            }
+
+            Assert.That(throttle.TrackedCallers, Is.LessThanOrEqualTo(AuthFailureThrottle.MaxTrackedCallers));
+        }
+
+        [Test]
+        public void TheSweepIsTimeGatedRatherThanRunningOnEveryFailure()
+        {
+            var clock = new FakeTimeProvider(Start);
+            var throttle = new AuthFailureThrottle(clock);
+
+            for (int failure = 0; failure < 500; failure++) throttle.RecordFailure(Caller + failure);
+
+            Assert.That(throttle.SweepCount, Is.Zero,
+                "sweeping per failure costs the size of the map on every failure, worst when it is biggest");
+
+            clock.SetUtcNow(Start + AuthFailureThrottle.SweepInterval);
+            throttle.RecordFailure(Caller);
+            throttle.RecordFailure(Caller);
+
+            Assert.That(throttle.SweepCount, Is.EqualTo(1), "and once the interval has passed, exactly once");
+        }
+
+        [Test]
+        public void ASweptCallerIsForgottenRatherThanKept()
+        {
+            var clock = new FakeTimeProvider(Start);
+            var throttle = new AuthFailureThrottle(clock);
+            throttle.RecordFailure(Caller);
+
+            clock.SetUtcNow(Start + AuthFailureThrottle.Window + AuthFailureThrottle.SweepInterval);
+            throttle.RecordFailure("198.51.100.7");
+
+            Assert.That(throttle.TrackedCallers, Is.EqualTo(1),
+                "the caller whose window closed must not still be occupying a slot");
+        }
+
+        [Test]
         public void OneCallerCannotSpendAnotherCallerBudget()
         {
             var throttle = new AuthFailureThrottle(new FakeTimeProvider(Start));

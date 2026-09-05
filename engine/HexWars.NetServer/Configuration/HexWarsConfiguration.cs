@@ -46,6 +46,7 @@ namespace HexWars.NetServer.Configuration
         public const string LobbyProviderKey = "LOBBY_PROVIDER";
         public const string MatchCompatibleClientBuildsKey = "MATCH_COMPATIBLE_CLIENT_BUILDS";
         public const string MatchTrustForwardedHeadersKey = "MATCH_TRUST_FORWARDED_HEADERS";
+        public const string MatchTrustedProxyCidrsKey = "MATCH_TRUSTED_PROXY_CIDRS";
         public const string MatchBlockedSteamIdsKey = "MATCH_BLOCKED_STEAM_IDS";
         public const string MatchMetricsTokenKey = "MATCH_METRICS_TOKEN";
         public const string MatchLogPseudonymKeyKey = "MATCH_LOG_PSEUDONYM_KEY";
@@ -152,6 +153,16 @@ namespace HexWars.NetServer.Configuration
             {
                 if (TryParseBool(trustRaw, out bool trust)) match.TrustForwardedHeaders = trust;
                 else errors.Add(MatchTrustForwardedHeadersKey + ": must be true, false, 1 or 0");
+            }
+
+            match.TrustedProxyCidrs = ReadList(config, MatchTrustedProxyCidrsKey);
+            foreach (string entry in match.TrustedProxyCidrs)
+            {
+                // Named rather than skipped. A typo here silently trusts nobody, which turns every
+                // forwarded address into the proxy address and quietly rate-limits the whole deployment
+                // as one caller - a failure that looks like load rather than like a configuration error.
+                if (!Hosting.TrustedProxies.IsValid(entry))
+                    errors.Add(MatchTrustedProxyCidrsKey + ": each entry must be an IP address or a CIDR range");
             }
 
             string? providerRaw = Value(config, LobbyProviderKey);
@@ -288,6 +299,7 @@ namespace HexWars.NetServer.Configuration
             target.LobbyProvider = source.LobbyProvider;
             target.CompatibleClientBuilds = source.CompatibleClientBuilds;
             target.TrustForwardedHeaders = source.TrustForwardedHeaders;
+            target.TrustedProxyCidrs = source.TrustedProxyCidrs;
             target.BlockedSteamIds = source.BlockedSteamIds;
             target.MetricsToken = source.MetricsToken;
             target.LogPseudonymKey = source.LogPseudonymKey;

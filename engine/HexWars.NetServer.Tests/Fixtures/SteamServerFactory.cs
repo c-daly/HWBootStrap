@@ -1,3 +1,4 @@
+using System.Net;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
@@ -6,6 +7,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace HexWars.NetServer.Tests.Fixtures
 {
@@ -74,6 +76,16 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// </summary>
         public long RequestBodyBytesRead => Interlocked.Read(ref _requestBodyBytesRead);
 
+        /// <summary>
+        /// The peer address every request appears to arrive from. The test server sets none, so without
+        /// this a known-network check has nothing to judge and any test of the forwarded-header trust
+        /// boundary would pass for the wrong reason.
+        /// </summary>
+        public IPAddress? RemoteIpAddress { get; set; }
+
+        /// <summary>When set, receives everything the host logs. Assign before the first request.</summary>
+        public ILoggerProvider? Logging { get; set; }
+
         /// <summary>Wraps every request body in a counting stream, ahead of the whole application
         /// pipeline.</summary>
         sealed class CountingBodyStartupFilter(SteamServerFactory owner) : IStartupFilter
@@ -83,6 +95,16 @@ namespace HexWars.NetServer.Tests.Fixtures
                 app.Use(async (context, following) =>
                 {
                     context.Request.Body = new CountingStream(context.Request.Body, owner);
+
+                    // The test server leaves the connection with no address, which would make every
+                    // known-network check trivially fail. Set before the forwarded-headers middleware, so
+                    // what a test says is the peer address is what that middleware judges.
+                    if (owner.RemoteIpAddress is not null)
+                    {
+                        context.Connection.RemoteIpAddress = owner.RemoteIpAddress;
+                        context.Connection.RemotePort = 51000;
+                    }
+
                     await following();
                 });
 
@@ -162,6 +184,11 @@ namespace HexWars.NetServer.Tests.Fixtures
             foreach (KeyValuePair<string, string> setting in Settings)
             {
                 builder.UseSetting(setting.Key, setting.Value);
+            }
+
+            if (Logging is not null)
+            {
+                builder.ConfigureLogging(logging => logging.AddProvider(Logging));
             }
 
             builder.ConfigureServices(services =>

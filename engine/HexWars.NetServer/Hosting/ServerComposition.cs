@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Threading.RateLimiting;
 using HexWars.Engine;
@@ -145,8 +146,32 @@ namespace HexWars.NetServer.Hosting
                     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
                     ForwardLimit = 1,
                 };
+
+                // The defaults trust loopback, which is not the deployment this runs in and would be one
+                // more thing to reason about. What is trusted is exactly what was configured.
                 forwarded.KnownNetworks.Clear();
                 forwarded.KnownProxies.Clear();
+
+                foreach (string entry in match.TrustedProxyCidrs)
+                {
+                    if (!TrustedProxies.TryParse(entry, out IPAddress prefix, out int prefixLength)) continue;
+
+                    forwarded.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, prefixLength));
+                }
+
+                if (match.TrustedProxyCidrs.Length == 0)
+                {
+                    // Not an error: the platform this deploys to does not publish its proxy addresses, so
+                    // an empty list is the only workable configuration there. It is worth saying out loud
+                    // once at startup, because on any host that is reachable directly it means every caller
+                    // can choose their own rate-limit partition by writing a header.
+                    app.Logger.LogWarning(
+                        "{TrustKey} is on with no {CidrKey}: every peer is trusted to name the client. "
+                        + "This is only safe when nothing but the platform proxy can reach this process.",
+                        HexWarsConfiguration.MatchTrustForwardedHeadersKey,
+                        HexWarsConfiguration.MatchTrustedProxyCidrsKey);
+                }
+
                 app.UseForwardedHeaders(forwarded);
             }
 
