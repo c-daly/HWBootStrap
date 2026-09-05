@@ -72,15 +72,30 @@ Four rules the handshake enforces before the credential service is touched at al
 
 ### The terminal reconnect window
 
-A `completed` match stays reachable for `MATCH_TERMINAL_RECONNECT_SECONDS` (default 600) after it finished.
-A seat that authenticates inside that window is sent `SEAT <n>` and `START <full replay>` and can fast
-forward to the position the game ended in; any `CMD` it then sends is answered `REJECT MatchEnded`. Past the
-window the same credential is answered `AUTH FAIL invalid`.
+A match that STARTED and has since ended stays reachable for `MATCH_TERMINAL_RECONNECT_SECONDS`
+(default 600) after it finished, whatever terminal status it reached - `completed`, `expired` or
+`abandoned`. A seat that authenticates inside that window is sent `SEAT <n>` and `START <full replay>` and
+can fast forward to the position the game ended in; any `CMD` it then sends is answered `REJECT MatchEnded`.
+Past the window the same credential is answered `AUTH FAIL invalid`.
+
+`POST /api/v1/steam/matches/{id}/join` honours the same window, so a player who no longer holds a working
+credential can still ask for one. The credential it issues is capped at what is left of the window rather
+than given the full `MATCH_JOIN_TOKEN_TTL_SECONDS`.
 
 The window exists because the last `APPLY` of a game is the frame most likely to be lost - it is broadcast at
 the instant the match becomes terminal - and without it a player whose socket dropped a moment earlier has no
-way at all to learn how the game they were playing ended. `expired` and `abandoned` matches are never
-reachable: there is no ending to deal, and both are statuses the server chose rather than the players.
+way at all to learn how the game they were playing ended. A game the reaper abandoned underneath its players
+ended just as definitely as one somebody won. A match that never started is never reachable once it is over:
+there is no game in it to show anybody.
+
+### Credentials on a live socket
+
+A handshake is a moment and a match is an hour, so the credential behind a socket is re-checked for the whole
+life of that socket. The connection carries the SHA-256 of the credential (never the credential) and its
+expiry: the heartbeat closes **1008 `credential expired`** the moment the expiry passes, and every
+`MATCH_CREDENTIAL_RECHECK_SECONDS` (default 60) it asks the store whether the credential is still live,
+closing **1008 `credential revoked`** when it is not. Issuing a new credential for a seat revokes the one
+before it, so the socket still holding the old one goes on the next re-check.
 
 ### One live socket per seat
 
@@ -101,6 +116,7 @@ it took, and the first eight characters of the match id.
 | 1001 | Endpoint unavailable | Stale: nothing inbound for `MATCH_STALE_CONNECTION_SECONDS`. |
 | 1008 | Policy violation | The handshake failed, the auth deadline passed, or the client is not reading (see §5). |
 | 1009 | Message too big | An inbound frame exceeded 64 KB. |
+| 1011 | Internal error | `resync required`: the server cannot say whether it recorded your last command, or cannot read the status of a match it was finishing. Reconnect and take `START`; **do not resend anything**. |
 | 1012 | Service restart | Graceful shutdown, after `SERVER RESTART`. |
 
 ## 4. Timing
@@ -165,12 +181,18 @@ and appended under that match's gate, one at a time. A double commit is not a ra
 happen; it is a row the database will not accept.
 
 **`REJECT TemporaryFailure` means the write did not happen, and the server has checked.** A statement that
-timed out, or a connection lost after the database had already committed, reaches the server as an exception
-over a journal that has already moved - so an append that throws is followed by a re-read of the journal, and
-the row is matched on all three of sequence, command wire and issuer. If it is there the command is treated
-as applied and broadcast normally; only if it is genuinely absent is `TemporaryFailure` sent. Without that
-check the honest-looking answer would invite the client to resend a command the server had in fact already
-committed.
+timed out, a connection lost after the database had already committed, a write cancelled mid-flight: all of
+them reach the server as an exception over a journal that may already have moved. So an append that fails is
+followed by a re-read of the journal, and the row is matched on all three of sequence, command wire and
+issuer. If it is there the command is treated as applied and broadcast normally; only if it is genuinely
+absent is `TemporaryFailure` sent.
+
+**If the re-read also fails, the socket is closed 1011 `resync required` and no `REJECT` is sent at all.**
+The server could not establish either answer, and `TemporaryFailure` is not a neutral thing to say - it is a
+claim that the write did not happen, which an obedient client acts on by sending the command again. A close
+cannot be misread that way: the rule after a disconnect is reconnect, take `START`, resend nothing, and that
+is exactly what settles the ambiguity. The same close is used when a match that has just ended cannot have
+its status read back.
 
 ## 7. Single instance
 
