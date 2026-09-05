@@ -67,6 +67,59 @@ namespace HexWars.NetServer.Tests
             Assert.That(result.Steam.WebApiBaseUrl.ToString(), Does.StartWith("https://partner.steam-api.com"));
         }
 
+        [TestCase("3")]
+        [TestCase("1")]
+        [TestCase("0")]
+        [TestCase("two")]
+        public void AProtocolVersionThisBuildDoesNotSpeak_FailsStartup(string configured)
+        {
+            // The number is written into every match row and compared against the number a later host
+            // carries. A typo does not fail now, it fails months from now as every match this host wrote
+            // becoming unrecoverable, so it has to fail before the process serves anything.
+            Dictionary<string, string?> values = ValidSteamSettings();
+            values["MATCH_PROTOCOL_VERSION"] = configured;
+
+            var result = Read(values);
+
+            Assert.That(result.IsValid, Is.False);
+            Assert.That(Joined(result), Does.Contain(HexWarsConfiguration.MatchProtocolVersionKey));
+            Assert.That(Joined(result), Does.Contain(ProtocolContract.SupportedList));
+        }
+
+        [Test]
+        public void TheSupportedProtocolVersion_IsAccepted()
+        {
+            Dictionary<string, string?> values = ValidSteamSettings();
+            values["MATCH_PROTOCOL_VERSION"] = ProtocolContract.Version.ToString();
+
+            var result = Read(values);
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.ProtocolVersion, Is.EqualTo(ProtocolContract.Version));
+        }
+
+        [Test]
+        public void TheNewSocketLimits_HaveDefaultsAndAreBounded()
+        {
+            var defaults = Read(ValidSteamSettings());
+
+            Assert.That(defaults.Match.TerminalReconnectSeconds, Is.EqualTo(600));
+            Assert.That(defaults.Match.MaxSocketsPerIp, Is.EqualTo(8));
+            Assert.That(defaults.Match.OutboundQueueBytes, Is.EqualTo(4 * 1024 * 1024));
+
+            Dictionary<string, string?> values = ValidSteamSettings();
+            values["MATCH_TERMINAL_RECONNECT_SECONDS"] = "90000";
+            values["MATCH_MAX_SOCKETS_PER_IP"] = "0";
+            values["MATCH_OUTBOUND_QUEUE_BYTES"] = "1024";
+
+            var refused = Read(values);
+
+            Assert.That(refused.IsValid, Is.False);
+            Assert.That(Joined(refused), Does.Contain("MATCH_TERMINAL_RECONNECT_SECONDS"));
+            Assert.That(Joined(refused), Does.Contain("MATCH_MAX_SOCKETS_PER_IP"));
+            Assert.That(Joined(refused), Does.Contain("MATCH_OUTBOUND_QUEUE_BYTES"));
+        }
+
         // ---- required keys -------------------------------------------------
 
         [Test]

@@ -55,6 +55,9 @@ namespace HexWars.NetServer.Configuration
         public const string MatchStaleConnectionSecondsKey = "MATCH_STALE_CONNECTION_SECONDS";
         public const string MatchOutboundQueueCapacityKey = "MATCH_OUTBOUND_QUEUE_CAPACITY";
         public const string MatchAuthTimeoutSecondsKey = "MATCH_AUTH_TIMEOUT_SECONDS";
+        public const string MatchTerminalReconnectSecondsKey = "MATCH_TERMINAL_RECONNECT_SECONDS";
+        public const string MatchMaxSocketsPerIpKey = "MATCH_MAX_SOCKETS_PER_IP";
+        public const string MatchOutboundQueueBytesKey = "MATCH_OUTBOUND_QUEUE_BYTES";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -133,11 +136,16 @@ namespace HexWars.NetServer.Configuration
             string? protocolRaw = Value(config, MatchProtocolVersionKey);
             if (protocolRaw is not null)
             {
+                // A supported value rather than any positive integer. The number is written into every
+                // match row and compared against the number a later host carries, so a typo here does not
+                // fail now - it fails months from now, as every match this host wrote becoming
+                // unrecoverable. There is no code path for a protocol this build does not speak.
                 if (int.TryParse(protocolRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int protocol)
-                    && protocol > 0)
+                    && ProtocolContract.SupportedVersions.Contains(protocol))
                     match.ProtocolVersion = protocol;
                 else
-                    errors.Add(MatchProtocolVersionKey + ": must be a positive integer");
+                    errors.Add(MatchProtocolVersionKey + ": must be one of " + ProtocolContract.SupportedList
+                        + ", the wire protocol(s) this build speaks");
             }
 
             string? ttlRaw = Value(config, MatchJoinTokenTtlSecondsKey);
@@ -176,6 +184,24 @@ namespace HexWars.NetServer.Configuration
                 MatchHostingOptions.MinAuthFrameTimeoutSeconds,
                 MatchHostingOptions.MaxAuthFrameTimeoutSeconds,
                 MatchHostingOptions.DefaultAuthFrameTimeoutSeconds, errors);
+
+            match.TerminalReconnectSeconds = BoundedInt(
+                config, MatchTerminalReconnectSecondsKey,
+                MatchHostingOptions.MinTerminalReconnectSeconds,
+                MatchHostingOptions.MaxTerminalReconnectSeconds,
+                MatchHostingOptions.DefaultTerminalReconnectSeconds, errors);
+
+            match.MaxSocketsPerIp = BoundedInt(
+                config, MatchMaxSocketsPerIpKey,
+                MatchHostingOptions.MinMaxSocketsPerIp,
+                MatchHostingOptions.MaxMaxSocketsPerIp,
+                MatchHostingOptions.DefaultMaxSocketsPerIp, errors);
+
+            match.OutboundQueueBytes = BoundedInt(
+                config, MatchOutboundQueueBytesKey,
+                MatchHostingOptions.MinOutboundQueueBytes,
+                MatchHostingOptions.MaxOutboundQueueBytes,
+                MatchHostingOptions.DefaultOutboundQueueBytes, errors);
 
             // Checked as a pair rather than as two ranges, because either value alone can be perfectly
             // reasonable and the combination still closes healthy sockets: a window that is not longer than
@@ -380,6 +406,9 @@ namespace HexWars.NetServer.Configuration
             target.StaleConnectionSeconds = source.StaleConnectionSeconds;
             target.OutboundQueueCapacity = source.OutboundQueueCapacity;
             target.AuthFrameTimeoutSeconds = source.AuthFrameTimeoutSeconds;
+            target.TerminalReconnectSeconds = source.TerminalReconnectSeconds;
+            target.MaxSocketsPerIp = source.MaxSocketsPerIp;
+            target.OutboundQueueBytes = source.OutboundQueueBytes;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

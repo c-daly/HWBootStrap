@@ -110,6 +110,44 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void ACompletedJournal_ReplaysEveryCommandRatherThanStoppingAtTheStart()
+        {
+            // The projection of a finished match is dealt to a client reconnecting inside the terminal
+            // window. Stopping at the start state would hand it the opening of a game that is over.
+            var journal = new MatchJournal(
+                Row(MatchStatus.Completed, ReplayFile.Write(FreshStart(), Array.Empty<Command>())),
+                new[] { Player(0, null), Player(1, null) },
+                new[] { Stored(1, FirstMove, PlayerId.Player0), Stored(2, ThenAttack, PlayerId.Player0) });
+
+            LiveMatch live = LiveMatch.FromJournal(journal);
+
+            GameState direct = GameEngine.Apply(FreshStart(), FirstMove).NewState;
+            direct = GameEngine.Apply(direct, ThenAttack).NewState;
+
+            Assert.That(live.Status, Is.EqualTo(MatchStatus.Completed));
+            Assert.That(live.Start, Is.Not.Null);
+            Assert.That(live.Log, Has.Count.EqualTo(2));
+            Assert.That(live.LastSequence, Is.EqualTo(2));
+            Assert.That(ReplayFile.Write(live.State!, Array.Empty<Command>()),
+                Is.EqualTo(ReplayFile.Write(direct, Array.Empty<Command>())));
+        }
+
+        [Test]
+        public void ACommandWhoseRowBelongsToTheOtherSeat_IsRefused()
+        {
+            // The row says who sent it and the payload says who played it. A journal where they disagree
+            // describes a move somebody was not entitled to make.
+            var journal = new MatchJournal(
+                Row(MatchStatus.Active, ReplayFile.Write(FreshStart(), Array.Empty<Command>())),
+                new[] { Player(0, null), Player(1, null) },
+                new[] { Stored(1, FirstMove, PlayerId.Player1) });
+
+            var refused = Assert.Throws<InvalidOperationException>(() => LiveMatch.FromJournal(journal));
+
+            Assert.That(refused!.Message, Does.Contain("seat"));
+        }
+
+        [Test]
         public void AJournalWithAMissingSequence_IsRefused()
         {
             string startReplay = ReplayFile.Write(FreshStart(), Array.Empty<Command>());

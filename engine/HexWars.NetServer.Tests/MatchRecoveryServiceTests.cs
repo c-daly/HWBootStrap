@@ -139,6 +139,51 @@ namespace HexWars.NetServer.Tests
             Assert.That(live.Status, Is.EqualTo(MatchStatus.Completed));
         }
 
+        [Test]
+        public async Task ACompletedJournal_ReplaysItsWholeLogRatherThanStoppingAtTheStart()
+        {
+            Seed(new MatchJournal(
+                Row(MatchId, MatchStatus.Completed, FreshStartReplay()),
+                new[] { Player(MatchId, 0), Player(MatchId, 1) },
+                new[] { Stored(1, FirstMove), Stored(2, ThenAttack) }));
+
+            LiveMatch live = await _recovery.LoadAsync(MatchId, Ct);
+
+            GameState direct = GameEngine.Apply(FreshStart(), FirstMove).NewState;
+            direct = GameEngine.Apply(direct, ThenAttack).NewState;
+
+            Assert.That(live.LastSequence, Is.EqualTo(2));
+            Assert.That(live.Log, Has.Count.EqualTo(2));
+            Assert.That(ReplayFile.Write(live.State!, Array.Empty<Command>()),
+                Is.EqualTo(ReplayFile.Write(direct, Array.Empty<Command>())),
+                "a terminal match is dealt to reconnecting clients, so it has to be the position it ended in");
+        }
+
+        [Test]
+        public void ACompletedJournalThatWillNotReplay_IsClassifiedRatherThanAccepted()
+        {
+            Seed(new MatchJournal(
+                Row(MatchId, MatchStatus.Completed, FreshStartReplay()),
+                new[] { Player(MatchId, 0), Player(MatchId, 1) },
+                new[] { Stored(1, FirstMove), Stored(2, FirstMove) }));
+
+            MatchRecoveryException refusal = Refusal();
+
+            Assert.That(refusal.Failure, Is.EqualTo(MatchRecoveryFailure.CommandReplayFailed));
+            Assert.That(refusal.Detail, Does.Contain("2"));
+        }
+
+        [Test]
+        public void ACompletedJournalWithASequenceGap_IsRefused()
+        {
+            Seed(new MatchJournal(
+                Row(MatchId, MatchStatus.Completed, FreshStartReplay()),
+                new[] { Player(MatchId, 0), Player(MatchId, 1) },
+                new[] { Stored(1, FirstMove), Stored(3, ThenAttack) }));
+
+            Assert.That(Refusal().Failure, Is.EqualTo(MatchRecoveryFailure.SequenceGap));
+        }
+
         // ---- the refusals, one per way a record can be unplayable ------------
 
         [Test]
@@ -174,6 +219,37 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(refusal.Failure, Is.EqualTo(MatchRecoveryFailure.UnsupportedProtocol));
             Assert.That(refusal.Detail, Does.Contain("1"));
+        }
+
+        [Test]
+        public void AJournalFromAProtocolThisBuildDoesNotSpeak_IsRefused()
+        {
+            Seed(new MatchJournal(
+                Row(MatchId, MatchStatus.Active, FreshStartReplay(), protocolVersion: 3),
+                new[] { Player(MatchId, 0), Player(MatchId, 1) },
+                Array.Empty<PersistedCommand>()));
+
+            MatchRecoveryException refusal = Refusal();
+
+            Assert.That(refusal.Failure, Is.EqualTo(MatchRecoveryFailure.UnsupportedProtocol));
+            Assert.That(refusal.Detail, Does.Contain("3"), "the operator needs the stored version");
+            Assert.That(refusal.Detail, Does.Contain(ProtocolContract.SupportedList),
+                "and the set this build speaks");
+        }
+
+        [Test]
+        public void AHostConfiguredForAProtocolThisBuildDoesNotSpeak_RefusesEveryMatch()
+        {
+            var wrong = new MatchHostingOptions { ProtocolVersion = 3 };
+            _recovery = new MatchRecoveryService(
+                _store, Options.Create(wrong), NullLogger<MatchRecoveryService>.Instance);
+
+            Seed(Active(FreshStartReplay()));
+
+            MatchRecoveryException refusal = Refusal();
+
+            Assert.That(refusal.Failure, Is.EqualTo(MatchRecoveryFailure.UnsupportedProtocol));
+            Assert.That(refusal.Detail, Does.Contain(HexWarsConfiguration.MatchProtocolVersionKey));
         }
 
         [Test]

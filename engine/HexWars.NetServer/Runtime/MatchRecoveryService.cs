@@ -108,13 +108,33 @@ namespace HexWars.NetServer.Runtime
                     "the journal was written under " + row.EngineVersion + ", this build replays "
                     + string.Join(", ", EngineContract.SupportedVersions));
 
-            if (row.ProtocolVersion != options.Value.ProtocolVersion)
+            // The supported set rather than the configured number. A host has the code for every version
+            // in the set, so refusing a row it can replay perfectly would strand matches over a deployment
+            // setting rather than over anything about the journal.
+            if (!ProtocolContract.SupportedVersions.Contains(row.ProtocolVersion))
                 throw new MatchRecoveryException(
                     MatchRecoveryFailure.UnsupportedProtocol, matchId,
-                    "the journal speaks protocol " + row.ProtocolVersion + ", this host speaks "
-                    + options.Value.ProtocolVersion);
+                    "the journal speaks protocol " + row.ProtocolVersion + ", this build speaks "
+                    + ProtocolContract.SupportedList);
 
-            if (row.Status == MatchStatus.Active) VerifyReplay(journal);
+            // And the configured value has to be one this build speaks. Options validation refuses anything
+            // else at startup; this is the second lock, for a host that reached here some other way.
+            if (!ProtocolContract.SupportedVersions.Contains(options.Value.ProtocolVersion))
+                throw new MatchRecoveryException(
+                    MatchRecoveryFailure.UnsupportedProtocol, matchId,
+                    HexWarsConfiguration.MatchProtocolVersionKey + " is " + options.Value.ProtocolVersion
+                    + ", which is not one of " + ProtocolContract.SupportedList);
+
+            if (row.Status == MatchStatus.Active && row.StartReplay is null)
+                throw new MatchRecoveryException(
+                    MatchRecoveryFailure.CorruptStartState, matchId,
+                    "the match is active and has no start state");
+
+            // Every journal that has a start state is verified, terminal ones included. A completed match
+            // is served for the length of the reconnect window and an abandoned one may still be read back,
+            // so a corrupt log in either has to be classified here rather than surface later as a
+            // projection that quietly disagrees with the record.
+            if (row.StartReplay is not null) VerifyReplay(journal);
 
             try
             {

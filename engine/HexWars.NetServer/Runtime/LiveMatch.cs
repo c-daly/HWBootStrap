@@ -106,11 +106,19 @@ namespace HexWars.NetServer.Runtime
 
             live.Seats = seats;
 
-            if (journal.Match.Status != MatchStatus.Active) return live;
-
+            // Every journal that has a start state is replayed, not only the active ones. A completed
+            // match is still handed to clients - the terminal reconnect window deals its final position -
+            // and a projection built by skipping the log would deal the opening of a game that is over.
             if (journal.Match.StartReplay is null)
-                throw new InvalidOperationException(
-                    "match " + journal.Match.MatchId + " is active with no start replay");
+            {
+                if (journal.Match.Status == MatchStatus.Active)
+                    throw new InvalidOperationException(
+                        "match " + journal.Match.MatchId + " is active with no start replay");
+
+                // Waiting: there is nothing to replay yet, and the seats and catalogues above are the
+                // whole projection.
+                return live;
+            }
 
             GameState state = ReplayFile.Read(journal.Match.StartReplay).Start;
             live.Start = state;
@@ -134,6 +142,21 @@ namespace HexWars.NetServer.Runtime
                         "replay failed at sequence " + stored.Sequence + " of match "
                         + journal.Match.MatchId + ": the stored command does not parse", malformed);
                 }
+
+                // The row says who sent it and the payload says who played it. When they disagree the
+                // journal describes a move somebody was not entitled to make, and replaying it would hand
+                // that move to whichever seat the payload names. Checked here as well as in the recovery
+                // service so the plain loader cannot build a projection the verified one would refuse.
+                if (!seats.TryGetValue(stored.IssuerSteamId, out int issuerSeat))
+                    throw new InvalidOperationException(
+                        "replay failed at sequence " + stored.Sequence + " of match "
+                        + journal.Match.MatchId + ": it was written by a player who holds no seat");
+
+                if (issuerSeat != (int)command.Issuer)
+                    throw new InvalidOperationException(
+                        "replay failed at sequence " + stored.Sequence + " of match "
+                        + journal.Match.MatchId + ": it claims seat " + (int)command.Issuer
+                        + " but its row belongs to seat " + issuerSeat);
 
                 Result applied = GameEngine.Apply(state, command);
                 if (!applied.Success)
