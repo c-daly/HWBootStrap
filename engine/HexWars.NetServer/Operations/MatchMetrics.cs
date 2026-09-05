@@ -100,6 +100,12 @@ namespace HexWars.NetServer.Operations
             public const string Load = "load";
             public const string Create = "create";
             public const string Join = "join";
+
+            /// <summary>The startup recovery pass listing the matches it has to check.</summary>
+            public const string RecoveryList = "recovery_list";
+
+            /// <summary>The startup recovery pass reading one journal.</summary>
+            public const string RecoveryLoad = "recovery_load";
         }
 
         /// <summary>How far a refused handshake got. A frame refusal never cost a database read; a
@@ -110,6 +116,13 @@ namespace HexWars.NetServer.Operations
             public const string Credential = "credential";
             public const string Timeout = "timeout";
             public const string Ticket = "ticket";
+
+            /// <summary>This host was already validating as many handshakes as it will. Not the fault of
+            /// the caller, and a different problem from a wrong credential.</summary>
+            public const string Capacity = "capacity";
+
+            /// <summary>A handshake that failed for a reason this server did not anticipate. Ours.</summary>
+            public const string Internal = "internal";
         }
 
         readonly Meter _meter = new(MeterName);

@@ -1,5 +1,6 @@
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Hosting;
+using HexWars.NetServer.Operations;
 
 namespace HexWars.NetServer
 {
@@ -21,6 +22,12 @@ namespace HexWars.NetServer
             // database. It needs a throwaway Postgres and says so - exit 3, never a quiet 0 - because a
             // self-test that passed for want of anything to test is worse than one that did not run.
             if (args.Length > 0 && args[0] == "selftest-durable") return await SelfTest.RunDurable();
+
+            // The read-only counterpart, and the only one of the two that may be pointed at real
+            // data. selftest-durable proves a match survives a restart by building one; this proves
+            // the matches already in a database can still be hosted, and writes nothing to do it.
+            if (args.Length > 0 && args[0] == "verify-journals")
+                return await JournalVerification.RunAsync(args, Console.Out);
 
             if (args.Length > 0 && args[0] == "describe-environment")
             {
