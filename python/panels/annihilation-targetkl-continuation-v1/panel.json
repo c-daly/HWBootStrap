@@ -1,0 +1,31 @@
+{
+  "algorithm": "maskable_ppo",
+  "algorithm_options": {
+    "learning_rate": 0.0003,
+    "n_epochs": 10,
+    "target_kl": 0.02
+  },
+  "evaluation_seed_count": 25,
+  "evaluation_seed_start": 5000000,
+  "evidence_seed_count": 10,
+  "evidence_training_seed": 11,
+  "final_step": 100352,
+  "opponent": "random",
+  "panel": "annihilation-targetkl-continuation-v1",
+  "policy": "HexCNN",
+  "reciprocal": true,
+  "reward": "minus_closing",
+  "schema_version": 1,
+  "scope": "tactical-v2 reduced curriculum, 13x9, three starting units",
+  "source_step": 51200,
+  "study_steps": [
+    51200,
+    75776,
+    100352
+  ],
+  "training_seeds": [
+    11,
+    23,
+    47
+  ]
+}

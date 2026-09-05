@@ -1,0 +1,121 @@
+{
+  "board": {
+    "flat_chance": 0.6,
+    "forest_weight": 15,
+    "height": 9,
+    "max_elevation": 4,
+    "plains_weight": 70,
+    "rough_weight": 10,
+    "water_weight": 5,
+    "width": 13,
+    "zone_depth": 3
+  },
+  "environment": "tactical-v2",
+  "episode": {
+    "max_steps": 808
+  },
+  "id": "tactical-v2-annihilation-ablation-minus_value",
+  "name": "Annihilation ablation: No draw credit, minus value delta",
+  "reward": {
+    "closing_weight": 0.02,
+    "draw_credit_weight": 0.0,
+    "points_weight": 0.5,
+    "shape_scale": 0.0,
+    "step_penalty": 0.005
+  },
+  "rules": {
+    "actions_per_turn": 0,
+    "biomes_enabled": false,
+    "bounty_rate": 0.5,
+    "deploy_cost_multiplier": 1.0,
+    "fog_of_war": false,
+    "generator_cost": 2,
+    "generator_health": 3,
+    "generator_output": 1,
+    "round_cap": 100,
+    "starting_points": 12
+  },
+  "schema_version": 1,
+  "tactical_v2": {
+    "max_controllable_units": 3,
+    "placement_policy": "symmetric-random-v1",
+    "starting_unit_count": 3,
+    "templates": [
+      {
+        "id": "brute-85597320",
+        "name": "Brute",
+        "stats": {
+          "damage": 2,
+          "defense": 2,
+          "health": 7,
+          "movement": 3,
+          "range": 1,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 2,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "striker-0d7b6999",
+        "name": "Striker",
+        "stats": {
+          "damage": 6,
+          "defense": 0,
+          "health": 2,
+          "movement": 3,
+          "range": 2,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 3,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "sniper-d065c02a",
+        "name": "Sniper",
+        "stats": {
+          "damage": 2,
+          "defense": 0,
+          "health": 2,
+          "movement": 2,
+          "range": 6,
+          "range_arc": 1,
+          "vertical_movement": 2,
+          "vision": 4,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "artillery-27c01722",
+        "name": "Artillery",
+        "stats": {
+          "damage": 6,
+          "defense": 0,
+          "health": 3,
+          "movement": 0,
+          "range": 5,
+          "range_arc": 2,
+          "vertical_movement": 0,
+          "vision": 2,
+          "vision_arc": 1
+        }
+      },
+      {
+        "id": "scout-d3503dfa",
+        "name": "Scout",
+        "stats": {
+          "damage": 0,
+          "defense": 0,
+          "health": 2,
+          "movement": 4,
+          "range": 0,
+          "range_arc": 0,
+          "vertical_movement": 3,
+          "vision": 7,
+          "vision_arc": 2
+        }
+      }
+    ]
+  }
+}

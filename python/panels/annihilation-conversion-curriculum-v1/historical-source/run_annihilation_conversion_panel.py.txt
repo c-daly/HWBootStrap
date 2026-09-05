@@ -1,0 +1,975 @@
+"""Run the preregistered annihilation conversion-curriculum decision panel.
+
+The runner is deliberately restart-safe: an existing run or evaluation is
+reused only after its full locked identity and schedule validate. Invalid or
+partial artifacts are never overwritten automatically.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import math
+import re
+import subprocess
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "python" / "hexwars_ml.py"
+RUNS = ROOT / "python" / "runs"
+PANEL = ROOT / "python" / "panels" / "annihilation-conversion-curriculum-v1"
+PANEL_MANIFEST = PANEL / "panel.json"
+SEED_MANIFEST = PANEL / "seed-banks.json"
+STANDARD_SCENARIO = ROOT / "python" / "config" / "experiments" / "annihilation-profiled-standard.json"
+MIXED_SCENARIO = ROOT / "python" / "config" / "experiments" / "annihilation-profiled-mixed.json"
+
+TRAINING_SEEDS = (101, 113, 127)
+TIMESTEPS = 51_200
+CHECKPOINT_INTERVAL = 25_000
+WORKERS = 4
+EXPECTED_CONTRACT_HASH = "efbde316a5e71e104467b0ebb7848d2b56d739997b7de3cc892e39704b744e23"
+EXPECTED_DUEL_CONTRACT_HASH = "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5"
+EXPECTED_ENCODING_HASH = "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f"
+EXPECTED_SCENARIO_HASHES = {
+    "profiled_standard": "5df9b345296d41c8772655b26fa5dc86e12da20e267b6b0b0cedf901a8e0b8f4",
+    "mixed_conversion": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+}
+CONDITIONS = {
+    "profiled_standard": STANDARD_SCENARIO,
+    "mixed_conversion": MIXED_SCENARIO,
+}
+CONTROLS = ("greedy", "random")
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    temporary.replace(path)
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+def run_name(condition: str, seed: int) -> str:
+    return f"annihilation-conversion-{condition}-seed{seed}-tb-v1"
+
+
+def expected_distribution(scenario: dict[str, Any]) -> dict[str, int]:
+    rows = scenario["tactical_v2"]["start_distribution"]
+    return {str(row["profile_id"]): int(row["basis_points"]) for row in rows}
+
+
+def validate_definitions() -> tuple[dict[str, Any], dict[str, Any]]:
+    panel = read_json(PANEL_MANIFEST)
+    seeds = read_json(SEED_MANIFEST)
+    require(panel.get("schema_version") == 1, "panel manifest schema must be 1")
+    require(panel.get("panel") == "annihilation-conversion-curriculum-v1", "wrong panel identity")
+    require(panel.get("status") in {"planned", "training", "complete"}, "invalid panel status")
+    if panel.get("status") == "complete":
+        require(panel.get("outcome") in {"curriculum_gate_passed", "curriculum_gate_failed"}, "invalid panel outcome")
+        require(panel.get("confirmation_bank_consumed") is False, "confirmation bank must remain unconsumed")
+        require(panel.get("next_authorized_task") == "bounded_search_baseline", "unexpected next authorized task")
+        require(bool(panel.get("result_evidence")), "completed panel has no result evidence")
+    require(panel.get("algorithm") == "maskable_ppo", "panel algorithm drifted")
+    require(panel.get("policy") == "HexCNN", "panel policy drifted")
+    require(panel.get("opponent") == "random", "panel opponent drifted")
+    training = panel.get("training", {})
+    require(training.get("timesteps") == TIMESTEPS, "panel timesteps drifted")
+    require(training.get("workers") == WORKERS, "panel worker count drifted")
+    require(tuple(training.get("training_seeds", ())) == TRAINING_SEEDS, "panel training seeds drifted")
+    require(training.get("alternating_learner_seat") is True, "learner seat policy drifted")
+    require(training.get("algorithm_options") == {
+        "learning_rate": 0.0003, "n_epochs": 10, "target_kl": 0.02,
+    }, "PPO options drifted")
+    reward = training.get("reward", {})
+    require(reward.get("draw_credit_weight") == 0.0, "draw credit must remain zero")
+    require(reward.get("closing_weight") == 0.0, "closing reward must remain zero")
+    require(tuple(seeds.get("training_seeds", ())) == TRAINING_SEEDS, "seed manifest training seeds drifted")
+    require(seeds.get("confirmation", {}).get("assigned") is False, "confirmation bank was already assigned")
+
+    panel_contract = panel.get("expected_tactical_contract", {})
+    require(panel_contract.get("contract_hash") == EXPECTED_CONTRACT_HASH, "training contract hash drifted")
+    require(panel_contract.get("encoding_hash") == EXPECTED_ENCODING_HASH, "encoding hash drifted")
+    for evidence in panel.get("training_evidence", []):
+        evidence_path = ROOT / str(evidence.get("path", ""))
+        require(evidence_path.is_file(), f"training evidence missing: {evidence_path}")
+        require(sha256(evidence_path) == evidence.get("sha256"), f"training evidence drifted: {evidence_path}")
+    for evidence in panel.get("result_evidence", []):
+        evidence_path = ROOT / str(evidence.get("path", ""))
+        require(evidence_path.is_file(), f"result evidence missing: {evidence_path}")
+        require(sha256(evidence_path) == evidence.get("sha256"), f"result evidence drifted: {evidence_path}")
+    for condition, scenario_path in CONDITIONS.items():
+        actual_hash = sha256(scenario_path)
+        require(actual_hash == EXPECTED_SCENARIO_HASHES[condition], f"scenario hash drifted: {condition}")
+        scenario = read_json(scenario_path)
+        require(scenario.get("environment") == "tactical-v2", f"wrong environment: {condition}")
+        require(scenario["reward"]["draw_credit_weight"] == 0.0, f"draw reward drifted: {condition}")
+        require(scenario["reward"]["closing_weight"] == 0.0, f"closing reward drifted: {condition}")
+        distribution = expected_distribution(scenario)
+        require(sum(distribution.values()) == 10_000, f"distribution sum drifted: {condition}")
+        require(distribution == panel["conditions"][condition], f"panel distribution drifted: {condition}")
+    require(
+        read_json(STANDARD_SCENARIO)["tactical_v2"]["start_profiles"]
+        == read_json(MIXED_SCENARIO)["tactical_v2"]["start_profiles"],
+        "condition profile catalogs differ",
+    )
+
+    standard_banks = seeds["locked_standard_evaluation"]["banks"]
+    require([bank["id"] for bank in standard_banks] == ["standard-a", "standard-b"], "standard bank IDs drifted")
+    require([bank["seeds"] for bank in standard_banks] == [
+        list(range(7_000_000, 7_000_025)), list(range(8_000_000, 8_000_025)),
+    ], "standard evaluation banks drifted")
+    conversion = seeds["locked_conversion_evaluation"]["profiles"]
+    expected_profiles = [row["id"] for row in panel["profile_catalog"] if row["id"] != "standard-3v3"]
+    require(list(conversion) == expected_profiles, "conversion profile schedule order drifted")
+    for index, profile in enumerate(expected_profiles):
+        require(conversion[profile] == list(range(9_000_000 + index * 1_000, 9_000_010 + index * 1_000)),
+                f"conversion seed bank drifted: {profile}")
+    all_locked = [seed for bank in standard_banks for seed in bank["seeds"]]
+    all_locked.extend(seed for profile in conversion.values() for seed in profile)
+    require(len(all_locked) == len(set(all_locked)), "locked evaluation banks overlap")
+    require(not set(all_locked).intersection(seeds["development"]["seeds"]), "development and locked banks overlap")
+    return panel, seeds
+
+
+def invoke(arguments: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as log:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), *arguments],
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(f"command failed with exit code {completed.returncode}; see {log_path}")
+
+
+def _expected_run_config(condition: str, seed: int) -> dict[str, Any]:
+    return {
+        "algorithm": "maskable_ppo",
+        "algorithm_options": {"learning_rate": 0.0003, "n_epochs": 10, "target_kl": 0.02},
+        "allow_unsafe_legacy_resume": False,
+        "backend": "sb3",
+        "checkpoint_interval": CHECKPOINT_INTERVAL,
+        "device": "cuda",
+        "environment": "tactical-v2",
+        "learner_seat": "alternating",
+        "opponent": {"kind": "scripted", "name": "random"},
+        "policy": "HexCNN",
+        "resume_source": None,
+        "run_name": run_name(condition, seed),
+        "seed": seed,
+        "timestep_mode": "absolute",
+        "total_timesteps": TIMESTEPS,
+        "trackers": [{"kind": "local"}, {"kind": "tensorboard"}],
+        "workers": WORKERS,
+    }
+
+
+def _validate_model_object(checkpoint: Path, manifest: dict[str, Any]) -> None:
+    from sb3_contrib import MaskablePPO
+
+    model = MaskablePPO.load(checkpoint, device="cpu")
+    require(model.num_timesteps == TIMESTEPS, f"saved model step drifted: {checkpoint}")
+    require(model.learning_rate == 0.0003, f"saved learning rate drifted: {checkpoint}")
+    require(model.n_epochs == 10, f"saved epoch count drifted: {checkpoint}")
+    require(model.target_kl == 0.02, f"saved target KL drifted: {checkpoint}")
+    require(model.n_steps == 512, f"saved rollout length drifted: {checkpoint}")
+    require(model.batch_size == 64, f"saved batch size drifted: {checkpoint}")
+    require(tuple(model.observation_space.shape) == (1292,), f"saved observation geometry drifted: {checkpoint}")
+    require(model.action_space.n == 1288, f"saved action geometry drifted: {checkpoint}")
+    require(manifest["contract"]["contract_hash"] == EXPECTED_CONTRACT_HASH, "run contract hash drifted")
+
+
+def validate_run(condition: str, seed: int, *, load_model: bool = True) -> dict[str, Any]:
+    run_dir = RUNS / run_name(condition, seed)
+    manifest_path = run_dir / "run.json"
+    require(manifest_path.is_file(), f"run manifest missing: {run_dir}")
+    manifest = read_json(manifest_path)
+    require(manifest.get("schema_version") == 1, f"run schema drifted: {run_dir}")
+    require(manifest.get("state") == "completed", f"run is not complete: {run_dir}")
+    require(manifest.get("timesteps") == TIMESTEPS, f"run timesteps drifted: {run_dir}")
+    require(manifest.get("latest_checkpoint_step") == TIMESTEPS, f"checkpoint step drifted: {run_dir}")
+    expected_checkpoint = f"checkpoints/step_{TIMESTEPS:09d}.zip"
+    require(manifest.get("latest_checkpoint") == expected_checkpoint, f"checkpoint identity drifted: {run_dir}")
+    checkpoint = run_dir / expected_checkpoint
+    require(checkpoint.is_file(), f"checkpoint missing: {checkpoint}")
+    require(manifest.get("config") == _expected_run_config(condition, seed), f"run config drifted: {run_dir}")
+    contract = manifest.get("contract", {})
+    require(contract.get("contract_hash") == EXPECTED_CONTRACT_HASH, f"contract drifted: {run_dir}")
+    require(contract.get("encoding_hash") == EXPECTED_ENCODING_HASH, f"encoding drifted: {run_dir}")
+    require(contract.get("observation_size") == 1292 and contract.get("action_size") == 1288,
+            f"geometry drifted: {run_dir}")
+    require(contract.get("semantics", {}).get("max_controllable_units") == 3, f"slot count drifted: {run_dir}")
+    require(read_json(run_dir / "scenario.json") == read_json(CONDITIONS[condition]), f"scenario snapshot drifted: {run_dir}")
+    require((run_dir / "tensorboard").is_dir() and any((run_dir / "tensorboard").glob("events.out.tfevents.*")),
+            f"TensorBoard artifact missing: {run_dir}")
+    require((run_dir / "progress.csv").is_file(), f"local progress missing: {run_dir}")
+    profile_files = manifest.get("profile_episode_files")
+    require(isinstance(profile_files, list) and len(profile_files) == WORKERS, f"profile sidecars drifted: {run_dir}")
+    require(all((run_dir / str(path)).is_file() for path in profile_files), f"profile sidecar missing: {run_dir}")
+    audit = manifest.get("profile_sampling", {})
+    expected = expected_distribution(read_json(CONDITIONS[condition]))
+    require(audit.get("expected_basis_points") == expected, f"profile weights drifted: {run_dir}")
+    counts = audit.get("counts", {})
+    require(set(counts) == set(expected), f"profile count catalog drifted: {run_dir}")
+    require(sum(counts.values()) == audit.get("episodes") == manifest.get("episodes"), f"episode counts do not reconcile: {run_dir}")
+    require(all(counts[profile] == 0 for profile, weight in expected.items() if weight == 0),
+            f"zero-weight profile was sampled: {run_dir}")
+    require(all(counts[profile] > 0 for profile, weight in expected.items() if weight > 0),
+            f"nonzero profile was absent: {run_dir}")
+    require(audit.get("warnings") == [], f"profile sampling warning blocks reuse: {run_dir}")
+    if load_model:
+        _validate_model_object(checkpoint, manifest)
+    return manifest
+
+
+def train(condition: str, seed: int) -> Path:
+    name = run_name(condition, seed)
+    run_dir = RUNS / name
+    if run_dir.exists():
+        print(f"TRAIN validate {name}", flush=True)
+        validate_run(condition, seed)
+        return run_dir
+    arguments = [
+        "train", "--run", name,
+        "--environment", "tactical-v2",
+        "--scenario-file", str(CONDITIONS[condition]),
+        "--algorithm", "maskable_ppo",
+        "--opponent", "random",
+        "--timesteps", str(TIMESTEPS),
+        "--checkpoint-every", str(CHECKPOINT_INTERVAL),
+        "--workers", str(WORKERS),
+        "--seed", str(seed),
+        "--device", "cuda",
+        "--learner-seat", "alternating",
+        "--tracker", "local", "--tracker", "tensorboard",
+        "--ppo-learning-rate", "0.0003",
+        "--ppo-n-epochs", "10",
+        "--ppo-target-kl", "0.02",
+        "--no-console-output", "--json",
+    ]
+    print(f"TRAIN start    {name}", flush=True)
+    invoke(arguments, PANEL / "logs" / f"train-{name}.log")
+    validate_run(condition, seed)
+    print(f"TRAIN complete {name}", flush=True)
+    return run_dir
+
+
+def _expected_schedule(seeds: list[int], profile: str) -> list[tuple[int, int]]:
+    return [(seed, seat) for seed in seeds for seat in (0, 1)]
+
+
+def validate_evaluation(
+    path: Path,
+    *,
+    controller: str,
+    seeds: list[int],
+    profile: str,
+    scenario: Path,
+    model_run: Path | None,
+) -> dict[str, Any]:
+    result = read_json(path)
+    require(result.get("schema_version") == 1, f"evaluation schema drifted: {path}")
+    require(result.get("reciprocal") is True, f"evaluation is not reciprocal: {path}")
+    require(result.get("seeds") == seeds, f"evaluation seed schedule drifted: {path}")
+    require(result.get("games") == len(seeds) * 2, f"evaluation game count drifted: {path}")
+    require(result.get("schedule") == {
+        "seed_start": seeds[0], "seed_count": len(seeds), "reciprocal": True,
+        "start_profile": profile, "reference_seat_policy": "candidate-seat",
+    }, f"evaluation schedule metadata drifted: {path}")
+    require(result.get("scenario", {}).get("sha256") == sha256(scenario), f"evaluation scenario drifted: {path}")
+    require(result.get("environment_contract") == {
+        "version": "tactical-v2", "contract_hash": EXPECTED_DUEL_CONTRACT_HASH,
+        "encoding_hash": EXPECTED_ENCODING_HASH,
+    }, f"evaluation duel contract drifted: {path}")
+    candidate = result.get("candidate", {})
+    if model_run is None:
+        require(candidate.get("kind") == "scripted" and candidate.get("name") == controller,
+                f"scripted controller identity drifted: {path}")
+    else:
+        require(candidate.get("kind") == "run", f"model controller kind drifted: {path}")
+        require(Path(candidate.get("source_run", "")).resolve() == model_run.resolve(), f"model run identity drifted: {path}")
+        require(candidate.get("step") == TIMESTEPS, f"model checkpoint step drifted: {path}")
+        require(candidate.get("contract_hash") == EXPECTED_CONTRACT_HASH, f"model contract drifted: {path}")
+    expected_rows = _expected_schedule(seeds, profile)
+    matches = result.get("matches", [])
+    require([(row.get("seed"), row.get("candidate_seat")) for row in matches] == expected_rows,
+            f"evaluation match order drifted: {path}")
+    for row in matches:
+        require(row.get("start_profile") == profile, f"match profile drifted: {path}")
+        require(row.get("reference_seat") == row.get("candidate_seat"), f"reference seat drifted: {path}")
+        require(row.get("scenario_sha256") == sha256(scenario), f"match scenario drifted: {path}")
+        require(row.get("contract_hash") == EXPECTED_DUEL_CONTRACT_HASH, f"match contract drifted: {path}")
+        require(row.get("encoding_hash") == EXPECTED_ENCODING_HASH, f"match encoding drifted: {path}")
+        require(row.get("outcome") in {"win", "loss", "draw"}, f"invalid outcome: {path}")
+        require(isinstance(row.get("model_decisions"), int) and row["model_decisions"] >= 0,
+                f"decision accounting missing: {path}")
+        require(isinstance(row.get("inference_seconds"), (int, float)) and row["inference_seconds"] >= 0,
+                f"inference accounting missing: {path}")
+        if row["outcome"] == "draw":
+            require(Path(row.get("trace_path", "")).is_file(), f"draw trace missing: {path}")
+            require(Path(row.get("replay_path", "")).is_file(), f"draw replay missing: {path}")
+            require(isinstance(row.get("classification"), dict), f"draw classification missing: {path}")
+    require(sum(result.get(name, -1) for name in ("wins", "losses", "draws")) == len(matches),
+            f"evaluation totals do not reconcile: {path}")
+    inference = result.get("inference", {})
+    require(inference.get("model_decisions") == sum(row["model_decisions"] for row in matches),
+            f"inference decisions do not reconcile: {path}")
+    require(inference.get("seconds", -1) >= 0, f"inference time missing: {path}")
+    return result
+
+
+def evaluate_suite(
+    *,
+    label: str,
+    controller: str,
+    seeds: list[int],
+    profile: str,
+    scenario: Path,
+    output: Path,
+    model_run: Path | None,
+) -> dict[str, Any]:
+    if output.exists():
+        print(f"EVAL  validate {label}", flush=True)
+        return validate_evaluation(
+            output, controller=controller, seeds=seeds, profile=profile,
+            scenario=scenario, model_run=model_run,
+        )
+    evidence = output.with_suffix("")
+    require(not evidence.exists(), f"partial evaluation evidence blocks restart: {evidence}")
+    arguments = [
+        "evaluate", "--p0", controller, "--p1", "random",
+        "--games", str(len(seeds)), "--seed-start", str(seeds[0]),
+        "--both-seats", "--workers", str(WORKERS),
+        "--environment", "tactical-v2",
+        "--scenario-file", str(scenario),
+        "--start-profile", profile,
+        "--capture-trace", "--evidence-dir", str(evidence),
+        "--output", str(output), "--json",
+    ]
+    print(f"EVAL  start    {label}", flush=True)
+    invoke(arguments, PANEL / "logs" / f"evaluate-{label}.log")
+    result = validate_evaluation(
+        output, controller=controller, seeds=seeds, profile=profile,
+        scenario=scenario, model_run=model_run,
+    )
+    print(f"EVAL  complete {label}", flush=True)
+    return result
+
+
+def model_evaluation_paths(condition: str, seed: int, banks: dict[str, Any]) -> list[Path]:
+    base = PANEL / "evaluations" / "models" / f"{condition}-seed{seed}"
+    paths = [base / f"standard-{bank['id']}.json" for bank in banks["locked_standard_evaluation"]["banks"]]
+    paths.extend(base / f"conversion-{profile}.json" for profile in banks["locked_conversion_evaluation"]["profiles"])
+    return paths
+
+
+def evaluate_model(condition: str, seed: int, banks: dict[str, Any]) -> None:
+    run_dir = RUNS / run_name(condition, seed)
+    validate_run(condition, seed)
+    controller = f"run:{run_dir}"
+    base = PANEL / "evaluations" / "models" / f"{condition}-seed{seed}"
+    for bank in banks["locked_standard_evaluation"]["banks"]:
+        evaluate_suite(
+            label=f"{condition}-seed{seed}-standard-{bank['id']}",
+            controller=controller, seeds=bank["seeds"], profile="standard-3v3",
+            scenario=STANDARD_SCENARIO, output=base / f"standard-{bank['id']}.json",
+            model_run=run_dir,
+        )
+    for profile, profile_seeds in banks["locked_conversion_evaluation"]["profiles"].items():
+        evaluate_suite(
+            label=f"{condition}-seed{seed}-{profile}",
+            controller=controller, seeds=profile_seeds, profile=profile,
+            scenario=MIXED_SCENARIO, output=base / f"conversion-{profile}.json",
+            model_run=run_dir,
+        )
+
+
+def evaluate_control(controller: str, banks: dict[str, Any]) -> None:
+    base = PANEL / "evaluations" / "controls" / controller
+    for bank in banks["locked_standard_evaluation"]["banks"]:
+        evaluate_suite(
+            label=f"control-{controller}-standard-{bank['id']}",
+            controller=controller, seeds=bank["seeds"], profile="standard-3v3",
+            scenario=STANDARD_SCENARIO, output=base / f"standard-{bank['id']}.json",
+            model_run=None,
+        )
+    for profile, profile_seeds in banks["locked_conversion_evaluation"]["profiles"].items():
+        evaluate_suite(
+            label=f"control-{controller}-{profile}",
+            controller=controller, seeds=profile_seeds, profile=profile,
+            scenario=MIXED_SCENARIO, output=base / f"conversion-{profile}.json",
+            model_run=None,
+        )
+
+
+def _matches(results: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [match for result in results for match in result["matches"]]
+
+
+def _outcome_summary(matches: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = Counter(match["outcome"] for match in matches)
+    seats: dict[str, Counter[str]] = defaultdict(Counter)
+    profiles: dict[str, Counter[str]] = defaultdict(Counter)
+    cycling = 0
+    failed_conversion = 0
+    rounds_to_win: list[int] = []
+    action_waste = 0
+    inference_seconds = 0.0
+    model_decisions = 0
+    for match in matches:
+        seats[str(match["candidate_seat"])][match["outcome"]] += 1
+        profiles[str(match["start_profile"])][match["outcome"]] += 1
+        classification = match.get("classification", {})
+        flags = classification.get("flags", []) if isinstance(classification, dict) else []
+        cycling += int("cycling" in flags)
+        failed_conversion += int("failed_conversion" in flags)
+        summary = match.get("summary", {})
+        if match["outcome"] == "win" and isinstance(summary.get("rounds"), int):
+            rounds_to_win.append(summary["rounds"])
+        waste = summary.get("wasted_end_turns_by_seat")
+        if isinstance(waste, list) and len(waste) == 2:
+            action_waste += int(waste[match["candidate_seat"]])
+        inference_seconds += float(match["inference_seconds"])
+        model_decisions += int(match["model_decisions"])
+    games = len(matches)
+    return {
+        "games": games,
+        "wins": totals["win"], "losses": totals["loss"], "draws": totals["draw"],
+        "win_rate": totals["win"] / games,
+        "loss_rate": totals["loss"] / games,
+        "draw_rate": totals["draw"] / games,
+        "cycling_draws": cycling,
+        "cycling_draw_incidence": cycling / games,
+        "failed_conversion_draws": failed_conversion,
+        "mean_rounds_to_win": sum(rounds_to_win) / len(rounds_to_win) if rounds_to_win else None,
+        "action_waste": action_waste,
+        "inference_seconds": inference_seconds,
+        "model_decisions": model_decisions,
+        "mean_inference_seconds_per_decision": inference_seconds / model_decisions if model_decisions else 0.0,
+        "by_seat": {seat: dict(counts) for seat, counts in sorted(seats.items())},
+        "by_profile": {profile: dict(counts) for profile, counts in sorted(profiles.items())},
+    }
+
+
+def _training_summary(condition: str, seed: int) -> dict[str, Any]:
+    manifest = validate_run(condition, seed)
+    run_dir = RUNS / run_name(condition, seed)
+    with (run_dir / "progress.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    final = rows[-1] if rows else {}
+    diagnostics = _last_optimizer_diagnostics(run_dir)
+    created = datetime.fromisoformat(manifest["created_at"].replace("Z", "+00:00"))
+    updated = datetime.fromisoformat(manifest["updated_at"].replace("Z", "+00:00"))
+    return {
+        "run": run_dir.name,
+        "checkpoint": manifest["latest_checkpoint"],
+        "checkpoint_sha256": sha256(run_dir / manifest["latest_checkpoint"]),
+        "environment_steps": manifest["timesteps"],
+        "episodes": manifest["episodes"],
+        "profile_sampling": manifest["profile_sampling"],
+        "wall_clock_seconds": (updated - created).total_seconds(),
+        "final_approx_kl": diagnostics.get("approx_kl"),
+        "final_clip_fraction": diagnostics.get("clip_fraction"),
+        "final_explained_variance": diagnostics.get("explained_variance"),
+        "final_entropy_loss": diagnostics.get("entropy_loss"),
+        "optimizer_updates": _optional_int(diagnostics.get("n_updates")),
+        "training_mean_reward": _optional_float(final.get("mean_reward")),
+        "steps_per_second": _optional_float(final.get("steps_per_second")),
+    }
+
+
+def _last_optimizer_diagnostics(run_dir: Path) -> dict[str, float]:
+    text = (run_dir / "train.log").read_text(encoding="utf-8")
+    diagnostics: dict[str, float] = {}
+    for field in ("approx_kl", "clip_fraction", "explained_variance", "entropy_loss", "n_updates"):
+        matches = re.findall(rf"\|\s+{field}\s+\|\s+([^\s|]+)", text)
+        if matches:
+            diagnostics[field] = float(matches[-1])
+    require(
+        set(diagnostics) == {"approx_kl", "clip_fraction", "explained_variance", "entropy_loss", "n_updates"},
+        f"optimizer diagnostics missing: {run_dir}",
+    )
+    return diagnostics
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in {None, ""} else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(float(value)) if value not in {None, ""} else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_model_results(condition: str, seed: int, banks: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    base = PANEL / "evaluations" / "models" / f"{condition}-seed{seed}"
+    standard = [validate_evaluation(
+        base / f"standard-{bank['id']}.json", controller=f"run:{RUNS / run_name(condition, seed)}",
+        seeds=bank["seeds"], profile="standard-3v3", scenario=STANDARD_SCENARIO,
+        model_run=RUNS / run_name(condition, seed),
+    ) for bank in banks["locked_standard_evaluation"]["banks"]]
+    conversion = [validate_evaluation(
+        base / f"conversion-{profile}.json", controller=f"run:{RUNS / run_name(condition, seed)}",
+        seeds=profile_seeds, profile=profile, scenario=MIXED_SCENARIO,
+        model_run=RUNS / run_name(condition, seed),
+    ) for profile, profile_seeds in banks["locked_conversion_evaluation"]["profiles"].items()]
+    return standard, conversion
+
+
+def _clause(name: str, passed: bool, **evidence: Any) -> dict[str, Any]:
+    return {"name": name, "passed": passed, "evidence": evidence}
+
+
+def _exact_sign_test(left_only: int, right_only: int) -> float:
+    discordant = left_only + right_only
+    if discordant == 0:
+        return 1.0
+    tail = min(left_only, right_only)
+    probability = sum(math.comb(discordant, value) for value in range(tail + 1)) / (2 ** discordant)
+    return min(1.0, 2.0 * probability)
+
+
+def _paired_summary(
+    control_matches: list[dict[str, Any]], mixed_matches: list[dict[str, Any]]
+) -> dict[str, Any]:
+    def key(match: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            match.get("training_seed"), match["seed"],
+            match["start_profile"], match["candidate_seat"],
+        )
+
+    control = {key(match): match for match in control_matches}
+    mixed = {key(match): match for match in mixed_matches}
+    require(len(control) == len(control_matches), "duplicate control pairing key")
+    require(len(mixed) == len(mixed_matches), "duplicate mixed pairing key")
+    require(set(control) == set(mixed), "condition evaluation schedules are not pairable")
+    both_win = control_only = mixed_only = neither_win = 0
+    control_only_loss = mixed_only_loss = 0
+    for pair_key in sorted(control):
+        left = control[pair_key]["outcome"]
+        right = mixed[pair_key]["outcome"]
+        left_win = left == "win"
+        right_win = right == "win"
+        if left_win and right_win:
+            both_win += 1
+        elif left_win:
+            control_only += 1
+        elif right_win:
+            mixed_only += 1
+        else:
+            neither_win += 1
+        control_only_loss += int(left == "loss" and right != "loss")
+        mixed_only_loss += int(right == "loss" and left != "loss")
+    return {
+        "games": len(control),
+        "both_win": both_win,
+        "control_only_wins": control_only,
+        "mixed_only_wins": mixed_only,
+        "neither_wins": neither_win,
+        "net_mixed_wins": mixed_only - control_only,
+        "two_sided_exact_sign_p": _exact_sign_test(control_only, mixed_only),
+        "control_only_losses": control_only_loss,
+        "mixed_only_losses": mixed_only_loss,
+    }
+
+
+def aggregate(panel: dict[str, Any], banks: dict[str, Any]) -> dict[str, Any]:
+    models: dict[str, dict[str, Any]] = {condition: {} for condition in CONDITIONS}
+    model_matches: dict[str, dict[int, dict[str, list[dict[str, Any]]]]] = {
+        condition: {} for condition in CONDITIONS
+    }
+    for condition in CONDITIONS:
+        for seed in TRAINING_SEEDS:
+            standard_results, conversion_results = _read_model_results(condition, seed, banks)
+            standard_matches = _matches(standard_results)
+            conversion_matches = _matches(conversion_results)
+            model_matches[condition][seed] = {
+                "standard": standard_matches,
+                "conversion": conversion_matches,
+            }
+            models[condition][str(seed)] = {
+                "training": _training_summary(condition, seed),
+                "standard": _outcome_summary(standard_matches),
+                "conversion": _outcome_summary(conversion_matches),
+            }
+
+    controls: dict[str, Any] = {}
+    for controller in CONTROLS:
+        base = PANEL / "evaluations" / "controls" / controller
+        standard_results = [validate_evaluation(
+            base / f"standard-{bank['id']}.json", controller=controller,
+            seeds=bank["seeds"], profile="standard-3v3", scenario=STANDARD_SCENARIO, model_run=None,
+        ) for bank in banks["locked_standard_evaluation"]["banks"]]
+        conversion_results = [validate_evaluation(
+            base / f"conversion-{profile}.json", controller=controller,
+            seeds=profile_seeds, profile=profile, scenario=MIXED_SCENARIO, model_run=None,
+        ) for profile, profile_seeds in banks["locked_conversion_evaluation"]["profiles"].items()]
+        controls[controller] = {
+            "standard": _outcome_summary(_matches(standard_results)),
+            "conversion": _outcome_summary(_matches(conversion_results)),
+        }
+
+    control_rows = models["profiled_standard"]
+    mixed_rows = models["mixed_conversion"]
+    total = lambda rows, suite, field: sum(rows[str(seed)][suite][field] for seed in TRAINING_SEEDS)
+    games = total(control_rows, "conversion", "games")
+    conversion_control_rate = total(control_rows, "conversion", "wins") / games
+    conversion_mixed_rate = total(mixed_rows, "conversion", "wins") / games
+    standard_games = total(control_rows, "standard", "games")
+    standard_control_rate = total(control_rows, "standard", "wins") / standard_games
+    standard_mixed_rate = total(mixed_rows, "standard", "wins") / standard_games
+    loss_control_rate = total(control_rows, "conversion", "losses") / games
+    loss_mixed_rate = total(mixed_rows, "conversion", "losses") / games
+    cycle_control = total(control_rows, "conversion", "cycling_draws")
+    cycle_mixed = total(mixed_rows, "conversion", "cycling_draws")
+
+    medium_profiles = [profile for profile in banks["locked_conversion_evaluation"]["profiles"] if "-medium" in profile]
+    def profile_wins(rows: dict[str, Any], profiles: list[str], seat: str | None = None) -> int:
+        count = 0
+        for seed in TRAINING_SEEDS:
+            summary = rows[str(seed)]["conversion"]
+            if seat is None:
+                count += sum(summary["by_profile"].get(profile, {}).get("win", 0) for profile in profiles)
+            else:
+                # Recover exact profile/seat pairing from validated match artifacts.
+                _, conversion_results = _read_model_results(
+                    "profiled_standard" if rows is control_rows else "mixed_conversion", seed, banks
+                )
+                count += sum(
+                    match["outcome"] == "win" and str(match["candidate_seat"]) == seat
+                    and match["start_profile"] in profiles
+                    for match in _matches(conversion_results)
+                )
+        return count
+
+    all_conversion_profiles = list(banks["locked_conversion_evaluation"]["profiles"])
+    paired_by_seed: dict[str, Any] = {}
+    for seed in TRAINING_SEEDS:
+        paired_by_seed[str(seed)] = {
+            suite: _paired_summary(
+                model_matches["profiled_standard"][seed][suite],
+                model_matches["mixed_conversion"][seed][suite],
+            )
+            for suite in ("standard", "conversion")
+        }
+
+    def all_condition_matches(condition: str, suite: str) -> list[dict[str, Any]]:
+        return [
+            {**match, "training_seed": seed}
+            for seed in TRAINING_SEEDS
+            for match in model_matches[condition][seed][suite]
+        ]
+
+    paired_overall = {
+        suite: _paired_summary(
+            all_condition_matches("profiled_standard", suite),
+            all_condition_matches("mixed_conversion", suite),
+        )
+        for suite in ("standard", "conversion")
+    }
+    paired_by_profile = {
+        profile: _paired_summary(
+            [match for match in all_condition_matches("profiled_standard", "conversion")
+             if match["start_profile"] == profile],
+            [match for match in all_condition_matches("mixed_conversion", "conversion")
+             if match["start_profile"] == profile],
+        )
+        for profile in all_conversion_profiles
+    }
+    clauses = [
+        _clause(
+            "aggregate conversion win rate improves by at least 15 percentage points",
+            conversion_mixed_rate - conversion_control_rate >= 0.15,
+            control=conversion_control_rate, mixed=conversion_mixed_rate,
+            delta_percentage_points=(conversion_mixed_rate - conversion_control_rate) * 100,
+        ),
+        _clause(
+            "conversion wins improve for every training seed",
+            all(mixed_rows[str(seed)]["conversion"]["wins"] > control_rows[str(seed)]["conversion"]["wins"] for seed in TRAINING_SEEDS),
+            by_seed={str(seed): {
+                "control": control_rows[str(seed)]["conversion"]["wins"],
+                "mixed": mixed_rows[str(seed)]["conversion"]["wins"],
+            } for seed in TRAINING_SEEDS},
+        ),
+        _clause(
+            "cycling draw incidence falls by at least 25 percent relative",
+            (cycle_mixed <= cycle_control * 0.75) if cycle_control else cycle_mixed == 0,
+            control=cycle_control, mixed=cycle_mixed,
+            relative_reduction=(cycle_control - cycle_mixed) / cycle_control if cycle_control else None,
+        ),
+        _clause(
+            "held-out medium separation conversion improves",
+            profile_wins(mixed_rows, medium_profiles) > profile_wins(control_rows, medium_profiles),
+            control_wins=profile_wins(control_rows, medium_profiles),
+            mixed_wins=profile_wins(mixed_rows, medium_profiles),
+        ),
+        _clause(
+            "standard win rate drop is at most 5 percentage points",
+            standard_control_rate - standard_mixed_rate <= 0.05,
+            control=standard_control_rate, mixed=standard_mixed_rate,
+            drop_percentage_points=(standard_control_rate - standard_mixed_rate) * 100,
+        ),
+        _clause(
+            "no seed loses more than 15 percentage points on standard",
+            all(
+                control_rows[str(seed)]["standard"]["win_rate"] - mixed_rows[str(seed)]["standard"]["win_rate"] <= 0.15
+                for seed in TRAINING_SEEDS
+            ),
+            by_seed={str(seed): {
+                "control": control_rows[str(seed)]["standard"]["win_rate"],
+                "mixed": mixed_rows[str(seed)]["standard"]["win_rate"],
+            } for seed in TRAINING_SEEDS},
+        ),
+        _clause(
+            "conversion loss rate rises by at most 5 percentage points",
+            loss_mixed_rate - loss_control_rate <= 0.05,
+            control=loss_control_rate, mixed=loss_mixed_rate,
+            increase_percentage_points=(loss_mixed_rate - loss_control_rate) * 100,
+        ),
+        _clause(
+            "conversion effect appears in both candidate seats",
+            all(profile_wins(mixed_rows, all_conversion_profiles, seat) > profile_wins(control_rows, all_conversion_profiles, seat)
+                for seat in ("0", "1")),
+            by_seat={seat: {
+                "control_wins": profile_wins(control_rows, all_conversion_profiles, seat),
+                "mixed_wins": profile_wins(mixed_rows, all_conversion_profiles, seat),
+            } for seat in ("0", "1")},
+        ),
+    ]
+    result = {
+        "schema_version": 1,
+        "panel": panel["panel"],
+        "diagnostic_only": True,
+        "models": models,
+        "controls": controls,
+        "paired_comparisons": {
+            "pairing_keys": ["training_seed", "map_seed", "start_profile", "candidate_seat"],
+            "overall": paired_overall,
+            "by_training_seed": paired_by_seed,
+            "by_profile": paired_by_profile,
+        },
+        "training_schedule_audit": {
+            "path": str(PANEL / "training-schedule-audit.json"),
+            "sha256": sha256(PANEL / "training-schedule-audit.json"),
+            "interpretation": read_json(PANEL / "training-schedule-audit.json")["interpretation"],
+        },
+        "curriculum_gate": {
+            "passed": all(clause["passed"] for clause in clauses),
+            "clauses": clauses,
+        },
+    }
+    write_json(PANEL / "aggregate.json", result)
+    write_report(result)
+    return result
+
+
+def write_report(aggregate_result: dict[str, Any]) -> None:
+    gate = aggregate_result["curriculum_gate"]
+    models = aggregate_result["models"]
+
+    def totals(condition: str, suite: str, field: str) -> int:
+        return sum(int(models[condition][str(seed)][suite][field]) for seed in TRAINING_SEEDS)
+
+    def profile_totals(condition: str, profile: str) -> tuple[int, int, int]:
+        counts = Counter()
+        for seed in TRAINING_SEEDS:
+            counts.update(models[condition][str(seed)]["conversion"]["by_profile"].get(profile, {}))
+        return counts["win"], counts["loss"], counts["draw"]
+
+    standard_control = totals("profiled_standard", "standard", "wins")
+    standard_mixed = totals("mixed_conversion", "standard", "wins")
+    conversion_control = totals("profiled_standard", "conversion", "wins")
+    conversion_mixed = totals("mixed_conversion", "conversion", "wins")
+    conversion_games = totals("profiled_standard", "conversion", "games")
+    schedule = aggregate_result["training_schedule_audit"]["interpretation"]
+    paired = aggregate_result["paired_comparisons"]
+    lines = [
+        "# Annihilation Conversion Curriculum v1",
+        "",
+        "> Diagnostic curriculum decision panel; not a tactical-v3 official tournament or production-AI promotion.",
+        "",
+        f"**Curriculum gate:** {'PASS' if gate['passed'] else 'FAIL'}",
+        "",
+        "The mixed curriculum did not produce the preregistered effect. Conversion wins rose from "
+        f"{conversion_control}/{conversion_games} ({conversion_control / conversion_games:.1%}) to "
+        f"{conversion_mixed}/{conversion_games} ({conversion_mixed / conversion_games:.1%}), only "
+        f"{(conversion_mixed - conversion_control) / conversion_games:.2%} in absolute rate. "
+        "Cycling draws fell from "
+        f"{totals('profiled_standard', 'conversion', 'cycling_draws')} to "
+        f"{totals('mixed_conversion', 'conversion', 'cycling_draws')}, while the gate required a 25% relative reduction.",
+        "",
+        "This is a useful negative result rather than a null run: mixed training preserved ordinary 3-v-3 play, "
+        "improved held-out medium conversion, reduced losses, and moved both seats in the favorable direction. "
+        "But the aggregate gain was small, seed 127 regressed, and cycling remained the dominant failure. "
+        "The plan therefore authorizes the bounded-search diagnostic; it does not authorize weight tuning, "
+        "100,352-step confirmation, Greedy training, self-play, or a DQN comparison.",
+        "",
+        "## Gate clauses",
+        "",
+    ]
+    for clause in gate["clauses"]:
+        lines.append(f"- {'PASS' if clause['passed'] else 'FAIL'} — {clause['name']}")
+
+    lines.extend([
+        "", "## Aggregate outcomes", "",
+        "| Controller / condition | Standard W-L-D | Conversion W-L-D |",
+        "|---|---:|---:|",
+        f"| Profiled standard PPO | {standard_control}-{totals('profiled_standard', 'standard', 'losses')}-{totals('profiled_standard', 'standard', 'draws')} "
+        f"| {conversion_control}-{totals('profiled_standard', 'conversion', 'losses')}-{totals('profiled_standard', 'conversion', 'draws')} |",
+        f"| Mixed conversion PPO | {standard_mixed}-{totals('mixed_conversion', 'standard', 'losses')}-{totals('mixed_conversion', 'standard', 'draws')} "
+        f"| {conversion_mixed}-{totals('mixed_conversion', 'conversion', 'losses')}-{totals('mixed_conversion', 'conversion', 'draws')} |",
+    ])
+    for controller in CONTROLS:
+        standard = aggregate_result["controls"][controller]["standard"]
+        conversion = aggregate_result["controls"][controller]["conversion"]
+        lines.append(
+            f"| {controller.title()} control | {standard['wins']}-{standard['losses']}-{standard['draws']} "
+            f"| {conversion['wins']}-{conversion['losses']}-{conversion['draws']} |"
+        )
+
+    lines.extend(["", "## Per-seed outcomes", "", "| Condition | Seed | Standard W-L-D | Conversion W-L-D |", "|---|---:|---:|---:|"])
+    for condition, seeds in aggregate_result["models"].items():
+        for seed, row in seeds.items():
+            standard = row["standard"]
+            conversion = row["conversion"]
+            lines.append(
+                f"| {condition} | {seed} | {standard['wins']}-{standard['losses']}-{standard['draws']} "
+                f"| {conversion['wins']}-{conversion['losses']}-{conversion['draws']} |"
+            )
+
+    lines.extend([
+        "", "## Paired conversion comparison", "",
+        "| Scope | Control-only wins | Mixed-only wins | Net mixed wins | Exact sign p |",
+        "|---|---:|---:|---:|---:|",
+    ])
+    overall_pair = paired["overall"]["conversion"]
+    lines.append(
+        f"| All seeds | {overall_pair['control_only_wins']} | {overall_pair['mixed_only_wins']} "
+        f"| {overall_pair['net_mixed_wins']:+d} | {overall_pair['two_sided_exact_sign_p']:.4f} |"
+    )
+    for seed in TRAINING_SEEDS:
+        value = paired["by_training_seed"][str(seed)]["conversion"]
+        lines.append(
+            f"| Seed {seed} | {value['control_only_wins']} | {value['mixed_only_wins']} "
+            f"| {value['net_mixed_wins']:+d} | {value['two_sided_exact_sign_p']:.4f} |"
+        )
+
+    lines.extend([
+        "", "## Conversion profiles", "",
+        "| Profile | Standard-trained W-L-D | Mixed-trained W-L-D | Net mixed wins |",
+        "|---|---:|---:|---:|",
+    ])
+    for profile in paired["by_profile"]:
+        left = profile_totals("profiled_standard", profile)
+        right = profile_totals("mixed_conversion", profile)
+        lines.append(
+            f"| {profile} | {left[0]}-{left[1]}-{left[2]} | {right[0]}-{right[1]}-{right[2]} "
+            f"| {right[0] - left[0]:+d} |"
+        )
+
+    lines.extend([
+        "", "## Training and compute", "",
+        "| Condition | Seed | Episodes | Seconds | Final KL | Final clip | Updates |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ])
+    for condition, seeds in models.items():
+        for seed, row in seeds.items():
+            training = row["training"]
+            lines.append(
+                f"| {condition} | {seed} | {training['episodes']} | {training['wall_clock_seconds']:.1f} "
+                f"| {training['final_approx_kl']:.4f} | {training['final_clip_fraction']:.3f} "
+                f"| {training['optimizer_updates']} |"
+            )
+
+    lines.extend([
+        "", "## Training-schedule limitation", "",
+        schedule["replicate_scope"],
+        "",
+        schedule["treatment_scope"],
+        "",
+        "This limitation was frozen before locked evaluation. It does not explain away the failed gate: "
+        "the realized treatment still supplied substantially more valid conversion practice, yet produced only a small and inconsistent gain.",
+        "",
+        "## Decision", "",
+        "Do not consume the 10,000,000-series confirmation bank and do not tune curriculum weights against these results. "
+        "Proceed to the bounded-search baseline from Task 9 to test whether explicit lookahead and persistent pursuit "
+        "can convert the same states where PPO cycles. Another learned algorithm remains gated on that diagnostic.",
+        "",
+    ])
+    path = PANEL / "REPORT.md"
+    temporary = path.with_suffix(".md.tmp")
+    temporary.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    temporary.replace(path)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--phase", choices=("validate", "train", "evaluate", "aggregate", "all"), default="all")
+    parser.add_argument("--condition", choices=tuple(CONDITIONS))
+    parser.add_argument("--seed", type=int, choices=TRAINING_SEEDS)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    panel, banks = validate_definitions()
+    conditions = [args.condition] if args.condition else list(CONDITIONS)
+    training_seeds = [args.seed] if args.seed else list(TRAINING_SEEDS)
+    print("VALID definitions", flush=True)
+    if args.phase == "validate":
+        return 0
+    if args.phase in {"train", "all"}:
+        for condition in conditions:
+            for seed in training_seeds:
+                train(condition, seed)
+    if args.phase in {"evaluate", "all"}:
+        for condition in conditions:
+            for seed in training_seeds:
+                evaluate_model(condition, seed, banks)
+        if args.condition is None and args.seed is None:
+            for controller in CONTROLS:
+                evaluate_control(controller, banks)
+        else:
+            print("EVAL  controls deferred for filtered run", flush=True)
+    if args.phase in {"aggregate", "all"}:
+        require(args.condition is None and args.seed is None, "aggregation requires the complete unfiltered panel")
+        result = aggregate(panel, banks)
+        print(f"AGGREGATE {'PASS' if result['curriculum_gate']['passed'] else 'FAIL'}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

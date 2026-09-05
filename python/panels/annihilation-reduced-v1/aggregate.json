@@ -1,0 +1,1518 @@
+{
+  "conditions": {
+    "full_draw025": {
+      "hypothesis": "Positive material credit at the cap encourages non-converting draws.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.080170915,
+            "clip_fraction": 0.536,
+            "entropy_loss": -2.13,
+            "explained_variance": 0.0642,
+            "steps_per_second": 224.4083653703637,
+            "training_mean_reward": -0.37960121794899915
+          },
+          "draws": 48,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_draw025-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_draw025-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 25,
+              "losses": 0,
+              "wins": 0
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 11,
+          "wins": 2
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.107983075,
+            "clip_fraction": 0.55,
+            "entropy_loss": -2.03,
+            "explained_variance": -0.227,
+            "steps_per_second": 251.76526110263868,
+            "training_mean_reward": -0.304049767983999
+          },
+          "draws": 42,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_draw025-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_draw025-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 23,
+          "wins": 8
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.088285595,
+            "clip_fraction": 0.542,
+            "entropy_loss": -2.18,
+            "explained_variance": 0.0261,
+            "steps_per_second": 272.71644057752684,
+            "training_mean_reward": -0.3946495895039989
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_draw025-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_draw025-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Full reward, draw credit 0.25",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.25,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 66,
+          "losses": 0,
+          "wins": 9
+        },
+        "candidate_as_p1": {
+          "draws": 64,
+          "losses": 0,
+          "wins": 11
+        }
+      },
+      "totals": {
+        "draw_rate": 0.8666666666666667,
+        "draws": 130,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.196980174497742,
+          "low": 0.0879980047055142
+        },
+        "win_rate": 0.13333333333333333,
+        "wins": 20
+      }
+    },
+    "full_nodraw": {
+      "hypothesis": "Removing positive draw credit improves annihilation conversion.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.112178266,
+            "clip_fraction": 0.595,
+            "entropy_loss": -2.43,
+            "explained_variance": -0.383,
+            "steps_per_second": 190.91720353472897,
+            "training_mean_reward": -0.4124999188399992
+          },
+          "draws": 43,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_nodraw-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_nodraw-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 11,
+          "wins": 7
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.09110749,
+            "clip_fraction": 0.551,
+            "entropy_loss": -2.14,
+            "explained_variance": 0.0686,
+            "steps_per_second": 182.48741032836082,
+            "training_mean_reward": -0.42094991871999904
+          },
+          "draws": 46,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_nodraw-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 1,
+          "run": "annihilation-ablation-full_nodraw-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 23,
+              "losses": 1,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 23,
+          "wins": 3
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0979189,
+            "clip_fraction": 0.523,
+            "entropy_loss": -1.96,
+            "explained_variance": -0.0871,
+            "steps_per_second": 181.27474382567542,
+            "training_mean_reward": -0.15264992047999948
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-full_nodraw-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_nodraw-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Full reward, no draw credit",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 65,
+          "losses": 1,
+          "wins": 9
+        },
+        "candidate_as_p1": {
+          "draws": 64,
+          "losses": 0,
+          "wins": 11
+        }
+      },
+      "totals": {
+        "draw_rate": 0.86,
+        "draws": 129,
+        "games": 150,
+        "losses": 1,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.196980174497742,
+          "low": 0.0879980047055142
+        },
+        "win_rate": 0.13333333333333333,
+        "wins": 20
+      }
+    },
+    "minus_closing": {
+      "hypothesis": "The closing-distance term is necessary for contact and conversion.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.09891608,
+            "clip_fraction": 0.54,
+            "entropy_loss": -2.23,
+            "explained_variance": 0.0201,
+            "steps_per_second": 192.48019718940645,
+            "training_mean_reward": -0.8151999993799905
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_closing-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_closing-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 11,
+          "wins": 10
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0882265,
+            "clip_fraction": 0.506,
+            "entropy_loss": -1.87,
+            "explained_variance": -0.0278,
+            "steps_per_second": 190.468321612204,
+            "training_mean_reward": -0.7120000003699926
+          },
+          "draws": 43,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_closing-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_closing-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 23,
+          "wins": 7
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.07447336,
+            "clip_fraction": 0.493,
+            "entropy_loss": -2.01,
+            "explained_variance": 0.161,
+            "steps_per_second": 194.93715837060887,
+            "training_mean_reward": -0.7143499994499913
+          },
+          "draws": 42,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_closing-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 1,
+          "run": "annihilation-ablation-minus_closing-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 1,
+              "wins": 2
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 47,
+          "wins": 7
+        }
+      ],
+      "name": "No draw credit, minus closing",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 64,
+          "losses": 1,
+          "wins": 10
+        },
+        "candidate_as_p1": {
+          "draws": 61,
+          "losses": 0,
+          "wins": 14
+        }
+      },
+      "totals": {
+        "draw_rate": 0.8333333333333334,
+        "draws": 125,
+        "games": 150,
+        "losses": 1,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.22703968204183714,
+          "low": 0.10994008412845499
+        },
+        "win_rate": 0.16,
+        "wins": 24
+      }
+    },
+    "minus_value": {
+      "hypothesis": "Material-delta shaping helps combat but may reward non-terminal advantage.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.08857324,
+            "clip_fraction": 0.552,
+            "entropy_loss": -2.2,
+            "explained_variance": 0.153,
+            "steps_per_second": 186.917764397468,
+            "training_mean_reward": -0.7056499172799984
+          },
+          "draws": 44,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_value-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_value-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 11,
+          "wins": 6
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.08592469,
+            "clip_fraction": 0.515,
+            "entropy_loss": -1.86,
+            "explained_variance": -0.093,
+            "steps_per_second": 189.17280707822567,
+            "training_mean_reward": -0.7858499187099984
+          },
+          "draws": 43,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_value-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 1,
+          "run": "annihilation-ablation-minus_value-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 23,
+              "losses": 1,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 23,
+          "wins": 6
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.074790455,
+            "clip_fraction": 0.502,
+            "entropy_loss": -2.07,
+            "explained_variance": 0.0395,
+            "steps_per_second": 171.20232879272308,
+            "training_mean_reward": -0.9712999134499978
+          },
+          "draws": 48,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-minus_value-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_value-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            }
+          },
+          "training_seed": 47,
+          "wins": 2
+        }
+      ],
+      "name": "No draw credit, minus value delta",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.005
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 70,
+          "losses": 1,
+          "wins": 4
+        },
+        "candidate_as_p1": {
+          "draws": 65,
+          "losses": 0,
+          "wins": 10
+        }
+      },
+      "totals": {
+        "draw_rate": 0.9,
+        "draws": 135,
+        "games": 150,
+        "losses": 1,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.1505639312756158,
+          "low": 0.05641186747708652
+        },
+        "win_rate": 0.09333333333333334,
+        "wins": 14
+      }
+    },
+    "terminal_only": {
+      "hypothesis": "Terminal wins alone are too sparse at this training budget.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.088794485,
+            "clip_fraction": 0.53,
+            "entropy_loss": -2.28,
+            "explained_variance": -0.0458,
+            "steps_per_second": 185.32043029027201,
+            "training_mean_reward": 0.29
+          },
+          "draws": 48,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_only-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_only-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 25,
+              "losses": 0,
+              "wins": 0
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 11,
+          "wins": 2
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.05132255,
+            "clip_fraction": 0.413,
+            "entropy_loss": -1.93,
+            "explained_variance": 0.0481,
+            "steps_per_second": 185.1920207052809,
+            "training_mean_reward": 0.34
+          },
+          "draws": 47,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_only-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_only-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 23,
+          "wins": 3
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.06566015,
+            "clip_fraction": 0.487,
+            "entropy_loss": -2.24,
+            "explained_variance": -0.0115,
+            "steps_per_second": 187.55267821820834,
+            "training_mean_reward": 0.34
+          },
+          "draws": 49,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_only-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_only-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 25,
+              "losses": 0,
+              "wins": 0
+            }
+          },
+          "training_seed": 47,
+          "wins": 1
+        }
+      ],
+      "name": "Pure terminal reward",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.0
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 73,
+          "losses": 0,
+          "wins": 2
+        },
+        "candidate_as_p1": {
+          "draws": 71,
+          "losses": 0,
+          "wins": 4
+        }
+      },
+      "totals": {
+        "draw_rate": 0.96,
+        "draws": 144,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.08451346421655606,
+          "low": 0.01845916060207442
+        },
+        "win_rate": 0.04,
+        "wins": 6
+      }
+    },
+    "terminal_time": {
+      "hypothesis": "A per-decision cost plus terminal result can learn fast annihilation without dense proxies.",
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.07642354,
+            "clip_fraction": 0.527,
+            "entropy_loss": -2.08,
+            "explained_variance": 0.176,
+            "steps_per_second": 188.98157680658232,
+            "training_mean_reward": -1.4618499999999852
+          },
+          "draws": 46,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_time-seed11-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_time-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 25,
+              "losses": 0,
+              "wins": 0
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 11,
+          "wins": 4
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.05832936,
+            "clip_fraction": 0.436,
+            "entropy_loss": -2.06,
+            "explained_variance": 0.19,
+            "steps_per_second": 193.36907419579822,
+            "training_mean_reward": -1.2641999999999873
+          },
+          "draws": 47,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_time-seed23-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_time-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 25,
+              "losses": 0,
+              "wins": 0
+            },
+            "candidate_as_p1": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            }
+          },
+          "training_seed": 23,
+          "wins": 3
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.06297673,
+            "clip_fraction": 0.49,
+            "entropy_loss": -2.23,
+            "explained_variance": 0.266,
+            "steps_per_second": 177.96382876415325,
+            "training_mean_reward": -1.1013499999999883
+          },
+          "draws": 47,
+          "evaluation": "python\\panels\\annihilation-reduced-v1\\evaluations\\annihilation-ablation-terminal_time-seed47-tb-v1.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-terminal_time-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 47,
+          "wins": 3
+        }
+      ],
+      "name": "Terminal plus time pressure",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.005
+      },
+      "seat_totals": {
+        "candidate_as_p0": {
+          "draws": 74,
+          "losses": 0,
+          "wins": 1
+        },
+        "candidate_as_p1": {
+          "draws": 66,
+          "losses": 0,
+          "wins": 9
+        }
+      },
+      "totals": {
+        "draw_rate": 0.9333333333333333,
+        "draws": 140,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.11836235511605896,
+          "low": 0.03661185666960744
+        },
+        "win_rate": 0.06666666666666667,
+        "wins": 10
+      }
+    }
+  },
+  "controls": {
+    "greedy_vs_random": {
+      "candidate": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "greedy",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "confidence_intervals": {
+        "draw": {
+          "confidence": 0.95,
+          "high": 0.7062499664528801,
+          "low": 0.44233441768578236
+        },
+        "loss": {
+          "confidence": 0.95,
+          "high": 0.07134759913335868,
+          "low": 0.0
+        },
+        "win": {
+          "confidence": 0.95,
+          "high": 0.5576655823142176,
+          "low": 0.2937500335471198
+        }
+      },
+      "draws": 29,
+      "games": 50,
+      "generated_at": "2026-07-29T04:51:36.493586Z",
+      "losses": 0,
+      "matches": [
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000000,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000000,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000001,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000001,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000002,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000002,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000003,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000003,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000004,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000004,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000005,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000005,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000006,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000006,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000007,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000007,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000008,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000008,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000009,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000009,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000010,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000010,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000011,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000011,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000012,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000012,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000013,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000013,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000014,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000014,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000015,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000015,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000016,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000016,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000017,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000017,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000018,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000018,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000019,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000019,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000020,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000020,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000021,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000021,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000022,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 3000022,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000023,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000023,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 3000024,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 3000024,
+          "winner": 1
+        }
+      ],
+      "opponent": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "random",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "rates": {
+        "draw": 0.58,
+        "loss": 0.0,
+        "win": 0.42
+      },
+      "reciprocal": true,
+      "schema_version": 1,
+      "seat_results": {
+        "candidate_as_p0": {
+          "draws": 17,
+          "losses": 0,
+          "wins": 8
+        },
+        "candidate_as_p1": {
+          "draws": 12,
+          "losses": 0,
+          "wins": 13
+        }
+      },
+      "seed_start": 3000000,
+      "seeds": [
+        3000000,
+        3000001,
+        3000002,
+        3000003,
+        3000004,
+        3000005,
+        3000006,
+        3000007,
+        3000008,
+        3000009,
+        3000010,
+        3000011,
+        3000012,
+        3000013,
+        3000014,
+        3000015,
+        3000016,
+        3000017,
+        3000018,
+        3000019,
+        3000020,
+        3000021,
+        3000022,
+        3000023,
+        3000024
+      ],
+      "wins": 21
+    },
+    "random_vs_random": {
+      "candidate": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "random",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "confidence_intervals": {
+        "draw": {
+          "confidence": 0.95,
+          "high": 1.0,
+          "low": 0.8668077490609516
+        },
+        "loss": {
+          "confidence": 0.95,
+          "high": 0.13319225093904843,
+          "low": 0.0
+        },
+        "win": {
+          "confidence": 0.95,
+          "high": 0.13319225093904843,
+          "low": 0.0
+        }
+      },
+      "draws": 25,
+      "games": 25,
+      "generated_at": "2026-07-29T04:51:39.557156Z",
+      "losses": 0,
+      "matches": [
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000000,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000001,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000002,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000003,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000004,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000005,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000006,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000007,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000008,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000009,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000010,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000011,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000012,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000013,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000014,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000015,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000016,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000017,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000018,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000019,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000020,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000021,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000022,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000023,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 3000024,
+          "winner": -1
+        }
+      ],
+      "opponent": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "random",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "rates": {
+        "draw": 1.0,
+        "loss": 0.0,
+        "win": 0.0
+      },
+      "reciprocal": false,
+      "schema_version": 1,
+      "seat_results": {
+        "candidate_as_p0": {
+          "draws": 25,
+          "losses": 0,
+          "wins": 0
+        },
+        "candidate_as_p1": {
+          "draws": 0,
+          "losses": 0,
+          "wins": 0
+        }
+      },
+      "seed_start": 3000000,
+      "seeds": [
+        3000000,
+        3000001,
+        3000002,
+        3000003,
+        3000004,
+        3000005,
+        3000006,
+        3000007,
+        3000008,
+        3000009,
+        3000010,
+        3000011,
+        3000012,
+        3000013,
+        3000014,
+        3000015,
+        3000016,
+        3000017,
+        3000018,
+        3000019,
+        3000020,
+        3000021,
+        3000022,
+        3000023,
+        3000024
+      ],
+      "wins": 0
+    }
+  },
+  "evaluation_seed_count": 25,
+  "evaluation_seed_start": 3000000,
+  "generated_at": "2026-07-29T04:53:25.102800Z",
+  "paired_win_comparisons": [
+    {
+      "both_win": 7,
+      "games": 150,
+      "left": "full_nodraw",
+      "left_only_wins": 13,
+      "neither_wins": 117,
+      "net_left_wins": 0,
+      "question": "effect of removing draw credit",
+      "right": "full_draw025",
+      "right_only_wins": 13,
+      "seed_net_left_wins": {
+        "11": 5,
+        "23": -5,
+        "47": 0
+      },
+      "two_sided_exact_sign_p": 1.0
+    },
+    {
+      "both_win": 7,
+      "games": 150,
+      "left": "minus_closing",
+      "left_only_wins": 17,
+      "neither_wins": 113,
+      "net_left_wins": 4,
+      "question": "effect of removing closing-distance shaping",
+      "right": "full_nodraw",
+      "right_only_wins": 13,
+      "seed_net_left_wins": {
+        "11": 3,
+        "23": 4,
+        "47": -3
+      },
+      "two_sided_exact_sign_p": 0.584664711728692
+    },
+    {
+      "both_win": 2,
+      "games": 150,
+      "left": "full_nodraw",
+      "left_only_wins": 18,
+      "neither_wins": 118,
+      "net_left_wins": 6,
+      "question": "effect of retaining value-delta shaping",
+      "right": "minus_value",
+      "right_only_wins": 12,
+      "seed_net_left_wins": {
+        "11": 1,
+        "23": -3,
+        "47": 8
+      },
+      "two_sided_exact_sign_p": 0.361594608053565
+    },
+    {
+      "both_win": 3,
+      "games": 150,
+      "left": "terminal_time",
+      "left_only_wins": 7,
+      "neither_wins": 137,
+      "net_left_wins": 4,
+      "question": "effect of adding per-decision time pressure to terminal reward",
+      "right": "terminal_only",
+      "right_only_wins": 3,
+      "seed_net_left_wins": {
+        "11": 2,
+        "23": 0,
+        "47": 2
+      },
+      "two_sided_exact_sign_p": 0.34375
+    },
+    {
+      "both_win": 7,
+      "games": 150,
+      "left": "full_nodraw",
+      "left_only_wins": 13,
+      "neither_wins": 127,
+      "net_left_wins": 10,
+      "question": "combined effect of closing and value shaping over terminal plus time",
+      "right": "terminal_time",
+      "right_only_wins": 3,
+      "seed_net_left_wins": {
+        "11": 3,
+        "23": 0,
+        "47": 7
+      },
+      "two_sided_exact_sign_p": 0.021270751953125
+    }
+  ],
+  "reciprocal_games_per_model": 50,
+  "schema_version": 1,
+  "training_seeds": [
+    11,
+    23,
+    47
+  ],
+  "training_timesteps": 51200
+}

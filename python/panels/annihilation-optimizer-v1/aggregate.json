@@ -1,0 +1,1312 @@
+{
+  "conditions": {
+    "full_combined": {
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.0024338677,
+            "clip_fraction": 0.0117,
+            "entropy_loss": -1.97,
+            "explained_variance": 0.0287,
+            "n_updates": 72.0,
+            "steps_per_second": 411.8503420312769,
+            "training_mean_reward": -0.31969991568999884
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_combined-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-full_combined-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            },
+            "candidate_as_p1": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            }
+          },
+          "training_seed": 11,
+          "wins": 10
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0020807832,
+            "clip_fraction": 0.00651,
+            "entropy_loss": -1.92,
+            "explained_variance": 0.356,
+            "n_updates": 72.0,
+            "steps_per_second": 379.95526694460045,
+            "training_mean_reward": -0.013299923159999552
+          },
+          "draws": 41,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_combined-seed23.json",
+          "games": 50,
+          "losses": 1,
+          "run": "annihilation-optimizer-full_combined-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 1,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 23,
+          "wins": 8
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0032047275,
+            "clip_fraction": 0.00911,
+            "entropy_loss": -2.01,
+            "explained_variance": 0.398,
+            "n_updates": 72.0,
+            "steps_per_second": 410.54830088645997,
+            "training_mean_reward": -0.17954992182999877
+          },
+          "draws": 43,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_combined-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-full_combined-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            },
+            "candidate_as_p1": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            }
+          },
+          "training_seed": 47,
+          "wins": 7
+        }
+      ],
+      "name": "Full no-draw reward, conservative combined PPO",
+      "scenario": "full_nodraw.json",
+      "totals": {
+        "draws": 124,
+        "games": 150,
+        "losses": 1,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.23446586416900808,
+          "low": 0.115514298743043
+        },
+        "win_rate": 0.16666666666666666,
+        "wins": 25
+      }
+    },
+    "full_default": {
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.112178266,
+            "clip_fraction": 0.595,
+            "entropy_loss": -2.43,
+            "explained_variance": -0.383,
+            "n_updates": 240.0,
+            "steps_per_second": 190.91720353472897,
+            "training_mean_reward": -0.4124999188399992
+          },
+          "draws": 41,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_default-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_nodraw-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            }
+          },
+          "training_seed": 11,
+          "wins": 9
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.09110749,
+            "clip_fraction": 0.551,
+            "entropy_loss": -2.14,
+            "explained_variance": 0.0686,
+            "n_updates": 240.0,
+            "steps_per_second": 182.48741032836082,
+            "training_mean_reward": -0.42094991871999904
+          },
+          "draws": 45,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_default-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_nodraw-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            },
+            "candidate_as_p1": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            }
+          },
+          "training_seed": 23,
+          "wins": 5
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0979189,
+            "clip_fraction": 0.523,
+            "entropy_loss": -1.96,
+            "explained_variance": -0.0871,
+            "n_updates": 240.0,
+            "steps_per_second": 181.27474382567542,
+            "training_mean_reward": -0.15264992047999948
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\full_default-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-full_nodraw-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 18,
+              "losses": 0,
+              "wins": 7
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Full no-draw reward, PPO defaults",
+      "scenario": "full_nodraw.json",
+      "totals": {
+        "draws": 126,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.22703968204183714,
+          "low": 0.10994008412845499
+        },
+        "win_rate": 0.16,
+        "wins": 24
+      }
+    },
+    "value_combined": {
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.0028399257,
+            "clip_fraction": 0.0109,
+            "entropy_loss": -2.28,
+            "explained_variance": 0.266,
+            "n_updates": 72.0,
+            "steps_per_second": 441.22225804670217,
+            "training_mean_reward": -0.4574500007499928
+          },
+          "draws": 39,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_combined-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_combined-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            }
+          },
+          "training_seed": 11,
+          "wins": 11
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0029214295,
+            "clip_fraction": 0.0127,
+            "entropy_loss": -1.52,
+            "explained_variance": 0.54,
+            "n_updates": 72.0,
+            "steps_per_second": 377.95152598365644,
+            "training_mean_reward": -0.5216499995899919
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_combined-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_combined-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            },
+            "candidate_as_p1": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            }
+          },
+          "training_seed": 23,
+          "wins": 10
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0025748834,
+            "clip_fraction": 0.00716,
+            "entropy_loss": -2.23,
+            "explained_variance": 0.253,
+            "n_updates": 72.0,
+            "steps_per_second": 378.7155149535519,
+            "training_mean_reward": -0.6481499999699909
+          },
+          "draws": 44,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_combined-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_combined-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            }
+          },
+          "training_seed": 47,
+          "wins": 6
+        }
+      ],
+      "name": "Value-only shaping, conservative combined PPO",
+      "scenario": "minus_closing.json",
+      "totals": {
+        "draws": 123,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.2492232783179601,
+          "low": 0.1267576780776089
+        },
+        "win_rate": 0.18,
+        "wins": 27
+      }
+    },
+    "value_default": {
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.09891608,
+            "clip_fraction": 0.54,
+            "entropy_loss": -2.23,
+            "explained_variance": 0.0201,
+            "n_updates": 240.0,
+            "steps_per_second": 192.48019718940645,
+            "training_mean_reward": -0.8151999993799905
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_default-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_closing-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 11,
+          "wins": 10
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.0882265,
+            "clip_fraction": 0.506,
+            "entropy_loss": -1.87,
+            "explained_variance": -0.0278,
+            "n_updates": 240.0,
+            "steps_per_second": 190.468321612204,
+            "training_mean_reward": -0.7120000003699926
+          },
+          "draws": 43,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_default-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_closing-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 23,
+          "wins": 7
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.07447336,
+            "clip_fraction": 0.493,
+            "entropy_loss": -2.01,
+            "explained_variance": 0.161,
+            "n_updates": 240.0,
+            "steps_per_second": 194.93715837060887,
+            "training_mean_reward": -0.7143499994499913
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_default-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-ablation-minus_closing-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 18,
+              "losses": 0,
+              "wins": 7
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Value-only shaping, PPO defaults",
+      "scenario": "minus_closing.json",
+      "totals": {
+        "draws": 123,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.2492232783179601,
+          "low": 0.1267576780776089
+        },
+        "win_rate": 0.18,
+        "wins": 27
+      }
+    },
+    "value_epochs3": {
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 3,
+        "target_kl": null
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.012166839,
+            "clip_fraction": 0.0975,
+            "entropy_loss": -2.0,
+            "explained_variance": -0.0342,
+            "n_updates": 72.0,
+            "steps_per_second": 439.0617456295905,
+            "training_mean_reward": -0.9572000002599897
+          },
+          "draws": 45,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_epochs3-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_epochs3-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            },
+            "candidate_as_p1": {
+              "draws": 23,
+              "losses": 0,
+              "wins": 2
+            }
+          },
+          "training_seed": 11,
+          "wins": 5
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.012344125,
+            "clip_fraction": 0.114,
+            "entropy_loss": -1.88,
+            "explained_variance": 0.116,
+            "n_updates": 72.0,
+            "steps_per_second": 475.8723096067505,
+            "training_mean_reward": -0.5570000002299913
+          },
+          "draws": 42,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_epochs3-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_epochs3-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 22,
+              "losses": 0,
+              "wins": 3
+            }
+          },
+          "training_seed": 23,
+          "wins": 8
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.009852511,
+            "clip_fraction": 0.112,
+            "entropy_loss": -1.79,
+            "explained_variance": 0.281,
+            "n_updates": 72.0,
+            "steps_per_second": 474.89968497361525,
+            "training_mean_reward": -0.5928500004199916
+          },
+          "draws": 39,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_epochs3-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_epochs3-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            }
+          },
+          "training_seed": 47,
+          "wins": 11
+        }
+      ],
+      "name": "Value-only shaping, 3 epochs",
+      "scenario": "minus_closing.json",
+      "totals": {
+        "draws": 126,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.22703968204183714,
+          "low": 0.10994008412845499
+        },
+        "win_rate": 0.16,
+        "wins": 24
+      }
+    },
+    "value_low_lr": {
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.012290675,
+            "clip_fraction": 0.108,
+            "entropy_loss": -1.96,
+            "explained_variance": 0.0142,
+            "n_updates": 240.0,
+            "steps_per_second": 286.27559435667445,
+            "training_mean_reward": -0.6789000001499913
+          },
+          "draws": 38,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_low_lr-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_low_lr-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 18,
+              "losses": 0,
+              "wins": 7
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 11,
+          "wins": 12
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.014674702,
+            "clip_fraction": 0.136,
+            "entropy_loss": -1.83,
+            "explained_variance": 0.107,
+            "n_updates": 240.0,
+            "steps_per_second": 260.47725563492935,
+            "training_mean_reward": -0.5964500010699926
+          },
+          "draws": 39,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_low_lr-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_low_lr-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 21,
+              "losses": 0,
+              "wins": 4
+            },
+            "candidate_as_p1": {
+              "draws": 18,
+              "losses": 0,
+              "wins": 7
+            }
+          },
+          "training_seed": 23,
+          "wins": 11
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.013869792,
+            "clip_fraction": 0.141,
+            "entropy_loss": -1.76,
+            "explained_variance": 0.137,
+            "n_updates": 240.0,
+            "steps_per_second": 267.8366139648041,
+            "training_mean_reward": -0.5107000001699924
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_low_lr-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_low_lr-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 24,
+              "losses": 0,
+              "wins": 1
+            },
+            "candidate_as_p1": {
+              "draws": 16,
+              "losses": 0,
+              "wins": 9
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Value-only shaping, learning rate 1e-4",
+      "scenario": "minus_closing.json",
+      "totals": {
+        "draws": 117,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.29282309982858373,
+          "low": 0.16116023701753923
+        },
+        "win_rate": 0.22,
+        "wins": 33
+      }
+    },
+    "value_targetkl": {
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02
+      },
+      "models": [
+        {
+          "diagnostics": {
+            "approx_kl": 0.024392663,
+            "clip_fraction": 0.181,
+            "entropy_loss": -2.19,
+            "explained_variance": 0.395,
+            "n_updates": 120.0,
+            "steps_per_second": 411.00681879895336,
+            "training_mean_reward": -0.5485000008299927
+          },
+          "draws": 36,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_targetkl-seed11.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_targetkl-seed11-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 17,
+              "losses": 0,
+              "wins": 8
+            },
+            "candidate_as_p1": {
+              "draws": 19,
+              "losses": 0,
+              "wins": 6
+            }
+          },
+          "training_seed": 11,
+          "wins": 14
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.023215313,
+            "clip_fraction": 0.176,
+            "entropy_loss": -1.98,
+            "explained_variance": -0.159,
+            "n_updates": 110.0,
+            "steps_per_second": 405.0764224768995,
+            "training_mean_reward": -0.6147499999299927
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_targetkl-seed23.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_targetkl-seed23-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 23,
+          "wins": 10
+        },
+        {
+          "diagnostics": {
+            "approx_kl": 0.014914321,
+            "clip_fraction": 0.0641,
+            "entropy_loss": -2.17,
+            "explained_variance": -0.0402,
+            "n_updates": 112.0,
+            "steps_per_second": 498.17773492675605,
+            "training_mean_reward": -0.9234500003699899
+          },
+          "draws": 40,
+          "evaluation": "python\\panels\\annihilation-optimizer-v1\\evaluations\\value_targetkl-seed47.json",
+          "games": 50,
+          "losses": 0,
+          "run": "annihilation-optimizer-value_targetkl-seed47-tb-v1",
+          "seat_results": {
+            "candidate_as_p0": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            },
+            "candidate_as_p1": {
+              "draws": 20,
+              "losses": 0,
+              "wins": 5
+            }
+          },
+          "training_seed": 47,
+          "wins": 10
+        }
+      ],
+      "name": "Value-only shaping, target KL 0.02",
+      "scenario": "minus_closing.json",
+      "totals": {
+        "draws": 116,
+        "games": 150,
+        "losses": 0,
+        "win_interval": {
+          "confidence": 0.95,
+          "high": 0.3000019393193978,
+          "low": 0.1669817942684841
+        },
+        "win_rate": 0.22666666666666666,
+        "wins": 34
+      }
+    }
+  },
+  "controls": {
+    "greedy_vs_random": {
+      "candidate": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "greedy",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "confidence_intervals": {
+        "draw": {
+          "confidence": 0.95,
+          "high": 0.6883780078874284,
+          "low": 0.42306028021656866
+        },
+        "loss": {
+          "confidence": 0.95,
+          "high": 0.07134759913335868,
+          "low": 0.0
+        },
+        "win": {
+          "confidence": 0.95,
+          "high": 0.5769397197834314,
+          "low": 0.3116219921125717
+        }
+      },
+      "draws": 28,
+      "games": 50,
+      "generated_at": "2026-07-29T05:57:54.080639Z",
+      "losses": 0,
+      "matches": [
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000000,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000000,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000001,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000001,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000002,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000002,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000003,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000003,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000004,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000004,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000005,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000005,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000006,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000006,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000007,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000007,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000008,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000008,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000009,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000009,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000010,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000010,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000011,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000011,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000012,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000012,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000013,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000013,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000014,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000014,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000015,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000015,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000016,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000016,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000017,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000017,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000018,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000018,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000019,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000019,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000020,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000020,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000021,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000021,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000022,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000022,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "win",
+          "seed": 4000023,
+          "winner": 0
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "win",
+          "seed": 4000023,
+          "winner": 1
+        },
+        {
+          "candidate_seat": 0,
+          "outcome": "draw",
+          "seed": 4000024,
+          "winner": -1
+        },
+        {
+          "candidate_seat": 1,
+          "outcome": "draw",
+          "seed": 4000024,
+          "winner": -1
+        }
+      ],
+      "opponent": {
+        "action_size": null,
+        "algorithm": null,
+        "contract": null,
+        "contract_hash": null,
+        "contract_version": null,
+        "encoding_hash": null,
+        "environment": null,
+        "inference_mode": "deterministic",
+        "kind": "scripted",
+        "legacy": false,
+        "name": "random",
+        "observation_size": null,
+        "path": null,
+        "promotable": false,
+        "step": null
+      },
+      "rates": {
+        "draw": 0.56,
+        "loss": 0.0,
+        "win": 0.44
+      },
+      "reciprocal": true,
+      "schema_version": 1,
+      "seat_results": {
+        "candidate_as_p0": {
+          "draws": 15,
+          "losses": 0,
+          "wins": 10
+        },
+        "candidate_as_p1": {
+          "draws": 13,
+          "losses": 0,
+          "wins": 12
+        }
+      },
+      "seed_start": 4000000,
+      "seeds": [
+        4000000,
+        4000001,
+        4000002,
+        4000003,
+        4000004,
+        4000005,
+        4000006,
+        4000007,
+        4000008,
+        4000009,
+        4000010,
+        4000011,
+        4000012,
+        4000013,
+        4000014,
+        4000015,
+        4000016,
+        4000017,
+        4000018,
+        4000019,
+        4000020,
+        4000021,
+        4000022,
+        4000023,
+        4000024
+      ],
+      "wins": 22
+    }
+  },
+  "evaluation_seed_count": 25,
+  "evaluation_seed_start": 4000000,
+  "generated_at": "2026-07-29T06:03:28.691470Z",
+  "paired_win_comparisons": [
+    {
+      "both_win": 13,
+      "left": "value_low_lr",
+      "left_only_wins": 20,
+      "neither_wins": 103,
+      "net_left_wins": 6,
+      "question": "lower learning rate",
+      "right": "value_default",
+      "right_only_wins": 14,
+      "seed_net_left_wins": {
+        "11": 2,
+        "23": 4,
+        "47": 0
+      },
+      "two_sided_exact_sign_p": 0.39152830513194203
+    },
+    {
+      "both_win": 5,
+      "left": "value_epochs3",
+      "left_only_wins": 19,
+      "neither_wins": 104,
+      "net_left_wins": -3,
+      "question": "fewer optimization epochs",
+      "right": "value_default",
+      "right_only_wins": 22,
+      "seed_net_left_wins": {
+        "11": -5,
+        "23": 1,
+        "47": 1
+      },
+      "two_sided_exact_sign_p": 0.755228657504631
+    },
+    {
+      "both_win": 13,
+      "left": "value_targetkl",
+      "left_only_wins": 21,
+      "neither_wins": 102,
+      "net_left_wins": 7,
+      "question": "KL-limited updates",
+      "right": "value_default",
+      "right_only_wins": 14,
+      "seed_net_left_wins": {
+        "11": 4,
+        "23": 3,
+        "47": 0
+      },
+      "two_sided_exact_sign_p": 0.31050465907901525
+    },
+    {
+      "both_win": 6,
+      "left": "value_combined",
+      "left_only_wins": 21,
+      "neither_wins": 102,
+      "net_left_wins": 0,
+      "question": "combined conservative update",
+      "right": "value_default",
+      "right_only_wins": 21,
+      "seed_net_left_wins": {
+        "11": 1,
+        "23": 3,
+        "47": -4
+      },
+      "two_sided_exact_sign_p": 1.0
+    },
+    {
+      "both_win": 8,
+      "left": "full_combined",
+      "left_only_wins": 17,
+      "neither_wins": 109,
+      "net_left_wins": 1,
+      "question": "combined update on full no-draw reward",
+      "right": "full_default",
+      "right_only_wins": 16,
+      "seed_net_left_wins": {
+        "11": 1,
+        "23": 3,
+        "47": -3
+      },
+      "two_sided_exact_sign_p": 1.0
+    },
+    {
+      "both_win": 13,
+      "left": "value_combined",
+      "left_only_wins": 14,
+      "neither_wins": 111,
+      "net_left_wins": 2,
+      "question": "reward choice under combined update",
+      "right": "full_combined",
+      "right_only_wins": 12,
+      "seed_net_left_wins": {
+        "11": 1,
+        "23": 2,
+        "47": -1
+      },
+      "two_sided_exact_sign_p": 0.8450189828872681
+    }
+  ],
+  "schema_version": 1,
+  "training_seeds": [
+    11,
+    23,
+    47
+  ],
+  "training_timesteps": 51200
+}

@@ -1,0 +1,122 @@
+{
+  "candidate": {
+    "action_size": null,
+    "algorithm": null,
+    "contract": null,
+    "contract_hash": null,
+    "contract_version": null,
+    "encoding_hash": null,
+    "environment": null,
+    "inference_mode": "deterministic",
+    "kind": "scripted",
+    "legacy": false,
+    "name": "greedy",
+    "observation_size": null,
+    "path": null,
+    "promotable": false,
+    "step": null
+  },
+  "confidence_intervals": {
+    "draw": {
+      "confidence": 0.95,
+      "high": 0.6576197724933468,
+      "low": 0.0
+    },
+    "loss": {
+      "confidence": 0.95,
+      "high": 0.6576197724933468,
+      "low": 0.0
+    },
+    "win": {
+      "confidence": 0.95,
+      "high": 1.0,
+      "low": 0.3423802275066532
+    }
+  },
+  "draws": 0,
+  "environment_contract": {
+    "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+    "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+    "version": "tactical-v2"
+  },
+  "games": 2,
+  "generated_at": "2026-07-29T14:21:37.111970Z",
+  "losses": 0,
+  "matches": [
+    {
+      "candidate_seat": 0,
+      "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+      "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+      "outcome": "win",
+      "reference_seat": 0,
+      "scenario_sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+      "seed": 6000000,
+      "start_profile": "conversion-2v1-far",
+      "winner": 0
+    },
+    {
+      "candidate_seat": 1,
+      "contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+      "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f",
+      "outcome": "win",
+      "reference_seat": 1,
+      "scenario_sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+      "seed": 6000000,
+      "start_profile": "conversion-2v1-far",
+      "winner": 1
+    }
+  ],
+  "opponent": {
+    "action_size": null,
+    "algorithm": null,
+    "contract": null,
+    "contract_hash": null,
+    "contract_version": null,
+    "encoding_hash": null,
+    "environment": null,
+    "inference_mode": "deterministic",
+    "kind": "scripted",
+    "legacy": false,
+    "name": "random",
+    "observation_size": null,
+    "path": null,
+    "promotable": false,
+    "step": null
+  },
+  "rates": {
+    "draw": 0.0,
+    "loss": 0.0,
+    "win": 1.0
+  },
+  "reciprocal": true,
+  "scenario": {
+    "id": "tactical-v2-annihilation-profiled-mixed",
+    "path": "python/config/experiments/annihilation-profiled-mixed.json",
+    "sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76"
+  },
+  "schedule": {
+    "reciprocal": true,
+    "reference_seat_policy": "candidate-seat",
+    "seed_count": 1,
+    "seed_start": 6000000,
+    "start_profile": "conversion-2v1-far"
+  },
+  "schema_version": 1,
+  "seat_results": {
+    "candidate_as_p0": {
+      "draws": 0,
+      "losses": 0,
+      "wins": 1
+    },
+    "candidate_as_p1": {
+      "draws": 0,
+      "losses": 0,
+      "wins": 1
+    }
+  },
+  "seed_start": 6000000,
+  "seeds": [
+    6000000
+  ],
+  "wins": 2
+}
