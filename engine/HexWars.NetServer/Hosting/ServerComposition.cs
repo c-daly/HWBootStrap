@@ -1,5 +1,8 @@
+using System.Text;
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Options;
 
@@ -14,7 +17,28 @@ namespace HexWars.NetServer.Hosting
     {
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
+            // Belt and braces with RemoveAllLoggers() on the Steam client: these categories log the full
+            // request URI at Information, and for the Steam client that URI is the publisher key and the
+            // auth ticket. Scoped to that one client on purpose - only its requests carry secrets, and a
+            // filter on the whole prefix would silently blind every other client this server ever adds.
+            // The trailing dot matters: the category is matched by prefix, so without it this would also
+            // silence any client whose name merely starts with this one, such as SteamWebApiMetrics.
+            builder.Logging.AddFilter(
+                "System.Net.Http.HttpClient." + SteamWebApiRegistration.HttpClientName + ".", LogLevel.None);
+
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+
+            // Read straight from configuration rather than the bound options: this runs before validation,
+            // and a legacy deployment with no DATABASE_URL must not pull Npgsql into the container at all.
+            if (!string.IsNullOrWhiteSpace(builder.Configuration["DATABASE_URL"]))
+                builder.Services.AddHexWarsPostgres();
+
+            // Registered unconditionally: the typed client resolves its options lazily, so a
+            // Legacy-only deployment with no Steam credentials is unaffected by it being here.
+            builder.Services.AddSteamWebApi();
+            // Stateless and options-driven: one instance serves every request, and resolving it here
+            // rather than constructing it in an endpoint keeps the lobby rules out of the HTTP layer.
+            builder.Services.AddSingleton<SteamLobbyValidator>();
             return builder;
         }
 
@@ -24,6 +48,13 @@ namespace HexWars.NetServer.Hosting
             // deployment throws OptionsValidationException naming the offending KEYS, never their values.
             var steam = app.Services.GetRequiredService<IOptions<SteamOptions>>().Value;
             var match = app.Services.GetRequiredService<IOptions<MatchHostingOptions>>().Value;
+
+            // Before the first line is written: every Steam id that reaches a log goes through this key,
+            // and a handle written under the startup default would not match the ones written after.
+            if (!string.IsNullOrEmpty(match.LogPseudonymKey))
+            {
+                SteamLogRedaction.ConfigureKey(Encoding.UTF8.GetBytes(match.LogPseudonymKey));
+            }
 
             app.Logger.LogInformation(
                 "Environment report {Report}", EnvironmentReport.Describe(steam, match, app.Environment).ToJson());

@@ -1,3 +1,4 @@
+using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Tests.Fakes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -33,6 +34,10 @@ namespace HexWars.NetServer.Tests
                 builder.UseSetting("MATCH_PUBLIC_BASE_URL", "https://match.invalid/base");
                 builder.UseSetting("MATCH_BUILD_ID", "build-42");
                 builder.ConfigureLogging(logging => logging.AddProvider(capture));
+                // The DATABASE_URL above names a host that does not resolve; this test is about the startup
+                // report, not storage, so drop the startup migration that would (correctly) refuse to boot.
+                builder.ConfigureServices(services =>
+                    services.Remove(services.Single(d => d.ImplementationType == typeof(MigrationHostedService))));
             });
             using var client = factory.CreateClient();
 

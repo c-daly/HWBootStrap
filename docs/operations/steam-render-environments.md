@@ -77,6 +77,7 @@ names, bound by the server configuration layer.
 | `MATCH_TRUST_FORWARDED_HEADERS` | bool | `false` | no | no | Honour forwarded-for headers. Set it `true` on Render so rate limiting sees the real client IP rather than the proxy. |
 | `MATCH_BLOCKED_STEAM_IDS` | comma list of SteamID64 | empty | no | no | Accounts refused at match create and join. |
 | `MATCH_METRICS_TOKEN` | string | unset | no | **YES** | When set, `GET /api/v1/metrics` requires the header `X-Metrics-Token` carrying this value. |
+| `MATCH_LOG_PSEUDONYM_KEY` | string, at least 16 characters | unset | no | **YES** | Key behind the `sid:` pseudonyms that stand in for Steam account ids in logs. Steam ids are an enumerable namespace, so the handle is an HMAC rather than a plain digest and the key is what stops a log reader precomputing it. Unset means a random key is generated per process, so handles correlate only within one process lifetime and never across a restart or between instances. Production should set it from the Render secret store so handles stay comparable across restarts and across instances. |
 | `DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE` | bool | `false` in the image | yes, in the container | no | Disables the .NET configuration file watcher. Required in the immutable container; see the lineage section. |
 | `PORT` | int | injected by Render | n/a on Render | no | The port the web service must listen on. Render injects it; do not hard-code it. |
 
@@ -184,6 +185,11 @@ Postgres-backed tests run against a real Postgres, never a mock and never a shar
 - The database is dropped with the container. There is no cleanup step to forget.
 - `HEXWARS_TEST_DATABASE_URL`, when set, overrides the container and points the fixture at an existing
   database. This is for CI runners and hosts without a Docker daemon.
+- Whatever it points at is checked before a single connection is opened, because every fixture starts by
+  dropping and recreating the public schema. The run proceeds only if the database name contains `test`,
+  or if `HEXWARS_TEST_DATABASE_DISPOSABLE` names that exact database. Anything else fails with a message
+  naming the database and how to confirm it. The container the fixture starts uses `hexwars_test`, so it
+  passes the same rule rather than being exempt from it.
 - Automated tests never use Render credentials, and never reach the live Valve API.
 
 ### The test project does not run on the production runtime

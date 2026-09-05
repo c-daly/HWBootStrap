@@ -290,6 +290,29 @@ namespace HexWars.NetServer.Tests
                 Is.EqualTo("abc"));
         }
 
+        [Test]
+        public void LogPseudonymKey_IsOptionalButMustBeLongEnoughWhenSet()
+        {
+            // Absent means a random per-process key, which is a usable default rather than an error.
+            Assert.That(Read(new Dictionary<string, string?>()).Match.LogPseudonymKey, Is.Null);
+
+            var configured = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_LOG_PSEUDONYM_KEY"] = "0123456789abcdef",
+            });
+            Assert.That(configured.IsValid, Is.True, Joined(configured));
+            Assert.That(configured.Match.LogPseudonymKey, Is.EqualTo("0123456789abcdef"));
+
+            var tooShort = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_LOG_PSEUDONYM_KEY"] = "tooshort",
+            });
+            Assert.That(tooShort.IsValid, Is.False);
+            Assert.That(tooShort.Errors, Has.Some.StartsWith("MATCH_LOG_PSEUDONYM_KEY:"));
+            // Like every other configuration error, it names the key and never the value.
+            Assert.That(Joined(tooShort), Does.Not.Contain("tooshort"));
+        }
+
         // ---- DATABASE_URL ---------------------------------------------------
 
         [Test]
@@ -571,6 +594,13 @@ namespace HexWars.NetServer.Tests
                 builder.UseSetting("DATABASE_URL", "postgres://hexwars:s3cr3t@db.internal:5432/hexwars");
                 builder.UseSetting("MATCH_PUBLIC_BASE_URL", "https://match.hexwars.invalid");
                 builder.UseSetting("MATCH_BUILD_ID", "build-42");
+                builder.ConfigureServices(services =>
+                {
+                    // This test is about which endpoints get mapped, not about storage. The DATABASE_URL
+                    // above names a host that does not resolve, so drop the startup migration that would
+                    // otherwise (correctly) refuse to boot. PostgresStartupTests covers that behaviour.
+                    services.Remove(services.Single(d => d.ImplementationType == typeof(MigrationHostedService)));
+                });
             });
             using var client = factory.CreateClient();
 
