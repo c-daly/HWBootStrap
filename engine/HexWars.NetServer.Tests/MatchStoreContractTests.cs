@@ -730,6 +730,54 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedInsideTheAllowedWindow_Succeeds()
+        {
+            // The one exception to a terminal match refusing credentials: a game that started and ended
+            // recently is still joinable, because a seat that missed the final APPLY has no other way to
+            // learn how it ended.
+            var match = await NewActiveMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            bool replaced = await Store.ReplaceJoinCredentialAsync(
+                Hash(67), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(3), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replaced, Is.True);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(67), Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedBeforeTheWindow_IsStillRefused()
+        {
+            var match = await NewActiveMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            bool replaced = await Store.ReplaceJoinCredentialAsync(
+                Hash(68), match.MatchId, match.Seat0, Ended.AddMinutes(30), Ended.AddMinutes(20), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replaced, Is.False);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(68), Ct), Is.Null);
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedWithoutStarting_IsRefusedEvenInTheWindow()
+        {
+            // No start replay: nothing was ever dealt, so there is no ending to come back for.
+            var match = await NewWaitingMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Expired, null, Ended, Ct), Is.True);
+
+            bool replaced = await Store.ReplaceJoinCredentialAsync(
+                Hash(69), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(1), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replaced, Is.False);
+        }
+
+        [Test]
         public async Task ReplaceJoinCredential_ForASteamIdWithNoSeat_IsRejected()
         {
             var match = await NewWaitingMatchAsync();

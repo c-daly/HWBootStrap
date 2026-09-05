@@ -8,9 +8,17 @@ namespace HexWars.NetServer.Auth
     /// </summary>
     public sealed record IssuedCredential(string Credential, DateTimeOffset ExpiresAt);
 
-    /// <summary>What a credential turned out to be: the match it belongs to, the Steam account behind it,
-    /// and the seat that account holds in that match.</summary>
-    public sealed record CredentialValidation(Guid MatchId, string SteamId, int Seat);
+    /// <summary>
+    /// What a credential turned out to be: the match it belongs to, the Steam account behind it, the seat
+    /// that account holds, and the identity of the credential itself.
+    ///
+    /// The hash rather than the credential, and it is here because a socket outlives its handshake. A
+    /// credential that expires or is revoked while a game is being played has to stop working then rather
+    /// than at the next reconnect, and the only way to ask that question later is to have kept the one
+    /// value that identifies the credential without being usable as one.
+    /// </summary>
+    public sealed record CredentialValidation(
+        Guid MatchId, string SteamId, int Seat, byte[] CredentialHash, DateTimeOffset ExpiresAt);
 
     /// <summary>
     /// Issues and checks the short-lived credential a client presents when it opens the match websocket.
@@ -42,5 +50,18 @@ namespace HexWars.NetServer.Auth
         /// unauthenticated socket, so telling it which of those happened would only help a guesser.
         /// </summary>
         Task<CredentialValidation?> ValidateAsync(Guid matchId, string credential, CancellationToken ct);
+
+        /// <summary>
+        /// Whether a credential that already opened a socket is still one.
+        ///
+        /// Asked periodically for the whole life of a connection, because the handshake is a moment and a
+        /// match is an hour. A credential revoked by the same player reconnecting elsewhere, or simply run
+        /// out of time, leaves a socket that was legitimate when it opened and is not any more; without
+        /// this the seat is held until the client chooses to let go of it.
+        ///
+        /// Takes the hash rather than the credential: nothing on this server keeps the credential, and
+        /// nothing should need it to ask this.
+        /// </summary>
+        Task<bool> IsStillValidAsync(byte[] credentialHash, Guid matchId, DateTimeOffset now);
     }
 }

@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using HexWars.NetServer.Auth;
+using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Persistence;
@@ -565,21 +566,90 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task JoiningAFinishedMatchIsAConflict()
+        public async Task JoiningAFinishedMatchLongAfterwardsIsAConflict()
         {
             using var factory = new SteamServerFactory();
             using HttpClient client = factory.CreateClient();
 
-            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
-            await factory.Store.TryStartMatchAsync(
-                matchId, "replay", SteamServerFactory.Start, default);
-            await factory.Store.TryCompleteMatchAsync(
-                matchId, MatchStatus.Completed, 0, SteamServerFactory.Start, default);
+            Guid matchId = await FinishedMatchAsync(factory, client);
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(11));
 
             HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
 
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
             Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        [Test]
+        public async Task JoiningAFinishedMatchInsideTheReconnectWindow_IsAllowed()
+        {
+            // A seat that missed the final APPLY has no other way to learn how the game it was playing
+            // ended. Refusing the join is what leaves that player looking at a position that stopped being
+            // true, so the window is joinable and the credential it hands back is capped at what is left
+            // of it.
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await FinishedMatchAsync(factory, client);
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(5));
+
+            HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK),
+                await response.Content.ReadAsStringAsync());
+
+            JsonElement body = await Body(response);
+            Assert.That(body.GetProperty("protocolVersion").GetInt32(),
+                Is.EqualTo(ProtocolContract.Version), "the protocol the match was written under");
+            Assert.That(body.GetProperty("seat").GetInt32(), Is.EqualTo(1));
+
+            DateTimeOffset expiresAt = body.GetProperty("credentialExpiresAt").GetDateTimeOffset();
+            Assert.That(expiresAt,
+                Is.EqualTo(SteamServerFactory.Start.AddSeconds(
+                    MatchHostingOptions.DefaultTerminalReconnectSeconds)),
+                "the credential ends when the window does, not a full TTL later");
+
+            var credentials = factory.Services.GetRequiredService<IMatchCredentialService>();
+            string credential = body.GetProperty("joinCredential").GetString()!;
+
+            Assert.That(await credentials.ValidateAsync(matchId, credential, default), Is.Not.Null);
+
+            factory.Clock.Advance(TimeSpan.FromMinutes(6));
+            Assert.That(await credentials.ValidateAsync(matchId, credential, default), Is.Null,
+                "and it stops working when the window closes rather than outliving it");
+        }
+
+        [Test]
+        public async Task JoiningAMatchThatEndedWithoutEverStartingIsAConflict()
+        {
+            // No start replay means no game was dealt, so there is no ending for a returning seat to be
+            // shown and the window has nothing to be for.
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+            await factory.Store.TryCompleteMatchAsync(
+                matchId, MatchStatus.Expired, null, SteamServerFactory.Start, default);
+
+            HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
+            Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        /// <summary>A match that started and then finished, at the instant the fixture clock begins.</summary>
+        static async Task<Guid> FinishedMatchAsync(SteamServerFactory factory, HttpClient client)
+        {
+            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+
+            await factory.Store.TryStartMatchAsync(
+                matchId, "replay", SteamServerFactory.Start, default);
+            await factory.Store.TryCompleteMatchAsync(
+                matchId, MatchStatus.Completed, 0, SteamServerFactory.Start, default);
+
+            return matchId;
         }
 
         // ---- an allocation that already exists ----------------------------------------------------
@@ -638,12 +708,15 @@ namespace HexWars.NetServer.Tests
 
             // Inside the seat lookup, which is after the join has already checked the status and before it
             // issues anything. Without the status check inside the issuing transaction this window hands
-            // out a credential for a finished game.
+            // out a credential for a match that is over.
+            //
+            // The match expires without ever starting, which is the ending the reconnect window does not
+            // cover: there is no game to come back to. A completion inside the window would be honoured
+            // on purpose, and would prove nothing about the transaction.
             factory.Counting.BeforeGetPlayer = async (id, _) =>
             {
-                await factory.Store.TryStartMatchAsync(id, "START-REPLAY", SteamServerFactory.Start, default);
                 await factory.Store.TryCompleteMatchAsync(
-                    id, MatchStatus.Completed, 0, SteamServerFactory.Start, default);
+                    id, MatchStatus.Expired, null, SteamServerFactory.Start, default);
             };
 
             HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);

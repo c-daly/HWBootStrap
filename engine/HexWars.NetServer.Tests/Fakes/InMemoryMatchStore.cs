@@ -328,7 +328,8 @@ namespace HexWars.NetServer.Tests.Fakes
         }
 
         public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null)
         {
             ValidateCredentialHash(credentialHash, nameof(credentialHash));
             ValidateSteamId(steamId, nameof(steamId));
@@ -345,7 +346,8 @@ namespace HexWars.NetServer.Tests.Fakes
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
 
                 MatchRow row = _matches[matchId];
-                if (!row.IsOpen) return Task.FromResult(false);
+                if (!row.IsOpen && !ReachableAfterTheEnd(row, now, allowTerminalWithin))
+                    return Task.FromResult(false);
 
                 CredentialRow? clash = Credential(credentialHash);
                 if (clash is not null)
@@ -367,6 +369,21 @@ namespace HexWars.NetServer.Tests.Fakes
 
                 return Task.FromResult(true);
             }
+        }
+
+        /// <summary>
+        /// Whether a match that is over is still close enough to its ending to be joined.
+        ///
+        /// Only a match that actually started: a waiting match that expired never had a game in it, so
+        /// there is nothing a returning seat could be shown.
+        /// </summary>
+        static bool ReachableAfterTheEnd(MatchRow row, DateTimeOffset now, TimeSpan? window)
+        {
+            if (window is not TimeSpan allowed || allowed <= TimeSpan.Zero) return false;
+            if (row.StartReplay is null) return false;
+            if (row.CompletedAt is not DateTimeOffset completedAt) return false;
+
+            return now - completedAt <= allowed;
         }
 
         public Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)

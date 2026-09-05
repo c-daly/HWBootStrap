@@ -246,6 +246,7 @@ namespace HexWars.NetServer.Endpoints
             AuthFailureThrottle throttle,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
+            TimeProvider time,
             ILoggerFactory loggerFactory,
             CancellationToken ct)
         {
@@ -289,7 +290,12 @@ namespace HexWars.NetServer.Endpoints
                         StatusCodes.Status404NotFound, ApiErrors.NotFound, ApiErrors.NotFoundMessage);
                 }
 
-                if (match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
+                // A finished match is refused, with one exception: a game that STARTED and ended within the
+                // reconnect window is still joinable, so a seat that missed the final APPLY can get a
+                // credential and be shown how it ended. The credential the service then issues is capped at
+                // what is left of that window.
+                if (match.Status is not (MatchStatus.Waiting or MatchStatus.Active)
+                    && !IsInsideTheTerminalWindow(match, options, time.GetUtcNow()))
                 {
                     return ApiErrors.Failure(
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.MatchEndedMessage);
@@ -399,6 +405,18 @@ namespace HexWars.NetServer.Endpoints
         /// there is none. Never anything from the request, which the caller controls.</summary>
         public static string CallerKey(HttpContext http) =>
             http.Connection.RemoteIpAddress?.ToString() ?? UnknownCaller;
+
+        /// <summary>Whether a match that is over is close enough to its ending for a seat to rejoin it. Only
+        /// a match that actually started - one that expired while waiting has no game to show anybody.</summary>
+        static bool IsInsideTheTerminalWindow(
+            PersistedMatch match, MatchHostingOptions options, DateTimeOffset now)
+        {
+            if (match.StartReplay is null) return false;
+            if (match.CompletedAt is not DateTimeOffset finishedAt) return false;
+            if (options.TerminalReconnectSeconds <= 0) return false;
+
+            return now - finishedAt <= TimeSpan.FromSeconds(options.TerminalReconnectSeconds);
+        }
 
         /// <summary>
         /// The websocket URL for this deployment: the public base URL with an upgraded scheme and the v2

@@ -265,8 +265,9 @@ namespace HexWars.NetServer.Persistence
             // wants the same lock. A save therefore either lands before the start and is picked up by the
             // read that builds the start replay, or it arrives after it and does nothing at all. An EXISTS
             // guard would not do: the start could commit between evaluating it and writing the row.
-            string? status = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
-            if (status is null || MatchStatusText.FromDb(status) != MatchStatus.Waiting)
+            TerminalJoinRow? locked =
+                await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
+            if (locked is null || MatchStatusText.FromDb(locked.Status) != MatchStatus.Waiting)
             {
                 await transaction.RollbackAsync(ct).ConfigureAwait(false);
                 return;
@@ -592,7 +593,8 @@ namespace HexWars.NetServer.Persistence
         }
 
         public async Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null)
         {
             MatchStoreGuard.ValidateCredentialHash(credentialHash, nameof(credentialHash));
             MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
@@ -605,7 +607,7 @@ namespace HexWars.NetServer.Persistence
             // TryCompleteMatchAsync take them in. Locking the seat first would invert that order against an
             // append (whose foreign key takes a key-share lock on the same seat) and the two would deadlock
             // under exactly the concurrent reconnect this method exists to serialise.
-            string? statusText = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct)
+            TerminalJoinRow? locked = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct)
                 .ConfigureAwait(false);
 
             await using (var seat = new NpgsqlCommand(
@@ -621,9 +623,20 @@ namespace HexWars.NetServer.Persistence
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
             }
 
-            if (statusText is null) return false;
-            MatchStatus status = MatchStatusText.FromDb(statusText);
-            if (status is not (MatchStatus.Waiting or MatchStatus.Active)) return false;
+            if (locked is null) return false;
+            MatchStatus status = MatchStatusText.FromDb(locked.Status);
+
+            // A terminal match is normally refused: a credential for a game that is over opens nothing
+            // worth opening. The exception is the reconnect window, where a seat that missed the final
+            // APPLY has to be able to get back in and be shown how the match ended - and only if the match
+            // actually started, because a waiting match that expired has no game to show anybody.
+            if (status is not (MatchStatus.Waiting or MatchStatus.Active)
+                && !(allowTerminalWithin is TimeSpan allowed
+                    && allowed > TimeSpan.Zero
+                    && locked.HasStartReplay
+                    && locked.CompletedAt is DateTimeOffset finishedAt
+                    && now - finishedAt <= allowed))
+                return false;
 
             await using (var revoke = new NpgsqlCommand(
                 "UPDATE match_join_credentials SET revoked_at = @now "
@@ -737,13 +750,27 @@ namespace HexWars.NetServer.Persistence
             return (reader.GetString(0), reader.GetBoolean(1));
         }
 
-        static async Task<string?> ReadStatusForUpdateAsync(NpgsqlConnection connection,
+        /// <summary>Everything the credential transaction has to decide on, read under the row lock in one
+        /// statement so the status and the ending it is being judged against cannot disagree.</summary>
+        sealed record TerminalJoinRow(string Status, bool HasStartReplay, DateTimeOffset? CompletedAt);
+
+        static async Task<TerminalJoinRow?> ReadStatusForUpdateAsync(NpgsqlConnection connection,
             NpgsqlTransaction transaction, Guid matchId, CancellationToken ct)
         {
             await using var command = new NpgsqlCommand(
-                "SELECT status FROM matches WHERE match_id = @matchId FOR UPDATE", connection, transaction);
+                "SELECT status, start_replay IS NOT NULL, completed_at FROM matches "
+                + "WHERE match_id = @matchId FOR UPDATE", connection, transaction);
             command.Parameters.AddWithValue("matchId", matchId);
-            return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+
+            await using NpgsqlDataReader reader =
+                await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+
+            return new TerminalJoinRow(
+                reader.GetString(0),
+                reader.GetBoolean(1),
+                reader.IsDBNull(2) ? null : ReadTimestamp(reader, 2));
         }
 
         static PersistedMatch ReadMatch(NpgsqlDataReader reader) => new(

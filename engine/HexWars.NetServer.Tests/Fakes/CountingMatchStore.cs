@@ -150,10 +150,12 @@ namespace HexWars.NetServer.Tests.Fakes
         }
 
         public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null)
         {
             Writes++;
-            return inner.ReplaceJoinCredentialAsync(credentialHash, matchId, steamId, expiresAt, now, ct);
+            return inner.ReplaceJoinCredentialAsync(
+                credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
         }
     }
 }

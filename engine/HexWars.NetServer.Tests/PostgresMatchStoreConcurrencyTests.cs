@@ -428,7 +428,12 @@ namespace HexWars.NetServer.Tests
 
             await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
             var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
-            Task<IssuedCredential> issue = NewCredentialService(other).IssueAsync(match.MatchId, match.Seat0, Ct);
+            // The window is closed for this issue on purpose. What is being proved is that issuing takes
+            // the match row lock and therefore sees a completion that is still in flight; leaving the
+            // window open would have it granted for a different and correct reason, and prove nothing
+            // about the lock.
+            Task<IssuedCredential> issue = NewCredentialService(other, terminalWindowSeconds: 0)
+                .IssueAsync(match.MatchId, match.Seat0, Ct);
 
             Task first = await Task.WhenAny(issue, Task.Delay(BlockedFor));
             Assert.That(first, Is.Not.SameAs(issue),
@@ -518,9 +523,15 @@ namespace HexWars.NetServer.Tests
                 "a failed reissue must not cost the player the credential they were already holding");
         }
 
-        MatchCredentialService NewCredentialService(IMatchStore store) => new(
+        MatchCredentialService NewCredentialService(
+            IMatchStore store,
+            int terminalWindowSeconds = MatchHostingOptions.DefaultTerminalReconnectSeconds) => new(
             store,
-            Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+            Options.Create(new MatchHostingOptions
+            {
+                JoinTokenTtlSeconds = 900,
+                TerminalReconnectSeconds = terminalWindowSeconds,
+            }),
             new FakeTimeProvider(Created),
             NullLogger<MatchCredentialService>.Instance);
 
@@ -531,9 +542,15 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await _store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct), Is.True);
 
+            // The window closed, so the only answer left is a refusal. Inside it a finished match is
+            // joinable on purpose - that is what lets a seat come back and be shown how the game ended.
             var service = new MatchCredentialService(
                 _store,
-                Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+                Options.Create(new MatchHostingOptions
+                {
+                    JoinTokenTtlSeconds = 900,
+                    TerminalReconnectSeconds = 0,
+                }),
                 new FakeTimeProvider(Created),
                 NullLogger<MatchCredentialService>.Instance);
 

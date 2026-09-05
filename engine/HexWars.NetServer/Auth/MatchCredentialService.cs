@@ -41,13 +41,27 @@ namespace HexWars.NetServer.Auth
 
             DateTimeOffset now = time.GetUtcNow();
             DateTimeOffset expiresAt = now.AddSeconds(options.Value.JoinTokenTtlSeconds);
+            TimeSpan window = TerminalWindow;
+
+            // A credential into a finished match is capped at what is left of the reconnect window. It is
+            // issued to let a seat learn how the game ended and for nothing else, so outliving the window
+            // it was granted under would leave a working key to a match nobody can play.
+            PersistedMatch? ending = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
+            if (ending is not null
+                && ending.Status is not (MatchStatus.Waiting or MatchStatus.Active)
+                && ending.CompletedAt is DateTimeOffset finishedAt)
+            {
+                DateTimeOffset closes = finishedAt + window;
+                if (closes < expiresAt) expiresAt = closes;
+            }
 
             // One store call, not two. Revoking and storing separately leaves a window where a concurrent
             // reconnect ends with two live credentials for one seat, and a failure between the two destroys
             // the only credential the player had. The store does both inside a single transaction that also
             // refuses a match which finished while the request was in flight.
             bool replaced = await store
-                .ReplaceJoinCredentialAsync(hash, matchId, steamId, expiresAt, now, ct).ConfigureAwait(false);
+                .ReplaceJoinCredentialAsync(hash, matchId, steamId, expiresAt, now, ct, window)
+                .ConfigureAwait(false);
 
             if (!replaced)
             {
@@ -132,32 +146,57 @@ namespace HexWars.NetServer.Auth
                 return null;
             }
 
-            return new CredentialValidation(matchId, issued.SteamId, seat.Seat);
+            return new CredentialValidation(
+                matchId, issued.SteamId, seat.Seat, issued.CredentialHash, issued.ExpiresAt);
+        }
+
+        public async Task<bool> IsStillValidAsync(byte[] credentialHash, Guid matchId, DateTimeOffset now)
+        {
+            ArgumentNullException.ThrowIfNull(credentialHash);
+
+            JoinCredentialRecord? issued = await store
+                .FindJoinCredentialAsync(credentialHash, CancellationToken.None).ConfigureAwait(false);
+
+            if (issued is null || issued.MatchId != matchId) return false;
+            if (issued.RevokedAt is not null) return false;
+
+            return issued.ExpiresAt > now;
+        }
+
+        /// <summary>How long after a match ends its seats can still get back in. Zero closes the window.</summary>
+        TimeSpan TerminalWindow
+        {
+            get
+            {
+                int seconds = options.Value.TerminalReconnectSeconds;
+                return seconds <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds(seconds);
+            }
         }
 
         /// <summary>
         /// Whether a socket may still be opened into this match.
         ///
-        /// Waiting and active are the game itself. A completed match stays reachable for
-        /// MATCH_TERMINAL_RECONNECT_SECONDS afterwards, because the final APPLY is the frame most likely to
-        /// be lost - it is broadcast at the instant the match becomes terminal - and a player whose socket
-        /// dropped a moment earlier has no other way to learn how the game they were playing ended. The
-        /// window is short and it does not extend the credential: an expired or revoked one is still
-        /// refused above, and no new credential can be issued into a finished match at all.
+        /// Waiting and active are the game itself. A match that STARTED and has since ended stays reachable
+        /// for MATCH_TERMINAL_RECONNECT_SECONDS afterwards, because the final APPLY is the frame most likely
+        /// to be lost - it is broadcast at the instant the match becomes terminal - and a player whose
+        /// socket dropped a moment earlier has no other way to learn how the game they were playing ended.
         ///
-        /// Expired and abandoned are never reachable. There is no ending to deal for either, and both are
-        /// statuses the server chose rather than the players.
+        /// Any terminal status, not only completed. A game the reaper abandoned or expired underneath its
+        /// players ended just as definitely as one somebody won, and the seats deserve to be shown the same
+        /// final position rather than a bare refusal.
+        ///
+        /// A match that never started is never reachable once it is over: there is no game in it to show.
         /// </summary>
         bool StillReachable(PersistedMatch match)
         {
             if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
-            if (match.Status != MatchStatus.Completed) return false;
+            if (match.StartReplay is null) return false;
             if (match.CompletedAt is not DateTimeOffset completedAt) return false;
 
-            int seconds = options.Value.TerminalReconnectSeconds;
-            if (seconds <= 0) return false;
+            TimeSpan window = TerminalWindow;
+            if (window <= TimeSpan.Zero) return false;
 
-            return time.GetUtcNow() - completedAt <= TimeSpan.FromSeconds(seconds);
+            return time.GetUtcNow() - completedAt <= window;
         }
 
         /// <summary>Match ids reach logs as their first eight hex characters: enough to follow one match

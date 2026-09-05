@@ -131,7 +131,11 @@ namespace HexWars.NetServer.Persistence
         /// <returns>True when the credential was stored; false when the match is not open.</returns>
         /// <exception cref="ArgumentException"><paramref name="credentialHash"/> is not 32 bytes, the Steam id
         /// is malformed, or it holds no seat in this match.</exception>
+        /// <param name="allowTerminalWithin">When set, a match in a terminal status that has a start replay
+        /// and finished within this window is still issued a credential. It is how a seat that missed the
+        /// final APPLY gets back in to learn how the game ended; null means open matches only.</param>
         Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct);
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null);
     }
 }

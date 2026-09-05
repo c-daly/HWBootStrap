@@ -225,10 +225,45 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task IssuingForAMatchThatHasEnded_IsRefusedRatherThanStored()
+        public async Task IssuingLongAfterAMatchHasEnded_IsRefusedRatherThanStored()
         {
             await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
             await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            _clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds + 60));
+
+            var refused = Assert.ThrowsAsync<InvalidOperationException>(
+                () => _service.IssueAsync(_matchId, _seat0, Ct));
+
+            Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
+        }
+
+        [Test]
+        public async Task IssuingInsideTheTerminalWindow_HandsBackACredentialCappedAtTheWindow()
+        {
+            // A seat that missed the final APPLY has to be able to ask for a way back in, and the way back
+            // in has to be no longer than the window it was granted under: a credential that outlived it
+            // would be a working key to a match nobody can play.
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            _clock.Advance(TimeSpan.FromMinutes(5));
+
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            Assert.That(issued.ExpiresAt,
+                Is.EqualTo(Origin.AddSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds)),
+                "the credential ends when the window does, not 15 minutes after it was asked for");
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task IssuingForAMatchThatEndedWithoutStarting_IsRefused()
+        {
+            // Nothing started, so there is no final position to come back for. The window exists to deal an
+            // ending, and a match that expired while waiting for barracks has none.
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
 
             var refused = Assert.ThrowsAsync<InvalidOperationException>(
                 () => _service.IssueAsync(_matchId, _seat0, Ct));
@@ -271,14 +306,26 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task ACredentialNeverValidatesIntoAnAbandonedMatch()
+        public async Task ACredentialValidatesIntoAnAbandonedMatchThatHadStarted()
         {
-            // Abandoned and expired are statuses the server chose rather than the players. There is no
-            // ending to deal, so there is nothing the window would be for.
+            // A game the reaper abandoned underneath its players ended just as definitely as one somebody
+            // won, and the seats deserve to be shown the same final position rather than a bare refusal.
             IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
 
             await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
             await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Abandoned, null, Origin, Ct);
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ACredentialNeverValidatesIntoAMatchThatEndedWithoutStarting()
+        {
+            // No start replay means no game was ever dealt, so there is no ending to show anybody and the
+            // window has nothing to be for.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
 
             Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null);
         }
