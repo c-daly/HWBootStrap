@@ -1117,6 +1117,100 @@ namespace HexWars.NetServer.Tests
             }));
         }
 
+        // ---- the window is judged where the seat is dealt ----------------------
+
+        [Test]
+        public async Task AWindowThatClosesWhileTheMatchIsLoading_DoesNotStillDealASeat()
+        {
+            // The credential service answers before the match has been loaded and before this gate was
+            // free. On a slow load - or behind a queue of other operations on the same match - the window
+            // it was reading can have closed by the time a seat would actually be dealt, and the seat was
+            // dealt anyway.
+            (MatchRecord played, GameState _) = await PlayToTheEndAsync();
+            Assert.That(Live().CompletedAt, Is.Not.Null, "the projection has to know when it ended");
+
+            TimeSpan window = TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+
+            // One tick inside the window, so validation passes...
+            _clock.SetUtcNow(Begin + window - TimeSpan.FromTicks(1));
+
+            // ...and the load takes long enough for it to close.
+            var slow = new ClockAdvancingLoader(
+                new JournalLiveMatchLoader(_faults), _clock, TimeSpan.FromTicks(2));
+
+            var coordinator = new DurableMatchCoordinator(
+                _faults, _credentials, slow, _sink, Options.Create(_options), _clock,
+                NullLogger<DurableMatchCoordinator>.Instance);
+
+            _sink.Clear();
+            DurableMatchCoordinator.AuthOutcome refused =
+                await coordinator.AuthenticateAsync("c2", _matchId.ToString(), _credential1, Ct);
+
+            Assert.That(refused.Ok, Is.False);
+            Assert.That(refused.Seat, Is.EqualTo(-1));
+            Assert.That(refused.FailCode, Is.EqualTo(DurableMatchCoordinator.AuthFailInvalid));
+            Assert.That(_sink.Sent, Is.Empty, "and no SEAT is dealt on the way to refusing");
+            Assert.That(played.Commands, Is.Not.Empty);
+        }
+
+        [Test]
+        public async Task AWindowStillOpenWhenTheGateIsReached_SeatsAsBefore()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheEndAsync();
+
+            TimeSpan window = TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+            _clock.SetUtcNow(Begin + window - TimeSpan.FromSeconds(30));
+
+            var slow = new ClockAdvancingLoader(
+                new JournalLiveMatchLoader(_faults), _clock, TimeSpan.FromSeconds(1));
+
+            var coordinator = new DurableMatchCoordinator(
+                _faults, _credentials, slow, _sink, Options.Create(_options), _clock,
+                NullLogger<DurableMatchCoordinator>.Instance);
+
+            _sink.Clear();
+            DurableMatchCoordinator.AuthOutcome seated =
+                await coordinator.AuthenticateAsync("c2", _matchId.ToString(), _credential1, Ct);
+
+            Assert.That(seated.Ok, Is.True, seated.FailCode);
+            Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
+            {
+                "SEAT 1",
+                NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
+            }));
+        }
+
+        [Test]
+        public async Task ATerminalMatchWithNoRecordedEnding_IsRefusedRatherThanGuessedAt()
+        {
+            // There is no honest way to judge a window against an ending nobody wrote down, and guessing
+            // it is open is the guess that hands out seats forever.
+            (MatchRecord _, GameState __) = await PlayToTheEndAsync();
+
+            LiveMatch live = Live();
+            live.CompletedAt = null;
+            _sink.Clear();
+
+            DurableMatchCoordinator.AuthOutcome refused = await Auth("c2", _credential1);
+
+            Assert.That(refused.Ok, Is.False);
+            Assert.That(refused.FailCode, Is.EqualTo(DurableMatchCoordinator.AuthFailInvalid));
+            Assert.That(_sink.Sent, Is.Empty);
+        }
+
+        /// <summary>A loader that moves the clock on while it works: a load that takes long enough for the
+        /// answer the credential service already gave to have gone stale.</summary>
+        sealed class ClockAdvancingLoader(
+            ILiveMatchLoader inner, FakeTimeProvider clock, TimeSpan takes) : ILiveMatchLoader
+        {
+            public async Task<LiveMatch> LoadAsync(Guid matchId, CancellationToken ct)
+            {
+                LiveMatch loaded = await inner.LoadAsync(matchId, ct);
+                clock.Advance(takes);
+                return loaded;
+            }
+        }
+
         // ---- a rebuild has to tell the seat that did not reconnect -------------
 
         [Test]

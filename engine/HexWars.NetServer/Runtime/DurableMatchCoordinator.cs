@@ -142,7 +142,8 @@ namespace HexWars.NetServer.Runtime
 
         /// <summary>What recording the end of a game concluded. <c>Advance</c> false means the caller must
         /// change nothing: the issuer has already been told why.</summary>
-        readonly record struct CompletionOutcome(bool Advance, MatchStatus Status);
+        readonly record struct CompletionOutcome(
+            bool Advance, MatchStatus Status, DateTimeOffset? CompletedAt = null);
 
         /// <summary>What the journal says about a command this process could not confirm it wrote.</summary>
         enum JournalCheck
@@ -286,9 +287,15 @@ namespace HexWars.NetServer.Runtime
                 if (!await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false))
                     return Failed(AuthFailUnavailable);
 
-                if (!CanSeat(match))
+                // Judged HERE as well as in the credential service, and this is the check that counts. The
+                // service answers before the match has been loaded and before this gate was free, so on a
+                // slow load - or behind a queue of other operations on the same match - the window it was
+                // reading can have closed by the time a seat would actually be dealt.
+                if (!CanSeat(match, time.GetUtcNow()))
                 {
-                    logger.LogDebug("Turned a player away: this match is {Status}", match.Status);
+                    logger.LogDebug(
+                        "Turned a player away: this match is {Status} and its reconnect window has closed",
+                        match.Status);
                     return Failed(AuthFailInvalid);
                 }
 
@@ -651,6 +658,7 @@ namespace HexWars.NetServer.Runtime
             }
 
             MatchStatus terminalStatus = MatchStatus.Completed;
+            DateTimeOffset? terminalAt = null;
             bool endTheSockets = false;
 
             if (applied.NewState.IsGameOver)
@@ -662,6 +670,7 @@ namespace HexWars.NetServer.Runtime
                 if (!outcome.Advance) return;
 
                 terminalStatus = outcome.Status;
+                terminalAt = outcome.CompletedAt;
 
                 // Completed is the game ending. Anything else terminal means somebody took this match away
                 // underneath a live game - the reaper, or an operator - and the sockets have to be told.
@@ -671,7 +680,11 @@ namespace HexWars.NetServer.Runtime
             match.State = applied.NewState;
             match.Log.Add(command);
             match.LastSequence = sequence;
-            if (applied.NewState.IsGameOver) match.Status = terminalStatus;
+            if (applied.NewState.IsGameOver)
+            {
+                match.Status = terminalStatus;
+                match.CompletedAt = terminalAt;
+            }
 
             string broadcast = NetProtocol.Apply(command);
             foreach (string connection in match.Connections.Keys) sink.Send(connection, broadcast);
@@ -736,7 +749,7 @@ namespace HexWars.NetServer.Runtime
             {
                 logger.LogInformation("Match finished, winner {WinnerSeat}",
                     winnerSeat is null ? "draw" : winnerSeat.ToString());
-                return new CompletionOutcome(true, MatchStatus.Completed);
+                return new CompletionOutcome(true, MatchStatus.Completed, now);
             }
 
             logger.LogWarning(
@@ -791,7 +804,7 @@ namespace HexWars.NetServer.Runtime
 
             // Read rather than assumed: a match that ends at the same moment the reaper abandons it is
             // abandoned, and the sockets watching it have to be told that rather than told they won.
-            return new CompletionOutcome(true, row.Status);
+            return new CompletionOutcome(true, row.Status, row.CompletedAt);
         }
 
         /// <summary>
@@ -847,14 +860,17 @@ namespace HexWars.NetServer.Runtime
 
             for (var attempt = 1; ; attempt++)
             {
+                DateTimeOffset closedAt = time.GetUtcNow();
+
                 try
                 {
                     if (await store
                             .TryCompleteMatchAsync(
-                                match.MatchId, MatchStatus.Completed, winnerSeat, time.GetUtcNow(), ct)
+                                match.MatchId, MatchStatus.Completed, winnerSeat, closedAt, ct)
                             .ConfigureAwait(false))
                     {
                         match.Status = MatchStatus.Completed;
+                        match.CompletedAt = closedAt;
                         logger.LogInformation(
                             "Closed a finished match the journal still called active, winner {WinnerSeat}",
                             winnerSeat is null ? "draw" : winnerSeat.ToString());
@@ -868,6 +884,7 @@ namespace HexWars.NetServer.Runtime
                     if (row is null) return false;
 
                     match.Status = row.Status;
+                    match.CompletedAt = row.CompletedAt;
                     return row.Status is not (MatchStatus.Waiting or MatchStatus.Active);
                 }
                 catch (Exception failure) when (attempt == 1)
@@ -1093,13 +1110,26 @@ namespace HexWars.NetServer.Runtime
         /// Whether a seat may be taken in this match right now.
         ///
         /// Waiting and active are the game. A match that started and has since ended - completed, expired
-        /// or abandoned - is served too, for as long as the credential service is willing to validate into
-        /// it: the final APPLY is the frame most likely to be lost, and a player whose socket dropped a
-        /// moment before it has no other way to learn how the game they were playing ended. A match that
-        /// never started has no game in it and is never served once it is over.
+        /// or abandoned - is served too, but only while its reconnect window is open: the final APPLY is
+        /// the frame most likely to be lost, and a player whose socket dropped a moment before it has no
+        /// other way to learn how the game they were playing ended. A match that never started has no game
+        /// in it and is never served once it is over.
+        ///
+        /// A terminal match whose record carries no completion instant is refused outright. There is no
+        /// honest way to judge a window against an ending nobody wrote down, and guessing it is open is the
+        /// guess that hands out seats forever.
         /// </summary>
-        static bool CanSeat(LiveMatch match) =>
-            match.Status is MatchStatus.Waiting or MatchStatus.Active || match.Start is not null;
+        bool CanSeat(LiveMatch match, DateTimeOffset now)
+        {
+            if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
+            if (match.Start is null) return false;
+
+            TimeSpan window = options.Value.TerminalReconnectWindow;
+
+            return window > TimeSpan.Zero
+                && match.CompletedAt is DateTimeOffset finishedAt
+                && now < finishedAt + window;
+        }
 
         /// <summary>What a command arriving at a match that is not being played is told. A match that has
         /// not started will take this command once it does; a terminal one never will, and a client that

@@ -140,6 +140,11 @@ namespace HexWars.NetServer.Configuration
         /// </summary>
         public int TerminalReconnectSeconds { get; set; } = DefaultTerminalReconnectSeconds;
 
+        /// <summary>The same value as a span, and zero when the window is closed. Every place that judges
+        /// the window reads it from here so they cannot drift apart on the arithmetic.</summary>
+        public TimeSpan TerminalReconnectWindow =>
+            TerminalReconnectSeconds <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds(TerminalReconnectSeconds);
+
         /// <summary>
         /// Sockets one address may hold on /ws/v2 at once, counted before the upgrade is accepted.
         ///

@@ -49,6 +49,16 @@ namespace HexWars.NetServer.Runtime
         /// <summary>The highest sequence known to be in the journal. The next append asks for this plus one.</summary>
         public int LastSequence { get; set; }
 
+        /// <summary>
+        /// When this match reached a terminal status, as the record has it. Null while it is being played.
+        ///
+        /// The projection carries it because the reconnect window is judged twice: once by the credential
+        /// service, and again under the match gate immediately before a seat is dealt. The second check is
+        /// the one that cannot be overtaken by a slow load, and it has nowhere else to read the instant
+        /// from without going back to the store while holding the gate.
+        /// </summary>
+        public DateTimeOffset? CompletedAt { get; set; }
+
         public string EngineVersion { get; private set; } = string.Empty;
 
         public int ProtocolVersion { get; private set; }
@@ -92,6 +102,7 @@ namespace HexWars.NetServer.Runtime
             {
                 Setup = GameSetup.Parse(journal.Match.SetupWire),
                 Status = journal.Match.Status,
+                CompletedAt = journal.Match.CompletedAt,
                 EngineVersion = journal.Match.EngineVersion,
                 ProtocolVersion = journal.Match.ProtocolVersion,
             };
@@ -203,6 +214,7 @@ namespace HexWars.NetServer.Runtime
 
             Setup = rebuilt.Setup;
             Status = rebuilt.Status;
+            CompletedAt = rebuilt.CompletedAt;
             Seats = rebuilt.Seats;
             EngineVersion = rebuilt.EngineVersion;
             ProtocolVersion = rebuilt.ProtocolVersion;
