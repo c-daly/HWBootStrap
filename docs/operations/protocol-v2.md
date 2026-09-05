@@ -113,7 +113,56 @@ the store under a `(match_id, sequence)` uniqueness constraint, and every comman
 and appended under that match's gate, one at a time. A double commit is not a race that is unlikely to
 happen; it is a row the database will not accept.
 
-## 7. Related documents
+## 7. Recovery guarantees
+
+Killing this process at any command boundary and starting a fresh one over the same database cannot lose,
+duplicate, reorder or alter an acknowledged action. That is the whole point of committing before
+broadcasting, and it is held to by `engine/HexWars.NetServer.Tests/MatchRestartRecoveryTests.cs`, which
+runs against real Postgres through the real host and disposes host A entirely - its sockets, its
+coordinator and its in-memory projection - before host B is built from nothing but the rows A left behind.
+
+What those tests establish:
+
+| Guarantee | How it is shown |
+|---|---|
+| A restart keeps the journal and the game continues from it | Three commands on host A, then host B verifies one open match at startup, both seats rejoin with fresh credentials, `START` carries exactly three commands and fast-forwards to the position an independent engine replay reaches, and a fourth command lands at sequence 4. |
+| No boundary is special | The same restart is taken after k = 0, 1, 2, 3, 4 and 5 commands. At every k the re-deal holds exactly k commands, the recovered position equals a direct replay of those k, the rest of the game plays out, and the journal ends as 1..5 with each sequence still holding the wire of its own command. |
+| A disconnect after a commit is not a lost command | The client sees `APPLY`, drops the socket, reconnects, and `START` already carries the command. Resending it is refused by the engine (that unit has already moved this turn), so the duplicate never reaches the journal. This is why the rule in §6 is reconnect-and-wait rather than resend. |
+| A failed durable write leaves nothing behind | One append is made to throw inside the real Postgres store. The issuer gets `REJECT TemporaryFailure`, the other seat is told nothing at all, the identical command sent again is accepted at sequence 1, and the journal holds exactly one row. |
+| A build that cannot honour a journal refuses the whole match | With `engine_version` rewritten to an unsupported value, the startup pass reports the match under `UnsupportedEngineContract`, `AUTH` is answered `AUTH FAIL unavailable` and closed 1008, and the journal is untouched. |
+| A restart while waiting does not lose a barracks | One seat sends `CATALOG` and the host goes away. After the restart that seat is not asked again, the other seat completes the start, and both are dealt the same game. |
+
+The state comparisons are against `ReplayFile.Write` of a position built by an independent engine replay,
+not against the other half of the restart: two halves compared with each other would agree happily on the
+same wrong game.
+
+### Running them
+
+```
+DOTNET_ROLL_FORWARD=Major dotnet test engine/HexWars.NetServer.Tests --filter MatchRestartRecoveryTests
+```
+
+A disposable Postgres is required. With no `HEXWARS_TEST_DATABASE_URL` set the suite starts
+`postgres:16-alpine` through Testcontainers; set that variable to point at an existing throwaway database
+instead. The fixture drops and recreates the public schema of whatever it is given, so it refuses any
+database whose name does not contain `test` unless `HEXWARS_TEST_DATABASE_DISPOSABLE` names it exactly.
+
+The same proof runs outside the test runner, as one command against a running database:
+
+```
+HEXWARS_TEST_DATABASE_URL=postgres://user:password@host:5432/hexwars_test \
+  dotnet run --project engine/HexWars.NetServer -- selftest-durable
+```
+
+It resets the schema, composes the real server on `http://127.0.0.1:5235` with only the Steam partner API
+scripted, plays the opening, stops the process, starts a second one on the same port, reconnects both
+seats with new credentials and plays on. It prints `SELFTEST-DURABLE PASS` and exits 0 on success, a
+diagnostic and 1 on failure, and **3** when it could not run at all: no `HEXWARS_TEST_DATABASE_URL`
+(`SELFTEST-DURABLE SKIPPED`), or a database that is not marked disposable by the same rule the test
+fixture applies (`SELFTEST-DURABLE REFUSED`). Exit 3 is never a pass - a self-test that came back green
+for want of anything to test is worse than one that did not run.
+
+## 8. Related documents
 
 - `docs/operations/steam-render-environments.md` — the environment variables named above.
 - `docs/operations/steam-client-configuration.md` — what the Unity client needs to reach this endpoint.
