@@ -60,12 +60,30 @@ namespace HexWars.NetServer.Tests.Fakes
             return inner.GetPlayersAsync(matchId, ct);
         }
 
-        public Task<PersistedPlayer?> GetPlayerAsync(Guid matchId, string steamId, CancellationToken ct)
+        /// <summary>
+        /// Runs before every seat lookup, once per assignment. It is the seam for the races an endpoint has
+        /// to survive: a seat lookup is the last read a join does before it issues a credential, so a hook
+        /// that completes the match here reproduces a game ending in the window between the status check and
+        /// the issue, which is otherwise only reachable by getting the timing right by luck.
+        /// </summary>
+        public Func<Guid, string, Task>? BeforeGetPlayer { get; set; }
+
+        public async Task<PersistedPlayer?> GetPlayerAsync(Guid matchId, string steamId, CancellationToken ct)
         {
             Reads++;
+
+            Func<Guid, string, Task>? hook = BeforeGetPlayer;
+            if (hook is not null)
+            {
+                // Cleared before it runs: the hook usually writes through this same store, and one that
+                // re-entered itself would recurse rather than simulate a race.
+                BeforeGetPlayer = null;
+                await hook(matchId, steamId).ConfigureAwait(false);
+            }
+
             return HideSeats
-                ? Task.FromResult<PersistedPlayer?>(null)
-                : inner.GetPlayerAsync(matchId, steamId, ct);
+                ? null
+                : await inner.GetPlayerAsync(matchId, steamId, ct).ConfigureAwait(false);
         }
 
         public Task SaveCatalogAsync(Guid matchId, string steamId, string catalogWire, CancellationToken ct)
@@ -129,6 +147,13 @@ namespace HexWars.NetServer.Tests.Fakes
         {
             Writes++;
             return inner.RevokeJoinCredentialsAsync(matchId, steamId, revokedAt, ct);
+        }
+
+        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+        {
+            Writes++;
+            return inner.ReplaceJoinCredentialAsync(credentialHash, matchId, steamId, expiresAt, now, ct);
         }
     }
 }

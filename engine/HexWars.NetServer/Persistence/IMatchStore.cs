@@ -113,5 +113,25 @@ namespace HexWars.NetServer.Persistence
         /// <summary>Revokes every credential this player still holds for this match. Already revoked rows keep
         /// the timestamp they were revoked at.</summary>
         Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct);
+
+        /// <summary>
+        /// Retires whatever this seat still holds and issues it one new credential, in a single transaction.
+        ///
+        /// This exists because revoke-then-store as two calls is not the operation the protocol needs. Two
+        /// clients reconnecting at once can interleave into two live credentials for one seat, and a store
+        /// failure between the two calls leaves the player with none - having destroyed the one they had.
+        /// Doing both under one lock on the seat makes \u0022issuing replaces\u0022 true rather than usually true.
+        ///
+        /// The match status is checked inside the same transaction for the same reason: a match that
+        /// completes while a join is in flight must not hand out a credential that would seat someone in a
+        /// finished game. Returns false, having changed nothing, when the match is no longer waiting or
+        /// active; the caller turns that into a refusal rather than a retry.
+        /// </summary>
+        /// <param name="now">The instant the revocations are stamped with.</param>
+        /// <returns>True when the credential was stored; false when the match is not open.</returns>
+        /// <exception cref="ArgumentException"><paramref name="credentialHash"/> is not 32 bytes, the Steam id
+        /// is malformed, or it holds no seat in this match.</exception>
+        Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct);
     }
 }

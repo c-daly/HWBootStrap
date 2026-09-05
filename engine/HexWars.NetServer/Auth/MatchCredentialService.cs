@@ -25,6 +25,14 @@ namespace HexWars.NetServer.Auth
         TimeProvider time,
         ILogger<MatchCredentialService> logger) : IMatchCredentialService
     {
+        /// <summary>
+        /// The message on the <see cref="InvalidOperationException"/> a refused issue carries. A constant
+        /// rather than a bespoke exception type so callers can match this one refusal precisely: an
+        /// endpoint that caught every InvalidOperationException would also turn a genuine store fault into
+        /// a cheerful 409.
+        /// </summary>
+        public const string MatchNotOpenMessage = "match is not open";
+
         public async Task<IssuedCredential> IssueAsync(Guid matchId, string steamId, CancellationToken ct)
         {
             var raw = new byte[CredentialEncoding.CredentialBytes];
@@ -34,11 +42,20 @@ namespace HexWars.NetServer.Auth
             DateTimeOffset now = time.GetUtcNow();
             DateTimeOffset expiresAt = now.AddSeconds(options.Value.JoinTokenTtlSeconds);
 
-            // Revoking before storing is what makes a reconnect safe to repeat. The other order would leave
-            // a window where the credential just handed to the player is already revoked, and a player who
-            // asked twice would hold two live credentials for one seat.
-            await store.RevokeJoinCredentialsAsync(matchId, steamId, now, ct).ConfigureAwait(false);
-            await store.StoreJoinCredentialAsync(hash, matchId, steamId, expiresAt, ct).ConfigureAwait(false);
+            // One store call, not two. Revoking and storing separately leaves a window where a concurrent
+            // reconnect ends with two live credentials for one seat, and a failure between the two destroys
+            // the only credential the player had. The store does both inside a single transaction that also
+            // refuses a match which finished while the request was in flight.
+            bool replaced = await store
+                .ReplaceJoinCredentialAsync(hash, matchId, steamId, expiresAt, now, ct).ConfigureAwait(false);
+
+            if (!replaced)
+            {
+                logger.LogInformation(
+                    "Refused a join credential for {Player} in match {Match}: the match is no longer open",
+                    SteamLogRedaction.HashSteamId(steamId), Short(matchId));
+                throw new InvalidOperationException(MatchNotOpenMessage);
+            }
 
             // The credential itself never appears in a log line, at any level. Only the fact of it does.
             logger.LogInformation(
@@ -93,6 +110,18 @@ namespace HexWars.NetServer.Auth
 
             // The seat is read rather than trusted from the credential row, because the seat number is what
             // the caller acts on and a credential that outlived its seat must open nothing.
+            // A credential outlives the game it was issued for: it is valid for its full TTL, and nothing
+            // revokes it when the match ends. Without this the websocket handshake would happily seat a
+            // player into a finished match and then have to discover the problem afterwards.
+            PersistedMatch? match = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
+            if (match is null || match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
+            {
+                logger.LogDebug(
+                    "Join credential for {Player} in match {Match} refused: the match is no longer open",
+                    SteamLogRedaction.HashSteamId(issued.SteamId), Short(matchId));
+                return null;
+            }
+
             PersistedPlayer? seat =
                 await store.GetPlayerAsync(matchId, issued.SteamId, ct).ConfigureAwait(false);
 

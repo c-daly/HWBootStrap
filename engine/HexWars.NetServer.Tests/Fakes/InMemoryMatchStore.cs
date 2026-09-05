@@ -327,6 +327,48 @@ namespace HexWars.NetServer.Tests.Fakes
             }
         }
 
+        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+        {
+            ValidateCredentialHash(credentialHash, nameof(credentialHash));
+            ValidateSteamId(steamId, nameof(steamId));
+
+            // The single lock is this store\u0027s whole transaction: revoke and insert cannot interleave with
+            // another caller, which is what the Postgres implementation buys with a row lock.
+            lock (_gate)
+            {
+                BeginWrite();
+
+                // The seat first, exactly as Postgres does: a missing match has no seat either, so an
+                // unknown match id is a caller error rather than a closed match.
+                if (Player(matchId, steamId) is null)
+                    throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
+
+                MatchRow row = _matches[matchId];
+                if (!row.IsOpen) return Task.FromResult(false);
+
+                CredentialRow? clash = Credential(credentialHash);
+                if (clash is not null)
+                    throw new InvalidOperationException("credential hash already bound to another seat");
+
+                foreach (CredentialRow credential in _credentials)
+                    if (credential.MatchId == matchId
+                        && string.Equals(credential.SteamId, steamId, StringComparison.Ordinal)
+                        && credential.RevokedAt is null)
+                        credential.RevokedAt = Stored(now);
+
+                _credentials.Add(new CredentialRow
+                {
+                    Hash = (byte[])credentialHash.Clone(),
+                    MatchId = matchId,
+                    SteamId = steamId,
+                    ExpiresAt = Stored(expiresAt),
+                });
+
+                return Task.FromResult(true);
+            }
+        }
+
         public Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)
         {
             ValidateSteamId(steamId, nameof(steamId));

@@ -224,6 +224,31 @@ namespace HexWars.NetServer.Tests
                 "a string that cannot be a credential must not become a database query");
         }
 
+        [Test]
+        public async Task IssuingForAMatchThatHasEnded_IsRefusedRatherThanStored()
+        {
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            var refused = Assert.ThrowsAsync<InvalidOperationException>(
+                () => _service.IssueAsync(_matchId, _seat0, Ct));
+
+            Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
+        }
+
+        [Test]
+        public async Task ACredentialStopsValidatingWhenItsMatchEnds()
+        {
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null,
+                "a credential outlives the game it was issued for, so a handshake must not seat a finished match");
+        }
+
         [TestCaseSource(nameof(CredentialsThatCannotBeCredentials))]
         public void CredentialEncoding_RefusesAnythingThatIsNotACanonicalCredential(string text)
         {
