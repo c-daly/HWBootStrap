@@ -45,7 +45,7 @@ namespace HexWars.Presentation
         }
 
         /// <summary>
-        /// How many driver events may wait for the next Pump. A v2 match is a handful of frames a
+        /// How many driver events may wait for the next Pump, per attempt. A v2 match is a handful of frames a
         /// second; a peer that queues hundreds is either broken or hostile, and an unbounded queue
         /// lets it grow the heap until the process dies.
         /// </summary>
@@ -62,10 +62,18 @@ namespace HexWars.Presentation
         readonly ISteamSocketDriver _driver;
         readonly Action<string>? _log;
         readonly Queue<SocketEvent> _queue = new Queue<SocketEvent>();
+        readonly Dictionary<int, int> _queuedByAttempt = new Dictionary<int, int>();
         readonly object _gate = new object();
 
         bool _disposed;
-        bool _violated;
+
+        /// <summary>
+        /// The attempt a violation ended, if any. It is an attempt id and not a flag because a socket
+        /// being torn down keeps firing: a late oversized frame, or a flood from an attempt that is
+        /// already over, must end THAT attempt and nothing else. A pump-wide latch silenced every
+        /// future attempt too, which is the isolation this class exists to provide.
+        /// </summary>
+        int? _violatedAttempt;
 
         /// <param name="log">Where socket errors go. Null discards them.</param>
         public SteamMatchSocketPump(SteamMatchSession session, ISteamSocketDriver driver, Action<string>? log = null)
@@ -95,6 +103,13 @@ namespace HexWars.Presentation
         /// </summary>
         public void Pump()
         {
+            var current = _session.CurrentAttempt;
+            lock (_gate)
+            {
+                // A new attempt starts clean: the previous one violation cannot mute it.
+                if (_violatedAttempt.HasValue && _violatedAttempt.Value != current) _violatedAttempt = null;
+            }
+
             for (var replayed = 0; replayed < MaxEventsPerPump; replayed++)
             {
                 SocketEvent next;
@@ -102,6 +117,7 @@ namespace HexWars.Presentation
                 {
                     if (_queue.Count == 0) return;
                     next = _queue.Dequeue();
+                    Released(next.AttemptId);
                 }
 
                 switch (next.Kind)
@@ -137,7 +153,11 @@ namespace HexWars.Presentation
             _driver.Closed -= OnClosed;
             _driver.Error -= OnError;
 
-            lock (_gate) { _queue.Clear(); }
+            lock (_gate)
+            {
+                _queue.Clear();
+                _queuedByAttempt.Clear();
+            }
         }
 
         void OnOpened(int attemptId)
@@ -173,14 +193,22 @@ namespace HexWars.Presentation
         {
             lock (_gate)
             {
-                if (_disposed || _violated) return;
-                if (_queue.Count >= MaxQueuedEvents)
+                if (_disposed) return;
+                if (_violatedAttempt == socketEvent.AttemptId) return;   // that attempt is over
+
+                int queued;
+                _queuedByAttempt.TryGetValue(socketEvent.AttemptId, out queued);
+                if (queued >= MaxQueuedEvents)
                 {
+                    // The cap is per attempt, so a dying socket flooding on its way out can neither
+                    // spend the live attempt allowance nor knock its queued frames out.
                     RaiseViolation(socketEvent.AttemptId,
                         "more than " + MaxQueuedEvents + " frames queued for one attempt");
                     return;
                 }
+
                 _queue.Enqueue(socketEvent);
+                _queuedByAttempt[socketEvent.AttemptId] = queued + 1;
             }
         }
 
@@ -188,18 +216,44 @@ namespace HexWars.Presentation
         {
             lock (_gate)
             {
-                if (_disposed || _violated) return;
+                if (_disposed || _violatedAttempt == attemptId) return;
                 RaiseViolation(attemptId, reason);
             }
         }
 
-        /// <summary>Drops everything queued and leaves one violation behind. Call under the lock.</summary>
+        /// <summary>
+        /// Drops what this attempt had queued and leaves one violation in its place. Every other
+        /// attempt keeps its events. Call under the lock.
+        /// </summary>
         void RaiseViolation(int attemptId, string reason)
         {
-            _violated = true;
-            _queue.Clear();
+            _violatedAttempt = attemptId;
+            DropQueued(attemptId);
             _queue.Enqueue(new SocketEvent(EventKind.Violation, attemptId,
                 "attempt " + attemptId + ": protocol violation, " + reason));
+            _queuedByAttempt[attemptId] = 1;
+        }
+
+        /// <summary>Removes every queued event belonging to one attempt. Call under the lock.</summary>
+        void DropQueued(int attemptId)
+        {
+            var kept = new List<SocketEvent>(_queue.Count);
+            foreach (var queued in _queue)
+            {
+                if (queued.AttemptId != attemptId) kept.Add(queued);
+            }
+            _queue.Clear();
+            foreach (var keep in kept) _queue.Enqueue(keep);
+            _queuedByAttempt.Remove(attemptId);
+        }
+
+        /// <summary>One event left the queue. Call under the lock.</summary>
+        void Released(int attemptId)
+        {
+            int queued;
+            if (!_queuedByAttempt.TryGetValue(attemptId, out queued)) return;
+            if (queued <= 1) _queuedByAttempt.Remove(attemptId);
+            else _queuedByAttempt[attemptId] = queued - 1;
         }
     }
 }

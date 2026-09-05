@@ -201,7 +201,64 @@ namespace HexWars.Presentation.Tests
             Assert.That(_log[0], Does.Contain("protocol violation"));
         }
 
+        [Test]
+        public void AnOversizedFrameFromAnAbandonedAttempt_DoesNotSilenceTheLiveOne()
+        {
+            var a = StartAndAbandonAnAttempt();
+            var b = OpenAttempt();
+
+            // A is being torn down and gets one last, enormous frame in.
+            _driver.RaiseMessage(a, new string('x', SteamMatchSocketPump.MaxFrameBytes + 1));
+            PumpAndExecute();
+
+            Assert.That(_session.State, Is.EqualTo(SteamMatchSessionState.Connecting),
+                "a dead attempt violation must not end the live one");
+
+            _driver.RaiseOpened(b);
+            PumpAndExecute();
+            Assert.That(_driver.SendsFor(b), Is.EqualTo(new[] { "AUTH " + MatchId + " " + SecondCredential }));
+
+            _driver.RaiseMessage(b, "SEAT 1");
+            PumpAndExecute();
+            Assert.That(_session.State, Is.EqualTo(SteamMatchSessionState.Seated));
+
+            _driver.RaiseMessage(b, "START 0 9 7");
+            Assert.That(Kinds(PumpAndExecute()), Is.EqualTo(new[] { SteamMatchSessionOutputKind.Start }));
+        }
+
+        [Test]
+        public void AFloodFromAnAbandonedAttempt_DoesNotEraseTheLiveAttemptQueue()
+        {
+            var a = StartAndAbandonAnAttempt();
+            var b = OpenAttempt();
+
+            _driver.RaiseOpened(b);                       // B has an event waiting
+            for (var i = 0; i < 300; i++) _driver.RaiseMessage(a, SteamMatchProtocol.Ping);
+
+            Assert.That(_pump.QueuedEvents, Is.EqualTo(2),
+                "B keeps its event; A keeps only its violation");
+
+            PumpAndExecute();
+            Assert.That(_driver.SendsFor(b), Is.EqualTo(new[] { "AUTH " + MatchId + " " + SecondCredential }),
+                "the live attempt still authenticates");
+            Assert.That(_session.State, Is.EqualTo(SteamMatchSessionState.Authenticating));
+        }
+
         // ----- helpers ------------------------------------------------------------------------
+
+        /// <summary>Runs one attempt to its handshake deadline and refreshes the credential.</summary>
+        int StartAndAbandonAnAttempt()
+        {
+            var abandoned = OpenAttempt();
+            _driver.RaiseOpened(abandoned);
+            PumpAndExecute();
+
+            _session.Tick(Clock);
+            _session.Tick(Clock + SteamMatchSession.HandshakeTimeoutSeconds);
+            _session.Drain();
+            _session.CredentialRefreshed(Ticket(SecondCredential));
+            return abandoned;
+        }
 
         static SteamMatchTicket Ticket(string credential)
         {

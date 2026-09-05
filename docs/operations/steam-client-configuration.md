@@ -69,6 +69,15 @@ git commit -m "build(unity): refresh packages-lock for the pinned Steamworks.NET
 If the lock file does not change, the editor did not re-resolve: delete the
 `com.rlabrecque.steamworks.net` entry from `packages-lock.json`, reopen the project, and repeat.
 
+## Inbound match frames, and what is still unbounded
+
+The match socket pump caps what one attempt may queue (256 events) and how many it replays per frame
+(64), and rejects any single frame over 256 KB as a protocol violation. One residual remains: the
+NativeWebSocket callback hands over the complete frame as a decoded byte array, so a compromised or
+broken server can still make the client allocate one oversized frame before the pump can measure it
+and drop the attempt. Bounding that would need a receive-side limit inside the websocket transport,
+which the current NativeWebSocket API does not expose.
+
 ## `steam_appid.txt` for editor runs
 
 Outside Steam, `SteamAPI.Init` needs the App ID in a file next to the executable. For Play mode in
