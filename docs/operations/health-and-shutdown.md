@@ -69,26 +69,59 @@ Act on it by hand: the match needs an operator, not a restart.
 
 ## 3. Graceful shutdown
 
-On `SIGTERM` (or any other stop), in this order:
+On `SIGTERM` (or any other stop), in two phases.
 
-1. **Readiness goes false first.** `/health/ready` answers 503 with the `shutdown` check `Unhealthy`, and
-   the platform stops routing new players here while the players already here are still being served.
-2. `POST /api/v1/steam/matches` and `POST /api/v1/steam/matches/{id}/join` answer **503**
-   `service_unavailable` immediately, before reading the body and before any call to Valve.
-3. `GET /ws/v2` refuses new upgrades with **503**.
-4. In-flight commits drain, up to **10 s**. This is what makes the shutdown honest: a command that was
-   journalled but never broadcast would leave a player who never heard about a move that is in the record.
-5. Every seated socket is sent `SERVER RESTART`.
-6. Every socket is closed with **1012 Service Restart**, reason `service restart`. A client that reads 1012
-   reconnects with backoff; a client that reads a torn connection shows a player a failure that never
-   happened.
-7. One summary line is logged: matches live, sockets closed, how long it took.
+### Phase 1: quiesce, immediately and without waiting
 
-The host shutdown timeout is **25 s**, which is comfortably more than the drain plus the goodbye and less
-than the patience of the platforms this deploys to. Give the container at least 30 s before `SIGKILL`.
+1. **Readiness goes false.** `/health/ready` answers 503 with the `shutdown` check `Unhealthy`, and the
+   platform stops routing new players here while the players already here are still being served.
+2. **The coordinator stops committing.** The flag is read under each match gate, so a command that reaches
+   the gate from here on is answered `REJECT TemporaryFailure` and nothing is appended or broadcast for it.
+   That is the answer the protocol already defines for a commit that did not happen: the client retries
+   after it reconnects, to whichever host is serving by then.
+3. **The registry stops admitting.** A socket that arrives now, or one already mid-upgrade, is refused and
+   closed with 1012 rather than seated into a process that is leaving.
 
-A legacy deployment has no coordinator and no socket registry. There, step 1 happens and the rest has
-nothing to do.
+All three happen before anything is drained or closed, which is what makes the next phase a barrier rather
+than a photograph. `POST /api/v1/steam/matches` and `.../join` answer **503** `service_unavailable` from
+step 1, before the body is read and before anything is asked of Valve.
+
+### Phase 2: drain, tell, close - inside one 20 second budget
+
+| Step | Bound |
+|---|---|
+| Drain in-flight commits | 10 s, and never more than what is left of the budget |
+| Broadcast `SERVER RESTART` | 5 s, and never more than what is left |
+| Close every socket with 1012 | whatever is left, with a floor of 3 s |
+
+Every step is bounded against the **remaining budget**, not against its own window. A step that overruns is
+logged and abandoned, and the next one still runs: **the 1012 closes are always attempted**, whatever
+happened before them. A match whose gate cannot be taken in time is skipped and counted rather than waited
+on, and each socket close is itself bounded at 3 s before the socket is aborted.
+
+That is the whole point of the budget. A wedged store or a client that stopped reading used to carry
+shutdown past the platform kill deadline, and a shutdown that is killed sends 1012 to nobody: every client
+it was serving sees a torn connection instead of an instruction to come back.
+
+One summary line closes it out, and it is what an operator reads after the process is gone:
+
+```
+Shutdown: 3 live match(es), 5 socket(s) closed, 1 not drained, took 11840 ms
+```
+
+`not drained` is the number that matters. Those are matches that may have had a command in flight this host
+never confirmed; their players will be re-dealt the whole log on reconnect and lose nothing, but a number
+that is routinely non-zero means commits are slow enough to be worth looking at.
+
+The process budget is 20 s and the host shutdown timeout is **25 s**, so a shutdown that spends its whole
+budget still has room for the closes. `maxShutdownDelaySeconds` in `render.yaml` is 60, comfortably more
+than both. Give any other platform at least 30 s before `SIGKILL`.
+
+The heartbeat stops re-checking credentials once shutdown begins, because a re-check is a database round
+trip for a socket that is about to be closed regardless of the answer. Pings carry on.
+
+A legacy deployment has no coordinator and no socket registry. There, phase 1 flips readiness and phase 2
+has nothing to do.
 
 ## 4. Metrics
 
@@ -100,12 +133,18 @@ other ways.
 |---|---|---|---|
 | `hexwars.matches.created` | counter | | Matches allocated from a lobby |
 | `hexwars.commands.committed` | counter | | Commands durably journalled and broadcast |
-| `hexwars.commands.rejected` | counter | `reason` | Commands refused, by the reason sent to the issuer |
-| `hexwars.db.failures` | counter | | Durable writes or reads that threw |
-| `hexwars.steam.failures` | counter | `failure` | Refusals from the Steam Web API |
-| `hexwars.auth.failures` | counter | | Tickets and socket handshakes that got no seat |
+| `hexwars.commands.rejected` | counter | `reason` | CMD frames refused, by the reason sent to the issuer. CMD only |
+| `hexwars.catalog.rejected` | counter | `reason` | CATALOG frames refused, and starts that could not be recorded |
+| `hexwars.db.failures` | counter | `op` | Store calls that threw, by call: `append`, `catalog`, `start`, `complete`, `status`, `reload`, `journal`, `touch`, `load`, `create`, `join` |
+| `hexwars.steam.failures` | counter | `failure` | Every Steam refusal: the exceptions Valve throws, plus `OwnershipMissing` and `Blocked`, which this server decides |
+| `hexwars.auth.failures` | counter | `stage` | Handshakes that got no seat: `frame` (never reached a credential), `credential` (a lookup that said no), `timeout` (never sent AUTH), `ticket` (Valve refused the ticket at the HTTP endpoint) |
 | `hexwars.reconnects` | counter | | Seats that took a socket having held one in the last 10 minutes |
 | `hexwars.recovery.failures` | counter | | Matches the startup recovery pass refused |
+
+The tags are the point of three of these. An untagged database counter says the database is unhappy and
+nothing an operator can act on: a wedged append and a journal read that timed out are the same number and
+different incidents. The same goes for a handshake refused before it cost a database read and one refused
+by the read itself, and for a command that was not applied against a catalog that was not accepted.
 | `hexwars.matches.live` | gauge | | Matches held in memory |
 | `hexwars.sockets.open` | gauge | | Live v2 sockets |
 | `hexwars.outbound.queue.max` | gauge | | Deepest any outbound queue has been |
