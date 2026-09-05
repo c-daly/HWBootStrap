@@ -279,11 +279,12 @@ namespace HexWars.NetServer.Runtime
                     dealt = rebuilt.Redealt;
                 }
 
-                // Before anything is served. A process killed between the append of a winning command and
-                // the row that records the win leaves a game the engine calls over and the database calls
-                // active; the next player through the door finishes closing it, rather than being dealt a
-                // match that can never end.
-                await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false);
+                // Before anything is served, and for the projection that was NOT stale - a first load of a
+                // journal a killed process left behind. A game the engine calls over and the database calls
+                // active is closed by the next player through the door, rather than being dealt to them as
+                // a match that can never end.
+                if (!await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false))
+                    return Failed(AuthFailUnavailable);
 
                 if (!CanSeat(match))
                 {
@@ -402,7 +403,7 @@ namespace HexWars.NetServer.Runtime
                     ReloadOutcome rebuilt = await TryReloadAsync(match, ct).ConfigureAwait(false);
                     if (!rebuilt.Ok)
                     {
-                        sink.Send(connectionId, RejectTemporaryFailure);
+                        if (!rebuilt.SocketsClosed) sink.Send(connectionId, RejectTemporaryFailure);
                         return;
                     }
 
@@ -412,7 +413,7 @@ namespace HexWars.NetServer.Runtime
                 // The same self-healing pass the handshake runs. A completion that threw left this match
                 // finished in the engine and active in the database; the next frame either way is the one
                 // that closes it.
-                await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false);
+                if (!await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false)) return;
 
                 if (!match.Connections.TryGetValue(connectionId, out string? steamId)
                     || !match.Seats.TryGetValue(steamId, out int seat))
@@ -533,7 +534,7 @@ namespace HexWars.NetServer.Runtime
             ReloadOutcome adopted = await TryReloadAsync(match, ct).ConfigureAwait(false);
             if (!adopted.Ok)
             {
-                sink.Send(connectionId, RejectTemporaryFailure);
+                if (!adopted.SocketsClosed) sink.Send(connectionId, RejectTemporaryFailure);
                 return;
             }
 
@@ -806,58 +807,81 @@ namespace HexWars.NetServer.Runtime
         /// <param name="alreadyDealt">True when the rebuild that preceded this has already handed every
         /// seat the current state. The replay is the same bytes either way, so dealing it twice in one
         /// operation would only make the client parse a game it has just parsed.</param>
-        async Task HealCompletionAsync(LiveMatch match, bool alreadyDealt, CancellationToken ct)
+        async Task<bool> HealCompletionAsync(LiveMatch match, bool alreadyDealt, CancellationToken ct)
         {
-            if (match.Status != MatchStatus.Active) return;
-            if (match.State is null || !match.State.IsGameOver) return;
+            if (match.Status != MatchStatus.Active) return true;
+            if (match.State is null || !match.State.IsGameOver) return true;
 
-            int? winnerSeat = match.State.Winner is PlayerId winner ? (int)winner : null;
-
-            try
+            if (!await TryCloseFinishedMatchAsync(match, ct).ConfigureAwait(false))
             {
-                if (await store
-                        .TryCompleteMatchAsync(
-                            match.MatchId, MatchStatus.Completed, winnerSeat, time.GetUtcNow(), ct)
-                        .ConfigureAwait(false))
+                // The record does not say the game is over and this host could not make it say so, so it
+                // says nothing at all: a terminal START here would be an outcome the journal does not
+                // carry. The sockets go back through the reconnect path, which reads the row.
+                match.Stale = true;
+                CloseEveryConnection(match, ResyncCloseStatus, ResyncCloseReason);
+                return false;
+            }
+
+            // Every seat watching this match is one that never heard how it ended - the APPLY that would
+            // have told them is the write that did not land. The replay ends in the terminal position, so
+            // re-dealing START is the whole answer.
+            if (!alreadyDealt) DealTheStart(match);
+            return true;
+        }
+
+        /// <summary>
+        /// Records the end of a game the journal already shows as over, with one immediate retry.
+        ///
+        /// True means the STORE now reads terminal - because this closed it, or because somebody else
+        /// already had. That distinction is the whole contract: callers use it to decide whether they may
+        /// tell anybody the game is over, and saying so on anything less would be announcing an outcome
+        /// the record does not carry.
+        ///
+        /// Two attempts, because a completion is one idempotent UPDATE: a first failure is usually a
+        /// connection that has just been replaced, and a second is a database this host cannot finish the
+        /// game against, which no number of further tries inside one operation will change.
+        /// </summary>
+        async Task<bool> TryCloseFinishedMatchAsync(LiveMatch match, CancellationToken ct)
+        {
+            int? winnerSeat = match.State!.Winner is PlayerId winner ? (int)winner : null;
+
+            for (var attempt = 1; ; attempt++)
+            {
+                try
                 {
-                    match.Status = MatchStatus.Completed;
-                    logger.LogInformation(
-                        "Closed a finished match the journal still called active, winner {WinnerSeat}",
-                        winnerSeat is null ? "draw" : winnerSeat.ToString());
+                    if (await store
+                            .TryCompleteMatchAsync(
+                                match.MatchId, MatchStatus.Completed, winnerSeat, time.GetUtcNow(), ct)
+                            .ConfigureAwait(false))
+                    {
+                        match.Status = MatchStatus.Completed;
+                        logger.LogInformation(
+                            "Closed a finished match the journal still called active, winner {WinnerSeat}",
+                            winnerSeat is null ? "draw" : winnerSeat.ToString());
 
-                    // Every seat watching this match is one that never heard how it ended - the APPLY that
-                    // would have told them is the write that did not land. The replay ends in the terminal
-                    // position, so re-dealing START is the whole answer.
-                    if (!alreadyDealt) DealTheStart(match);
-                    return;
+                        return true;
+                    }
+
+                    // False means somebody moved the row first, and what they moved it to decides what this
+                    // host serves. It is read rather than assumed.
+                    PersistedMatch? row = await store.GetMatchAsync(match.MatchId, ct).ConfigureAwait(false);
+                    if (row is null) return false;
+
+                    match.Status = row.Status;
+                    return row.Status is not (MatchStatus.Waiting or MatchStatus.Active);
                 }
-
-                // False means somebody moved the row first, and what they moved it to decides what this
-                // host serves. It is read rather than assumed.
-                PersistedMatch? row = await store.GetMatchAsync(match.MatchId, ct).ConfigureAwait(false);
-                if (row is null) return;
-
-                match.Status = row.Status;
-
-                // The same re-deal for a match somebody else ended. The seats are watching a game that is
-                // over either way, and they have to be shown the position it ended in.
-                if (!alreadyDealt && match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
-                    DealTheStart(match);
-            }
-            catch (OperationCanceledException)
-            {
-                // Stale BEFORE it propagates. A cancelled heal leaves a projection that says active over a
-                // game the engine calls over, and a caller that saw only the cancellation would have no
-                // reason to rebuild it.
-                match.Stale = true;
-                throw;
-            }
-            catch (Exception failure)
-            {
-                // Left stale on purpose: the next operation on this match rebuilds it and tries again,
-                // which is the entire self-healing loop.
-                logger.LogError(failure, "A finished match could not be closed; it will be tried again");
-                match.Stale = true;
+                catch (Exception failure) when (attempt == 1)
+                {
+                    logger.LogWarning(failure, "A finished match would not close; trying once more");
+                }
+                catch (Exception again)
+                {
+                    // Not rethrown, cancellation included. The caller marks the projection stale and sends
+                    // the sockets away to resync, which is a better answer than an exception unwinding
+                    // through a gate holder that has already decided nothing may be broadcast.
+                    logger.LogError(again, "A finished match could not be closed");
+                    return false;
+                }
             }
         }
 
@@ -1144,8 +1168,10 @@ namespace HexWars.NetServer.Runtime
             }
         }
 
-        /// <summary>Whether a rebuild worked, and whether it re-dealt START in the course of it.</summary>
-        readonly record struct ReloadOutcome(bool Ok, bool Redealt);
+        /// <summary>Whether a rebuild worked, whether it re-dealt START in the course of it, and whether
+        /// it gave up in a way that has already closed the sockets - in which case the caller has nothing
+        /// left to say to anybody.</summary>
+        readonly record struct ReloadOutcome(bool Ok, bool Redealt, bool SocketsClosed);
 
         /// <summary>
         /// Rebuilds a stale projection, and tells the seats when the rebuild changed the game under them.
@@ -1176,20 +1202,34 @@ namespace HexWars.NetServer.Runtime
             {
                 logger.LogError(failure,
                     "This projection is stale and could not be rebuilt from the journal");
-                return new ReloadOutcome(false, false);
+                return new ReloadOutcome(false, false, false);
+            }
+
+            // The completion FIRST, before a single frame goes out. A terminal START says the game is
+            // over, and saying that while the store still calls the match active would be this host
+            // announcing an outcome the record does not carry - and if the completion then never lands,
+            // the record never will, and the reaper eventually calls the game abandoned instead.
+            if (match.Status == MatchStatus.Active
+                && match.State is not null
+                && match.State.IsGameOver
+                && !await TryCloseFinishedMatchAsync(match, ct).ConfigureAwait(false))
+            {
+                match.Stale = true;
+                CloseEveryConnection(match, ResyncCloseStatus, ResyncCloseReason);
+                return new ReloadOutcome(false, false, true);
             }
 
             bool nowTerminal = match.Status is not (MatchStatus.Waiting or MatchStatus.Active);
             bool moved = match.LastSequence > seenBefore
                 || (nowTerminal && before is MatchStatus.Waiting or MatchStatus.Active);
 
-            if (!moved || match.Start is null) return new ReloadOutcome(true, false);
+            if (!moved || match.Start is null) return new ReloadOutcome(true, false, false);
 
             logger.LogInformation(
                 "The rebuild moved this match on; re-dealing the state to every connected seat");
 
             DealTheStart(match);
-            return new ReloadOutcome(true, true);
+            return new ReloadOutcome(true, true, false);
         }
 
         /// <summary>Whether this match was refused recently enough that reading its journal again would

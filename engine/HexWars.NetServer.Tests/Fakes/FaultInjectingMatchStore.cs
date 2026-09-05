@@ -20,6 +20,7 @@ namespace HexWars.NetServer.Tests.Fakes
         Exception? _nextAppendFailure;
         Exception? _afterNextAppendFailure;
         Exception? _nextCompletionFailure;
+        int _nextCompletionRemaining;
         Exception? _everyCompletionFailure;
         Exception? _afterCompletionFailure;
         int _afterCompletionRemaining;
@@ -53,8 +54,14 @@ namespace HexWars.NetServer.Tests.Fakes
         /// </summary>
         public void ThrowAfterNextAppend(Exception? failure) => _afterNextAppendFailure = failure;
 
-        /// <summary>Arms the next TryCompleteMatchAsync to throw, once. Null disarms it.</summary>
-        public void FailNextCompletion(Exception? failure) => _nextCompletionFailure = failure;
+        /// <summary>Arms the next TryCompleteMatchAsync calls to throw, <paramref name="times"/> of them.
+        /// Two is the interesting number: the coordinator retries a failed completion once immediately, so
+        /// one failure is invisible to everybody and two is a database it cannot finish the game against.</summary>
+        public void FailNextCompletion(Exception? failure, int times = 1)
+        {
+            _nextCompletionFailure = failure;
+            _nextCompletionRemaining = failure is null ? 0 : times;
+        }
 
         /// <summary>Fails EVERY TryCompleteMatchAsync until disarmed with null: a database this host cannot
         /// finish a game against, rather than one bad moment it can retry through.</summary>
@@ -152,9 +159,10 @@ namespace HexWars.NetServer.Tests.Fakes
             if (_everyCompletionFailure is not null) throw _everyCompletionFailure;
 
             Exception? failure = _nextCompletionFailure;
-            if (failure is not null)
+            if (failure is not null && _nextCompletionRemaining > 0)
             {
-                _nextCompletionFailure = null;
+                _nextCompletionRemaining--;
+                if (_nextCompletionRemaining == 0) _nextCompletionFailure = null;
                 throw failure;
             }
 

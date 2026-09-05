@@ -947,6 +947,58 @@ namespace HexWars.NetServer.Tests
                 Is.EqualTo(new[] { DurableMatchCoordinator.RejectNoSeat }));
         }
 
+        [Test]
+        public async Task ARebuildThatCannotCloseTheGame_SaysNothingAtAll()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            // The winning command commits and no completion attempt lands, so the projection goes stale
+            // over a game the engine calls over and the record still calls active.
+            _faults.FailEveryCompletion(new InvalidOperationException("the database went away"));
+            await Cmd(played.Commands[^1]);
+            Assert.That(Live().Stale, Is.True);
+
+            // The next operation rebuilds - and the completion still will not land. A terminal START here
+            // would be this host announcing an outcome the record does not carry, and if the completion
+            // never lands the record never will: the reaper would eventually call the game abandoned.
+            _sink.Clear();
+            await Cmd("c1", new EndTurn(PlayerId.Player1));
+
+            Assert.That(_sink.Sent, Is.Empty, "nothing may be said about a game the record has not ended");
+            Assert.That(_sink.Closed.Select(c => c.CloseStatus),
+                Is.All.EqualTo(DurableMatchCoordinator.ResyncCloseStatus));
+            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EquivalentTo(new[] { "c0", "c1" }));
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+        }
+
+        [Test]
+        public async Task ARebuildThatClosesTheGame_CommitsTheCompletionBeforeTheStartGoesOut()
+        {
+            (MatchRecord played, GameState _) = await PlayToTheBrinkAsync();
+
+            _faults.FailEveryCompletion(new InvalidOperationException("the database went away"));
+            await Cmd(played.Commands[^1]);
+            _faults.FailEveryCompletion(null);
+
+            // The invariant, watched from inside the send: by the time a terminal START leaves this host,
+            // the store must already agree the match is over. A START that overtook its own completion
+            // would be telling both players a result that the record might never carry.
+            var statusWhenTheStartWentOut = new List<MatchStatus>();
+            _sink.OnSend = (_, message) =>
+            {
+                if (!message.StartsWith("START ", StringComparison.Ordinal)) return;
+                statusWhenTheStartWentOut.Add(
+                    _store.GetMatchAsync(_matchId, Ct).GetAwaiter().GetResult()!.Status);
+            };
+
+            _sink.Clear();
+            await Auth("c2", _credential1);
+
+            Assert.That(statusWhenTheStartWentOut, Is.Not.Empty, "a terminal START has to have been dealt");
+            Assert.That(statusWhenTheStartWentOut, Is.All.EqualTo(MatchStatus.Completed));
+            Assert.That(Live().Status, Is.EqualTo(MatchStatus.Completed));
+        }
+
         // ---- an ambiguous commit nobody can settle ----------------------------
 
         [Test]
