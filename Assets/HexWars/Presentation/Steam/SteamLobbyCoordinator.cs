@@ -222,6 +222,10 @@ namespace HexWars.Presentation
 
             if (!string.IsNullOrEmpty(_lobbyId) && IsRetryableInLobby(_phase))
             {
+                // A retry starts a fresh exchange over an abandoned one, so the old request and any
+                // half-published match go first. The lobby itself is kept.
+                _api.Cancel();
+                ClearPendingMatchKey();
                 _generation++;
                 _allocationStarted = false;
                 _joinRequestedMatchId = null;
@@ -303,7 +307,14 @@ namespace HexWars.Presentation
                 return;
             }
 
-            if (_matchKeyWritesLeft > 0) { RetryMatchKeyWrite(); return; }
+            // The pending hw_match write belongs to one allocation. Anything that ended that
+            // allocation - the opponent leaving above all - leaves the phase somewhere else, and a
+            // write that lands then would hand the owner a ticket for a match with nobody in it.
+            if (_matchKeyWritesLeft > 0)
+            {
+                if (_phase == SteamLobbyPhase.AllocatingMatch) { RetryMatchKeyWrite(); return; }
+                ClearPendingMatchKey();
+            }
 
             if (!DeadlineExpired()) return;
 
@@ -544,6 +555,7 @@ namespace HexWars.Presentation
             }
 
             ClearDeadline();
+            ClearPendingMatchKey();   // the allocation this write belonged to is over
             _allocationStarted = false;
             _joinRequestedMatchId = null;
             _matchId = null;

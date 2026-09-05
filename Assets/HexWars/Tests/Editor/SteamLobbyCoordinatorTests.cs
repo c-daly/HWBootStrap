@@ -920,6 +920,40 @@ namespace HexWars.Presentation.Tests
             Assert.That(_sut.Status.LobbyId, Is.EqualTo(second), "the live join still completes");
         }
 
+        // ----- abandoning a half-published match ------------------------------------------------
+
+        [Test]
+        public void AnOpponentLeavingBetweenAFailedMatchKeyWriteAndItsRetry_AbandonsThePublication()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _api.CreateResults.Enqueue(SteamMatchApiResult.Success("match-1", Wss, "cred-1", 0));
+            _steam.FailSetLobbyDataForKey = SteamLobbyKeys.Match;
+
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.AllocatingMatch));
+            var cancelsAfterAllocation = _steam.CancelAuthTicketCalls;
+
+            _steam.RemoveRemoteMember(lobbyId, RemoteId);
+            Pump();
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.WaitingForPlayer));
+
+            // The write would now succeed, which is exactly the trap: a retry landing here would hand
+            // the owner a ticket for a match the guest already walked out of.
+            _steam.FailSetLobbyDataForKey = null;
+            var writesBefore = _steam.SetLobbyDataCalls;
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + 1);
+            _sut.Tick(Clock + 2);
+
+            Assert.That(_steam.SetLobbyDataCalls, Is.EqualTo(writesBefore), "hw_match must not be written");
+            Assert.That(_tickets, Is.Empty, "no ticket for a match with nobody in it");
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.WaitingForPlayer));
+            Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId), "the lobby stays open for the next player");
+            Assert.That(_steam.CancelAuthTicketCalls, Is.GreaterThan(cancelsAfterAllocation),
+                "the abandoned allocation releases its ticket");
+            Assert.That(_steam.GetLobby(lobbyId)!.Metadata.ContainsKey(SteamLobbyKeys.Match), Is.False);
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()
