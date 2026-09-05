@@ -37,9 +37,11 @@ namespace HexWars.NetServer.Contracts
         /// client bug, which a log line serves better than a response, or someone probing.</summary>
         public const string InvalidRequestMessage = "That request was not valid.";
 
-        /// <summary>For an account this server has been told not to serve. It names no appeal route on
-        /// purpose; support does that, an error body cannot.</summary>
-        public const string BlockedMessage = "This account cannot start a match.";
+        /// <summary>For an account this server has been told not to serve. Both endpoints share it, so it
+        /// has to cover joining as well as starting: a blocked player rejoining their own match should not
+        /// be told they cannot start one. It names no appeal route on purpose; support does that, an error
+        /// body cannot.</summary>
+        public const string BlockedMessage = "This account cannot start or join a match.";
 
         public const string NotFoundMessage = "That match no longer exists.";
 
