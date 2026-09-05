@@ -228,6 +228,52 @@ namespace HexWars.NetServer.Tests
             Assert.That((await store.GetMatchAsync(matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
         }
 
+        // ---- what the database counter says the recovery pass did ------------
+
+        /// <summary>
+        /// The recovery tags belong to the STARTUP pass and to nothing else.
+        ///
+        /// LoadAsync is the shared ILiveMatchLoader: every live handshake and every stale reload goes
+        /// through it too. Tagging inside it counted an outage during an ordinary reconnect as a startup
+        /// problem, and counted it twice, because the caller already counts it as load or reload.
+        /// </summary>
+        [Test]
+        public void TheSharedLoader_DoesNotClaimTheRecoveryTag()
+        {
+            var metrics = new MatchMetrics();
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var recovery = new MatchRecoveryService(
+                _store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.LoadAsync(Guid.NewGuid(), Ct));
+
+            Assert.That(metrics.Snapshot().DatabaseFailuresByOp, Is.Empty,
+                "a handshake that could not read a journal is not a recovery failure");
+        }
+
+        [Test]
+        public void TheStartupPass_TagsTheListItCouldNotRead()
+        {
+            var metrics = new MatchMetrics();
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var recovery = new MatchRecoveryService(
+                _store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.VerifyOpenMatchesAsync(Ct));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryList], Is.EqualTo(1));
+            Assert.That(byOp.ContainsKey(MatchMetrics.DbOp.RecoveryLoad), Is.False,
+                "it never got as far as reading a journal");
+        }
+
         MatchRecoveryService NewRecovery(IMatchStore store) => new(
             store,
             Options.Create(new MatchHostingOptions()),

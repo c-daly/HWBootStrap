@@ -216,5 +216,74 @@ namespace HexWars.NetServer.Tests
             Assert.That(output, Does.Contain(open.ToString()));
             Assert.That(output, Does.Not.Contain(broken.ToString()));
         }
+
+        [Test]
+        public async Task ThroughTheCommandBoundary_ItAcceptsANonDisposableNameAndFallsBackToDatabaseUrl()
+        {
+            await SeedAsync("109775240000000001", EngineContract.Version, false);
+
+            string? verify = Environment.GetEnvironmentVariable(JournalVerification.DatabaseVariable);
+            string? database = Environment.GetEnvironmentVariable("DATABASE_URL");
+
+            try
+            {
+                // Through Program.Main, which is where an operator actually reaches it. The database is
+                // named hexwars_test here only because the fixture names it that; what matters is that no
+                // disposable-name guard stands between this verb and a real database, because standing
+                // between them is exactly what made the previous procedure impossible to follow.
+                Environment.SetEnvironmentVariable(
+                    JournalVerification.DatabaseVariable, _database.DatabaseUrl);
+                Environment.SetEnvironmentVariable("DATABASE_URL", null);
+
+                Assert.That(await Program.Main(new[] { "verify-journals" }), Is.Zero);
+
+                // And the fallback: no verify variable, so it uses the address the service itself runs on.
+                Environment.SetEnvironmentVariable(JournalVerification.DatabaseVariable, null);
+                Environment.SetEnvironmentVariable("DATABASE_URL", _database.DatabaseUrl);
+
+                Assert.That(await Program.Main(new[] { "verify-journals" }), Is.Zero);
+
+                // With neither, it says so rather than guessing.
+                Environment.SetEnvironmentVariable("DATABASE_URL", null);
+                Assert.That(await Program.Main(new[] { "verify-journals" }), Is.EqualTo(2));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(JournalVerification.DatabaseVariable, verify);
+                Environment.SetEnvironmentVariable("DATABASE_URL", database);
+            }
+        }
+
+        [Test]
+        public async Task TheReadOnlySessionCannotBeTurnedOff()
+        {
+            await using NpgsqlDataSource source = JournalVerification.ReadOnlySource(_database.DatabaseUrl);
+
+            await using NpgsqlConnection connection =
+                await source.OpenConnectionAsync(CancellationToken.None);
+
+            // DDL, not just DML. A verb that only blocked UPDATE would still let a migration through.
+            await using (NpgsqlCommand ddl = connection.CreateCommand())
+            {
+                ddl.CommandText = "CREATE TABLE verify_should_not_exist (id int)";
+                Assert.ThrowsAsync<PostgresException>(
+                    async () => await ddl.ExecuteNonQueryAsync(CancellationToken.None));
+            }
+
+            // And the guard cannot be talked out of the way from inside the session. If this ever starts
+            // succeeding, the verb has to move to BEGIN READ ONLY per batch instead.
+            await using (NpgsqlCommand defeat = connection.CreateCommand())
+            {
+                defeat.CommandText =
+                    "SET default_transaction_read_only = off; UPDATE matches SET build_id = 'nope'";
+
+                Assert.ThrowsAsync<PostgresException>(
+                    async () => await defeat.ExecuteNonQueryAsync(CancellationToken.None));
+            }
+
+            await using NpgsqlCommand gone = connection.CreateCommand();
+            gone.CommandText = "SELECT to_regclass('public.verify_should_not_exist') IS NULL";
+            Assert.That(await gone.ExecuteScalarAsync(CancellationToken.None), Is.True);
+        }
     }
 }

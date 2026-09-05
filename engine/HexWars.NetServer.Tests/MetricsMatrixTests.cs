@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using HexWars.Engine;
+using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
@@ -69,9 +71,9 @@ namespace HexWars.NetServer.Tests
             /// <summary>The one thing being measured.</summary>
             public required Func<MetricsMatrixTests, Fixture, Task> Act { get; init; }
 
-            /// <summary>Totals this path legitimately moves as well. A ticket Valve refused is both a
-            /// Steam failure and an authentication failure, and pretending otherwise would mean choosing
-            /// which of the two an operator is allowed to see.</summary>
+            /// <summary>What else this path legitimately moves: a total by name, or a tagged slot as
+            /// counter.tag. A ticket Valve refused is both a Steam failure and an authentication failure,
+            /// and pretending otherwise would mean choosing which of the two an operator may see.</summary>
             public string[] AlsoMoves { get; init; } = Array.Empty<string>();
 
             public override string ToString() => Name;
@@ -84,6 +86,7 @@ namespace HexWars.NetServer.Tests
             public required SteamServerFactory Factory { get; init; }
             public required WebApplicationFactory<Program> Host { get; init; }
             public required FaultInjectingMatchStore Faults { get; init; }
+            public required FaultInjectingCredentialService Credentials { get; init; }
             public required HttpClient Client { get; init; }
             public DurableFlowClient? Zero { get; set; }
             public DurableFlowClient? One { get; set; }
@@ -141,7 +144,7 @@ namespace HexWars.NetServer.Tests
                 // An append that threw is a database failure AND a command the issuer was refused. Both
                 // are true and both are wanted: one says the store is unhappy, the other says a player
                 // was told to try again.
-                AlsoMoves = new[] { "commandsRejected" },
+                AlsoMoves = new[] { "commandsRejected", "rejectionsByReason.TemporaryFailure" },
                 Arrange = (test, f) => test.SeatBothAsync(f),
                 Act = async (test, f) =>
                 {
@@ -206,7 +209,7 @@ namespace HexWars.NetServer.Tests
             {
                 Name = "steamFailures.AuthenticationFailed",
                 Expect = new Expectation("steamFailuresByKind", "AuthenticationFailed"),
-                AlsoMoves = new[] { "authFailures" },
+                AlsoMoves = new[] { "authFailures", "authFailuresByStage.ticket" },
                 Act = async (test, f) =>
                 {
                     using HttpResponseMessage refused = await f.Client.PostAsJsonAsync(
@@ -258,6 +261,44 @@ namespace HexWars.NetServer.Tests
                     await again.DisposeAsync();
                 },
             },
+            new Row
+            {
+                Name = "authFailures.capacity",
+                Expect = new Expectation("authFailuresByStage", "capacity"),
+                Arrange = async (test, f) => f.Zero = await DurableFlowClient.CreateAsync(
+                    f.Host, FakeSteamWebApiClient.LobbyId, FakeSteamWebApiClient.OwnerTicket),
+                Act = async (test, f) =>
+                {
+                    // Every validation slot taken. Not the fault of the caller, and a different problem
+                    // from a credential that was wrong, which is why it has a stage of its own.
+                    using (ProtocolV2WebSocketServer.HoldEveryValidationSlot())
+                    {
+                        await f.Zero!.OpenAsync();
+                        await f.Zero.SendAuthAsync();
+                        await f.Zero.ExpectAsync("AUTH FAIL ");
+                    }
+                },
+            },
+            new Row
+            {
+                Name = "authFailures.internal",
+                Expect = new Expectation("authFailuresByStage", "internal"),
+                Arrange = async (test, f) =>
+                {
+                    f.Zero = await DurableFlowClient.CreateAsync(
+                        f.Host, FakeSteamWebApiClient.LobbyId, FakeSteamWebApiClient.OwnerTicket);
+
+                    // The credential lookup is outside every catch the coordinator has, so a fault here is
+                    // the unanticipated failure the internal stage exists to make visible.
+                    f.Credentials.FailNextValidate(new InvalidOperationException("unexpected"));
+                },
+                Act = async (test, f) =>
+                {
+                    await f.Zero!.OpenAsync();
+                    await f.Zero.SendAuthAsync();
+                    await f.Zero.ExpectAsync("AUTH FAIL ");
+                },
+            },
         };
 
         public static IEnumerable<Row> Cases() => Rows;
@@ -275,6 +316,27 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(Read(after, row.Expect), Is.EqualTo(Read(before, row.Expect) + 1),
                 row.Name + " did not move");
+
+            // Every OTHER tag of the same counter, held still. A path that records two tags for one event
+            // reads as twice the traffic and splits it across labels that then disagree with the total,
+            // which is the shape the recovery tag had: counted in the shared loader and again by the
+            // caller. The untagged sweep below cannot see it, because the total moved exactly once.
+            foreach (string map in Tagged.Values)
+            {
+                foreach (JsonProperty sibling in after.GetProperty(map).EnumerateObject())
+                {
+                    if (map == row.Expect.Counter && sibling.Name == row.Expect.Tag) continue;
+
+                    long was = before.GetProperty(map).TryGetProperty(sibling.Name, out JsonElement had)
+                        ? had.GetInt64()
+                        : 0;
+
+                    if (row.AlsoMoves.Contains(map + "." + sibling.Name)) continue;
+
+                    Assert.That(sibling.Value.GetInt64(), Is.EqualTo(was),
+                        map + "." + sibling.Name + " moved while " + row.Name + " was being driven");
+                }
+            }
 
             foreach (string counter in Counters)
             {
@@ -331,20 +393,32 @@ namespace HexWars.NetServer.Tests
                 ruleset: SteamLobbyRules.CustomRuleset, setupWire: GameSetup.Default.ToWire());
 
             var faults = new FaultInjectingMatchStore(factory.Store);
+            FaultInjectingCredentialService? credentials = null;
 
             WebApplicationFactory<Program> host = Track(factory.WithWebHostBuilder(
                 builder => builder.ConfigureServices(services =>
                 {
                     services.RemoveAll<IMatchStore>();
                     services.AddSingleton<IMatchStore>(faults);
+
+                    services.AddSingleton<IMatchCredentialService>(provider =>
+                        credentials = new FaultInjectingCredentialService(
+                            ActivatorUtilities.CreateInstance<MatchCredentialService>(provider)));
                 })));
+
+            HttpClient client = Track(host.CreateClient());
+
+            // Forces the credential factory above to run, so the seam it captures exists before a row
+            // reaches for it.
+            host.Services.GetRequiredService<IMatchCredentialService>();
 
             return new Fixture
             {
                 Factory = factory,
                 Host = host,
                 Faults = faults,
-                Client = Track(host.CreateClient()),
+                Credentials = credentials!,
+                Client = client,
             };
         }
 

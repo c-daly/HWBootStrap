@@ -387,5 +387,73 @@ namespace HexWars.NetServer.Tests
                 one.Drop();
             }
         }
+
+        [Test]
+        public async Task Shutdown_RefusesAHandshakeThatWasWaitingOnTheGate()
+        {
+            SteamServerFactory fixture = Fixture();
+            var faults = new FaultInjectingMatchStore(fixture.Store);
+
+            WebApplicationFactory<Program> host = Track(fixture.WithWebHostBuilder(
+                builder => builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IMatchStore>();
+                    services.AddSingleton<IMatchStore>(faults);
+                })));
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(host);
+            await using (zero)
+            await using (one)
+            {
+                var coordinator = host.Services.GetRequiredService<DurableMatchCoordinator>();
+                var registry = host.Services.GetRequiredService<V2ConnectionRegistry>();
+                int seated = coordinator.ConnectionsOf(zero.MatchId).Count;
+                int writesBefore = fixture.Store.WriteCount;
+
+                // Paused where the LAST test could not reach: the journal read, which happens on the way
+                // in rather than on the way out. A handshake held here has not reloaded, healed, dealt or
+                // broadcast anything yet, and every one of those is what the first barrier read prevents.
+                var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                faults.BeforeTouch = async () =>
+                {
+                    reached.TrySetResult();
+                    await release.Task.ConfigureAwait(false);
+                };
+
+                DurableFlowClient late = await DurableFlowClient.JoinAsync(
+                    host, zero.MatchId, FakeSteamWebApiClient.OwnerTicket);
+
+                await using (late)
+                {
+                    await late.OpenAsync();
+                    await late.SendAuthAsync();
+                    await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+                    coordinator.BeginShutdown();
+                    registry.BeginShutdown();
+                    release.TrySetResult();
+
+                    Assert.That((int)(await late.ExpectCloseAsync())!,
+                        Is.EqualTo(GracefulShutdownService.RestartCloseStatus));
+
+                    Assert.That(coordinator.ConnectionsOf(zero.MatchId).Count, Is.EqualTo(seated));
+                    // Exactly one, and it is the liveness stamp that was already issued when the
+                    // flag was set: this test pauses inside it. Nothing the barrier guards ran - no
+                    // reload, no heal, no start, no append - which is what the count would show if it
+                    // had, and what it used to show before the barrier moved to the top of the gate.
+                    Assert.That(fixture.Store.WriteCount, Is.EqualTo(writesBefore + 1),
+                        "the only write is the stamp that was already in flight");
+
+                    // No START re-dealt, no APPLY broadcast, on either socket.
+                    await zero.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+                    await one.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+
+                    late.Drop();
+                }
+
+                faults.BeforeTouch = null;
+            }
+        }
     }
 }
