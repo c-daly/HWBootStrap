@@ -60,6 +60,33 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void TheFirstFailureOfANewWindowIsActuallyCounted()
+        {
+            // Crossing the window boundary is exactly when the sweep drops the old entry, so a failure
+            // recorded here can land on a counter that is no longer the dictionary\u0027s. It reads as one free
+            // bad ticket per window: the lockout arrives on the eleventh attempt rather than the tenth.
+            var clock = new FakeTimeProvider(Start);
+            var throttle = new AuthFailureThrottle(clock);
+
+            for (int failure = 0; failure < 3; failure++) throttle.RecordFailure(Caller);
+
+            clock.SetUtcNow(Start + AuthFailureThrottle.Window);
+            throttle.RecordFailure(Caller);
+
+            Assert.That(throttle.FailuresFor(Caller), Is.EqualTo(1),
+                "the new window has to start at the failure that opened it, not at nothing");
+
+            for (int failure = 2; failure <= AuthFailureThrottle.MaxFailures; failure++)
+            {
+                Assert.That(throttle.IsThrottled(Caller), Is.False, "before failure " + failure);
+                throttle.RecordFailure(Caller);
+            }
+
+            Assert.That(throttle.IsThrottled(Caller), Is.True,
+                "the limit must bite on the tenth failure of the new window, not the eleventh");
+        }
+
+        [Test]
         public void AFreshWindowStartsCountingAgainFromZero()
         {
             var clock = new FakeTimeProvider(Start);

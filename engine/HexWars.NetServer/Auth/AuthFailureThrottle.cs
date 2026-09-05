@@ -52,6 +52,15 @@ namespace HexWars.NetServer.Auth
         /// <summary>How many times the periodic sweep has actually run, for asserting it is time-gated.</summary>
         internal int SweepCount { get; private set; }
 
+        /// <summary>Failures recorded against the live entry for this caller, or null when none is tracked.
+        /// The public surface answers only "throttled or not", which cannot tell a count of zero from a
+        /// count that was written somewhere the dictionary is no longer looking.</summary>
+        internal int? FailuresFor(string key)
+        {
+            if (!_counters.TryGetValue(key, out Counter? counter)) return null;
+            lock (counter) return counter.Failures;
+        }
+
         /// <summary>The failures recorded for one caller, and when their current window opened.</summary>
         sealed class Counter
         {
@@ -64,23 +73,35 @@ namespace HexWars.NetServer.Auth
         {
             DateTimeOffset now = time.GetUtcNow();
 
-            // A caller already tracked cannot grow the map, so it never has to wait on the gate. Only an
-            // admission does, because checking for room and then inserting are two steps: without holding
-            // the gate across both, two threads that each find room at the ceiling minus one will each
-            // insert, and the ceiling becomes a number the map passes rather than one it respects.
-            Counter counter = _counters.TryGetValue(key, out Counter? tracked)
-                ? Maintained(now, tracked)
-                : Admit(key, now);
+            // Maintenance before the counter is fetched, never after. The sweep drops entries whose
+            // window has elapsed, which is precisely the entry a failure at the window boundary is about
+            // to increment: fetching first meant the count landed on an object the dictionary had already
+            // let go, and the caller got one free bad ticket at the start of every window.
+            Maintain(now);
 
-            lock (counter)
+            while (true)
             {
-                if (now - counter.StartedAt >= Window)
+                // A caller already tracked cannot grow the map, so it never has to wait on the gate. Only
+                // an admission does, because checking for room and inserting are two halves of one
+                // decision and a ceiling enforced across a gap is not a ceiling.
+                Counter counter = _counters.TryGetValue(key, out Counter? tracked) ? tracked : Admit(key, now);
+
+                lock (counter)
                 {
-                    counter.StartedAt = now;
-                    counter.Failures = 0;
+                    if (now - counter.StartedAt >= Window)
+                    {
+                        counter.StartedAt = now;
+                        counter.Failures = 0;
+                    }
+
+                    counter.Failures++;
                 }
 
-                counter.Failures++;
+                // Maintenance on another thread can still have swept this entry between the fetch and the
+                // increment. That is rare rather than impossible, and a lost failure is the one outcome
+                // this class exists to prevent, so the write is confirmed against the live map and redone
+                // if it landed on a detached counter.
+                if (_counters.TryGetValue(key, out Counter? live) && ReferenceEquals(live, counter)) return;
             }
         }
 
@@ -92,13 +113,11 @@ namespace HexWars.NetServer.Auth
             DateTimeOffset now = time.GetUtcNow();
             lock (counter)
             {
-                // An elapsed window is dropped rather than reset, so a caller who stopped failing stops
-                // costing memory. A racing RecordFailure simply re-adds it.
-                if (now - counter.StartedAt >= Window)
-                {
-                    _counters.TryRemove(new KeyValuePair<string, Counter>(key, counter));
-                    return false;
-                }
+                // An elapsed window is simply not a lockout. This deliberately does NOT drop the entry:
+                // removing it here would take it out from under a RecordFailure that had already fetched
+                // it, and that failure would then be counted on a detached object and lost. Reclaiming the
+                // memory is a job for the sweep, which runs before anything fetches a counter.
+                if (now - counter.StartedAt >= Window) return false;
 
                 return counter.Failures >= MaxFailures;
             }
@@ -137,18 +156,16 @@ namespace HexWars.NetServer.Auth
             }
         }
 
-        /// <summary>Runs the periodic sweep if it is due, then hands back the caller unchanged. A caller
-        /// already in the map cannot grow it, so this never needs to make room.</summary>
-        Counter Maintained(DateTimeOffset now, Counter counter)
+        /// <summary>Runs the periodic sweep if it is due. Never makes room: only an admission can grow
+        /// the map, and that path makes its own.</summary>
+        void Maintain(DateTimeOffset now)
         {
-            if (_swept && now - _lastSweep < SweepInterval) return counter;
+            if (_swept && now - _lastSweep < SweepInterval) return;
 
             lock (_maintenanceGate)
             {
                 MaintainLocked(now, admittingNewCaller: false);
             }
-
-            return counter;
         }
 
         void MaintainLocked(DateTimeOffset now, bool admittingNewCaller)
