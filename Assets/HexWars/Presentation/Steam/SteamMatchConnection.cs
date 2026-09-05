@@ -1,8 +1,8 @@
 #nullable enable
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
 using UnityEngine;
 using NativeWebSocket;
 using HexWars.Engine;
@@ -22,9 +22,16 @@ namespace HexWars.Presentation
     /// server speaks PING and announces a planned restart with SERVER RESTART.
     /// </para>
     /// <para>
-    /// The socket callbacks may arrive off the main thread, so they only set volatile flags and queue
-    /// raw frames. <see cref="Update"/> is the single place the session is driven and its outputs are
-    /// carried out, which keeps every Unity call on the main thread.
+    /// Attempts are isolated by id. A socket that is being abandoned keeps firing for a while: its
+    /// OnClose lands late, and so can a SEAT the server sent before it noticed. Every event carries
+    /// the attempt it belongs to (see <see cref="ISteamSocketDriver"/>), the session ignores anything
+    /// that is not the live attempt, and the lifecycle waits - bounded - for the previous socket to
+    /// finish closing before the next one opens.
+    /// </para>
+    /// <para>
+    /// The socket callbacks may arrive off the main thread, so they only queue into
+    /// <see cref="SteamMatchSocketPump"/>. <see cref="Update"/> is the single place the session is
+    /// driven and its outputs are carried out, which keeps every Unity call on the main thread.
     /// </para>
     /// </summary>
     public sealed class SteamMatchConnection : MonoBehaviour
@@ -32,10 +39,13 @@ namespace HexWars.Presentation
         /// <summary>How long a credential refresh may take before the drop counts as unrecoverable.</summary>
         public const float RefreshTimeoutSeconds = 30f;
 
-        readonly SteamMatchSession _session = new SteamMatchSession();
-        readonly Queue<string> _inbound = new Queue<string>();
+        /// <summary>How long the previous attempt gets to finish closing before the next one opens.</summary>
+        public const float AttemptCloseTimeoutSeconds = 2f;
 
-        WebSocket? _ws;
+        readonly SteamMatchSession _session = new SteamMatchSession();
+
+        NativeWebSocketDriver? _driver;
+        SteamMatchSocketPump? _pump;
         GameBootstrap? _game;
         SteamMatchTicket? _ticket;
         Func<Action<SteamMatchTicket?>, bool>? _refresh;
@@ -46,10 +56,8 @@ namespace HexWars.Presentation
         /// <summary>True only after the server accepted the credential and dealt a seat.</summary>
         public bool Connected { get; private set; }
 
-        bool _closing;                 // deliberate teardown (Cancel / Main menu), not an error
-        volatile bool _socketOpened;   // the socket opened; the session has not been told yet
-        volatile bool _attemptClosed;  // this attempt is over (OnClose fired, or it never opened)
-        bool _stopped;                 // the session will not try again
+        bool _closing;      // deliberate teardown (Cancel / Main menu), not an error
+        bool _stopped;      // the session will not try again
         bool _retryRequested;
         double _retryDelay;
         bool _refreshPending;
@@ -66,34 +74,35 @@ namespace HexWars.Presentation
             _ticket = ticket;
             _refresh = refreshCredential;
             _session.UseTicket(ticket);
+            _driver = new NativeWebSocketDriver(message => Debug.LogWarning("[SteamNet] " + message));
+            _pump = new SteamMatchSocketPump(_session, _driver, message => Debug.LogError("[SteamNet] " + message));
             StartCoroutine(Lifecycle());
         }
 
         /// <summary>
-        /// One attempt per pass. An attempt ends on the socket close event OR on the session handshake
-        /// deadline, which is what stops a socket that opens and then never answers AUTH from hanging
-        /// the game on "Connecting..." for good.
+        /// One attempt per pass. An attempt ends on its own socket close event OR on the session
+        /// handshake deadline, which covers connect as well as the handshake: a socket that never
+        /// finishes connecting, and one that opens and then never answers AUTH, both used to hang the
+        /// game on "Connecting..." for good.
         /// </summary>
         IEnumerator Lifecycle()
         {
             while (true)
             {
-                OpenOnce();
-                while (!_attemptClosed && !_retryRequested && !_stopped && !_closing) yield return null;
-                if (_closing) yield break;
+                var attempt = OpenOnce();
 
-                // The deadline may already have ended this attempt; only a real close needs telling.
-                if (_attemptClosed && !_retryRequested && !_stopped)
-                {
-                    _session.Closed();
-                    ExecuteOutputs();
-                }
+                while (!_retryRequested && !_stopped && !_closing) yield return null;
                 if (_closing || _stopped) yield break;
-                if (!_retryRequested) yield break;
 
                 _retryRequested = false;
                 var wait = _retryDelay;
-                CloseSocket();
+
+                // Wait for the abandoned socket to finish closing before the next one opens, so its
+                // last events land while it is still the attempt they belong to. Bounded: a socket
+                // that will not close must not hold the reconnect up for ever.
+                yield return CloseAttempt(attempt);
+                if (_closing) yield break;
+
                 if (wait > 0) yield return new WaitForSeconds((float)wait);
                 if (_closing) yield break;
 
@@ -110,6 +119,31 @@ namespace HexWars.Presentation
                     ExecuteOutputs();
                 }
                 if (_closing || _stopped) yield break;
+            }
+        }
+
+        /// <summary>Closes one attempt and waits, bounded, for the close to finish.</summary>
+        IEnumerator CloseAttempt(int attemptId)
+        {
+            var driver = _driver;
+            if (driver == null) yield break;
+
+            Task? closing = null;
+            try { closing = driver.CloseAsync(attemptId); }
+            catch (Exception e) { Debug.LogWarning("[SteamNet] close failed: " + e.Message); }
+            if (closing == null) yield break;
+
+            var deadline = Time.unscaledTime + AttemptCloseTimeoutSeconds;
+            while (!closing.IsCompleted && Time.unscaledTime < deadline) yield return null;
+
+            if (!closing.IsCompleted)
+            {
+                Debug.LogWarning("[SteamNet] attempt " + attemptId + " did not close in time; abandoning its socket");
+            }
+            else if (closing.IsFaulted)
+            {
+                var reason = closing.Exception == null ? "unknown" : closing.Exception.GetBaseException().Message;
+                Debug.LogWarning("[SteamNet] close failed: " + reason);
             }
         }
 
@@ -146,90 +180,44 @@ namespace HexWars.Presentation
             _session.CredentialRefreshed(ticket);
         }
 
-        /// <summary>One attempt, event-driven exactly as in <see cref="NetClient"/>: the Connect Task is
-        /// only observed for faults, because on WebGL it completes the moment the JS socket is kicked.</summary>
-        void OpenOnce()
+        /// <summary>Begins one attempt and hands back the id every event for it must carry.</summary>
+        int OpenOnce()
         {
-            _attemptClosed = false;
-            _socketOpened = false;
-            _session.Attempting();
+            var attempt = _session.BeginAttempt();
 
             var ticket = _ticket;
-            if (ticket == null || string.IsNullOrEmpty(ticket.WebsocketUrl))
+            var driver = _driver;
+            if (driver == null || ticket == null || string.IsNullOrEmpty(ticket.WebsocketUrl))
             {
                 Debug.LogError("[SteamNet] no match socket url");
-                _attemptClosed = true;
-                return;
+                _session.Closed(attempt);
+                ExecuteOutputs();
+                return attempt;
             }
 
             Debug.Log("[SteamNet] connecting to " + SafeUrl(ticket.WebsocketUrl));
-            try { _ws = new WebSocket(ticket.WebsocketUrl); }
-            catch (Exception e)
-            {
-                Debug.LogError("[SteamNet] socket create failed: " + e.Message);
-                _attemptClosed = true;
-                return;
-            }
-
-            _ws.OnOpen += () =>
-            {
-                Debug.Log("[SteamNet] open");
-                _socketOpened = true;   // Update sends AUTH, on the main thread
-            };
-            _ws.OnError += e => Debug.LogError("[SteamNet] error: " + e);
-            _ws.OnClose += c =>
-            {
-                Connected = false;
-                Debug.Log("[SteamNet] closed: " + c);
-                _attemptClosed = true;
-            };
-            _ws.OnMessage += data =>
-            {
-                var raw = Encoding.UTF8.GetString(data);
-                lock (_inbound) _inbound.Enqueue(raw);
-            };
-
-            try
-            {
-                _ws.Connect().ContinueWith(t =>
-                {
-                    if (!t.IsFaulted) return;
-                    Debug.LogError("[SteamNet] connect faulted: " + t.Exception.GetBaseException().Message);
-                    _attemptClosed = true;
-                }, System.Threading.Tasks.TaskScheduler.Default);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError("[SteamNet] connect failed: " + e.Message);
-                _attemptClosed = true;
-            }
+            driver.Open(ticket.WebsocketUrl, attempt);
+            return attempt;
         }
 
-        public async void Send(string message)
+        public void Send(string message)
         {
-            var ws = _ws;
-            if (ws != null && ws.State == WebSocketState.Open) await ws.SendText(message);
+            var driver = _driver;
+            if (driver == null) return;
+            driver.Send(_session.CurrentAttempt, message);
         }
 
         void Update()
         {
-#if !UNITY_WEBGL || UNITY_EDITOR
-            _ws?.DispatchMessageQueue();
-#endif
+            var driver = _driver;
+            if (driver != null) driver.DispatchMessages();
             if (_closing) return;
 
             // a started game means a drop has something to reconnect into
             if (_game != null && _game.State != null) _session.GameStarted = true;
 
-            if (_socketOpened) { _socketOpened = false; _session.Opened(); }
-
-            while (true)
-            {
-                string? frame = null;
-                lock (_inbound) { if (_inbound.Count > 0) frame = _inbound.Dequeue(); }
-                if (frame == null) break;
-                _session.Frame(frame);
-            }
+            var pump = _pump;
+            if (pump != null) pump.Pump();
 
             _session.Tick(Time.unscaledTimeAsDouble);
             ExecuteOutputs();
@@ -278,6 +266,15 @@ namespace HexWars.Presentation
                         Debug.LogWarning("[SteamNet] auth rejected: " + output.Text);
                         if (game != null) game.OnNetAuthFailed(output.Text);
                         break;
+                    case SteamMatchSessionOutputKind.ProtocolViolation:
+                        // The far end sent something the protocol does not allow. Drop the socket at
+                        // once rather than keep reading from a peer that is not speaking v2.
+                        Connected = false;
+                        _stopped = true;
+                        Debug.LogWarning("[SteamNet] protocol violation; closing the socket (code "
+                                         + output.Text + ")");
+                        CloseCurrentAttempt();
+                        break;
                     case SteamMatchSessionOutputKind.Reconnecting:
                         Connected = false;
                         if (game != null) game.OnNetReconnecting(output.Seat);
@@ -292,15 +289,25 @@ namespace HexWars.Presentation
                         if (game != null) game.OnNetClosed();
                         break;
                     case SteamMatchSessionOutputKind.GiveUp:
-                        // No fresh credential: this connection can never come back, so it takes itself
-                        // down and the bootstrap puts the player back on the title.
+                        // No fresh credential, or a peer that broke the protocol: this connection can
+                        // never come back, so it takes itself down and the bootstrap puts the player
+                        // back on the title.
                         Connected = false;
                         _stopped = true;
+                        CloseCurrentAttempt();
                         if (game != null) game.OnSteamReconnectAbandoned();
                         Destroy(this);
                         return;
                 }
             }
+        }
+
+        void CloseCurrentAttempt()
+        {
+            var driver = _driver;
+            if (driver == null) return;
+            try { driver.CloseAsync(_session.CurrentAttempt); }
+            catch (Exception e) { Debug.LogWarning("[SteamNet] close failed: " + e.Message); }
         }
 
         string StartingCatalogMessage()
@@ -310,22 +317,18 @@ namespace HexWars.Presentation
             return NetProtocol.Catalog(BarracksWire.Write(catalog));
         }
 
-        async void CloseSocket()
-        {
-            var ws = _ws;
-            _ws = null;
-            if (ws == null) return;
-            try { await ws.Close(); }
-            catch (Exception e) { Debug.LogWarning("[SteamNet] close failed: " + e.Message); }
-        }
-
-        async void OnDestroy()
+        void OnDestroy()
         {
             _closing = true;        // deliberate teardown (Cancel / Main menu), not an error
             StopAllCoroutines();
-            var ws = _ws;
-            _ws = null;
-            if (ws != null) await ws.Close();
+
+            var pump = _pump;
+            _pump = null;
+            if (pump != null) pump.Dispose();
+
+            var driver = _driver;
+            _driver = null;
+            if (driver != null) driver.CloseAll();
         }
 
         /// <summary>Log-safe form of the socket URL. The credential is never in a URL, and this keeps it
@@ -339,6 +342,158 @@ namespace HexWars.Presentation
                 return uri.Scheme + "://" + uri.Authority + uri.AbsolutePath;
             }
             catch (Exception) { return "(unparsed)"; }
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ISteamSocketDriver"/> on NativeWebSocket. Every handler closes over the attempt id
+    /// its socket was opened for, which is what makes a late event from a dying socket identifiable
+    /// as such instead of being fed to whichever attempt happens to be live.
+    /// </summary>
+    sealed class NativeWebSocketDriver : ISteamSocketDriver
+    {
+        readonly object _gate = new object();
+        readonly Action<string> _log;
+
+        WebSocket? _socket;
+        int _socketAttempt;
+
+        public NativeWebSocketDriver(Action<string>? log = null)
+        {
+            _log = log ?? (_ => { });
+        }
+
+        public event Action<int>? Opened;
+        public event Action<int, string>? Message;
+        public event Action<int, string>? Closed;
+        public event Action<int, string>? Error;
+
+        public void Open(string url, int attemptId)
+        {
+            CloseAll();   // an attempt never inherits the socket of the one before it
+
+            WebSocket socket;
+            try { socket = new WebSocket(url); }
+            catch (Exception e)
+            {
+                RaiseError(attemptId, "socket create failed: " + e.Message);
+                RaiseClosed(attemptId, "create-failed");
+                return;
+            }
+
+            lock (_gate)
+            {
+                _socket = socket;
+                _socketAttempt = attemptId;
+            }
+
+            socket.OnOpen += () => RaiseOpened(attemptId);
+            socket.OnError += message => RaiseError(attemptId, message);
+            socket.OnClose += code => RaiseClosed(attemptId, code.ToString());
+            socket.OnMessage += data => RaiseMessage(attemptId, Encoding.UTF8.GetString(data));
+
+            // The Connect Task is only observed for faults, because on WebGL it completes the moment
+            // the JS socket is kicked; the open itself arrives as OnOpen.
+            try
+            {
+                socket.Connect().ContinueWith(task =>
+                {
+                    if (!task.IsFaulted) return;
+                    var reason = task.Exception == null ? "unknown" : task.Exception.GetBaseException().Message;
+                    RaiseError(attemptId, "connect faulted: " + reason);
+                    RaiseClosed(attemptId, "connect-faulted");
+                }, TaskScheduler.Default);
+            }
+            catch (Exception e)
+            {
+                RaiseError(attemptId, "connect failed: " + e.Message);
+                RaiseClosed(attemptId, "connect-failed");
+            }
+        }
+
+        public void Send(int attemptId, string text)
+        {
+            WebSocket? socket;
+            lock (_gate)
+            {
+                if (_socketAttempt != attemptId) return;
+                socket = _socket;
+            }
+            if (socket == null || socket.State != WebSocketState.Open) return;
+            SendText(socket, text);
+        }
+
+        public Task CloseAsync(int attemptId)
+        {
+            WebSocket? socket;
+            lock (_gate)
+            {
+                if (_socket == null || _socketAttempt != attemptId) return Task.CompletedTask;
+                socket = _socket;
+                _socket = null;
+                _socketAttempt = 0;
+            }
+            return CloseSocket(socket);
+        }
+
+        /// <summary>Closes whatever socket is still held, whichever attempt it belonged to.</summary>
+        public void CloseAll()
+        {
+            WebSocket? socket;
+            lock (_gate)
+            {
+                socket = _socket;
+                _socket = null;
+                _socketAttempt = 0;
+            }
+            if (socket == null) return;
+            var _ = CloseSocket(socket);   // fire and forget: nobody is waiting on this one
+        }
+
+        /// <summary>Drains the socket queue. WebGL dispatches its own, so this is a no-op there.</summary>
+        public void DispatchMessages()
+        {
+#if !UNITY_WEBGL || UNITY_EDITOR
+            WebSocket? socket;
+            lock (_gate) { socket = _socket; }
+            if (socket != null) socket.DispatchMessageQueue();
+#endif
+        }
+
+        async Task CloseSocket(WebSocket socket)
+        {
+            try { await socket.Close(); }
+            catch (Exception e) { _log("close failed: " + e.Message); }
+        }
+
+        async void SendText(WebSocket socket, string text)
+        {
+            try { await socket.SendText(text); }
+            catch (Exception e) { _log("send failed: " + e.Message); }
+        }
+
+        void RaiseOpened(int attemptId)
+        {
+            var handler = Opened;
+            if (handler != null) handler(attemptId);
+        }
+
+        void RaiseMessage(int attemptId, string text)
+        {
+            var handler = Message;
+            if (handler != null) handler(attemptId, text);
+        }
+
+        void RaiseClosed(int attemptId, string reason)
+        {
+            var handler = Closed;
+            if (handler != null) handler(attemptId, reason);
+        }
+
+        void RaiseError(int attemptId, string message)
+        {
+            var handler = Error;
+            if (handler != null) handler(attemptId, message);
         }
     }
 }

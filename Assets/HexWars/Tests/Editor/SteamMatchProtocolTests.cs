@@ -28,7 +28,30 @@ namespace HexWars.Presentation.Tests
         public void TryParseAuthFail_WithoutACode_IsStillAnAuthFailure()
         {
             Assert.That(SteamMatchProtocol.TryParseAuthFail("AUTH FAIL", out var code), Is.True);
-            Assert.That(code, Is.Empty);
+            Assert.That(code, Is.EqualTo(SteamMatchProtocol.AuthFailUnknown));
+        }
+
+        [Test]
+        public void TryParseAuthFail_YieldsOnlyCodesFromTheFixedSet()
+        {
+            foreach (var known in new[] { "invalid", "expired", "unavailable", "protocol" })
+            {
+                Assert.That(SteamMatchProtocol.TryParseAuthFail("AUTH FAIL " + known, out var code), Is.True);
+                Assert.That(code, Is.EqualTo(known));
+            }
+        }
+
+        [Test]
+        public void TryParseAuthFail_NeverPassesAnUntrustedPayloadThrough()
+        {
+            // The payload is whatever the far end sent. It reaches a Unity log and a player-facing
+            // path, so it is mapped to a code we chose or to "unknown" - never echoed.
+            var hostile = "AUTH FAIL 0A1B2C3D-join-credential\nSEAT 0";
+            Assert.That(SteamMatchProtocol.TryParseAuthFail(hostile, out var code), Is.True);
+            Assert.That(code, Is.EqualTo(SteamMatchProtocol.AuthFailUnknown));
+
+            Assert.That(SteamMatchProtocol.TryParseAuthFail("AUTH FAIL Expired", out var cased), Is.True);
+            Assert.That(cased, Is.EqualTo(SteamMatchProtocol.AuthFailUnknown), "the set is matched exactly");
         }
 
         [Test]

@@ -46,6 +46,10 @@
     <Compile Include="../../Assets/HexWars/Tests/Editor/StartupRouteTests.cs" Link="Presentation/Steam/StartupRouteTests.cs" />
     <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSession.cs" Link="Presentation/Steam/SteamMatchSession.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSessionTests.cs" Link="Presentation/Steam/SteamMatchSessionTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamSocketDriver.cs" Link="Presentation/Steam/ISteamSocketDriver.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSocketPump.cs" Link="Presentation/Steam/SteamMatchSocketPump.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamSocketDriver.cs" Link="Presentation/Steam/FakeSteamSocketDriver.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSocketPumpTests.cs" Link="Presentation/Steam/SteamMatchSocketPumpTests.cs" />
     <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamInviteGate.cs" Link="Presentation/Steam/SteamInviteGate.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/SteamInviteGateTests.cs" Link="Presentation/Steam/SteamInviteGateTests.cs" />
   </ItemGroup>

@@ -293,6 +293,15 @@ namespace HexWars.Presentation
     {
         public const string AuthFailPrefix = "AUTH FAIL";
 
+        /// <summary>The code reported when the server sent something outside the known set.</summary>
+        public const string AuthFailUnknown = "unknown";
+
+        /// <summary>The close code used when the far end broke the protocol.</summary>
+        public const string ProtocolCloseCode = "protocol";
+
+        /// <summary>Every AUTH FAIL code this client recognises. Anything else becomes "unknown".</summary>
+        static readonly string[] AuthFailCodes = { "invalid", "expired", "unavailable", ProtocolCloseCode };
+
         public const string Ping = "PING";
 
         public const string Pong = "PONG";
@@ -308,8 +317,17 @@ namespace HexWars.Presentation
             return "AUTH " + (matchId ?? string.Empty) + " " + (credential ?? string.Empty);
         }
 
-        /// <summary>Recognises <c>AUTH FAIL &lt;code&gt;</c> and yields the code (invalid, expired,
-        /// unavailable). A frame that merely starts with the same letters is not a match.</summary>
+        /// <summary>
+        /// Recognises <c>AUTH FAIL &lt;code&gt;</c> and yields one of <c>invalid</c>, <c>expired</c>,
+        /// <c>unavailable</c>, <c>protocol</c> - or <c>unknown</c> for anything else. A frame that
+        /// merely starts with the same letters is not a match.
+        /// <para>
+        /// The payload is attacker-controlled: it is whatever the far end of the socket chose to send,
+        /// before this client has decided it trusts that end at all. It reaches a Unity log and the
+        /// bootstrap failure path, so it is mapped onto a code we chose and the raw text is dropped
+        /// here, at the parse, rather than being carried around and hopefully sanitised later.
+        /// </para>
+        /// </summary>
         public static bool TryParseAuthFail(string? raw, out string code)
         {
             code = string.Empty;
@@ -317,10 +335,15 @@ namespace HexWars.Presentation
             if (!raw!.StartsWith(AuthFailPrefix, StringComparison.Ordinal)) return false;
 
             var rest = raw.Substring(AuthFailPrefix.Length);
-            if (rest.Length == 0) return true;
+            if (rest.Length == 0) { code = AuthFailUnknown; return true; }
             if (!rest.StartsWith(" ", StringComparison.Ordinal)) return false;
 
-            code = rest.Substring(1).Trim();
+            var payload = rest.Substring(1).Trim();
+            foreach (var known in AuthFailCodes)
+            {
+                if (string.Equals(payload, known, StringComparison.Ordinal)) { code = known; return true; }
+            }
+            code = AuthFailUnknown;
             return true;
         }
 

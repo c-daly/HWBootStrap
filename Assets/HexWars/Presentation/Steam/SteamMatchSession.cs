@@ -63,6 +63,9 @@ namespace HexWars.Presentation
 
         /// <summary>No fresh credential could be had: the match is unrecoverable.</summary>
         GiveUp,
+
+        /// <summary>The far end broke the protocol. The output text is the close code to use.</summary>
+        ProtocolViolation,
     }
 
     /// <summary>One queued instruction from <see cref="SteamMatchSession"/>.</summary>
@@ -90,8 +93,22 @@ namespace HexWars.Presentation
 
         public override string ToString()
         {
-            return Kind + "(" + Text + ", seat=" + Seat + ", delay="
+            var rendered = Kind == SteamMatchSessionOutputKind.Send ? Redact(Text) : Text;
+            return Kind + "(" + rendered + ", seat=" + Seat + ", delay="
                  + DelaySeconds.ToString(CultureInfo.InvariantCulture) + ")";
+        }
+
+        /// <summary>
+        /// An outbound frame is rendered as its verb and nothing else. AUTH carries the single-use
+        /// join credential and the match id, and no diagnostic is worth putting those in a log or a
+        /// crash report. The same rule covers every other Send, so a frame added later cannot leak
+        /// a payload just because nobody remembered to redact it.
+        /// </summary>
+        static string Redact(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            var space = text.IndexOf(" ", StringComparison.Ordinal);
+            return space < 0 ? text : text.Substring(0, space) + " <redacted>";
         }
     }
 
@@ -130,16 +147,21 @@ namespace HexWars.Presentation
         double? _handshakeAnchor;
 
         int _attempt;
+        int _currentAttempt;
+        int _staleEventsIgnored;
         bool _authFailed;
+        bool _protocolViolated;
         bool _expectRestart;
 
         public SteamMatchSession()
         {
+            ArmHandshake();
         }
 
         public SteamMatchSession(SteamMatchTicket ticket)
         {
             UseTicket(ticket);
+            ArmHandshake();
         }
 
         public SteamMatchSessionState State { get; private set; } = SteamMatchSessionState.Connecting;
@@ -156,6 +178,18 @@ namespace HexWars.Presentation
         /// <summary>True when the credential was refused, which no retry can fix.</summary>
         public bool AuthFailed { get { return _authFailed; } }
 
+        /// <summary>
+        /// The id of the socket attempt that is live now. Every event the driver reports carries the
+        /// attempt it belongs to, and anything that is not this one is dropped.
+        /// </summary>
+        public int CurrentAttempt { get { return _currentAttempt; } }
+
+        /// <summary>How many driver events were dropped because they belonged to an old attempt.</summary>
+        public int StaleEventsIgnored { get { return _staleEventsIgnored; } }
+
+        /// <summary>True when the far end sent something the protocol does not allow.</summary>
+        public bool ProtocolViolated { get { return _protocolViolated; } }
+
         /// <summary>Adopts a (re-issued) ticket for the next AUTH frame.</summary>
         public void UseTicket(SteamMatchTicket? ticket)
         {
@@ -163,27 +197,55 @@ namespace HexWars.Presentation
             _credential = ticket == null ? string.Empty : ticket.JoinCredential;
         }
 
-        /// <summary>A new socket is being opened. Call before <see cref="Opened"/>.</summary>
-        public void Attempting()
+        /// <summary>
+        /// A new socket is being opened. Returns the id every event for that socket must carry.
+        /// <para>
+        /// The handshake deadline is armed here rather than on <see cref="Opened"/>, so that ONE
+        /// deadline covers connect, AUTH and SEAT together. A socket that hangs on connect used to be
+        /// covered by nothing at all: the deadline only started once the socket opened, so a connect
+        /// that never completed left the game on "Connecting..." for good.
+        /// </para>
+        /// </summary>
+        public int BeginAttempt()
         {
-            if (_authFailed) return;
+            _currentAttempt++;
+            if (_authFailed || _protocolViolated) return _currentAttempt;
+
             State = SteamMatchSessionState.Connecting;
-            ClearHandshake();
+            ArmHandshake();
+            return _currentAttempt;
         }
 
-        /// <summary>The socket opened: AUTH goes out first, and the handshake deadline starts.</summary>
+        /// <summary>The current attempt socket opened. AUTH is the very first frame out.</summary>
         public void Opened()
         {
-            if (_authFailed) return;
+            Opened(_currentAttempt);
+        }
+
+        /// <summary>The socket for <paramref name="attemptId"/> opened. A stale id is ignored.</summary>
+        public void Opened(int attemptId)
+        {
+            if (!IsCurrentAttempt(attemptId)) return;
+            if (_authFailed || _protocolViolated) return;
+            // An attempt the deadline already ended is over even though its id is still the current
+            // one: an open arriving now would re-send AUTH with a credential that is already spent.
+            if (State == SteamMatchSessionState.Closed) return;
+
             State = SteamMatchSessionState.Authenticating;
-            _handshakeArmed = true;
-            _handshakeAnchor = null;
+            // The deadline is NOT restarted here: it was armed for the whole attempt in BeginAttempt.
             Emit(SteamMatchSessionOutputKind.Send, SteamMatchProtocol.AuthFrame(_matchId, _credential));
         }
 
-        /// <summary>One inbound frame.</summary>
+        /// <summary>One inbound frame on the current attempt.</summary>
         public void Frame(string? raw)
         {
+            Frame(_currentAttempt, raw);
+        }
+
+        /// <summary>One inbound frame on <paramref name="attemptId"/>. A stale id is ignored.</summary>
+        public void Frame(int attemptId, string? raw)
+        {
+            if (!IsCurrentAttempt(attemptId)) return;
             if (raw == null) return;
             if (State == SteamMatchSessionState.Closed) return;
 
@@ -237,9 +299,19 @@ namespace HexWars.Presentation
             }
         }
 
-        /// <summary>The socket closed.</summary>
+        /// <summary>The current attempt socket closed.</summary>
         public void Closed()
         {
+            Closed(_currentAttempt);
+        }
+
+        /// <summary>
+        /// The socket for <paramref name="attemptId"/> closed. A stale id is ignored, which is what
+        /// stops the late OnClose of an abandoned attempt from ending the one that replaced it.
+        /// </summary>
+        public void Closed(int attemptId)
+        {
+            if (!IsCurrentAttempt(attemptId)) return;
             EndAttempt(false);
         }
 
@@ -281,20 +353,40 @@ namespace HexWars.Presentation
 
         // ----- internals ---------------------------------------------------------------------
 
+        /// <summary>
+        /// SEAT is the server accepting AUTH, so it is validated before anything is acted on and
+        /// before the handshake deadline is touched.
+        /// <para>
+        /// Three rules, each of which was a way in. It is accepted ONLY in Authenticating, so a SEAT
+        /// that arrives before our own AUTH went out cannot seat an unauthenticated socket. The
+        /// payload must be exactly 0, 1 or FULL, so a seat index the game has no player for can never
+        /// reach the barracks cache. And the deadline is cleared only once the payload is known good:
+        /// clearing it first meant a single malformed SEAT disarmed the timeout and hung the attempt
+        /// with nothing left to end it.
+        /// </para>
+        /// </summary>
         void OnSeat(string payload)
         {
-            ClearHandshake();
+            if (State != SteamMatchSessionState.Authenticating) return;
 
             if (string.Equals(payload, "FULL", StringComparison.Ordinal))
             {
+                ClearHandshake();
                 State = SteamMatchSessionState.Closed;
                 Emit(SteamMatchSessionOutputKind.SeatFull);
                 return;
             }
 
-            int seat;
-            if (!int.TryParse(payload, NumberStyles.Integer, CultureInfo.InvariantCulture, out seat)) return;
+            if (!string.Equals(payload, "0", StringComparison.Ordinal)
+                && !string.Equals(payload, "1", StringComparison.Ordinal))
+            {
+                ProtocolViolation();
+                return;
+            }
 
+            var seat = string.Equals(payload, "1", StringComparison.Ordinal) ? 1 : 0;
+
+            ClearHandshake();
             State = SteamMatchSessionState.Seated;
             if (_attempt > 0)
             {
@@ -328,6 +420,30 @@ namespace HexWars.Presentation
             var delay = plannedRestart ? 0 : BackoffSeconds[Math.Min(_attempt, BackoffSeconds.Length - 1)];
             _attempt++;
             Emit(SteamMatchSessionOutputKind.Retry, null, 0, delay);
+        }
+
+        /// <summary>The far end broke the protocol: end the attempt and never try it again.</summary>
+        void ProtocolViolation()
+        {
+            _protocolViolated = true;
+            State = SteamMatchSessionState.Closed;
+            ClearHandshake();
+            Emit(SteamMatchSessionOutputKind.ProtocolViolation, SteamMatchProtocol.ProtocolCloseCode);
+            Emit(SteamMatchSessionOutputKind.GiveUp);
+        }
+
+        /// <summary>True while the event belongs to the live attempt; a stale one is counted here.</summary>
+        bool IsCurrentAttempt(int attemptId)
+        {
+            if (attemptId == _currentAttempt) return true;
+            _staleEventsIgnored++;
+            return false;
+        }
+
+        void ArmHandshake()
+        {
+            _handshakeArmed = true;
+            _handshakeAnchor = null;
         }
 
         void ClearHandshake()
