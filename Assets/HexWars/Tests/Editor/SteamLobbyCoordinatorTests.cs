@@ -1003,6 +1003,24 @@ namespace HexWars.Presentation.Tests
             Assert.That(_steam.LeaveLobbyCalls, Is.EqualTo(1), "the lobby Steam did create is not stranded");
         }
 
+        // ----- starting an operation over one in flight -----------------------------------------
+
+        [Test]
+        public void StartingAnOperationDuringAnExchange_CancelsTheRequestAndReleasesTheTicket()
+        {
+            var lobbyId = CreateOwnedLobbyWithOpponent();
+            _api.Deferred = true;
+            ReadyUpBothPlayers(lobbyId);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.AllocatingMatch));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.Zero);
+
+            _sut.Reconnect("match-9");
+
+            Assert.That(_api.CancelCalls, Is.EqualTo(1), "the abandoned request must be cancelled");
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(1),
+                "the abandoned exchange must not keep its Web API ticket");
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()

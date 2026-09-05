@@ -215,16 +215,12 @@ namespace HexWars.Presentation
         {
             if (!EnsureSteam()) return;
 
-            // A retry starts a fresh exchange, so whatever ticket the abandoned one still holds goes
-            // now. Cancelling when none is held costs nothing; leaving one live costs a ticket slot
-            // on the account for its whole lifetime.
-            ReleaseTicket();
-
             if (!string.IsNullOrEmpty(_lobbyId) && IsRetryableInLobby(_phase))
             {
-                // A retry starts a fresh exchange over an abandoned one, so the old request and any
-                // half-published match go first. The lobby itself is kept.
+                // A retry starts a fresh exchange over an abandoned one, so the old request, its
+                // ticket and any half-published match go first. The lobby itself is kept.
                 _api.Cancel();
+                ReleaseTicket();
                 ClearPendingMatchKey();
                 _generation++;
                 _allocationStarted = false;
@@ -882,6 +878,15 @@ namespace HexWars.Presentation
 
         void BeginOperation(Operation operation)
         {
+            // Starting an operation over one that is still in flight abandons it. Bumping the
+            // generation only makes this client ignore the answer: the match service request keeps
+            // running and the Web API ticket stays live on the account unless both are released here.
+            if (_phase != SteamLobbyPhase.Idle && _phase != SteamLobbyPhase.Cancelled)
+            {
+                _api.Cancel();
+                ReleaseTicket();
+            }
+
             _generation++;
             _operation = operation;
             _idleAfterCancel = false;
