@@ -41,6 +41,17 @@ namespace HexWars.NetServer.Configuration
         public const string MatchPublicBaseUrlKey = "MATCH_PUBLIC_BASE_URL";
         public const string MatchJoinTokenTtlSecondsKey = "MATCH_JOIN_TOKEN_TTL_SECONDS";
         public const string MatchBuildIdKey = "MATCH_BUILD_ID";
+
+        /// <summary>
+        /// The commit Render sets on every deploy, used as the build id when nothing else supplies one.
+        ///
+        /// Not a HexWars setting and not documented as one: it is read only as a fallback, because a
+        /// Blueprint has nowhere to write the commit it is about to deploy. Without it an operator has
+        /// two bad choices - leave the build id unset and be refused at startup, or pin a literal that
+        /// stops matching what is actually running, which is the one thing a client compatibility check
+        /// is made against.
+        /// </summary>
+        public const string RenderGitCommitKey = "RENDER_GIT_COMMIT";
         public const string MatchProtocolVersionKey = "MATCH_PROTOCOL_VERSION";
         public const string AllowedWebOriginsKey = "ALLOWED_WEB_ORIGINS";
         public const string LobbyProviderKey = "LOBBY_PROVIDER";
@@ -100,7 +111,10 @@ namespace HexWars.NetServer.Configuration
             string? webApiBaseRaw = Value(config, SteamWebApiBaseUrlKey);
             string? databaseUrlRaw = Value(config, DatabaseUrlKey);
             string? publicBaseRaw = Value(config, MatchPublicBaseUrlKey);
-            string? buildIdRaw = Value(config, MatchBuildIdKey);
+            // An explicit build id outranks the platform one: somebody who set it meant it, and a
+            // deployment that pins a build for a compatibility window must not have it silently
+            // replaced by whatever commit happened to deploy.
+            string? buildIdRaw = Value(config, MatchBuildIdKey) ?? Value(config, RenderGitCommitKey);
 
             // A missing, unparseable or zero App ID all mean the same thing to an operator: not configured.
             if (appIdRaw is not null
