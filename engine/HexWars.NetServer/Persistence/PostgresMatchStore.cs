@@ -43,6 +43,14 @@ namespace HexWars.NetServer.Persistence
 
         const string CommandColumns = "match_id, sequence, command_wire, accepted_at, issuer_steam_id";
 
+        /// <summary>The three statuses a match can end in, as a SQL literal list. Literals rather than
+        /// parameters on purpose: ix_matches_terminal_completed is a PARTIAL index over exactly this list,
+        /// and a planner cannot prove a parameter matches a partial index predicate, so parameterising it
+        /// would quietly turn the retention purge into a sequential scan of every match ever played.</summary>
+        static readonly string TerminalStatuses =
+            "('" + MatchStatusText.Completed + "', '" + MatchStatusText.Expired + "', '"
+            + MatchStatusText.Abandoned + "')";
+
         /// <summary>The two statuses that mean a match can still be joined or played, written as a SQL
         /// literal list so the only place these words are spelled is "MatchStatusText".</summary>
         static readonly string OpenStatuses =
@@ -266,6 +274,92 @@ namespace HexWars.NetServer.Persistence
             await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false)) ids.Add(reader.GetGuid(0));
             return ids;
+        }
+
+        // ---- retention -------------------------------------------------------
+
+        public async Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(policy);
+
+            await using NpgsqlConnection connection =
+                await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using NpgsqlTransaction transaction =
+                await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+            // One transaction for all four statements, in the order the retention decision states them. The
+            // order is what stops a sweep contradicting itself: a match this pass has just expired carries an
+            // ending stamped now, so the delete pass that follows cannot also remove it.
+            //
+            // last_activity_at is written with GREATEST rather than assigned. Every other write in this class
+            // does the same, because that column is what the abandon rule reads and a value that could move
+            // backwards would let a clock skew drag a live match into the reaper.
+            int expired = await AgeOutAsync(
+                connection, transaction, ct,
+                "UPDATE matches SET status = @terminal, completed_at = @now, "
+                + "last_activity_at = GREATEST(last_activity_at, @now) "
+                + "WHERE status = @status AND created_at < @now - @age",
+                MatchStatusText.Expired, MatchStatusText.Waiting, now, policy.WaitingExpiry);
+
+            // The one statement whose ids the caller needs. An abandoned match may still have sockets
+            // attached to it, and nothing but the coordinator holding them can close them.
+            var abandoned = new List<Guid>();
+            await using (var abandon = new NpgsqlCommand(
+                "UPDATE matches SET status = @terminal, completed_at = @now, "
+                + "last_activity_at = GREATEST(last_activity_at, @now) "
+                + "WHERE status = @status AND last_activity_at < @now - @age "
+                + "RETURNING match_id", connection, transaction))
+            {
+                abandon.Parameters.AddWithValue("terminal", MatchStatusText.Abandoned);
+                abandon.Parameters.AddWithValue("status", MatchStatusText.Active);
+                abandon.Parameters.Add(Timestamp("now", now));
+                abandon.Parameters.Add(Interval("age", policy.ActiveIdle));
+
+                await using NpgsqlDataReader reader =
+                    await abandon.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false)) abandoned.Add(reader.GetGuid(0));
+            }
+
+            int credentials;
+            await using (var purge = new NpgsqlCommand(
+                "DELETE FROM match_join_credentials WHERE expires_at < @now - @age", connection, transaction))
+            {
+                purge.Parameters.Add(Timestamp("now", now));
+                purge.Parameters.Add(Interval("age", policy.CredentialRetention));
+                credentials = await purge.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            // Only from matches, ever. Seats, commands and any remaining credentials cascade from the match
+            // row; reaching for a seat directly is refused by the schema, because a journal with a hole in it
+            // replays into a different game than the one that was played.
+            int deleted;
+            await using (var reap = new NpgsqlCommand(
+                "DELETE FROM matches WHERE status IN " + TerminalStatuses
+                + " AND completed_at < @now - @age", connection, transaction))
+            {
+                reap.Parameters.Add(Timestamp("now", now));
+                reap.Parameters.Add(Interval("age", policy.TerminalRetention));
+                deleted = await reap.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
+
+            return new RetentionResult(expired, abandoned.Count, credentials, deleted, abandoned);
+        }
+
+        /// <summary>One of the two ageing-out UPDATEs. They differ only in the status they move from, the
+        /// status they move to and the column they judge, so the plumbing is written once.</summary>
+        static async Task<int> AgeOutAsync(
+            NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken ct,
+            string sql, string terminal, string status, DateTimeOffset now, TimeSpan age)
+        {
+            await using var command = new NpgsqlCommand(sql, connection, transaction);
+            command.Parameters.AddWithValue("terminal", terminal);
+            command.Parameters.AddWithValue("status", status);
+            command.Parameters.Add(Timestamp("now", now));
+            command.Parameters.Add(Interval("age", age));
+            return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
         // ---- match lifecycle -------------------------------------------------
@@ -839,6 +933,12 @@ namespace HexWars.NetServer.Persistence
 
         static NpgsqlParameter Timestamp(string name, DateTimeOffset value) =>
             new(name, NpgsqlDbType.TimestampTz) { Value = value.UtcDateTime };
+
+        /// <summary>An age, as a Postgres interval. Typed explicitly so an age subtracted from now is arithmetic
+        /// the database does against an index, rather than a comparison this process would have to make
+        /// over every row in the table.</summary>
+        static NpgsqlParameter Interval(string name, TimeSpan value) =>
+            new(name, NpgsqlDbType.Interval) { Value = value };
 
         /// <summary>Match ids are logged eight characters wide: enough to follow one match through a log,
         /// short enough not to turn every line into a wall of hex.</summary>

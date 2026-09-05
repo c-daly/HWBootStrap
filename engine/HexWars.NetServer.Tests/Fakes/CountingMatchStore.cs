@@ -157,5 +157,12 @@ namespace HexWars.NetServer.Tests.Fakes
             return inner.ReplaceJoinCredentialAsync(
                 credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
         }
+
+        public Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct)
+        {
+            Writes++;
+            return inner.ApplyRetentionAsync(policy, now, ct);
+        }
     }
 }

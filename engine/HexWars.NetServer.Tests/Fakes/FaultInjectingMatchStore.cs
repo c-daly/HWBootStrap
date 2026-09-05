@@ -210,5 +210,9 @@ namespace HexWars.NetServer.Tests.Fakes
             TimeSpan? allowTerminalWithin = null) =>
             inner.ReplaceJoinCredentialAsync(
                 credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
+
+        public Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct) =>
+            inner.ApplyRetentionAsync(policy, now, ct);
     }
 }
