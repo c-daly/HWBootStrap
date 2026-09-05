@@ -8,6 +8,7 @@ using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Endpoints;
+using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
@@ -448,8 +449,11 @@ namespace HexWars.NetServer.Tests
             Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
             Assert.That(factory.RequestBodyBytesRead, Is.GreaterThan(0),
                 "this body really did have to be read, or the bound below asserts nothing");
-            Assert.That(factory.RequestBodyBytesRead, Is.LessThanOrEqualTo(JsonBody.DefaultMaxBytes + 1),
-                "and the read must stop one byte past the cap rather than draining the whole body");
+            Assert.That(factory.RequestBodyBytesRead,
+                Is.LessThanOrEqualTo(RequestLimits.MaxRequestBodyBytes + 1),
+                "and the read stops one byte past the TRANSPORT cap rather than draining the whole body - "
+                + "a body with no declared length is measured by the request-limit middleware, which is the "
+                + "only thing that can measure one, and the JSON reader then refuses what is left");
         }
 
         /// <summary>A stream that will not say how long it is, so HttpClient sends it chunked.</summary>
