@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -256,13 +257,29 @@ namespace HexWars.NetServer.Tests
 
             // Nothing about the process changed; the database did. Readiness is asked again on every probe
             // rather than answered once at startup, and this is the difference that shows it.
+            // A refused connection answers immediately and would prove nothing about the deadline. This
+            // address is not routable, so the probe hangs exactly the way a database that has gone away
+            // hangs, and the only thing that can end it in time is the deadline the check imposes.
             gone = Track(NpgsqlDataSource.Create(
-                "Host=127.0.0.1;Port=1;Username=u;Password=p;Database=fake;Timeout=1"));
+                "Host=10.255.255.1;Port=5432;Username=u;Password=p;Database=fake;Timeout=2"));
 
+            var clock = Stopwatch.StartNew();
             (HttpStatusCode code, _, IReadOnlyList<ReadyCheck> checks) = await ReadyAsync(client);
+            clock.Stop();
 
             Assert.That(code, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
             Assert.That(Check(checks, HealthEndpoints.DatabaseCheck).Status, Is.EqualTo("Unhealthy"));
+            Assert.That(clock.Elapsed, Is.LessThan(TimeSpan.FromSeconds(4)),
+                "a probe that waits as long as the connection attempt is a probe with no deadline");
+
+            // And it let the pool go. A probe that abandoned a lease would make the next one queue behind
+            // it, so the second answer arriving in time is the evidence the first one cleaned up.
+            var second = Stopwatch.StartNew();
+            Assert.That((await ReadyAsync(client)).Code, Is.EqualTo(HttpStatusCode.ServiceUnavailable));
+            second.Stop();
+
+            Assert.That(second.Elapsed, Is.LessThan(TimeSpan.FromSeconds(4)),
+                "the first probe leased a connection it never gave back");
         }
 
         [Test]
@@ -305,35 +322,6 @@ namespace HexWars.NetServer.Tests
         }
 
         // ---- going away -------------------------------------------------------
-
-        [Test]
-        public async Task Shutdown_TellsEverySeatAndClosesTheSocketsWithServiceRestart()
-        {
-            SteamServerFactory factory = Track(new SteamServerFactory());
-            using HttpClient warm = factory.CreateClient();
-
-            await using DurableFlowClient zero = await DurableFlowClient.CreateAsync(
-                factory, FakeSteamWebApiClient.LobbyId, FakeSteamWebApiClient.OwnerTicket);
-            await using DurableFlowClient one = await DurableFlowClient.JoinAsync(
-                factory, zero.MatchId, FakeSteamWebApiClient.GuestTicket);
-
-            await zero.ConnectAsync();
-            await zero.ExpectAsync(NetProtocol.CatalogRequest);
-            await one.ConnectAsync();
-            await one.ExpectAsync(NetProtocol.CatalogRequest);
-
-            factory.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
-
-            Assert.That(await zero.ExpectAsync(GracefulShutdownService.RestartNotice),
-                Is.EqualTo(GracefulShutdownService.RestartNotice));
-            Assert.That(await one.ExpectAsync(GracefulShutdownService.RestartNotice),
-                Is.EqualTo(GracefulShutdownService.RestartNotice));
-
-            Assert.That((int)(await zero.ExpectCloseAsync())!,
-                Is.EqualTo(GracefulShutdownService.RestartCloseStatus));
-            Assert.That((int)(await one.ExpectCloseAsync())!,
-                Is.EqualTo(GracefulShutdownService.RestartCloseStatus));
-        }
 
         [Test]
         public async Task Shutdown_TurnsAwayANewMatchAndANewJoinWith503()

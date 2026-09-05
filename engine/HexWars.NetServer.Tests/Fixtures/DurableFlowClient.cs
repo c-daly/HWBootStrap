@@ -322,11 +322,12 @@ namespace HexWars.NetServer.Tests.Fixtures
                         await _socket.CloseAsync(
                             WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
                 }
-                catch (WebSocketException)
+                catch (Exception)
                 {
-                }
-                catch (OperationCanceledException)
-                {
+                    // Every exception, and deliberately so. This close is a courtesy: the server may have
+                    // already closed or aborted this socket, and the in-memory transport reports that in
+                    // more than one way. A test that failed in its own teardown would report the courtesy
+                    // rather than the thing it was written to check.
                 }
 
                 _socket.Dispose();

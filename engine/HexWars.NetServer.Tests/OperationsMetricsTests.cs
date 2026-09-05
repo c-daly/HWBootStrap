@@ -1,11 +1,17 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using HexWars.Engine;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Operations;
+using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
 using HexWars.NetServer.Tests.Fixtures;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using NUnit.Framework;
 
 namespace HexWars.NetServer.Tests
@@ -71,7 +77,8 @@ namespace HexWars.NetServer.Tests
         }
 
         /// <summary>Both seats seated on a started match, with no commands played.</summary>
-        static async Task<(DurableFlowClient Zero, DurableFlowClient One)> StartAsync(SteamServerFactory host)
+        static async Task<(DurableFlowClient Zero, DurableFlowClient One)> StartAsync(
+            WebApplicationFactory<Program> host)
         {
             DurableFlowClient zero = await DurableFlowClient.CreateAsync(
                 host, FakeSteamWebApiClient.LobbyId, FakeSteamWebApiClient.OwnerTicket);
@@ -172,6 +179,119 @@ namespace HexWars.NetServer.Tests
                     snapshot.GetProperty("rejectionsByReason").GetProperty("WrongSeat").GetInt64(),
                     Is.EqualTo(1));
                 Assert.That(snapshot.GetProperty("commandsCommitted").GetInt64(), Is.Zero);
+            }
+        }
+
+        [Test]
+        public async Task Metrics_CountACatalogRefusalApartFromACommandRefusal()
+        {
+            SteamServerFactory factory = Host();
+            using HttpClient client = factory.CreateClient();
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(factory);
+            await using (zero)
+            await using (one)
+            {
+                // The match has started, so a second catalog is refused. It is a different event from a
+                // move that was not applied, and an operator reading one counter must not be reading both.
+                await zero.SendCatalogAsync();
+                Assert.That(await zero.ExpectAsync("REJECT "), Is.EqualTo("REJECT CatalogClosed"));
+
+                JsonElement snapshot = await SnapshotAsync(client);
+
+                Assert.That(snapshot.GetProperty("catalogRejected").GetInt64(), Is.EqualTo(1));
+                Assert.That(
+                    snapshot.GetProperty("catalogRejectionsByReason").GetProperty("CatalogClosed").GetInt64(),
+                    Is.EqualTo(1));
+                Assert.That(snapshot.GetProperty("commandsRejected").GetInt64(), Is.Zero,
+                    "a catalog that was refused is not a command that was refused");
+            }
+        }
+
+        [Test]
+        public async Task Metrics_CountAStoreFailureUnderTheCallThatFailed()
+        {
+            SteamServerFactory factory = Host();
+            var faults = new FaultInjectingMatchStore(factory.Store);
+
+            WebApplicationFactory<Program> host = Track(factory.WithWebHostBuilder(
+                builder => builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<IMatchStore>();
+                    services.AddSingleton<IMatchStore>(faults);
+                })));
+
+            using HttpClient client = host.CreateClient();
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(host);
+            await using (zero)
+            await using (one)
+            {
+                faults.FailNextAppend(new InvalidOperationException("the database is not there"));
+
+                await zero.SendCmdAsync(Opening);
+                Assert.That(await zero.ExpectAsync("REJECT "), Is.EqualTo("REJECT TemporaryFailure"));
+
+                JsonElement snapshot = await SnapshotAsync(client);
+
+                Assert.That(snapshot.GetProperty("databaseFailures").GetInt64(), Is.GreaterThanOrEqualTo(1));
+                Assert.That(
+                    snapshot.GetProperty("databaseFailuresByOp").GetProperty("append").GetInt64(),
+                    Is.EqualTo(1),
+                    "an untagged total says the database is unhappy and nothing an operator can act on");
+            }
+        }
+
+        [Test]
+        public async Task Metrics_CountAnOwnershipRefusalAsASteamFailure()
+        {
+            SteamServerFactory factory = Host();
+            factory.Steam.Ownership.Remove(FakeSteamWebApiClient.OwnerSteamId);
+
+            using HttpClient client = factory.CreateClient();
+
+            using HttpResponseMessage refused = await client.PostAsJsonAsync(
+                DurableFlowClient.CreateRoute,
+                new
+                {
+                    steamLobbyId = FakeSteamWebApiClient.LobbyId,
+                    ticket = FakeSteamWebApiClient.OwnerTicket,
+                });
+
+            Assert.That(refused.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden));
+
+            JsonElement snapshot = await SnapshotAsync(client);
+
+            Assert.That(
+                snapshot.GetProperty("steamFailuresByKind").GetProperty("OwnershipMissing").GetInt64(),
+                Is.EqualTo(1),
+                "a no Valve answered with is still Valve turning a player away");
+            Assert.That(snapshot.GetProperty("matchesCreated").GetInt64(), Is.Zero);
+        }
+
+        [Test]
+        public async Task Metrics_CountAMalformedHandshakeUnderTheFrameStage()
+        {
+            SteamServerFactory factory = Host();
+            using HttpClient client = factory.CreateClient();
+
+            DurableFlowClient seat = await DurableFlowClient.CreateAsync(
+                factory, FakeSteamWebApiClient.LobbyId, FakeSteamWebApiClient.OwnerTicket);
+
+            await using (seat)
+            {
+                await seat.OpenAsync();
+                await seat.SendAsync("HELLO there");
+
+                Assert.That(await seat.ExpectAsync("AUTH FAIL "), Is.EqualTo("AUTH FAIL invalid"));
+
+                JsonElement snapshot = await SnapshotAsync(client);
+
+                Assert.That(
+                    snapshot.GetProperty("authFailuresByStage").GetProperty("frame").GetInt64(),
+                    Is.EqualTo(1),
+                    "a refusal that never reached the credential store is not a credential failure");
+                Assert.That(snapshot.GetProperty("authFailures").GetInt64(), Is.EqualTo(1));
             }
         }
 
