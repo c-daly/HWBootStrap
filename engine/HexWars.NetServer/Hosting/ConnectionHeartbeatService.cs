@@ -40,8 +40,21 @@ namespace HexWars.NetServer.Hosting
         /// <summary>Credential re-checks in flight at once, across every socket on this host.</summary>
         internal const int MaxConcurrentRechecks = 8;
 
+        /// <summary>
+        /// Store calls that may be OUTSTANDING at once, whatever this host has given up waiting for.
+        ///
+        /// Abandoning an await frees the worker; it does not free the store. A client that treats
+        /// cancellation as a suggestion therefore leaves a call running after its worker has moved on, and
+        /// without a ceiling those orphans grow by up to eight a pass forever - invisible to any count of
+        /// passes or workers. Twice the concurrency, so one slow generation of checks can overlap the next
+        /// without stalling it, and no more than that.
+        /// </summary>
+        internal const int MaxOutstandingChecks = 2 * MaxConcurrentRechecks;
+
         /// <summary>How long one re-check is given before it is abandoned until the next cadence.</summary>
         internal static readonly TimeSpan RecheckTimeout = TimeSpan.FromSeconds(5);
+
+        readonly SemaphoreSlim _outstanding = new(MaxOutstandingChecks, MaxOutstandingChecks);
 
         /// <summary>How often a cadence that could not start is allowed to say so.</summary>
         static readonly TimeSpan OverrunLogInterval = TimeSpan.FromMinutes(1);
@@ -53,6 +66,7 @@ namespace HexWars.NetServer.Hosting
         Task? _inflight;
         CancellationTokenSource? _inflightCancellation;
         DateTimeOffset _lastOverrunLog = DateTimeOffset.MinValue;
+        DateTimeOffset _lastStarvedLog = DateTimeOffset.MinValue;
 
         /// <summary>Connections that have been offered to the batch selection. A socket that is not due is
         /// never counted, so this is what proves the selection walks the due ones and not the host.</summary>
@@ -67,6 +81,10 @@ namespace HexWars.NetServer.Hosting
         /// <summary>Re-check passes running right now: one, or none. Never two.</summary>
         internal int RecheckBatchesInFlight =>
             Volatile.Read(ref _inflight) is { IsCompleted: false } ? 1 : 0;
+
+        /// <summary>Store calls this host is still waiting on, including the ones it has stopped awaiting.
+        /// Never above <see cref="MaxOutstandingChecks"/>.</summary>
+        internal int OutstandingChecks => MaxOutstandingChecks - _outstanding.CurrentCount;
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -183,6 +201,18 @@ namespace HexWars.NetServer.Hosting
                 + "and this tick starts none. Sockets keep their place in the queue.");
         }
 
+        /// <summary>Says re-checks have stopped because every outstanding slot is held by a call that never
+        /// came back. At most once a minute: a store in this state is in it for a while.</summary>
+        void NoteStarved(DateTimeOffset now)
+        {
+            if (now - _lastStarvedLog < OverrunLogInterval) return;
+
+            _lastStarvedLog = now;
+            logger.LogWarning(
+                "The credential store is not answering; live re-checks are paused until it does. "
+                + "Sockets stay open.");
+        }
+
         /// <summary>
         /// The oldest-checked due sockets, up to <paramref name="budget"/>, in oldest-first order.
         ///
@@ -249,6 +279,19 @@ namespace HexWars.NetServer.Hosting
             {
                 await Parallel.ForEachAsync(batch, pool, async (connection, ct) =>
                 {
+                    // The ceiling is taken BEFORE the stamp. When every slot is held by a call this host
+                    // has given up on, re-checks simply pause - fail open, sockets stay where they are -
+                    // and the sockets that could not be reached are left unstamped and still due.
+                    try
+                    {
+                        await _outstanding.WaitAsync(ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        if (_outstanding.CurrentCount == 0) NoteStarved(now);
+                        throw;
+                    }
+
                     // Stamped as the check starts, not when the batch was chosen: a socket the deadline
                     // never reached keeps its place at the front of the queue.
                     connection.LastCredentialCheck = now;
@@ -276,22 +319,52 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken batch)
         {
+            // One outstanding slot is held on entry. Every path below either hands it to a store call or
+            // gives it back here; it is never simply dropped.
+            if (connection.CredentialHash is not byte[] hash || connection.MatchId is not Guid matchId)
+            {
+                _outstanding.Release();
+                return;
+            }
+
+            var deadline = CancellationTokenSource.CreateLinkedTokenSource(batch);
+            deadline.CancelAfter(RecheckTimeout);
+
+            Task<bool> call;
             try
             {
-                if (connection.CredentialHash is not byte[] hash) return;
-                if (connection.MatchId is not Guid matchId) return;
+                call = credentials.IsStillValidAsync(hash, matchId, now, deadline.Token);
+            }
+            catch (Exception failure)
+            {
+                // A client that threw before it managed to return a task.
+                deadline.Dispose();
+                _outstanding.Release();
+                logger.LogWarning(failure, "A live credential could not be re-checked");
+                return;
+            }
 
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(batch);
-                deadline.CancelAfter(RecheckTimeout);
+            // The slot follows the CALL and not this method, and the continuation is attached before the
+            // await so abandoning the await cannot release it early. Giving the slot back when this method
+            // returns would be counting the workers again, which is the thing that does not bound anything:
+            // the store is still busy whether or not anybody is still listening to it.
+            _ = call.ContinueWith(
+                finished =>
+                {
+                    _ = finished.Exception;   // observed, so an abandoned failure is not an unhandled one
+                    _outstanding.Release();
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
 
-                // The token is passed AND the await is bounded. A store client that ignores cancellation
+            try
+            {
+                // The token is passed AND the await is bounded. A store client that ignores the token
                 // would otherwise hold this worker for as long as it liked, and the deadline would be a
                 // request rather than a deadline. WaitAsync abandons it instead: the worker moves on, and
-                // the orphaned call is bounded by eight per pass and one pass at a time.
-                bool valid = await credentials
-                    .IsStillValidAsync(hash, matchId, now, deadline.Token)
-                    .WaitAsync(deadline.Token)
-                    .ConfigureAwait(false);
+                // the call it left behind still owns a slot until it finishes.
+                bool valid = await call.WaitAsync(deadline.Token).ConfigureAwait(false);
 
                 if (valid) return;
 
@@ -308,6 +381,14 @@ namespace HexWars.NetServer.Hosting
             catch (Exception failure)
             {
                 logger.LogWarning(failure, "A live credential could not be re-checked");
+            }
+            finally
+            {
+                // Only once the call is really over. The token belongs to it as well as to the await, and
+                // a call this host abandoned is still holding one - disposing the source underneath it
+                // would turn a slow store into an ObjectDisposedException. An abandoned source clears
+                // itself when its own timer fires, which is at most one re-check timeout away.
+                if (call.IsCompleted) deadline.Dispose();
             }
         }
     }

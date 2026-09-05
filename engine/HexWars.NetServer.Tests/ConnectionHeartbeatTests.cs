@@ -181,6 +181,7 @@ namespace HexWars.NetServer.Tests
             await _heartbeat.StartAsync(CancellationToken.None);
             await WaitUntil(() => _credentials.Completed >= 100, TimeSpan.FromSeconds(20));
 
+            AssertStartedOldestFirst(_credentials.StartOrder);
             Assert.That(_credentials.Completed, Is.EqualTo(100));
             Assert.That(_heartbeat.RecheckCadences, Is.EqualTo(1),
                 "one pass, not thirteen: the workers keep pulling until the batch is drained");
@@ -264,7 +265,8 @@ namespace HexWars.NetServer.Tests
             Start(recheckSeconds: 300, heartbeatSeconds: 1, budget: 256,
                 checkTakes: TimeSpan.FromSeconds(3));
 
-            for (var i = 0; i < 100; i++) Seat(i, due: true, lastCheck: oldest.AddSeconds(i));
+            foreach (int index in Shuffled(100))
+                Seat(index, due: true, lastCheck: oldest.AddSeconds(index));
 
             await _heartbeat.StartAsync(CancellationToken.None);
             await WaitUntil(() => _heartbeat.RecheckCadences >= 3, TimeSpan.FromSeconds(20));
@@ -276,6 +278,8 @@ namespace HexWars.NetServer.Tests
             Assert.That(started.Count, Is.LessThan(100), "the checks outlast a cadence, so not all of them");
             Assert.That(started, Is.EquivalentTo(Enumerable.Range(0, started.Count).Select(i => (byte)i)),
                 "the started sockets are the N oldest, with no younger one jumping the queue");
+
+            AssertStartedOldestFirst(_credentials.StartOrder);
         }
 
         [Test]
@@ -326,6 +330,106 @@ namespace HexWars.NetServer.Tests
                 Is.GreaterThanOrEqualTo(1), "each failure is reported once");
         }
 
+        [Test]
+        public async Task AStoreThatIgnoresCancellation_CannotAccumulateOrphanedCalls()
+        {
+            // Abandoning an await frees the WORKER. It does not free the store: the call this host stopped
+            // listening to is still running, still holding a connection, still costing something. Counting
+            // passes or workers cannot see those, so without a ceiling on the calls themselves they grow by
+            // up to eight a pass for as long as the store misbehaves.
+            Start(recheckSeconds: 300, heartbeatSeconds: 1, budget: 256);
+            _credentials.IgnoresCancellation = true;
+
+            RecordingWebSocket peer = Seat(0);
+            for (var i = 1; i < 100; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+
+            var highestOutstanding = 0;
+            for (var sample = 0; sample < 80; sample++)
+            {
+                highestOutstanding = Math.Max(highestOutstanding, _heartbeat.OutstandingChecks);
+                Assert.That(_credentials.InFlightNow,
+                    Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxOutstandingChecks),
+                    "the store is never given more calls than the ceiling allows");
+                await Task.Delay(100);
+            }
+
+            Assert.That(highestOutstanding,
+                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxOutstandingChecks));
+            Assert.That(_credentials.InFlightPeak,
+                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxOutstandingChecks),
+                "including across passes, which is what workers alone cannot bound");
+            Assert.That(peer.Sent.Count(m => m == "PING"), Is.GreaterThanOrEqualTo(3),
+                "and the pings that keep every match alive still go out every tick");
+            Assert.That(_connections.Any(c => c.IsClosed), Is.False,
+                "a store that will not answer closes nobody: re-checks pause, they do not convict");
+
+            // And when the store comes back, every slot returns and re-checks resume.
+            long before = _credentials.Started;
+            _credentials.ReleaseAll();
+
+            await WaitUntil(() => _heartbeat.OutstandingChecks == 0, TimeSpan.FromSeconds(20));
+            Assert.That(_heartbeat.OutstandingChecks, Is.Zero, "every abandoned call gave its slot back");
+
+            await WaitUntil(() => _credentials.Started > before, TimeSpan.FromSeconds(20));
+            Assert.That(_credentials.Started, Is.GreaterThan(before), "and checking starts again");
+        }
+
+        [Test]
+        public async Task ABudgetSmallerThanTheDueSet_TakesExactlyTheOldest()
+        {
+            // Registered shuffled, so passing this means the heap ordered them and not the dictionary.
+            DateTimeOffset oldest = DateTimeOffset.UtcNow.AddHours(-2);
+
+            Start(recheckSeconds: 300, heartbeatSeconds: 5, budget: 8);
+
+            foreach (int index in Shuffled(20))
+                Seat(index, due: true, lastCheck: oldest.AddSeconds(index));
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _credentials.Started >= 8, TimeSpan.FromSeconds(20));
+
+            // Read between ticks: the next one is five seconds away.
+            Assert.That(_credentials.Seen,
+                Is.EquivalentTo(Enumerable.Range(0, 8).Select(i => (byte)i)),
+                "the eight oldest, and none of the twelve younger ones");
+
+            AssertStartedOldestFirst(_credentials.StartOrder);
+        }
+
+        /// <summary>
+        /// Asserts nothing started while something meaningfully older was still waiting.
+        ///
+        /// Not a strict sort: eight workers pull the head of the batch at once, so the eight oldest start
+        /// in whatever order the scheduler runs them. What must hold is that no socket starts more than one
+        /// worker-wave ahead of the oldest thing still unstarted.
+        /// </summary>
+        static void AssertStartedOldestFirst(IReadOnlyList<byte> order)
+        {
+            for (var position = 0; position < order.Count; position++)
+                Assert.That(order[position],
+                    Is.LessThan(position + ConnectionHeartbeatService.MaxConcurrentRechecks),
+                    "seat " + order[position].ToString() + " started at position " + position.ToString()
+                    + ", jumping ahead of older sockets that had not started");
+        }
+
+        /// <summary>0..count-1 in an order that is not the natural one, with a fixed seed so a failure can
+        /// be reproduced.</summary>
+        static IEnumerable<int> Shuffled(int count)
+        {
+            var indices = Enumerable.Range(0, count).ToArray();
+            var random = new Random(20260905);
+
+            for (int i = indices.Length - 1; i > 0; i--)
+            {
+                int j = random.Next(i + 1);
+                (indices[i], indices[j]) = (indices[j], indices[i]);
+            }
+
+            return indices;
+        }
+
         static async Task WaitUntil(Func<bool> condition, TimeSpan within)
         {
             DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(within);
@@ -355,6 +459,8 @@ namespace HexWars.NetServer.Tests
             int _inFlightPeak;
 
             readonly HashSet<byte> _seen = new();
+            readonly List<byte> _order = new();
+            readonly TaskCompletionSource _ignored = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
             public int Started => Volatile.Read(ref _started);
 
@@ -367,12 +473,26 @@ namespace HexWars.NetServer.Tests
             public int Cancelled => Volatile.Read(ref _cancelled);
             public int InFlightPeak => Volatile.Read(ref _inFlightPeak);
 
+            /// <summary>Calls this fake has been given and has not finished. It counts the ones the caller
+            /// has stopped waiting for, which is the whole point: a worker moving on does not end a query.</summary>
+            public int InFlightNow => Volatile.Read(ref _inFlight);
+
+            /// <summary>The seats checks were started for, in the order they started.</summary>
+            public IReadOnlyList<byte> StartOrder
+            {
+                get { lock (_order) return _order.ToArray(); }
+            }
+
             public void BlockFor(byte seat)
             {
                 lock (_blocked) _blocked.Add(seat);
             }
 
-            public void ReleaseAll() => _release.Release(int.MaxValue / 2);
+            public void ReleaseAll()
+            {
+                _ignored.TrySetResult();
+                _release.Release(int.MaxValue / 2);
+            }
 
             public async Task<bool> IsStillValidAsync(
                 byte[] credentialHash, Guid matchId, DateTimeOffset now, CancellationToken ct)
@@ -380,6 +500,7 @@ namespace HexWars.NetServer.Tests
                 Interlocked.Increment(ref _started);
                 RecordPeak(Interlocked.Increment(ref _inFlight));
                 lock (_seen) _seen.Add(credentialHash[0]);
+                lock (_order) _order.Add(credentialHash[0]);
 
                 if (Throws)
                 {
@@ -389,8 +510,9 @@ namespace HexWars.NetServer.Tests
 
                 if (IgnoresCancellation)
                 {
-                    // No token, on purpose. What is being tested is the caller giving up on it.
-                    await new TaskCompletionSource().Task.ConfigureAwait(false);
+                    // No token, on purpose. What is being tested is the caller giving up on it - and the
+                    // ceiling that stops those abandoned calls from accumulating without bound.
+                    await _ignored.Task.ConfigureAwait(false);
                 }
 
                 bool blocked;
