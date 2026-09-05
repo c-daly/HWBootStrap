@@ -44,30 +44,44 @@ git ls-remote https://github.com/rlabrecque/Steamworks.NET.git refs/tags/<tag>^{
 The `^{}` suffix dereferences an annotated tag to the commit it wraps; without it you get the tag
 object, which Unity will not resolve. Record the new tag-to-SHA pair in the table above.
 
-### Owner gate: regenerating `Packages/packages-lock.json`
+### `Packages/packages-lock.json`, and the owner gate on it
 
 Unity also writes `Packages/packages-lock.json`, which records the resolved revision for every git
-dependency. Only the editor can produce that file, so it is **not** part of this change and the lock
-file in the repository still names the previous revision. Until the step below is done, a clean
-checkout resolves the package from `manifest.json` rather than from the lock, which is the one thing
-the pin exists to prevent.
+dependency. A clean checkout resolves from the lock, so a package missing there leaves the pin in
+`manifest.json` as the only thing naming the revision, which is the situation the pin exists to
+prevent.
 
-This is an owner gate: the change is not finished until someone with the editor does it.
+No editor was available when the pin was made, so the `com.rlabrecque.steamworks.net` entry was
+**written by hand**. For a git dependency the entry is deterministic: `version` is the manifest URL
+verbatim, `depth` is 0, `source` is `git`, `dependencies` is empty because the package declares none
+in its `package.json` at that commit, and `hash` is the pinned commit itself.
 
-1. Open the project once in **Unity 6000.5** (the version in `ProjectSettings/ProjectVersion.txt`).
-2. Let the Package Manager finish resolving. It rewrites `Packages/packages-lock.json` in place, and
-   the `com.rlabrecque.steamworks.net` entry should then carry the same commit SHA as `manifest.json`
-   (`c21a8f0e31c56ae8707130967faf491f7dd7c0d8`).
-3. Verify the two agree, then commit the lock file on its own:
+```json
+"com.rlabrecque.steamworks.net": {
+  "version": "https://github.com/rlabrecque/Steamworks.NET.git?path=/com.rlabrecque.steamworks.net#c21a8f0e31c56ae8707130967faf491f7dd7c0d8",
+  "depth": 0,
+  "source": "git",
+  "dependencies": {},
+  "hash": "c21a8f0e31c56ae8707130967faf491f7dd7c0d8"
+}
+```
+
+The owner gate is confirming that entry, not producing it. On the first open in **Unity 6000.5** (the
+version in `ProjectSettings/ProjectVersion.txt`), let the Package Manager finish resolving, then look
+at the lock file:
 
 ```
-git diff --stat Packages/packages-lock.json
+git diff Packages/packages-lock.json
+```
+
+No diff means the hand-written entry matches what the editor resolved and there is nothing to do. A
+diff means the editor disagreed: keep the editor version and commit it, because that is the one the
+build will use.
+
+```
 git add Packages/packages-lock.json
 git commit -m "build(unity): refresh packages-lock for the pinned Steamworks.NET revision"
 ```
-
-If the lock file does not change, the editor did not re-resolve: delete the
-`com.rlabrecque.steamworks.net` entry from `packages-lock.json`, reopen the project, and repeat.
 
 ## Inbound match frames, and what is still unbounded
 
