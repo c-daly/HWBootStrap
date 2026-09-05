@@ -795,6 +795,7 @@ namespace HexWars.NetServer.Tests
         {
             using var factory = new SteamServerFactory();
             factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Settings["MATCH_TRUST_ALL_PROXIES"] = "true";
             using HttpClient client = factory.CreateClient();
 
             const string abuser = "203.0.113.10";
@@ -876,6 +877,7 @@ namespace HexWars.NetServer.Tests
             var captured = new CapturingLoggerProvider();
             using var factory = new SteamServerFactory();
             factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Settings["MATCH_TRUST_ALL_PROXIES"] = "true";
             factory.Logging = captured;
             using HttpClient client = factory.CreateClient();
 

@@ -47,6 +47,7 @@ namespace HexWars.NetServer.Configuration
         public const string MatchCompatibleClientBuildsKey = "MATCH_COMPATIBLE_CLIENT_BUILDS";
         public const string MatchTrustForwardedHeadersKey = "MATCH_TRUST_FORWARDED_HEADERS";
         public const string MatchTrustedProxyCidrsKey = "MATCH_TRUSTED_PROXY_CIDRS";
+        public const string MatchTrustAllProxiesKey = "MATCH_TRUST_ALL_PROXIES";
         public const string MatchBlockedSteamIdsKey = "MATCH_BLOCKED_STEAM_IDS";
         public const string MatchMetricsTokenKey = "MATCH_METRICS_TOKEN";
         public const string MatchLogPseudonymKeyKey = "MATCH_LOG_PSEUDONYM_KEY";
@@ -155,7 +156,26 @@ namespace HexWars.NetServer.Configuration
                 else errors.Add(MatchTrustForwardedHeadersKey + ": must be true, false, 1 or 0");
             }
 
+            string? trustAllRaw = Value(config, MatchTrustAllProxiesKey);
+            if (trustAllRaw is not null)
+            {
+                if (TryParseBool(trustAllRaw, out bool trustAll)) match.TrustAllProxies = trustAll;
+                else errors.Add(MatchTrustAllProxiesKey + ": must be true, false, 1 or 0");
+            }
+
             match.TrustedProxyCidrs = ReadList(config, MatchTrustedProxyCidrsKey);
+
+            // Trusting every peer is a real deployment on a platform that does not publish its proxy
+            // addresses. It is also exactly what a half-finished configuration looks like, and the
+            // consequence of guessing wrong is that any caller can pick their own rate-limit partition by
+            // writing a header. So it has to be said rather than arrived at.
+            if (match.TrustForwardedHeaders && match.TrustedProxyCidrs.Length == 0 && !match.TrustAllProxies)
+            {
+                errors.Add(MatchTrustForwardedHeadersKey + ": set " + MatchTrustedProxyCidrsKey
+                    + " to the proxy addresses, or " + MatchTrustAllProxiesKey
+                    + "=true to confirm this service is reachable only through its platform proxy");
+            }
+
             foreach (string entry in match.TrustedProxyCidrs)
             {
                 // Named rather than skipped. A typo here silently trusts nobody, which turns every
@@ -300,6 +320,7 @@ namespace HexWars.NetServer.Configuration
             target.CompatibleClientBuilds = source.CompatibleClientBuilds;
             target.TrustForwardedHeaders = source.TrustForwardedHeaders;
             target.TrustedProxyCidrs = source.TrustedProxyCidrs;
+            target.TrustAllProxies = source.TrustAllProxies;
             target.BlockedSteamIds = source.BlockedSteamIds;
             target.MetricsToken = source.MetricsToken;
             target.LogPseudonymKey = source.LogPseudonymKey;

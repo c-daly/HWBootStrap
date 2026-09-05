@@ -250,7 +250,14 @@ namespace HexWars.NetServer.Tests
         [TestCase("0", false)]
         public void BooleanKeys_AcceptTrueFalseOneZero(string raw, bool expected)
         {
-            var result = Read(new Dictionary<string, string?> { ["MATCH_TRUST_FORWARDED_HEADERS"] = raw });
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_TRUST_FORWARDED_HEADERS"] = raw,
+
+                // This test is about how a boolean is spelled, not about the proxy trust rule that a
+                // forwarded-headers deployment also has to satisfy.
+                ["MATCH_TRUST_ALL_PROXIES"] = "true",
+            });
 
             Assert.That(result.IsValid, Is.True, Joined(result));
             Assert.That(result.Match.TrustForwardedHeaders, Is.EqualTo(expected));
@@ -289,6 +296,47 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(result.Errors, Does.Contain(
                 "MATCH_TRUSTED_PROXY_CIDRS: each entry must be an IP address or a CIDR range"));
+        }
+
+        [Test]
+        public void TrustingForwardedHeadersWithNoProxyList_FailsWithoutAnExplicitAcknowledgement()
+        {
+            // Trusting every peer is a real deployment on a platform that does not publish its proxy
+            // addresses, but it is never something to arrive at by leaving a key unset: on any host with a
+            // second way in it hands every caller their own rate-limit partition.
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_TRUST_FORWARDED_HEADERS"] = "true",
+            });
+
+            Assert.That(result.IsValid, Is.False);
+            Assert.That(Joined(result), Does.Contain("MATCH_TRUSTED_PROXY_CIDRS"));
+            Assert.That(Joined(result), Does.Contain("MATCH_TRUST_ALL_PROXIES"));
+        }
+
+        [Test]
+        public void TrustingEveryProxy_IsValidOnceItIsAcknowledged()
+        {
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_TRUST_FORWARDED_HEADERS"] = "true",
+                ["MATCH_TRUST_ALL_PROXIES"] = "true",
+            });
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.TrustAllProxies, Is.True);
+        }
+
+        [Test]
+        public void TrustingForwardedHeadersWithAProxyList_NeedsNoAcknowledgement()
+        {
+            var result = Read(new Dictionary<string, string?>
+            {
+                ["MATCH_TRUST_FORWARDED_HEADERS"] = "true",
+                ["MATCH_TRUSTED_PROXY_CIDRS"] = "10.4.0.0/16",
+            });
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
         }
 
         [Test]
