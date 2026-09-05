@@ -33,8 +33,13 @@ client is still there, not what it has to say.
 | `CATALOG?` | none | This seat has not sent a catalog yet and the match is still waiting for it. |
 | `START` | replay text | The dealt start state. Sent when the match becomes active, and again to any seat that reconnects into an active match. |
 | `APPLY` | command wire form | A command that is durably recorded. Broadcast to both seats. |
-| `REJECT` | `Malformed`, `NoSeat`, `WrongSeat`, `CatalogClosed`, `CatalogV1Required`, `TemporaryFailure`, or an engine rejection reason | The command was not applied. Sent to the issuer only. |
+| `REJECT` | `Malformed`, `NoSeat`, `WrongSeat`, `CatalogClosed`, `CatalogV1Required`, `MatchEnded`, `TemporaryFailure`, or an engine rejection reason | The command was not applied. Sent to the issuer only. |
 | `AUTH FAIL` | `invalid`, `expired`, or `unavailable` | The handshake failed. Always followed by a close with status 1008. |
+
+`REJECT CatalogV1Required` and `REJECT MatchEnded` are deliberately different answers. The first means the
+match has not started and this command will be accepted once it does; the second means the match is over and
+no command will ever be accepted again. A client that cannot tell them apart retries a move into a finished
+game forever.
 | `PING` | none | Liveness probe. Answer with `PONG`. |
 | `SERVER RESTART` | none | Graceful shutdown, followed by a close with status 1012. Reconnect with backoff and re-authenticate. |
 
@@ -48,7 +53,42 @@ client is still there, not what it has to say.
 3. A socket that sends nothing within `MATCH_AUTH_TIMEOUT_SECONDS` is closed 1008 with no frame. It has
    proved nothing and is holding a connection slot.
 4. On success the server sends `SEAT <n>`, then either `CATALOG?` (the match is still waiting and this seat
-   has not sent one) or `START <replay>` (the match is active).
+   has not sent one) or `START <replay>` (the match is active, or finished and inside the terminal window
+   below).
+
+Four rules the handshake enforces before the credential service is touched at all:
+
+- **In Production the socket must be https.** After forwarded headers, a request that still says `http` is
+  answered **400 before the upgrade**. The very next frame on a v2 socket is a bearer credential.
+- **One address may hold `MATCH_MAX_SOCKETS_PER_IP` sockets** (default 8). Over that the upgrade is answered
+  **429**. An accepted socket costs a receive buffer, a writer task and a registry entry before it has
+  proved anything.
+- **Failed `AUTH` frames are counted per address.** Ten failures in five minutes and the rest of that window
+  is answered `AUTH FAIL invalid` and closed 1008 without a database query. Only `invalid` counts:
+  `unavailable` means this host could not answer, and counting it would lock a match out during exactly the
+  outage its players are retrying through.
+- **At most 64 handshakes are validated at once, process-wide.** An `AUTH` frame that waits more than two
+  seconds for a slot is answered `AUTH FAIL unavailable`.
+
+### The terminal reconnect window
+
+A `completed` match stays reachable for `MATCH_TERMINAL_RECONNECT_SECONDS` (default 600) after it finished.
+A seat that authenticates inside that window is sent `SEAT <n>` and `START <full replay>` and can fast
+forward to the position the game ended in; any `CMD` it then sends is answered `REJECT MatchEnded`. Past the
+window the same credential is answered `AUTH FAIL invalid`.
+
+The window exists because the last `APPLY` of a game is the frame most likely to be lost - it is broadcast at
+the instant the match becomes terminal - and without it a player whose socket dropped a moment earlier has no
+way at all to learn how the game they were playing ended. `expired` and `abandoned` matches are never
+reachable: there is no ending to deal, and both are statuses the server chose rather than the players.
+
+### One live socket per seat
+
+A successful `AUTH` for a (match, seat) that already has a socket closes the earlier one with **1000
+`superseded`**. A second `AUTH` on one seat is far more often a reconnect whose predecessor has not been
+noticed yet than it is two clients, and when it is two, one credential fanning out into an unbounded number
+of sockets is the shape of an abuse rather than of a game. A client that is closed this way should not
+reconnect in a loop; it has been replaced.
 
 The `AUTH` frame is never logged, at any level. What reaches a log is that a socket authenticated, the seat
 it took, and the first eight characters of the match id.
@@ -57,7 +97,7 @@ it took, and the first eight characters of the match id.
 
 | Code | Name on the wire | When |
 |---|---|---|
-| 1000 | Normal closure | The socket ended normally, from either side. |
+| 1000 | Normal closure | The socket ended normally, from either side. Also `superseded` (this seat authenticated on a newer socket) and `match ended` (the match reached a terminal status underneath a live game). |
 | 1001 | Endpoint unavailable | Stale: nothing inbound for `MATCH_STALE_CONNECTION_SECONDS`. |
 | 1008 | Policy violation | The handshake failed, the auth deadline passed, or the client is not reading (see §5). |
 | 1009 | Message too big | An inbound frame exceeded 64 KB. |
@@ -70,6 +110,8 @@ it took, and the first eight characters of the match id.
 | `MATCH_AUTH_TIMEOUT_SECONDS` | 10 s | How long a new socket has to send `AUTH`. |
 | `MATCH_HEARTBEAT_SECONDS` | 20 s | How often the server sends `PING` on every seated socket. |
 | `MATCH_STALE_CONNECTION_SECONDS` | 60 s | Silence after which a seated socket is closed 1001. Must be greater than the heartbeat, and by enough to survive a lost ping; startup refuses a configuration where it is not. |
+| `MATCH_TERMINAL_RECONNECT_SECONDS` | 600 s | How long a finished match still accepts a handshake. `0` closes the window. |
+| `MATCH_MAX_SOCKETS_PER_IP` | 8 | Sockets one address may hold at once. Over the cap the upgrade is answered 429. |
 
 The heartbeat is the only traffic on an idle match. Without it an idle socket is indistinguishable from a
 dead one and an intermediary will eventually drop it silently; without the silence check a client that lost
@@ -78,8 +120,17 @@ stopped listening.
 
 ## 5. Slow clients
 
-Each connection has a bounded outbound queue, `MATCH_OUTBOUND_QUEUE_CAPACITY` frames (default 256). When it
-fills, the connection is closed with **1008 `slow client`**.
+Each connection has a bounded outbound queue: `MATCH_OUTBOUND_QUEUE_CAPACITY` frames (default 256) **and**
+`MATCH_OUTBOUND_QUEUE_BYTES` bytes (default 4 MB). Exceeding either closes the connection with **1008
+`slow client`**.
+
+Both bounds are needed. A frame count is not a memory bound on its own, because frames are not one size: a
+`START` carrying a long journal is orders of magnitude bigger than an `APPLY`, so a queue well inside its
+frame limit can still be holding megabytes - once per socket, for every socket on the host.
+
+What bounds a `START` in turn is the ruleset. A journal cannot grow without limit: the engine ends a game at
+`GameConfig.RoundCap` rounds (default 100) whatever the players do, and a match nobody finishes is reaped by
+the retention job described in `docs/operations/match-data-retention.md`.
 
 The bound is the point. The coordinator hands frames over synchronously while holding a per-match gate, so
 enqueueing must never wait; with an unbounded queue that promise is kept by letting a client which has
@@ -113,7 +164,27 @@ the store under a `(match_id, sequence)` uniqueness constraint, and every comman
 and appended under that match's gate, one at a time. A double commit is not a race that is unlikely to
 happen; it is a row the database will not accept.
 
-## 7. Recovery guarantees
+**`REJECT TemporaryFailure` means the write did not happen, and the server has checked.** A statement that
+timed out, or a connection lost after the database had already committed, reaches the server as an exception
+over a journal that has already moved - so an append that throws is followed by a re-read of the journal, and
+the row is matched on all three of sequence, command wire and issuer. If it is there the command is treated
+as applied and broadcast normally; only if it is genuinely absent is `TemporaryFailure` sent. Without that
+check the honest-looking answer would invite the client to resend a command the server had in fact already
+committed.
+
+## 7. Single instance
+
+**This service runs as exactly one instance.** Match projections are process-local: the coordinator holds the
+replayed state of every match it is hosting in memory, and a second process would hold its own copy of the
+same match with no way to learn that the first one had moved on. The durable journal would stay correct - the
+sequence constraint sees to that - but the losing host would answer commands with `TemporaryFailure` until it
+reloaded, and each host would broadcast only to its own half of the players.
+
+So `render.yaml` sets `numInstances: 1`, and horizontal scaling is gated on the cross-host projection
+invalidation the plan describes rather than on capacity. Restarts and redeploys are safe and always were:
+that is what the next section is about.
+
+## 8. Recovery guarantees
 
 Killing this process at any command boundary and starting a fresh one over the same database cannot lose,
 duplicate, reorder or alter an acknowledged action. That is the whole point of committing before
@@ -162,7 +233,7 @@ diagnostic and 1 on failure, and **3** when it could not run at all: no `HEXWARS
 fixture applies (`SELFTEST-DURABLE REFUSED`). Exit 3 is never a pass - a self-test that came back green
 for want of anything to test is worse than one that did not run.
 
-## 8. Related documents
+## 9. Related documents
 
 - `docs/operations/steam-render-environments.md` — the environment variables named above.
 - `docs/operations/steam-client-configuration.md` — what the Unity client needs to reach this endpoint.
