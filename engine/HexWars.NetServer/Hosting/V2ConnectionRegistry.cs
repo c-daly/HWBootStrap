@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Runtime;
+using Microsoft.Extensions.Options;
 
 namespace HexWars.NetServer.Hosting
 {
@@ -12,9 +14,16 @@ namespace HexWars.NetServer.Hosting
     /// themselves. Splitting them would mean two dictionaries that have to agree, and the moment they did
     /// not, a frame would be queued for a socket that had already gone.
     /// </summary>
-    public sealed class V2ConnectionRegistry(ILogger<V2ConnectionRegistry> logger) : IConnectionSink
+    public sealed class V2ConnectionRegistry(
+        IOptions<MatchHostingOptions> options, ILogger<V2ConnectionRegistry> logger) : IConnectionSink
     {
         readonly ConcurrentDictionary<string, V2Connection> _connections = new(StringComparer.Ordinal);
+
+        /// <summary>Sockets held or promised per address. Counting the accepted ones after the fact is not
+        /// a cap: a hundred upgrades that arrive together all read the same low count and all pass.</summary>
+        readonly ConcurrentDictionary<string, int> _perAddress = new(StringComparer.Ordinal);
+
+        readonly int _maxPerAddress = options.Value.MaxSocketsPerIp;
 
         int _maxQueueDepth;
 
@@ -28,12 +37,61 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         public int MaxQueueDepth => Volatile.Read(ref _maxQueueDepth);
 
+        /// <summary>
+        /// Claims one slot for an address, or refuses.
+        ///
+        /// Taken BEFORE the upgrade and released by <see cref="Remove"/>, so the count a caller is judged
+        /// against includes the sockets that are still being accepted. A check-then-accept against a count
+        /// of live connections is not a cap at all: every upgrade in a simultaneous burst reads the same
+        /// number and every one of them passes it.
+        /// </summary>
+        public bool TryReserve(string ip)
+        {
+            ArgumentNullException.ThrowIfNull(ip);
+
+            while (true)
+            {
+                if (!_perAddress.TryGetValue(ip, out int held))
+                {
+                    if (_maxPerAddress < 1) return false;
+                    if (_perAddress.TryAdd(ip, 1)) return true;
+                    continue;
+                }
+
+                if (held >= _maxPerAddress) return false;
+                if (_perAddress.TryUpdate(ip, held + 1, held)) return true;
+            }
+        }
+
+        /// <summary>Hands a reservation back. Called when the upgrade never became a connection; a socket
+        /// that did become one gives its slot back through <see cref="Remove"/> instead.</summary>
+        public void Release(string ip)
+        {
+            ArgumentNullException.ThrowIfNull(ip);
+
+            while (true)
+            {
+                if (!_perAddress.TryGetValue(ip, out int held)) return;
+
+                if (held <= 1)
+                {
+                    if (_perAddress.TryRemove(new KeyValuePair<string, int>(ip, held))) return;
+                    continue;
+                }
+
+                if (_perAddress.TryUpdate(ip, held - 1, held)) return;
+            }
+        }
+
+        /// <summary>Takes ownership of the reservation already made for this connection address.</summary>
         internal void Add(V2Connection connection) => _connections[connection.Id] = connection;
 
         internal void Remove(string connectionId)
         {
-            if (_connections.TryRemove(connectionId, out V2Connection? connection))
-                Observe(connection.MaxQueueDepth);
+            if (!_connections.TryRemove(connectionId, out V2Connection? connection)) return;
+
+            Observe(connection.MaxQueueDepth);
+            Release(connection.RemoteIp);
         }
 
         internal bool TryGet(string connectionId, out V2Connection? connection) =>
@@ -42,16 +100,9 @@ namespace HexWars.NetServer.Hosting
         /// <summary>A point-in-time copy, so a caller can close connections while walking it.</summary>
         internal IReadOnlyCollection<V2Connection> Snapshot() => _connections.Values.ToArray();
 
-        /// <summary>How many sockets one address is holding. The material for a per-address cap, and worth
-        /// having before one is needed: a count nobody kept is a count nobody can act on.</summary>
-        public int CountForIp(string ip)
-        {
-            int count = 0;
-            foreach (V2Connection connection in _connections.Values)
-                if (string.Equals(connection.RemoteIp, ip, StringComparison.Ordinal)) count++;
-
-            return count;
-        }
+        /// <summary>How many slots one address holds, reservations that have not yet become sockets
+        /// included. That is the number the cap is enforced on, so it is the number worth reporting.</summary>
+        public int CountForIp(string ip) => _perAddress.TryGetValue(ip, out int held) ? held : 0;
 
         /// <summary>Queues one frame for one connection. A connection that has gone away is not an error:
         /// the coordinator decides what to send before it can know whether the socket is still there.</summary>

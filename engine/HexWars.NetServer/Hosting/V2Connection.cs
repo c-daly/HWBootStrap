@@ -115,6 +115,22 @@ namespace HexWars.NetServer.Hosting
 
         public bool IsAuthenticated => _authenticated;
 
+        /// <summary>
+        /// SHA-256 of the credential this socket authenticated with, or null while it is unauthenticated.
+        ///
+        /// The hash and never the credential. It is enough to ask the store whether that credential is
+        /// still good, which is the only question a live socket has about it, and it is useless to anybody
+        /// who reads it out of a memory dump.
+        /// </summary>
+        public byte[]? CredentialHash { get; set; }
+
+        /// <summary>When the credential behind this socket stops working. A handshake is a moment and a
+        /// match is an hour, so the socket has to outlive neither.</summary>
+        public DateTimeOffset? CredentialExpiresAt { get; set; }
+
+        /// <summary>When this socket last had its credential checked against the store.</summary>
+        public DateTimeOffset LastCredentialCheck { get; set; }
+
         /// <summary>True once a close has been asked for, whether or not it has finished.</summary>
         public bool IsClosed => Volatile.Read(ref _closing) != 0;
 

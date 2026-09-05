@@ -58,6 +58,7 @@ namespace HexWars.NetServer.Configuration
         public const string MatchTerminalReconnectSecondsKey = "MATCH_TERMINAL_RECONNECT_SECONDS";
         public const string MatchMaxSocketsPerIpKey = "MATCH_MAX_SOCKETS_PER_IP";
         public const string MatchOutboundQueueBytesKey = "MATCH_OUTBOUND_QUEUE_BYTES";
+        public const string MatchCredentialRecheckSecondsKey = "MATCH_CREDENTIAL_RECHECK_SECONDS";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -202,6 +203,12 @@ namespace HexWars.NetServer.Configuration
                 MatchHostingOptions.MinOutboundQueueBytes,
                 MatchHostingOptions.MaxOutboundQueueBytes,
                 MatchHostingOptions.DefaultOutboundQueueBytes, errors);
+
+            match.CredentialRecheckSeconds = BoundedInt(
+                config, MatchCredentialRecheckSecondsKey,
+                MatchHostingOptions.MinCredentialRecheckSeconds,
+                MatchHostingOptions.MaxCredentialRecheckSeconds,
+                MatchHostingOptions.DefaultCredentialRecheckSeconds, errors);
 
             // Checked as a pair rather than as two ranges, because either value alone can be perfectly
             // reasonable and the combination still closes healthy sockets: a window that is not longer than
@@ -409,6 +416,7 @@ namespace HexWars.NetServer.Configuration
             target.TerminalReconnectSeconds = source.TerminalReconnectSeconds;
             target.MaxSocketsPerIp = source.MaxSocketsPerIp;
             target.OutboundQueueBytes = source.OutboundQueueBytes;
+            target.CredentialRecheckSeconds = source.CredentialRecheckSeconds;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

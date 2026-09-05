@@ -17,6 +17,10 @@ namespace HexWars.NetServer.Configuration
         public const int MinMaxSocketsPerIp = 1;
         public const int MaxMaxSocketsPerIp = 256;
 
+        public const int DefaultCredentialRecheckSeconds = 60;
+        public const int MinCredentialRecheckSeconds = 5;
+        public const int MaxCredentialRecheckSeconds = 3600;
+
         public const int DefaultOutboundQueueBytes = 4 * 1024 * 1024;
         public const int MinOutboundQueueBytes = 64 * 1024;
         public const int MaxOutboundQueueBytes = 64 * 1024 * 1024;
@@ -150,5 +154,14 @@ namespace HexWars.NetServer.Configuration
         /// holding megabytes, and the number of those queues is the number of sockets on the host.
         /// </summary>
         public int OutboundQueueBytes { get; set; } = DefaultOutboundQueueBytes;
+
+        /// <summary>
+        /// How often a live socket has its credential checked again against the store.
+        ///
+        /// The handshake is a moment and a match is an hour. A credential revoked by the same player
+        /// reconnecting elsewhere, or simply expired, leaves a socket that was legitimate when it opened
+        /// and is not any more, and nothing else on this host would ever notice.
+        /// </summary>
+        public int CredentialRecheckSeconds { get; set; } = DefaultCredentialRecheckSeconds;
     }
 }

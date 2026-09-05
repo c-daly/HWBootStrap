@@ -7,6 +7,7 @@ using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Tests.Fakes;
 using HexWars.NetServer.Tests.Fixtures;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -126,6 +127,26 @@ namespace HexWars.NetServer.Tests
             while (!result.EndOfMessage);
 
             return new Received(Encoding.UTF8.GetString(message.ToArray()), null);
+        }
+
+        /// <summary>
+        /// The close status this socket ends with, ignoring whatever it is sent on the way there.
+        ///
+        /// The heartbeat runs on the real clock in a host test, so PING frames arrive between anything a
+        /// test does and the close it is waiting for. Asserting on the next frame would be asserting on
+        /// the ping cadence.
+        /// </summary>
+        static async Task<WebSocketCloseStatus?> ExpectCloseAsync(WebSocket socket, TimeSpan within)
+        {
+            DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(within);
+
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                Received frame = await ReceiveAsync(socket, deadline - DateTimeOffset.UtcNow);
+                if (frame.CloseStatus is not null) return frame.CloseStatus;
+            }
+
+            return null;
         }
 
         /// <summary>Authenticates one seat and consumes the two frames a waiting match answers with.</summary>
@@ -637,6 +658,135 @@ namespace HexWars.NetServer.Tests
 
             using WebSocket other = await SeatAsync(_credential1, 1);
             await StartTheMatch(second, other);
+        }
+
+        [Test]
+        public async Task AHundredUpgradesAtOnceFromOneAddress_LeaveExactlyTheCapAccepted()
+        {
+            // The cap has to be a reservation, not a count. Checked against the sockets that already exist,
+            // every upgrade in a simultaneous burst reads the same low number and every one of them passes.
+            const int cap = 8;
+
+            Start(fixture =>
+            {
+                fixture.Settings["MATCH_MAX_SOCKETS_PER_IP"] = cap.ToString();
+                fixture.Settings["MATCH_AUTH_TIMEOUT_SECONDS"] = "120";
+                fixture.RemoteIpAddress = IPAddress.Parse("203.0.113.8");
+            });
+
+            await SeedAWaitingMatch();
+
+            var accepted = new List<WebSocket>();
+            var refused = 0;
+            var gate = new object();
+
+            var attempts = new List<Task>();
+            for (var i = 0; i < 100; i++)
+            {
+                attempts.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        WebSocket socket = await ConnectAsync();
+                        lock (gate) accepted.Add(socket);
+                    }
+                    catch (Exception failure)
+                    {
+                        Assert.That(failure.Message, Does.Contain("429"));
+                        lock (gate) refused++;
+                    }
+                }));
+            }
+
+            await Task.WhenAll(attempts);
+
+            try
+            {
+                Assert.That(accepted, Has.Count.EqualTo(cap), "the cap is a cap under concurrency or it is nothing");
+                Assert.That(refused, Is.EqualTo(100 - cap));
+
+                var registry = _host.Services.GetRequiredService<V2ConnectionRegistry>();
+                Assert.That(registry.CountForIp("203.0.113.8"), Is.EqualTo(cap));
+            }
+            finally
+            {
+                foreach (WebSocket socket in accepted) socket.Dispose();
+            }
+        }
+
+        [Test]
+        public async Task ASocketWhoseCredentialExpires_IsClosedByTheHeartbeat()
+        {
+            // A handshake is a moment and a match is an hour. A credential that runs out while a game is
+            // being played has to end the socket then, not at whatever reconnect the client happens to make.
+            Start();
+            await SeedAWaitingMatch();
+
+            using WebSocket socket = await SeatAsync(_credential0, 0);
+
+            // The expiry is moved rather than waited out: this host runs on the real clock, and a test
+            // that waited for a genuine 15-minute TTL would be a test of patience. What is being checked
+            // is that the heartbeat reads the expiry the socket is carrying and acts on it.
+            var registry = _host.Services.GetRequiredService<V2ConnectionRegistry>();
+            V2Connection connection = registry.Snapshot().Single(c => c.IsAuthenticated);
+            Assert.That(connection.CredentialExpiresAt, Is.Not.Null,
+                "a seated socket has to be carrying the expiry of the credential that seated it");
+
+            connection.CredentialExpiresAt = DateTimeOffset.UtcNow.AddSeconds(-1);
+
+            Assert.That(await ExpectCloseAsync(socket, TimeSpan.FromSeconds(10)),
+                Is.EqualTo(WebSocketCloseStatus.PolicyViolation));
+        }
+
+        [Test]
+        public async Task ASocketWhoseCredentialIsRevoked_IsClosedOnTheNextRecheck()
+        {
+            // Issuing a new credential for a seat revokes the one before it. The socket still holding the
+            // revoked one was legitimate when it opened and is not any more.
+            // A silence window well past the recheck cadence, so what closes this socket is the revocation
+            // rather than a client that stopped answering pings while the test waited.
+            Start(fixture =>
+            {
+                fixture.Settings["MATCH_CREDENTIAL_RECHECK_SECONDS"] = "5";
+                fixture.Settings["MATCH_STALE_CONNECTION_SECONDS"] = "60";
+            });
+
+            await SeedAWaitingMatch();
+
+            using WebSocket socket = await SeatAsync(_credential0, 0);
+
+            var credentials = _host.Services.GetRequiredService<IMatchCredentialService>();
+            await credentials.IssueAsync(_matchId, Seat0Steam, CancellationToken.None);
+
+            Assert.That(await ExpectCloseAsync(socket, TimeSpan.FromSeconds(20)),
+                Is.EqualTo(WebSocketCloseStatus.PolicyViolation));
+        }
+
+        [Test]
+        public async Task AFrameThatCarriesACredentialByMistake_IsNeverWrittenToTheLog()
+        {
+            // A client that puts its credential in the wrong frame must not have it logged by the code that
+            // read it. No truncation makes that safe: any prefix of a 43-character secret is still a prefix
+            // of a secret, so what is logged is the type and a byte count.
+            var captured = new CapturingLoggerProvider();
+            Start(fixture => fixture.Logging = captured);
+            await SeedAWaitingMatch();
+
+            using WebSocket socket = await SeatAsync(_credential0, 0);
+
+            await SendAsync(socket, "CMD " + _credential1);
+            await SendAsync(socket, NetProtocol.Catalog(_credential1));
+
+            // A frame this client will get an answer to, so the two above have certainly been read by then.
+            await SendAsync(socket, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
+            await ReceiveAsync(socket);
+
+            Assert.That(captured.Messages, Is.Not.Empty);
+            Assert.That(captured.Messages.Any(m => m.Contains(_credential1, StringComparison.Ordinal)),
+                Is.False, "the whole credential");
+            Assert.That(
+                captured.Messages.Any(m => m.Contains(_credential1[..12], StringComparison.Ordinal)),
+                Is.False, "nor any part of it");
         }
 
         async Task StartTheMatch(WebSocket zero, WebSocket one)

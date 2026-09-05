@@ -113,10 +113,11 @@ namespace HexWars.NetServer.Hosting
             string remoteIp =
                 context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller;
 
-            // Also before the upgrade. An accepted socket costs a receive buffer, a writer task and a
-            // registry entry before it has proved anything, so the ceiling has to be applied while refusing
-            // is still free.
-            if (registry.CountForIp(remoteIp) >= options.MaxSocketsPerIp)
+            // Also before the upgrade, and as a reservation rather than a count. An accepted socket costs a
+            // receive buffer, a writer task and a registry entry before it has proved anything - and a
+            // ceiling checked against the sockets that already exist is no ceiling at all when a hundred
+            // upgrades arrive together and every one of them reads the same low number.
+            if (!registry.TryReserve(remoteIp))
             {
                 logger.LogWarning(
                     "Refused a v2 socket: this address already holds {Cap} of them", options.MaxSocketsPerIp);
@@ -124,7 +125,17 @@ namespace HexWars.NetServer.Hosting
                 return;
             }
 
-            WebSocket socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            WebSocket socket;
+            try
+            {
+                socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // The reservation never became a connection, so nothing else will ever give it back.
+                registry.Release(remoteIp);
+                throw;
+            }
 
             var connection = new V2Connection(
                 Guid.NewGuid().ToString("N"),
@@ -135,7 +146,8 @@ namespace HexWars.NetServer.Hosting
                 time.GetUtcNow());
 
             // Registered before the handshake, because the coordinator answers AUTH by sending SEAT through
-            // the sink: a connection the sink cannot find would authenticate into silence.
+            // the sink: a connection the sink cannot find would authenticate into silence. Add takes over
+            // the reservation above; Remove is what hands it back.
             registry.Add(connection);
 
             try
@@ -293,6 +305,13 @@ namespace HexWars.NetServer.Hosting
             connection.MatchId = Guid.Parse(tokens[0]);
             connection.LastInbound = time.GetUtcNow();
 
+            // Kept for the life of the socket, because the handshake is a moment and a match is an hour: a
+            // credential that expires or is revoked mid-game has to end this connection then, not at
+            // whatever reconnect the client happens to make next.
+            connection.CredentialHash = outcome.CredentialHash;
+            connection.CredentialExpiresAt = outcome.CredentialExpiresAt;
+            connection.LastCredentialCheck = time.GetUtcNow();
+
             logger.LogInformation(
                 "A v2 socket took seat {Seat} of match {MatchId}",
                 outcome.Seat,
@@ -334,8 +353,12 @@ namespace HexWars.NetServer.Hosting
                 NetMessage inbound = NetProtocol.Parse(frame.Text);
                 if (inbound.Type is "CMD" or "CATALOG")
                 {
+                    // The type and a byte count, never the payload. A client that puts its credential in
+                    // the wrong frame would otherwise have it written to the log by the code that read it,
+                    // and no amount of truncation makes that safe - the credential is 43 characters and
+                    // any prefix of it is still a prefix of a secret.
                     logger.LogDebug(
-                        "RECV {Type} {Payload}", inbound.Type, Truncate(inbound.Payload, LoggedPayloadLength));
+                        "RECV {Type} {Bytes} bytes", inbound.Type, inbound.Payload.Length);
                 }
 
                 await coordinator.ReceiveAsync(connection.Id, frame.Text, aborted).ConfigureAwait(false);
