@@ -6,8 +6,8 @@ namespace HexWars.NetServer.Tests
 {
     /// <summary>
     /// The Origin rule on its own: same-origin is always allowed, ALLOWED_WEB_ORIGINS widens it, and
-    /// anything else is refused. Absent and unparseable Origins keep the pre-existing pass-through so
-    /// non-browser clients and the in-process selftest are unaffected.
+    /// anything else is refused. An ABSENT Origin passes through, so non-browser clients and the
+    /// in-process selftest are unaffected; one that is present and unreadable does not.
     /// </summary>
     [TestFixture]
     public class OriginPolicyTests
@@ -26,9 +26,13 @@ namespace HexWars.NetServer.Tests
         public void NoOriginHeader_IsAllowed() =>
             Assert.That(OriginPolicy.IsAllowed(Request("game.invalid", origin: null), None), Is.True);
 
-        [Test]
-        public void UnparseableOrigin_IsAllowed() =>
-            Assert.That(OriginPolicy.IsAllowed(Request("game.invalid", "null"), None), Is.True);
+        /// <summary>The literal word null is what a browser sends from a sandboxed frame, a file:// page or
+        /// a data: URL - precisely the contexts a cross-site upgrade is launched from. Treating it as absent
+        /// would leave the rule with a hole shaped like the attack.</summary>
+        [TestCase("null")]
+        [TestCase("not a url")]
+        public void UnparseableOrigin_IsRefused(string origin) =>
+            Assert.That(OriginPolicy.IsAllowed(Request("game.invalid", origin), None), Is.False);
 
         [TestCase("game.invalid", "https://game.invalid")]
         [TestCase("game.invalid", "http://GAME.invalid")]

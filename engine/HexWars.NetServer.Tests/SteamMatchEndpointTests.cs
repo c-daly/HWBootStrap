@@ -398,12 +398,17 @@ namespace HexWars.NetServer.Tests
 
         /// <summary>An otherwise valid request with a large unknown member. Unknown members are ignored by
         /// the serializer, which is exactly how a caller would smuggle work in: size is then the only
-        /// reason left to refuse it.</summary>
+        /// reason left to refuse it.
+        ///
+        /// Deliberately inside the transport cap in RequestLimits and outside the JSON reader cap. These
+        /// tests are about the reader, and a body past the transport cap would be answered 413 by middleware
+        /// before either endpoint was reached - which is a different refusal, covered in SecurityControlsTests.
+        /// </summary>
         static string OversizedCreateBody() => JsonSerializer.Serialize(new
         {
             steamLobbyId = FakeSteamWebApiClient.LobbyId,
             ticket = FakeSteamWebApiClient.OwnerTicket,
-            padding = new string((char)120, 20 * 1024),
+            padding = new string((char)120, 10 * 1024),
         });
 
         [Test]
@@ -831,6 +836,11 @@ namespace HexWars.NetServer.Tests
         public async Task TheSixthCreateInAWindowIsRateLimited()
         {
             using var factory = new SteamServerFactory();
+
+            // The per-address open-match quota is lifted out of the way on purpose: it refuses the fourth
+            // ALLOCATION and this test is about the limiter, which refuses the sixth REQUEST. Leaving both in
+            // play would have the quota answer first and this test would pass without the limiter existing.
+            factory.Settings["MATCH_MAX_OPEN_MATCHES_PER_IP"] = "10";
 
             // Distinct lobbies, because the create endpoint is idempotent per lobby: repeating one lobby
             // would return the same match every time and could pass without the limiter existing.
