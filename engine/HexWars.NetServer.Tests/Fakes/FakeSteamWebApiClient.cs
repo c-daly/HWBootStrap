@@ -33,7 +33,7 @@ namespace HexWars.NetServer.Tests.Fakes
         public const string BuildId = "test-build";
         public const int QuickSeed = 4242;
 
-        /// <summary>The one hw_setup a quick-v1 lobby on <see cref=\"QuickSeed\"/> may advertise.</summary>
+        /// <summary>The one hw_setup a quick-v1 lobby on <see cref="QuickSeed"/> may advertise.</summary>
         public static string QuickSetupWire => SteamLobbyRules.QuickMatchSetup(QuickSeed).ToWire();
 
         /// <summary>Ticket hex to the identity Valve vouches for. An unlisted ticket is AuthenticationFailed.</summary>
@@ -64,7 +64,7 @@ namespace HexWars.NetServer.Tests.Fakes
 
         /// <summary>
         /// The happy path: three known tickets, all three accounts own the app, and one ready two-member
-        /// quick-v1 lobby owned by <see cref=\"OwnerSteamId\"/>.
+        /// quick-v1 lobby owned by <see cref="OwnerSteamId"/>.
         /// </summary>
         public static FakeSteamWebApiClient Ready()
         {
@@ -79,8 +79,19 @@ namespace HexWars.NetServer.Tests.Fakes
             return fake;
         }
 
-        public void Identify(string ticketHex, string steamId) =>
-            Tickets[ticketHex] = new SteamIdentity(steamId, steamId, false, false);
+        /// <param name="vacBanned">A VAC ban is not a reason to refuse a match: it is a matchmaking signal
+        /// for the games that use it, and HexWars does not.</param>
+        /// <param name="publisherBanned">A ban this publisher issued, which is a reason to refuse.</param>
+        /// <param name="ownerSteamId">The licence holder, which differs from the player under Family
+        /// Sharing. Defaults to the player, which is the ordinary case.</param>
+        public void Identify(
+            string ticketHex,
+            string steamId,
+            bool publisherBanned = false,
+            bool vacBanned = false,
+            string? ownerSteamId = null) =>
+            Tickets[ticketHex] =
+                new SteamIdentity(steamId, ownerSteamId ?? steamId, vacBanned, publisherBanned);
 
         /// <summary>A lobby that passes every validator rule, with each rule exposed as a parameter so a
         /// test can break exactly one of them.</summary>

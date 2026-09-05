@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using HexWars.NetServer.Auth;
+using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using HexWars.NetServer.Tests.Fakes;
@@ -420,6 +421,21 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task JoiningAnUnknownMatchWithABadTicket_IsUnauthorizedRatherThanNotFound()
+        {
+            // Authentication comes before the match lookup on purpose: a caller holding no valid ticket
+            // must not be able to tell a match id that never existed from one that has finished, and a
+            // throttled caller must not be able to make this server read the database at all.
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Join(client, Guid.NewGuid(), UnknownTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized));
+            Assert.That(await ErrorCode(response), Is.EqualTo("authentication_failed"));
+        }
+
+        [Test]
         public async Task JoiningAFinishedMatchIsAConflict()
         {
             using var factory = new SteamServerFactory();
@@ -435,6 +451,157 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
             Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        // ---- an allocation that already exists ----------------------------------------------------
+
+        [Test]
+        public async Task AnExistingAllocationWhoseRosterHasChanged_IsAConflict()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+
+            // The guest left and somebody else took the seat. The match already written names the first
+            // guest, so honouring this request would hand the owner a credential for a game the person
+            // now sitting in the lobby cannot join.
+            factory.Steam.Lobbies[FakeSteamWebApiClient.LobbyId] = FakeSteamWebApiClient.ReadyLobby(
+                guestSteamId: FakeSteamWebApiClient.OutsiderSteamId);
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict),
+                await response.Content.ReadAsStringAsync());
+            Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+
+            IReadOnlyList<PersistedPlayer> players = await factory.Store.GetPlayersAsync(matchId, default);
+            Assert.That(
+                players.Select(player => player.SteamId),
+                Does.Contain(FakeSteamWebApiClient.GuestSteamId),
+                "the stored roster is the one the journal is keyed by and must not be quietly rewritten");
+        }
+
+        [Test]
+        public async Task AnExistingAllocationWhoseSetupHasChanged_IsAConflict()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+
+            factory.Steam.Lobbies[FakeSteamWebApiClient.LobbyId] = FakeSteamWebApiClient.ReadyLobby(
+                setupWire: SteamLobbyRules.QuickMatchSetup(1234).ToWire());
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict));
+            Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        [Test]
+        public async Task AMatchThatEndsWhileTheJoinIsInFlight_IsAConflict()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+
+            // Inside the seat lookup, which is after the join has already checked the status and before it
+            // issues anything. Without the status check inside the issuing transaction this window hands
+            // out a credential for a finished game.
+            factory.Counting.BeforeGetPlayer = async (id, _) =>
+            {
+                await factory.Store.TryStartMatchAsync(id, "START-REPLAY", SteamServerFactory.Start, default);
+                await factory.Store.TryCompleteMatchAsync(
+                    id, MatchStatus.Completed, 0, SteamServerFactory.Start, default);
+            };
+
+            HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Conflict),
+                await response.Content.ReadAsStringAsync());
+            Assert.That(await ErrorCode(response), Is.EqualTo("lobby_changed"));
+        }
+
+        // ---- bans and protocol ---------------------------------------------------------------------
+
+        [Test]
+        public async Task APublisherBannedOwnerCannotStartAMatch()
+        {
+            using var factory = new SteamServerFactory();
+            factory.Steam.Identify(
+                FakeSteamWebApiClient.OwnerTicket, FakeSteamWebApiClient.OwnerSteamId, publisherBanned: true);
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden));
+            Assert.That(await ErrorCode(response), Is.EqualTo("blocked"));
+            Assert.That(factory.Steam.LobbyCalls, Is.Zero,
+                "a banned account must be refused before this server spends a lobby read on them");
+        }
+
+        [Test]
+        public async Task APublisherBannedGuestCannotJoin()
+        {
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            Guid matchId = await CreatedMatchId(await Create(client, FakeSteamWebApiClient.OwnerTicket));
+            factory.Steam.Identify(
+                FakeSteamWebApiClient.GuestTicket, FakeSteamWebApiClient.GuestSteamId, publisherBanned: true);
+
+            HttpResponseMessage response = await Join(client, matchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden));
+            Assert.That(await ErrorCode(response), Is.EqualTo("blocked"));
+        }
+
+        [Test]
+        public async Task AVacBannedPlayerIsStillAllowedToPlay()
+        {
+            // VAC is a signal for the games that consume it, and HexWars does not. Refusing on it would ban
+            // players for something that happened in an unrelated title.
+            using var factory = new SteamServerFactory();
+            factory.Steam.Identify(
+                FakeSteamWebApiClient.OwnerTicket, FakeSteamWebApiClient.OwnerSteamId, vacBanned: true);
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK),
+                await response.Content.ReadAsStringAsync());
+        }
+
+        [Test]
+        public async Task AMatchPersistedUnderAnotherProtocolCannotBeJoined()
+        {
+            using var factory = new SteamServerFactory();
+
+            // A match this deployment did not write: the row carries protocol 1 and this server speaks 2,
+            // so the credential it would hand back names a socket the client cannot talk on.
+            CreateMatchResult seeded = await factory.Store.CreateMatchForLobbyAsync(
+                new CreateMatchRequest(
+                    FakeSteamWebApiClient.LobbyId,
+                    FakeSteamWebApiClient.QuickSetupWire,
+                    "hexwars-engine/1",
+                    1,
+                    SteamServerFactory.BuildId,
+                    new[]
+                    {
+                        (FakeSteamWebApiClient.OwnerSteamId, 0),
+                        (FakeSteamWebApiClient.GuestSteamId, 1),
+                    },
+                    SteamServerFactory.Start),
+                default);
+
+            using HttpClient client = factory.CreateClient();
+            HttpResponseMessage response =
+                await Join(client, seeded.Match.MatchId, FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That((int)response.StatusCode, Is.EqualTo(426), await response.Content.ReadAsStringAsync());
+            Assert.That(await ErrorCode(response), Is.EqualTo("incompatible_version"));
         }
 
         // ---- throttling --------------------------------------------------------------------------

@@ -609,8 +609,8 @@ namespace HexWars.NetServer.Persistence
                 seat.Parameters.AddWithValue("matchId", matchId);
                 seat.Parameters.AddWithValue("steamId", steamId);
 
-                // Before the status answer on purpose: a credential belongs to a seat, so \u0022there is no such
-                // seat\u0022 is a caller error however the match is doing, and an unknown match has no seat either.
+                // Before the status answer on purpose: a credential belongs to a seat, so a missing seat is
+                // a caller error however the match is doing, and an unknown match has no seat either.
                 if (await seat.ExecuteScalarAsync(ct).ConfigureAwait(false) is null)
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
             }

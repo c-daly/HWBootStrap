@@ -333,7 +333,7 @@ namespace HexWars.NetServer.Tests.Fakes
             ValidateCredentialHash(credentialHash, nameof(credentialHash));
             ValidateSteamId(steamId, nameof(steamId));
 
-            // The single lock is this store\u0027s whole transaction: revoke and insert cannot interleave with
+            // The single lock is the whole transaction here: revoke and insert cannot interleave with
             // another caller, which is what the Postgres implementation buys with a row lock.
             lock (_gate)
             {

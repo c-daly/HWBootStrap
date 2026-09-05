@@ -120,7 +120,7 @@ namespace HexWars.NetServer.Persistence
         /// This exists because revoke-then-store as two calls is not the operation the protocol needs. Two
         /// clients reconnecting at once can interleave into two live credentials for one seat, and a store
         /// failure between the two calls leaves the player with none - having destroyed the one they had.
-        /// Doing both under one lock on the seat makes \u0022issuing replaces\u0022 true rather than usually true.
+        /// Doing both under one lock on the seat makes replacement true rather than merely usually true.
         ///
         /// The match status is checked inside the same transaction for the same reason: a match that
         /// completes while a join is in flight must not hand out a credential that would seat someone in a

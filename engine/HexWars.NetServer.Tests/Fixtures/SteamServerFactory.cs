@@ -16,7 +16,7 @@ namespace HexWars.NetServer.Tests.Fixtures
     /// the pipeline would pass while the deployed server refused every request.
     ///
     /// DATABASE_URL is set but never connected to. The Postgres branch of composition is what registers
-    /// <see cref=\"HexWars.NetServer.Auth.IMatchCredentialService\"/>, so a host without it cannot issue a
+    /// <see cref="HexWars.NetServer.Auth.IMatchCredentialService"/>, so a host without it cannot issue a
     /// join credential at all; the startup migration that would (correctly) refuse to reach that address
     /// is removed instead, and the store behind it is replaced.
     ///
@@ -50,8 +50,19 @@ namespace HexWars.NetServer.Tests.Fixtures
             ["MATCH_JOIN_TOKEN_TTL_SECONDS"] = "900",
         };
 
-        /// <summary>The store the host uses unless <see cref=\"UsePostgres\"/> is set.</summary>
+        /// <summary>The store the host uses unless <see cref="UsePostgres"/> is set. Write to it directly to
+        /// arrange state a request could not reach, and read its WriteCount to assert a request wrote
+        /// nothing.</summary>
         public InMemoryMatchStore Store { get; } = new();
+
+        /// <summary>
+        /// The decorator the host actually resolves, wrapping <see cref="Store"/>. It carries the seam a
+        /// race needs: a hook that runs inside a seat lookup, so a test can end a match in the window
+        /// between a join checking the status and issuing the credential.
+        /// </summary>
+        public CountingMatchStore Counting { get; }
+
+        public SteamServerFactory() => Counting = new CountingMatchStore(Store);
 
         /// <summary>The scripted Steam API. Configure its tables before the first request.</summary>
         public FakeSteamWebApiClient Steam { get; } = FakeSteamWebApiClient.Ready();
@@ -62,7 +73,7 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// <summary>When set, the host keeps the real PostgresMatchStore and talks to <see cref=\"Database\"/>.</summary>
         public bool UsePostgres { get; private set; }
 
-        /// <summary>The database behind a <see cref=\"PostgresAsync\"/> factory, for asserting on rows.</summary>
+        /// <summary>The database behind a <see cref="PostgresAsync"/> factory, for asserting on rows.</summary>
         public PostgresTestDatabase? Database { get; private set; }
 
         /// <summary>
@@ -102,7 +113,7 @@ namespace HexWars.NetServer.Tests.Fixtures
                 if (!UsePostgres)
                 {
                     services.RemoveAll<IMatchStore>();
-                    services.AddSingleton<IMatchStore>(Store);
+                    services.AddSingleton<IMatchStore>(Counting);
                 }
 
                 services.RemoveAll<ISteamWebApiClient>();

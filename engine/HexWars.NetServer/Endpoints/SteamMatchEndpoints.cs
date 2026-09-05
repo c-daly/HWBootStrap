@@ -87,11 +87,8 @@ namespace HexWars.NetServer.Endpoints
             {
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
-                if (IsBlocked(options, identity.SteamId))
+                if (IsRefusedAccount(options, identity, logger, "a match creation"))
                 {
-                    logger.LogWarning(
-                        "Refused a match creation from blocked account {Sid}",
-                        SteamLogRedaction.HashSteamId(identity.SteamId));
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
                 }
@@ -133,26 +130,24 @@ namespace HexWars.NetServer.Endpoints
 
                 if (!result.Created)
                 {
-                    // A match for this lobby already existed, so the seats it was created with win over
-                    // the lobby snapshot just read: the roster may have changed since, and the stored one
-                    // is the roster the journal is keyed by. A requester who is not in it is asking to
-                    // join a match that moved on without them.
-                    PersistedPlayer? player = await store
-                        .GetPlayerAsync(result.Match.MatchId, requesterId, ct).ConfigureAwait(false);
+                    // A match for this lobby already existed. The stored roster and setup are what the
+                    // journal is keyed by, so they win - and if the lobby has moved on since, this request
+                    // is not the retry it looks like. Handing back a credential anyway would seat the
+                    // requester in a game the people now in the lobby are not playing.
+                    IReadOnlyList<PersistedPlayer> existing = await store
+                        .GetPlayersAsync(result.Match.MatchId, ct).ConfigureAwait(false);
 
-                    if (player is null)
+                    if (!RosterMatches(existing, verified.Players) ||
+                        !string.Equals(result.Match.SetupWire, verified.Setup.ToWire(), StringComparison.Ordinal))
                     {
                         logger.LogInformation(
-                            "Refused {Sid} an existing match {MatchId} for lobby {LobbyId}: no seat",
-                            SteamLogRedaction.HashSteamId(requesterId), Short(result.Match.MatchId),
-                            verified.LobbyId);
+                            "Refused an existing match {MatchId} for lobby {LobbyId}: the lobby no longer matches it",
+                            Short(result.Match.MatchId), verified.LobbyId);
                         return ApiErrors.Failure(
                             StatusCodes.Status409Conflict,
                             ApiErrors.LobbyChanged,
                             SteamFailureMessages.LobbyChanged);
                     }
-
-                    seat = player.Seat;
                 }
 
                 if (seat is null)
@@ -161,6 +156,20 @@ namespace HexWars.NetServer.Endpoints
                     // a refusal is still the right answer to a match this player would have no seat in.
                     return ApiErrors.Failure(
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, SteamFailureMessages.LobbyChanged);
+                }
+
+                // The protocol the match was WRITTEN under, not the one this process happens to speak. A
+                // deployment that has moved on cannot serve a match allocated by the previous one, and
+                // saying so is better than issuing a credential for a socket the client cannot talk on.
+                if (result.Match.ProtocolVersion != options.ProtocolVersion)
+                {
+                    logger.LogInformation(
+                        "Refused match {MatchId}: it was allocated under protocol {Stored}, this server speaks {Current}",
+                        Short(result.Match.MatchId), result.Match.ProtocolVersion, options.ProtocolVersion);
+                    return ApiErrors.Failure(
+                        StatusCodes.Status426UpgradeRequired,
+                        ApiErrors.IncompatibleVersion,
+                        SteamFailureMessages.IncompatibleVersion);
                 }
 
                 IssuedCredential credential = await credentials
@@ -173,7 +182,7 @@ namespace HexWars.NetServer.Endpoints
 
                 return Results.Json(new CreateSteamMatchResponse(
                     result.Match.MatchId,
-                    options.ProtocolVersion,
+                    result.Match.ProtocolVersion,
                     WebsocketUrlFor(options.PublicBaseUrl),
                     seat.Value,
                     credential.Credential,
@@ -185,6 +194,15 @@ namespace HexWars.NetServer.Endpoints
                     "Steam refused a match creation for lobby {LobbyId}: {Failure} ({Detail})",
                     request.SteamLobbyId, failure.Failure, failure.Detail);
                 return ApiErrors.From(failure);
+            }
+            catch (InvalidOperationException closed)
+                when (closed.Message == MatchCredentialService.MatchNotOpenMessage)
+            {
+                // The match ended between the checks above and the credential being issued. Matched on the
+                // one message rather than the exception type: any other InvalidOperationException from here
+                // is a fault, and answering those with a cheerful 409 would hide it.
+                return ApiErrors.Failure(
+                    StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.MatchEndedMessage);
             }
             catch (ArgumentException invalid)
             {
@@ -232,6 +250,20 @@ namespace HexWars.NetServer.Endpoints
 
             try
             {
+                // Authentication before the match lookup, deliberately. A caller with no valid ticket must
+                // not be able to tell a match id that never existed from one that has finished, and a
+                // throttled caller must cost this server no database read at all.
+                string caller = CallerKey(http);
+                if (throttle.IsThrottled(caller)) return ApiErrors.RateLimitedResult();
+
+                SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
+
+                if (IsRefusedAccount(options, identity, logger, "a join"))
+                {
+                    return ApiErrors.Failure(
+                        StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
+                }
+
                 PersistedMatch? match = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
                 if (match is null)
                 {
@@ -245,18 +277,18 @@ namespace HexWars.NetServer.Endpoints
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.MatchEndedMessage);
                 }
 
-                string caller = CallerKey(http);
-                if (throttle.IsThrottled(caller)) return ApiErrors.RateLimitedResult();
-
-                SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
-
-                if (IsBlocked(options, identity.SteamId))
+                // The protocol the match was written under. This check is only meaningful here and not at
+                // allocation: a rolling deploy can leave a match from the previous version open, and the
+                // client rejoining it is the one that finds out.
+                if (match.ProtocolVersion != options.ProtocolVersion)
                 {
-                    logger.LogWarning(
-                        "Refused a join from blocked account {Sid} at match {MatchId}",
-                        SteamLogRedaction.HashSteamId(identity.SteamId), Short(matchId));
+                    logger.LogInformation(
+                        "Refused a join at match {MatchId}: it speaks protocol {Stored}, this server speaks {Current}",
+                        Short(matchId), match.ProtocolVersion, options.ProtocolVersion);
                     return ApiErrors.Failure(
-                        StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
+                        StatusCodes.Status426UpgradeRequired,
+                        ApiErrors.IncompatibleVersion,
+                        SteamFailureMessages.IncompatibleVersion);
                 }
 
                 // Membership on join comes from the persisted roster, not from Steam. The lobby settled
@@ -283,7 +315,7 @@ namespace HexWars.NetServer.Endpoints
 
                 return Results.Json(new JoinSteamMatchResponse(
                     matchId,
-                    options.ProtocolVersion,
+                    match.ProtocolVersion,
                     WebsocketUrlFor(options.PublicBaseUrl),
                     player.Seat,
                     credential.Credential,
@@ -295,6 +327,16 @@ namespace HexWars.NetServer.Endpoints
                     "Steam refused a join at match {MatchId}: {Failure} ({Detail})",
                     Short(matchId), failure.Failure, failure.Detail);
                 return ApiErrors.From(failure);
+            }
+            catch (InvalidOperationException closed)
+                when (closed.Message == MatchCredentialService.MatchNotOpenMessage)
+            {
+                // The match finished between the status check above and the credential being issued. The
+                // issuing transaction is the only place that window can be closed, so this is not a check
+                // that could have been made earlier.
+                logger.LogInformation("Match {MatchId} ended while a join was in flight", Short(matchId));
+                return ApiErrors.Failure(
+                    StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.MatchEndedMessage);
             }
             catch (ArgumentException invalid)
             {
@@ -393,6 +435,39 @@ namespace HexWars.NetServer.Endpoints
         internal static bool IsWellFormedRequestedSetup(string? value) =>
             value is null || value.Length <= MaxRequestedSetupLength;
 
+        /// <summary>
+        /// True for an account this server will not serve: one on the operator block list, or one Valve
+        /// says this publisher has banned.
+        ///
+        /// A VAC ban is deliberately not a refusal. VAC is a signal for the games that consume it, and
+        /// HexWars does not; refusing on it would bar players over something that happened in an unrelated
+        /// title. It is logged, because an operator investigating a report will want to know.
+        /// </summary>
+        static bool IsRefusedAccount(
+            MatchHostingOptions options, SteamIdentity identity, ILogger logger, string what)
+        {
+            string handle = SteamLogRedaction.HashSteamId(identity.SteamId);
+
+            if (identity.PublisherBanned)
+            {
+                logger.LogWarning("Refused {What} from publisher-banned account {Sid}", what, handle);
+                return true;
+            }
+
+            if (IsBlocked(options, identity.SteamId))
+            {
+                logger.LogWarning("Refused {What} from blocked account {Sid}", what, handle);
+                return true;
+            }
+
+            if (identity.VacBanned)
+            {
+                logger.LogInformation("Allowing {What} from VAC-banned account {Sid}", what, handle);
+            }
+
+            return false;
+        }
+
         /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
         /// form still matches the account it was meant to name.</summary>
         internal static bool IsBlocked(MatchHostingOptions options, string steamId)
@@ -410,6 +485,34 @@ namespace HexWars.NetServer.Endpoints
 
         static string Canonical(string steamId) =>
             SteamId64.TryNormalize(steamId, out string canonical) ? canonical : steamId.Trim();
+
+        /// <summary>
+        /// True when the stored roster is seat for seat the one the lobby just verified to. Compared as a
+        /// set rather than in order: the store is free to return players in whatever order it likes, and a
+        /// test that depended on that order would be pinning something the contract does not promise.
+        /// </summary>
+        internal static bool RosterMatches(
+            IReadOnlyList<PersistedPlayer> stored, IReadOnlyList<(string SteamId, int Seat)> verified)
+        {
+            if (stored.Count != verified.Count) return false;
+
+            foreach ((string steamId, int seat) in verified)
+            {
+                bool seated = false;
+                foreach (PersistedPlayer player in stored)
+                {
+                    if (string.Equals(player.SteamId, steamId, StringComparison.Ordinal) && player.Seat == seat)
+                    {
+                        seated = true;
+                        break;
+                    }
+                }
+
+                if (!seated) return false;
+            }
+
+            return true;
+        }
 
         static int? SeatOf(IReadOnlyList<(string SteamId, int Seat)> players, string steamId)
         {
