@@ -69,7 +69,8 @@ names, bound by the server configuration layer.
 | `DATABASE_URL` | `postgres://` URI, or an Npgsql keyword/value string | none | when Steam is enabled, or in Production | **YES** | Postgres connection target. Only `host:port/db` may ever be echoed back; credentials never are. |
 | `MATCH_PUBLIC_BASE_URL` | absolute URL, https in Production, no credentials, query, or fragment | none | when Steam is enabled, or in Production | no | The externally reachable base URL. The server derives the websocket URL from it by mapping `http` to `ws` and `https` to `wss`, then appending `/ws/v2`. Startup rejects a value carrying userinfo, a query string, or a fragment, because this value is echoed into the environment report and logged; the report renders scheme, authority and path only. |
 | `MATCH_JOIN_TOKEN_TTL_SECONDS` | int | `900` | no | no | Lifetime of an issued join credential. Valid range 60..86400. |
-| `MATCH_BUILD_ID` | string | none | yes | no | Identifies the running build. On Render, set it from `RENDER_GIT_COMMIT`. |
+| `MATCH_BUILD_ID` | string | none | yes | no | Identifies the running build. Falls back to `RENDER_GIT_COMMIT` when unset, so a Render deploy needs no value here; set it only to pin a build for a client compatibility window. |
+| `RENDER_GIT_COMMIT` | string | set by Render | no | no | Not a HexWars setting. Read only as the fallback for `MATCH_BUILD_ID`, because a Blueprint has nowhere to write the commit it is about to deploy. An explicit `MATCH_BUILD_ID` always wins. |
 | `MATCH_PROTOCOL_VERSION` | int | `2` | no | no | Wire protocol version advertised to clients and stored on each match. Must be one this build actually speaks (today: `2`); anything else fails startup. The number is written into every match row and compared against the number a later host carries, so a value this build has no code for does not fail now, it fails months from now as every match written under it becoming unrecoverable. |
 | `MATCH_HEARTBEAT_SECONDS` | int | `20` | no | no | How often `/ws/v2` sends `PING` on every authenticated socket. Valid range 1..300. It is the only traffic on an idle match, so it is also the only thing keeping an intermediary from dropping a socket both ends still believe in. |
 | `MATCH_STALE_CONNECTION_SECONDS` | int | `60` | no | no | Silence after which an authenticated `/ws/v2` socket is closed with 1001. Valid range 2..900, and it must be greater than `MATCH_HEARTBEAT_SECONDS`: a window no longer than the ping cadence judges silence over an interval the client was never given a chance to answer in. Startup fails if it is not. |
@@ -253,6 +254,9 @@ version, lobby provider, engine version, and database target without revealing a
 
 ## 10. Related documents
 
+- [Render Steam Playtest runbook](render-steam-playtest-runbook.md) - what `render.yaml` provisions, and
+  the deploy, rollback, scaling and alerting procedures.
+- [Match recovery runbook](match-recovery-runbook.md) - what to do about a match this build will not host.
 - [Health, metrics and graceful shutdown](health-and-shutdown.md) - the probe routes to configure, what
   `MATCH_METRICS_TOKEN` unlocks, and what the process does on `SIGTERM`.
 - [Protocol v2](protocol-v2.md) - the match websocket.

@@ -145,3 +145,5 @@ computed inside it would be computed over the wrong window; subtract two reading
 - [Steam / Render environment authority](steam-render-environments.md) - every variable named above.
 - [Protocol v2](protocol-v2.md) - the frames and close codes a shutdown produces.
 - [Match data retention](match-data-retention.md) - what happens to a match nobody comes back to.
+- [Render Steam Playtest runbook](render-steam-playtest-runbook.md) - the probes to configure and
+  the alerts to build on the metrics above.
