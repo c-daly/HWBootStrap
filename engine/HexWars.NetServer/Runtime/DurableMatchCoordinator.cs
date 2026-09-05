@@ -34,7 +34,7 @@ namespace HexWars.NetServer.Runtime
         IConnectionSink sink,
         IOptions<MatchHostingOptions> options,
         TimeProvider time,
-        ILogger<DurableMatchCoordinator> logger)
+        ILogger<DurableMatchCoordinator> logger) : IMatchEvictor
     {
         /// <summary>How long a match with no connections is kept in memory before it is released. It is not
         /// an abandonment rule: nothing durable changes, the next player to arrive simply reloads it.</summary>
@@ -50,6 +50,11 @@ namespace HexWars.NetServer.Runtime
         /// its own rather than after a deploy.
         /// </summary>
         public static readonly TimeSpan UnrecoverableRetryWindow = TimeSpan.FromSeconds(60);
+
+        /// <summary>How long an eviction waits for one match to be free before giving up on it for this
+        /// pass. Long enough for a commit in flight, short enough that a sweep over every abandoned match on
+        /// the host cannot be held up by one of them.</summary>
+        public static readonly TimeSpan EvictionGateWait = TimeSpan.FromSeconds(5);
 
         /// <summary>The frame has no seat behind it: the connection never authenticated, or its match has
         /// been released.</summary>
@@ -316,7 +321,7 @@ namespace HexWars.NetServer.Runtime
                 {
                     // A liveness stamp that did not land costs this match a little of its reaper budget and
                     // nothing else. Refusing the connection over it would be strictly worse for the player.
-                    logger.LogWarning(failure, "Could not record that a player is here");
+                    logger.LogWarning("Could not record that a player is here: {Failure}", Describe(failure));
                 }
 
                 // THE gate, and the last thing that happens before this handshake changes anything. Every
@@ -412,7 +417,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "A frame arrived for a match that could not be loaded");
+                logger.LogWarning("A frame arrived for a match that could not be loaded: {Failure}", Describe(failure));
                 sink.Send(connectionId, RejectTemporaryFailure);
                 return;
             }
@@ -530,7 +535,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "The start state could not be written, so it was not dealt");
+                logger.LogWarning("The start state could not be written, so it was not dealt: {Failure}", Describe(failure));
                 match.Stale = true;
                 sink.Send(connectionId, RejectTemporaryFailure);
                 return;
@@ -804,7 +809,7 @@ namespace HexWars.NetServer.Runtime
                 // advancing to Completed would be inventing an ending, and broadcasting an APPLY under it
                 // would hand the clients a result that may not be the recorded one. The sockets are sent
                 // back through the reconnect path, which reads the row.
-                logger.LogError(failure, "The status of a finished match could not be re-read");
+                logger.LogError("The status of a finished match could not be re-read: {Failure}", Describe(failure));
                 match.Stale = true;
                 CloseEveryConnection(match, ResyncCloseStatus, ResyncCloseReason);
                 return new CompletionOutcome(false, match.Status);
@@ -905,14 +910,14 @@ namespace HexWars.NetServer.Runtime
                 }
                 catch (Exception failure) when (attempt == 1)
                 {
-                    logger.LogWarning(failure, "A finished match would not close; trying once more");
+                    logger.LogWarning("A finished match would not close; trying once more: {Failure}", Describe(failure));
                 }
                 catch (Exception again)
                 {
                     // Not rethrown, cancellation included. The caller marks the projection stale and sends
                     // the sockets away to resync, which is a better answer than an exception unwinding
                     // through a gate holder that has already decided nothing may be broadcast.
-                    logger.LogError(again, "A finished match could not be closed");
+                    logger.LogError("A finished match could not be closed: {Failure}", Describe(again));
                     return false;
                 }
             }
@@ -953,7 +958,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "The journal could not be re-read after an ambiguous append");
+                logger.LogWarning("The journal could not be re-read after an ambiguous append: {Failure}", Describe(failure));
                 return JournalCheck.Unknown;
             }
         }
@@ -1062,20 +1067,48 @@ namespace HexWars.NetServer.Runtime
             }
         }
 
-        /// <summary>Closes every connection of the named matches and drops them from memory.</summary>
-        public async Task EvictAsync(IEnumerable<Guid> matchIds, int closeStatus, string reason)
+        /// <summary>
+        /// Closes every connection of the named matches and drops them from memory.
+        ///
+        /// The gate is taken with a deadline and the match is removed only once it is held. Waiting forever
+        /// would let one wedged match stall the retention sweep behind it, and removing the match first and
+        /// then failing to take the gate would strand its sockets: the entry would be gone, so the retry
+        /// would find nothing to close and the players would sit on a match nobody is hosting.
+        /// </summary>
+        public async Task<IReadOnlyList<Guid>> EvictAsync(
+            IEnumerable<Guid> matchIds, int closeStatus, string reason, CancellationToken ct = default)
         {
             ArgumentNullException.ThrowIfNull(matchIds);
 
+            List<Guid>? unevicted = null;
+
             foreach (Guid matchId in matchIds)
             {
-                if (!_matches.TryRemove(matchId, out Lazy<Task<LiveMatch>>? entry)) continue;
-                if (!entry.IsValueCreated || !entry.Value.IsCompletedSuccessfully) continue;
+                ct.ThrowIfCancellationRequested();
+
+                if (!_matches.TryGetValue(matchId, out Lazy<Task<LiveMatch>>? entry)) continue;
+
+                if (!entry.IsValueCreated || !entry.Value.IsCompletedSuccessfully)
+                {
+                    // Nothing was ever projected, so there are no sockets to close and nothing to wait for.
+                    _matches.TryRemove(matchId, out _);
+                    continue;
+                }
 
                 LiveMatch match = entry.Value.Result;
-                await match.Gate.WaitAsync().ConfigureAwait(false);
+
+                if (!await match.Gate.WaitAsync(EvictionGateWait, ct).ConfigureAwait(false))
+                {
+                    using IDisposable? scope = MatchScope(matchId);
+                    logger.LogWarning(
+                        "A match that should be evicted is busy; leaving it for the next pass");
+                    (unevicted ??= new List<Guid>()).Add(matchId);
+                    continue;
+                }
+
                 try
                 {
+                    _matches.TryRemove(matchId, out _);
                     CloseEveryConnection(match, closeStatus, reason);
                 }
                 finally
@@ -1083,6 +1116,8 @@ namespace HexWars.NetServer.Runtime
                     match.Gate.Release();
                 }
             }
+
+            return (IReadOnlyList<Guid>?)unevicted ?? Array.Empty<Guid>();
         }
 
         // ---- internals -------------------------------------------------------
@@ -1312,5 +1347,9 @@ namespace HexWars.NetServer.Runtime
         /// <summary>Match ids reach logs as their first eight hex characters, the same shortening the
         /// credential service uses, so one match can be followed across both.</summary>
         static string Short(Guid matchId) => LogScopes.ShortMatchId(matchId);
+
+        /// <summary>An exception as text a log may keep. Handing the object to the logger would hand the
+        /// sink whatever the failing code was quoting, and down here that is a connection string.</summary>
+        static string Describe(Exception failure) => SteamLogRedaction.Describe(failure);
     }
 }

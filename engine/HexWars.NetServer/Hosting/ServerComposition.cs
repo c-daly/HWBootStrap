@@ -119,6 +119,11 @@ namespace HexWars.NetServer.Hosting
                 // per-request instance would hold none of them.
                 builder.Services.AddSingleton<DurableMatchCoordinator>();
 
+                // The same instance under the name the retention sweeper knows it by. Two registrations
+                // would be two coordinators, and the second would be evicting matches nobody is hosting.
+                builder.Services.AddSingleton<IMatchEvictor>(
+                    provider => provider.GetRequiredService<DurableMatchCoordinator>());
+
                 // Registered next to the coordinator it sweeps, and after it, because it resolves it. It
                 // is the only thing that touches an idle socket at all, so it is also the only thing that
                 // notices a client which went away without saying so.

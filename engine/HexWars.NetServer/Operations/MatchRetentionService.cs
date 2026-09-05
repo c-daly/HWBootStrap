@@ -22,7 +22,7 @@ namespace HexWars.NetServer.Operations
     /// </summary>
     public sealed class MatchRetentionService(
         IMatchStore store,
-        DurableMatchCoordinator coordinator,
+        IMatchEvictor evictor,
         IOptions<MatchHostingOptions> options,
         TimeProvider time,
         ILogger<MatchRetentionService> logger) : BackgroundService
@@ -37,6 +37,21 @@ namespace HexWars.NetServer.Operations
 
         /// <summary>Sweeps that have finished, whatever they found. What proves the cadence is running.</summary>
         internal int Sweeps => Volatile.Read(ref _sweeps);
+
+        /// <summary>How long one eviction is given before the sweep moves on to the next match.</summary>
+        internal static readonly TimeSpan EvictionTimeout = TimeSpan.FromSeconds(5);
+
+        /// <summary>Matches waiting to be evicted at once, at most.</summary>
+        internal const int MaxPendingEvictions = 256;
+
+        readonly object _pendingGate = new();
+        readonly HashSet<Guid> _pending = new();
+
+        /// <summary>Ids an earlier pass could not close, waiting for the next one.</summary>
+        internal int PendingEvictions
+        {
+            get { lock (_pendingGate) return _pending.Count; }
+        }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -89,12 +104,11 @@ namespace HexWars.NetServer.Operations
 
             // After the rows, never before them. A socket closed for a match the sweep then failed to
             // abandon would have dropped a player out of a game that is still being played.
-            if (result.AbandonedIds.Count > 0)
-            {
-                await coordinator
-                    .EvictAsync(result.AbandonedIds, AbandonedCloseStatus, AbandonedCloseReason)
-                    .ConfigureAwait(false);
-            }
+            //
+            // Per id, and each one on its own. An eviction that throws or never returns must not take the
+            // retention loop with it: the rows are already correct, the sockets are what is left, and a
+            // socket that could not be closed is worth retrying rather than worth dying over.
+            await EvictAsync(Due(result.AbandonedIds), ct).ConfigureAwait(false);
 
             // Counts only. Never a match id, a Steam id, a command wire or credential material.
             if (!result.IsEmpty)
@@ -106,6 +120,98 @@ namespace HexWars.NetServer.Operations
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// The ids this pass should try to close: what it just abandoned, plus whatever an earlier pass
+        /// could not get to. Retrying is the point of the pending set - an abandoned match whose socket was
+        /// never closed is a player still sitting in a game the database says is over.
+        /// </summary>
+        IReadOnlyList<Guid> Due(IReadOnlyList<Guid> abandoned)
+        {
+            lock (_pendingGate)
+            {
+                if (_pending.Count == 0) return abandoned;
+
+                // A snapshot, not a hand-off. An id leaves the pending set when it has actually been
+                // evicted; clearing it here would lose every id this pass does not reach, and a pass can
+                // stop at any point because shutdown cancelled it.
+                var due = new List<Guid>(_pending);
+
+                foreach (Guid id in abandoned)
+                {
+                    if (!due.Contains(id)) due.Add(id);
+                }
+
+                return due;
+            }
+        }
+
+        /// <summary>Closes the sockets of each match in turn, and remembers the ones it could not.</summary>
+        async Task EvictAsync(IReadOnlyList<Guid> matchIds, CancellationToken ct)
+        {
+            var single = new Guid[1];
+
+            foreach (Guid matchId in matchIds)
+            {
+                ct.ThrowIfCancellationRequested();
+                single[0] = matchId;
+
+                try
+                {
+                    IReadOnlyList<Guid> left = await evictor
+                        .EvictAsync(single, AbandonedCloseStatus, AbandonedCloseReason, ct)
+                        .WaitAsync(EvictionTimeout, time, ct)
+                        .ConfigureAwait(false);
+
+                    if (left.Count > 0) Remember(matchId);
+                    else Forget(matchId);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutdown. The id stays pending so the next process, or the next pass, tries again.
+                    Remember(matchId);
+                    throw;
+                }
+                catch (TimeoutException)
+                {
+                    logger.LogWarning(
+                        "An eviction did not finish within {Seconds}s; it will be tried again next sweep",
+                        (int)EvictionTimeout.TotalSeconds);
+                    Remember(matchId);
+                }
+                catch (Exception failure)
+                {
+                    // One match that would not close is not a reason to stop closing the others, and it is
+                    // certainly not a reason to end the loop that applies the whole retention policy.
+                    logger.LogWarning(failure, "An abandoned match could not be evicted; retrying next sweep");
+                    Remember(matchId);
+                }
+            }
+        }
+
+        /// <summary>Drops an id that has been dealt with, so a retry does not become a permanent one.</summary>
+        void Forget(Guid matchId)
+        {
+            lock (_pendingGate) _pending.Remove(matchId);
+        }
+
+        /// <summary>Keeps an id for the next pass, up to a ceiling. The set is bounded because it is fed by
+        /// whatever the host is failing to do, and an unbounded record of failures is its own outage.</summary>
+        void Remember(Guid matchId)
+        {
+            lock (_pendingGate)
+            {
+                if (_pending.Count >= MaxPendingEvictions)
+                {
+                    logger.LogWarning(
+                        "More than {Ceiling} matches are waiting to be evicted; dropping the newest",
+                        MaxPendingEvictions);
+                    return;
+                }
+
+                _pending.Add(matchId);
+            }
         }
     }
 }
