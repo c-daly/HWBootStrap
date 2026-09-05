@@ -87,7 +87,7 @@ names, bound by the server configuration layer.
 | `MATCH_TRUSTED_PROXY_CIDRS` | comma list of IP addresses or CIDR ranges | empty | no | no | Whose forwarded-for header this server believes. Only consulted when `MATCH_TRUST_FORWARDED_HEADERS` is `true`. Each entry must be an IPv4 or IPv6 address, optionally with a prefix length; an entry that does not parse fails startup. |
 | `MATCH_TRUST_ALL_PROXIES` | bool | `false` | when `MATCH_TRUST_FORWARDED_HEADERS` is `true` and `MATCH_TRUSTED_PROXY_CIDRS` is empty | no | Confirms that trusting every peer to name the client is deliberate. Render does not publish its proxy addresses, so `render.yaml` sets this `true` alongside `MATCH_TRUST_FORWARDED_HEADERS`. Startup fails if forwarded headers are trusted with neither a proxy list nor this acknowledgement. |
 | `MATCH_BLOCKED_STEAM_IDS` | comma list of SteamID64 | empty | no | no | Accounts refused at match create and join. |
-| `MATCH_METRICS_TOKEN` | string | unset | no | **YES** | When set, `GET /api/v1/metrics` requires the header `X-Metrics-Token` carrying this value. |
+| `MATCH_METRICS_TOKEN` | string | unset | no | **YES** | Unset, `GET /api/v1/metrics` answers 404. Set, it requires the header `X-Metrics-Token` carrying this value and answers 401 without it. See [Health, metrics and graceful shutdown](health-and-shutdown.md). |
 | `MATCH_LOG_PSEUDONYM_KEY` | string, at least 16 characters | unset | no | **YES** | Key behind the `sid:` pseudonyms that stand in for Steam account ids in logs. Steam ids are an enumerable namespace, so the handle is an HMAC rather than a plain digest and the key is what stops a log reader precomputing it. Unset means a random key is generated per process, so handles correlate only within one process lifetime and never across a restart or between instances. Production should set it from the Render secret store so handles stay comparable across restarts and across instances. |
 | `DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE` | bool | `false` in the image | yes, in the container | no | Disables the .NET configuration file watcher. Required in the immutable container; see the lineage section. |
 | `PORT` | int | injected by Render | n/a on Render | no | The port the web service must listen on. Render injects it; do not hard-code it. |
@@ -250,3 +250,10 @@ None of the following can be derived from the repository. Each one blocks the de
 
 This foundation is complete when a clean server process reports its environment, App ID, build ID, protocol
 version, lobby provider, engine version, and database target without revealing a secret.
+
+## 10. Related documents
+
+- [Health, metrics and graceful shutdown](health-and-shutdown.md) - the probe routes to configure, what
+  `MATCH_METRICS_TOKEN` unlocks, and what the process does on `SIGTERM`.
+- [Protocol v2](protocol-v2.md) - the match websocket.
+- [Steam client configuration](steam-client-configuration.md) - what the Unity client needs.
