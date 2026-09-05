@@ -472,8 +472,15 @@ namespace HexWars.NetServer.Tests
 
             await Cmd("c0", new EndTurn(PlayerId.Player0));
 
-            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { "REJECT TemporaryFailure" }));
-            Assert.That(_sink.MessagesFor("c1"), Is.Empty);
+            // The rebuild found a command these seats had never been told about, so both of them are dealt
+            // the log before the issuer is told to try again. Correcting the projection silently would
+            // leave two clients playing a position the journal no longer agrees with.
+            Assert.That(_sink.MessagesFor("c0").First(), Does.StartWith("START "));
+            Assert.That(_sink.MessagesFor("c0").First(), Does.Contain(CommandWire.Write(behindTheBack)));
+            Assert.That(_sink.MessagesFor("c0").Last(), Is.EqualTo("REJECT TemporaryFailure"));
+            Assert.That(_sink.MessagesFor("c1"),
+                Is.EqualTo(new[] { _sink.MessagesFor("c0").First() }),
+                "the seat that issued nothing missed the same command and is dealt the same log");
 
             LiveMatch live = Live();
             Assert.That(live.LastSequence, Is.EqualTo(1));
@@ -1056,6 +1063,77 @@ namespace HexWars.NetServer.Tests
                 "SEAT 1",
                 NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
             }));
+        }
+
+        // ---- a rebuild has to tell the seat that did not reconnect -------------
+
+        [Test]
+        public async Task ARebuildThatFindsTheGameOver_TellsTheOpponentTooNotJustTheReconnectingSeat()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+
+            // The completion COMMITS and its answer is lost, twice. The row is terminal, this host has no
+            // way of knowing, and the issuer is disconnected. What must not happen next is the opponent -
+            // still connected, still looking at the position before the winning move - being left there
+            // forever because the reconnecting seat was the only one anybody thought to tell.
+            _faults.ThrowAfterNextComplete(new InvalidOperationException("the response was lost"), times: 2);
+            _sink.Clear();
+            await Cmd(played.Commands[^1]);
+
+            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EqualTo(new[] { "c0" }));
+            Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed),
+                "the completion did land; only the answer was lost");
+            Assert.That(Live().Stale, Is.True);
+
+            // c1 never went away. c0 comes back on a new socket.
+            _sink.Clear();
+            DurableMatchCoordinator.AuthOutcome back = await Auth("c0-again", _credential0);
+            Assert.That(back.Ok, Is.True, back.FailCode);
+
+            string terminal = NetProtocol.Start(ReplayFile.Write(start, played.Commands));
+            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { terminal }),
+                "the seat that stayed connected is dealt the ending it never heard about");
+            Assert.That(_sink.MessagesFor("c0-again"), Is.EqualTo(new[] { "SEAT 0", terminal }));
+
+            Assert.That(ReplayFile.Read(terminal["START ".Length..]).Start, Is.Not.Null);
+            Assert.That(Live().State!.IsGameOver, Is.True);
+            Assert.That(Live().Status, Is.EqualTo(MatchStatus.Completed));
+        }
+
+        [Test]
+        public async Task ACancelledStatusReRead_LeavesTheProjectionStaleAndTheEndingRecoverable()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+
+            // Somebody else ends the match, so TryComplete answers false, and the read that would say what
+            // they ended it as is cancelled. A cancellation here is no different from any other failure
+            // after a durable append: the journal has moved and this projection has not.
+            var abandonedOnce = false;
+            _faults.BeforeCompletion = async () =>
+            {
+                if (abandonedOnce) return;
+                abandonedOnce = true;
+                await _store.TryCompleteMatchAsync(
+                    _matchId, MatchStatus.Abandoned, null, _clock.GetUtcNow(), Ct);
+            };
+
+            _faults.FailNextGetMatch(new OperationCanceledException("the request went away"));
+            _sink.Clear();
+
+            await Cmd(played.Commands[^1]);
+
+            Assert.That(Live().Stale, Is.True, "a cancellation must not leave a pre-final projection usable");
+            Assert.That(_sink.Sent.Any(s => s.Message.StartsWith("APPLY ", StringComparison.Ordinal)),
+                Is.False);
+            Assert.That(_sink.Closed.Select(c => c.CloseStatus),
+                Is.All.EqualTo(DurableMatchCoordinator.ResyncCloseStatus));
+
+            // And the command really was durable, so a reconnect is dealt it.
+            _sink.Clear();
+            await Auth("c2", _credential1);
+
+            Assert.That(_sink.MessagesFor("c2").Last(),
+                Is.EqualTo(NetProtocol.Start(ReplayFile.Write(start, played.Commands))));
         }
     }
 }

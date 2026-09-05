@@ -629,6 +629,82 @@ namespace HexWars.NetServer.Tests
             Assert.That(await StatusOfAsync(database, matchId), Is.EqualTo("active"));
         }
 
+        /// <summary>
+        /// A process killed between the winning append and the row that records the win: host B closes the
+        /// match at startup, before anybody asks, and both seats are dealt the ending on reconnect.
+        /// </summary>
+        [Test]
+        public async Task AWinningAppendWithNoCompletion_IsHealedByTheStartupPass()
+        {
+            PostgresTestDatabase database = await PostgresTestDatabase.GetAsync();
+            Guid matchId;
+            MatchRecord played;
+            GameState start;
+
+            await using (SteamServerFactory a = await HostAsync(reset: true))
+            {
+                (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(a);
+
+                await using (zero)
+                await using (one)
+                {
+                    matchId = zero.MatchId;
+                    start = zero.Start!;
+
+                    // The rest of the game is journalled through the store rather than played through the
+                    // sockets. What this test is about is the gap between the last append and the
+                    // completion, and driving a few hundred commands over websockets to reach it would add
+                    // nothing but minutes.
+                    played = Match.Record(
+                        start, new GreedyAgent(11), new GreedyAgent(29), maxCommands: 4000);
+                    Assert.That(played.Result.Final.IsGameOver, Is.True,
+                        "the offline driver never reached a terminal state, so this test proves nothing");
+
+                    var store = a.Services.GetRequiredService<IMatchStore>();
+                    for (var i = 0; i < played.Commands.Count; i++)
+                    {
+                        Command command = played.Commands[i];
+                        AppendResult appended = await store.AppendCommandAsync(
+                            matchId, i + 1, CommandWire.Write(command),
+                            command.Issuer == PlayerId.Player0
+                                ? FakeSteamWebApiClient.OwnerSteamId
+                                : FakeSteamWebApiClient.GuestSteamId,
+                            DateTimeOffset.UtcNow, default);
+
+                        Assert.That(appended.Status, Is.EqualTo(AppendStatus.Appended));
+                    }
+                }
+            }
+
+            Assert.That(await StatusOfAsync(database, matchId), Is.EqualTo("active"),
+                "the win is in the journal and the row does not know it yet");
+
+            await using SteamServerFactory b = await HostAsync(reset: false);
+
+            RecoveryReport report = RecoveryOf(b);
+            Assert.That(report.Healed, Is.EqualTo(1),
+                "the startup pass closes it before a player has to ask, or the reaper gets there first");
+            Assert.That(report.Failed, Is.Empty);
+            Assert.That(await StatusOfAsync(database, matchId), Is.EqualTo("completed"));
+
+            (DurableFlowClient zeroB, DurableFlowClient oneB) = await RejoinAsync(b, matchId);
+            await using (zeroB)
+            await using (oneB)
+            {
+                await zeroB.ConnectAsync();
+                await zeroB.ExpectAsync("START ");
+                await oneB.ConnectAsync();
+                await oneB.ExpectAsync("START ");
+
+                string terminal = ReplayFile.Write(start, played.Commands);
+                Assert.That(zeroB.ReplayText, Is.EqualTo(terminal));
+                Assert.That(oneB.ReplayText, Is.EqualTo(terminal));
+                Assert.That(zeroB.State!.IsGameOver, Is.True,
+                    "both seats are dealt the position the game ended in");
+                Assert.That(oneB.State!.IsGameOver, Is.True);
+            }
+        }
+
         /// <summary>Writes a barracks straight into the row, without the coordinator seeing it.</summary>
         static async Task StoreCatalogDirectlyAsync(
             PostgresTestDatabase database, Guid matchId, int seat)

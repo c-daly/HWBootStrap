@@ -21,6 +21,8 @@ namespace HexWars.NetServer.Tests.Fakes
         Exception? _afterNextAppendFailure;
         Exception? _nextCompletionFailure;
         Exception? _everyCompletionFailure;
+        Exception? _afterCompletionFailure;
+        int _afterCompletionRemaining;
         Exception? _nextJournalReadFailure;
         Exception? _nextGetMatchFailure;
 
@@ -57,6 +59,19 @@ namespace HexWars.NetServer.Tests.Fakes
         /// <summary>Fails EVERY TryCompleteMatchAsync until disarmed with null: a database this host cannot
         /// finish a game against, rather than one bad moment it can retry through.</summary>
         public void FailEveryCompletion(Exception? failure) => _everyCompletionFailure = failure;
+
+        /// <summary>
+        /// Lets the next completions COMMIT and then throws, <paramref name="times"/> of them.
+        ///
+        /// The difference from FailEveryCompletion is the whole point: the row really is terminal and the
+        /// caller has no way of knowing. It is the shape of a response lost on the way back, and it is how
+        /// a projection ends up stale over a match that has already finished.
+        /// </summary>
+        public void ThrowAfterNextComplete(Exception? failure, int times = 1)
+        {
+            _afterCompletionFailure = failure;
+            _afterCompletionRemaining = failure is null ? 0 : times;
+        }
 
         /// <summary>Arms the next LoadJournalAsync to throw, once. What makes an ambiguous commit
         /// unverifiable rather than merely uncertain.</summary>
@@ -146,9 +161,14 @@ namespace HexWars.NetServer.Tests.Fakes
             if (BeforeCompletion is not null) await BeforeCompletion().ConfigureAwait(false);
 
             CompletionsForwarded++;
-            return await inner
+            bool completed = await inner
                 .TryCompleteMatchAsync(matchId, terminal, winnerSeat, completedAt, ct)
                 .ConfigureAwait(false);
+
+            if (_afterCompletionRemaining <= 0 || _afterCompletionFailure is null) return completed;
+
+            _afterCompletionRemaining--;
+            throw _afterCompletionFailure;
         }
 
         public Task TouchAsync(Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct) =>
@@ -168,8 +188,8 @@ namespace HexWars.NetServer.Tests.Fakes
             Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct) =>
             inner.RevokeJoinCredentialsAsync(matchId, steamId, revokedAt, ct);
 
-        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+        public Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
+            string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
             TimeSpan? allowTerminalWithin = null) =>
             inner.ReplaceJoinCredentialAsync(
                 credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
