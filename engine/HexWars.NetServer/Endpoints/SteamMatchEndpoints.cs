@@ -81,11 +81,18 @@ namespace HexWars.NetServer.Endpoints
             AuthFailureThrottle throttle,
             TimeProvider time,
             IOptions<MatchHostingOptions> hosting,
+            IHostEnvironment environment,
             ILoggerFactory loggerFactory,
             CancellationToken ct)
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            if (IsRefusedTransport(http, environment))
+            {
+                logger.LogWarning("Refused a match creation that arrived over plaintext http");
+                return ApiErrors.InvalidRequestResult();
+            }
 
             CreateSteamMatchRequest? request =
                 await JsonBody.ReadAsync<CreateSteamMatchRequest>(http.Request, ct: ct).ConfigureAwait(false);
@@ -254,11 +261,18 @@ namespace HexWars.NetServer.Endpoints
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
             IOptions<MatchHostingOptions> hosting,
+            IHostEnvironment environment,
             ILoggerFactory loggerFactory,
             CancellationToken ct)
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            if (IsRefusedTransport(http, environment))
+            {
+                logger.LogWarning("Refused a join that arrived over plaintext http");
+                return ApiErrors.InvalidRequestResult();
+            }
 
             JoinSteamMatchRequest? request =
                 await JsonBody.ReadAsync<JoinSteamMatchRequest>(http.Request, ct: ct).ConfigureAwait(false);
@@ -487,6 +501,21 @@ namespace HexWars.NetServer.Endpoints
 
             return false;
         }
+
+        /// <summary>
+        /// True when this request arrived over a transport a Steam ticket may not travel on.
+        ///
+        /// The body carries a Steam auth ticket and the response carries a join credential, so a
+        /// plaintext hop hands both to anyone on the path - and the credential is a bearer token for a
+        /// seat, which makes replay the whole attack. Only Production is guarded: Development and the
+        /// test host speak http, and a rule that applied everywhere would make these endpoints
+        /// unreachable exactly where they are exercised.
+        ///
+        /// Read after the forwarded-headers middleware, so behind a TLS-terminating proxy this is the
+        /// scheme of the client leg rather than of the hop into this process.
+        /// </summary>
+        static bool IsRefusedTransport(HttpContext http, IHostEnvironment environment) =>
+            environment.IsProduction() && !http.Request.IsHttps;
 
         /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
         /// form still matches the account it was meant to name.</summary>

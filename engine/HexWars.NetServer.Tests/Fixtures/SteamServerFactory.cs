@@ -86,6 +86,13 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// <summary>When set, receives everything the host logs. Assign before the first request.</summary>
         public ILoggerProvider? Logging { get; set; }
 
+        /// <summary>
+        /// The hosting environment name. Development by default, because that is what lets the suite reach
+        /// these endpoints over the plaintext transport of the test host; set Production for the rules
+        /// that only apply there.
+        /// </summary>
+        public string Environment { get; init; } = "Development";
+
         /// <summary>Wraps every request body in a counting stream, ahead of the whole application
         /// pipeline.</summary>
         sealed class CountingBodyStartupFilter(SteamServerFactory owner) : IStartupFilter
@@ -180,7 +187,7 @@ namespace HexWars.NetServer.Tests.Fixtures
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseEnvironment("Development");
+            builder.UseEnvironment(Environment);
             foreach (KeyValuePair<string, string> setting in Settings)
             {
                 builder.UseSetting(setting.Key, setting.Value);

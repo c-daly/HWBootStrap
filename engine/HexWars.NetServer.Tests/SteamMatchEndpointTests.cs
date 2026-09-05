@@ -915,6 +915,88 @@ namespace HexWars.NetServer.Tests
             });
         }
 
+        // ---- transport ------------------------------------------------------------------------------
+
+        /// <summary>A Production host, with the Postgres branch pointed at an address it never reaches and
+        /// the proxy trust an https deployment behind a proxy needs.</summary>
+        static SteamServerFactory ProductionFactory()
+        {
+            var factory = new SteamServerFactory { Environment = "Production" };
+            factory.Settings["MATCH_TRUST_FORWARDED_HEADERS"] = "true";
+            factory.Settings["MATCH_TRUSTED_PROXY_CIDRS"] = "10.4.0.0/16";
+            factory.RemoteIpAddress = IPAddress.Parse("10.4.7.9");
+            return factory;
+        }
+
+        [Test]
+        public async Task InProductionAPlaintextRequestIsRefused()
+        {
+            // A ticket on a plaintext hop is a ticket anyone on the path can lift and replay, and so is
+            // the credential coming back. Refusing is the only answer that does not depend on nobody
+            // having been listening.
+            using SteamServerFactory factory = ProductionFactory();
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage create = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(create.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(create), Is.EqualTo("invalid_request"));
+            Assert.That(factory.Steam.AuthenticateCalls, Is.Zero,
+                "the ticket must not be presented to Valve once it has already travelled in the clear");
+        }
+
+        [Test]
+        public async Task InProductionAProxiedHttpsRequestIsAllowed()
+        {
+            using SteamServerFactory factory = ProductionFactory();
+            using HttpClient client = factory.CreateClient();
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, CreateRoute)
+            {
+                Content = JsonContent.Create(new
+                {
+                    steamLobbyId = FakeSteamWebApiClient.LobbyId,
+                    ticket = FakeSteamWebApiClient.OwnerTicket,
+                }),
+            };
+
+            // What the platform proxy sends: it terminated TLS, so the hop this process sees is plaintext
+            // and the header is the only thing that can say the client leg was not.
+            request.Headers.Add("X-Forwarded-Proto", "https");
+            request.Headers.Add("X-Forwarded-For", "198.51.100.1");
+
+            HttpResponseMessage response = await client.SendAsync(request);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK),
+                await response.Content.ReadAsStringAsync());
+        }
+
+        [Test]
+        public async Task InProductionAPlaintextJoinIsRefused()
+        {
+            using SteamServerFactory factory = ProductionFactory();
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Join(client, Guid.NewGuid(), FakeSteamWebApiClient.GuestTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
+            Assert.That(await ErrorCode(response), Is.EqualTo("invalid_request"));
+        }
+
+        [Test]
+        public async Task OutsideProductionPlaintextIsStillAllowed()
+        {
+            // Development and the test host speak http. A guard that applied everywhere would make the
+            // whole suite unable to reach the endpoints it exists to test.
+            using var factory = new SteamServerFactory();
+            using HttpClient client = factory.CreateClient();
+
+            HttpResponseMessage response = await Create(client, FakeSteamWebApiClient.OwnerTicket);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK),
+                await response.Content.ReadAsStringAsync());
+        }
+
         // ---- provenance and provider gating ------------------------------------------------------
 
         [Test]
