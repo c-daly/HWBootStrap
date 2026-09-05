@@ -185,6 +185,11 @@ Postgres-backed tests run against a real Postgres, never a mock and never a shar
 - The database is dropped with the container. There is no cleanup step to forget.
 - `HEXWARS_TEST_DATABASE_URL`, when set, overrides the container and points the fixture at an existing
   database. This is for CI runners and hosts without a Docker daemon.
+- Whatever it points at is checked before a single connection is opened, because every fixture starts by
+  dropping and recreating the public schema. The run proceeds only if the database name contains `test`,
+  or if `HEXWARS_TEST_DATABASE_DISPOSABLE` names that exact database. Anything else fails with a message
+  naming the database and how to confirm it. The container the fixture starts uses `hexwars_test`, so it
+  passes the same rule rather than being exempt from it.
 - Automated tests never use Render credentials, and never reach the live Valve API.
 
 ### The test project does not run on the production runtime
