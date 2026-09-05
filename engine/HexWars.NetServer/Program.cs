@@ -34,11 +34,43 @@ namespace HexWars.NetServer
             var port = Environment.GetEnvironmentVariable("PORT");
             if (!string.IsNullOrWhiteSpace(port)) builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
+            ConfigureLogging(builder);
+
             builder.AddHexWarsServer();
             var app = builder.Build();
             app.UseHexWarsServer();
             await app.RunAsync();
             return 0;
+        }
+
+        /// <summary>
+        /// The console the platform actually reads, with scopes turned on.
+        ///
+        /// This is not cosmetic. Match and lobby ids are carried as logging SCOPES rather than repeated in
+        /// every message, and the default console formatter does not render scopes at all - so without this
+        /// the identifiers an operator searches for during an incident are computed, attached, and then
+        /// dropped on the floor. JSON in Production because Render indexes structured lines and a search for
+        /// one MatchId is the whole point; the readable formatter everywhere else, because a person is
+        /// looking at it. The default provider is cleared first so a line is not written twice.
+        /// </summary>
+        internal static void ConfigureLogging(WebApplicationBuilder builder)
+        {
+            builder.Logging.ClearProviders();
+
+            if (builder.Environment.IsProduction())
+            {
+                builder.Logging.AddJsonConsole(console =>
+                {
+                    console.IncludeScopes = true;
+
+                    // One timezone in the log, and the one every other timestamp in this system is in.
+                    console.UseUtcTimestamp = true;
+                });
+
+                return;
+            }
+
+            builder.Logging.AddSimpleConsole(console => console.IncludeScopes = true);
         }
 
         /// <summary>Validate the environment and print the report. Returns 0 when the process could serve

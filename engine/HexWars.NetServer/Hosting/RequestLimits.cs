@@ -54,11 +54,15 @@ namespace HexWars.NetServer.Hosting
         /// <summary>
         /// Refuses an over-large body up front, with the error shape every other refusal uses.
         ///
-        /// Kestrel already enforces the same bound, but it does so by throwing when the body is READ, which
-        /// reaches the client as a bare 413 with no body and reaches the log as an exception. Answering from
-        /// the declared Content-Length instead means the caller gets the same JSON they get for every other
-        /// refusal, and the body is never pulled off the wire at all. A request that declares no length is
-        /// left to Kestrel, which is the only thing that can measure one as it arrives.
+        /// Kestrel enforces the same bound, but only when the application READS that far, and this one never
+        /// does: the endpoints stop at their own, much tighter JSON cap. So a body that simply omits
+        /// Content-Length would sail past the transport limit and be answered 400 by the JSON reader, which
+        /// is the wrong answer and, worse, means the documented 16 KB ceiling was never actually a ceiling.
+        ///
+        /// A declared length is answered from the header, without a byte being pulled off the socket. An
+        /// undeclared one is measured: the body is buffered and read one byte past the cap, which is bounded
+        /// work whatever the client intends to send, and rewound so the endpoint still sees it. Only requests
+        /// that can carry a body are touched, so a websocket upgrade and a static file GET pay nothing.
         /// </summary>
         public static IApplicationBuilder UseHexWarsRequestLimits(this IApplicationBuilder app)
         {
@@ -66,17 +70,80 @@ namespace HexWars.NetServer.Hosting
 
             return app.Use(async (context, next) =>
             {
-                if (context.Request.ContentLength is long declared && declared > MaxRequestBodyBytes)
+                if (context.Request.ContentLength is long declared)
                 {
-                    context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
-                    await context.Response
-                        .WriteAsJsonAsync(new ApiError(ApiErrors.InvalidRequest, TooLargeMessage))
-                        .ConfigureAwait(false);
-                    return;
+                    if (declared > MaxRequestBodyBytes)
+                    {
+                        await RefuseAsync(context).ConfigureAwait(false);
+                        return;
+                    }
+                }
+                else if (CarriesAnUndeclaredBody(context.Request))
+                {
+                    if (await IsOverTheCapAsync(context.Request).ConfigureAwait(false))
+                    {
+                        await RefuseAsync(context).ConfigureAwait(false);
+                        return;
+                    }
                 }
 
                 await next().ConfigureAwait(false);
             });
+        }
+
+        /// <summary>A request with no Content-Length that still intends to send something. GET, HEAD,
+        /// DELETE, OPTIONS and TRACE do not, and a websocket upgrade is a GET.</summary>
+        static bool CarriesAnUndeclaredBody(HttpRequest request) =>
+            !HttpMethods.IsGet(request.Method)
+            && !HttpMethods.IsHead(request.Method)
+            && !HttpMethods.IsOptions(request.Method)
+            && !HttpMethods.IsDelete(request.Method)
+            && !HttpMethods.IsTrace(request.Method);
+
+        /// <summary>
+        /// Reads one byte past the cap and says whether it got there.
+        ///
+        /// Buffering first is what lets the endpoint read the same body afterwards. The buffer is bounded by
+        /// the cap plus one, so a client streaming megabytes is measured in kilobytes and then refused.
+        /// </summary>
+        static async Task<bool> IsOverTheCapAsync(HttpRequest request)
+        {
+            request.EnableBuffering();
+
+            var probe = new byte[MaxRequestBodyBytes + 1];
+            var filled = 0;
+
+            try
+            {
+                while (filled < probe.Length)
+                {
+                    int read = await request.Body
+                        .ReadAsync(
+                            probe.AsMemory(filled, probe.Length - filled),
+                            request.HttpContext.RequestAborted)
+                        .ConfigureAwait(false);
+
+                    if (read == 0) break;
+
+                    filled += read;
+                }
+            }
+            catch (Microsoft.AspNetCore.Http.BadHttpRequestException)
+            {
+                // Kestrel enforces the same ceiling and reaches it first, one byte earlier than this probe
+                // does. Its own answer is a 413 with an exception page rather than the error body every
+                // other refusal on this server uses, so the exception is caught and answered here instead.
+                return true;
+            }
+
+            request.Body.Position = 0;
+            return filled > MaxRequestBodyBytes;
+        }
+
+        static Task RefuseAsync(HttpContext context)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return context.Response.WriteAsJsonAsync(new ApiError(ApiErrors.InvalidRequest, TooLargeMessage));
         }
     }
 }

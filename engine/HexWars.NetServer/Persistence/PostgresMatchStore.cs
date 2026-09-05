@@ -45,8 +45,15 @@ namespace HexWars.NetServer.Persistence
 
         /// <summary>The three statuses a match can end in, as a SQL literal list. Literals rather than
         /// parameters on purpose: ix_matches_terminal_completed is a PARTIAL index over exactly this list,
-        /// and a planner cannot prove a parameter matches a partial index predicate, so parameterising it
-        /// would quietly turn the retention purge into a sequential scan of every match ever played.</summary>
+        /// and a partial index can only be used where the planner can prove the query implies its predicate.
+        /// A parameter gets there on a custom plan, where the value is known, and stops getting there the
+        /// moment PostgreSQL switches that statement to a generic plan - so the sweep would work in testing
+        /// and turn into a sequential scan of every match ever played after the fifth execution.</summary>
+        /// <summary>One status as a SQL literal. The same reasoning as TerminalStatuses: these are
+        /// fixed words from MatchStatusText, never caller input, and written as literals so the
+        /// planner can match them against the partial indexes the retention statements depend on.</summary>
+        static string Literal(string status) => "'" + status + "'";
+
         static readonly string TerminalStatuses =
             "('" + MatchStatusText.Completed + "', '" + MatchStatusText.Expired + "', '"
             + MatchStatusText.Abandoned + "')";
@@ -55,6 +62,36 @@ namespace HexWars.NetServer.Persistence
         /// literal list so the only place these words are spelled is "MatchStatusText".</summary>
         static readonly string OpenStatuses =
             "('" + MatchStatusText.Waiting + "', '" + MatchStatusText.Active + "')";
+
+
+        /// <summary>
+        /// The four retention statements, exactly as docs/operations/match-data-retention.md states them.
+        ///
+        /// Every status is a SQL LITERAL and only the two ages are parameters. That is load-bearing rather
+        /// than stylistic: the indexes behind these statements are PARTIAL, over a predicate written in
+        /// these same words, and a partial index is only usable where the planner can prove the query
+        /// implies that predicate. A parameter manages it on a custom plan and stops managing it on a
+        /// generic one, which is the worst shape a performance bug can have - correct in testing, and a
+        /// sequential scan of every match ever played once the statement has run a few times in production.
+        /// The constants are internal so a test can EXPLAIN the statement the server issues rather than a
+        /// copy of it that has drifted.
+        /// </summary>
+        internal static readonly string ExpireWaitingStatement =
+            "UPDATE matches SET status = " + Literal(MatchStatusText.Expired)
+            + ", completed_at = @now, last_activity_at = GREATEST(last_activity_at, @now) "
+            + "WHERE status = " + Literal(MatchStatusText.Waiting) + " AND created_at < @now - @age";
+
+        internal static readonly string AbandonIdleStatement =
+            "UPDATE matches SET status = " + Literal(MatchStatusText.Abandoned)
+            + ", completed_at = @now, last_activity_at = GREATEST(last_activity_at, @now) "
+            + "WHERE status = " + Literal(MatchStatusText.Active) + " AND last_activity_at < @now - @age "
+            + "RETURNING match_id";
+
+        internal const string PurgeCredentialsStatement =
+            "DELETE FROM match_join_credentials WHERE expires_at < @now - @age";
+
+        internal static readonly string PurgeTerminalStatement =
+            "DELETE FROM matches WHERE status IN " + TerminalStatuses + " AND completed_at < @now - @age";
 
         /// <summary>Test hook: runs once the journal read has taken its snapshot and before the rest
         /// of the journal is read, so a test can commit a start and an append into that window.</summary>
@@ -296,23 +333,13 @@ namespace HexWars.NetServer.Persistence
             // does the same, because that column is what the abandon rule reads and a value that could move
             // backwards would let a clock skew drag a live match into the reaper.
             int expired = await AgeOutAsync(
-                connection, transaction, ct,
-                "UPDATE matches SET status = @terminal, completed_at = @now, "
-                + "last_activity_at = GREATEST(last_activity_at, @now) "
-                + "WHERE status = @status AND created_at < @now - @age",
-                MatchStatusText.Expired, MatchStatusText.Waiting, now, policy.WaitingExpiry);
+                connection, transaction, ct, ExpireWaitingStatement, now, policy.WaitingExpiry);
 
-            // The one statement whose ids the caller needs. An abandoned match may still have sockets
+            // The only statement whose ids the caller needs. An abandoned match may still have sockets
             // attached to it, and nothing but the coordinator holding them can close them.
             var abandoned = new List<Guid>();
-            await using (var abandon = new NpgsqlCommand(
-                "UPDATE matches SET status = @terminal, completed_at = @now, "
-                + "last_activity_at = GREATEST(last_activity_at, @now) "
-                + "WHERE status = @status AND last_activity_at < @now - @age "
-                + "RETURNING match_id", connection, transaction))
+            await using (var abandon = new NpgsqlCommand(AbandonIdleStatement, connection, transaction))
             {
-                abandon.Parameters.AddWithValue("terminal", MatchStatusText.Abandoned);
-                abandon.Parameters.AddWithValue("status", MatchStatusText.Active);
                 abandon.Parameters.Add(Timestamp("now", now));
                 abandon.Parameters.Add(Interval("age", policy.ActiveIdle));
 
@@ -322,8 +349,7 @@ namespace HexWars.NetServer.Persistence
             }
 
             int credentials;
-            await using (var purge = new NpgsqlCommand(
-                "DELETE FROM match_join_credentials WHERE expires_at < @now - @age", connection, transaction))
+            await using (var purge = new NpgsqlCommand(PurgeCredentialsStatement, connection, transaction))
             {
                 purge.Parameters.Add(Timestamp("now", now));
                 purge.Parameters.Add(Interval("age", policy.CredentialRetention));
@@ -334,9 +360,7 @@ namespace HexWars.NetServer.Persistence
             // row; reaching for a seat directly is refused by the schema, because a journal with a hole in it
             // replays into a different game than the one that was played.
             int deleted;
-            await using (var reap = new NpgsqlCommand(
-                "DELETE FROM matches WHERE status IN " + TerminalStatuses
-                + " AND completed_at < @now - @age", connection, transaction))
+            await using (var reap = new NpgsqlCommand(PurgeTerminalStatement, connection, transaction))
             {
                 reap.Parameters.Add(Timestamp("now", now));
                 reap.Parameters.Add(Interval("age", policy.TerminalRetention));
@@ -348,15 +372,12 @@ namespace HexWars.NetServer.Persistence
             return new RetentionResult(expired, abandoned.Count, credentials, deleted, abandoned);
         }
 
-        /// <summary>One of the two ageing-out UPDATEs. They differ only in the status they move from, the
-        /// status they move to and the column they judge, so the plumbing is written once.</summary>
+        /// <summary>Runs one ageing-out UPDATE and answers how many rows it moved.</summary>
         static async Task<int> AgeOutAsync(
             NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken ct,
-            string sql, string terminal, string status, DateTimeOffset now, TimeSpan age)
+            string sql, DateTimeOffset now, TimeSpan age)
         {
             await using var command = new NpgsqlCommand(sql, connection, transaction);
-            command.Parameters.AddWithValue("terminal", terminal);
-            command.Parameters.AddWithValue("status", status);
             command.Parameters.Add(Timestamp("now", now));
             command.Parameters.Add(Interval("age", age));
             return await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
