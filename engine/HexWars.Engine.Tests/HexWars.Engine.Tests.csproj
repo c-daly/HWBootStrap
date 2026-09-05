@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="NUnit" Version="3.14.0" />
     <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
   </ItemGroup>
@@ -28,6 +29,29 @@
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementHighlightClassifierTests.cs" Link="Presentation/MovementHighlightClassifierTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementTooltipFormatterTests.cs" Link="Presentation/MovementTooltipFormatterTests.cs" />
     <Compile Include="../../Assets/HexWars/Tests/Editor/MovementPresentationRouteTests.cs" Link="Presentation/MovementPresentationRouteTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbySnapshot.cs" Link="Presentation/Steam/SteamLobbySnapshot.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamLobbyClient.cs" Link="Presentation/Steam/ISteamLobbyClient.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamLobbyClient.cs" Link="Presentation/Steam/FakeSteamLobbyClient.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/FakeSteamLobbyClientTests.cs" Link="Presentation/Steam/FakeSteamLobbyClientTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyRules.cs" Link="Presentation/Steam/SteamLobbyRules.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyStatus.cs" Link="Presentation/Steam/SteamLobbyStatus.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamMatchApi.cs" Link="Presentation/Steam/ISteamMatchApi.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamLobbyCoordinator.cs" Link="Presentation/Steam/SteamLobbyCoordinator.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamMatchApi.cs" Link="Presentation/Steam/FakeSteamMatchApi.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamLobbyCoordinatorTests.cs" Link="Presentation/Steam/SteamLobbyCoordinatorTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchApiContracts.cs" Link="Presentation/Steam/SteamMatchApiContracts.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchApiContractsTests.cs" Link="Presentation/Steam/SteamMatchApiContractsTests.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchProtocolTests.cs" Link="Presentation/Steam/SteamMatchProtocolTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/StartupRoute.cs" Link="Presentation/Steam/StartupRoute.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/StartupRouteTests.cs" Link="Presentation/Steam/StartupRouteTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSession.cs" Link="Presentation/Steam/SteamMatchSession.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSessionTests.cs" Link="Presentation/Steam/SteamMatchSessionTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/ISteamSocketDriver.cs" Link="Presentation/Steam/ISteamSocketDriver.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamMatchSocketPump.cs" Link="Presentation/Steam/SteamMatchSocketPump.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/Fakes/FakeSteamSocketDriver.cs" Link="Presentation/Steam/FakeSteamSocketDriver.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamMatchSocketPumpTests.cs" Link="Presentation/Steam/SteamMatchSocketPumpTests.cs" />
+    <Compile Include="../../Assets/HexWars/Presentation/Steam/SteamInviteGate.cs" Link="Presentation/Steam/SteamInviteGate.cs" />
+    <Compile Include="../../Assets/HexWars/Tests/Editor/SteamInviteGateTests.cs" Link="Presentation/Steam/SteamInviteGateTests.cs" />
   </ItemGroup>
 
 </Project>

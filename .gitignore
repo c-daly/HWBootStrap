@@ -154,3 +154,7 @@ Assets/_Recovery/
 Assets/_Recovery.meta
 Assets/Scifi Guns SFX Pack/
 Assets/Scifi Guns SFX Pack.meta
+
+# Steamworks.NET reads this in the editor to pick the dev App ID. It is per-developer
+# local configuration, never a repository artifact.
+steam_appid.txt

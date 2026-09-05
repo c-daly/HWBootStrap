@@ -1,0 +1,23 @@
+{
+    "name": "HexWars.Presentation.PlayModeTests",
+    "rootNamespace": "HexWars.Presentation.PlayModeTests",
+    "references": [
+        "HexWars.Presentation",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "HexWars.Engine.dll",
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
