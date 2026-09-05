@@ -152,7 +152,9 @@ namespace HexWars.Presentation
             if (_mode == SetupMode.Host)
             {
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
-                ToggleBtn("Private (invite only)", 120f, y, 250f, 38f, () => _private, () => { _private = !_private; RefreshToggles(); });
+                // on Steam the same flag picks the lobby type instead of hiding a server room code
+                ToggleBtn(SteamRuntime.IsSteamBuild ? "Friends only (invite)" : "Private (invite only)",
+                          120f, y, 250f, 38f, () => _private, () => { _private = !_private; RefreshToggles(); });
             }
             else if (_mode == SetupMode.VsAi)
             {
@@ -316,6 +318,15 @@ namespace HexWars.Presentation
             {
                 _game.StartLocalGame(setup, false);
                 // form dismisses via Update when State exists
+                return;
+            }
+
+            if (SteamRuntime.IsSteamBuild)
+            {
+                // Steam hosting is a lobby, not a room code: the lobby screen owns the wait and the invite
+                SteamLobbyScreen.OpenHost(_game, setup,
+                                          _private ? SteamLobbyVisibility.FriendsOnly : SteamLobbyVisibility.Public);
+                Close();
                 return;
             }
 
