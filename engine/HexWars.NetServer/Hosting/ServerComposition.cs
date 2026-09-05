@@ -1,9 +1,14 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Contracts;
+using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -17,6 +22,15 @@ namespace HexWars.NetServer.Hosting
     /// </summary>
     public static class ServerComposition
     {
+        /// <summary>How long a rate-limit budget lasts before it refills.</summary>
+        public static readonly TimeSpan RateLimitWindow = TimeSpan.FromMinutes(1);
+
+        /// <summary>Match creations one address may attempt per window.</summary>
+        public const int CreatePermitsPerWindow = 5;
+
+        /// <summary>Join attempts one address may make per window.</summary>
+        public const int JoinPermitsPerWindow = 20;
+
         public static WebApplicationBuilder AddHexWarsServer(this WebApplicationBuilder builder)
         {
             // Belt and braces with RemoveAllLoggers() on the Steam client: these categories log the full
@@ -53,6 +67,51 @@ namespace HexWars.NetServer.Hosting
             // Stateless and options-driven: one instance serves every request, and resolving it here
             // rather than constructing it in an endpoint keeps the lobby rules out of the HTTP layer.
             builder.Services.AddSingleton<SteamLobbyValidator>();
+
+            // Process-wide by necessity: a per-request throttle would count to one and never refuse.
+            builder.Services.AddSingleton<AuthFailureThrottle>();
+
+            builder.Services.AddRateLimiter(limiter =>
+            {
+                limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+                // The default rejection writes an empty body, which a client cannot tell apart from any
+                // other 429 a proxy might have produced. Answering in the same shape as every other
+                // refusal means the Unity client has one error path rather than two.
+                limiter.OnRejected = async (context, token) =>
+                {
+                    context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                    await context.HttpContext.Response.WriteAsJsonAsync(
+                        new ApiError(ApiErrors.RateLimited, SteamFailureMessages.RateLimited), token);
+                };
+
+                // Creating a match costs two Steam round trips and a write, so it is the expensive door
+                // and gets the tight budget. Joining is cheap and is the call a reconnecting client
+                // repeats, so it gets room to retry without a player being locked out of their own game.
+                limiter.AddPolicy(SteamMatchEndpoints.CreateRateLimitPolicy, context =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        SteamMatchEndpoints.CallerKey(context),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = CreatePermitsPerWindow,
+                            Window = RateLimitWindow,
+
+                            // Nothing is queued: a caller over budget is told so immediately rather than
+                            // holding a connection open waiting for a permit it may never get.
+                            QueueLimit = 0,
+                        }));
+
+                limiter.AddPolicy(SteamMatchEndpoints.JoinRateLimitPolicy, context =>
+                    RateLimitPartition.GetFixedWindowLimiter(
+                        SteamMatchEndpoints.CallerKey(context),
+                        _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = JoinPermitsPerWindow,
+                            Window = RateLimitWindow,
+                            QueueLimit = 0,
+                        }));
+            });
+
             return builder;
         }
 
@@ -73,6 +132,24 @@ namespace HexWars.NetServer.Hosting
             app.Logger.LogInformation(
                 "Environment report {Report}", EnvironmentReport.Describe(steam, match, app.Environment).ToJson());
 
+            // First, before anything reads the connection: the rate limiter and the auth-failure
+            // throttle both partition on the remote address, and behind a proxy every request carries the
+            // proxy address until this runs. A single hop is trusted and the known-network lists are
+            // cleared, which together mean exactly one X-Forwarded-For entry is honoured - the one the
+            // proxy in front of this process appended. Off by default: a server reachable directly would
+            // otherwise let any caller choose their own rate-limit partition with a header.
+            if (match.TrustForwardedHeaders)
+            {
+                var forwarded = new ForwardedHeadersOptions
+                {
+                    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+                    ForwardLimit = 1,
+                };
+                forwarded.KnownNetworks.Clear();
+                forwarded.KnownProxies.Clear();
+                app.UseForwardedHeaders(forwarded);
+            }
+
             app.UseWebSockets();
             app.UseDefaultFiles();   // serve the WebGL client (index.html) from wwwroot/ when a deploy copies it in
             // Unity WebGL ships .unityweb/.data/.wasm; without these mappings Kestrel 404s them.
@@ -81,6 +158,12 @@ namespace HexWars.NetServer.Hosting
             types.Mappings[".data"] = "application/octet-stream";
             types.Mappings[".wasm"] = "application/wasm";
             app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = types });
+
+            // After routing (WebApplication inserts that first) and before the endpoints, so the limiter
+            // can read the policy off the endpoint the request matched. Static files are already served
+            // above: a rate limit on the WebGL bundle would throttle a page load, not an abuser.
+            app.UseRateLimiter();
+
             app.MapGet("/healthz", () => "ok");
 
             if (match.LobbyProvider.HasFlag(LobbyProviders.Legacy))
@@ -105,6 +188,14 @@ namespace HexWars.NetServer.Hosting
                     });
                 });
                 app.Map("/ws", LegacyWebSocketServer.Handle);
+            }
+
+            // Mapped only when the Steam provider is on. A Legacy-only deployment has no Steam
+            // credentials and no database, so these routes could not serve a request; a 404 is a truer
+            // answer than a 503 from a handler that was never going to work.
+            if (match.LobbyProvider.HasFlag(LobbyProviders.Steam))
+            {
+                app.MapSteamMatchEndpoints();
             }
 
             return app;
