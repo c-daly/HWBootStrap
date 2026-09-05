@@ -389,7 +389,7 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task Shutdown_RefusesAHandshakeThatWasWaitingOnTheGate()
+        public async Task Shutdown_RefusesAHandshakeAtTheFinalBarrier()
         {
             SteamServerFactory fixture = Fixture();
             var faults = new FaultInjectingMatchStore(fixture.Store);

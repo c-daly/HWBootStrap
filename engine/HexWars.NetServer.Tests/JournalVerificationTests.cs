@@ -88,18 +88,27 @@ namespace HexWars.NetServer.Tests
             return (exit, written.ToString());
         }
 
-        /// <summary>What Postgres says it has written to this database, ever.</summary>
-        async Task<long> WritesAsync()
+        /// <summary>
+        /// Everything the verb could possibly have changed, as one string.
+        ///
+        /// Content rather than pg_stat counters: those are flushed asynchronously, so a write from the
+        /// SEEDING can still be in flight when the first reading is taken and land before the second,
+        /// which fails a test about the verb for something the test itself did.
+        /// </summary>
+        async Task<string> FingerprintAsync()
         {
             await using NpgsqlConnection connection =
                 await _database.DataSource.OpenConnectionAsync(CancellationToken.None);
             await using NpgsqlCommand read = connection.CreateCommand();
             read.CommandText =
-                "SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) "
-                + "FROM pg_stat_user_tables WHERE schemaname = 'public'";
+                "SELECT md5(coalesce(string_agg(row, '|' ORDER BY row), '')) FROM ("
+                + "  SELECT matches::text AS row FROM matches UNION ALL"
+                + "  SELECT match_players::text FROM match_players UNION ALL"
+                + "  SELECT match_commands::text FROM match_commands UNION ALL"
+                + "  SELECT schema_migrations::text FROM schema_migrations"
+                + ") AS everything";
 
-            object? answer = await read.ExecuteScalarAsync(CancellationToken.None);
-            return Convert.ToInt64(answer);
+            return (string)(await read.ExecuteScalarAsync(CancellationToken.None))!;
         }
 
         [Test]
@@ -147,13 +156,13 @@ namespace HexWars.NetServer.Tests
             await SeedAsync("109775240000000001", EngineContract.Version, false);
             await SeedAsync("109775240000000002", EngineContract.Version, true);
 
-            long before = await WritesAsync();
+            string before = await FingerprintAsync();
             (int exit, _) = await RunAsync();
-            long after = await WritesAsync();
+            string after = await FingerprintAsync();
 
             Assert.That(exit, Is.EqualTo(1));
             Assert.That(after, Is.EqualTo(before),
-                "Postgres counted an insert, update or delete during a verb that promises none");
+                "something in this database changed during a verb that promises to change nothing");
         }
 
         [Test]
@@ -254,36 +263,69 @@ namespace HexWars.NetServer.Tests
             }
         }
 
+
         [Test]
-        public async Task TheReadOnlySessionCannotBeTurnedOff()
+        public async Task TurningTheSessionDefaultOffDoesNotDefeatTheVerifierQueries()
         {
             await using NpgsqlDataSource source = JournalVerification.ReadOnlySource(_database.DatabaseUrl);
 
-            await using NpgsqlConnection connection =
-                await source.OpenConnectionAsync(CancellationToken.None);
-
-            // DDL, not just DML. A verb that only blocked UPDATE would still let a migration through.
-            await using (NpgsqlCommand ddl = connection.CreateCommand())
+            // The bypass the session default cannot survive: SET as its OWN command, so it commits before
+            // the write is even parsed. This is what makes the default a default rather than a guarantee.
+            await using (NpgsqlConnection loosened = await source.OpenConnectionAsync(CancellationToken.None))
+            await using (NpgsqlCommand off = loosened.CreateCommand())
             {
-                ddl.CommandText = "CREATE TABLE verify_should_not_exist (id int)";
-                Assert.ThrowsAsync<PostgresException>(
-                    async () => await ddl.ExecuteNonQueryAsync(CancellationToken.None));
+                off.CommandText = "SET default_transaction_read_only = off";
+                await off.ExecuteNonQueryAsync(CancellationToken.None);
+
+                await using NpgsqlCommand write = loosened.CreateCommand();
+                write.CommandText = "UPDATE matches SET build_id = 'nope'";
+
+                // Honest about what the session default is worth on its own: nothing, once something has
+                // turned it off. The guarantee has to come from the transaction instead.
+                Assert.DoesNotThrowAsync(
+                    async () => await write.ExecuteNonQueryAsync(CancellationToken.None));
             }
 
-            // And the guard cannot be talked out of the way from inside the session. If this ever starts
-            // succeeding, the verb has to move to BEGIN READ ONLY per batch instead.
-            await using (NpgsqlCommand defeat = connection.CreateCommand())
-            {
-                defeat.CommandText =
-                    "SET default_transaction_read_only = off; UPDATE matches SET build_id = 'nope'";
+            // And the same two commands through the path the verb actually uses. SET TRANSACTION READ ONLY
+            // cannot be lifted from inside the transaction it applies to, so the write is refused however
+            // the session was left.
+            Assert.ThrowsAsync<PostgresException>(async () => await JournalVerification.ReadOnlyQueryAsync(
+                source,
+                "UPDATE matches SET build_id = 'nope'",
+                async (command, token) => await command.ExecuteNonQueryAsync(token),
+                CancellationToken.None));
 
-                Assert.ThrowsAsync<PostgresException>(
-                    async () => await defeat.ExecuteNonQueryAsync(CancellationToken.None));
-            }
+            Assert.ThrowsAsync<PostgresException>(async () => await JournalVerification.ReadOnlyQueryAsync(
+                source,
+                "CREATE TABLE verify_should_not_exist (id int)",
+                async (command, token) => await command.ExecuteNonQueryAsync(token),
+                CancellationToken.None));
+        }
 
-            await using NpgsqlCommand gone = connection.CreateCommand();
-            gone.CommandText = "SELECT to_regclass('public.verify_should_not_exist') IS NULL";
-            Assert.That(await gone.ExecuteScalarAsync(CancellationToken.None), Is.True);
+        [Test]
+        public void EverySqlStatementInTheVerbGoesThroughTheReadOnlyHelper()
+        {
+            // A guarantee that rests on one method is only as good as the promise that nothing else opens
+            // a command. That promise is checkable, so it is checked: the two CreateCommand calls in the
+            // file are the two inside the helper itself.
+            string source = File.ReadAllText(VerbSourcePath());
+
+            int commands = source.Split("CreateCommand()").Length - 1;
+            int inHelper = source[source.IndexOf("ReadOnlyQueryAsync<T>", StringComparison.Ordinal)..]
+                .Split("CreateCommand()").Length - 1;
+
+            Assert.That(commands, Is.EqualTo(inHelper),
+                "a statement outside ReadOnlyQueryAsync would run without a read-only transaction");
+        }
+
+        static string VerbSourcePath()
+        {
+            var directory = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
+            while (directory is not null && directory.Name != "engine") directory = directory.Parent;
+
+            Assert.That(directory, Is.Not.Null, "could not find the engine directory from the test output");
+            return Path.Combine(
+                directory!.FullName, "HexWars.NetServer", "Operations", "JournalVerification.cs");
         }
     }
 }
