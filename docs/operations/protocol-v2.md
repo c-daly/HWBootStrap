@@ -31,7 +31,7 @@ client is still there, not what it has to say.
 |---|---|---|
 | `SEAT` | `0` or `1` | The seat this credential holds. Always the first frame after a successful `AUTH`. |
 | `CATALOG?` | none | This seat has not sent a catalog yet and the match is still waiting for it. |
-| `START` | replay text | The dealt start state. Sent when the match becomes active, and again to any seat that reconnects into an active match. |
+| `START` | replay text | The dealt start state plus every accepted command. Sent when the match becomes active, to any seat that reconnects, and **unsolicited, at any time**, when the server has had to rebuild its view of the match and finds it ahead of what this socket was last told. Always fast-forward to it; it is the authoritative log. |
 | `APPLY` | command wire form | A command that is durably recorded. Broadcast to both seats. |
 | `REJECT` | `Malformed`, `NoSeat`, `WrongSeat`, `CatalogClosed`, `CatalogV1Required`, `MatchEnded`, `TemporaryFailure`, or an engine rejection reason | The command was not applied. Sent to the issuer only. |
 | `AUTH FAIL` | `invalid`, `expired`, or `unavailable` | The handshake failed. Always followed by a close with status 1008. |
@@ -87,6 +87,17 @@ the instant the match becomes terminal - and without it a player whose socket dr
 way at all to learn how the game they were playing ended. A game the reaper abandoned underneath its players
 ended just as definitely as one somebody won. A match that never started is never reachable once it is over:
 there is no game in it to show anybody.
+
+### An unsolicited START
+
+A server that could not finish telling both seats what happened marks its view of the match stale and
+rebuilds it from the journal. When that rebuild finds the match terminal, or finds commands this host never
+broadcast, **every connected seat is sent `START` with the whole log** - not only the one that reconnected.
+The seat that stayed connected is the one most likely to be looking at a position that has stopped being
+true, and nothing else would ever tell it.
+
+A client must therefore accept `START` at any point in a match and treat it as a replacement for everything
+it believes about the game, rather than assuming it only ever arrives once at the beginning.
 
 ### Credentials on a live socket
 

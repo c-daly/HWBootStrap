@@ -215,10 +215,12 @@ namespace HexWars.NetServer.Hosting
 
             if (!string.Equals(opening.Type, AuthMessage, StringComparison.Ordinal))
             {
-                // The TYPE only, truncated. A client that sent its credential in the wrong frame would
-                // otherwise have it written to the log by the code that refused it.
+                // A byte count and nothing else. The type looked safe to log because a well-behaved client
+                // puts a keyword there - but this branch is the one a MISBEHAVING client reaches, and a
+                // client that opened with its bare credential would have that credential written to the log
+                // by the code that refused it. Truncating does not help: a prefix of a secret is a secret.
                 logger.LogDebug(
-                    "A v2 socket opened with {Type} rather than AUTH", Truncate(opening.Type, LoggedMatchIdLength));
+                    "A v2 socket opened with something other than AUTH, {Bytes} bytes", first.Text.Length);
                 throttle.RecordFailure(connection.RemoteIp);
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
                 return false;

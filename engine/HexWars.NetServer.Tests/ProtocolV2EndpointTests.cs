@@ -661,6 +661,28 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task AnOpeningFrameThatIsJustACredential_IsNeverWrittenToTheLog()
+        {
+            // The refusal path for a bad first frame used to log the frame TYPE, which is safe only for a
+            // client that puts a keyword there - and this is the branch a client that does not reaches. A
+            // client that opened with its bare credential would have had it logged by the code refusing it.
+            var captured = new CapturingLoggerProvider();
+            Start(fixture => fixture.Logging = captured);
+            await SeedAWaitingMatch();
+
+            using WebSocket socket = await ConnectAsync();
+            await SendAsync(socket, _credential0);
+
+            Assert.That((await ReceiveAsync(socket)).Text, Is.EqualTo("AUTH FAIL invalid"));
+
+            Assert.That(captured.Messages, Is.Not.Empty);
+            Assert.That(captured.Messages.Any(m => m.Contains(_credential0, StringComparison.Ordinal)),
+                Is.False, "the whole credential");
+            Assert.That(captured.Messages.Any(m => m.Contains(_credential0[..8], StringComparison.Ordinal)),
+                Is.False, "nor the first eight characters of it");
+        }
+
+        [Test]
         public async Task AHundredUpgradesAtOnceFromOneAddress_LeaveExactlyTheCapAccepted()
         {
             // The cap has to be a reservation, not a count. Checked against the sockets that already exist,

@@ -37,6 +37,14 @@ namespace HexWars.NetServer.Hosting
 
         internal const string RevokedReason = "credential revoked";
 
+        /// <summary>Credential re-checks in flight at once, across every socket on this host.</summary>
+        internal const int MaxConcurrentRechecks = 8;
+
+        /// <summary>How long one re-check is given before it is abandoned until the next cadence.</summary>
+        internal static readonly TimeSpan RecheckTimeout = TimeSpan.FromSeconds(5);
+
+        readonly SemaphoreSlim _recheckSlots = new(MaxConcurrentRechecks, MaxConcurrentRechecks);
+
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             TimeSpan interval = TimeSpan.FromSeconds(options.Value.HeartbeatIntervalSeconds);
@@ -58,8 +66,20 @@ namespace HexWars.NetServer.Hosting
                     {
                         if (!connection.IsAuthenticated) continue;
 
-                        if (await IsCredentialDeadAsync(connection, now, recheck).ConfigureAwait(false))
+                        // Arithmetic, so it happens on every tick and costs nothing.
+                        if (connection.CredentialExpiresAt is DateTimeOffset expiresAt && expiresAt <= now)
+                        {
+                            logger.LogInformation("Closing a v2 socket whose credential has expired");
+                            _ = connection.CloseAsync(CredentialCloseStatus, ExpiredReason);
                             continue;
+                        }
+
+                        // Started and not awaited. A re-check is a database round trip, and awaiting one
+                        // here would put every socket on this host behind the slowest of them: one match
+                        // querying a wedged connection would hold up the ping that keeps every other match
+                        // alive. The ping is the thing this loop exists for, so it is the thing that must
+                        // never wait.
+                        if (IsRecheckDue(connection, now, recheck)) BeginRecheck(connection, now, stoppingToken);
 
                         if (now - connection.LastInbound >= silence)
                         {
@@ -91,48 +111,82 @@ namespace HexWars.NetServer.Hosting
             }
         }
 
+        /// <summary>Whether this socket is due to have its credential asked about again.</summary>
+        static bool IsRecheckDue(V2Connection connection, DateTimeOffset now, TimeSpan recheck) =>
+            connection.CredentialHash is not null
+            && connection.MatchId is not null
+            && now - connection.LastCredentialCheck >= recheck;
+
         /// <summary>
-        /// Closes a socket whose credential has stopped being one, and says whether it did.
+        /// Starts one credential re-check and returns immediately.
         ///
-        /// Expiry is arithmetic and is checked every tick; revocation is a question only the store can
-        /// answer, so it is asked on a slower cadence. Without either, a credential that was withdrawn -
-        /// by the same player reconnecting elsewhere, or simply by time - leaves a socket that was
-        /// legitimate when it opened and holds a seat for as long as the client cares to keep it.
+        /// The cadence is stamped before the work begins rather than after it, so a re-check that is slow
+        /// or times out is not started again by the very next tick - it is simply retried when the cadence
+        /// next comes round, which is the behaviour a store having a bad minute needs.
         /// </summary>
-        async Task<bool> IsCredentialDeadAsync(
-            V2Connection connection, DateTimeOffset now, TimeSpan recheck)
+        void BeginRecheck(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
         {
-            if (connection.CredentialExpiresAt is DateTimeOffset expiresAt && expiresAt <= now)
-            {
-                logger.LogInformation("Closing a v2 socket whose credential has expired");
-                _ = connection.CloseAsync(CredentialCloseStatus, ExpiredReason);
-                return true;
-            }
-
-            if (connection.CredentialHash is not byte[] hash) return false;
-            if (connection.MatchId is not Guid matchId) return false;
-            if (now - connection.LastCredentialCheck < recheck) return false;
-
             connection.LastCredentialCheck = now;
+            _ = RecheckAsync(connection, now, stopping);
+        }
 
-            bool valid;
+        /// <summary>
+        /// Asks the store whether a live socket still has a credential, and closes it when it does not.
+        ///
+        /// Bounded and deadlined on purpose. Revocation is a question only the store can answer, so it
+        /// costs a round trip per socket, and a host with a thousand of them must not turn one heartbeat
+        /// into a thousand simultaneous queries. Anything that does not answer inside the deadline leaves
+        /// the socket exactly as it was: an unanswered question is not evidence against the player, and
+        /// closing every live socket over a database having a bad minute would be a self-inflicted outage.
+        /// </summary>
+        async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
+        {
+            if (connection.CredentialHash is not byte[] hash) return;
+            if (connection.MatchId is not Guid matchId) return;
+
             try
             {
-                valid = await credentials.IsStillValidAsync(hash, matchId, now).ConfigureAwait(false);
+                if (!await _recheckSlots.WaitAsync(RecheckTimeout, stopping).ConfigureAwait(false))
+                {
+                    logger.LogWarning(
+                        "A credential re-check waited {Seconds}s for a slot and was left for the next pass",
+                        (int)RecheckTimeout.TotalSeconds);
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            try
+            {
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+                deadline.CancelAfter(RecheckTimeout);
+
+                bool valid = await credentials
+                    .IsStillValidAsync(hash, matchId, now, deadline.Token).ConfigureAwait(false);
+
+                if (valid) return;
+
+                logger.LogInformation("Closing a v2 socket whose credential is no longer valid");
+                _ = connection.CloseAsync(CredentialCloseStatus, RevokedReason);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!stopping.IsCancellationRequested)
+                    logger.LogWarning(
+                        "A credential re-check did not answer inside {Seconds}s; leaving the socket open",
+                        (int)RecheckTimeout.TotalSeconds);
             }
             catch (Exception failure)
             {
-                // A store that will not answer is not evidence against the player. Closing every live
-                // socket over one failed query would turn a database blip into a mass disconnect.
                 logger.LogWarning(failure, "A live credential could not be re-checked");
-                return false;
             }
-
-            if (valid) return false;
-
-            logger.LogInformation("Closing a v2 socket whose credential is no longer valid");
-            _ = connection.CloseAsync(CredentialCloseStatus, RevokedReason);
-            return true;
+            finally
+            {
+                _recheckSlots.Release();
+            }
         }
     }
 }
