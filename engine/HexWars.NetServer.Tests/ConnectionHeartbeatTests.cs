@@ -56,7 +56,8 @@ namespace HexWars.NetServer.Tests
             int recheckSeconds,
             int heartbeatSeconds = 1,
             int budget = MatchHostingOptions.DefaultMaxRechecksPerCadence,
-            TimeSpan? checkTakes = null)
+            TimeSpan? checkTakes = null,
+            IMatchCredentialService? credentials = null)
         {
             var options = Options.Create(new MatchHostingOptions
             {
@@ -72,11 +73,12 @@ namespace HexWars.NetServer.Tests
 
             _registry = new V2ConnectionRegistry(options, NullLogger<V2ConnectionRegistry>.Instance);
             _credentials = new BlockingCredentialService(checkTakes);
+            IMatchCredentialService service = credentials ?? _credentials;
 
             var store = new InMemoryMatchStore();
             var coordinator = new DurableMatchCoordinator(
                 store,
-                _credentials,
+                service,
                 new JournalLiveMatchLoader(store),
                 _registry,
                 options,
@@ -86,7 +88,7 @@ namespace HexWars.NetServer.Tests
             _heartbeat = new ConnectionHeartbeatService(
                 _registry,
                 coordinator,
-                _credentials,
+                service,
                 options,
                 TimeProvider.System,
                 _loggers.CreateLogger<ConnectionHeartbeatService>());
@@ -377,6 +379,55 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task WhenEveryPermitIsHeld_TheStarvationWarningIsWrittenOnce()
+        {
+            // A cancelled cadence releases every waiting worker at the same instant, and each of them has
+            // the same thing to report. A throttle that reads and then writes lets all eight through and
+            // buries the fact it was meant to report in eight copies of itself.
+            Start(recheckSeconds: 300, heartbeatSeconds: 1, budget: 256);
+            _credentials.IgnoresCancellation = true;
+
+            for (var i = 0; i < 60; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+
+            // Two passes fill the sixteen permits; from the third on, every worker waits and is cancelled.
+            await WaitUntil(
+                () => _logs.Any("credential store is not answering"), TimeSpan.FromSeconds(20));
+            await Task.Delay(3000);
+
+            Assert.That(
+                _logs.Messages.Count(m =>
+                    m.Contains("credential store is not answering", StringComparison.Ordinal)),
+                Is.EqualTo(1),
+                "one worker owns the line; the other seven that woke with it stay quiet");
+        }
+
+        [Test]
+        public async Task AStoreThatThrowsBeforeItReturnsATask_StillGivesItsPermitBack()
+        {
+            // A synchronous throw never produces a task, so there is nothing for the completion
+            // continuation to hang off. The permit has to come back on that path too, or a store failing
+            // this way would exhaust the ceiling in sixteen checks and pause re-checks for good.
+            var throwing = new SynchronouslyThrowingCredentialService();
+            Start(recheckSeconds: 1, heartbeatSeconds: 1, credentials: throwing);
+
+            for (var i = 0; i < 4; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => throwing.Calls >= 4, TimeSpan.FromSeconds(20));
+            await WaitUntil(() => _heartbeat.OutstandingChecks == 0, TimeSpan.FromSeconds(10));
+
+            Assert.That(_heartbeat.OutstandingChecks, Is.Zero, "every permit came back");
+            Assert.That(_connections.Any(c => c.IsClosed), Is.False,
+                "a store that will not answer closes nobody");
+            Assert.That(
+                _logs.Messages.Count(m =>
+                    m.Contains("could not be re-checked", StringComparison.Ordinal)),
+                Is.GreaterThanOrEqualTo(4), "and each failure is reported once");
+        }
+
+        [Test]
         public async Task ABudgetSmallerThanTheDueSet_TakesExactlyTheOldest()
         {
             // Registered shuffled, so passing this means the heap ordered them and not the dictionary.
@@ -550,6 +601,30 @@ namespace HexWars.NetServer.Tests
                     if (prior == seen) return;
                     seen = prior;
                 }
+            }
+
+            public Task<IssuedCredential> IssueAsync(Guid matchId, string steamId, CancellationToken ct) =>
+                throw new NotSupportedException();
+
+            public Task<CredentialValidation?> ValidateAsync(
+                Guid matchId, string credential, CancellationToken ct) =>
+                throw new NotSupportedException();
+        }
+
+        /// <summary>A store client that throws where it stands, before it has a task to fail.</summary>
+        sealed class SynchronouslyThrowingCredentialService : IMatchCredentialService
+        {
+            int _calls;
+
+            public int Calls => Volatile.Read(ref _calls);
+
+            // Deliberately NOT async: an async method turns a throw into a faulted task, which is the
+            // path that already has a continuation to release the permit. This one has none.
+            public Task<bool> IsStillValidAsync(
+                byte[] credentialHash, Guid matchId, DateTimeOffset now, CancellationToken ct)
+            {
+                Interlocked.Increment(ref _calls);
+                throw new InvalidOperationException("the database is not answering");
             }
 
             public Task<IssuedCredential> IssueAsync(Guid matchId, string steamId, CancellationToken ct) =>

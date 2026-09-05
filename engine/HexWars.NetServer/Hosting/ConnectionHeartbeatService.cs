@@ -65,8 +65,8 @@ namespace HexWars.NetServer.Hosting
 
         Task? _inflight;
         CancellationTokenSource? _inflightCancellation;
-        DateTimeOffset _lastOverrunLog = DateTimeOffset.MinValue;
-        DateTimeOffset _lastStarvedLog = DateTimeOffset.MinValue;
+        long _lastOverrunLogTicks;
+        long _lastStarvedLogTicks;
 
         /// <summary>Connections that have been offered to the batch selection. A socket that is not due is
         /// never counted, so this is what proves the selection walks the due ones and not the host.</summary>
@@ -151,6 +151,23 @@ namespace HexWars.NetServer.Hosting
             }
         }
 
+        /// <summary>
+        /// Whether this caller is the one that gets to write the next throttled line, and claims it.
+        ///
+        /// A read followed by a write is not a throttle when several threads reach it together - and they
+        /// do reach it together, because a cancelled cadence releases every waiting worker at the same
+        /// instant and each of them has the same thing to report. One compare-and-swap decides.
+        /// </summary>
+        static bool TryClaimLogSlot(ref long lastTicks, DateTimeOffset now, TimeSpan interval)
+        {
+            long observed = Interlocked.Read(ref lastTicks);
+            long ticks = now.UtcTicks;
+
+            if (ticks - observed < interval.Ticks) return false;
+
+            return Interlocked.CompareExchange(ref lastTicks, ticks, observed) == observed;
+        }
+
         /// <summary>Whether this socket is due to have its credential asked about again.</summary>
         static bool IsRecheckDue(V2Connection connection, DateTimeOffset now, TimeSpan recheck) =>
             connection.CredentialHash is not null
@@ -193,9 +210,8 @@ namespace HexWars.NetServer.Hosting
         /// tick, and a line per tick would bury the fact rather than report it.</summary>
         void NoteOverrun(DateTimeOffset now)
         {
-            if (now - _lastOverrunLog < OverrunLogInterval) return;
+            if (!TryClaimLogSlot(ref _lastOverrunLogTicks, now, OverrunLogInterval)) return;
 
-            _lastOverrunLog = now;
             logger.LogWarning(
                 "A credential re-check pass was still running when the next was due; it has been cancelled "
                 + "and this tick starts none. Sockets keep their place in the queue.");
@@ -205,9 +221,8 @@ namespace HexWars.NetServer.Hosting
         /// came back. At most once a minute: a store in this state is in it for a while.</summary>
         void NoteStarved(DateTimeOffset now)
         {
-            if (now - _lastStarvedLog < OverrunLogInterval) return;
+            if (!TryClaimLogSlot(ref _lastStarvedLogTicks, now, OverrunLogInterval)) return;
 
-            _lastStarvedLog = now;
             logger.LogWarning(
                 "The credential store is not answering; live re-checks are paused until it does. "
                 + "Sockets stay open.");
