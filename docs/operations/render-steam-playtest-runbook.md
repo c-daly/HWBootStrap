@@ -189,7 +189,8 @@ Before promoting a staging build to production:
 
 - [ ] Staging `GET /health/ready` is 200 with all four checks Healthy
 - [ ] `scripts/verify-multiplayer.sh` passed against staging
-- [ ] `selftest-durable` passed against a restored copy of the staging database
+- [ ] `verify-journals` passed against a restored copy of the staging database. NOT `selftest-durable`:
+      it drops the schema of whatever it is given, so it belongs on a throwaway database only
 - [ ] No new migration breaks the additive-only rule
 - [ ] The client build in the Playtest depot is listed in `MATCH_COMPATIBLE_CLIENT_BUILDS`, or that list is empty
 - [ ] A quiet deploy window is chosen, or the interruption is acceptable

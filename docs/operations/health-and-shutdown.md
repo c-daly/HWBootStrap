@@ -135,9 +135,9 @@ other ways.
 | `hexwars.commands.committed` | counter | | Commands durably journalled and broadcast |
 | `hexwars.commands.rejected` | counter | `reason` | CMD frames refused, by the reason sent to the issuer. CMD only |
 | `hexwars.catalog.rejected` | counter | `reason` | CATALOG frames refused, and starts that could not be recorded |
-| `hexwars.db.failures` | counter | `op` | Store calls that threw, by call: `append`, `catalog`, `start`, `complete`, `status`, `reload`, `journal`, `touch`, `load`, `create`, `join` |
-| `hexwars.steam.failures` | counter | `failure` | Every Steam refusal: the exceptions Valve throws, plus `OwnershipMissing` and `Blocked`, which this server decides |
-| `hexwars.auth.failures` | counter | `stage` | Handshakes that got no seat: `frame` (never reached a credential), `credential` (a lookup that said no), `timeout` (never sent AUTH), `ticket` (Valve refused the ticket at the HTTP endpoint) |
+| `hexwars.db.failures` | counter | `op` | Store calls that threw, by call: `append`, `catalog`, `start`, `complete`, `status`, `reload`, `journal`, `touch`, `load`, `create`, `join`, and the startup pass ones, `recovery_list`, `recovery_load`, `recovery_heal` |
+| `hexwars.steam.failures` | counter | `failure` | Every Steam refusal: the exceptions Valve throws, plus `OwnershipMissing`, `Blocked` and `lobby_changed`, which this server decides |
+| `hexwars.auth.failures` | counter | `stage` | Handshakes that got no seat: `frame` (never reached a credential), `credential` (a lookup that said no), `timeout` (never sent AUTH), `ticket` (Valve refused the ticket at the HTTP endpoint), `capacity` (this host was already validating as many as it will), `internal` (a failure this server did not anticipate: ours, not the caller) |
 | `hexwars.reconnects` | counter | | Seats that took a socket having held one in the last 10 minutes |
 | `hexwars.recovery.failures` | counter | | Matches the startup recovery pass refused |
 
@@ -145,6 +145,13 @@ The tags are the point of three of these. An untagged database counter says the 
 nothing an operator can act on: a wedged append and a journal read that timed out are the same number and
 different incidents. The same goes for a handshake refused before it cost a database read and one refused
 by the read itself, and for a command that was not applied against a catalog that was not accepted.
+
+The three `recovery_` operations belong to the startup pass alone. The loader they read through is the
+same one every live handshake and every stale reload uses, so tagging inside it would report an outage
+during an ordinary reconnect as a startup problem, and would count it twice.
+
+A handshake refused while this host is shutting down is deliberately counted nowhere. Nothing about the
+caller was wrong; it is a shutdown, and the shutdown summary already says so.
 | `hexwars.matches.live` | gauge | | Matches held in memory |
 | `hexwars.sockets.open` | gauge | | Live v2 sockets |
 | `hexwars.outbound.queue.max` | gauge | | Deepest any outbound queue has been |
