@@ -39,6 +39,17 @@ namespace HexWars.NetServer.Runtime
         /// an abandonment rule: nothing durable changes, the next player to arrive simply reloads it.</summary>
         public static readonly TimeSpan IdleEvictionWindow = TimeSpan.FromMinutes(10);
 
+        /// <summary>
+        /// How long a match this build refuses to replay stays refused without being tried again.
+        ///
+        /// Refusing is the most expensive answer this server has - it costs a full journal read and replay
+        /// to reach - and it is the answer a reconnecting client asks for repeatedly, because from its side
+        /// an unavailable match looks exactly like a server that is coming back. Long enough that a backoff
+        /// storm reads the journal once; short enough that a match repaired by hand starts working again on
+        /// its own rather than after a deploy.
+        /// </summary>
+        public static readonly TimeSpan UnrecoverableRetryWindow = TimeSpan.FromSeconds(60);
+
         /// <summary>The frame has no seat behind it: the connection never authenticated, or its match has
         /// been released.</summary>
         public const string RejectNoSeat = "REJECT NoSeat";
@@ -74,6 +85,10 @@ namespace HexWars.NetServer.Runtime
         /// <summary>Connection id to match id, so an inbound frame can find its game without the socket
         /// layer having to remember anything.</summary>
         readonly ConcurrentDictionary<string, Guid> _connections = new(StringComparer.Ordinal);
+
+        /// <summary>Matches this build has refused to replay, and when. Read on every handshake so a
+        /// journal that cannot be recovered is read once per window rather than once per reconnect.</summary>
+        readonly ConcurrentDictionary<Guid, DateTimeOffset> _unrecoverable = new();
 
         /// <summary>The protocol version this host speaks, as the websocket route reports it.</summary>
         public int ProtocolVersion { get; } = options.Value.ProtocolVersion;
@@ -146,6 +161,15 @@ namespace HexWars.NetServer.Runtime
                 return Failed(AuthFailInvalid);
             }
 
+            // Checked after the credential, so a bad credential is still answered as invalid rather than
+            // as this match being unavailable, and before the load, which is the expensive part being
+            // avoided.
+            if (IsStillRefused(matchId))
+            {
+                logger.LogDebug("Turned a player away: this match was refused recently and is not retried yet");
+                return Failed(AuthFailUnavailable);
+            }
+
             LiveMatch match;
             try
             {
@@ -154,6 +178,16 @@ namespace HexWars.NetServer.Runtime
             catch (OperationCanceledException)
             {
                 throw;
+            }
+            catch (MatchRecoveryException refusal)
+            {
+                // Logged at Error and only once per window: this is an operator problem, not a player one,
+                // and a reconnect storm against a broken journal must not also be a log storm.
+                _unrecoverable[matchId] = time.GetUtcNow();
+                logger.LogError(
+                    "Refusing every seat in this match: {Failure} {Detail} - maintenance required",
+                    refusal.Failure, refusal.Detail);
+                return Failed(AuthFailUnavailable);
             }
             catch (Exception failure)
             {
@@ -562,6 +596,13 @@ namespace HexWars.NetServer.Runtime
                 }
             }
 
+            // Cached refusals expire on read, which is enough for a match somebody keeps asking for and
+            // nothing at all for one they gave up on. Dropping them here keeps a host that has outlived a
+            // few broken matches from carrying them for the rest of its life.
+            foreach (KeyValuePair<Guid, DateTimeOffset> refused in _unrecoverable)
+                if (now - refused.Value >= UnrecoverableRetryWindow)
+                    _unrecoverable.TryRemove(refused);
+
             return Task.CompletedTask;
         }
 
@@ -685,6 +726,18 @@ namespace HexWars.NetServer.Runtime
                     "This projection is stale and could not be rebuilt from the journal");
                 return false;
             }
+        }
+
+        /// <summary>Whether this match was refused recently enough that reading its journal again would
+        /// only produce the same refusal. The entry is dropped once it expires, so the next handshake pays
+        /// for one honest retry and a repaired match comes back without a restart.</summary>
+        bool IsStillRefused(Guid matchId)
+        {
+            if (!_unrecoverable.TryGetValue(matchId, out DateTimeOffset refusedAt)) return false;
+            if (time.GetUtcNow() - refusedAt < UnrecoverableRetryWindow) return true;
+
+            _unrecoverable.TryRemove(new KeyValuePair<Guid, DateTimeOffset>(matchId, refusedAt));
+            return false;
         }
 
         IEnumerable<LiveMatch> Cached()

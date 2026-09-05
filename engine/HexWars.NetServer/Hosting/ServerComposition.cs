@@ -66,7 +66,14 @@ namespace HexWars.NetServer.Hosting
                 // service does: it cannot be built without one, and in Development the container is
                 // validated at build time, so registering it for a legacy deployment with no database
                 // would turn a service nobody resolves into a startup failure.
-                builder.Services.AddSingleton<ILiveMatchLoader, JournalLiveMatchLoader>();
+                builder.Services.AddSingleton<MatchRecoveryService>();
+
+                // The same instance behind both names. The coordinator only ever needs a projection, and
+                // the startup pass needs the verification method the interface deliberately does not carry;
+                // registering them separately would give the two of them different loaders and let a match
+                // pass startup under rules the handshake then refuses it under.
+                builder.Services.AddSingleton<ILiveMatchLoader>(
+                    provider => provider.GetRequiredService<MatchRecoveryService>());
 
                 // A placeholder until the websocket route brings a real one. TryAdd so the route can
                 // register its own sink ahead of this call and keep it.
@@ -76,6 +83,22 @@ namespace HexWars.NetServer.Hosting
                 // per-request instance would hold none of them.
                 builder.Services.AddSingleton<DurableMatchCoordinator>();
             }
+
+            // Both registered unconditionally, and AFTER the Postgres branch on purpose.
+            //
+            // Unconditionally, because readiness has to be able to say something about recovery on every
+            // deployment, and "the pass never ran" is a different answer from "there was nothing to check".
+            // After the branch, because hosted services start in registration order and this one must run
+            // once the migrations have: journals checked against a schema that has not been brought up to
+            // date yet would be refused for a reason that has nothing to do with the matches.
+            //
+            // The recovery service is resolved optionally rather than required - a legacy deployment with
+            // no DATABASE_URL never registered one, and there is nothing for the pass to verify there.
+            builder.Services.TryAddSingleton<RecoveryState>();
+            builder.Services.AddSingleton<IHostedService>(provider => new RecoveryStartupService(
+                provider.GetRequiredService<RecoveryState>(),
+                provider.GetService<MatchRecoveryService>(),
+                provider.GetRequiredService<ILogger<RecoveryStartupService>>()));
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
             // Legacy-only deployment with no Steam credentials is unaffected by it being here.

@@ -13,6 +13,8 @@ namespace HexWars.NetServer.Runtime
     public interface ILiveMatchLoader
     {
         /// <summary>The current projection of one match.</summary>
+        /// <exception cref="MatchRecoveryException">This build will not host that match, and says why.
+        /// What the shipped loader throws for every refusal, missing match included.</exception>
         /// <exception cref="KeyNotFoundException">No match has that id.</exception>
         /// <exception cref="InvalidOperationException">The journal cannot be replayed.</exception>
         Task<LiveMatch> LoadAsync(Guid matchId, CancellationToken ct);
